@@ -29,7 +29,8 @@ class Run(SQLModel, table=True):
 
     # Context
     model_name: str = Field(index=True)
-    year: Optional[int] = Field(default=None)
+    year: Optional[int] = Field(default=None, index=True)
+    iteration: Optional[int] = Field(default=None, index=True)
 
     # Hashing (For Caching/Optimization)
     config_hash: Optional[str] = Field(index=True)

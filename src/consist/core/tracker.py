@@ -48,9 +48,15 @@ class Tracker:
         Context manager for an execution block.
         Handles initialization, error catching, and status updates.
         """
+
+        year = kwargs.pop("year", None)
+        iteration = kwargs.pop("iteration", None)
+
         run = Run(
             id=run_id,
             model_name=model,
+            year=year,           # Goes to optimized SQL column
+            iteration=iteration, # Goes to optimized SQL column
             status="running",
             meta=kwargs,
             created_at=datetime.utcnow()
