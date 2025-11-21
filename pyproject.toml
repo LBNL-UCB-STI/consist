@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "black>=25.11.0",
     "duckdb>=1.4.2",
     "duckdb-engine>=0.17.0",
     "pydantic>=2.12.4",

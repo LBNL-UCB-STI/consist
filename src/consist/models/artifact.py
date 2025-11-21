@@ -4,22 +4,26 @@ from typing import Dict, Any, Optional
 from sqlalchemy import Column, JSON
 from sqlmodel import Field, SQLModel
 
+
 class Artifact(SQLModel, table=True):
     """
     Represents a physical data object (File, Directory, Zarr store).
     """
+
     __tablename__ = "artifact"
 
     # Core Identity
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     key: str = Field(index=True, description="Semantic name, e.g., 'households'")
-    
+
     # Location (Virtualized)
-    uri: str = Field(index=True, description="Portable URI, e.g., 'inputs://land_use.csv'")
-    
+    uri: str = Field(
+        index=True, description="Portable URI, e.g., 'inputs://land_use.csv'"
+    )
+
     # Driver Info
     driver: str = Field(description="Format handler: parquet, csv, zarr, h5, git")
-    
+
     # Lineage
     run_id: Optional[str] = Field(default=None, foreign_key="run.id", index=True)
 

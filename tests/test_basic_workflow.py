@@ -28,9 +28,7 @@ def test_dual_write_workflow(tmp_path):
     with tracker.start_run(run_id="run_1", model="test_model", config=config):
         # Log an input
         tracker.log_artifact(
-            path="/inputs/land_use.csv",
-            key="land_use",
-            direction="input"
+            path="/inputs/land_use.csv", key="land_use", direction="input"
         )
 
         # Log an output
@@ -38,7 +36,7 @@ def test_dual_write_workflow(tmp_path):
             path=str(run_dir / "trips.csv"),
             key="trips",
             direction="output",
-            meta={"rows": 100}
+            meta={"rows": 100},
         )
 
     # --- ASSERTION TIME ---

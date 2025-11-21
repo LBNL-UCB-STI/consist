@@ -15,10 +15,10 @@ from consist.models.run import Run, RunArtifactLink, ConsistRecord
 
 class Tracker:
     def __init__(
-            self,
-            run_dir: Path,
-            db_path: Optional[str] = None,
-            mounts: Dict[str, str] = None
+        self,
+        run_dir: Path,
+        db_path: Optional[str] = None,
+        mounts: Dict[str, str] = None,
     ):
         """
         Args:
@@ -43,7 +43,9 @@ class Tracker:
         self.current_consist: Optional[ConsistRecord] = None
 
     @contextmanager
-    def start_run(self, run_id: str, model: str, config: Dict[str, Any] = None, **kwargs):
+    def start_run(
+        self, run_id: str, model: str, config: Dict[str, Any] = None, **kwargs
+    ):
         """
         Context manager for an execution block.
         Handles initialization, error catching, and status updates.
@@ -55,17 +57,14 @@ class Tracker:
         run = Run(
             id=run_id,
             model_name=model,
-            year=year,           # Goes to optimized SQL column
-            iteration=iteration, # Goes to optimized SQL column
+            year=year,  # Goes to optimized SQL column
+            iteration=iteration,  # Goes to optimized SQL column
             status="running",
             meta=kwargs,
-            created_at=datetime.utcnow()
+            created_at=datetime.utcnow(),
         )
 
-        self.current_consist = ConsistRecord(
-            run=run,
-            config=config or {}
-        )
+        self.current_consist = ConsistRecord(run=run, config=config or {})
 
         # Initial Flush
         self._flush_json()
@@ -104,7 +103,7 @@ class Tracker:
             uri=uri,
             driver=driver,
             run_id=self.current_consist.run.id if direction == "output" else None,
-            meta=meta
+            meta=meta,
         )
 
         # 4. Update Memory
@@ -128,7 +127,9 @@ class Tracker:
         abs_path = str(Path(path).resolve())
 
         # Check mounts longest-match first
-        for name, root in sorted(self.mounts.items(), key=lambda x: len(x[1]), reverse=True):
+        for name, root in sorted(
+            self.mounts.items(), key=lambda x: len(x[1]), reverse=True
+        ):
             root_abs = str(Path(root).resolve())
             if abs_path.startswith(root_abs):
                 rel = os.path.relpath(abs_path, root_abs)
@@ -162,7 +163,8 @@ class Tracker:
 
     def _sync_run_to_db(self, run: Run):
         """Sync Run status to DB. Tolerates DB failures."""
-        if not self.engine: return
+        if not self.engine:
+            return
         try:
             with Session(self.engine) as session:
                 session.merge(run)
@@ -173,7 +175,8 @@ class Tracker:
 
     def _sync_artifact_to_db(self, artifact: Artifact, direction: str):
         """Sync Artifact and Link to DB."""
-        if not self.engine or not self.current_consist: return
+        if not self.engine or not self.current_consist:
+            return
         try:
             with Session(self.engine) as session:
                 # Merge artifact (create or update)
@@ -183,7 +186,7 @@ class Tracker:
                 link = RunArtifactLink(
                     run_id=self.current_consist.run.id,
                     artifact_id=db_artifact.id,  # Use DB ID
-                    direction=direction
+                    direction=direction,
                 )
                 session.merge(link)
                 session.commit()

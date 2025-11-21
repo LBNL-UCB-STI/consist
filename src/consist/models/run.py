@@ -8,20 +8,26 @@ from consist.models.artifact import Artifact
 
 class RunArtifactLink(SQLModel, table=True):
     """Link table tracking inputs and outputs for a Run."""
+
     __tablename__ = "run_artifact_link"
 
     run_id: str = Field(foreign_key="run.id", primary_key=True)
     artifact_id: uuid.UUID = Field(foreign_key="artifact.id", primary_key=True)
 
     direction: str  # "input" or "output"
-    is_implicit: bool = Field(default=False, description="Was this auto-detected via lineage?")
+    is_implicit: bool = Field(
+        default=False, description="Was this auto-detected via lineage?"
+    )
 
 
 class Run(SQLModel, table=True):
     """Represents a single execution unit (Model Step or Workflow)."""
+
     __tablename__ = "run"
 
-    id: str = Field(primary_key=True, description="Unique Run ID (e.g. 'asim_2010_iter2_uuid')")
+    id: str = Field(
+        primary_key=True, description="Unique Run ID (e.g. 'asim_2010_iter2_uuid')"
+    )
     parent_run_id: Optional[str] = Field(default=None, foreign_key="run.id", index=True)
 
     # State
@@ -46,6 +52,7 @@ class ConsistRecord(SQLModel):
     """
     The 'Log is Truth' Aggregation.
     """
+
     run: Run
     inputs: List[Artifact] = []
     outputs: List[Artifact] = []
