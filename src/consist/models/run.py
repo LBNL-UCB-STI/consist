@@ -11,8 +11,8 @@ class RunArtifactLink(SQLModel, table=True):
 
     __tablename__ = "run_artifact_link"
 
-    run_id: str = Field(foreign_key="run.id", primary_key=True)
-    artifact_id: uuid.UUID = Field(foreign_key="artifact.id", primary_key=True)
+    run_id: str = Field(primary_key=True)
+    artifact_id: uuid.UUID = Field(primary_key=True)
 
     direction: str  # "input" or "output"
     is_implicit: bool = Field(

@@ -25,7 +25,7 @@ class Artifact(SQLModel, table=True):
     driver: str = Field(description="Format handler: parquet, csv, zarr, h5, git")
 
     # Lineage
-    run_id: Optional[str] = Field(default=None, foreign_key="run.id", index=True)
+    run_id: Optional[str] = Field(default=None, index=True)
 
     # Metadata (Flexible JSON bag)
     # Stores: checksums, schema signatures, matrix shapes, etc.
