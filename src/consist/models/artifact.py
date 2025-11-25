@@ -7,7 +7,23 @@ from sqlmodel import Field, SQLModel
 
 class Artifact(SQLModel, table=True):
     """
-    Represents a physical data object (File, Directory, Zarr store).
+    Represents a physical data object, such as a file, directory, or database table.
+
+    Artifacts are the core building blocks of the provenance system, tracking the inputs
+    and outputs of runs. Each artifact has a unique identity, a virtualized location,
+    and rich metadata.
+
+    Attributes:
+        id (uuid.UUID): A unique identifier for the artifact.
+        key (str): A semantic, human-readable name for the artifact (e.g., "households", "parcels").
+        uri (str): A portable, virtualized Uniform Resource Identifier (URI) for the artifact's
+                   location (e.g., "inputs://land_use.csv").
+        driver (str): The name of the format handler used to read or write the artifact
+                      (e.g., "parquet", "csv", "zarr").
+        run_id (Optional[str]): The ID of the run that generated this artifact. Null for inputs.
+        meta (Dict[str, Any]): A flexible JSON field for storing arbitrary metadata, such as
+                               checksums, schema signatures, or data dimensions.
+        created_at (datetime): The timestamp when the artifact was first logged.
     """
 
     __tablename__ = "artifact"
@@ -45,5 +61,15 @@ class Artifact(SQLModel, table=True):
         return self.driver in ("parquet", "csv", "sql")
 
     def get_meta(self, key: str, default: Any = None) -> Any:
-        """Safe access to the JSON metadata bag."""
+        """
+        Safely retrieves a value from the 'meta' dictionary.
+
+        Args:
+            key (str): The key to look up in the metadata.
+            default (Any, optional): The default value to return if the key is not found.
+                                     Defaults to None.
+
+        Returns:
+            Any: The value associated with the key, or the default value if the key is not present.
+        """
         return self.meta.get(key, default)

@@ -20,8 +20,24 @@ class Household(SQLModel, table=True):
 
 def test_hybrid_view_generation(tracker, tmp_path):
     """
-    The 'Happy Path': Unions a Parquet file (Cold) with a DB Table (Hot).
-    Verifies Forward Schema Drift (Hot has extra col).
+    Tests the "happy path" for hybrid view generation, where both "hot" and "cold" data exist.
+
+    This test verifies that `ViewFactory` can successfully create a SQL view that unions
+    data from a materialized database table ("hot" data) and a raw Parquet file ("cold" data).
+    It specifically checks that the view gracefully handles forward schema drift, where the
+    "hot" data contains a column that the "cold" data lacks.
+
+    What happens:
+    1. A Parquet file is created representing "cold" data, missing a 'persons' column.
+    2. A run is executed to log this file as a 'households' artifact.
+    3. A separate run ingests "hot" data (which includes the 'persons' column) into the
+       database, also for the 'households' concept.
+    4. A hybrid view `v_households` is created.
+
+    What's checked:
+    - The final view contains records from both the hot and cold sources.
+    - The record from the "cold" source has a `NULL` (or `NaN`) value for the 'persons' column.
+    - The record from the "hot" source has the correct value for the 'persons' column.
     """
     # 1. Cold Data (Missing 'persons')
     cold_df = pd.DataFrame({"id": [1], "income": [50000.0]})
@@ -57,8 +73,23 @@ def test_hybrid_view_generation(tracker, tmp_path):
 
 def test_pure_cold_view(tracker, tmp_path):
     """
-    Verifies the view works when NO data is in the database (File-only mode).
-    This is critical for the initial migration phase.
+    Tests the creation of a view when only "cold" (file-based) data exists.
+
+    This test is critical for ensuring that Consist can operate in a "file-only" mode,
+    where no data has been materialized into the database yet. It verifies that the
+    `ViewFactory` can correctly create a view that unions multiple file-based artifacts.
+
+    What happens:
+    1. Two distinct Parquet files are created.
+    2. Two separate runs are executed, each logging one of the files under the same
+       concept key ('zones').
+    3. A view `v_zones` is created for the 'zones' concept. At this point, no
+       `global_tables.zones` table exists in the database.
+
+    What's checked:
+    - The resulting view contains the data from both Parquet files.
+    - The Consist system columns (e.g., `consist_run_id`) are correctly injected into
+      the view's output, even for file-only sources.
     """
     # Create two parquet files
     df1 = pd.DataFrame({"id": [1], "val": ["A"]})
@@ -88,8 +119,23 @@ def test_pure_cold_view(tracker, tmp_path):
 
 def test_bidirectional_schema_drift(tracker, tmp_path):
     """
-    Verifies that if Cold has a column Hot lacks, AND Hot has a column Cold lacks,
-    DuckDB preserves BOTH columns (filling with NULLs).
+    Tests the view's ability to handle bidirectional schema drift between "hot" and "cold" data.
+
+    This test verifies that DuckDB's `UNION ALL BY NAME` feature correctly handles cases
+    where the file-based data has a column that the database table lacks, and vice-versa.
+    The final view should contain all columns from both sources, with `NULL` values filling
+    in where a column is absent for a given record.
+
+    What happens:
+    1. A "cold" Parquet file is created with a `legacy_col` but no `new_col`.
+    2. A "hot" data record is ingested into the database with a `new_col` but no `legacy_col`.
+    3. A hybrid view is created to union these two sources.
+
+    What's checked:
+    - The record originating from the "cold" source has the correct value for `legacy_col`
+      and a `NULL` value for `new_col`.
+    - The record originating from the "hot" source has a `NULL` value for `legacy_col`
+      and the correct value for `new_col`.
     """
     # Cold: Has 'legacy_col', missing 'new_col'
     cold_df = pd.DataFrame({"id": [1], "legacy_col": ["old"]})
@@ -130,8 +176,20 @@ def test_bidirectional_schema_drift(tracker, tmp_path):
 
 def test_empty_state_safety(tracker):
     """
-    Verifies that asking for a view of a non-existent concept
-    returns a valid (but empty) view, rather than crashing.
+    Tests the system's resilience when creating a view for a concept that does not exist.
+
+    This test ensures that requesting a view for a `concept_key` that has neither
+    materialized data nor any file-based artifacts does not cause an error. The expected
+    behavior is the creation of a valid, but empty, SQL view.
+
+    What happens:
+    - `create_view` is called with a `concept_key` ("ghost_concept") that has no associated
+      artifacts or database tables.
+
+    What's checked:
+    - The operation completes without raising an exception.
+    - The resulting view (`v_ghost`) can be queried (e.g., `SELECT count(*)`).
+    - Querying the view returns an empty result set.
     """
     tracker.create_view("v_ghost", "ghost_concept")
 
@@ -147,8 +205,23 @@ def test_empty_state_safety(tracker):
 
 def test_view_with_mounts(tmp_path):
     """
-    Verifies that the ViewFactory correctly resolves virtualized URIs
-    (e.g., inputs://) to absolute paths required by DuckDB.
+    Tests that the ViewFactory correctly handles virtualized URIs using mounts.
+
+    This test ensures that when an artifact is logged with a path that falls under a
+    configured mount point, the `ViewFactory` can correctly resolve the virtualized URI
+    (e.g., "inputs://...") back to an absolute file path that DuckDB can use to read the file.
+
+    What happens:
+    1. A Tracker is initialized with a specific `mounts` dictionary mapping "inputs" to a temp directory.
+    2. A Parquet file is created inside this mounted directory.
+    3. An artifact is logged using the file's absolute path.
+    4. A view is created for the concept associated with the artifact.
+
+    What's checked:
+    - The `Artifact` table in the database correctly stores the virtualized URI ("inputs://...").
+    - The created view can be queried successfully, proving that the `ViewFactory` was able
+      to resolve the virtualized URI back to an absolute path for DuckDB's `read_parquet` function.
+    - The data in the view is correct.
     """
     # Setup tracker with mounts (Cannot use default fixture here)
     data_dir = tmp_path / "data_mount"

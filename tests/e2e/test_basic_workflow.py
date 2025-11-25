@@ -12,8 +12,23 @@ from consist.models.artifact import Artifact
 
 def test_dual_write_workflow(tmp_path):
     """
-    Verifies that the Tracker writes to BOTH JSON and DuckDB.
-    tmp_path is a pytest fixture that gives a unique temp folder.
+    Tests the end-to-end "dual-write" functionality of the Tracker.
+
+    This test simulates a complete workflow and verifies that the Tracker correctly
+    logs provenance information to both the human-readable JSON file (`consist.json`)
+    and the analytical DuckDB database. It ensures that the primary record-keeping
+    mechanisms of Consist are functioning in harmony.
+
+    What happens:
+    1. A Tracker is initialized with temporary paths for the run directory and database.
+    2. A run context is started, simulating a model execution.
+    3. An input artifact and an output artifact are logged.
+    4. The run completes successfully.
+
+    What's checked:
+    - The `consist.json` file is created and its contents are validated (run ID, status, artifacts, config).
+    - The DuckDB database is checked to ensure that the correct number of `Run` and `Artifact`
+      records were created, verifying the database indexing.
     """
     # 1. Setup Paths
     run_dir = tmp_path / "test_run_1"

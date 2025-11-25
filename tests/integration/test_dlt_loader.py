@@ -16,7 +16,29 @@ class MockTable(SQLModel, table=True):
 
 
 def test_ingest_artifact_strict(tracker, engine, db_path):
-    """Test that tracker.ingest handles data loading and locking."""
+    """
+    Tests the `ingest` method in "Strict Mode".
+
+    This integration test verifies that `dlt_loader` correctly ingests data into DuckDB when a
+    specific SQLModel schema is provided. It checks that data is loaded into the correct table
+    and that the Consist-specific system columns (e.g., `consist_run_id`, `consist_year`) are
+    automatically added and populated with the correct context from the run.
+
+    What happens:
+    1. A run is started using the provided `tracker` fixture.
+    2. An artifact is logged, associating it with a specific SQLModel schema (`MockTable`).
+    3. A list of mock data records is created.
+    4. The test fixture's SQLAlchemy engine is disposed to simulate a separate process,
+       allowing the tracker's internal `ingest` method to acquire a lock on the database.
+    5. The tracker's `ingest` method is called with the artifact, data, and schema.
+
+    What's checked:
+    - After ingestion, the database is queried to ensure the data was loaded into the
+      `global_tables.mock_data` table.
+    - The content of the loaded data is verified.
+    - The presence and correctness of the automatically injected system columns (`consist_run_id`,
+      `consist_year`) are confirmed.
+    """
 
     # 1. Setup Context
     # We must be inside a run for ingest to work

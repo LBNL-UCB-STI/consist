@@ -13,14 +13,48 @@ if TYPE_CHECKING:
 
 
 class ViewFactory:
+    """
+    A factory class responsible for generating "Hybrid Views" in DuckDB.
+
+    Hybrid Views combine data from materialized tables (often ingested via dlt)
+    with data directly from file-based artifacts (e.g., Parquet, CSV),
+    providing a unified SQL interface to query both "hot" and "cold" data
+    transparently.
+    """
     def __init__(self, tracker: "Tracker"):
+        """
+        Initializes the ViewFactory with a reference to the main Tracker.
+
+        Args:
+            tracker (Tracker): An instance of the Consist Tracker, which provides
+                               access to the database engine, artifact resolution,
+                               and other run-time context.
+        """
         self.tracker = tracker
 
-    def create_hybrid_view(self, view_name: str, concept_key: str, driver_filter: List[str] = None):
+    def create_hybrid_view(
+        self, view_name: str, concept_key: str, driver_filter: Optional[List[str]] = None
+    ) -> bool:
         """
-        Creates a DuckDB VIEW that creates a union of:
-        1. 'Hot' data in global_tables.{concept_key}
-        2. 'Cold' data from Artifacts (Parquet/CSV) with matching key
+        Creates or replaces a DuckDB SQL VIEW that combines "hot" and "cold" data for a given concept.
+
+        "Hot" data refers to records already materialized into a DuckDB table (e.g., via ingestion).
+        "Cold" data refers to records still residing in file-based artifacts (e.g., Parquet, CSV).
+        The resulting view uses `UNION ALL BY NAME` to gracefully handle schema differences.
+
+        Args:
+            view_name (str): The name to assign to the newly created or replaced SQL view.
+            concept_key (str): The semantic key identifying the data concept (e.g., "households").
+                               Artifacts and materialized tables matching this key will be included.
+            driver_filter (Optional[List[str]]): An optional list of artifact drivers (e.g., "parquet", "csv")
+                                                 to include when querying "cold" data. If None, "parquet"
+                                                 and "csv" drivers are considered by default.
+
+        Returns:
+            bool: True if the view creation was attempted (even if empty), False otherwise.
+
+        Raises:
+            RuntimeError: If the Tracker's database engine is not configured.
         """
         if not self.tracker.engine:
             raise RuntimeError("Cannot create views: No database engine configured.")
@@ -56,7 +90,15 @@ class ViewFactory:
         return True
 
     def _check_table_exists(self, table_path: str) -> bool:
-        """Checks information_schema for table existence."""
+        """
+        Checks if a specified table exists in the DuckDB information schema.
+
+        Args:
+            table_path (str): The full path to the table (e.g., "global_tables.my_table" or "my_table").
+
+        Returns:
+            bool: True if the table exists, False otherwise.
+        """
         if "." in table_path:
             schema, table = table_path.split(".", 1)
         else:
@@ -74,9 +116,26 @@ class ViewFactory:
 
         return result > 0
 
-    def _generate_cold_queries(self, concept_key: str, driver_filter: List[str] = None) -> List[str]:
+    def _generate_cold_queries(
+        self, concept_key: str, driver_filter: Optional[List[str]] = None
+    ) -> List[str]:
         """
-        Finds artifacts and generates SQL SELECT statements with injected system columns.
+        Identifies "cold" artifacts (file-based) for a given concept key and generates
+        SQL SELECT statements to query them directly.
+
+        It resolves artifact URIs to local paths, handles missing files gracefully,
+        and injects Consist-specific system columns (e.g., `consist_run_id`, `consist_year`)
+        into the generated SELECT statements for traceability.
+
+        Args:
+            concept_key (str): The semantic key for which to find file-based artifacts.
+            driver_filter (Optional[List[str]]): An optional list of artifact drivers
+                                                 to filter by (e.g., "parquet", "csv").
+                                                 Defaults to ["parquet", "csv"].
+
+        Returns:
+            List[str]: A list of SQL SELECT statements, each designed to query a
+                       single "cold" artifact.
         """
         drivers = driver_filter or ["parquet", "csv"]
 

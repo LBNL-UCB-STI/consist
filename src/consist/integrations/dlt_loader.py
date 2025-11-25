@@ -9,8 +9,21 @@ from consist.models.run import Run
 
 def _extend_schema_with_system_columns(base_model: Type[SQLModel]) -> Type[SQLModel]:
     """
-    Dynamically creates a new SQLModel class that inherits from the user's model
-    but adds the Consist system columns.
+    Dynamically creates a new SQLModel class that extends a given base model
+    by adding Consist-specific system columns (e.g., run_id, artifact_id, year, iteration).
+
+    This is used to inject provenance information directly into the schema of
+    ingested data without modifying the user's original SQLModel definition.
+    The dynamically created model does not set `table=True` as it's primarily for
+    `dlt` schema inference and validation.
+
+    Args:
+        base_model (Type[SQLModel]): The original SQLModel class provided by the user,
+                                      defining the structure of their data.
+
+    Returns:
+        Type[SQLModel]: A new SQLModel class that inherits from `base_model` and
+                        includes the additional Consist system columns.
     """
     # 1. Define Annotations (The Types)
     new_annotations = {
@@ -47,14 +60,35 @@ def _extend_schema_with_system_columns(base_model: Type[SQLModel]) -> Type[SQLMo
 
 
 def ingest_artifact(
-        artifact: Artifact,
-        run_context: Run,
-        db_path: str,
-        data_iterable: Iterable[Dict[str, Any]],
-        schema_model: Optional[Type[SQLModel]] = None,
+    artifact: Artifact,
+    run_context: Run,
+    db_path: str,
+    data_iterable: Iterable[Dict[str, Any]],
+    schema_model: Optional[Type[SQLModel]] = None,
 ):
     """
-    The Bridge between File Artifacts and the Global Table.
+    Ingests data associated with an artifact into the DuckDB database using `dlt`.
+
+    This function acts as a bridge, taking an iterable of data records and loading
+    them into a destination table, dynamically extending the schema with Consist's
+    provenance columns. It supports both strict schema validation (via `schema_model`)
+    and automatic schema inference.
+
+    Args:
+        artifact (Artifact): The `Artifact` object representing the data being ingested.
+                             Its key is used as the resource name if no `schema_model` is provided.
+        run_context (Run): The current `Run` object, providing context (run_id, year, iteration)
+                           for the provenance columns.
+        db_path (str): The file path to the DuckDB database where data will be loaded.
+        data_iterable (Iterable[Dict[str, Any]]): An iterable of dictionaries, where each
+                                                  dictionary represents a record to be ingested.
+        schema_model (Optional[Type[SQLModel]]): An optional SQLModel class that defines the
+                                                  expected schema of the ingested data. If provided,
+                                                  `dlt` uses this for strict schema enforcement.
+                                                  If None, `dlt` attempts to infer the schema.
+
+    Returns:
+        dlt.pipeline.LoadInfo: An object containing information about the dlt load operation.
     """
 
     # 1. Define the Context Injection Logic

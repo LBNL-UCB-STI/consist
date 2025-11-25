@@ -23,9 +23,22 @@ class IdentityManager:
     def __init__(self, project_root: str = "."):
         self.project_root = project_root
 
-    def calculate_run_signature(self, code_hash: str, config_hash: str, input_hash: str) -> str:
+    def calculate_run_signature(
+        self, code_hash: str, config_hash: str, input_hash: str
+    ) -> str:
         """
-        Computes the final 'Cache Key' for the run.
+        Computes the final cryptographic signature (cache key) for a run.
+
+        This signature is a composite hash of the code version, configuration, and input data,
+        forming the Merkle-DAG identity of the run.
+
+        Args:
+            code_hash (str): The hash representing the code version (e.g., Git commit SHA).
+            config_hash (str): The hash representing the run's configuration.
+            input_hash (str): The hash representing the state of all input artifacts.
+
+        Returns:
+            str: A SHA256 hex digest representing the unique signature of the run.
         """
         # We use a separator to prevent collision attacks
         composite = f"code:{code_hash}|conf:{config_hash}|in:{input_hash}"

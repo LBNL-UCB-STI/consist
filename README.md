@@ -11,7 +11,7 @@ It replaces the legacy `DuckDBManager` and `records.py` logic with a robust, sta
 
 **Philosophy:** *"JSON for Truth, SQL for Power."*
 
-### 1. The Tracker (`consist.tools.tracker`)
+### 1. The Tracker (`consist.core.tracker`)
 The central orchestrator. It manages the lifecycle of a **Run** and logs **Artifacts** (files/data).
 - **Dual-Write:** Synchronously writes to a human-readable JSON log and an analytic DuckDB index.
 - **Path Virtualization:** Converts absolute paths (e.g., `/mnt/data/file.csv`) into portable URIs (e.g., `inputs://file.csv`) to enable run portability across machines.
