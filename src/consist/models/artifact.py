@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 from sqlalchemy import Column, JSON
 from sqlmodel import Field, SQLModel
+from pydantic import PrivateAttr
 
 
 class Artifact(SQLModel, table=True):
@@ -50,7 +51,22 @@ class Artifact(SQLModel, table=True):
     # Audit
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
-    # --- Format Helpers (Python logic, not new columns) ---
+    # --- Runtime State (Not persisted) ---
+    _abs_path: Optional[str] = PrivateAttr(default=None)
+
+    @property
+    def abs_path(self) -> Optional[str]:
+        """
+        Runtime-only helper to access the absolute path of this artifact.
+        Useful when chaining runs in the same script.
+        """
+        return self._abs_path
+
+    @abs_path.setter
+    def abs_path(self, value: str):
+        self._abs_path = value
+
+    # --- Format Helpers ---
 
     @property
     def is_matrix(self) -> bool:

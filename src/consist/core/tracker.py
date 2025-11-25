@@ -1,7 +1,7 @@
 import os
 import json
 from pathlib import Path
-from typing import Dict, Optional, List, Any, Type, Iterable
+from typing import Dict, Optional, List, Any, Type, Iterable, Union
 from datetime import datetime, UTC
 from uuid import uuid4
 from contextlib import contextmanager
@@ -13,6 +13,8 @@ from consist.core.views import ViewFactory
 # Models
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifactLink, ConsistRecord
+# Core
+from consist.core.identity import IdentityManager
 
 
 class Tracker:
@@ -27,10 +29,11 @@ class Tracker:
     4. Providing path virtualization to make runs portable across different environments.
     """
     def __init__(
-        self,
-        run_dir: Path,
-        db_path: Optional[str] = None,
-        mounts: Dict[str, str] = None,
+            self,
+            run_dir: Path,
+            db_path: Optional[str] = None,
+            mounts: Dict[str, str] = None,
+            project_root: str = ".",
     ):
         """
         Initializes the Consist Tracker.
@@ -54,8 +57,7 @@ class Tracker:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.mounts = mounts or {}
         self.db_path = db_path
-
-        # Database Setup (Optional, tolerant to missing DB)
+        self.identity = IdentityManager(project_root=project_root)
         self.engine = None
         if db_path:
             # Using duckdb-engine for SQLAlchemy support
@@ -63,11 +65,7 @@ class Tracker:
 
             SQLModel.metadata.create_all(
                 self.engine,
-                tables=[
-                    Run.__table__,
-                    Artifact.__table__,
-                    RunArtifactLink.__table__
-                ]
+                tables=[Run.__table__, Artifact.__table__, RunArtifactLink.__table__]
             )
 
         # In-Memory State (The Source of Truth)
@@ -75,46 +73,30 @@ class Tracker:
 
     @contextmanager
     def start_run(
-        self, run_id: str, model: str, config: Dict[str, Any] = None, **kwargs
+            self, run_id: str, model: str, config: Dict[str, Any] = None, **kwargs
     ):
-        """
-        A context manager that defines and manages the lifecycle of a single Consist run.
-
-        This method initializes a new run record, sets its status, and ensures proper
-        state management and logging (to both JSON and the database) throughout the
-        execution block. It handles both successful completion and exceptions.
-
-        Args:
-            run_id (str): A unique identifier for the current run.
-            model (str): The name of the model or logical step associated with this run.
-            config (Optional[Dict[str, Any]]): A dictionary representing the configuration
-                                                used for this run. Defaults to an empty dict.
-            **kwargs: Additional metadata to be stored in the `meta` field of the Run object.
-                      Common examples include 'year', 'iteration', or custom tags.
-
-        Yields:
-            Tracker: The Tracker instance, allowing methods to be called within the run context.
-
-        Raises:
-            Exception: Any exception raised within the 'with' block will be caught,
-                       the run status will be updated to "failed", and then the exception
-                       will be re-raised.
-        """
+        if config is None:
+            config = {}
 
         year = kwargs.pop("year", None)
         iteration = kwargs.pop("iteration", None)
 
+        config_hash = self.identity.compute_config_hash(config)
+        git_hash = self.identity.get_code_version()
+
         run = Run(
             id=run_id,
             model_name=model,
-            year=year,  # Goes to optimized SQL column
-            iteration=iteration,  # Goes to optimized SQL column
+            year=year,
+            iteration=iteration,
             status="running",
+            config_hash=config_hash,
+            git_hash=git_hash,
             meta=kwargs,
             created_at=datetime.now(UTC),
         )
 
-        self.current_consist = ConsistRecord(run=run, config=config or {})
+        self.current_consist = ConsistRecord(run=run, config=config)
 
         # Initial Flush
         self._flush_json()
@@ -132,6 +114,111 @@ class Tracker:
             self._flush_json()
             self._sync_run_to_db(run)
             self.current_consist = None
+
+    def log_artifact(
+            self,
+            path: Union[str, Artifact],
+            key: Optional[str] = None,
+            direction: str = "output",
+            schema: Optional[Type[SQLModel]] = None,
+            **meta,
+    ) -> Artifact:
+        """
+        Logs an artifact (file or data reference) within the current run context.
+
+        This method virtualizes the artifact's path, infers its driver, injects schema
+        metadata if provided, creates an `Artifact` object, and then persists its
+        metadata to both the JSON log and the database.
+
+        Args:
+            path (Union[str, Artifact]): Either a file path string OR an existing Artifact object
+                                         (e.g., from a previous run).
+            key (Optional[str]): Semantic name. Required if 'path' is a string.
+                                 Defaults to artifact.key if 'path' is an Artifact object.
+            direction (str): "input" or "output".
+            schema (Optional[Type[SQLModel]]): Schema definition for the data.
+            **meta: Additional metadata.
+
+        Returns:
+            Artifact: The newly created and logged `Artifact` object.
+
+        Raises:
+            RuntimeError: If `log_artifact` is called outside an active run context.
+        """
+        if not self.current_consist:
+            raise RuntimeError("Cannot log artifact outside of a run context.")
+
+        artifact_obj = None
+        resolved_abs_path = None
+
+        # --- Logic Branch A: Artifact Object Passed (Reuse/Link) ---
+        if isinstance(path, Artifact):
+            artifact_obj = path
+
+            # 1. Resolve Physical Path (for hashing/validity)
+            # Use runtime cache if available, else try resolving URI
+            if artifact_obj.abs_path:
+                resolved_abs_path = artifact_obj.abs_path
+            else:
+                # Warning: If URI is relative, this might resolve incorrectly in a new run dir
+                # but we attempt it as best-effort.
+                resolved_abs_path = self.resolve_uri(artifact_obj.uri)
+
+            # 2. Inherit/Override Metadata
+            # If key is not provided, keep original. If provided, we treat it as an alias?
+            # For simplicity, we stick to the original key unless we want to rename.
+            # Let's enforce the key matches or default to it.
+            if key is None:
+                key = artifact_obj.key
+
+            # Update meta if provided
+            if meta:
+                # Shallow merge
+                artifact_obj.meta.update(meta)
+
+        # --- Logic Branch B: String Path Passed (New/Discovery) ---
+        else:
+            if key is None:
+                raise ValueError("Argument 'key' is required when logging a new path.")
+
+            # 1. Path Virtualization
+            # Convert physical path -> Virtual URI
+            resolved_abs_path = str(Path(path).resolve())
+            uri = self._virtualize_path(resolved_abs_path)
+
+            # 2. Driver Inference
+            driver = Path(path).suffix.lstrip(".").lower() or "unknown"
+
+            # 3. Create Object
+            artifact_obj = Artifact(
+                key=key,
+                uri=uri,
+                driver=driver,
+                run_id=self.current_consist.run.id if direction == "output" else None,
+                meta=meta,
+            )
+
+        # --- Common Logic ---
+
+        # Schema Metadata Injection
+        if schema:
+            artifact_obj.meta["schema_name"] = schema.__name__
+            artifact_obj.meta["has_strict_schema"] = True
+
+        # Attach Runtime Path (Vital for chaining)
+        artifact_obj.abs_path = resolved_abs_path
+
+        # Update Memory (Current Run Record)
+        if direction == "input":
+            self.current_consist.inputs.append(artifact_obj)
+        else:
+            self.current_consist.outputs.append(artifact_obj)
+
+        # Write to Persistence
+        self._flush_json()
+        self._sync_artifact_to_db(artifact_obj, direction)
+
+        return artifact_obj
 
     def ingest(
             self,
@@ -189,76 +276,6 @@ class Tracker:
             raise e
         # Note: We don't need to explicitly reconnect self.engine.
         # SQLAlchemy will automatically reconnect the next time it's used.
-
-    def log_artifact(
-        self,
-        path: str,
-        key: str,
-        direction: str = "output",
-        schema: Optional[Type[SQLModel]] = None,
-        **meta,
-    ) -> Artifact:
-        """
-        Logs an artifact (file or data reference) within the current run context.
-
-        This method virtualizes the artifact's path, infers its driver, injects schema
-        metadata if provided, creates an `Artifact` object, and then persists its
-        metadata to both the JSON log and the database.
-
-        Args:
-            path (str): The absolute or relative file system path to the artifact.
-                        This path will be converted to a portable URI.
-            key (str): A semantic name for the artifact (e.g., "households", "cleaned_data").
-            direction (str): Specifies whether the artifact is an "input" to the run
-                             or an "output" generated by the run. Defaults to "output".
-            schema (Optional[Type[SQLModel]]): An optional SQLModel class that describes the
-                                                structure of the data contained in this artifact.
-                                                If provided, its name and a flag will be stored
-                                                in the artifact's metadata.
-            **meta: Arbitrary keyword arguments that will be stored as additional metadata
-                    within the artifact's `meta` dictionary.
-
-        Returns:
-            Artifact: The newly created and logged `Artifact` object.
-
-        Raises:
-            RuntimeError: If `log_artifact` is called outside of an active run context.
-        """
-        if not self.current_consist:
-            raise RuntimeError("Cannot log artifact outside of a run context.")
-
-        # 1. Path Virtualization
-        uri = self._virtualize_path(path)
-
-        # 2. Driver Inference
-        driver = Path(path).suffix.lstrip(".").lower() or "unknown"
-
-        # 3. Schema Metadata Injection
-        if schema:
-            # We store the class name. In the future, we could store a hash of model_json_schema()
-            meta["schema_name"] = schema.__name__
-            meta["has_strict_schema"] = True
-
-        # 4. Create Object
-        artifact = Artifact(
-            key=key,
-            uri=uri,
-            driver=driver,
-            run_id=self.current_consist.run.id if direction == "output" else None,
-            meta=meta,
-        )
-
-        # 5. Update Memory
-        if direction == "input":
-            self.current_consist.inputs.append(artifact)
-        else:
-            self.current_consist.outputs.append(artifact)
-
-        # 6. Write
-        self._flush_json()
-        self._sync_artifact_to_db(artifact, direction)
-
-        return artifact
 
     def create_view(self, view_name: str, concept_key: str):
         """
@@ -333,7 +350,7 @@ class Tracker:
 
         # Check mounts longest-match first
         for name, root in sorted(
-            self.mounts.items(), key=lambda x: len(x[1]), reverse=True
+                self.mounts.items(), key=lambda x: len(x[1]), reverse=True
         ):
             root_abs = str(Path(root).resolve())
             if abs_path.startswith(root_abs):
@@ -399,6 +416,8 @@ class Tracker:
                     db_run.status = run.status
                     db_run.updated_at = run.updated_at
                     db_run.meta = run.meta
+                    db_run.config_hash = run.config_hash
+                    db_run.git_hash = run.git_hash
                     session.add(db_run)
                 else:
                     # Insert new: Create a fresh copy for the DB
@@ -434,7 +453,7 @@ class Tracker:
                 # Create Link
                 link = RunArtifactLink(
                     run_id=self.current_consist.run.id,
-                    artifact_id=db_artifact.id,  # Use DB ID
+                    artifact_id=db_artifact.id,
                     direction=direction,
                 )
                 session.merge(link)

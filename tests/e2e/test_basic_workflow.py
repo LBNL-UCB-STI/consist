@@ -8,11 +8,14 @@ from sqlmodel import Session, select, create_engine
 from consist.core.tracker import Tracker
 from consist.models.run import Run
 from consist.models.artifact import Artifact
+from consist.core.identity import IdentityManager
 
 
 def test_dual_write_workflow(tmp_path):
     """
     Tests the end-to-end "dual-write" functionality of the Tracker.
+        INCLUDING automatic Identity hashing (Config & Git).
+
 
     This test simulates a complete workflow and verifies that the Tracker correctly
     logs provenance information to both the human-readable JSON file (`consist.json`)
@@ -40,6 +43,9 @@ def test_dual_write_workflow(tmp_path):
     # 3. Run a Fake Workflow
     config = {"random_seed": 42, "scenario": "test"}
 
+    # Calculate what we expect the hash to be manually
+    expected_config_hash = IdentityManager().compute_config_hash(config)
+
     with tracker.start_run(run_id="run_1", model="test_model", config=config):
         # Log an input
         tracker.log_artifact(
@@ -63,11 +69,19 @@ def test_dual_write_workflow(tmp_path):
     with open(json_file) as f:
         data = json.load(f)
 
+    # Standard checks
     assert data["run"]["id"] == "run_1"
     assert data["run"]["status"] == "completed"
     assert len(data["inputs"]) == 1
     assert len(data["outputs"]) == 1
     assert data["config"]["random_seed"] == 42
+
+    # Hashing checks
+    assert data["run"]["config_hash"] == expected_config_hash, "Config hash mismatch in JSON"
+    assert "git_hash" in data["run"], "Git hash field missing in JSON"
+    # Note: git_hash might be 'no_git_module_found' or 'unknown' depending on environment,
+    # but it should not be None/Null.
+    assert data["run"]["git_hash"] is not None
 
     print(f"\nJSON Output content: {json.dumps(data, indent=2)}")
 
@@ -77,7 +91,11 @@ def test_dual_write_workflow(tmp_path):
         # Check Run
         runs = session.exec(select(Run)).all()
         assert len(runs) == 1
-        assert runs[0].id == "run_1"
+        db_run = runs[0]
+
+        assert db_run.id == "run_1"
+        assert db_run.config_hash == expected_config_hash, "Config hash mismatch in DB"
+        assert db_run.git_hash is not None, "Git hash missing in DB"
 
         # Check Artifacts
         artifacts = session.exec(select(Artifact)).all()

@@ -27,6 +27,12 @@ A "View Factory" that abstracts storage details.
 - **Hybrid Views:** Generates SQL `UNION ALL BY NAME` views that combine "Cold" data (raw files) and "Hot" data (materialized rows) into a single queryable table.
 - **Schema Drift:** Gracefully handles missing or extra columns between runs.
 
+## Run Identity & Caching
+
+Consist automatically generates a cryptographic signature for every run to enable safe caching and "forking" of workflows.
+
+**Identity Formula:** `H_run = SHA256( H_code + H_config + H_inputs )`
+
 ## Setup
 
 This project is managed with `uv`.
@@ -47,26 +53,50 @@ from pathlib import Path
 
 # Initialize
 tracker = Tracker(
-    run_dir=Path("./runs"), 
+    run_dir=Path("./runs/experiment_1"), 
     db_path="./provenance.duckdb"
 )
 
-# Start a tracked execution context
-with tracker.start_run("run_id_123", model="asim", year=2010):
+config = {
+    "scenario": "high_growth",
+    "random_seed": 12345,
+    "ui_settings": {"color": "blue"} # 'Noise' keys can be excluded
+}
+
+# The Tracker automatically:
+# 1. Canonicalizes the config (sorts keys, handles types).
+# 2. Captures the current Git Commit SHA (H_code).
+# 3. Computes H_config.
+
+# --- Step 1: Generation ---
+with tracker.start_run("run_id_101", model="asim", year=2010, config=config):
     
-    # Log an input file
+    # 1. Log an input
     tracker.log_artifact("/path/to/input.csv", key="households", direction="input")
     
-    # ... Run simulation logic ...
+    # 2. Run simulation logic...
+    # (Assume we write a file called 'outputs.csv' here)
     
-    # Ingest output data to DB
+    # 3. Log the output
+    # This returns an Artifact object with a portable URI (e.g. "./outputs.csv")
+    # AND a runtime cache of the absolute path.
+    persons_artifact = tracker.log_artifact("outputs.csv", key="persons", direction="output")
+    
+    # 4. (Optional) Ingest into DuckDB for analysis
     tracker.ingest(
-        artifact=tracker.log_artifact("outputs.csv", key="persons"),
+        artifact=persons_artifact,
         data=[{"id": 1, "income": 50000}]
     )
 
-# Create a unified view (reads from files OR db)
-tracker.create_view("v_persons", "persons")
+# --- Step 2: Consumption (Chaining Runs) ---
+# We can pass artifacts from previous runs directly into new ones!
+with tracker.start_run("run_id_102", model="post_processor"):
+    
+    # No need to manually resolve paths. The artifact object knows where it lives.
+    tracker.log_artifact(persons_artifact, direction="input")
+    
+    # Create a unified view to query it
+    tracker.create_view("v_persons", "persons")
 ```
 
 ## Current Status
@@ -76,6 +106,7 @@ tracker.create_view("v_persons", "persons")
 - [x] Tracker Implementation
 - [x] dlt Integration
 - [x] Hybrid View Generation
-- [ ] Canonical Config Hashing (In Progress)
+- [x] Canonical Config Hashing
+- [x] Run Identity (Git + Config + Inputs)
 - [ ] Run Forking/Caching logic
 - [ ] SQL Transformers
