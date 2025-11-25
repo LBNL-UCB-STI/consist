@@ -1,6 +1,5 @@
 # tests/integration/test_views.py
 
-import pytest
 import pandas as pd
 from typing import Optional
 from sqlmodel import SQLModel, Field, text
@@ -8,6 +7,7 @@ from consist.core.tracker import Tracker
 
 
 # --- Models ---
+
 
 class Household(SQLModel, table=True):
     __tablename__ = "households"
@@ -17,6 +17,7 @@ class Household(SQLModel, table=True):
 
 
 # --- Tests ---
+
 
 def test_hybrid_view_generation(tracker, tmp_path):
     """
@@ -53,7 +54,7 @@ def test_hybrid_view_generation(tracker, tmp_path):
         tracker.ingest(
             artifact=tracker.log_artifact("dummy", "households"),
             data=hot_data,
-            schema=Household
+            schema=Household,
         )
 
     # 3. Verify
@@ -64,11 +65,11 @@ def test_hybrid_view_generation(tracker, tmp_path):
 
         assert len(df) == 2
         # Check Cold Row (year 2010)
-        assert df.iloc[0]['consist_year'] == 2010
-        assert pd.isna(df.iloc[0]['persons'])
+        assert df.iloc[0]["consist_year"] == 2010
+        assert pd.isna(df.iloc[0]["persons"])
         # Check Hot Row (year 2011)
-        assert df.iloc[1]['consist_year'] == 2011
-        assert df.iloc[1]['persons'] == 3.0
+        assert df.iloc[1]["consist_year"] == 2011
+        assert df.iloc[1]["persons"] == 3.0
 
 
 def test_pure_cold_view(tracker, tmp_path):
@@ -112,7 +113,7 @@ def test_pure_cold_view(tracker, tmp_path):
     with tracker.engine.connect() as conn:
         df = pd.read_sql("SELECT * FROM v_zones ORDER BY id", conn)
         assert len(df) == 2
-        assert df['val'].tolist() == ["A", "B"]
+        assert df["val"].tolist() == ["A", "B"]
         # Ensure system columns were injected
         assert "consist_run_id" in df.columns
 
@@ -157,7 +158,7 @@ def test_bidirectional_schema_drift(tracker, tmp_path):
         tracker.ingest(
             artifact=tracker.log_artifact("dummy", "drift_test"),
             data=hot_data,
-            schema=DriftModel
+            schema=DriftModel,
         )
 
     tracker.create_view("v_drift", "drift_test")
@@ -166,12 +167,12 @@ def test_bidirectional_schema_drift(tracker, tmp_path):
         df = pd.read_sql("SELECT * FROM v_drift ORDER BY id", conn)
 
         # Row 1 (Cold): legacy=old, new=NaN
-        assert df.iloc[0]['legacy_col'] == "old"
-        assert pd.isna(df.iloc[0]['new_col'])
+        assert df.iloc[0]["legacy_col"] == "old"
+        assert pd.isna(df.iloc[0]["new_col"])
 
         # Row 2 (Hot): legacy=NaN, new=fresh
-        assert pd.isna(df.iloc[1]['legacy_col'])
-        assert df.iloc[1]['new_col'] == "fresh"
+        assert pd.isna(df.iloc[1]["legacy_col"])
+        assert df.iloc[1]["new_col"] == "fresh"
 
 
 def test_empty_state_safety(tracker):
@@ -230,7 +231,7 @@ def test_view_with_mounts(tmp_path):
     tracker = Tracker(
         run_dir=tmp_path / "runs",
         db_path=str(tmp_path / "provenance.duckdb"),
-        mounts={"inputs": str(data_dir)}
+        mounts={"inputs": str(data_dir)},
     )
 
     # Create file inside the mount point
@@ -247,7 +248,9 @@ def test_view_with_mounts(tmp_path):
     # Verify internal storage is virtualized
     with tracker.engine.connect() as conn:
         # We query the artifact table directly to prove it stored the virtualization
-        uris = pd.read_sql("SELECT uri FROM artifact WHERE key='mounted_data'", conn)['uri'].tolist()
+        uris = pd.read_sql("SELECT uri FROM artifact WHERE key='mounted_data'", conn)[
+            "uri"
+        ].tolist()
         assert uris[0] == "inputs://mounted.parquet"
 
     # Create View (This tests if ViewFactory correctly resolves inputs:// back to absolute)
@@ -256,4 +259,4 @@ def test_view_with_mounts(tmp_path):
     with tracker.engine.connect() as conn:
         df = pd.read_sql("SELECT * FROM v_mounted", conn)
         assert len(df) == 1
-        assert df.iloc[0]['x'] == 100
+        assert df.iloc[0]["x"] == 100

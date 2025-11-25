@@ -1,18 +1,17 @@
 import os
-import json
 from pathlib import Path
-from typing import Dict, Optional, List, Any, Type, Iterable, Union
+from typing import Dict, Optional, Any, Type, Iterable, Union
 from datetime import datetime, UTC
-from uuid import uuid4
 from contextlib import contextmanager
 
-from sqlmodel import create_engine, Session, select, SQLModel
-from sqlmodel.main import SQLModelMetaclass
+from sqlmodel import create_engine, Session, SQLModel
 
 from consist.core.views import ViewFactory
+
 # Models
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifactLink, ConsistRecord
+
 # Core
 from consist.core.identity import IdentityManager
 
@@ -28,12 +27,13 @@ class Tracker:
        and a DuckDB database for analytical querying.
     4. Providing path virtualization to make runs portable across different environments.
     """
+
     def __init__(
-            self,
-            run_dir: Path,
-            db_path: Optional[str] = None,
-            mounts: Dict[str, str] = None,
-            project_root: str = ".",
+        self,
+        run_dir: Path,
+        db_path: Optional[str] = None,
+        mounts: Dict[str, str] = None,
+        project_root: str = ".",
     ):
         """
         Initializes the Consist Tracker.
@@ -65,7 +65,7 @@ class Tracker:
 
             SQLModel.metadata.create_all(
                 self.engine,
-                tables=[Run.__table__, Artifact.__table__, RunArtifactLink.__table__]
+                tables=[Run.__table__, Artifact.__table__, RunArtifactLink.__table__],
             )
 
         # In-Memory State (The Source of Truth)
@@ -73,7 +73,7 @@ class Tracker:
 
     @contextmanager
     def start_run(
-            self, run_id: str, model: str, config: Dict[str, Any] = None, **kwargs
+        self, run_id: str, model: str, config: Dict[str, Any] = None, **kwargs
     ):
         if config is None:
             config = {}
@@ -116,12 +116,12 @@ class Tracker:
             self.current_consist = None
 
     def log_artifact(
-            self,
-            path: Union[str, Artifact],
-            key: Optional[str] = None,
-            direction: str = "output",
-            schema: Optional[Type[SQLModel]] = None,
-            **meta,
+        self,
+        path: Union[str, Artifact],
+        key: Optional[str] = None,
+        direction: str = "output",
+        schema: Optional[Type[SQLModel]] = None,
+        **meta,
     ) -> Artifact:
         """
         Logs an artifact (file or data reference) within the current run context.
@@ -221,10 +221,10 @@ class Tracker:
         return artifact_obj
 
     def ingest(
-            self,
-            artifact: Artifact,
-            data: Iterable[Dict[str, Any]],
-            schema: Optional[Type[SQLModel]] = None
+        self,
+        artifact: Artifact,
+        data: Iterable[Dict[str, Any]],
+        schema: Optional[Type[SQLModel]] = None,
     ):
         """
         Ingests an iterable of dictionary data into the global DuckDB database.
@@ -269,7 +269,7 @@ class Tracker:
                 run_context=self.current_consist.run,
                 db_path=self.db_path,
                 data_iterable=data,
-                schema_model=schema
+                schema_model=schema,
             )
         except Exception as e:
             # Re-raise, but the engine remains disposed (safe)
@@ -350,7 +350,7 @@ class Tracker:
 
         # Check mounts longest-match first
         for name, root in sorted(
-                self.mounts.items(), key=lambda x: len(x[1]), reverse=True
+            self.mounts.items(), key=lambda x: len(x[1]), reverse=True
         ):
             root_abs = str(Path(root).resolve())
             if abs_path.startswith(root_abs):

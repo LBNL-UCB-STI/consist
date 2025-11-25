@@ -1,11 +1,7 @@
 # tests/integration/test_dlt_loader.py
 from typing import Optional
 
-import pytest
 from sqlmodel import SQLModel, Field, Session, text
-from consist.integrations.dlt_loader import ingest_artifact
-from consist.models.run import Run
-from consist.models.artifact import Artifact
 
 
 # Define a test schema
@@ -55,15 +51,13 @@ def test_ingest_artifact_strict(tracker, engine, db_path):
         engine.dispose()
 
         # The Tracker will handle its own engine.dispose() internally now.
-        tracker.ingest(
-            artifact=artifact,
-            data=raw_data,
-            schema=MockTable
-        )
+        tracker.ingest(artifact=artifact, data=raw_data, schema=MockTable)
 
     # 4. Verify (SQLAlchemy reconnects automatically)
     with Session(engine) as session:
-        result = session.exec(text("SELECT * FROM global_tables.mock_data ORDER BY id")).fetchall()
+        result = session.exec(
+            text("SELECT * FROM global_tables.mock_data ORDER BY id")
+        ).fetchall()
 
         assert len(result) == 2
         row_1 = result[0]

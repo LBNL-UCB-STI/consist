@@ -1,12 +1,9 @@
 # tests/test_chaining.py
 
-import pytest
 import json
-from pathlib import Path
 from sqlmodel import Session, select, create_engine
 
 from consist.core.tracker import Tracker
-from consist.models.run import Run
 from consist.models.artifact import Artifact
 from consist.models.run import RunArtifactLink
 
@@ -41,9 +38,7 @@ def test_pipeline_chaining(tmp_path):
         # Log it
         # Note: Tracker will set artifact.abs_path internally
         generated_artifact = tracker.log_artifact(
-            str(outfile),
-            key="my_data",
-            direction="output"
+            str(outfile), key="my_data", direction="output"
         )
 
     assert generated_artifact is not None
@@ -55,10 +50,7 @@ def test_pipeline_chaining(tmp_path):
     with tracker.start_run("run_con", model="consumer"):
         # PASS THE OBJECT DIRECTLY!
         # No manual path resolution needed.
-        input_artifact = tracker.log_artifact(
-            generated_artifact,
-            direction="input"
-        )
+        input_artifact = tracker.log_artifact(generated_artifact, direction="input")
 
         # Verify it's the same logical artifact
         assert input_artifact.key == "my_data"

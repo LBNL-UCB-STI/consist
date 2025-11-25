@@ -1,7 +1,6 @@
 # tests/unit/test_identity.py
 
 import pytest
-import json
 import hashlib
 import tempfile
 import os
@@ -62,10 +61,7 @@ class TestConfigHashing:
         config_std = {"val": 10, "arr": [1, 2]}
 
         # Config with numpy types
-        config_np = {
-            "val": np.int64(10),
-            "arr": np.array([1, 2])
-        }
+        config_np = {"val": np.int64(10), "arr": np.array([1, 2])}
 
         hash_std = im.compute_config_hash(config_std)
         hash_np = im.compute_config_hash(config_np)
@@ -104,14 +100,18 @@ class TestInputHashing:
 
         try:
             # Artifact representing the raw file (no run_id)
-            art = Artifact(key="raw", uri="inputs://file.txt", driver="txt", run_id=None)
+            art = Artifact(
+                key="raw", uri="inputs://file.txt", driver="txt", run_id=None
+            )
             resolver = lambda uri: fname
 
             hash_val = im.compute_input_hash([art], path_resolver=resolver)
 
             # Expected: SHA256 of "hello world"
             expected_file_hash = hashlib.sha256(b"hello world").hexdigest()
-            expected_composite = hashlib.sha256(f"file:{expected_file_hash}".encode()).hexdigest()
+            expected_composite = hashlib.sha256(
+                f"file:{expected_file_hash}".encode()
+            ).hexdigest()
 
             assert hash_val == expected_composite
 

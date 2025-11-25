@@ -1,7 +1,6 @@
 # src/consist/core/views.py
 
 import os
-from pathlib import Path
 from typing import List, Optional, TYPE_CHECKING
 from sqlmodel import select, Session, text  # <--- Added text
 
@@ -21,6 +20,7 @@ class ViewFactory:
     providing a unified SQL interface to query both "hot" and "cold" data
     transparently.
     """
+
     def __init__(self, tracker: "Tracker"):
         """
         Initializes the ViewFactory with a reference to the main Tracker.
@@ -33,7 +33,10 @@ class ViewFactory:
         self.tracker = tracker
 
     def create_hybrid_view(
-        self, view_name: str, concept_key: str, driver_filter: Optional[List[str]] = None
+        self,
+        view_name: str,
+        concept_key: str,
+        driver_filter: Optional[List[str]] = None,
     ) -> bool:
         """
         Creates or replaces a DuckDB SQL VIEW that combines "hot" and "cold" data for a given concept.
@@ -106,10 +109,12 @@ class ViewFactory:
             table = table_path
 
         # Use text() for SQLAlchemy 2.0 compatibility
-        sql = text("""
+        sql = text(
+            """
         SELECT count(*) FROM information_schema.tables 
         WHERE table_schema = :schema AND table_name = :table
-        """)
+        """
+        )
 
         with self.tracker.engine.connect() as conn:
             result = conn.execute(sql, {"schema": schema, "table": table}).scalar()
@@ -155,7 +160,9 @@ class ViewFactory:
             abs_path = self.tracker.resolve_uri(artifact.uri)
             if not os.path.exists(abs_path):
                 # Skip missing files to prevent View runtime errors
-                print(f"[Consist Warning] Skipping missing artifact in View: {abs_path}")
+                print(
+                    f"[Consist Warning] Skipping missing artifact in View: {abs_path}"
+                )
                 continue
 
             # Determine reader function
@@ -173,7 +180,7 @@ class ViewFactory:
                 f"'{run.id}'::VARCHAR as consist_run_id",
                 f"'{artifact.id}'::VARCHAR as consist_artifact_id",
                 f"{run.year or 'NULL'}::INTEGER as consist_year",
-                f"{run.iteration or 'NULL'}::INTEGER as consist_iteration"
+                f"{run.iteration or 'NULL'}::INTEGER as consist_iteration",
             ]
 
             sqls.append(f"SELECT {', '.join(cols)} FROM {reader}")

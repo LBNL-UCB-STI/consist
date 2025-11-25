@@ -1,7 +1,4 @@
-import pytest
-from pathlib import Path
 import json
-import os
 from sqlmodel import Session, select, create_engine
 
 # Note: Because of 'src' layout, this import works if environment is set up right
@@ -77,7 +74,9 @@ def test_dual_write_workflow(tmp_path):
     assert data["config"]["random_seed"] == 42
 
     # Hashing checks
-    assert data["run"]["config_hash"] == expected_config_hash, "Config hash mismatch in JSON"
+    assert (
+        data["run"]["config_hash"] == expected_config_hash
+    ), "Config hash mismatch in JSON"
     assert "git_hash" in data["run"], "Git hash field missing in JSON"
     # Note: git_hash might be 'no_git_module_found' or 'unknown' depending on environment,
     # but it should not be None/Null.

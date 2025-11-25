@@ -51,9 +51,7 @@ def _extend_schema_with_system_columns(base_model: Type[SQLModel]) -> Type[SQLMo
     # We inherit from base_model so validation rules for user data are preserved.
     # Note: We do NOT set table=True. This is just a schema for dlt to read.
     extended_model = type(
-        f"Extended_{base_model.__name__}",
-        (base_model,),
-        new_attributes
+        f"Extended_{base_model.__name__}", (base_model,), new_attributes
     )
 
     return extended_model
@@ -107,7 +105,7 @@ def ingest_artifact(
     pipeline = dlt.pipeline(
         pipeline_name="consist_materializer",
         destination=dlt.destinations.duckdb(f"duckdb:///{db_path}"),
-        dataset_name="global_tables"
+        dataset_name="global_tables",
     )
 
     if schema_model:

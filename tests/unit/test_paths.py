@@ -1,6 +1,7 @@
 # tests/unit/test_paths.py
 from consist.core.tracker import Tracker
 
+
 def test_virtualize_path_with_mounts(tmp_path):
     """
     Tests the path virtualization logic of the Tracker.

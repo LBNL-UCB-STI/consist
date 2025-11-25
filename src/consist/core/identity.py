@@ -1,7 +1,7 @@
 import hashlib
 import json
 import time
-from typing import Dict, List, Any, Optional, Callable, Union, Set
+from typing import Dict, List, Any, Optional, Callable, Set
 from pathlib import Path
 
 # Try importing git, handle error if missing (optional dependency)
@@ -44,7 +44,7 @@ class IdentityManager:
         self.hashing_strategy = hashing_strategy
 
     def calculate_run_signature(
-            self, code_hash: str, config_hash: str, input_hash: str
+        self, code_hash: str, config_hash: str, input_hash: str
     ) -> str:
         """
         Computes the final cryptographic signature (cache key) for a run.
@@ -65,7 +65,7 @@ class IdentityManager:
         return hashlib.sha256(composite.encode("utf-8")).hexdigest()
 
     def compute_config_hash(
-            self, config: Dict[str, Any], exclude_keys: Optional[List[str]] = None
+        self, config: Dict[str, Any], exclude_keys: Optional[List[str]] = None
     ) -> str:
         """
         Generates a deterministic hash of the configuration.
@@ -85,9 +85,9 @@ class IdentityManager:
         return hashlib.sha256(json_str.encode("utf-8")).hexdigest()
 
     def compute_input_hash(
-            self,
-            inputs: List["Artifact"],
-            path_resolver: Optional[Callable[[str], str]] = None
+        self,
+        inputs: List["Artifact"],
+        path_resolver: Optional[Callable[[str], str]] = None,
     ) -> str:
         """
         Generates a deterministic hash of the input state.

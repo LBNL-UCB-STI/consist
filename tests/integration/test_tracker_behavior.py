@@ -40,7 +40,9 @@ def test_log_artifact_outside_of_run_context(tracker):
     Tests that calling `log_artifact` outside of an active run context
     raises a RuntimeError, preventing improper use.
     """
-    with pytest.raises(RuntimeError, match="Cannot log artifact outside of a run context"):
+    with pytest.raises(
+        RuntimeError, match="Cannot log artifact outside of a run context"
+    ):
         tracker.log_artifact("some_file.csv", "some_key")
 
 
@@ -49,10 +51,12 @@ def test_ingest_outside_of_run_context(tracker):
     Tests that calling `ingest` outside of an active run context
     raises a RuntimeError, preventing improper use.
     """
-    from consist.models.artifact import Artifact
+
     # We need a dummy artifact to pass to the method.
     # Crucially, we create it directly, not via tracker.log_artifact.
     dummy_artifact = Artifact(key="dummy", uri="dummy.csv", driver="csv")
 
-    with pytest.raises(RuntimeError, match="Cannot ingest data outside of a run context"):
+    with pytest.raises(
+        RuntimeError, match="Cannot ingest data outside of a run context"
+    ):
         tracker.ingest(artifact=dummy_artifact, data=[])
