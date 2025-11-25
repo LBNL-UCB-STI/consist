@@ -33,6 +33,45 @@ Consist automatically generates a cryptographic signature for every run to enabl
 
 **Identity Formula:** `H_run = SHA256( H_code + H_config + H_inputs )`
 
+### Pseudocode & Configuration
+
+The hashing happens automatically when you use the `Tracker`.
+
+```python
+from consist.core.tracker import Tracker
+
+# Option A: Standard Mode (Secure)
+# - Input files are hashed by reading their full content (SHA256).
+# - Good for small data or verifying absolute integrity.
+tracker = Tracker(run_dir="./runs")
+
+# Option B: Fast Mode (Performance)
+# - Input files are hashed by metadata (File Size + Modification Time).
+# - Essential for workflows with 10GB+ input files.
+tracker = Tracker(run_dir="./runs", hashing_strategy="fast")
+
+# --- usage ---
+
+config = {
+    "scenario": "high_growth",
+    "random_seed": 12345,
+    "ui_settings": {"color": "blue"} # 'Noise' keys can be excluded
+}
+
+# The Tracker automatically:
+# 1. Canonicalizes the config (sorts keys, handles types).
+# 2. Captures the current Git Commit SHA (H_code).
+# 3. Computes H_config.
+with tracker.start_run("run_1", config=config):
+    
+    # 4. As you log inputs, Tracker computes H_inputs (Content or Metadata)
+    tracker.log_artifact("large_data.csv", direction="input")
+
+# RESULT:
+# Check 'consist.json'. You will see unique signatures that
+# prove exactly what code and data produced this result.
+```
+
 ## Setup
 
 This project is managed with `uv`.
@@ -48,7 +87,8 @@ uv run pytest
 ## Usage Example
 
 ```python
-from consist.tools.tracker import Tracker
+import consist
+from consist.core.tracker import Tracker
 from pathlib import Path
 
 # Initialize
@@ -57,33 +97,22 @@ tracker = Tracker(
     db_path="./provenance.duckdb"
 )
 
-config = {
-    "scenario": "high_growth",
-    "random_seed": 12345,
-    "ui_settings": {"color": "blue"} # 'Noise' keys can be excluded
-}
-
-# The Tracker automatically:
-# 1. Canonicalizes the config (sorts keys, handles types).
-# 2. Captures the current Git Commit SHA (H_code).
-# 3. Computes H_config.
-
 # --- Step 1: Generation ---
-with tracker.start_run("run_id_101", model="asim", year=2010, config=config):
+with tracker.start_run("run_id_101", model="asim", year=2010):
     
-    # 1. Log an input
-    tracker.log_artifact("/path/to/input.csv", key="households", direction="input")
+    # 1. Log an input using the global API
+    # (No need to pass 'tracker' into your functions!)
+    consist.log_artifact("/path/to/input.csv", key="households", direction="input")
     
     # 2. Run simulation logic...
     # (Assume we write a file called 'outputs.csv' here)
     
     # 3. Log the output
-    # This returns an Artifact object with a portable URI (e.g. "./outputs.csv")
-    # AND a runtime cache of the absolute path.
-    persons_artifact = tracker.log_artifact("outputs.csv", key="persons", direction="output")
+    # This returns an Artifact object with a portable URI and runtime path
+    persons_artifact = consist.log_artifact("outputs.csv", key="persons", direction="output")
     
     # 4. (Optional) Ingest into DuckDB for analysis
-    tracker.ingest(
+    consist.ingest(
         artifact=persons_artifact,
         data=[{"id": 1, "income": 50000}]
     )
@@ -92,8 +121,9 @@ with tracker.start_run("run_id_101", model="asim", year=2010, config=config):
 # We can pass artifacts from previous runs directly into new ones!
 with tracker.start_run("run_id_102", model="post_processor"):
     
-    # No need to manually resolve paths. The artifact object knows where it lives.
-    tracker.log_artifact(persons_artifact, direction="input")
+    # The artifact object knows where it lives. 
+    # Consist resolves it automatically for the current context.
+    consist.log_artifact(persons_artifact, direction="input")
     
     # Create a unified view to query it
     tracker.create_view("v_persons", "persons")
@@ -108,5 +138,7 @@ with tracker.start_run("run_id_102", model="post_processor"):
 - [x] Hybrid View Generation
 - [x] Canonical Config Hashing
 - [x] Run Identity (Git + Config + Inputs)
+- [x] Artifact Object Chaining (Pipeline API)
+- [x] Global Context (`import consist`)
 - [ ] Run Forking/Caching logic
 - [ ] SQL Transformers

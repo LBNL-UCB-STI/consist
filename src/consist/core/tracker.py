@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from sqlmodel import create_engine, Session, SQLModel
 
 from consist.core.views import ViewFactory
+from consist.core.context import push_tracker, pop_tracker
 
 # Models
 from consist.models.artifact import Artifact
@@ -96,6 +97,8 @@ class Tracker:
             created_at=datetime.now(UTC),
         )
 
+        push_tracker(self)
+
         self.current_consist = ConsistRecord(run=run, config=config)
 
         # Initial Flush
@@ -110,6 +113,8 @@ class Tracker:
             run.meta["error"] = str(e)
             raise e
         finally:
+            pop_tracker()
+
             run.updated_at = datetime.now(UTC)
             self._flush_json()
             self._sync_run_to_db(run)
