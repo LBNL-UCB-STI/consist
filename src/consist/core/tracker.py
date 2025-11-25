@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from sqlmodel import create_engine, Session, select, SQLModel
 from sqlmodel.main import SQLModelMetaclass
 
+from consist.core.views import ViewFactory
 # Models
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifactLink, ConsistRecord
@@ -177,6 +178,36 @@ class Tracker:
         self._sync_artifact_to_db(artifact, direction)
 
         return artifact
+
+    def create_view(self, view_name: str, concept_key: str):
+        """
+        Creates a hybrid view uniting materialized and file-based data.
+        """
+        factory = ViewFactory(self)
+        return factory.create_hybrid_view(view_name, concept_key)
+
+    def resolve_uri(self, uri: str) -> str:
+        """
+        Converts inputs://file.csv -> /mnt/data/file.csv
+        Inverse of _virtualize_path.
+        """
+        # 1. Check schemes (mounts)
+        if "://" in uri:
+            scheme, rel_path = uri.split("://", 1)
+            if scheme in self.mounts:
+                root = self.mounts[scheme]
+                return str(Path(root) / rel_path)
+
+            # Handle file:// protocol if present
+            if scheme == "file":
+                return rel_path
+
+        # 2. Handle relative paths (./output/...)
+        if uri.startswith("./"):
+            return str(self.run_dir / uri[2:])
+
+        # 3. Fallback: Return as is (assume absolute or unrecognized)
+        return uri
 
     # --- Internals ---
 
