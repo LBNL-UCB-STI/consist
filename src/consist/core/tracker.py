@@ -1,20 +1,22 @@
 import os
+import json
 from pathlib import Path
-from typing import Dict, Optional, Any, Type, Iterable, Union, List
+from typing import Dict, Optional, List, Any, Type, Iterable, Union
 from datetime import datetime, UTC
+from uuid import uuid4
 from contextlib import contextmanager
 
-from sqlmodel import create_engine, Session, SQLModel
+from sqlmodel import create_engine, Session, select, SQLModel
+from sqlmodel.main import SQLModelMetaclass
 
 from consist.core.views import ViewFactory
-from consist.core.context import push_tracker, pop_tracker
-
 # Models
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifactLink, ConsistRecord
-
 # Core
 from consist.core.identity import IdentityManager
+# Context
+from consist.core.context import push_tracker, pop_tracker
 
 
 class Tracker:
@@ -30,11 +32,11 @@ class Tracker:
     """
 
     def __init__(
-        self,
-        run_dir: Path,
-        db_path: Optional[str] = None,
-        mounts: Dict[str, str] = None,
-        project_root: str = ".",
+            self,
+            run_dir: Path,
+            db_path: Optional[str] = None,
+            mounts: Dict[str, str] = None,
+            project_root: str = ".",
     ):
         """
         Initializes the Consist Tracker.
@@ -66,7 +68,7 @@ class Tracker:
 
             SQLModel.metadata.create_all(
                 self.engine,
-                tables=[Run.__table__, Artifact.__table__, RunArtifactLink.__table__],
+                tables=[Run.__table__, Artifact.__table__, RunArtifactLink.__table__]
             )
 
         # In-Memory State (The Source of Truth)
@@ -74,12 +76,12 @@ class Tracker:
 
     @contextmanager
     def start_run(
-        self,
-        run_id: str,
-        model: str,
-        config: Dict[str, Any] = None,
-        inputs: Optional[List[Union[str, Artifact]]] = None,
-        **kwargs,
+            self,
+            run_id: str,
+            model: str,
+            config: Dict[str, Any] = None,
+            inputs: Optional[List[Union[str, Artifact]]] = None,
+            **kwargs
     ):
         if config is None:
             config = {}
@@ -110,6 +112,7 @@ class Tracker:
         self._flush_json()
         self._sync_run_to_db(run)
 
+        # Auto-Log Inputs
         if inputs:
             for item in inputs:
                 # We reuse the existing logic.
@@ -118,9 +121,7 @@ class Tracker:
                     # If it's an object, we use its key by default
                     self.log_artifact(item, direction="input")
                 else:
-                    # If it's a string, we need a key.
-                    # We can infer one from the filename or require the user to use log_artifact manually
-                    # if they want specific keys. For this helper, let's infer from filename.
+                    # Infer key from filename for convenience
                     key = Path(item).stem
                     self.log_artifact(item, key=key, direction="input")
 
@@ -140,34 +141,16 @@ class Tracker:
             self.current_consist = None
 
     def log_artifact(
-        self,
-        path: Union[str, Artifact],
-        key: Optional[str] = None,
-        direction: str = "output",
-        schema: Optional[Type[SQLModel]] = None,
-        **meta,
+            self,
+            path: Union[str, Artifact],
+            key: Optional[str] = None,
+            direction: str = "output",
+            schema: Optional[Type[SQLModel]] = None,
+            **meta,
     ) -> Artifact:
         """
         Logs an artifact (file or data reference) within the current run context.
-
-        This method virtualizes the artifact's path, infers its driver, injects schema
-        metadata if provided, creates an `Artifact` object, and then persists its
-        metadata to both the JSON log and the database.
-
-        Args:
-            path (Union[str, Artifact]): Either a file path string OR an existing Artifact object
-                                         (e.g., from a previous run).
-            key (Optional[str]): Semantic name. Required if 'path' is a string.
-                                 Defaults to artifact.key if 'path' is an Artifact object.
-            direction (str): "input" or "output".
-            schema (Optional[Type[SQLModel]]): Schema definition for the data.
-            **meta: Additional metadata.
-
-        Returns:
-            Artifact: The newly created and logged `Artifact` object.
-
-        Raises:
-            RuntimeError: If `log_artifact` is called outside an active run context.
+        Supports automatic lineage discovery if logging a path that was output by a previous run.
         """
         if not self.current_consist:
             raise RuntimeError("Cannot log artifact outside of a run context.")
@@ -175,7 +158,7 @@ class Tracker:
         artifact_obj = None
         resolved_abs_path = None
 
-        # --- Logic Branch A: Artifact Object Passed (Reuse/Link) ---
+        # --- Logic Branch A: Artifact Object Passed (Explicit Chaining) ---
         if isinstance(path, Artifact):
             artifact_obj = path
 
@@ -200,7 +183,7 @@ class Tracker:
                 # Shallow merge
                 artifact_obj.meta.update(meta)
 
-        # --- Logic Branch B: String Path Passed (New/Discovery) ---
+        # --- Logic Branch B: String Path Passed (Implicit Chaining or New) ---
         else:
             if key is None:
                 raise ValueError("Argument 'key' is required when logging a new path.")
@@ -210,17 +193,43 @@ class Tracker:
             resolved_abs_path = str(Path(path).resolve())
             uri = self._virtualize_path(resolved_abs_path)
 
-            # 2. Driver Inference
-            driver = Path(path).suffix.lstrip(".").lower() or "unknown"
+            # 1. NEW: Try to discover existing lineage for Inputs
+            # If we are using this file as an input, check if Consist knows who made it.
+            if direction == "input" and self.engine:
+                try:
+                    with Session(self.engine) as session:
+                        # Find the most recent artifact created at this location
+                        statement = (
+                            select(Artifact)
+                            .where(Artifact.uri == uri)
+                            .where(Artifact.run_id is not None)  # Must be generated by a run
+                            .order_by(Artifact.created_at.desc())
+                            .limit(1)
+                        )
+                        parent = session.exec(statement).first()
 
-            # 3. Create Object
-            artifact_obj = Artifact(
-                key=key,
-                uri=uri,
-                driver=driver,
-                run_id=self.current_consist.run.id if direction == "output" else None,
-                meta=meta,
-            )
+                        if parent:
+                            # LINEAGE FOUND!
+                            # Detach from session so we can use it in our current flow
+                            session.expunge(parent)
+                            artifact_obj = parent
+
+                            # Merge new metadata if provided
+                            if meta:
+                                artifact_obj.meta.update(meta)
+                except Exception as e:
+                    print(f"[Consist Warning] Lineage discovery failed: {e}")
+
+            # 2. If no parent found, create fresh Artifact
+            if artifact_obj is None:
+                driver = Path(path).suffix.lstrip(".").lower() or "unknown"
+                artifact_obj = Artifact(
+                    key=key,
+                    uri=uri,
+                    driver=driver,
+                    run_id=self.current_consist.run.id if direction == "output" else None,
+                    meta=meta,
+                )
 
         # --- Common Logic ---
 
@@ -245,19 +254,13 @@ class Tracker:
         return artifact_obj
 
     def ingest(
-        self,
-        artifact: Artifact,
-        data: Optional[Union[Iterable[Dict[str, Any]], Any]] = None,
-        schema: Optional[Type[SQLModel]] = None,
-        run: Optional[Run] = None,
+            self,
+            artifact: Artifact,
+            data: Optional[Union[Iterable[Dict[str, Any]], Any]] = None,
+            schema: Optional[Type[SQLModel]] = None,
+            run: Optional[Run] = None
     ):
         """
-        Ingests an iterable of dictionary data into the global DuckDB database.
-
-        This method uses the `dlt` (Data Load Tool) integration to load data associated
-        with a given artifact into the database. It handles temporary database connection
-        disposal and re-establishment to allow `dlt` exclusive access.
-
         Args:
             artifact (Artifact): The artifact object representing the data being ingested.
                                  Its metadata might include schema information.
@@ -277,6 +280,9 @@ class Tracker:
                           an active run context.
             Exception: Any exception raised by the underlying `dlt` ingestion process.
         """
+        if not self.db_path:
+            raise RuntimeError("Cannot ingest data: No database configured.")
+
         # Determine Context
         target_run = None
         if run:
@@ -286,23 +292,21 @@ class Tracker:
             # Online / Active Mode
             target_run = self.current_consist.run
         else:
-            raise RuntimeError(
-                "Cannot ingest data: No active run context and no explicit 'run' argument provided."
-            )
+            raise RuntimeError("Cannot ingest data: No active run context.")
 
         # 1. Release Lock
         # We temporarily close our connection so dlt can open the file exclusively.
         if self.engine:
             self.engine.dispose()
 
+        from consist.integrations.dlt_loader import ingest_artifact
+
+        # Auto-Resolve Data if None
         data_to_pass = data
         if data_to_pass is None:
             # If no data provided, we assume we should read from the artifact's file
             # We resolve the URI to an absolute path string
             data_to_pass = self.resolve_uri(artifact.uri)
-
-        # 2. Delegate to Loader
-        from consist.integrations.dlt_loader import ingest_artifact
 
         try:
             info = ingest_artifact(
@@ -310,10 +314,10 @@ class Tracker:
                 run_context=target_run,
                 db_path=self.db_path,
                 data_iterable=data_to_pass,
-                schema_model=schema,
+                schema_model=schema
             )
 
-            # Prevent hybrid views from double-counting this artifact
+            # Mark as Ingested
             artifact.meta["is_ingested"] = True
 
             # Persist metadata update to DB
@@ -323,6 +327,7 @@ class Tracker:
                     session.commit()
 
             return info
+
         except Exception as e:
             raise e
         # Note: We don't need to explicitly reconnect self.engine.
@@ -401,7 +406,7 @@ class Tracker:
 
         # Check mounts longest-match first
         for name, root in sorted(
-            self.mounts.items(), key=lambda x: len(x[1]), reverse=True
+                self.mounts.items(), key=lambda x: len(x[1]), reverse=True
         ):
             root_abs = str(Path(root).resolve())
             if abs_path.startswith(root_abs):

@@ -92,3 +92,42 @@ def test_pipeline_chaining(tmp_path):
     assert data["inputs"][0]["key"] == "my_data"
     # Ensure absolute path didn't leak into JSON
     assert "_abs_path" not in data["inputs"][0]
+
+
+def test_implicit_file_chaining(tmp_path):
+    """
+    Tests that passing a FILE PATH string (not an Artifact object)
+    still correctly links to the previous run if the URI matches.
+    """
+    run_dir = tmp_path / "implicit_runs"
+    db_path = str(tmp_path / "implicit.duckdb")
+    tracker = Tracker(run_dir=run_dir, db_path=db_path)
+
+    # 1. Run A generates a file
+    file_path = run_dir / "handoff.csv"
+    with tracker.start_run("run_A", model="step1"):
+        file_path.write_text("a,b\n1,2")
+        tracker.log_artifact(str(file_path), key="handoff", direction="output")
+
+    # 2. Run B inputs that FILE PATH
+    with tracker.start_run("run_B", model="step2"):
+        # We pass the string path.
+        # Tracker should auto-discover that this URI belongs to Run A.
+        tracker.log_artifact(str(file_path), key="handoff", direction="input")
+
+        # Verify In-Memory State
+        inp = tracker.current_consist.inputs[0]
+        assert inp.run_id == "run_A"  # <--- Success if this is set!
+
+    # 3. Verify Database Links
+    engine = create_engine(f"duckdb:///{db_path}")
+    with Session(engine) as session:
+        # Should reuse the SAME artifact UUID
+        artifacts = session.exec(select(Artifact)).all()
+        assert len(artifacts) == 1
+
+        links = session.exec(select(RunArtifactLink)).all()
+        # Run A -> Out -> Art 1
+        # Run B -> In  -> Art 1
+        assert len(links) == 2
+        assert links[0].artifact_id == links[1].artifact_id
