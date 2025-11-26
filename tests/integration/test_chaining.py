@@ -47,16 +47,16 @@ def test_pipeline_chaining(tmp_path):
 
     # --- Phase 2: Consumption ---
 
-    with tracker.start_run("run_con", model="consumer"):
-        # PASS THE OBJECT DIRECTLY!
-        # No manual path resolution needed.
-        input_artifact = tracker.log_artifact(generated_artifact, direction="input")
+    with tracker.start_run("run_con", model="consumer", inputs=[generated_artifact]):
+        # Note: We don't need to call log_artifact inside here anymore.
+        # But we can check that it happened.
 
-        # Verify it's the same logical artifact
+        assert len(tracker.current_consist.inputs) == 1
+        input_artifact = tracker.current_consist.inputs[0]
+
+        # Verify Identity
         assert input_artifact.key == "my_data"
         assert input_artifact.uri == generated_artifact.uri
-        # Ideally, it's the same Python object if we passed it in,
-        # or a clone with the same metadata.
 
     # --- Phase 3: Verification (Database) ---
     engine = create_engine(f"duckdb:///{db_path}")

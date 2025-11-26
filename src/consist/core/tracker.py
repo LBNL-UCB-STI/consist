@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Dict, Optional, Any, Type, Iterable, Union
+from typing import Dict, Optional, Any, Type, Iterable, Union, List
 from datetime import datetime, UTC
 from contextlib import contextmanager
 
@@ -74,7 +74,12 @@ class Tracker:
 
     @contextmanager
     def start_run(
-        self, run_id: str, model: str, config: Dict[str, Any] = None, **kwargs
+        self,
+        run_id: str,
+        model: str,
+        config: Dict[str, Any] = None,
+        inputs: Optional[List[Union[str, Artifact]]] = None,
+        **kwargs,
     ):
         if config is None:
             config = {}
@@ -104,6 +109,20 @@ class Tracker:
         # Initial Flush
         self._flush_json()
         self._sync_run_to_db(run)
+
+        if inputs:
+            for item in inputs:
+                # We reuse the existing logic.
+                # This handles path resolution, linking, and DB syncing.
+                if isinstance(item, Artifact):
+                    # If it's an object, we use its key by default
+                    self.log_artifact(item, direction="input")
+                else:
+                    # If it's a string, we need a key.
+                    # We can infer one from the filename or require the user to use log_artifact manually
+                    # if they want specific keys. For this helper, let's infer from filename.
+                    key = Path(item).stem
+                    self.log_artifact(item, key=key, direction="input")
 
         try:
             yield self
