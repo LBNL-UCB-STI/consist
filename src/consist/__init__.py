@@ -1,3 +1,6 @@
+from consist.models.run import Run
+
+
 def hello() -> str:
     """
     Returns a greeting string.
@@ -44,9 +47,12 @@ def ingest(
     artifact: Artifact,
     data: Iterable[Dict[str, Any]],
     schema: Optional[Type[SQLModel]] = None,
+    run: Optional[Run] = None,
 ):
     """
     Ingests data into the active run's database.
     See consist.core.tracker.Tracker.ingest for details.
     """
-    return get_active_tracker().ingest(artifact=artifact, data=data, schema=schema)
+    return get_active_tracker().ingest(
+        artifact=artifact, data=data, schema=schema, run=run
+    )

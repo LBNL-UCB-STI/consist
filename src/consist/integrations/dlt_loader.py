@@ -1,10 +1,21 @@
-# src/consist/integrations/dlt_loader.py
-
 import dlt
-from typing import Type, Iterable, Dict, Any, Optional
+import os
+import warnings
+from typing import Type, Iterable, Dict, Any, Optional, Union
 from sqlmodel import SQLModel, Field
 from consist.models.artifact import Artifact
 from consist.models.run import Run
+from dlt.common.libs.pydantic import pydantic_to_table_schema_columns
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
+
+try:
+    import pyarrow as pa
+except ImportError:
+    pa = None
 
 
 def _extend_schema_with_system_columns(base_model: Type[SQLModel]) -> Type[SQLModel]:
@@ -39,7 +50,7 @@ def _extend_schema_with_system_columns(base_model: Type[SQLModel]) -> Type[SQLMo
         "consist_artifact_id": Field(default=None),
         "consist_year": Field(default=None),
         "consist_iteration": Field(default=None),
-        "__annotations__": new_annotations,  # Crucial: Pass annotations here
+        "__annotations__": new_annotations,
     }
 
     # 3. Preserve the table name
@@ -61,71 +72,114 @@ def ingest_artifact(
     artifact: Artifact,
     run_context: Run,
     db_path: str,
-    data_iterable: Iterable[Dict[str, Any]],
+    data_iterable: Union[Iterable[Dict[str, Any]], Any],
     schema_model: Optional[Type[SQLModel]] = None,
 ):
-    """
-    Ingests data associated with an artifact into the DuckDB database using `dlt`.
+    # --- Context Helper Values ---
+    ctx_run_id = run_context.id
+    ctx_art_id = str(artifact.id)
+    ctx_year = run_context.year
+    ctx_iter = run_context.iteration
 
-    This function acts as a bridge, taking an iterable of data records and loading
-    them into a destination table, dynamically extending the schema with Consist's
-    provenance columns. It supports both strict schema validation (via `schema_model`)
-    and automatic schema inference.
+    # --- Strategy Selector ---
+    is_vectorized = False
 
-    Args:
-        artifact (Artifact): The `Artifact` object representing the data being ingested.
-                             Its key is used as the resource name if no `schema_model` is provided.
-        run_context (Run): The current `Run` object, providing context (run_id, year, iteration)
-                           for the provenance columns.
-        db_path (str): The file path to the DuckDB database where data will be loaded.
-        data_iterable (Iterable[Dict[str, Any]]): An iterable of dictionaries, where each
-                                                  dictionary represents a record to be ingested.
-        schema_model (Optional[Type[SQLModel]]): An optional SQLModel class that defines the
-                                                  expected schema of the ingested data. If provided,
-                                                  `dlt` uses this for strict schema enforcement.
-                                                  If None, `dlt` attempts to infer the schema.
+    # We will determine the columns object to pass to dlt
+    dlt_columns = None
+    resource_name = artifact.key
 
-    Returns:
-        dlt.pipeline.LoadInfo: An object containing information about the dlt load operation.
-    """
+    if schema_model:
+        resource_name = schema_model.__tablename__
+        # Create the extended model (with system cols)
+        extended_model = _extend_schema_with_system_columns(schema_model)
 
-    # 1. Define the Context Injection Logic
-    def add_context(record: Dict[str, Any]):
-        record["consist_run_id"] = run_context.id
-        record["consist_artifact_id"] = str(artifact.id)
+        # Default: Pass the class (Enables Validation)
+        dlt_columns = extended_model
 
-        if run_context.year is not None:
-            record["consist_year"] = run_context.year
-        if run_context.iteration is not None:
-            record["consist_iteration"] = run_context.iteration
+    if pd and isinstance(data_iterable, pd.DataFrame):
+        is_vectorized = True
 
-        return record
+        # --- Schema Audit ---
+        if schema_model:
+            # Check fields
+            if hasattr(schema_model, "model_fields"):
+                schema_cols = set(schema_model.model_fields.keys())
+            else:
+                schema_cols = set(schema_model.__fields__.keys())
 
-    # 2. Configure the Pipeline
+            data_cols = set(data_iterable.columns)
+            ghost_cols = data_cols - schema_cols
+            if ghost_cols:
+                warnings.warn(
+                    f"\n[Consist Schema Warning] The following columns exist in the DATA but are missing from "
+                    f"the SCHEMA '{schema_model.__name__}':\n"
+                    f"   {ghost_cols}\n"
+                    f"   -> Action Required: Add these fields to your SQLModel class to capture this data.\n"
+                )
+
+            # --- Disable Pydantic Validator for DataFrames ---
+            # If we pass the Pydantic CLASS, dlt tries to validate the DataFrame row-by-row (slow/crashes).
+            # If we pass a DICT, dlt uses it for the DB Schema but skips Python validation.
+            try:
+                dlt_columns = pydantic_to_table_schema_columns(extended_model)
+            except Exception as e:
+                # Fallback if conversion fails (unlikely)
+                print(
+                    f"[Consist Warning] Failed to convert SQLModel to dlt schema: {e}"
+                )
+                dlt_columns = extended_model
+
+        # Apply context vectorially
+        data_iterable["consist_run_id"] = ctx_run_id
+        data_iterable["consist_artifact_id"] = ctx_art_id
+        if ctx_year is not None:
+            data_iterable["consist_year"] = ctx_year
+        if ctx_iter is not None:
+            data_iterable["consist_iteration"] = ctx_iter
+
+    elif pa and isinstance(data_iterable, pa.Table):
+        # Arrow logic (TODO)
+        is_vectorized = True
+        pass
+
+        # --- Pipeline Configuration ---
+    pipeline_working_dir = os.path.dirname(os.path.abspath(db_path))
+
     pipeline = dlt.pipeline(
         pipeline_name="consist_materializer",
+        pipelines_dir=pipeline_working_dir,
         destination=dlt.destinations.duckdb(f"duckdb:///{db_path}"),
         dataset_name="global_tables",
     )
 
-    if schema_model:
-        # Story 1: Strict Mode
-        resource_name = schema_model.__tablename__
-        columns = _extend_schema_with_system_columns(schema_model)
+    # --- Resource Creation ---
+    if is_vectorized:
+        # Fast Path
+        resource = dlt.resource(
+            data_iterable,
+            name=resource_name,
+            write_disposition="append",
+            columns=dlt_columns,  # Now a dict (if vectorized), preventing PydanticValidator
+        )
     else:
-        # Story 3: Quick Mode / Auto-Inference
-        resource_name = artifact.key
-        columns = None
+        # Slow Path (Dicts)
+        def add_context(record: Dict[str, Any]):
+            record["consist_run_id"] = ctx_run_id
+            record["consist_artifact_id"] = ctx_art_id
+            if ctx_year is not None:
+                record["consist_year"] = ctx_year
+            if ctx_iter is not None:
+                record["consist_iteration"] = ctx_iter
+            return record
 
-    # 3. Create the dlt Resource
-    resource = dlt.resource(
-        data_iterable,
-        name=resource_name,
-        write_disposition="append",
-        columns=columns,
-    ).add_map(add_context)
+        resource = dlt.resource(
+            data_iterable,
+            name=resource_name,
+            write_disposition="append",
+            columns=dlt_columns,
+        ).add_map(add_context)
 
-    # 4. Run the Pipeline
+    # --- Execution ---
     info = pipeline.run(resource)
 
     return info

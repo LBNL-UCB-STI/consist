@@ -1,8 +1,6 @@
-# src/consist/core/views.py
-
 import os
 from typing import List, Optional, TYPE_CHECKING
-from sqlmodel import select, Session, text  # <--- Added text
+from sqlmodel import select, Session, text
 
 from consist.models.artifact import Artifact
 from consist.models.run import Run
@@ -62,11 +60,11 @@ class ViewFactory:
         if not self.tracker.engine:
             raise RuntimeError("Cannot create views: No database engine configured.")
 
-        # 1. Identify 'Hot' Data availability
+        # 1. Identify 'Hot' Data
         hot_table_exists = self._check_table_exists(f"global_tables.{concept_key}")
 
-        # 2. Identify 'Cold' Artifacts
-        cold_sqls = self._generate_cold_queries(concept_key, driver_filter)
+        # 2. Identify 'Cold' Artifacts (Optimized)
+        cold_sql = self._generate_cold_query_optimized(concept_key, driver_filter)
 
         # 3. Construct the Union
         parts = []
@@ -75,7 +73,8 @@ class ViewFactory:
             # Select everything from the materialized table
             parts.append(f"SELECT * FROM global_tables.{concept_key}")
 
-        parts.extend(cold_sqls)
+        if cold_sql:
+            parts.append(cold_sql)
 
         if not parts:
             # Fallback: Create an empty view with a generic schema
@@ -84,8 +83,7 @@ class ViewFactory:
             # UNION ALL BY NAME matches columns by name, nulling out missing ones.
             query = "\nUNION ALL BY NAME\n".join(parts)
 
-        # 4. Execute View Creation
-        # Use begin() to ensure the DDL is committed
+        # 4. Execute
         with self.tracker.engine.begin() as conn:
             sql = f"CREATE OR REPLACE VIEW {view_name} AS \n{query}"
             conn.execute(text(sql))
@@ -110,37 +108,16 @@ class ViewFactory:
 
         # Use text() for SQLAlchemy 2.0 compatibility
         sql = text(
-            """
-        SELECT count(*) FROM information_schema.tables 
-        WHERE table_schema = :schema AND table_name = :table
-        """
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema = :schema AND table_name = :table"
         )
-
         with self.tracker.engine.connect() as conn:
-            result = conn.execute(sql, {"schema": schema, "table": table}).scalar()
+            return conn.execute(sql, {"schema": schema, "table": table}).scalar() > 0
 
-        return result > 0
-
-    def _generate_cold_queries(
+    def _generate_cold_query_optimized(
         self, concept_key: str, driver_filter: Optional[List[str]] = None
-    ) -> List[str]:
+    ) -> Optional[str]:
         """
-        Identifies "cold" artifacts (file-based) for a given concept key and generates
-        SQL SELECT statements to query them directly.
-
-        It resolves artifact URIs to local paths, handles missing files gracefully,
-        and injects Consist-specific system columns (e.g., `consist_run_id`, `consist_year`)
-        into the generated SELECT statements for traceability.
-
-        Args:
-            concept_key (str): The semantic key for which to find file-based artifacts.
-            driver_filter (Optional[List[str]]): An optional list of artifact drivers
-                                                 to filter by (e.g., "parquet", "csv").
-                                                 Defaults to ["parquet", "csv"].
-
-        Returns:
-            List[str]: A list of SQL SELECT statements, each designed to query a
-                       single "cold" artifact.
+        Generates a single optimized SQL query for all cold artifacts using Vectorized Reads.
         """
         drivers = driver_filter or ["parquet", "csv"]
 
@@ -154,9 +131,16 @@ class ViewFactory:
             )
             results = session.exec(statement).all()
 
-        sqls = []
+        if not results:
+            return None
+
+        # Group artifacts by driver to vectorize reads
+        # (e.g. read_parquet can't read CSVs, so we group them)
+        grouped = {}
         for artifact, run in results:
-            # Resolve URI to absolute path for DuckDB
+            if artifact.meta and artifact.meta.get("is_ingested"):
+                continue
+
             abs_path = self.tracker.resolve_uri(artifact.uri)
             if not os.path.exists(abs_path):
                 # Skip missing files to prevent View runtime errors
@@ -165,24 +149,80 @@ class ViewFactory:
                 )
                 continue
 
-            # Determine reader function
-            if artifact.driver == "parquet":
-                reader = f"read_parquet('{abs_path}')"
-            elif artifact.driver == "csv":
-                reader = f"read_csv_auto('{abs_path}')"
-            else:
+            if artifact.driver not in grouped:
+                grouped[artifact.driver] = []
+
+            grouped[artifact.driver].append(
+                {
+                    "path": abs_path,
+                    "run_id": run.id,
+                    "art_id": str(artifact.id),
+                    "year": run.year,
+                    "iter": run.iteration,
+                }
+            )
+
+        union_parts = []
+
+        for driver, items in grouped.items():
+            if not items:
                 continue
 
-            # Inject Context Columns (The Consist Protocol)
-            # We cast strict types to match the Global Table schema
-            cols = [
-                "*",
-                f"'{run.id}'::VARCHAR as consist_run_id",
-                f"'{artifact.id}'::VARCHAR as consist_artifact_id",
-                f"{run.year or 'NULL'}::INTEGER as consist_year",
-                f"{run.iteration or 'NULL'}::INTEGER as consist_iteration",
-            ]
+            # --- Optimization: Vectorized Read + Join ---
+            # We construct a CTE (Common Table Expression) that maps filenames to metadata
 
-            sqls.append(f"SELECT {', '.join(cols)} FROM {reader}")
+            # 1. Build Metadata Map (VALUES list)
+            # DuckDB allows matching on 'filename' returned by reader
+            meta_rows = []
+            path_list = []
 
-        return sqls
+            for item in items:
+                # Escape single quotes in paths for SQL safety
+                safe_path = item["path"].replace("'", "''")
+                path_list.append(f"'{safe_path}'")
+
+                # Meta row: (path, run_id, art_id, year, iter)
+                row = (
+                    f"'{safe_path}'",
+                    f"'{item['run_id']}'",
+                    f"'{item['art_id']}'",
+                    f"{item['year'] or 'NULL'}",
+                    f"{item['iter'] or 'NULL'}",
+                )
+                meta_rows.append(f"({', '.join(row)})")
+
+            # 2. Define Reader
+            if driver == "parquet":
+                # union_by_name=True handles schema drift across files!
+                reader_func = f"read_parquet([{', '.join(path_list)}], union_by_name=true, filename=true)"
+            elif driver == "csv":
+                reader_func = f"read_csv_auto([{', '.join(path_list)}], union_by_name=true, filename=true)"
+            else:
+                continue  # Unknown driver fallback
+
+            # 3. Construct Query with CTE
+            # The CTE 'file_meta' acts as our lookup table
+            cte_values = ",\n        ".join(meta_rows)
+
+            # Using a unique alias for the CTE to prevent collisions if multiple drivers exist
+            cte_name = f"meta_{driver}"
+
+            query = f"""
+            SELECT 
+                data.* EXCLUDE (filename), 
+                {cte_name}.run_id as consist_run_id,
+                {cte_name}.art_id as consist_artifact_id,
+                CAST({cte_name}.year AS INTEGER) as consist_year,
+                CAST({cte_name}.iter AS INTEGER) as consist_iteration
+            FROM {reader_func} data
+            JOIN (
+                VALUES {cte_values}
+            ) as {cte_name}(fpath, run_id, art_id, year, iter)
+            ON data.filename = {cte_name}.fpath
+            """
+            union_parts.append(query)
+
+        if not union_parts:
+            return None
+
+        return "\nUNION ALL BY NAME\n".join(union_parts)

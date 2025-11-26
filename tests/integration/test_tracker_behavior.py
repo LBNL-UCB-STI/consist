@@ -57,6 +57,6 @@ def test_ingest_outside_of_run_context(tracker):
     dummy_artifact = Artifact(key="dummy", uri="dummy.csv", driver="csv")
 
     with pytest.raises(
-        RuntimeError, match="Cannot ingest data outside of a run context"
+        RuntimeError, match="Cannot ingest data: No active run context and no explicit 'run' argument provided."
     ):
         tracker.ingest(artifact=dummy_artifact, data=[])

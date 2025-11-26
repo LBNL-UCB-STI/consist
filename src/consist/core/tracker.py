@@ -230,6 +230,7 @@ class Tracker:
         artifact: Artifact,
         data: Iterable[Dict[str, Any]],
         schema: Optional[Type[SQLModel]] = None,
+        run: Optional[Run] = None,
     ):
         """
         Ingests an iterable of dictionary data into the global DuckDB database.
@@ -246,6 +247,8 @@ class Tracker:
             schema (Optional[Type[SQLModel]]): An optional SQLModel class that defines the
                                                 expected schema for the ingested data. If provided,
                                                 `dlt` will use this for strict validation.
+            run (Optional[Run]): If provided, tags data with this run's ID (Offline Mode).
+                                 If None, uses the currently active run (Online Mode).
 
         Raises:
             RuntimeError: If no database is configured (`db_path` was not provided during
@@ -253,11 +256,18 @@ class Tracker:
                           an active run context.
             Exception: Any exception raised by the underlying `dlt` ingestion process.
         """
-        if not self.db_path:
-            raise RuntimeError("Cannot ingest data: No database configured.")
-
-        if not self.current_consist:
-            raise RuntimeError("Cannot ingest data outside of a run context.")
+        # Determine Context
+        target_run = None
+        if run:
+            # Offline / Post-Hoc Mode
+            target_run = run
+        elif self.current_consist:
+            # Online / Active Mode
+            target_run = self.current_consist.run
+        else:
+            raise RuntimeError(
+                "Cannot ingest data: No active run context and no explicit 'run' argument provided."
+            )
 
         # 1. Release Lock
         # We temporarily close our connection so dlt can open the file exclusively.
@@ -265,19 +275,28 @@ class Tracker:
             self.engine.dispose()
 
         # 2. Delegate to Loader
-        # Local import to avoid top-level dependency weight
         from consist.integrations.dlt_loader import ingest_artifact
 
         try:
-            return ingest_artifact(
+            info = ingest_artifact(
                 artifact=artifact,
-                run_context=self.current_consist.run,
+                run_context=target_run,
                 db_path=self.db_path,
                 data_iterable=data,
                 schema_model=schema,
             )
+
+            # Prevent hybrid views from double-counting this artifact
+            artifact.meta["is_ingested"] = True
+
+            # Persist metadata update to DB
+            if self.engine:
+                with Session(self.engine) as session:
+                    session.merge(artifact)
+                    session.commit()
+
+            return info
         except Exception as e:
-            # Re-raise, but the engine remains disposed (safe)
             raise e
         # Note: We don't need to explicitly reconnect self.engine.
         # SQLAlchemy will automatically reconnect the next time it's used.
