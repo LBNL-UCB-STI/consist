@@ -45,7 +45,9 @@ def log_artifact(
 
 def ingest(
     artifact: Artifact,
-    data: Iterable[Dict[str, Any]],
+    data: Optional[
+        Union[Iterable[Dict[str, Any]], Any]
+    ] = None,  # <--- FIX: Added Default
     schema: Optional[Type[SQLModel]] = None,
     run: Optional[Run] = None,
 ):

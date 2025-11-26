@@ -228,7 +228,7 @@ class Tracker:
     def ingest(
         self,
         artifact: Artifact,
-        data: Iterable[Dict[str, Any]],
+        data: Optional[Union[Iterable[Dict[str, Any]], Any]] = None,
         schema: Optional[Type[SQLModel]] = None,
         run: Optional[Run] = None,
     ):
@@ -242,8 +242,10 @@ class Tracker:
         Args:
             artifact (Artifact): The artifact object representing the data being ingested.
                                  Its metadata might include schema information.
-            data (Iterable[Dict[str, Any]]): An iterable (e.g., list of dicts, generator)
+            data (Optional[Iterable[Dict[str, Any]]]): An iterable (e.g., list of dicts, generator)
                                              where each item represents a row of data to be ingested.
+                                             If 'data' is omitted, Consist attempts to stream it
+                                             directly from the artifact's file URI.
             schema (Optional[Type[SQLModel]]): An optional SQLModel class that defines the
                                                 expected schema for the ingested data. If provided,
                                                 `dlt` will use this for strict validation.
@@ -274,6 +276,12 @@ class Tracker:
         if self.engine:
             self.engine.dispose()
 
+        data_to_pass = data
+        if data_to_pass is None:
+            # If no data provided, we assume we should read from the artifact's file
+            # We resolve the URI to an absolute path string
+            data_to_pass = self.resolve_uri(artifact.uri)
+
         # 2. Delegate to Loader
         from consist.integrations.dlt_loader import ingest_artifact
 
@@ -282,7 +290,7 @@ class Tracker:
                 artifact=artifact,
                 run_context=target_run,
                 db_path=self.db_path,
-                data_iterable=data,
+                data_iterable=data_to_pass,
                 schema_model=schema,
             )
 
