@@ -1,21 +1,17 @@
 import os
-import json
 from pathlib import Path
 from typing import Dict, Optional, List, Any, Type, Iterable, Union
 from datetime import datetime, UTC
-from uuid import uuid4
 from contextlib import contextmanager
 
 from sqlmodel import create_engine, Session, select, SQLModel
-from sqlmodel.main import SQLModelMetaclass
+
+# Removed SQLModelMetaclass
 
 from consist.core.views import ViewFactory
-# Models
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifactLink, ConsistRecord
-# Core
 from consist.core.identity import IdentityManager
-# Context
 from consist.core.context import push_tracker, pop_tracker
 
 
@@ -32,11 +28,12 @@ class Tracker:
     """
 
     def __init__(
-            self,
-            run_dir: Path,
-            db_path: Optional[str] = None,
-            mounts: Dict[str, str] = None,
-            project_root: str = ".",
+        self,
+        run_dir: Path,
+        db_path: Optional[str] = None,
+        mounts: Dict[str, str] = None,
+        project_root: str = ".",
+        hashing_strategy: str = "full",
     ):
         """
         Initializes the Consist Tracker.
@@ -56,11 +53,15 @@ class Tracker:
                                              virtualizing artifact paths, making runs portable.
                                              Defaults to an empty dictionary if None.
         """
-        self.run_dir = Path(run_dir)
+        # Force absolute resolve on run_dir to prevent /var vs /private/var mismatches
+        self.run_dir = Path(run_dir).resolve()
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.mounts = mounts or {}
         self.db_path = db_path
-        self.identity = IdentityManager(project_root=project_root)
+        self.identity = IdentityManager(
+            project_root=project_root, hashing_strategy=hashing_strategy
+        )
+
         self.engine = None
         if db_path:
             # Using duckdb-engine for SQLAlchemy support
@@ -68,24 +69,74 @@ class Tracker:
 
             SQLModel.metadata.create_all(
                 self.engine,
-                tables=[Run.__table__, Artifact.__table__, RunArtifactLink.__table__]
+                tables=[Run.__table__, Artifact.__table__, RunArtifactLink.__table__],
             )
 
         # In-Memory State (The Source of Truth)
         self.current_consist: Optional[ConsistRecord] = None
 
+    @property
+    def is_cached(self) -> bool:
+        """Returns True if the current run is a valid Cache Hit."""
+        return self.current_consist and self.current_consist.cached_run is not None
+
+    def find_matching_run(
+        self, config_hash: str, input_hash: str, git_hash: str
+    ) -> Optional[Run]:
+        if not self.engine:
+            return None
+        try:
+            with Session(self.engine) as session:
+                statement = (
+                    select(Run)
+                    .where(Run.status == "completed")
+                    .where(Run.config_hash == config_hash)
+                    .where(Run.input_hash == input_hash)
+                    .where(Run.git_hash == git_hash)
+                    .order_by(Run.created_at.desc())
+                    .limit(1)
+                )
+                return session.exec(statement).first()
+        except Exception as e:
+            print(f"[Consist Warning] Cache lookup failed: {e}")
+            return None
+
+    def _validate_run_outputs(self, run: Run) -> bool:
+        """Verifies cached run outputs are accessible (Disk or DB)."""
+        if not self.engine:
+            return True
+
+        with Session(self.engine) as session:
+            statement = (
+                select(Artifact)
+                .join(RunArtifactLink, Artifact.id == RunArtifactLink.artifact_id)
+                .where(RunArtifactLink.run_id == run.id)
+                .where(RunArtifactLink.direction == "output")
+            )
+            outputs = session.exec(statement).all()
+
+            for art in outputs:
+                resolved_path = self.resolve_uri(art.uri)
+                on_disk = Path(resolved_path).exists()
+                in_db = art.meta.get("is_ingested", False)
+
+                if not on_disk and not in_db:
+                    print(f"⚠️ [Consist] Cache Validation Failed. Missing: {art.uri}")
+                    return False
+            return True
+
     @contextmanager
     def start_run(
-            self,
-            run_id: str,
-            model: str,
-            config: Dict[str, Any] = None,
-            inputs: Optional[List[Union[str, Artifact]]] = None,
-            **kwargs
+        self,
+        run_id: str,
+        model: str,
+        config: Dict[str, Any] = None,
+        inputs: Optional[List[Union[str, Artifact]]] = None,
+        cache_mode: str = "reuse",
+        **kwargs,
     ):
         if config is None:
             config = {}
-
         year = kwargs.pop("year", None)
         iteration = kwargs.pop("iteration", None)
 
@@ -108,11 +159,7 @@ class Tracker:
 
         self.current_consist = ConsistRecord(run=run, config=config)
 
-        # Initial Flush
-        self._flush_json()
-        self._sync_run_to_db(run)
-
-        # Auto-Log Inputs
+        # 2. Process Inputs
         if inputs:
             for item in inputs:
                 # We reuse the existing logic.
@@ -124,6 +171,63 @@ class Tracker:
                     # Infer key from filename for convenience
                     key = Path(item).stem
                     self.log_artifact(item, key=key, direction="input")
+
+        # 3. Detect Parent Lineage
+        parent_candidates = [
+            a.run_id for a in self.current_consist.inputs if a.run_id is not None
+        ]
+        if parent_candidates:
+            run.parent_run_id = parent_candidates[-1]
+
+        # 4. Identity Completion
+        try:
+            input_hash = self.identity.compute_input_hash(
+                self.current_consist.inputs, path_resolver=self.resolve_uri
+            )
+            run.input_hash = input_hash
+            run.signature = self.identity.calculate_run_signature(
+                code_hash=git_hash, config_hash=config_hash, input_hash=input_hash
+            )
+        except Exception as e:
+            print(f"[Consist Warning] Failed to compute inputs hash: {e}")
+            run.input_hash = "error"
+
+        # 5. Cache Lookup
+        cached_run = None
+
+        if cache_mode == "reuse":
+            # Only look up if mode is reuse
+            cached_run = self.find_matching_run(
+                config_hash=run.config_hash,
+                input_hash=run.input_hash,
+                git_hash=run.git_hash,
+            )
+            if cached_run:
+                if self._validate_run_outputs(cached_run):
+                    self.current_consist.cached_run = cached_run
+                    print(f"✅ [Consist] Cache HIT! Matching run: {cached_run.id}")
+
+                    # HYDRATE OUTPUTS
+                    with Session(self.engine) as session:
+                        statement = (
+                            select(Artifact)
+                            .join(
+                                RunArtifactLink, Artifact.id == RunArtifactLink.artifact_id
+                            )
+                            .where(RunArtifactLink.run_id == cached_run.id)
+                            .where(RunArtifactLink.direction == "output")
+                        )
+                        cached_outputs = session.exec(statement).all()
+                        for art in cached_outputs:
+                            session.expunge(art)
+                            self.current_consist.outputs.append(art)
+                else:
+                    print("🔄 [Consist] Cache Miss (Data Missing). Re-running...")
+        elif cache_mode == "overwrite":
+            print(f"⚠️ [Consist] Cache lookup skipped (Mode: Overwrite).")
+
+        self._flush_json()
+        self._sync_run_to_db(run)
 
         try:
             yield self
@@ -141,12 +245,12 @@ class Tracker:
             self.current_consist = None
 
     def log_artifact(
-            self,
-            path: Union[str, Artifact],
-            key: Optional[str] = None,
-            direction: str = "output",
-            schema: Optional[Type[SQLModel]] = None,
-            **meta,
+        self,
+        path: Union[str, Artifact],
+        key: Optional[str] = None,
+        direction: str = "output",
+        schema: Optional[Type[SQLModel]] = None,
+        **meta,
     ) -> Artifact:
         """
         Logs an artifact (file or data reference) within the current run context.
@@ -161,40 +265,21 @@ class Tracker:
         # --- Logic Branch A: Artifact Object Passed (Explicit Chaining) ---
         if isinstance(path, Artifact):
             artifact_obj = path
-
-            # 1. Resolve Physical Path (for hashing/validity)
-            # Use runtime cache if available, else try resolving URI
-            if artifact_obj.abs_path:
-                resolved_abs_path = artifact_obj.abs_path
-            else:
-                # Warning: If URI is relative, this might resolve incorrectly in a new run dir
-                # but we attempt it as best-effort.
-                resolved_abs_path = self.resolve_uri(artifact_obj.uri)
-
-            # 2. Inherit/Override Metadata
-            # If key is not provided, keep original. If provided, we treat it as an alias?
-            # For simplicity, we stick to the original key unless we want to rename.
-            # Let's enforce the key matches or default to it.
+            resolved_abs_path = artifact_obj.abs_path or self.resolve_uri(
+                artifact_obj.uri
+            )
             if key is None:
                 key = artifact_obj.key
-
-            # Update meta if provided
             if meta:
-                # Shallow merge
                 artifact_obj.meta.update(meta)
 
-        # --- Logic Branch B: String Path Passed (Implicit Chaining or New) ---
         else:
             if key is None:
-                raise ValueError("Argument 'key' is required when logging a new path.")
-
-            # 1. Path Virtualization
-            # Convert physical path -> Virtual URI
+                raise ValueError("Argument 'key' required.")
             resolved_abs_path = str(Path(path).resolve())
             uri = self._virtualize_path(resolved_abs_path)
 
-            # 1. NEW: Try to discover existing lineage for Inputs
-            # If we are using this file as an input, check if Consist knows who made it.
+            # 1. Lineage Discovery
             if direction == "input" and self.engine:
                 try:
                     with Session(self.engine) as session:
@@ -202,7 +287,7 @@ class Tracker:
                         statement = (
                             select(Artifact)
                             .where(Artifact.uri == uri)
-                            .where(Artifact.run_id is not None)  # Must be generated by a run
+                            .where(Artifact.run_id.is_not(None))
                             .order_by(Artifact.created_at.desc())
                             .limit(1)
                         )
@@ -213,12 +298,10 @@ class Tracker:
                             # Detach from session so we can use it in our current flow
                             session.expunge(parent)
                             artifact_obj = parent
-
-                            # Merge new metadata if provided
                             if meta:
                                 artifact_obj.meta.update(meta)
                 except Exception as e:
-                    print(f"[Consist Warning] Lineage discovery failed: {e}")
+                    print(f"[Consist Warning] Lineage discovery failed for {uri}: {e}")
 
             # 2. If no parent found, create fresh Artifact
             if artifact_obj is None:
@@ -227,7 +310,9 @@ class Tracker:
                     key=key,
                     uri=uri,
                     driver=driver,
-                    run_id=self.current_consist.run.id if direction == "output" else None,
+                    run_id=(
+                        self.current_consist.run.id if direction == "output" else None
+                    ),
                     meta=meta,
                 )
 
@@ -254,11 +339,11 @@ class Tracker:
         return artifact_obj
 
     def ingest(
-            self,
-            artifact: Artifact,
-            data: Optional[Union[Iterable[Dict[str, Any]], Any]] = None,
-            schema: Optional[Type[SQLModel]] = None,
-            run: Optional[Run] = None
+        self,
+        artifact: Artifact,
+        data: Optional[Union[Iterable[Dict[str, Any]], Any]] = None,
+        schema: Optional[Type[SQLModel]] = None,
+        run: Optional[Run] = None,
     ):
         """
         Args:
@@ -282,23 +367,12 @@ class Tracker:
         """
         if not self.db_path:
             raise RuntimeError("Cannot ingest data: No database configured.")
-
-        # Determine Context
-        target_run = None
-        if run:
-            # Offline / Post-Hoc Mode
-            target_run = run
-        elif self.current_consist:
-            # Online / Active Mode
-            target_run = self.current_consist.run
-        else:
+        target_run = run or (self.current_consist.run if self.current_consist else None)
+        if not target_run:
             raise RuntimeError("Cannot ingest data: No active run context.")
 
-        # 1. Release Lock
-        # We temporarily close our connection so dlt can open the file exclusively.
         if self.engine:
             self.engine.dispose()
-
         from consist.integrations.dlt_loader import ingest_artifact
 
         # Auto-Resolve Data if None
@@ -314,11 +388,13 @@ class Tracker:
                 run_context=target_run,
                 db_path=self.db_path,
                 data_iterable=data_to_pass,
-                schema_model=schema
+                schema_model=schema,
             )
 
-            # Mark as Ingested
-            artifact.meta["is_ingested"] = True
+            # FORCE Metadata update
+            new_meta = dict(artifact.meta)
+            new_meta["is_ingested"] = True
+            artifact.meta = new_meta
 
             # Persist metadata update to DB
             if self.engine:
@@ -366,25 +442,19 @@ class Tracker:
                  If the URI cannot be fully resolved (e.g., scheme not mounted),
                  it returns the most resolved path or the original URI.
         """
+        path_str = uri
         # 1. Check schemes (mounts)
         if "://" in uri:
             scheme, rel_path = uri.split("://", 1)
             if scheme in self.mounts:
-                root = self.mounts[scheme]
-                return str(Path(root) / rel_path)
+                path_str = str(Path(self.mounts[scheme]) / rel_path)
+            elif scheme == "file":
+                path_str = rel_path
+        elif uri.startswith("./"):
+            path_str = str(self.run_dir / uri[2:])
 
-            # Handle file:// protocol if present
-            if scheme == "file":
-                return rel_path
-
-        # 2. Handle relative paths (./output/...)
-        if uri.startswith("./"):
-            return str(self.run_dir / uri[2:])
-
-        # 3. Fallback: Return as is (assume absolute or unrecognized)
-        return uri
-
-    # --- Internals ---
+        # Ensure we always return absolute, resolved paths
+        return str(Path(path_str).resolve())
 
     def _virtualize_path(self, path: str) -> str:
         """
@@ -406,7 +476,7 @@ class Tracker:
 
         # Check mounts longest-match first
         for name, root in sorted(
-                self.mounts.items(), key=lambda x: len(x[1]), reverse=True
+            self.mounts.items(), key=lambda x: len(x[1]), reverse=True
         ):
             root_abs = str(Path(root).resolve())
             if abs_path.startswith(root_abs):
@@ -424,19 +494,8 @@ class Tracker:
         return abs_path
 
     def _flush_json(self):
-        """
-        Atomically writes the current `ConsistRecord` (representing the run's state)
-        to a human-readable JSON file (`consist.json`) within the run directory.
-
-        This method ensures data integrity by writing to a temporary file first
-        and then renaming it, preventing corruption if the process is interrupted.
-        It only operates if there is an active run context (`current_consist`).
-        """
         if not self.current_consist:
             return
-
-        # Note: Pydantic V2 uses model_dump_json()
-        # We rely on a standard encoder for things like numpy (not implemented here yet)
         json_str = self.current_consist.model_dump_json(indent=2)
 
         target = self.run_dir / "consist.json"
@@ -474,6 +533,9 @@ class Tracker:
                     db_run.meta = run.meta
                     db_run.config_hash = run.config_hash
                     db_run.git_hash = run.git_hash
+                    db_run.input_hash = run.input_hash
+                    db_run.signature = run.signature
+                    db_run.parent_run_id = run.parent_run_id
                     session.add(db_run)
                 else:
                     # Insert new: Create a fresh copy for the DB

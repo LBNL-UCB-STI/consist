@@ -25,7 +25,7 @@ tracker = Tracker(
 
 # 2. Run Context
 config = {"scenario": "high_growth", "year": 2030}
-with tracker.start_run("run_101", model="asim", config=config):
+with tracker.start_run("run_101", model="demand", config=config):
     
     # A. Log Inputs (Global API)
     consist.log_artifact("inputs/households.csv", key="households", direction="input")
@@ -42,6 +42,11 @@ with tracker.start_run("run_101", model="asim", config=config):
     # D. Ingest (Optional - For High Performance Querying)
     # Pass the DataFrame directly for vectorized speed (5M+ rows/sec)
     consist.ingest(artifact=art, data=df_out)
+    
+# With Lineage Discovery, this works too!
+with tracker.start_run("run_2", model="supply", inputs=["runs/output.parquet"]):
+    df_for_analysis = pd.read_parquet("runs/output.parquet")
+    # Consist checks DB, sees "run_1" created this file, and links them automatically.
 
 # 3. Analysis (Hybrid Views)
 # Query the data using SQL, regardless of whether it was ingested or just logged.
@@ -51,16 +56,50 @@ with tracker.engine.connect() as conn:
     print(conn.execute("SELECT avg(val) FROM v_results").fetchone())
 ```
 
+## Smart Caching & Reproducibility
+
+Consist automatically creates a "Merkle DAG" of your workflow. Before running any model step, it calculates a cryptographic signature based on:
+1.  **Code:** Git Commit SHA (+ dirty state).
+2.  **Config:** Canonical hash of the configuration dictionary.
+3.  **Inputs:** Unique hash of input artifacts (linking back to the specific run that created them).
+
+### Automatic Forking
+If you change a parameter in step 3 of a 10-step pipeline, Consist detects the change.
+*   Steps 1 & 2 are **Cached** (Instant "Ghost" replay).
+*   Step 3 is **Re-run** (Fork).
+*   Steps 4-10 are **Re-run** (Cascade).
+
+### Usage:
+```python
+# Standard Run (Checks cache first)
+with tracker.start_run("run_id", model="my_model", config=conf, inputs=[...]):
+    if tracker.is_cached:
+        print("Skipping execution!")
+    else:
+        # Do heavy work
+        ...
+
+# Force Rerun (Ignore cache)
+with tracker.start_run("run_id", ..., cache_mode="overwrite"):
+    # Always runs, and updates the cache for future runs.
+    ...
+```
+
+### "Ghost Mode" (The Hydrated Database)
+You can share a `provenance.duckdb` file with a colleague *without* sending the raw files.
+If data has been **Ingested**, Consist's cache validation will pass even if the file is missing from disk ("Ghost Mode"), allowing collaborators to run downstream models using the database as the data source.
+
+
 ## Data Strategy: Hot vs. Cold
 
 Consist supports two modes of operation for every artifact, which can be mixed freely.
 
-| Feature | **Cold Data** (Log Only) | **Hot Data** (Log + Ingest) |
-| :--- | :--- | :--- |
-| **Storage** | Raw Files (Parquet/CSV) | DuckDB File |
-| **Ingest Time** | Instant (Zero Copy) | Fast (Vectorized Copy) |
-| **Query Speed** | Good (Vectorized Read) | Best (Native Table) |
-| **Use Case** | Archival, Huge Files (>10GB) | Dashboards, Heavy Joins |
+| Feature         | **Cold Data** (Log Only)     | **Hot Data** (Log + Ingest) |
+|:----------------|:-----------------------------|:----------------------------|
+| **Storage**     | Raw Files (Parquet/CSV)      | DuckDB File                 |
+| **Ingest Time** | Instant (Zero Copy)          | Fast (Vectorized Copy)      |
+| **Query Speed** | Good (Vectorized Read)       | Best (Native Table)         |
+| **Use Case**    | Archival, Huge Files (>10GB) | Dashboards, Heavy Joins     |
 
 *   **Hybrid Views** automatically Union both types. If you ingest a file later (Post-Hoc), the view automatically switches to using the Hot copy.
 

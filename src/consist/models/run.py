@@ -27,9 +27,7 @@ class RunArtifactLink(SQLModel, table=True):
     artifact_id: uuid.UUID = Field(primary_key=True)
 
     direction: str  # "input" or "output"
-    is_implicit: bool = Field(
-        default=False, description="Was this auto-detected via lineage?"
-    )
+    is_implicit: bool = Field(default=False)
 
 
 class Run(SQLModel, table=True):
@@ -55,24 +53,26 @@ class Run(SQLModel, table=True):
 
     __tablename__ = "run"
 
-    id: str = Field(
-        primary_key=True, description="Unique Run ID (e.g. 'asim_2010_iter2_uuid')"
-    )
+    id: str = Field(primary_key=True)
     parent_run_id: Optional[str] = Field(default=None, foreign_key="run.id", index=True)
 
     # State
-    status: str = Field(default="running", index=True)  # running, completed, failed
+    status: str = Field(default="running", index=True)
 
     # Context
     model_name: str = Field(index=True)
     year: Optional[int] = Field(default=None, index=True)
     iteration: Optional[int] = Field(default=None, index=True)
 
-    # Hashing (For Caching/Optimization)
+    # Identity / Caching
     config_hash: Optional[str] = Field(index=True)
     git_hash: Optional[str]
+    input_hash: Optional[str] = Field(default=None, index=True)  # NEW
+    signature: Optional[str] = Field(
+        default=None, index=True
+    )  # NEW (The composite key)
 
-    # Metadata (Tags, Hostname, Duration)
+    # Metadata
     meta: Dict[str, Any] = Field(default={}, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -98,5 +98,7 @@ class ConsistRecord(SQLModel):
     inputs: List[Artifact] = []
     outputs: List[Artifact] = []
 
-    # Configuration snapshot
+    # Cache Detection State
+    cached_run: Optional[Run] = None  # NEW: Stores the potential cache hit
+
     config: Dict[str, Any] = {}
