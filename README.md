@@ -85,6 +85,25 @@ with tracker.start_run("run_id", ..., cache_mode="overwrite"):
     ...
 ```
 
+### Container-Native Workflows
+
+Consist treats containers (Docker/Singularity) as "Pure Functions," enabling perfect caching of heavy containerized workloads.
+
+```python
+# Consist tracks the Image + Command as part of the Run Identity
+consist.run_container_step(
+    tracker,
+    run_id="model_step_1",
+    image="pilates/asim:v2.1",
+    command="python run.py --conf configs/base.yaml",
+    inputs=["./host/inputs/land_use.csv"],   # Host Path (Hashed)
+    outputs=["./host/outputs/results.csv"],  # Host Path (Tracked)
+    volumes={"./host/inputs": "/data/inputs", "./host/outputs": "/data/outputs"}
+)
+```
+
+If you re-run this script, Consist detects that the input files and the image tag haven't changed, and skips the container execution entirely, hydrating the results.csv from its cache.
+
 ### "Ghost Mode" (The Hydrated Database)
 You can share a `provenance.duckdb` file with a colleague *without* sending the raw files.
 If data has been **Ingested**, Consist's cache validation will pass even if the file is missing from disk ("Ghost Mode"), allowing collaborators to run downstream models using the database as the data source.

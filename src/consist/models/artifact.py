@@ -8,11 +8,11 @@ from pydantic import PrivateAttr
 
 class Artifact(SQLModel, table=True):
     """
-    Represents a physical data object, such as a file, directory, or database table.
+    Represents a physical data object, such as a file, directory, or database table, central to Consist's provenance tracking and caching.
 
     Artifacts are the core building blocks of the provenance system, tracking the inputs
     and outputs of runs. Each artifact has a unique identity, a virtualized location,
-    and rich metadata.
+    and rich metadata, supporting both "hot" (ingested) and "cold" (file-based) data strategies.
 
     Attributes:
         id (uuid.UUID): A unique identifier for the artifact.
@@ -46,12 +46,16 @@ class Artifact(SQLModel, table=True):
 
     # Metadata (Flexible JSON bag)
     # Stores: checksums, schema signatures, matrix shapes, etc.
+    # Uses SQLAlchemy's JSON type for efficient persistence of arbitrary JSON structures.
     meta: Dict[str, Any] = Field(default={}, sa_column=Column(JSON))
 
     # Audit
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     # --- Runtime State (Not persisted) ---
+    # PrivateAttr is used here to store data that is not part of the SQLModel schema
+    # but is needed at runtime, aligning with "Path Resolution & Mounts" and "Artifact Chaining"
+    # as described in the architecture documentation.
     _abs_path: Optional[str] = PrivateAttr(default=None)
 
     @property

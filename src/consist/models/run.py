@@ -65,14 +65,27 @@ class Run(SQLModel, table=True):
     iteration: Optional[int] = Field(default=None, index=True)
 
     # Identity / Caching
-    config_hash: Optional[str] = Field(index=True)
-    git_hash: Optional[str]
-    input_hash: Optional[str] = Field(default=None, index=True)  # NEW
+    # These fields are crucial for Consist's Merkle DAG caching strategy, forming the "signature"
+    # that determines run uniqueness and cache hits.
+    config_hash: Optional[str] = Field(
+        index=True, description="SHA256 hash of the canonicalized run configuration."
+    )
+    git_hash: Optional[str] = Field(
+        description="Git commit hash of the code version at the time of the run."
+    )
+    input_hash: Optional[str] = Field(
+        default=None,
+        index=True,
+        description="SHA256 hash derived from the provenance IDs of input artifacts.",
+    )  # NEW
     signature: Optional[str] = Field(
-        default=None, index=True
+        default=None,
+        index=True,
+        description="Composite hash (SHA256) of code, config, and input hashes, defining the unique identity for caching.",
     )  # NEW (The composite key)
 
     # Metadata
+    # Uses SQLAlchemy's JSON type for efficient persistence of arbitrary JSON structures.
     meta: Dict[str, Any] = Field(default={}, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

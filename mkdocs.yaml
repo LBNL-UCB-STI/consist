@@ -1,0 +1,34 @@
+site_name: Consist
+site_url: https://yourusername.github.io/consist/
+repo_url: https://github.com/yourusername/consist
+repo_name: yourusername/consist
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+  palette:
+    scheme: default
+    primary: teal
+    accent: purple
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+
+nav:
+  - Home: ../README.md
+#  - User Guide:
+#      - Getting Started: docs/getting_started.md  # You can create this later
+  - API Reference:
+      - Tracker: api/tracker.md
+      - Artifact: api/artifact.md
+      - Run: api/run.md
+      - Identity Manager: api/identity.md
+      - View Factory: api/views.md
+      - DLT Loader: api/dlt_loader.md
+      - Docker Integration: api/docker.md

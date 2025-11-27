@@ -11,12 +11,13 @@ if TYPE_CHECKING:
 
 class ViewFactory:
     """
-    A factory class responsible for generating "Hybrid Views" in DuckDB.
+    A factory class responsible for generating **"Hybrid Views"** in DuckDB, acting as
+    Consist's **"The Virtualizer"** component.
 
     Hybrid Views combine data from materialized tables (often ingested via dlt)
     with data directly from file-based artifacts (e.g., Parquet, CSV),
     providing a unified SQL interface to query both "hot" and "cold" data
-    transparently.
+    transparently. This approach is central to Consist's flexible data access strategy.
     """
 
     def __init__(self, tracker: "Tracker"):
@@ -39,9 +40,14 @@ class ViewFactory:
         """
         Creates or replaces a DuckDB SQL VIEW that combines "hot" and "cold" data for a given concept.
 
+        This method generates a **"Hybrid View"** which allows transparent querying across
+        different data storage types. It implements **"View Optimization"** by leveraging
+        DuckDB's capabilities for vectorized reads from files. The resulting view uses
+        `UNION ALL BY NAME` to gracefully handle **"Schema Evolution"** (different columns
+        across runs or data sources) by nulling out missing columns.
+
         "Hot" data refers to records already materialized into a DuckDB table (e.g., via ingestion).
         "Cold" data refers to records still residing in file-based artifacts (e.g., Parquet, CSV).
-        The resulting view uses `UNION ALL BY NAME` to gracefully handle schema differences.
 
         Args:
             view_name (str): The name to assign to the newly created or replaced SQL view.
@@ -117,7 +123,20 @@ class ViewFactory:
         self, concept_key: str, driver_filter: Optional[List[str]] = None
     ) -> Optional[str]:
         """
-        Generates a single optimized SQL query for all cold artifacts using Vectorized Reads.
+        Generates a single optimized SQL query for all "cold" artifacts of a given `concept_key`.
+
+        This method is central to **"View Optimization"** by employing **"Vectorization"**:
+        it uses DuckDB's `read_parquet` or `read_csv_auto` functions with a list of file paths
+        for efficient, single-pass reads. It also dynamically injects run-specific metadata
+        (e.g., `consist_run_id`, `consist_year`) using a Common Table Expression (CTE)
+        to allow unified querying with hot data.
+
+        Args:
+            concept_key (str): The semantic key for which to generate the cold data query.
+            driver_filter (Optional[List[str]]): List of artifact drivers to include.
+
+        Returns:
+            Optional[str]: A SQL query string for the cold data, or None if no cold data is found.
         """
         drivers = driver_filter or ["parquet", "csv"]
 
