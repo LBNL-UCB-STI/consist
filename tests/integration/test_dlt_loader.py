@@ -3,6 +3,7 @@ import pytest
 from typing import Optional
 from sqlmodel import SQLModel, Field, Session, text
 import pandas as pd
+from dlt.pipeline.exceptions import PipelineStepFailed
 
 
 # Define a test schema for Strict Mode
@@ -164,3 +165,56 @@ def test_schema_drift_warning(tracker, engine):
         # Should warn about 'ghost_col'
         with pytest.warns(UserWarning, match="ghost_col"):
             tracker.ingest(artifact=artifact, data=df_drift, schema=MockTable)
+
+
+class StrictPerson(SQLModel, table=True):
+    __tablename__ = "strict_person"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    age: int
+
+
+def test_ingest_with_invalid_data_in_strict_mode(tracker, engine):
+    """
+    Tests that the dlt_loader in strict mode correctly raises an exception when it encounters
+    data that does not conform to the provided SQLModel schema.
+
+    What happens:
+    1. A strict schema `StrictPerson` is defined, expecting `age` to be an integer.
+    2. A list of data is created, containing one valid record and one invalid record
+       (where `age` is a string).
+    3. The tracker attempts to ingest this data using the strict schema.
+
+    What's checked:
+    - The `tracker.ingest` call raises a `dlt.pipeline.exceptions.PipelineStepFailed` exception.
+    - The exception message confirms a data validation error related to the `age` column.
+    - No data is loaded into the target `strict_person` table, as the transaction is aborted.
+    """
+    data = [
+        {"id": 1, "name": "Alice", "age": 30},
+        {"id": 2, "name": "Bob", "age": "thirty"},
+    ]
+
+    with tracker.start_run("run_strict_invalid", "test_model"):
+        artifact = tracker.log_artifact(
+            "inputs/people.json", "people", schema=StrictPerson
+        )
+        engine.dispose()
+
+        with pytest.raises(PipelineStepFailed) as excinfo:
+            tracker.ingest(artifact=artifact, data=data, schema=StrictPerson)
+
+        # Check the exception message for details
+        assert "contract_mode=freeze` is violated" in str(excinfo.value)
+        assert "unable to parse string as an integer" in str(excinfo.value)
+        assert "Column: `('age',)`" in str(excinfo.value)
+
+    # Verify that NO data was ingested because the transaction failed
+    with Session(engine) as session:
+        result = session.exec(
+            text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'global_tables' AND table_name = 'strict_person'"
+            )
+        ).first()
+        assert result is None, "Table 'strict_person' should not have been created."

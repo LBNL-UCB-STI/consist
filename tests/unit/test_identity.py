@@ -1,5 +1,15 @@
 # tests/unit/test_identity.py
 
+"""
+This module contains unit tests for the `IdentityManager` class within Consist's core,
+focusing on the various hashing mechanisms that establish the unique identity of runs
+and artifacts.
+
+It verifies the correctness of:
+-   Configuration hashing (canonicalization, exclusions, data type handling).
+-   Input artifact hashing (based on provenance or file content).
+-   Code version detection (Git commit SHA and dirty state).
+"""
 import pytest
 import hashlib
 import tempfile
@@ -22,6 +32,13 @@ except ImportError:
 
 
 class TestConfigHashing:
+    """
+    Tests the `compute_config_hash` method of `IdentityManager`.
+
+    These tests ensure that configuration hashing is deterministic, correctly
+    handles key exclusions, and properly converts different Python types
+    (including NumPy types) into a canonical, hashable representation.
+    """
 
     def test_canonicalization(self):
         """Test that dictionary key order does not affect the hash."""
@@ -70,6 +87,13 @@ class TestConfigHashing:
 
 
 class TestInputHashing:
+    """
+    Tests the `compute_input_hash` method of `IdentityManager`.
+
+    These tests verify that input artifact hashing correctly differentiates between
+    provenance-based inputs (from previous runs) and raw file-based inputs,
+    and that the configured hashing strategy ("fast" vs. "full") is applied correctly.
+    """
 
     def test_provenance_based_inputs(self):
         """Test hashing inputs that come from previous runs."""
@@ -157,6 +181,13 @@ class TestInputHashing:
 
 
 class TestCodeVersion:
+    """
+    Tests the `get_code_version` method of `IdentityManager`.
+
+    These tests ensure that the Git code version (SHA) is correctly retrieved
+    and that "dirty" repository states are appropriately flagged with a nonce,
+    safeguarding reproducibility.
+    """
 
     @patch("consist.core.identity.git")
     def test_clean_repo(self, mock_git):

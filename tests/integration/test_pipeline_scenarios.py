@@ -1,3 +1,13 @@
+"""
+This module contains integration tests for various pipeline scenarios, focusing on
+how Consist handles complex workflows, caching behaviors, and error recovery.
+
+It uses a `mock_model_step` helper function to simulate individual steps within a pipeline
+and verify Consist's tracking, caching, and lineage capabilities across these steps.
+"""
+
+import logging
+
 import pytest
 import pandas as pd
 import time
@@ -40,6 +50,25 @@ def mock_model_step(
     config: dict = None,
     cache_mode: str = "reuse",  # <--- NEW ARGUMENT
 ) -> str:
+    """
+    Simulates a single step in a data processing pipeline.
+
+    This helper function creates a Consist run context for a given step, logs its inputs,
+    and either retrieves cached outputs or executes a dummy operation to generate a new output.
+    It's designed to be used repeatedly to build and test multi-step pipelines.
+
+    Args:
+        tracker (Tracker): The Consist Tracker instance.
+        ctx (PipelineContext): A context object to log actual executions for verification.
+        step_name (str): The name of the simulated pipeline step (used as model name and key).
+        inputs (List[str]): A list of file paths (as strings) that serve as inputs to this step.
+        config (dict, optional): Configuration dictionary for the step. Defaults to an empty dict.
+        cache_mode (str): Consist caching behavior ("reuse", "overwrite", "readonly").
+
+    Returns:
+        str: The resolved path to the output artifact generated or retrieved by this step.
+             This path is a host filesystem path, not a virtualized URI.
+    """
     if config is None:
         config = {}
 
@@ -79,7 +108,7 @@ def mock_model_step(
 def test_pipeline_forking_cold_storage(tracker_setup, ctx):
     tracker, _ = tracker_setup
 
-    print("\n--- Phase 1: Full Run ---")
+    logging.info("\n--- Phase 1: Full Run ---")
     out_a = mock_model_step(tracker, ctx, "A", [], {"p": 1})
     out_b = mock_model_step(tracker, ctx, "B", [out_a], {"p": 1})
     out_c = mock_model_step(tracker, ctx, "C", [out_b], {"p": 1})
@@ -88,7 +117,7 @@ def test_pipeline_forking_cold_storage(tracker_setup, ctx):
     assert ctx.execution_log == ["A", "B", "C", "D"]
     ctx.clear_log()
 
-    print("\n--- Phase 2: Forked Run ---")
+    logging.info("\n--- Phase 2: Forked Run ---")
     out_a_2 = mock_model_step(tracker, ctx, "A", [], {"p": 1})
     out_b_2 = mock_model_step(tracker, ctx, "B", [out_a_2], {"p": 1})
     out_c_2 = mock_model_step(tracker, ctx, "C", [out_b_2], {"p": 999})
@@ -116,14 +145,14 @@ def test_cache_overwrite_mode(tracker_setup, ctx):
     tracker, _ = tracker_setup
 
     # 1. Run A (Normal)
-    print("\n--- Phase 1: Normal Run ---")
+    logging.info("\n--- Phase 1: Normal Run ---")
     out_a_1 = mock_model_step(tracker, ctx, "A", [], {"p": 1})
     assert "A" in ctx.execution_log
     ctx.clear_log()
 
     # 2. Run A (Overwrite)
     # Even though Config/Inputs/Code are identical, we force execution.
-    print("\n--- Phase 2: Overwrite Run ---")
+    logging.info("\n--- Phase 2: Overwrite Run ---")
     out_a_2 = mock_model_step(tracker, ctx, "A", [], {"p": 1}, cache_mode="overwrite")
 
     # ASSERTIONS

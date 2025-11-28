@@ -1,3 +1,4 @@
+import logging
 import os
 from pathlib import Path
 from typing import Dict, Optional, List, Any, Type, Iterable, Union
@@ -126,7 +127,7 @@ class Tracker:
                 )
                 return session.exec(statement).first()
         except Exception as e:
-            print(f"[Consist Warning] Cache lookup failed: {e}")
+            logging.warning(f"[Consist Warning] Cache lookup failed: {e}")
             return None
 
     def _validate_run_outputs(self, run: Run) -> bool:
@@ -162,7 +163,9 @@ class Tracker:
                 in_db = art.meta.get("is_ingested", False)
 
                 if not on_disk and not in_db:
-                    print(f"⚠️ [Consist] Cache Validation Failed. Missing: {art.uri}")
+                    logging.warning(
+                        f"⚠️ [Consist] Cache Validation Failed. Missing: {art.uri}"
+                    )
                     return False
             return True
 
@@ -281,7 +284,7 @@ class Tracker:
                 code_hash=git_hash, config_hash=config_hash, input_hash=input_hash
             )
         except Exception as e:
-            print(
+            logging.warning(
                 f"[Consist Warning] Failed to compute inputs hash for run {run_id}: {e}"
             )
             run.input_hash = "error"  # Mark as error to prevent false cache hits
@@ -301,7 +304,9 @@ class Tracker:
                 # Validate cached run outputs for "Ghost Mode" and "Self-Healing"
                 if self._validate_run_outputs(cached_run):
                     self.current_consist.cached_run = cached_run
-                    print(f"✅ [Consist] Cache HIT! Matching run: {cached_run.id}")
+                    logging.info(
+                        f"✅ [Consist] Cache HIT! Matching run: {cached_run.id}"
+                    )
 
                     # HYDRATE OUTPUTS: Populate current run's outputs from the cached run
                     with Session(self.engine) as session:
@@ -322,15 +327,15 @@ class Tracker:
                             art.abs_path = self.resolve_uri(art.uri)
                             self.current_consist.outputs.append(art)
                 else:
-                    print(
+                    logging.info(
                         "🔄 [Consist] Cache Miss (Data Missing or Invalidated). Re-running..."
                     )
         elif cache_mode == "overwrite":
-            print(
+            logging.warning(
                 "⚠️ [Consist] Cache lookup skipped (Mode: Overwrite). Run will execute and update cache."
             )
         elif cache_mode == "readonly":
-            print(
+            logging.info(
                 "👁️ [Consist] Cache lookup in read-only mode. New results will not be saved."
             )
             # In readonly, we still lookup but don't set cached_run so it executes, but also don't save new results.
@@ -455,7 +460,9 @@ class Tracker:
                             if meta:
                                 artifact_obj.meta.update(meta)  # Apply any new meta
                 except Exception as e:
-                    print(f"[Consist Warning] Lineage discovery failed for {uri}: {e}")
+                    logging.warning(
+                        f"[Consist Warning] Lineage discovery failed for {uri}: {e}"
+                    )
 
             # 2. If no parent artifact found or it's an output, create a fresh Artifact object
             if artifact_obj is None:
@@ -725,7 +732,7 @@ class Tracker:
 
                 session.commit()
         except Exception as e:
-            print(f"[Consist Warning] Database sync failed: {e}")
+            logging.warning(f"[Consist Warning] Database sync failed: {e}")
 
     def _sync_artifact_to_db(self, artifact: Artifact, direction: str):
         """
@@ -760,4 +767,4 @@ class Tracker:
                 session.merge(link)
                 session.commit()
         except Exception as e:
-            print(f"[Consist Warning] Artifact sync failed: {e}")
+            logging.warning(f"[Consist Warning] Artifact sync failed: {e}")

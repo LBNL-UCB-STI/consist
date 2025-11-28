@@ -1,5 +1,14 @@
 # tests/benchmarks/test_benchmark_comparison.py
 
+"""
+This module contains comparative benchmarks for analytical queries across
+Pandas, Polars, and Consist's "cold" (zero-copy file reads) data paths.
+
+The primary goal is to quantify the performance benefits of Consist's approach
+to data virtualization and optimized querying for large datasets, especially
+when handling schema drift and avoiding full data loads into memory.
+"""
+import logging
 import pytest
 import pandas as pd
 import numpy as np
@@ -60,6 +69,37 @@ class Profiler:
 
 @pytest.mark.heavy
 def test_comparative_analysis_benchmark(tmp_path):
+    """
+    Benchmarks the performance (time and RAM) of a large-scale data analysis workflow
+    involving loading, concatenation, and aggregation, using Pandas, Polars, and
+    Consist's "cold" (zero-copy file reads) path. This benchmark specifically
+    includes a scenario with schema drift between datasets.
+
+    This test highlights Consist's efficiency for analytical queries over large datasets
+    with varying schemas, especially when avoiding full data loads into memory.
+
+    What happens:
+    1.  Two large Pandas DataFrames (df_a and df_b) are generated with `N_ROWS` records each.
+        -   df_a represents a "baseline" schema.
+        -   df_b represents a "policy" scenario with an additional column ('subsidy'),
+            simulating schema drift.
+    2.  These DataFrames are saved as Parquet files.
+    3.  Consist runs are initiated to log these Parquet files as artifacts under the
+        same `concept_key` ('results').
+    4.  The same data analysis workflow (read, combine, aggregate) is then applied using:
+        -   Pure Pandas (reading full files into memory, manual schema alignment via `pd.concat`).
+        -   Polars (lazy evaluation on Parquet files, `pl.concat(how="diagonal")` for drift).
+        -   Consist's "cold" path (creating a view directly over Parquet files and executing SQL
+            that naturally handles schema drift via `UNION ALL BY NAME`).
+    5.  Performance metrics (time and peak RAM) are recorded for each method.
+
+    What's checked:
+    - The numerical results (aggregated mean values for 'val' and 'subsidy') from all
+      three methods are asserted to be equivalent, verifying the correctness of Consist's
+      query generation and schema drift handling.
+    - Performance metrics are printed to stdout (handled by Profiler class) for manual
+      comparison and analysis, demonstrating Consist's efficiency.
+    """
     run_dir = tmp_path / "bench_runs"
     db_path = str(tmp_path / "bench.duckdb")
     tracker = Tracker(run_dir=run_dir, db_path=db_path)
@@ -68,7 +108,9 @@ def test_comparative_analysis_benchmark(tmp_path):
     # =========================================================================
     # 1. SETUP: GENERATE DATA
     # =========================================================================
-    print(f"\n[Setup] Generating 2 runs x {N_ROWS:,} rows (Schema Drift included)...")
+    logging.info(
+        f"\n[Setup] Generating 2 runs x {N_ROWS:,} rows (Schema Drift included)..."
+    )
 
     # Run A (Baseline)
     df_a = pd.DataFrame(
@@ -110,7 +152,7 @@ def test_comparative_analysis_benchmark(tmp_path):
     # unless we manage `is_ingested` flag carefully.
     # For this test, let's keep them Cold for the main comparison.
 
-    print("[Setup] Data generated.")
+    logging.info("[Setup] Data generated.")
     del df_a, df_b
     gc.collect()
 
@@ -159,7 +201,7 @@ def test_comparative_analysis_benchmark(tmp_path):
             )  # Execute
 
     else:
-        print("[Polars         ] Skipped (not installed)")
+        logging.info("[Polars         ] Skipped (not installed)")
 
     # =========================================================================
     # BENCHMARK 3: CONSIST (Cold View)
@@ -188,10 +230,10 @@ def test_comparative_analysis_benchmark(tmp_path):
     # VERIFICATION
     # =========================================================================
     # Ensure they got similar results
-    print("\n[Verification]")
-    print(f"Pandas Rows: {len(res_pandas)}")
+    logging.info("\n[Verification]")
+    logging.info(f"Pandas Rows: {len(res_pandas)}")
     if pl:
-        print(f"Polars Rows: {len(res_polars)}")
-    print(f"Consist Rows: {len(res_consist)}")
+        logging.info(f"Polars Rows: {len(res_polars)}")
+    logging.info(f"Consist Rows: {len(res_consist)}")
 
     assert len(res_consist) == 2

@@ -1,3 +1,10 @@
+"""
+Consist: Automatic provenance tracking and intelligent caching for scientific simulation workflows.
+
+This package provides the main public API for Consist, allowing users to interact with
+the Tracker for managing runs, logging artifacts, and ingesting data.
+"""
+
 from consist.models.run import Run
 
 

@@ -1,3 +1,12 @@
+"""
+This module provides utility functions for generating code or data artifacts
+based on existing Consist runs or metadata.
+
+Currently, it includes a placeholder for generating SQLModel classes from
+tables associated with a specific run.
+"""
+
+
 # consist/tools/generator.py
 def generate_models_from_run(run_id: str, output_file: str):
     """

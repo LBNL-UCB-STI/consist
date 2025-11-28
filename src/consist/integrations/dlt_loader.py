@@ -1,3 +1,16 @@
+"""
+This module provides the integration layer between Consist and the dlt (Data Load Tool) library.
+It is responsible for materializing artifact data into the DuckDB database, handling various
+data formats (Pandas DataFrames, Parquet, CSV, Zarr) and ensuring that Consist's system
+columns (e.g., run_id, artifact_id) are correctly injected for provenance.
+
+Key functionalities include:
+- Dynamic extension of user-defined SQLModel schemas with Consist system columns.
+- Handling of different data ingestion strategies: vectorized (Pandas, PyArrow) and streaming.
+- Specialized handlers for common file formats (Parquet, CSV, Zarr metadata).
+- Integration with dlt pipeline for robust data loading, schema inference, and validation.
+"""
+
 import dlt
 import os
 import warnings
@@ -103,7 +116,7 @@ def _handle_zarr_metadata(path: str) -> Iterable[Dict[str, Any]]:
                 "dims": list(da.dims),
                 "shape": list(da.shape),
                 "dtype": str(da.dtype),
-                "attributes": da.attrs  # dlt handles JSON dumping automatically
+                "attributes": da.attrs,  # dlt handles JSON dumping automatically
             }
 
         # 2. Yield Coordinates
@@ -114,40 +127,80 @@ def _handle_zarr_metadata(path: str) -> Iterable[Dict[str, Any]]:
                 "dims": list(da.dims),
                 "shape": list(da.shape),
                 "dtype": str(da.dtype),
-                "attributes": da.attrs
+                "attributes": da.attrs,
             }
     except Exception as e:
         raise ValueError(f"Failed to extract Zarr metadata from {path}: {e}")
 
 
 def _handle_parquet_path(path: str, ctx: Dict[str, Any]) -> Tuple[Any, bool]:
-    """Returns (iterable/df, is_vectorized) for Parquet."""
+    """
+    Handles ingestion of Parquet files, providing a streaming or vectorized data source
+    suitable for `dlt` ingestion.
+
+    Args:
+        path (str): The file system path to the Parquet file.
+        ctx (Dict[str, Any]): A dictionary of Consist system context values (e.g.,
+                               `consist_run_id`) to be injected into the data.
+
+    Returns:
+        Tuple[Any, bool]: A tuple containing:
+                          - The data source (either a Pandas DataFrame or a generator
+                            yielding Pandas DataFrames/batches).
+                          - A boolean indicating if the source is vectorized (True for DF,
+                            False for generator).
+
+    Raises:
+        ImportError: If neither Pandas nor PyArrow is available.
+    """
     if pa and pq:
+
         def parquet_stream():
             pf = pq.ParquetFile(path)
             for batch in pf.iter_batches():
                 df_batch = batch.to_pandas()
                 for k, v in ctx.items():
-                    if v is not None: df_batch[k] = v
+                    if v is not None:
+                        df_batch[k] = v
                 yield df_batch
 
         return parquet_stream(), True
     elif pd:
         df = pd.read_parquet(path)
         for k, v in ctx.items():
-            if v is not None: df[k] = v
+            if v is not None:
+                df[k] = v
         return df, True
     else:
         raise ImportError(f"Pandas or PyArrow required for Parquet: {path}")
 
 
 def _handle_csv_path(path: str, ctx: Dict[str, Any]) -> Tuple[Any, bool]:
-    """Returns (iterable, is_vectorized) for CSV."""
+    """
+    Handles ingestion of CSV files, providing a streaming data source
+    suitable for `dlt` ingestion.
+
+    Args:
+        path (str): The file system path to the CSV file.
+        ctx (Dict[str, Any]): A dictionary of Consist system context values (e.g.,
+                               `consist_run_id`) to be injected into the data.
+
+    Returns:
+        Tuple[Any, bool]: A tuple containing:
+                          - The data source (a generator yielding Pandas DataFrames/chunks).
+                          - A boolean indicating if the source is vectorized (True for generator
+                            with chunks, effectively).
+
+    Raises:
+        ImportError: If Pandas is not available.
+    """
     if pd:
+
         def csv_stream():
             for df_batch in pd.read_csv(path, chunksize=100_000):
                 for k, v in ctx.items():
-                    if v is not None: df_batch[k] = v
+                    if v is not None:
+                        df_batch[k] = v
                 yield df_batch
 
         return csv_stream(), True
@@ -156,11 +209,11 @@ def _handle_csv_path(path: str, ctx: Dict[str, Any]) -> Tuple[Any, bool]:
 
 
 def ingest_artifact(
-        artifact: Artifact,
-        run_context: Run,
-        db_path: str,
-        data_iterable: Union[Iterable[Dict[str, Any]], Any],
-        schema_model: Optional[Type[SQLModel]] = None,
+    artifact: Artifact,
+    run_context: Run,
+    db_path: str,
+    data_iterable: Union[Iterable[Dict[str, Any]], Any],
+    schema_model: Optional[Type[SQLModel]] = None,
 ):
     """
     Ingests artifact data into DuckDB.
@@ -171,7 +224,7 @@ def ingest_artifact(
         "consist_run_id": run_context.id,
         "consist_artifact_id": str(artifact.id),
         "consist_year": run_context.year,
-        "consist_iteration": run_context.iteration
+        "consist_iteration": run_context.iteration,
     }
 
     is_vectorized = False
@@ -215,7 +268,8 @@ def ingest_artifact(
     if pd and isinstance(data_iterable, pd.DataFrame):
         is_vectorized = True
         for k, v in ctx.items():
-            if v is not None: data_iterable[k] = v
+            if v is not None:
+                data_iterable[k] = v
 
         # --- FIX 2: Restore Schema Audit Warning ---
         if schema_model:

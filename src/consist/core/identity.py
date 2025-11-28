@@ -1,3 +1,4 @@
+import logging
 import hashlib
 import json
 import time
@@ -238,7 +239,6 @@ class IdentityManager:
 
         return obj
 
-
     def _compute_file_checksum(self, file_path: str) -> str:
         """
         Computes identifier for a file OR directory based on configured strategy.
@@ -260,22 +260,20 @@ class IdentityManager:
                         meta_str += f"{p.name}:{stat.st_size}_{stat.st_mtime_ns}|"
                 return hashlib.sha256(meta_str.encode("utf-8")).hexdigest()
             else:
-                # Full hashing of a Zarr directory is extremely slow.
-                # We recommend forcing 'fast' for directories or using 'manifest' hashing.
-                # For now, fallback to fast behavior or raise warning.
-                print(f"[Consist Warning] Full content hashing on directory {path.name} is slow.")
-                # (Logic to hash all file contents would go here if strictly needed)
-                # Fallback to fast for now to prevent hangs:
-                return self._compute_file_checksum(file_path) # Recursion error? No, logic above changes.
-                # Actually, let's just duplicate the fast logic or implement full.
-                # Implementing full content hash for dir:
+                # Default to full content hashing for directories if not 'fast'.
+                # This can be slow for large directories.
+                logging.warning(
+                    f"[Consist Warning] Performing full content hashing on directory '{path.name}'. "
+                    "This can be slow. Consider using 'fast' hashing_strategy or pre-computed hashes for directories."
+                )
                 sha256 = hashlib.sha256()
                 for p in sorted(path.rglob("*")):
                     if p.is_file():
                         with open(p, "rb") as f:
                             while True:
                                 chunk = f.read(65536)
-                                if not chunk: break
+                                if not chunk:
+                                    break
                                 sha256.update(chunk)
                 return sha256.hexdigest()
 

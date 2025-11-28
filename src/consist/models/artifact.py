@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Dict, Any, Optional
 from sqlalchemy import Column, JSON
 from sqlmodel import Field, SQLModel
@@ -50,7 +50,7 @@ class Artifact(SQLModel, table=True):
     meta: Dict[str, Any] = Field(default={}, sa_column=Column(JSON))
 
     # Audit
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     # --- Runtime State (Not persisted) ---
     # PrivateAttr is used here to store data that is not part of the SQLModel schema

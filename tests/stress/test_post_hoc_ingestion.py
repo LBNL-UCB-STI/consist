@@ -1,5 +1,14 @@
 # tests/stress/test_post_hoc_ingestion.py
 
+"""
+This module contains stress tests for Consist's "post-hoc" or "offline" ingestion capabilities,
+particularly relevant for High-Performance Computing (HPC) workflows.
+
+It verifies that Consist can track runs and artifacts by writing only JSON metadata during
+the primary computation phase, and then later (post-hoc) ingest the associated data into
+the database for analytical querying, correctly attributing provenance.
+"""
+import logging
 import pytest
 import pandas as pd
 import numpy as np
@@ -31,7 +40,7 @@ def test_offline_ingestion(tmp_path):
     # =========================================================================
     # PHASE 1: The "HPC Simulation" (No DB Writes)
     # =========================================================================
-    print("\n[Phase 1] Simulation running (Writing Parquet + JSON only)...")
+    logging.info("\n[Phase 1] Simulation running (Writing Parquet + JSON only)...")
 
     df_sim = pd.DataFrame({"id": np.arange(N_ROWS), "val": np.random.rand(N_ROWS)})
 
@@ -50,7 +59,7 @@ def test_offline_ingestion(tmp_path):
     # =========================================================================
     # PHASE 2: The "Nightly Ingestor" (Post-Hoc)
     # =========================================================================
-    print("[Phase 2] Reading JSON and Backfilling Database...")
+    logging.info("[Phase 2] Reading JSON and Backfilling Database...")
 
     # 1. Load the JSON Metadata
     with open(json_path, "r") as f:
@@ -69,7 +78,7 @@ def test_offline_ingestion(tmp_path):
     # We need to resolve the path. Since the JSON has the 'uri',
     # we use the tracker to resolve it back to absolute path.
     abs_path = tracker.resolve_uri(restored_artifact.uri)
-    print(f"   -> Loading data from {abs_path}")
+    logging.info(f"   -> Loading data from {abs_path}")
     df_to_load = pd.read_parquet(abs_path)
 
     # 4. PERFORM OFFLINE INGESTION
@@ -82,7 +91,7 @@ def test_offline_ingestion(tmp_path):
     # =========================================================================
     # PHASE 3: Verification
     # =========================================================================
-    print("[Phase 3] Verifying Data Provenance...")
+    logging.info("[Phase 3] Verifying Data Provenance...")
 
     # Create view using the restored artifact key
     tracker.create_view("v_weather", "weather_data")
@@ -92,8 +101,8 @@ def test_offline_ingestion(tmp_path):
         query = text("SELECT consist_run_id, COUNT(*) FROM v_weather GROUP BY 1")
         row = conn.execute(query).fetchone()
 
-        print(f"   -> Found data for Run ID: {row[0]}")
-        print(f"   -> Row Count: {row[1]}")
+        logging.info(f"   -> Found data for Run ID: {row[0]}")
+        logging.info(f"   -> Row Count: {row[1]}")
 
         assert row[0] == "run_hpc_01"
         assert row[1] == N_ROWS

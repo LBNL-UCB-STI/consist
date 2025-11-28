@@ -1,3 +1,4 @@
+import logging
 import pandas as pd
 from typing import List
 
@@ -16,13 +17,17 @@ class MatrixViewFactory:
     def __init__(self, tracker):
         self.tracker = tracker
 
-    def load_matrix_view(self, concept_key: str, variables: List[str] = None) -> "xr.Dataset":
+    def load_matrix_view(
+        self, concept_key: str, variables: List[str] = None
+    ) -> "xr.Dataset":
         """
         Returns a lazy xarray Dataset containing all runs that match the concept_key.
         The dataset is concatenated along the 'run_id' dimension.
         """
-        if xr is None: raise ImportError("xarray is required.")
-        if not self.tracker.engine: raise RuntimeError("Database connection required.")
+        if xr is None:
+            raise ImportError("xarray is required.")
+        if not self.tracker.engine:
+            raise RuntimeError("Database connection required.")
 
         # 1. Query Metadata
         query = f"""
@@ -33,33 +38,35 @@ class MatrixViewFactory:
             ORDER BY r.year, r.iteration
         """
         df = pd.read_sql(query, self.tracker.engine)
-        if df.empty: return xr.Dataset()
+        if df.empty:
+            return xr.Dataset()
 
         # 2. Lazy Open & Stack
         datasets = []
         for _, row in df.iterrows():
             try:
-                uri = row['uri']
+                uri = row["uri"]
                 path = self.tracker.resolve_uri(uri)
 
                 ds = xr.open_zarr(path, consolidated=False)
-                if variables: ds = ds[variables]
+                if variables:
+                    ds = ds[variables]
 
                 # FIX: Stack along 'run_id' dimension.
                 # Treat 'year' and 'iteration' as metadata (coords) for that run.
-                ds = ds.assign_coords({
-                    "year": row['year'] or 0,
-                    "iteration": row['iteration'] or 0
-                })
+                ds = ds.assign_coords(
+                    {"year": row["year"] or 0, "iteration": row["iteration"] or 0}
+                )
                 # Expand run_id to be the primary concatenation dimension
-                ds = ds.expand_dims(run_id=[row['run_id']])
+                ds = ds.expand_dims(run_id=[row["run_id"]])
 
                 datasets.append(ds)
             except Exception as e:
-                print(f"[Consist Warning] Failed to load matrix {uri}: {e}")
+                logging.warning(f"[Consist Warning] Failed to load matrix {uri}: {e}")
                 continue
 
-        if not datasets: return xr.Dataset()
+        if not datasets:
+            return xr.Dataset()
 
         # 3. Combine
         # Use concat to keep dimensions dense (avoiding sparse NaNs)

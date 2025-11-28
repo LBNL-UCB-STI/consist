@@ -1,3 +1,10 @@
+"""
+This module provides utilities for integrating Consist with containerized workflows,
+specifically Docker and Singularity. It allows users to execute container commands
+while automatically tracking provenance and leveraging Consist's caching mechanisms.
+"""
+
+import logging
 from typing import List, Dict
 from pathlib import Path
 import subprocess
@@ -80,12 +87,14 @@ def run_container_step(
 
         # --- A. Check Cache (Consist handles this automatically within start_run) ---
         if t.is_cached:
-            print(f"✅ Consist Cache HIT! Skipping container execution for {image}.")
+            logging.info(
+                f"✅ Consist Cache HIT! Skipping container execution for {image}."
+            )
             # Outputs are already "hydrated" by Consist, no need to re-execute or re-log
             return True
 
         # --- B. Execute Container Backend (Actual Computation) ---
-        print(f"🔄 Executing container: {image} with command: '{command}'")
+        logging.info(f"🔄 Executing container: {image} with command: '{command}'")
         success = _execute_container_backend(
             client, image, volumes, command, environment
         )
@@ -104,7 +113,7 @@ def run_container_step(
                     host_out_path, direction="output", key=Path(host_out_path).name
                 )
             else:
-                print(
+                logging.warning(
                     f"⚠️ Warning: Expected output '{host_out_path}' was not created by container '{image}'."
                 )
 
@@ -143,7 +152,7 @@ def _execute_container_backend(client, image, volumes, command, environment) -> 
             container.remove()
             return result["StatusCode"] == 0
         except Exception as e:
-            print(f"Docker Error: {e}")
+            logging.error(f"Docker Error: {e}")
             return False
     else:
         # Singularity Logic

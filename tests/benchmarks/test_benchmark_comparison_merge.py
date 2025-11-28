@@ -1,3 +1,13 @@
+"""
+This module contains comparative benchmarks for join and merge operations across
+Pandas, Polars, and Consist (both "cold" and "hot" data paths).
+
+The primary goal is to quantify the performance benefits of Consist's approach
+to data virtualization and optimized querying for large datasets, especially
+when compared to traditional Pandas/Polars operations.
+"""
+
+import logging
 import pytest
 import pandas as pd
 import numpy as np
@@ -54,6 +64,32 @@ class Profiler:
 
 @pytest.mark.heavy
 def test_comparative_join_benchmark(tmp_path):
+    """
+    Benchmarks the performance (time and RAM) of a large-scale data join/merge operation
+    using Pandas, Polars, and Consist's "cold" (zero-copy file reads) and "hot" (ingested DuckDB)
+    paths.
+
+    This test highlights Consist's efficiency for analytical queries over large datasets,
+    especially when avoiding full data loads into memory.
+
+    What happens:
+    1.  Two large Pandas DataFrames (df_a and df_b) are generated with `N_ROWS` records each.
+    2.  These DataFrames are saved as Parquet files.
+    3.  Consist runs are initiated to log these Parquet files as artifacts.
+    4.  The same join/merge and aggregation logic is then applied using:
+        -   Pure Pandas (reading full files into memory).
+        -   Polars (lazy evaluation on Parquet files).
+        -   Consist's "cold" path (creating a view directly over Parquet files and executing SQL).
+        -   Consist's "hot" path (ingesting data into DuckDB and then querying).
+    5.  Performance metrics (time and peak RAM) are recorded for each method.
+
+    What's checked:
+    - The numerical results (mean delta for category 'X') from all four methods
+      are asserted to be statistically equivalent (within a small tolerance).
+      This verifies the correctness of Consist's query generation and execution.
+    - Performance metrics are printed to stdout (handled by Profiler class) for manual
+      comparison and analysis, demonstrating Consist's efficiency.
+    """
     run_dir = tmp_path / "bench_join"
     db_path = str(tmp_path / "bench_join.duckdb")
     tracker = Tracker(run_dir=run_dir, db_path=db_path)
@@ -62,7 +98,7 @@ def test_comparative_join_benchmark(tmp_path):
     # =========================================================================
     # 1. SETUP: GENERATE DATA
     # =========================================================================
-    print(f"\n[Setup] Generating 2 runs x {N_ROWS:,} rows...")
+    logging.info(f"\n[Setup] Generating 2 runs x {N_ROWS:,} rows...")
 
     ids = np.arange(N_ROWS)
 
@@ -100,7 +136,7 @@ def test_comparative_join_benchmark(tmp_path):
         df_b.to_parquet(path_b)
         art_b = consist.log_artifact(str(path_b), key="results")
 
-    print("[Setup] Data generated.")
+    logging.info("[Setup] Data generated.")
     del df_a, df_b
     gc.collect()
 
@@ -132,7 +168,7 @@ def test_comparative_join_benchmark(tmp_path):
                 .collect()
             )
     else:
-        print("[Polars         ] Skipped")
+        logging.info("[Polars         ] Skipped")
 
     # =========================================================================
     # BENCHMARK 3: CONSIST (Cold / Zero-Copy)
@@ -157,7 +193,7 @@ def test_comparative_join_benchmark(tmp_path):
     # BENCHMARK 4: CONSIST (Hot / Native)
     # =========================================================================
     # 4a. Measure Ingestion Cost (Setup)
-    print("\n[Ingestion Phase] moving data to DuckDB...")
+    logging.info("\n[Ingestion Phase] moving data to DuckDB...")
     with Profiler("Ingestion Cost") as p:
         # We pass the paths directly to avoid loading into Python RAM
         # Tracker sees the path string and streams it via Arrow
@@ -185,14 +221,14 @@ def test_comparative_join_benchmark(tmp_path):
     # =========================================================================
     # VERIFICATION
     # =========================================================================
-    print("\n[Verification (Avg Delta for Cat X)]")
+    logging.info("\n[Verification (Avg Delta for Cat X)]")
     val_pd = res_pandas.loc["X"]
     val_cold = next(r[1] for r in res_consist_cold if r[0] == "X")
     val_hot = next(r[1] for r in res_consist_hot if r[0] == "X")
 
-    print(f"Pandas:  {val_pd:.4f}")
-    print(f"Cold:    {val_cold:.4f}")
-    print(f"Hot:     {val_hot:.4f}")
+    logging.info(f"Pandas:  {val_pd:.4f}")
+    logging.info(f"Cold:    {val_cold:.4f}")
+    logging.info(f"Hot:     {val_hot:.4f}")
 
     assert abs(val_pd - val_cold) < 0.01
     assert abs(val_pd - val_hot) < 0.01

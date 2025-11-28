@@ -1,6 +1,5 @@
 import pytest
 import numpy as np
-from pathlib import Path
 
 # Skip if dependencies missing
 zarr = pytest.importorskip("zarr")
@@ -20,11 +19,13 @@ def test_extract_zarr_structure(tmp_path):
     # Create Dataset with Data Variable + Coordinate
     ds = xr.Dataset(
         data_vars={
-            "temperature": (("x", "y"), np.zeros((10, 20), dtype="float32"), {"units": "C"})
+            "temperature": (
+                ("x", "y"),
+                np.zeros((10, 20), dtype="float32"),
+                {"units": "C"},
+            )
         },
-        coords={
-            "x": np.arange(10)
-        }
+        coords={"x": np.arange(10)},
     )
     ds.to_zarr(store_path)
 

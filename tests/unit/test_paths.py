@@ -1,3 +1,11 @@
+"""
+This module contains unit tests for Consist's path virtualization and resolution logic.
+
+It specifically verifies the `_virtualize_path` and `resolve_uri` methods of the `Tracker`,
+ensuring that file system paths are correctly converted to and from portable URIs
+based on configured mounts and run directories.
+"""
+
 # tests/unit/test_paths.py
 from consist.core.tracker import Tracker
 

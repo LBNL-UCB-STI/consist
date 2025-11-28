@@ -1,3 +1,13 @@
+"""
+This module contains stress tests for Consist's "typed analysis" workflow,
+leveraging SQLModel for schema definition and DLT for strict ingestion.
+
+It demonstrates how Consist can enforce data contracts and enable Pythonic,
+type-safe querying of large datasets via SQLAlchemy expressions, effectively
+bridging the gap between Python data science and SQL analytics.
+"""
+
+import logging
 import pytest
 import pandas as pd
 import numpy as np
@@ -10,6 +20,22 @@ import consist
 # 1. Define the Schema (The Contract)
 # We set schema="global_tables" so SQLAlchemy knows where to find it in DuckDB
 class CensusRecord(SQLModel, table=True):
+    """
+    SQLModel class representing a strict schema for census records.
+
+    This model serves as a data contract, defining the expected types and structure
+    of census data when ingested into Consist. By specifying `__table_args__` and
+    `__tablename__`, it maps directly to the global Consist data model for "census_strict"
+    records within the DuckDB database.
+
+    Attributes:
+        person_id (int): Unique identifier for each person, serving as the primary key.
+        age (int): Age of the person.
+        income (float): Income of the person.
+        mode (str): Primary mode of transport (e.g., "car", "transit", "walk").
+        city (Optional[str]): Optional field for the city of residence.
+    """
+
     __tablename__ = "census_strict"
     __table_args__ = {"schema": "global_tables"}
 
@@ -25,6 +51,32 @@ class CensusRecord(SQLModel, table=True):
 
 @pytest.mark.heavy
 def test_typed_analysis_workflow(tmp_path):
+    """
+    Tests an end-to-end "typed analysis" workflow using Consist, SQLModel, and DLT's
+    strict ingestion capabilities.
+
+    This test demonstrates how Consist allows users to define explicit data schemas
+    using SQLModel, strictly ingest data according to those schemas, and then
+    perform Pythonic, type-safe analytical queries directly against the data in DuckDB
+    using SQLAlchemy expressions, without writing raw SQL strings.
+
+    What happens:
+    1.  A large Pandas DataFrame (`df`) is generated with synthetic census data.
+    2.  This DataFrame is ingested into Consist using `consist.ingest`, with `CensusRecord`
+        provided as a strict schema. This ensures data conforms to the defined types
+        and structures.
+    3.  A Pythonic analytical query is constructed using SQLModel (e.g., `select(CensusRecord.mode, ...)`)
+        to group data by mode, calculate count, and average income, with filtering.
+    4.  This query is executed via the `tracker.engine`, returning aggregated results.
+    5.  The results are also fetched as a Pandas DataFrame for further Python-based analysis.
+
+    What's checked:
+    -   The ingestion process successfully loads data into the `global_tables.census_strict` table.
+    -   The Pythonic SQLAlchemy query correctly translates into SQL and retrieves accurate
+        aggregated results from the DuckDB database.
+    -   The structure and content of the results are validated.
+    -   The conversion of aggregated results back into a Pandas DataFrame is successful.
+    """
     run_dir = tmp_path / "typed_run"
     db_path = str(tmp_path / "typed.duckdb")
     tracker = Tracker(run_dir=run_dir, db_path=db_path)
@@ -33,7 +85,7 @@ def test_typed_analysis_workflow(tmp_path):
     # =========================================================================
     # 1. GENERATE & INGEST (With Strict Schema)
     # =========================================================================
-    print("\n[Step 1] Generating data...")
+    logging.info("\n[Step 1] Generating data...")
     N = 100_000
     df = pd.DataFrame(
         {
@@ -56,7 +108,7 @@ def test_typed_analysis_workflow(tmp_path):
     # =========================================================================
     # 2. ANALYSIS (The "Pandas-like" SQL Way)
     # =========================================================================
-    print("[Step 2] performing Typed Analysis (No SQL Strings)...")
+    logging.info("[Step 2] performing Typed Analysis (No SQL Strings)...")
 
     # We use the tracker's session to execute SQLAlchemy expressions
     # This is efficient: It generates the SQL query, sends it to DuckDB,
@@ -80,12 +132,12 @@ def test_typed_analysis_workflow(tmp_path):
 
         results = session.exec(statement).all()
 
-        print(f"\n{'Mode':<10} {'Count':<10} {'Avg Income':<15}")
-        print("-" * 35)
+        logging.info(f"\n{'Mode':<10} {'Count':<10} {'Avg Income':<15}")
+        logging.info("-" * 35)
         for row in results:
             # Row matches the select() structure
             mode, count, avg_inc = row
-            print(f"{mode:<10} {count:<10} ${avg_inc:,.2f}")
+            logging.info(f"{mode:<10} {count:<10} ${avg_inc:,.2f}")
 
             assert count > 0
             assert avg_inc > 0
@@ -94,11 +146,11 @@ def test_typed_analysis_workflow(tmp_path):
     # 3. BONUS: Into DataFrame
     # =========================================================================
     # If you really want a DataFrame back for plotting:
-    print("\n[Step 3] Fetching aggregated result as DataFrame...")
+    logging.info("\n[Step 3] Fetching aggregated result as DataFrame...")
 
     with tracker.engine.connect() as conn:
         # You can pass the SQLAlchemy statement directly to read_sql
         df_agg = pd.read_sql(statement, conn)
 
-    print(df_agg)
+    logging.info(df_agg)
     assert len(df_agg) == 3

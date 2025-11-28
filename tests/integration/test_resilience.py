@@ -1,3 +1,12 @@
+"""
+This module contains integration tests focused on the resilience and fault tolerance
+of the Consist system.
+
+It specifically verifies that core operations, such as run tracking and artifact logging,
+behave gracefully and do not crash the application when underlying external dependencies
+(e.g., the database) encounter failures.
+"""
+
 from unittest.mock import patch
 import json
 

@@ -260,3 +260,69 @@ def test_view_with_mounts(tmp_path):
         df = pd.read_sql("SELECT * FROM v_mounted", conn)
         assert len(df) == 1
         assert df.iloc[0]["x"] == 100
+
+
+def test_hybrid_view_with_multiple_cold_schema_drift(tracker, tmp_path):
+    """
+    Tests the ViewFactory's ability to create a hybrid view from multiple "cold" (file-based)
+    artifacts, where each file has a different schema, demonstrating schema drift handling
+    with only file-based data.
+
+    What happens:
+    1. A first run logs a Parquet file with columns `['id', 'value_a']`.
+    2. A second run logs another Parquet file for the same concept, but with an additional
+       column `value_b` (`['id', 'value_a', 'value_b']`).
+    3. A hybrid view is created combining these two cold data sources.
+
+    What's checked:
+    - The final view contains all rows from both Parquet files.
+    - Rows from the first file (missing `value_b`) have `NaN` for `value_b`.
+    - Rows from the second file (having `value_b`) have the correct `value_b` data.
+    - System columns like `consist_run_id` are correctly associated with their respective runs.
+    """
+    # 1. First Cold Data (Missing 'value_b')
+    df1 = pd.DataFrame({"id": [1, 2], "value_a": [10, 20]})
+    path1 = tmp_path / "file1.parquet"
+    df1.to_parquet(path1)
+
+    run_id1 = "run_cold_schema_1"
+    with tracker.start_run(run_id1, "model_drift", year=2023):
+        tracker.log_artifact(str(path1), key="drift_concept", driver="parquet")
+
+    # 2. Second Cold Data (Has 'value_b')
+    df2 = pd.DataFrame({"id": [3, 4], "value_a": [30, 40], "value_b": ["x", "y"]})
+    path2 = tmp_path / "file2.parquet"
+    df2.to_parquet(path2)
+
+    run_id2 = "run_cold_schema_2"
+    with tracker.start_run(run_id2, "model_drift", year=2024):
+        tracker.log_artifact(str(path2), key="drift_concept", driver="parquet")
+
+    # 3. Create the hybrid view
+    tracker.create_view("v_drift_concept", "drift_concept")
+
+    # 4. Query the view and perform assertions
+    with tracker.engine.connect() as conn:
+        df_result = pd.read_sql(
+            "SELECT consist_run_id, id, value_a, value_b FROM v_drift_concept ORDER BY id",
+            conn,
+        )
+
+        # Assertions
+        assert len(df_result) == 4
+        assert df_result["id"].tolist() == [1, 2, 3, 4]
+        assert df_result["value_a"].tolist() == [10, 20, 30, 40]
+
+        # Check value_b for rows from run1 (should be NaN)
+        assert pd.isna(df_result.iloc[0]["value_b"])
+        assert pd.isna(df_result.iloc[1]["value_b"])
+
+        # Check value_b for rows from run2 (should have values)
+        assert df_result.iloc[2]["value_b"] == "x"
+        assert df_result.iloc[3]["value_b"] == "y"
+
+        # Check run_id associations
+        assert df_result.iloc[0]["consist_run_id"] == run_id1
+        assert df_result.iloc[1]["consist_run_id"] == run_id1
+        assert df_result.iloc[2]["consist_run_id"] == run_id2
+        assert df_result.iloc[3]["consist_run_id"] == run_id2

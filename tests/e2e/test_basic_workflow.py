@@ -1,3 +1,4 @@
+import logging
 import json
 from sqlmodel import Session, select, create_engine
 
@@ -82,7 +83,7 @@ def test_dual_write_workflow(tmp_path):
     # but it should not be None/Null.
     assert data["run"]["git_hash"] is not None
 
-    print(f"\nJSON Output content: {json.dumps(data, indent=2)}")
+    logging.info(f"\nJSON Output content: {json.dumps(data, indent=2)}")
 
     # 5. Check SQL (The Index)
     engine = create_engine(f"duckdb:///{db_path}")
@@ -100,4 +101,4 @@ def test_dual_write_workflow(tmp_path):
         artifacts = session.exec(select(Artifact)).all()
         assert len(artifacts) == 2  # 1 input + 1 output
 
-        print(f"\nDB Artifacts found: {[a.key for a in artifacts]}")
+        logging.info(f"\nDB Artifacts found: {[a.key for a in artifacts]}")

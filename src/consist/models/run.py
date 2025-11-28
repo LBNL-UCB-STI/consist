@@ -1,6 +1,7 @@
 import uuid
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+from datetime import UTC
 from sqlalchemy import Column, JSON
 from sqlmodel import Field, SQLModel
 from consist.models.artifact import Artifact
@@ -87,8 +88,8 @@ class Run(SQLModel, table=True):
     # Metadata
     # Uses SQLAlchemy's JSON type for efficient persistence of arbitrary JSON structures.
     meta: Dict[str, Any] = Field(default={}, sa_column=Column(JSON))
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ConsistRecord(SQLModel):

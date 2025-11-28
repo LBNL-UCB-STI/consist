@@ -1,3 +1,13 @@
+"""
+This module contains stress tests specifically designed to evaluate the performance
+and correctness of Consist's "cold view optimization" for large numbers of file-based
+artifacts.
+
+It focuses on verifying the efficiency of vectorized reads from numerous Parquet files
+and the graceful handling of schema drift without ingesting data into the database.
+"""
+
+import logging
 import pytest
 import pandas as pd
 import numpy as np
@@ -20,7 +30,7 @@ def test_cold_vectorized_view(tmp_path):
     tracker = Tracker(run_dir=run_dir, db_path=db_path)
     tracker.identity.hashing_strategy = "fast"
 
-    print("\n[Setup] Generating 50 files across 5 runs...")
+    logging.info("\n[Setup] Generating 50 files across 5 runs...")
 
     # We will track expected counts
     total_rows = 0
@@ -53,23 +63,23 @@ def test_cold_vectorized_view(tmp_path):
     # =========================================================================
     # VERIFICATION
     # =========================================================================
-    print("[Verification] Creating Hybrid View over Cold Data...")
+    logging.info("[Verification] Creating Hybrid View over Cold Data...")
 
     # This should trigger _generate_cold_query_optimized
     # It should produce a single SELECT ... FROM read_parquet([... list of 50 files ...])
     tracker.create_view("v_cold", "distributed_data")
 
-    print("[Verification] Querying...")
+    logging.info("[Verification] Querying...")
     with tracker.engine.connect() as conn:
         # 1. Count Total Rows
         count = conn.execute(text("SELECT COUNT(*) FROM v_cold")).scalar()
-        print(f"   -> Total Rows: {count}")
+        logging.info(f"   -> Total Rows: {count}")
         assert count == total_rows
 
         # 2. Check Schema Drift (extra_col should be NULL for runs 0-2, 1 for runs 3-4)
         # Summing it verifies that DuckDB correctly aligned the schemas
         extra_sum = conn.execute(text("SELECT SUM(extra_col) FROM v_cold")).scalar()
-        print(f"   -> Extra Col Sum: {extra_sum}")
+        logging.info(f"   -> Extra Col Sum: {extra_sum}")
         assert extra_sum == expected_extra_sum
 
         # 3. Check Metadata Injection (The CTE Join)
@@ -78,9 +88,9 @@ def test_cold_vectorized_view(tmp_path):
             text("SELECT consist_run_id, COUNT(*) FROM v_cold GROUP BY 1 ORDER BY 1")
         ).fetchall()
 
-        print("   -> Rows per Run:")
+        logging.info("   -> Rows per Run:")
         for r in run_counts:
-            print(f"      {r[0]}: {r[1]}")
+            logging.info(f"      {r[0]}: {r[1]}")
             assert r[1] == 1000  # 10 files * 100 rows
 
-    print("Success! Vectorized Read Optimization works.")
+    logging.info("Success! Vectorized Read Optimization works.")

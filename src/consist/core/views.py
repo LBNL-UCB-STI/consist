@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import List, Optional, TYPE_CHECKING
 from sqlmodel import select, Session, text
@@ -163,7 +164,7 @@ class ViewFactory:
             abs_path = self.tracker.resolve_uri(artifact.uri)
             if not os.path.exists(abs_path):
                 # Skip missing files to prevent View runtime errors
-                print(
+                logging.warning(
                     f"[Consist Warning] Skipping missing artifact in View: {abs_path}"
                 )
                 continue
