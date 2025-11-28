@@ -1,7 +1,8 @@
 import dlt
 import os
 import warnings
-from typing import Type, Iterable, Dict, Any, Optional, Union
+from typing import Type, Iterable, Dict, Any, Optional, Union, Tuple
+from pathlib import Path
 from sqlmodel import SQLModel, Field
 from consist.models.artifact import Artifact
 from consist.models.run import Run
@@ -19,6 +20,13 @@ try:
 except ImportError:
     pa = None
     pq = None
+
+try:
+    import zarr
+    import xarray as xr
+except ImportError:
+    zarr = None
+    xr = None
 
 
 def _extend_schema_with_system_columns(base_model: Type[SQLModel]) -> Type[SQLModel]:
@@ -75,217 +83,190 @@ def _extend_schema_with_system_columns(base_model: Type[SQLModel]) -> Type[SQLMo
     return extended_model
 
 
+def _handle_zarr_metadata(path: str) -> Iterable[Dict[str, Any]]:
+    """
+    Handler for Zarr/NetCDF-like arrays.
+    Yields structural metadata (variables, dims, attrs) instead of raw pixel data.
+    """
+    if not xr:
+        raise ImportError("xarray and zarr are required for Zarr ingestion.")
+
+    try:
+        # Open consolidated=False to be safe with basic zarr stores
+        ds = xr.open_zarr(path, consolidated=False)
+
+        # 1. Yield Data Variables
+        for var_name, da in ds.data_vars.items():
+            yield {
+                "variable_name": var_name,
+                "variable_type": "data",
+                "dims": list(da.dims),
+                "shape": list(da.shape),
+                "dtype": str(da.dtype),
+                "attributes": da.attrs  # dlt handles JSON dumping automatically
+            }
+
+        # 2. Yield Coordinates
+        for coord_name, da in ds.coords.items():
+            yield {
+                "variable_name": coord_name,
+                "variable_type": "coordinate",
+                "dims": list(da.dims),
+                "shape": list(da.shape),
+                "dtype": str(da.dtype),
+                "attributes": da.attrs
+            }
+    except Exception as e:
+        raise ValueError(f"Failed to extract Zarr metadata from {path}: {e}")
+
+
+def _handle_parquet_path(path: str, ctx: Dict[str, Any]) -> Tuple[Any, bool]:
+    """Returns (iterable/df, is_vectorized) for Parquet."""
+    if pa and pq:
+        def parquet_stream():
+            pf = pq.ParquetFile(path)
+            for batch in pf.iter_batches():
+                df_batch = batch.to_pandas()
+                for k, v in ctx.items():
+                    if v is not None: df_batch[k] = v
+                yield df_batch
+
+        return parquet_stream(), True
+    elif pd:
+        df = pd.read_parquet(path)
+        for k, v in ctx.items():
+            if v is not None: df[k] = v
+        return df, True
+    else:
+        raise ImportError(f"Pandas or PyArrow required for Parquet: {path}")
+
+
+def _handle_csv_path(path: str, ctx: Dict[str, Any]) -> Tuple[Any, bool]:
+    """Returns (iterable, is_vectorized) for CSV."""
+    if pd:
+        def csv_stream():
+            for df_batch in pd.read_csv(path, chunksize=100_000):
+                for k, v in ctx.items():
+                    if v is not None: df_batch[k] = v
+                yield df_batch
+
+        return csv_stream(), True
+    else:
+        raise ImportError(f"Pandas required for CSV: {path}")
+
+
 def ingest_artifact(
-    artifact: Artifact,
-    run_context: Run,
-    db_path: str,
-    data_iterable: Union[Iterable[Dict[str, Any]], Any],
-    schema_model: Optional[Type[SQLModel]] = None,
+        artifact: Artifact,
+        run_context: Run,
+        db_path: str,
+        data_iterable: Union[Iterable[Dict[str, Any]], Any],
+        schema_model: Optional[Type[SQLModel]] = None,
 ):
     """
-    Ingests data associated with an `Artifact` into the Consist DuckDB database using `dlt`.
-
-    This function acts as **"The Materializer"**, integrating with `dlt` to load data
-    from various sources (file paths, DataFrames, iterables of dicts) into a structured
-    table within the `global_tables` dataset in DuckDB.
-
-    Key features:
-    -   **Vectorized Ingestion**: Optimizes for performance by supporting direct ingestion
-        from file paths (Parquet, CSV) or DataFrames, leveraging `dlt`'s fast loading paths.
-    -   **Schema Evolution**: Supports `dlt`'s automatic schema detection and evolution.
-        When `schema_model` is provided, it enables a **"Strict Mode"** for validation
-        against a predefined SQLModel schema, while also allowing flexible schema inference.
-    -   **Provenance Injection**: Dynamically injects Consist-specific system columns
-        (`consist_run_id`, `consist_artifact_id`, `consist_year`, `consist_iteration`)
-        into the ingested data, linking every record back to its provenance.
-
-    Args:
-        artifact (Artifact): The artifact object representing the data being ingested.
-                             Its metadata might include schema information.
-        run_context (Run): The `Run` object providing context (e.g., run_id, year, iteration)
-                           for provenance injection.
-        db_path (str): The file path to the DuckDB database.
-        data_iterable (Union[Iterable[Dict[str, Any]], Any]): The data to ingest. Can be:
-                                                              - A file path (str) for Parquet/CSV.
-                                                              - A Pandas DataFrame or PyArrow Table.
-                                                              - An iterable of dictionaries (row-by-row).
-        schema_model (Optional[Type[SQLModel]]): An optional SQLModel class that defines the
-                                                    expected schema for the ingested data. If provided,
-                                                    it enables strict validation and defines the table structure.
-
-    Raises:
-        ImportError: If required libraries (Pandas, PyArrow) are not installed for certain file types.
-        ValueError: If an unsupported file extension is provided or other data issues.
-        Exception: Any exception raised by the underlying `dlt` ingestion process.
+    Ingests artifact data into DuckDB.
+    Supports Vectorized loading for Tables and Metadata loading for Matrices.
     """
-    # --- Context Helper Values for Provenance Injection ---
-    ctx_run_id = run_context.id
-    ctx_art_id = str(artifact.id)
-    ctx_year = run_context.year
-    ctx_iter = run_context.iteration
+    # System Context
+    ctx = {
+        "consist_run_id": run_context.id,
+        "consist_artifact_id": str(artifact.id),
+        "consist_year": run_context.year,
+        "consist_iteration": run_context.iteration
+    }
 
-    # Flag to track if data is being processed in a vectorized manner
     is_vectorized = False
+    resource_name = artifact.key  # Default name
 
-    # NEW: Handle File Paths (Streaming or Loading for Vectorized Ingestion)
+    # --- 1. Data Source Resolution ---
     if isinstance(data_iterable, str):
         file_path = data_iterable
+        driver = artifact.driver or Path(file_path).suffix.lstrip(".").lower()
 
-        # 1. PARQUET HANDLING
-        if file_path.endswith(".parquet"):
-            if pa and pq:
-                # Streaming Path (Preferred: Low Memory for large files)
-                def parquet_stream():
-                    pf = pq.ParquetFile(file_path)
-                    for batch in pf.iter_batches():
-                        df_batch = batch.to_pandas()
-                        # Vectorized Injection of System Columns
-                        df_batch["consist_run_id"] = ctx_run_id
-                        df_batch["consist_artifact_id"] = ctx_art_id
-                        if ctx_year is not None:
-                            df_batch["consist_year"] = ctx_year
-                        if ctx_iter is not None:
-                            df_batch["consist_iteration"] = ctx_iter
-                        yield df_batch
+        if driver == "zarr":
+            # Matrix Mode: Ingest Metadata Only
+            data_iterable = _handle_zarr_metadata(file_path)
+            resource_name = "zarr_catalog"  # Force common catalog table
+            is_vectorized = False  # It's a generator of dicts
 
-                data_iterable = parquet_stream()
-                is_vectorized = True
+        elif driver == "parquet" or file_path.endswith(".parquet"):
+            data_iterable, is_vectorized = _handle_parquet_path(file_path, ctx)
 
-            elif pd:
-                # Fallback Path (High Memory, but works without PyArrow/Stream, might use fastparquet)
-                df_loaded = pd.read_parquet(file_path)
-                data_iterable = df_loaded
-                is_vectorized = True
-
-            else:
-                raise ImportError(
-                    f"Cannot ingest '{file_path}': Pandas or PyArrow required for Parquet files."
-                )
-
-        # 2. CSV HANDLING
-        elif file_path.endswith(".csv"):
-            if pd:
-                # Streaming CSV with Pandas chunking
-                def csv_stream():
-                    for df_batch in pd.read_csv(file_path, chunksize=100_000):
-                        # Vectorized Injection of System Columns
-                        df_batch["consist_run_id"] = ctx_run_id
-                        df_batch["consist_artifact_id"] = ctx_art_id
-                        if ctx_year is not None:
-                            df_batch["consist_year"] = ctx_year
-                        if ctx_iter is not None:
-                            df_batch["consist_iteration"] = ctx_iter
-                        yield df_batch
-
-                data_iterable = csv_stream()
-                is_vectorized = True
-            else:
-                raise ImportError(
-                    f"Cannot ingest '{file_path}': Pandas required for CSV files."
-                )
+        elif driver == "csv" or file_path.endswith(".csv"):
+            data_iterable, is_vectorized = _handle_csv_path(file_path, ctx)
 
         else:
-            raise ValueError(
-                f"Cannot ingest '{file_path}': Unsupported extension or logic fell through. "
-                f"Supported vectorized file types: .parquet, .csv"
-            )
+            raise ValueError(f"Unsupported ingestion driver: {driver}")
 
-    # --- Standardize Data Source and Schema Handling ---
-
+    # --- 2. Schema Handling ---
     dlt_columns = None
-    resource_name = artifact.key  # Default resource name for dlt
+
+    # If we are in Matrix Mode (Zarr), we might want a fixed internal schema for the catalog,
+    # but dlt infers it well enough (var_name, dims, shape, etc).
+
+    extended_model = None
 
     if schema_model:
-        # If a schema model is provided, use its tablename for the dlt resource
         resource_name = schema_model.__tablename__
-        # Create an extended model which includes Consist system columns
         extended_model = _extend_schema_with_system_columns(schema_model)
-
-        # --- "Strict Mode" for Schema Validation & Evolution ---
-        # By default, passing the class enables validation.
+        # Default to model for standard dict ingestion
         dlt_columns = extended_model
 
-    # Check for DataFrame/Arrow (Direct Memory Object) and apply system columns
-    # We check 'is_vectorized' first in case we converted a file path to a DataFrame/generator above.
-    if is_vectorized or (pd and isinstance(data_iterable, pd.DataFrame)):
-        is_vectorized = True  # Confirm vectorized path
+        # Direct DataFrame Injection Check
+    if pd and isinstance(data_iterable, pd.DataFrame):
+        is_vectorized = True
+        for k, v in ctx.items():
+            if v is not None: data_iterable[k] = v
 
-        # If it's a direct DataFrame (not our generator from a file), we inject cols here.
-        # Generators already handle injection within their stream.
-        if pd and isinstance(data_iterable, pd.DataFrame):
-            # Vectorized Injection of System Columns for direct DataFrames
-            data_iterable["consist_run_id"] = ctx_run_id
-            data_iterable["consist_artifact_id"] = ctx_art_id
-            if ctx_year is not None:
-                data_iterable["consist_year"] = ctx_year
-            if ctx_iter is not None:
-                data_iterable["consist_iteration"] = ctx_iter
-
-        # Schema Audit & dlt's Strict Mode (part of "Ingestion & Schema Evolution")
+        # --- FIX 2: Restore Schema Audit Warning ---
         if schema_model:
             # Get user-defined schema columns
             schema_cols = set(getattr(schema_model, "model_fields", {}).keys()) or set(
                 getattr(schema_model, "__fields__", {}).keys()
             )
+            data_cols = set(data_iterable.columns)
+            ghost_cols = data_cols - schema_cols
 
-            # Only audit if we have the DataFrame handy and not a generator
-            if pd and isinstance(data_iterable, pd.DataFrame):
-                data_cols = set(data_iterable.columns)
-                ghost_cols = data_cols - schema_cols
-                if ghost_cols:
-                    warnings.warn(
-                        f"\n[Consist Schema Warning] Data columns {ghost_cols} present in input "
-                        f"but missing from provided schema '{schema_model.__name__}'. "
-                        "These columns will be dropped during ingestion in strict mode."
-                    )
+            # Filter out system columns from ghost check
+            ghost_cols = {c for c in ghost_cols if not c.startswith("consist_")}
 
-            # --- Critical: Disable Pydantic Validator for DataFrames in dlt ---
-            # If dlt is given a Pydantic CLASS with a DataFrame, it attempts row-by-row
-            # validation which is extremely slow and can crash for large datasets.
-            # Instead, we convert the Pydantic model to a dlt table schema dictionary.
-            # This allows dlt to use the schema for DB table creation/evolution,
-            # but skips Python-level row validation.
-            try:
-                # Use the extended_model to generate the dlt schema including system columns
-                dlt_columns = pydantic_to_table_schema_columns(extended_model)
-            except Exception as e:
+            if ghost_cols:
                 warnings.warn(
-                    f"[Consist Warning] Failed to convert SQLModel to dlt schema columns: {e}. "
-                    "Falling back to passing extended model directly, which might be slower "
-                    "for DataFrame ingestion if dlt tries to validate rows."
+                    f"\n[Consist Schema Warning] Data columns {ghost_cols} present in input "
+                    f"but missing from provided schema '{schema_model.__name__}'. "
+                    "These columns will be dropped during ingestion in strict mode."
                 )
-                dlt_columns = extended_model  # Fallback if conversion fails
 
-    # --- dlt Pipeline Configuration (Part of "The Materializer") ---
-    # dlt will create/manage the tables in the specified DuckDB and dataset.
+    if is_vectorized and extended_model:
+        try:
+            dlt_columns = pydantic_to_table_schema_columns(extended_model)
+        except Exception:
+            # If conversion fails, fallback (but this might crash for DataFrames as seen)
+            dlt_columns = extended_model
+
+    # --- 3. Pipeline Execution ---
     pipeline_working_dir = os.path.dirname(os.path.abspath(db_path))
 
     pipeline = dlt.pipeline(
         pipeline_name="consist_materializer",
-        pipelines_dir=pipeline_working_dir,  # dlt stores temporary files/state here
+        pipelines_dir=pipeline_working_dir,
         destination=dlt.destinations.duckdb(f"duckdb:///{db_path}"),
-        dataset_name="global_tables",  # All Consist ingested data goes into 'global_tables'
+        dataset_name="global_tables",
     )
 
     # --- Resource Creation (dlt's Data Source Definition) ---
     if is_vectorized:
-        # Fast Path: DataFrames or generators yielding DataFrames/PyArrow Tables
+        # Fast Path (Tables)
         resource = dlt.resource(
             data_iterable,
             name=resource_name,
-            write_disposition="append",  # Always append new data to existing tables
-            columns=dlt_columns,  # Use our generated/extended schema
+            write_disposition="append",
+            columns=dlt_columns,
         )
     else:
-        # Slow Path: Iterables of Python dictionaries (row-by-row processing)
-        # We need to manually add context to each record in this path.
+        # Slow/Metadata Path (Matrices or Lists)
+        # We must manually inject context for every record
         def add_context(record: Dict[str, Any]):
-            record["consist_run_id"] = ctx_run_id
-            record["consist_artifact_id"] = ctx_art_id
-            if ctx_year is not None:
-                record["consist_year"] = ctx_year
-            if ctx_iter is not None:
-                record["consist_iteration"] = ctx_iter
+            record.update({k: v for k, v in ctx.items() if v is not None})
             return record
 
         resource = dlt.resource(
@@ -293,12 +274,6 @@ def ingest_artifact(
             name=resource_name,
             write_disposition="append",
             columns=dlt_columns,
-        ).add_map(
-            add_context
-        )  # Apply the context injection map
+        ).add_map(add_context)
 
-    # --- Execution ---
-    # This runs the dlt pipeline, loading the data into DuckDB.
-    info = pipeline.run(resource)
-
-    return info
+    return pipeline.run(resource)

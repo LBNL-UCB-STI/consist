@@ -17,6 +17,8 @@ dependencies = [
     "pydantic>=2.12.4",
     "sqlalchemy>=2.0.44",
     "sqlmodel>=0.0.27",
+    "xarray>=2025.11.0",
+    "zarr>=3.1.5",
 ]
 
 [build-system]
