@@ -1,113 +1,108 @@
 # Consist
 
-**Consist** is the new provenance, caching, and data virtualization layer for PILATES.
+**Automatic provenance tracking, intelligent caching, and data virtualization for scientific simulation workflows.**
 
-## Core Architecture
+Consist tracks what you ran, what it produced, and automatically skips re-running unchanged work. It bridges the gap between raw file-based workflows (CSV/Parquet/HDF5) and analytical databases (DuckDB), offering a "Zero-Copy" virtualization layer for high-performance analysis.
 
-1.  **The Tracker:** Manages Run lifecycle and Identity (Config + Code + Inputs).
-2.  **The Materializer:** Bridges raw files into DuckDB with automatic Schema Evolution.
-3.  **The Virtualizer:** Creates "Hybrid Views" querying both database tables and raw files transparently.
+---
 
-## Usage Example
+## The Problem
+
+Research pipelines are often brittle:
+- **"Which config produced Figure 3?"** (Provenance Hell)
+- **Re-running a 10-step pipeline** because you tweaked one parameter in step 7.
+- **Writing one-off scripts** to compare outputs across dozens of simulation runs.
+- **Transferring 40GB of CSVs** just to share results with a colleague.
+
+**Consist solves this.**
+
+---
+
+## Key Features
+
+### 🔄 Smart Caching (Merkle DAG)
+Change a parameter? Consist detects it.
+*   **Hash-Based Identity:** Runs are identified by `SHA256(Code + Config + Inputs)`.
+*   **Auto-Forking:** If inputs change, downstream runs automatically fork.
+*   **Ghost Mode:** If results exist in the DB, Consist skips execution even if raw files are missing.
+
+### 📊 Hybrid Data Views
+Query your simulation outputs with SQL without ETL.
+*   **Hot & Cold Data:** Consist creates "Hybrid Views" that UNION raw files (Parquet/CSV) with ingested data (DuckDB) transparently.
+*   **Vectorized Reads:** Queries scanning raw files are pushed down to DuckDB's vectorized reader.
+*   **Schema Evolution:** Handles changing columns across runs gracefully (`UNION BY NAME`).
+
+### 📦 Container-Native
+Treats Docker/Singularity containers as "Pure Functions".
+*   Tracks `Image Digest + Command` as configuration.
+*   Tracks mounted volumes as Inputs/Outputs.
+*   Perfect for reproducible HPC workflows.
+
+---
+
+## Quickstart
+
+### Installation
+
+```bash
+git clone https://github.com/your-org/consist.git
+cd consist
+pip install -e .
+```
+
+### Basic Usage
 
 ```python
-import consist
+from consist import Tracker
 import pandas as pd
-from consist.core.tracker import Tracker
-from pathlib import Path
 
-# 1. Initialize (Once per script)
-tracker = Tracker(
-    run_dir=Path("./runs"), 
-    db_path="./provenance.duckdb",
-    hashing_strategy="fast" # Use metadata for speed
-)
+# 1. Initialize (Once per project)
+tracker = Tracker("./runs", db_path="./provenance.duckdb")
 
 # 2. Run Context
-config = {"scenario": "high_growth", "year": 2030}
-with tracker.start_run("run_101", model="demand", config=config):
+config = {"growth_rate": 0.05, "year": 2030}
+
+with tracker.start_run("run_1", model="demand_model", config=config):
     
-    # A. Log Inputs (Global API)
-    consist.log_artifact("inputs/households.csv", key="households", direction="input")
-    
-    # B. Run Logic
-    # ... (generate outputs) ...
-    df_out = pd.DataFrame({"id": [1], "val": [100]})
-    df_out.to_parquet("runs/output.parquet")
-    
-    # C. Log Outputs
-    # Returns an Artifact object
-    art = consist.log_artifact("runs/output.parquet", key="results", direction="output")
-    
-    # D. Ingest (Optional - For High Performance Querying)
-    # Pass the DataFrame directly for vectorized speed (5M+ rows/sec)
-    consist.ingest(artifact=art, data=df_out)
-    
-# With Lineage Discovery, this works too!
-with tracker.start_run("run_2", model="supply", inputs=["runs/output.parquet"]):
-    df_for_analysis = pd.read_parquet("runs/output.parquet")
-    # Consist checks DB, sees "run_1" created this file, and links them automatically.
-
-# 3. Analysis (Hybrid Views)
-# Query the data using SQL, regardless of whether it was ingested or just logged.
-tracker.create_view("v_results", "results")
-
-with tracker.engine.connect() as conn:
-    print(conn.execute("SELECT avg(val) FROM v_results").fetchone())
-```
-
-## Smart Caching & Reproducibility
-
-Consist automatically creates a "Merkle DAG" of your workflow. Before running any model step, it calculates a cryptographic signature based on:
-1.  **Code:** Git Commit SHA (+ dirty state).
-2.  **Config:** Canonical hash of the configuration dictionary.
-3.  **Inputs:** Unique hash of input artifacts (linking back to the specific run that created them).
-
-### Automatic Forking
-If you change a parameter in step 3 of a 10-step pipeline, Consist detects the change.
-*   Steps 1 & 2 are **Cached** (Instant "Ghost" replay).
-*   Step 3 is **Re-run** (Fork).
-*   Steps 4-10 are **Re-run** (Cascade).
-
-### Usage:
-```python
-# Standard Run (Checks cache first)
-with tracker.start_run("run_id", model="my_model", config=conf, inputs=[...]):
+    # A. Check Cache (Optional explicit check)
     if tracker.is_cached:
-        print("Skipping execution!")
+        print("Skipping execution - results hydrated!")
     else:
-        # Do heavy work
-        ...
-
-# Force Rerun (Ignore cache)
-with tracker.start_run("run_id", ..., cache_mode="overwrite"):
-    # Always runs, and updates the cache for future runs.
-    ...
+        # B. Do Work
+        df = pd.DataFrame({"id": [1, 2], "val": [10, 20]})
+        df.to_parquet("runs/output.parquet")
+        
+        # C. Log Output
+        art = tracker.log_artifact("runs/output.parquet", key="demand_results")
+        
+        # D. Ingest (Optional: For sub-second query performance)
+        tracker.ingest(art, df)
 ```
 
-### Container-Native Workflows
+### Running Containers
 
-Consist treats containers (Docker/Singularity) as "Pure Functions," enabling perfect caching of heavy containerized workloads.
+Consist wraps Docker/Singularity execution to provide caching for black-box models.
 
 ```python
-# Consist tracks the Image + Command as part of the Run Identity
-consist.run_container_step(
-    tracker,
+from consist.integrations.containers import run_container
+
+run_container(
+    tracker=tracker,
     run_id="model_step_1",
     image="pilates/asim:v2.1",
-    command="python run.py --conf configs/base.yaml",
-    inputs=["./host/inputs/land_use.csv"],   # Host Path (Hashed)
-    outputs=["./host/outputs/results.csv"],  # Host Path (Tracked)
-    volumes={"./host/inputs": "/data/inputs", "./host/outputs": "/data/outputs"}
+    command=["python", "run.py", "-c", "config.yaml"],
+    inputs=["./host/inputs/land_use.csv"],   
+    outputs=["./host/outputs/results.csv"],
+    volumes={
+        "/abs/host/inputs": "/data/inputs", 
+        "/abs/host/outputs": "/data/outputs"
+    },
+    backend_type="docker" # or "singularity"
 )
+# If run again with same inputs/image, Consist skips execution instantly.
 ```
 
-If you re-run this script, Consist detects that the input files and the image tag haven't changed, and skips the container execution entirely, hydrating the results.csv from its cache.
-
-### "Ghost Mode" (The Hydrated Database)
-You can share a `provenance.duckdb` file with a colleague *without* sending the raw files.
-If data has been **Ingested**, Consist's cache validation will pass even if the file is missing from disk ("Ghost Mode"), allowing collaborators to run downstream models using the database as the data source.
-
+---
 
 ## Data Strategy: Hot vs. Cold
 
@@ -115,38 +110,84 @@ Consist supports two modes of operation for every artifact, which can be mixed f
 
 | Feature         | **Cold Data** (Log Only)     | **Hot Data** (Log + Ingest) |
 |:----------------|:-----------------------------|:----------------------------|
-| **Storage**     | Raw Files (Parquet/CSV)      | DuckDB File                 |
+| **Storage**     | Raw Files (Parquet/CSV/H5)   | DuckDB File                 |
 | **Ingest Time** | Instant (Zero Copy)          | Fast (Vectorized Copy)      |
 | **Query Speed** | Good (Vectorized Read)       | Best (Native Table)         |
 | **Use Case**    | Archival, Huge Files (>10GB) | Dashboards, Heavy Joins     |
 
-*   **Hybrid Views** automatically Union both types. If you ingest a file later (Post-Hoc), the view automatically switches to using the Hot copy.
+**Analysis Example:**
+```python
+# Create a view that unions ALL runs (Hot and Cold)
+tracker.create_view("all_results", "demand_results")
 
+# Query via SQL
+with tracker.engine.connect() as conn:
+    df = pd.read_sql("""
+        SELECT consist_run_id, AVG(val) 
+        FROM all_results 
+        GROUP BY consist_run_id
+    """, conn)
+```
 
-## Benchmarks: The "Zero-Copy" Advantage
+### Advanced Formats (HDF5 & Zarr)
 
-Why use Consist instead of just loading files with Pandas?
+Consist supports complex scientific formats.
 
-Because Consist's **Hybrid Views** leverage DuckDB's vectorized reader to query files directly from disk without loading them entirely into RAM. This is particularly powerful for comparative analysis across many simulation runs.
+**HDF5 Tables (Virtual Artifacts):**
+HDF5 files often contain multiple datasets. You can log "Virtual Artifacts" pointing to specific tables.
 
-We benchmarked Consist against standard data tools on two common research tasks:
-1.  **Aggregate:** GroupBy on 10M rows across 2 files.
-2.  **Compare:** Hash Join on 5M rows (Policy vs. Baseline) with Schema Drift.
+```python
+# Log the physical file
+tracker.log_artifact("pipeline.h5", key="store", driver="h5")
 
-| Task            | Implementation     | Time      | Peak RAM    | Notes                           |
-|:----------------|:-------------------|:----------|:------------|:--------------------------------|
-| **Aggregation** | Pandas             | 0.46s     | ~780 MB     | Eagerly loads all columns       |
-| (10M Rows)      | Polars (Lazy)      | 0.24s     | ~280 MB     |                                 |
-|                 | **Consist (Cold)** | **0.04s** | **~80 MB**  | **Only reads required columns** |
-|                 |                    |           |             |                                 |
-| **Join**        | Pandas             | 0.76s     | ~620 MB     | Memory spike due to merge       |
-| (5M Rows)       | Polars (Lazy)      | 0.20s     | ~440 MB     |                                 |
-|                 | **Consist (Cold)** | **0.12s** | **~272 MB** | Zero Setup Time                 |
-|                 | **Consist (Hot)**  | **0.06s** | **~3 MB**   | **Fastest Query (Native DB)**   |
+# Log a virtual table inside it
+tracker.log_artifact(
+    "pipeline.h5", 
+    key="persons", 
+    driver="h5_table", 
+    meta={"table_path": "/2018/persons"}
+)
+```
 
-*Benchmark run on Apple M3 Max. "Consist (Cold)" refers to querying raw Parquet files via Consist Views without pre-ingestion.*
+**Zarr Matrices:**
+For N-Dimensional arrays, Consist ingests the **structure** (metadata) but keeps pixel data on disk.
+```python
+from consist.core.matrix import MatrixViewFactory
 
-**Key Takeaways:**
-1.  **Smart I/O:** Consist/DuckDB pushes queries down to the scan layer. If you don't ask for a column, Consist doesn't read it.
-2.  **Hot vs. Cold:** Use **Cold** views for ad-hoc analysis (zero setup). Use **Hot** (Ingested) tables for dashboards or repeated heavy joins to get sub-0.1s performance (at the cost of a one-time ingestion step).
-3.  **Automatic Schema Drift:** The benchmarks included files with mismatched columns. Consist handled this automatically (`UNION BY NAME`), whereas Pandas required manual alignment logic.
+# Load a virtual xarray dataset spanning multiple runs
+ds = MatrixViewFactory(tracker).load_matrix_view("congestion_matrix")
+# Slice across runs efficiently
+diff = ds.sel(year=2030) - ds.sel(year=2020)
+```
+
+---
+
+## Benchmarks
+
+Why use Consist instead of just loading files with Pandas? 
+**Smart I/O.** Consist pushes queries down to the scan layer. If you don't ask for a column, Consist doesn't read it.
+
+| Task (5M Rows) | Implementation | Time | Peak RAM |
+|:---|:---|:---|:---|
+| **Aggregation** | Pandas | 0.46s | ~780 MB |
+| | **Consist (Cold)** | **0.04s** | **~80 MB** |
+| **Join** | Pandas | 0.76s | ~620 MB |
+| | **Consist (Hot)** | **0.06s** | **~3 MB** |
+
+---
+
+## Architecture
+
+1.  **The Tracker:** Manages Run lifecycle, Identity hashing, and Locking.
+2.  **The Materializer (`dlt` Bridge):** Bridges raw files into DuckDB with automatic Schema Evolution.
+3.  **The Virtualizer (View Factory):** Creates "Hybrid Views" querying both database tables and raw files.
+4.  **Identity Manager:** Computes Merkle Hashes of Code (Git SHA), Config (Canonical JSON), and Inputs (Provenance Graph).
+
+## Contributing
+
+Consist is currently in active development for the PILATES project.
+
+**Requirements:**
+*   Python 3.13+
+*   DuckDB
+*   Docker (Optional, for container support)
