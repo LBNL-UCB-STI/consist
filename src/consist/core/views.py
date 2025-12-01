@@ -1,3 +1,5 @@
+# src/consist/core/views.py
+
 import logging
 import os
 from typing import List, Optional, TYPE_CHECKING
@@ -216,7 +218,8 @@ class ViewFactory:
                 # union_by_name=True handles schema drift across files!
                 reader_func = f"read_parquet([{', '.join(path_list)}], union_by_name=true, filename=true)"
             elif driver == "csv":
-                reader_func = f"read_csv_auto([{', '.join(path_list)}], union_by_name=true, filename=true)"
+                # normalize_names=true helps with CSV header inconsistencies (case/spacing)
+                reader_func = f"read_csv_auto([{', '.join(path_list)}], union_by_name=true, filename=true, normalize_names=true)"
             else:
                 continue  # Unknown driver fallback
 

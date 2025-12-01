@@ -6,7 +6,7 @@ the Tracker for managing runs, logging artifacts, and ingesting data.
 """
 
 from consist.models.run import Run
-
+from consist.api import load
 
 # src/consist/__init__.py
 
@@ -31,6 +31,7 @@ def log_artifact(
     key: Optional[str] = None,
     direction: str = "output",
     schema: Optional[Type[SQLModel]] = None,
+    driver: Optional[str] = None,
     **meta,
 ) -> Artifact:
     """
@@ -45,13 +46,15 @@ def log_artifact(
         key (Optional[str]): A semantic name for the artifact. Required if `path` is a string.
         direction (str): "input" or "output". Defaults to "output".
         schema (Optional[Type[SQLModel]]): Optional SQLModel class for schema metadata.
+        driver (Optional[str]): Explicitly specify the driver (e.g., 'h5_table').
+                                If None, inferred from file extension.
         **meta: Additional metadata for the artifact.
 
     Returns:
         Artifact: The created or updated `Artifact` object.
     """
     return get_active_tracker().log_artifact(
-        path=path, key=key, direction=direction, schema=schema, **meta
+        path=path, key=key, direction=direction, schema=schema, driver=driver, **meta
     )
 
 

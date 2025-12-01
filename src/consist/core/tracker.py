@@ -1,11 +1,18 @@
 import logging
 import os
+import random
+import uuid
 from pathlib import Path
-from typing import Dict, Optional, List, Any, Type, Iterable, Union
+from time import sleep
+from typing import Dict, Optional, List, Any, Type, Iterable, Union, Callable
 from datetime import datetime, UTC
 from contextlib import contextmanager
 
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm.exc import ConcurrentModificationError
 from sqlmodel import create_engine, Session, select, SQLModel
+
+from sqlalchemy.pool import NullPool
 
 # Removed SQLModelMetaclass
 
@@ -73,12 +80,20 @@ class Tracker:
 
         self.engine = None
         if db_path:
-            # Using duckdb-engine for SQLAlchemy support
-            self.engine = create_engine(f"duckdb:///{db_path}")
+            # Using NullPool ensures the file lock is released when the session closes
+            self.engine = create_engine(f"duckdb:///{db_path}", poolclass=NullPool)
 
-            SQLModel.metadata.create_all(
-                self.engine,
-                tables=[Run.__table__, Artifact.__table__, RunArtifactLink.__table__],
+            # WRAP: Schema creation in retry logic
+            self._execute_with_retry(
+                lambda: SQLModel.metadata.create_all(
+                    self.engine,
+                    tables=[
+                        Run.__table__,
+                        Artifact.__table__,
+                        RunArtifactLink.__table__,
+                    ],
+                ),
+                operation_name="init_schema",
             )
 
         # In-Memory State (The Source of Truth)
@@ -114,7 +129,8 @@ class Tracker:
         """
         if not self.engine:
             return None
-        try:
+
+        def _query():
             with Session(self.engine) as session:
                 statement = (
                     select(Run)
@@ -126,8 +142,12 @@ class Tracker:
                     .limit(1)
                 )
                 return session.exec(statement).first()
+
+        try:
+            return self._execute_with_retry(_query, operation_name="cache_lookup")
         except Exception as e:
-            logging.warning(f"[Consist Warning] Cache lookup failed: {e}")
+            # If it still fails after retries, log warning and return None (Cache Miss)
+            logging.warning(f"[Consist Warning] Cache lookup failed after retries: {e}")
             return None
 
     def _validate_run_outputs(self, run: Run) -> bool:
@@ -168,6 +188,41 @@ class Tracker:
                     )
                     return False
             return True
+
+    def _execute_with_retry(
+        self, func: Callable, operation_name: str = "db_op", retries: int = 20
+    ):
+        """
+        Executes a function with exponential backoff if a Database Lock occurs.
+        Crucial for concurrent DuckDB usage.
+        """
+        for i in range(retries):
+            try:
+                return func()
+            except OperationalError as e:
+                # Check for DuckDB lock strings
+                msg = str(e)
+                if (
+                    "Conflicting lock" in msg
+                    or "IO Error" in msg
+                    or "Could not set lock" in msg
+                ):
+                    if i == retries - 1:
+                        logging.error(
+                            f"[Consist] DB Lock Timeout on {operation_name} after {retries} attempts."
+                        )
+                        raise e
+
+                    # Exponential Backoff with Jitter
+                    sleep_time = (0.1 * (2**i)) + random.uniform(0.01, 0.1)
+                    # Cap at 1 second
+                    sleep_time = min(sleep_time, 1.0)
+                    sleep(sleep_time)
+                else:
+                    raise e
+            except Exception as e:
+                raise e
+        raise ConcurrentModificationError("Concurrency problem")
 
     @contextmanager
     def start_run(
@@ -374,6 +429,7 @@ class Tracker:
         key: Optional[str] = None,
         direction: str = "output",
         schema: Optional[Type[SQLModel]] = None,
+        driver: Optional[str] = None,
         **meta,
     ) -> Artifact:
         """
@@ -399,6 +455,8 @@ class Tracker:
             schema (Optional[Type[SQLModel]]): An optional SQLModel class that defines the
                                                 expected schema for the artifact's data. Its
                                                 name will be stored in artifact metadata.
+            driver (Optional[str]): Explicitly specify the driver (e.g., 'h5_table').
+                                    If None, inferred from file extension.
             **meta: Additional key-value pairs to store in the artifact's flexible `meta` field.
 
         Returns:
@@ -423,6 +481,8 @@ class Tracker:
             )
             if key is None:
                 key = artifact_obj.key  # Use existing key if not overridden
+            if driver:
+                artifact_obj.driver = driver
             if meta:
                 artifact_obj.meta.update(meta)  # Update existing meta with new values
 
@@ -457,6 +517,8 @@ class Tracker:
                             # Detach from session so we can use it in our current flow without binding issues
                             session.expunge(parent)
                             artifact_obj = parent
+                            if driver:
+                                artifact_obj.driver = driver
                             if meta:
                                 artifact_obj.meta.update(meta)  # Apply any new meta
                 except Exception as e:
@@ -466,7 +528,10 @@ class Tracker:
 
             # 2. If no parent artifact found or it's an output, create a fresh Artifact object
             if artifact_obj is None:
-                driver = Path(path).suffix.lstrip(".").lower() or "unknown"
+                # Infer driver if not provided
+                if driver is None:
+                    driver = Path(path).suffix.lstrip(".").lower() or "unknown"
+
                 artifact_obj = Artifact(
                     key=key,
                     uri=uri,
@@ -552,7 +617,7 @@ class Tracker:
             data_to_pass = self.resolve_uri(artifact.uri)
 
         try:
-            info = ingest_artifact(
+            info, resource_name = ingest_artifact(
                 artifact=artifact,
                 run_context=target_run,
                 db_path=self.db_path,
@@ -561,9 +626,24 @@ class Tracker:
             )
 
             # FORCE Metadata update
-            new_meta = dict(artifact.meta)
-            new_meta["is_ingested"] = True
-            artifact.meta = new_meta
+            # We must wrap this in retry logic because dlt might be releasing the lock
+            def _update_metadata():
+                if self.engine:
+                    with Session(self.engine) as session:
+                        # Re-fetch or merge to ensure attached to session
+                        # We modify the object first
+                        new_meta = dict(artifact.meta)
+                        new_meta["is_ingested"] = True
+                        new_meta["dlt_table_name"] = resource_name
+                        artifact.meta = new_meta
+
+                        session.merge(artifact)
+                        session.commit()
+
+            # Execute with retry to handle lock contention from dlt teardown
+            self._execute_with_retry(
+                _update_metadata, operation_name="ingest_metadata_update"
+            )
 
             # Persist metadata update to DB
             if self.engine:
@@ -577,6 +657,54 @@ class Tracker:
             raise e
         # Note: We don't need to explicitly reconnect self.engine.
         # SQLAlchemy will automatically reconnect the next time it's used.
+
+    def get_artifact(self, key_or_id: Union[str, uuid.UUID]) -> Optional[Artifact]:
+        """
+        Retrieves an Artifact by its semantic key or UUID.
+
+        Priority:
+        1. Checks current run's outputs (In-Memory).
+        2. Checks current run's inputs (In-Memory).
+        3. Queries Database (Persistence).
+
+        Args:
+            key_or_id (Union[str, uuid.UUID]): The artifact's 'key' (e.g. "households")
+                                               or its UUID.
+
+        Returns:
+            Optional[Artifact]: The found Artifact object, or None.
+        """
+        # 1. Check In-Memory Context (Current Run)
+        if self.current_consist:
+            for art in reversed(self.current_consist.outputs):
+                if art.key == key_or_id or art.id == key_or_id:
+                    return art
+            for art in self.current_consist.inputs:
+                if art.key == key_or_id or art.id == key_or_id:
+                    return art
+
+        # 2. Check Database with Retry
+        if self.engine:
+
+            def _query():
+                with Session(self.engine) as session:
+                    if isinstance(key_or_id, uuid.UUID):
+                        return session.get(Artifact, key_or_id)
+                    else:
+                        statement = (
+                            select(Artifact)
+                            .where(Artifact.key == key_or_id)
+                            .order_by(Artifact.created_at.desc())
+                            .limit(1)
+                        )
+                        return session.exec(statement).first()
+
+            try:
+                return self._execute_with_retry(_query, operation_name="get_artifact")
+            except Exception:
+                return None
+
+        return None
 
     def create_view(self, view_name: str, concept_key: str):
         """
@@ -705,12 +833,10 @@ class Tracker:
         """
         if not self.engine:
             return
-        try:
-            with Session(self.engine) as session:
-                # FIX: Never bind the live 'run' object to this temporary session.
-                # If we do session.add(run), it gets attached, then expired on commit.
-                # Instead, we perform a "Clone and Push" operation.
 
+        def _do_sync():
+            with Session(self.engine) as session:
+                # "Clone and Push"
                 db_run = session.get(Run, run.id)
                 if db_run:
                     # Update existing DB row explicitly
@@ -731,8 +857,14 @@ class Tracker:
                     session.add(new_run)
 
                 session.commit()
+
+        try:
+            self._execute_with_retry(_do_sync, operation_name="sync_run")
         except Exception as e:
-            logging.warning(f"[Consist Warning] Database sync failed: {e}")
+            # Dual-Write Safety: If DB fails after retries, log warning but don't crash run
+            logging.warning(
+                f"[Consist Warning] Database sync failed for run {run.id}: {e}"
+            )
 
     def _sync_artifact_to_db(self, artifact: Artifact, direction: str):
         """
@@ -753,7 +885,8 @@ class Tracker:
         """
         if not self.engine or not self.current_consist:
             return
-        try:
+
+        def _do_sync():
             with Session(self.engine) as session:
                 # Merge artifact (create or update)
                 db_artifact = session.merge(artifact)
@@ -766,5 +899,8 @@ class Tracker:
                 )
                 session.merge(link)
                 session.commit()
+
+        try:
+            self._execute_with_retry(_do_sync, operation_name="sync_artifact")
         except Exception as e:
             logging.warning(f"[Consist Warning] Artifact sync failed: {e}")

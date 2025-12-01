@@ -12,21 +12,14 @@ Key functionalities include:
 """
 
 import dlt
-import os
-import warnings
-from typing import Type, Iterable, Dict, Any, Optional, Union, Tuple
-from pathlib import Path
-from sqlmodel import SQLModel, Field
+import uuid
+import pandas as pd
+from typing import Optional, Any, Iterable, Union, Type, Set, Dict, Tuple
+from sqlmodel import SQLModel
 from consist.models.artifact import Artifact
 from consist.models.run import Run
-from dlt.common.libs.pydantic import pydantic_to_table_schema_columns
 
 # Robust imports
-try:
-    import pandas as pd
-except ImportError:
-    pd = None
-
 try:
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -40,60 +33,6 @@ try:
 except ImportError:
     zarr = None
     xr = None
-
-
-def _extend_schema_with_system_columns(base_model: Type[SQLModel]) -> Type[SQLModel]:
-    """
-    Dynamically creates a new SQLModel class that extends a given base model
-    by adding Consist-specific system columns (e.g., `consist_run_id`, `consist_artifact_id`,
-    `consist_year`, `consist_iteration`).
-
-    This function plays a crucial role in Consist's **"Ingestion & Schema Evolution"** strategy.
-    It injects provenance information directly into the schema of ingested data,
-    allowing `dlt` to automatically load these system columns. This avoids modifying
-    the user's original SQLModel definition while ensuring every row in the
-    global database is traceable to its origin.
-    The dynamically created model does not set `table=True` as it's primarily for
-    `dlt` schema inference and validation.
-
-    Args:
-        base_model (Type[SQLModel]): The original SQLModel class provided by the user,
-                                      defining the structure of their data.
-
-    Returns:
-        Type[SQLModel]: A new SQLModel class that inherits from `base_model` and
-                        includes the additional Consist system columns.
-    """
-    # 1. Define Annotations (The Types)
-    new_annotations = {
-        "consist_run_id": Optional[str],
-        "consist_artifact_id": Optional[str],
-        "consist_year": Optional[int],
-        "consist_iteration": Optional[int],
-    }
-
-    # 2. Define Attributes (The Defaults/FieldInfos)
-    new_attributes = {
-        "consist_run_id": Field(default=None),
-        "consist_artifact_id": Field(default=None),
-        "consist_year": Field(default=None),
-        "consist_iteration": Field(default=None),
-        "__annotations__": new_annotations,
-    }
-
-    # 3. Preserve the table name
-    # dlt uses this to determine the destination table in DuckDB
-    if hasattr(base_model, "__tablename__"):
-        new_attributes["__tablename__"] = base_model.__tablename__
-
-    # 4. Create the class dynamically
-    # We inherit from base_model so validation rules for user data are preserved.
-    # Note: We do NOT set table=True. This is just a schema for dlt to read.
-    extended_model = type(
-        f"Extended_{base_model.__name__}", (base_model,), new_attributes
-    )
-
-    return extended_model
 
 
 def _handle_zarr_metadata(path: str) -> Iterable[Dict[str, Any]]:
@@ -116,7 +55,7 @@ def _handle_zarr_metadata(path: str) -> Iterable[Dict[str, Any]]:
                 "dims": list(da.dims),
                 "shape": list(da.shape),
                 "dtype": str(da.dtype),
-                "attributes": da.attrs,  # dlt handles JSON dumping automatically
+                "attributes": da.attrs,
             }
 
         # 2. Yield Coordinates
@@ -209,125 +148,203 @@ def _handle_csv_path(path: str, ctx: Dict[str, Any]) -> Tuple[Any, bool]:
 
 
 def ingest_artifact(
-    artifact: Artifact,
-    run_context: Run,
+    artifact: "Artifact",
+    run_context: "Run",
     db_path: str,
-    data_iterable: Union[Iterable[Dict[str, Any]], Any],
+    data_iterable: Optional[Union[Iterable[Any], str, pd.DataFrame]] = None,
     schema_model: Optional[Type[SQLModel]] = None,
 ):
     """
     Ingests artifact data into DuckDB.
     Supports Vectorized loading for Tables and Metadata loading for Matrices.
     """
-    # System Context
-    ctx = {
-        "consist_run_id": run_context.id,
-        "consist_artifact_id": str(artifact.id),
-        "consist_year": run_context.year,
-        "consist_iteration": run_context.iteration,
-    }
 
-    is_vectorized = False
-    resource_name = artifact.key  # Default name
-
-    # --- 1. Data Source Resolution ---
+    # 1. Resolve Data Source (Streaming Batches)
     if isinstance(data_iterable, str):
         file_path = data_iterable
-        driver = artifact.driver or Path(file_path).suffix.lstrip(".").lower()
 
-        if driver == "zarr":
-            # Matrix Mode: Ingest Metadata Only
-            data_iterable = _handle_zarr_metadata(file_path)
-            resource_name = "zarr_catalog"  # Force common catalog table
-            is_vectorized = False  # It's a generator of dicts
+        if artifact.driver == "parquet":
+            data_source = _yield_parquet_batches(file_path)
 
-        elif driver == "parquet" or file_path.endswith(".parquet"):
-            data_iterable, is_vectorized = _handle_parquet_path(file_path, ctx)
+        elif artifact.driver == "csv":
+            data_source = _yield_csv_batches(file_path)
 
-        elif driver == "csv" or file_path.endswith(".csv"):
-            data_iterable, is_vectorized = _handle_csv_path(file_path, ctx)
+        elif artifact.driver == "h5_table":
+            table_path = artifact.meta.get("table_path") or artifact.meta.get(
+                "sub_path"
+            )
+            if not table_path:
+                raise ValueError(f"Artifact '{artifact.key}' missing 'table_path'.")
+            data_source = _yield_h5_batches(file_path, table_path)
+
+        elif artifact.driver == "json":
+            data_source = pd.read_json(file_path).to_dict(orient="records")
+
+        elif artifact.driver == "zarr":
+            data_source = _handle_zarr_metadata(file_path)
 
         else:
-            raise ValueError(f"Unsupported ingestion driver: {driver}")
+            raise ValueError(f"Ingestion not supported for driver: {artifact.driver}")
 
-    # --- 2. Schema Handling ---
-    dlt_columns = None
+    elif data_iterable is not None:
+        # User passed explicit data object
+        if isinstance(data_iterable, pd.DataFrame):
+            # Treat single DataFrame as a list containing one batch for vectorization
+            data_source = [data_iterable]
+        else:
+            # Assume list of dicts or generator
+            data_source = data_iterable
+    else:
+        raise ValueError("No data provided for ingestion.")
 
-    # If we are in Matrix Mode (Zarr), we might want a fixed internal schema for the catalog,
-    # but dlt infers it well enough (var_name, dims, shape, etc).
+    # 2. Configure dlt Pipeline
+    if schema_model and hasattr(schema_model, "__tablename__"):
+        desired_table_name = schema_model.__tablename__
+    else:
+        desired_table_name = artifact.key
 
-    extended_model = None
-
-    if schema_model:
-        resource_name = schema_model.__tablename__
-        extended_model = _extend_schema_with_system_columns(schema_model)
-        # Default to model for standard dict ingestion
-        dlt_columns = extended_model
-
-        # Direct DataFrame Injection Check
-    if pd and isinstance(data_iterable, pd.DataFrame):
-        is_vectorized = True
-        for k, v in ctx.items():
-            if v is not None:
-                data_iterable[k] = v
-
-        # --- FIX 2: Restore Schema Audit Warning ---
-        if schema_model:
-            # Get user-defined schema columns
-            schema_cols = set(getattr(schema_model, "model_fields", {}).keys()) or set(
-                getattr(schema_model, "__fields__", {}).keys()
-            )
-            data_cols = set(data_iterable.columns)
-            ghost_cols = data_cols - schema_cols
-
-            # Filter out system columns from ghost check
-            ghost_cols = {c for c in ghost_cols if not c.startswith("consist_")}
-
-            if ghost_cols:
-                warnings.warn(
-                    f"\n[Consist Schema Warning] Data columns {ghost_cols} present in input "
-                    f"but missing from provided schema '{schema_model.__name__}'. "
-                    "These columns will be dropped during ingestion in strict mode."
-                )
-
-    if is_vectorized and extended_model:
-        try:
-            dlt_columns = pydantic_to_table_schema_columns(extended_model)
-        except Exception:
-            # If conversion fails, fallback (but this might crash for DataFrames as seen)
-            dlt_columns = extended_model
-
-    # --- 3. Pipeline Execution ---
-    pipeline_working_dir = os.path.dirname(os.path.abspath(db_path))
-
+    pipeline_uid = uuid.uuid4().hex[:8]
     pipeline = dlt.pipeline(
-        pipeline_name="consist_materializer",
-        pipelines_dir=pipeline_working_dir,
-        destination=dlt.destinations.duckdb(f"duckdb:///{db_path}"),
+        pipeline_name=f"consist_ingest_{pipeline_uid}",
+        destination=dlt.destinations.duckdb(f"{db_path}"),
         dataset_name="global_tables",
     )
 
-    # --- Resource Creation (dlt's Data Source Definition) ---
-    if is_vectorized:
-        # Fast Path (Tables)
-        resource = dlt.resource(
-            data_iterable,
-            name=resource_name,
-            write_disposition="append",
-            columns=dlt_columns,
+    # 3. Validation Setup
+    allowed_keys: Optional[Set[str]] = None
+    if schema_model:
+        allowed_keys = set(schema_model.model_fields.keys())
+        allowed_keys.update(
+            {
+                "consist_run_id",
+                "consist_artifact_id",
+                "consist_year",
+                "consist_iteration",
+            }
         )
+
+    # 4. Enrich Rows (Vectorized & Scalar support)
+    def _enrich_rows(source):
+        for item in source:
+            # PATH A: Vectorized (Pandas DataFrame)
+            if isinstance(item, pd.DataFrame):
+                batch = item.copy(deep=False)
+
+                # Vectorized Assignment
+                batch["consist_run_id"] = run_context.id
+                batch["consist_artifact_id"] = str(artifact.id)
+                batch["consist_year"] = run_context.year
+                batch["consist_iteration"] = run_context.iteration
+
+                # Vectorized Strict Mode Check
+                if allowed_keys:
+                    current_cols = set(batch.columns)
+                    extra_cols = current_cols - allowed_keys
+                    if extra_cols:
+                        raise ValueError(
+                            f"Schema Contract Violation: Found undefined columns {extra_cols} "
+                            f"in artifact '{artifact.key}'. Strict Schema '{schema_model.__name__}' "
+                            "does not allow new columns."
+                        )
+                yield batch
+
+            # PATH B: Scalar (Dictionary)
+            elif isinstance(item, dict):
+                item["consist_run_id"] = run_context.id
+                item["consist_artifact_id"] = str(artifact.id)
+                item["consist_year"] = run_context.year
+                item["consist_iteration"] = run_context.iteration
+
+                if allowed_keys:
+                    current_keys = set(item.keys())
+                    extra_cols = current_keys - allowed_keys
+                    if extra_cols:
+                        raise ValueError(
+                            f"Schema Contract Violation: Found undefined columns {extra_cols} "
+                            f"in artifact '{artifact.key}'."
+                        )
+                yield item
+
+            else:
+                yield item
+
+    # 5. Define Resource
+    resource_kwargs = {
+        "name": desired_table_name,
+        "write_disposition": "append",
+    }
+
+    # Always hint system columns so dlt creates them even if values are NULL
+    system_columns = {
+        "consist_run_id": {"data_type": "text", "nullable": True},
+        "consist_artifact_id": {"data_type": "text", "nullable": True},
+        "consist_year": {"data_type": "bigint", "nullable": True},
+        "consist_iteration": {"data_type": "bigint", "nullable": True},
+    }
+
+    if schema_model:
+        resource_kwargs["schema_contract"] = {
+            "tables": "evolve",
+            "columns": "freeze",
+            "data_type": "freeze",
+        }
+        columns = _sqlmodel_to_dlt_columns(schema_model)
+        columns.update(system_columns)
+        resource_kwargs["columns"] = columns
     else:
-        # Slow/Metadata Path (Matrices or Lists)
-        # We must manually inject context for every record
-        def add_context(record: Dict[str, Any]):
-            record.update({k: v for k, v in ctx.items() if v is not None})
-            return record
+        # Loose Mode: Hint system columns, allow everything else to evolve
+        resource_kwargs["columns"] = system_columns
 
-        resource = dlt.resource(
-            data_iterable,
-            name=resource_name,
-            write_disposition="append",
-            columns=dlt_columns,
-        ).add_map(add_context)
+    resource = dlt.resource(_enrich_rows(data_source), **resource_kwargs)
 
-    return pipeline.run(resource)
+    # 6. Run
+    info = pipeline.run(resource)
+
+    real_table_name = pipeline.default_schema.naming.normalize_table_identifier(
+        desired_table_name
+    )
+    return info, real_table_name
+
+
+def _sqlmodel_to_dlt_columns(model: Type[SQLModel]) -> dict:
+    columns = {}
+    for name, field in model.model_fields.items():
+        py_type = field.annotation
+        dlt_type = "text"
+        if py_type is int or py_type is Optional[int]:
+            dlt_type = "bigint"
+        elif py_type is float or py_type is Optional[float]:
+            dlt_type = "double"
+        elif py_type is bool or py_type is Optional[bool]:
+            dlt_type = "bool"
+        columns[name] = {"data_type": dlt_type, "nullable": not field.is_required()}
+    return columns
+
+
+# --- Generators ---
+
+
+def _yield_h5_batches(path: str, key: str):
+    try:
+        import tables
+    except ImportError:
+        raise ImportError("PyTables is required.")
+    with pd.HDFStore(path, mode="r") as store:
+        if key not in store:
+            raise KeyError(f"Key '{key}' not found in HDF5.")
+        iterator = pd.read_hdf(path, key=key, chunksize=50000, iterator=True)
+        for chunk in iterator:
+            yield chunk
+
+
+def _yield_parquet_batches(path: str):
+    import pyarrow.parquet as pq
+
+    parquet_file = pq.ParquetFile(path)
+    for batch in parquet_file.iter_batches():
+        yield batch.to_pandas()
+
+
+def _yield_csv_batches(path: str):
+    for chunk in pd.read_csv(path, chunksize=50000):
+        yield chunk

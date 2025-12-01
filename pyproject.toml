@@ -17,6 +17,8 @@ dependencies = [
     "pydantic>=2.12.4",
     "sqlalchemy>=2.0.44",
     "sqlmodel>=0.0.27",
+    "tables>=3.10.2",
+    "tqdm>=4.67.1",
     "xarray>=2025.11.0",
     "zarr>=3.1.5",
 ]
@@ -29,6 +31,7 @@ build-backend = "uv_build"
 dev = [
     "alembic>=1.17.2",
     "black>=25.11.0",
+    "docker>=7.1.0",
     "mkdocs-material>=9.7.0",
     "mkdocstrings[python]>=0.30.1",
     "polars>=1.35.2",
