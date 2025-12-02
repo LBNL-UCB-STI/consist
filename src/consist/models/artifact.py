@@ -93,3 +93,9 @@ class Artifact(SQLModel, table=True):
             Any: The value associated with the key, or the default value if the key is not present.
         """
         return self.meta.get(key, default)
+
+    def __repr__(self):
+        return f"<Artifact key='{self.key}' driver='{self.driver}' uri='{self.uri}'>"
+
+    def __str__(self):
+        return f"Artifact(key={self.key}, path={self.uri})"

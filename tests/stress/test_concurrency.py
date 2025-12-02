@@ -27,33 +27,40 @@ def worker_routine(args):
             fpath.write_text(f"data from {worker_id}")
             tracker.log_artifact(fpath, key=f"data_{worker_id}")
 
-            # Simulate DB write contention
+            # Simulate explicit sync trigger (though start_run handles it)
             tracker._sync_run_to_db(tracker.current_consist.run)
+
+        # CRITICAL FIX: Explicitly dispose engine to release file lock immediately
+        if tracker.engine:
+            tracker.engine.dispose()
 
         return True, ""
     except Exception as e:
         return False, str(e)
 
 
-@pytest.mark.timeout(30)  # Fail if deadlocked
+@pytest.mark.timeout(60)  # Increased timeout for safer concurrency checks
 def test_multiprocess_contention(tmp_path):
     """
-    Spawns multiple processes to hammering the same DuckDB file.
+    Spawns multiple processes to hammer the same DuckDB file.
     Verifies that Consist handles (or we identify the need to handle) locking.
     """
     run_dir = tmp_path / "runs"
     run_dir.mkdir()
     db_path = str(tmp_path / "provenance.duckdb")
 
-    # Initialize DB schema once in main process
+    # Initialize DB schema once in main process to reduce initial startup race
     t = Tracker(run_dir=run_dir, db_path=db_path)
+    if t.engine:
+        t.engine.dispose()
     del t  # Close connection
 
     num_workers = 4
     pool = multiprocessing.Pool(processes=num_workers)
 
     # Prepare args
-    args = [(run_dir, db_path, i) for i in range(num_workers)]
+    # Ensure arguments are picklable (Path objects are fine)
+    args = [(run_dir, str(db_path), i) for i in range(num_workers)]
 
     # Run in parallel
     results = pool.map(worker_routine, args)

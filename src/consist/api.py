@@ -1,12 +1,18 @@
-# src/consist/api.py
-
 import pandas as pd
 from pathlib import Path
-from typing import Optional, Union, Any
+from typing import Optional, Union, Any, Type, Iterable, Dict, TYPE_CHECKING
+from contextlib import contextmanager
+
+from sqlalchemy import text
 
 # Internal imports
 from consist.models.artifact import Artifact
+from consist.models.run import Run
 from consist.core.context import get_active_tracker
+from sqlmodel import SQLModel
+
+if TYPE_CHECKING:
+    from consist.core.tracker import Tracker
 
 # Import loaders for specific formats
 try:
@@ -18,6 +24,99 @@ try:
     import tables
 except ImportError:
     tables = None
+
+
+# --- Core Access ---
+
+
+def current_tracker() -> "Tracker":
+    """
+    Returns the currently active Tracker instance.
+    Useful for introspection (e.g. accessing .last_run) inside deep functions.
+    """
+    return get_active_tracker()
+
+
+# --- Proxy Functions ---
+
+
+def log_artifact(
+    path: Union[str, Artifact],
+    key: Optional[str] = None,
+    direction: str = "output",
+    schema: Optional[Type[SQLModel]] = None,
+    driver: Optional[str] = None,
+    **meta,
+) -> Artifact:
+    """
+    Logs an artifact (file or data reference) to the currently active run.
+
+    This function is a convenient proxy to `consist.core.tracker.Tracker.log_artifact`.
+    It automatically links the artifact to the current run context, handles path
+    virtualization, and performs lineage discovery.
+
+    Args:
+        path (Union[str, Artifact]): The file path (str) or an existing `Artifact` object.
+        key (Optional[str]): A semantic name for the artifact. Required if `path` is a string.
+        direction (str): "input" or "output". Defaults to "output".
+        schema (Optional[Type[SQLModel]]): Optional SQLModel class for schema metadata.
+        driver (Optional[str]): Explicitly specify the driver (e.g., 'h5_table').
+                                If None, inferred from file extension.
+        **meta: Additional metadata for the artifact.
+
+    Returns:
+        Artifact: The created or updated `Artifact` object.
+    """
+    return get_active_tracker().log_artifact(
+        path=path, key=key, direction=direction, schema=schema, driver=driver, **meta
+    )
+
+
+def ingest(
+    artifact: Artifact,
+    data: Optional[Union[Iterable[Dict[str, Any]], Any]] = None,
+    schema: Optional[Type[SQLModel]] = None,
+    run: Optional[Run] = None,
+):
+    """
+    Ingests data associated with an `Artifact` into the active run's database.
+
+    This function is a convenient proxy to `consist.core.tracker.Tracker.ingest`.
+    It materializes data into the DuckDB, leveraging `dlt` for efficient loading
+    and injecting provenance information.
+
+    Args:
+        artifact (Artifact): The artifact object representing the data being ingested.
+        data (Optional[Union[Iterable[Dict[str, Any]], Any]]): The data to ingest. Can be a
+                                                              file path, DataFrame, or iterable of dicts.
+        schema (Optional[Type[SQLModel]]): An optional SQLModel class defining the schema.
+        run (Optional[Run]): The run context for ingestion. Defaults to the active run.
+    """
+    return get_active_tracker().ingest(
+        artifact=artifact, data=data, schema=schema, run=run
+    )
+
+
+@contextmanager
+def capture_outputs(
+    directory: Union[str, Any], pattern: str = "*", recursive: bool = False
+):
+    """
+    Watches a directory for changes within the current active run context.
+    Proxy to `tracker.capture_outputs`.
+
+    Usage:
+        import consist
+
+        # Inside a function where you don't have the 'tracker' object:
+        with consist.capture_outputs("./outputs"):
+             legacy_code.run()
+    """
+    with get_active_tracker().capture_outputs(directory, pattern, recursive) as capture:
+        yield capture
+
+
+# --- Data Loading ---
 
 
 def load(
@@ -42,13 +141,16 @@ def load(
 
     # 1. Resolve Tracker
     if tracker is None:
-        tracker = get_active_tracker()
+        try:
+            tracker = get_active_tracker()
+        except RuntimeError:
+            tracker = None
 
     if tracker is None:
         # If we have an absolute path cached in runtime, we might get lucky without a tracker
         # but usually we need the tracker to resolve 'inputs://' or access the DB.
         if artifact.abs_path and Path(artifact.abs_path).exists():
-            pass  # We can proceed strictly on disk
+            pass
         else:
             raise RuntimeError(
                 "consist.load() requires a Tracker instance to resolve paths or access the database. "
@@ -63,7 +165,7 @@ def load(
         path = artifact.abs_path
 
     load_kwargs = artifact.meta.copy()
-    load_kwargs.update(kwargs)  # User kwargs override meta
+    load_kwargs.update(kwargs)
 
     # 3. Try Disk Load (Priority 1)
     if Path(path).exists():
@@ -75,7 +177,6 @@ def load(
             raise RuntimeError(
                 f"Artifact {artifact.key} is missing from disk, but marked as ingested. Provide a tracker with a DB connection to load it."
             )
-
         return _load_from_db(artifact, tracker, **kwargs)
 
     # 5. Failure
@@ -120,9 +221,6 @@ def _load_from_disk(path: str, driver: str, **kwargs):
         return pd.read_hdf(path, key=key)
 
     elif driver in ("h5", "hdf5"):
-        # This represents the WHOLE file.
-        # We probably can't return a single DataFrame.
-        # Return the store object?
         if not tables:
             raise ImportError("PyTables is required.")
         return pd.HDFStore(path, mode="r")
@@ -133,27 +231,21 @@ def _load_from_disk(path: str, driver: str, **kwargs):
 
 def _load_from_db(artifact: Artifact, tracker: "Tracker", **kwargs):
     """Recovers data from the global tables."""
-    # dlt normalizes table names. We attempt to guess the table name.
-    # 1. Exact key match (normalized)
-    # 2. Schema name match
-    # 3. Filename match
-
-    # For now, simplistic approach: Try the key.
-    # We really should store the 'table_name' in artifact.meta during ingest to avoid guessing.
-    # But for now, let's look for the key.
-
-    # We query specific rows for this artifact ID to ensure we don't get mixed data
-    # from other runs that updated the same table.
-
-    # Note: This requires us to know the table name.
-    # Improvement for Phase 2.1: Store 'dlt_table_name' in artifact.meta during ingest!
-
-    table_name = artifact.key  # Simple assumption for now
-
+    table_name = artifact.key
     query = f"SELECT * FROM global_tables.{table_name} WHERE consist_artifact_id = '{artifact.id}'"
-
     try:
-        return pd.read_sql(query, tracker.engine, **kwargs)
+        return pd.read_sql(text(query), tracker.engine, **kwargs)
     except Exception as e:
         # If table not found, provide helpful error
         raise RuntimeError(f"Failed to load from DB table '{table_name}': {e}")
+
+
+def log_meta(**kwargs):
+    """
+    Updates the active run's metadata with the provided key-value pairs.
+    Useful for logging metrics, tags, or execution stats at runtime.
+
+    Usage:
+        consist.log_meta(accuracy=0.95, rows_processed=1000)
+    """
+    get_active_tracker().log_meta(**kwargs)

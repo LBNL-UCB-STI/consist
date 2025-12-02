@@ -2,25 +2,38 @@ import logging
 import os
 import random
 import uuid
+import functools
+import inspect
 from pathlib import Path
 from time import sleep
 from typing import Dict, Optional, List, Any, Type, Iterable, Union, Callable
 from datetime import datetime, UTC
 from contextlib import contextmanager
 
-from sqlalchemy.exc import OperationalError
+import pandas as pd
+
+from sqlalchemy.exc import OperationalError, DatabaseError
 from sqlalchemy.orm.exc import ConcurrentModificationError
 from sqlmodel import create_engine, Session, select, SQLModel
 
 from sqlalchemy.pool import NullPool
-
-# Removed SQLModelMetaclass
+from pydantic import BaseModel
 
 from consist.core.views import ViewFactory
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifactLink, ConsistRecord
 from consist.core.identity import IdentityManager
 from consist.core.context import push_tracker, pop_tracker
+
+
+class OutputCapture:
+    """
+    Helper object to hold artifacts captured during a 'capture_outputs' block.
+    Allows users to access the auto-logged artifacts immediately after the block.
+    """
+
+    def __init__(self):
+        self.artifacts: List[Artifact] = []
 
 
 class Tracker:
@@ -98,6 +111,38 @@ class Tracker:
 
         # In-Memory State (The Source of Truth)
         self.current_consist: Optional[ConsistRecord] = None
+
+        # Introspection State (Last completed run)
+        self._last_consist: Optional[ConsistRecord] = None
+
+    @property
+    def last_run(self) -> Optional[ConsistRecord]:
+        """
+        Returns the record of the most recently completed run (successful or failed).
+        Useful for debugging and introspection in notebooks.
+        """
+        return self._last_consist
+
+    def history(self, limit: int = 10) -> pd.DataFrame:
+        """
+        Returns a Pandas DataFrame of recent runs from the database.
+        Useful for quickly verifying run status and provenance.
+        """
+        if not self.engine:
+            return pd.DataFrame()
+
+        query = f"""
+            SELECT id, model_name, status, created_at, 
+                   config_hash, git_hash, input_hash
+            FROM run 
+            ORDER BY created_at DESC 
+            LIMIT {limit}
+        """
+        try:
+            return pd.read_sql(query, self.engine)
+        except Exception as e:
+            logging.warning(f"Failed to fetch history: {e}")
+            return pd.DataFrame()
 
     @property
     def is_cached(self) -> bool:
@@ -199,24 +244,26 @@ class Tracker:
         for i in range(retries):
             try:
                 return func()
-            except OperationalError as e:
+            except (OperationalError, DatabaseError) as e:
                 # Check for DuckDB lock strings
                 msg = str(e)
+                # Broader check for lock messages
                 if (
-                    "Conflicting lock" in msg
-                    or "IO Error" in msg
-                    or "Could not set lock" in msg
+                        "Conflicting lock" in msg
+                        or "IO Error" in msg
+                        or "Could not set lock" in msg
+                        or "database is locked" in msg  # common in sqlite/duckdb
                 ):
                     if i == retries - 1:
                         logging.error(
-                            f"[Consist] DB Lock Timeout on {operation_name} after {retries} attempts."
+                            f"[Consist] DB Lock Timeout on {operation_name} after {retries} attempts. Last error: {msg}"
                         )
                         raise e
 
                     # Exponential Backoff with Jitter
-                    sleep_time = (0.1 * (2**i)) + random.uniform(0.01, 0.1)
-                    # Cap at 1 second
-                    sleep_time = min(sleep_time, 1.0)
+                    # slightly increased backoff factor to handling higher contention
+                    sleep_time = (0.1 * (1.5 ** i)) + random.uniform(0.05, 0.2)
+                    sleep_time = min(sleep_time, 2.0)  # Cap at 2 seconds
                     sleep(sleep_time)
                 else:
                     raise e
@@ -224,62 +271,200 @@ class Tracker:
                 raise e
         raise ConcurrentModificationError("Concurrency problem")
 
+    def task(
+        self,
+        cache_mode: str = "reuse",
+        depends_on: Optional[List[Union[str, Path, Artifact]]] = None,
+        capture_dir: Optional[Union[str, Path]] = None,
+        capture_pattern: str = "*",
+        **run_kwargs,
+    ):
+        def decorator(func):
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs):
+                sig = inspect.signature(func)
+                try:
+                    bound = sig.bind(*args, **kwargs)
+                except TypeError as e:
+                    logging.warning(
+                        f"[Consist] Signature binding failed for @task {func.__name__}: {e}"
+                    )
+                    bound = None
+
+                config = {}
+                inputs = []
+
+                if bound:
+                    bound.apply_defaults()
+                    raw_args = bound.arguments
+                    for k, v in raw_args.items():
+                        if isinstance(v, Artifact):
+                            inputs.append(v)
+                            config[k] = v.uri
+                        elif isinstance(v, list) and v and isinstance(v[0], Artifact):
+                            inputs.extend(v)
+                            config[k] = [a.uri for a in v]
+                        else:
+                            config[k] = v
+
+                if depends_on:
+                    for dep in depends_on:
+                        if isinstance(dep, Artifact):
+                            inputs.append(dep)
+                            config[f"dep_{dep.key}"] = dep.uri
+                        elif isinstance(dep, (str, Path)):
+                            # Check for Glob Patterns
+                            dep_str = str(dep)
+                            if "*" in dep_str or "?" in dep_str or "[" in dep_str:
+                                # Expand Glob
+                                # Note: Glob is relative to CWD unless absolute
+                                p = Path(dep_str)
+                                root = Path(".").resolve()
+                                if p.is_absolute():
+                                    root = p.anchor
+                                    matcher = p.relative_to(root)
+                                else:
+                                    matcher = p
+
+                                found_any = False
+                                for match in root.glob(str(matcher)):
+                                    if match.exists():
+                                        found_any = True
+                                        inputs.append(str(match.resolve()))
+
+                                if not found_any:
+                                    logging.warning(f"[Consist] No files found matching dependency pattern: {dep}")
+
+                            else:
+                                # Normal Path (File or Directory)
+                                p = Path(dep).resolve()
+                                if p.exists():
+                                    inputs.append(str(p))
+                                else:
+                                    logging.warning(f"[Consist] Dependency not found: {dep}")
+
+                model_name = func.__name__
+                run_id = f"{model_name}_{uuid.uuid4().hex[:8]}"
+
+                with self.start_run(
+                    run_id=run_id,
+                    model=model_name,
+                    config=config,
+                    inputs=inputs,
+                    cache_mode=cache_mode,
+                    **run_kwargs,
+                ):
+                    if self.is_cached:
+                        outputs = self.current_consist.outputs
+                        if capture_dir:
+                            return outputs
+                        if not outputs:
+                            return None
+                        if len(outputs) == 1:
+                            return outputs[0]
+                        return outputs
+
+                    if capture_dir:
+                        with self.capture_outputs(
+                            capture_dir, pattern=capture_pattern
+                        ) as cap:
+                            result = func(*args, **kwargs)
+                        if result is not None:
+                            raise ValueError(
+                                f"Task '{model_name}' defines 'capture_dir', so it must return None."
+                            )
+                        return cap.artifacts
+
+                    else:
+                        result = func(*args, **kwargs)
+                        if isinstance(result, (str, Path)):
+                            p = Path(result)
+                            if not p.exists():
+                                raise FileNotFoundError(
+                                    f"Task returned path {p} which does not exist."
+                                )
+                            return self.log_artifact(p, key=p.stem)
+                        elif isinstance(result, dict):
+                            logged_dict = {}
+                            for key, val in result.items():
+                                if not isinstance(val, (str, Path)):
+                                    raise ValueError(
+                                        "Task dictionary return values must be Paths."
+                                    )
+                                logged_dict[key] = self.log_artifact(val, key=key)
+                            return logged_dict
+                        elif result is None:
+                            return None
+                        else:
+                            raise TypeError(
+                                f"Task '{model_name}' returned unsupported type {type(result)}."
+                            )
+
+            return wrapper
+
+        return decorator
+
+    @contextmanager
+    def capture_outputs(
+        self, directory: Union[str, Path], pattern: str = "*", recursive: bool = False
+    ):
+        if not self.current_consist:
+            raise RuntimeError(
+                "capture_outputs must be used within a start_run context."
+            )
+
+        dir_path = Path(directory).resolve()
+        if not dir_path.exists():
+            dir_path.mkdir(parents=True, exist_ok=True)
+
+        def _scan():
+            files = {}
+            iterator = dir_path.rglob(pattern) if recursive else dir_path.glob(pattern)
+            for f in iterator:
+                if f.is_file():
+                    files[f] = f.stat().st_mtime_ns
+            return files
+
+        before_state = _scan()
+        capture_result = OutputCapture()
+
+        try:
+            yield capture_result
+        finally:
+            after_state = _scan()
+            for f_path, mtime in after_state.items():
+                is_new = f_path not in before_state
+                is_modified = f_path in before_state and mtime > before_state[f_path]
+
+                if is_new or is_modified:
+                    key = f_path.stem
+                    try:
+                        art = self.log_artifact(
+                            str(f_path),
+                            key=key,
+                            direction="output",
+                            captured_automatically=True,
+                        )
+                        capture_result.artifacts.append(art)
+                        logging.info(f"📸 [Consist] Captured output: {f_path.name}")
+                    except Exception as e:
+                        logging.error(f"[Consist] Failed to auto-capture {f_path}: {e}")
+
     @contextmanager
     def start_run(
         self,
         run_id: str,
         model: str,
-        config: Dict[str, Any] = None,
+        config: Union[Dict[str, Any], BaseModel, None] = None,
         inputs: Optional[List[Union[str, Artifact]]] = None,
         cache_mode: str = "reuse",
         **kwargs,
     ):
-        """
-        Context manager to initiate and manage the lifecycle of a Consist run.
-
-        This method orchestrates the core Consist features:
-        1.  **Run Initialization**: Creates a new `Run` record with basic metadata.
-        2.  **Configuration Hashing**: Computes a canonical hash of the provided `config`.
-        3.  **Git Version Capture**: Records the current Git commit hash for code provenance.
-        4.  **Input Processing**: Resolves input paths, logs them as `Artifacts`, and performs
-            **"Auto-Forking"** by detecting lineage from previous runs.
-        5.  **Parent Lineage**: Automatically identifies and links to a parent run if inputs
-            are outputs of a previous run.
-        6.  **Signature Calculation**: Computes the run's unique "signature" (Merkle DAG hash)
-            based on code, config, and input hashes.
-        7.  **Cache Lookup**: Based on `cache_mode`, attempts to find a matching previously
-            completed run. If found and validated (considering **"Ghost Mode"**), it
-            flags the current run as cached.
-        8.  **Output Hydration**: If a cache hit occurs, outputs from the cached run are
-            "hydrated" (loaded into the current context) to simulate re-execution without
-            actual computation.
-        9.  **Dual-Write Logging**: Persists run metadata to both `consist.json` (for human
-            readability and source of truth) and DuckDB (for analytical querying) at
-            the start and end of the run, adhering to **"Dual-Write Safety"**.
-
-        Args:
-            run_id (str): A unique identifier for this specific run.
-            model (str): The name of the model or logical step being executed.
-            config (Dict[str, Any], optional): The configuration dictionary for this run.
-                                             Defaults to an empty dictionary.
-            inputs (Optional[List[Union[str, Artifact]]], optional): A list of paths (str)
-                                                                     or `Artifact` objects
-                                                                     representing inputs to this run.
-            cache_mode (str): Determines caching behavior:
-                              - "reuse" (default): Attempts to find and reuse cached results.
-                              - "overwrite": Executes the run regardless of cache, updating the cache.
-                              - "readonly": Executes if not cached, but does not save new results.
-            **kwargs: Additional metadata to store in the run's `meta` field.
-
-        Yields:
-            Tracker: The current Tracker instance, providing context for logging artifacts.
-
-        Raises:
-            RuntimeError: If `log_artifact` is called outside this context manager.
-        """
-        # 1. Run Initialization and Context Setup
         if config is None:
             config = {}
+        elif isinstance(config, BaseModel):
+            config = config.model_dump()
+
         year = kwargs.pop("year", None)
         iteration = kwargs.pop("iteration", None)
 
@@ -299,9 +484,7 @@ class Tracker:
             created_at=datetime.now(UTC),
         )
 
-        push_tracker(
-            self
-        )  # Make this tracker instance globally accessible for log_artifact
+        push_tracker(self)
         self.current_consist = ConsistRecord(run=run, config=config)
 
         # 2. Process Inputs & Auto-Forking
@@ -342,7 +525,7 @@ class Tracker:
             logging.warning(
                 f"[Consist Warning] Failed to compute inputs hash for run {run_id}: {e}"
             )
-            run.input_hash = "error"  # Mark as error to prevent false cache hits
+            run.input_hash = "error"
             run.signature = "error"
 
         # 5. Cache Lookup (Smart Caching)
@@ -416,7 +599,10 @@ class Tracker:
         finally:
             pop_tracker()  # Clean up global tracker context
 
-            # 7. Final Dual-Write Logging
+            # --- Introspection: Snapshot the result before clearing ---
+            self._last_consist = self.current_consist
+            # ----------------------------------------------------------
+
             run.updated_at = datetime.now(UTC)
             self._flush_json()
             if cache_mode != "readonly":  # Only sync to DB if not in readonly mode
@@ -484,7 +670,7 @@ class Tracker:
             if driver:
                 artifact_obj.driver = driver
             if meta:
-                artifact_obj.meta.update(meta)  # Update existing meta with new values
+                artifact_obj.meta.update(meta)
 
         # --- Logic Branch B: String Path Passed (New or Discovered Artifact) ---
         else:
@@ -504,9 +690,7 @@ class Tracker:
                         statement = (
                             select(Artifact)
                             .where(Artifact.uri == uri)
-                            .where(
-                                Artifact.run_id.is_not(None)
-                            )  # Ensure it's an output of a run
+                            .where(Artifact.run_id.is_not(None))
                             .order_by(Artifact.created_at.desc())
                             .limit(1)
                         )
@@ -520,7 +704,7 @@ class Tracker:
                             if driver:
                                 artifact_obj.driver = driver
                             if meta:
-                                artifact_obj.meta.update(meta)  # Apply any new meta
+                                artifact_obj.meta.update(meta)
                 except Exception as e:
                     logging.warning(
                         f"[Consist Warning] Lineage discovery failed for {uri}: {e}"
@@ -538,7 +722,7 @@ class Tracker:
                     driver=driver,
                     run_id=(
                         self.current_consist.run.id if direction == "output" else None
-                    ),  # Only outputs have a creating run_id
+                    ),
                     meta=meta,
                 )
 
@@ -559,8 +743,7 @@ class Tracker:
         else:
             self.current_consist.outputs.append(artifact_obj)
 
-        # Write to Persistence (Dual-Write)
-        self._flush_json()  # Always flush JSON first
+        self._flush_json()
         self._sync_artifact_to_db(artifact_obj, direction)
 
         return artifact_obj
@@ -904,3 +1087,27 @@ class Tracker:
             self._execute_with_retry(_do_sync, operation_name="sync_artifact")
         except Exception as e:
             logging.warning(f"[Consist Warning] Artifact sync failed: {e}")
+
+    def log_meta(self, **kwargs):
+        """
+        Updates the metadata for the current run.
+        Useful for logging metrics (accuracy, loss) or tags calculated at runtime.
+
+        Args:
+            **kwargs: Key-value pairs to merge into run.meta.
+        """
+        if not self.current_consist:
+            logging.warning("[Consist] Cannot log_meta: No active run.")
+            return
+
+        # 1. Update In-Memory
+        # Ensure 'meta' is a dict (SQLModel sometimes initializes defaults oddly depending on version)
+        if self.current_consist.run.meta is None:
+            self.current_consist.run.meta = {}
+
+        self.current_consist.run.meta.update(kwargs)
+
+        # 2. Persist
+        self._flush_json()
+        # We also sync to DB immediately so external monitors can see progress/tags
+        self._sync_run_to_db(self.current_consist.run)
