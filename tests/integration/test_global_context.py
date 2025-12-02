@@ -6,8 +6,22 @@ import consist
 
 def test_global_context_logging(tracker):
     """
-    Verifies that we can use consist.log_artifact() directly
-    without passing the tracker object around.
+    Verifies that `consist.log_artifact()` can be used globally without
+    explicitly passing the `Tracker` object, relying on the active global context.
+
+    This test confirms the convenience of Consist's top-level API for logging
+    artifacts within an active run, and also ensures that attempts to log
+    outside an active run correctly raise an error.
+
+    What happens:
+    1. A `tracker.start_run` context is initiated.
+    2. Inside the run, `consist.log_artifact` is called with a fake path and metadata.
+    3. An attempt is made to call `consist.log_artifact` outside any active run context.
+
+    What's checked:
+    - The `Artifact` returned by `consist.log_artifact` has the correct key and metadata.
+    - The `tracker.current_consist.outputs` list contains the logged artifact.
+    - Calling `consist.log_artifact` outside an active run correctly raises a `RuntimeError`.
     """
     with tracker.start_run(run_id="global_run_1", model="test_global"):
         # Log via Top-Level API
@@ -29,7 +43,23 @@ def test_global_context_logging(tracker):
 
 def test_global_capture_outputs(tracker, run_dir):
     """
-    Verifies consist.capture_outputs().
+    Verifies that `consist.capture_outputs()` correctly monitors a directory
+    and logs newly created files as artifacts, using the global active `Tracker` context.
+
+    This test confirms the functionality of the global context manager for
+    automatically tracking side-effect outputs from external tools or legacy code.
+
+    What happens:
+    1. A new output directory `global_out` is created.
+    2. A `tracker.start_run` context is initiated.
+    3. Inside the run, `consist.capture_outputs` is used as a context manager
+       to monitor `global_out` for `.txt` files.
+    4. A `test.txt` file is created within `global_out` during the `with` block.
+
+    What's checked:
+    - The `capture` object returned by the context manager contains exactly one artifact.
+    - The `key` of the captured artifact is "test".
+    - The `tracker.current_consist.outputs` list in the active tracker contains the captured artifact.
     """
     out_dir = run_dir / "global_out"
     out_dir.mkdir()
@@ -48,7 +78,23 @@ def test_global_capture_outputs(tracker, run_dir):
 
 def test_global_introspection(tracker):
     """
-    Verifies consist.current_tracker().
+    Verifies the behavior of `consist.current_tracker()` for retrieving the
+    active `Tracker` instance from the global context.
+
+    This test ensures that `current_tracker()` correctly returns the active
+    instance when inside a run context and raises an error when called
+    outside any active run, preventing operations on a non-existent context.
+
+    What happens:
+    1. A `tracker.start_run` context is initiated.
+    2. Inside the run, `consist.current_tracker()` is called.
+    3. `consist.current_tracker()` is called again outside any run context.
+
+    What's checked:
+    - Inside the run, `consist.current_tracker()` returns the same `Tracker`
+      instance that initiated the run.
+    - The `id` of the run returned by `current_tracker()` matches the expected `run_id`.
+    - Outside the run context, `consist.current_tracker()` correctly raises a `RuntimeError`.
     """
     with tracker.start_run("intro", "test_model"):
         # Should return the active tracker instance

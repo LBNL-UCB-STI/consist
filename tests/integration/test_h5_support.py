@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 import pandas as pd
 from consist.core.tracker import Tracker
@@ -13,13 +15,35 @@ except ImportError:
 
 
 @pytest.mark.skipif(not has_tables, reason="PyTables not installed")
-def test_h5_virtual_artifacts(tmp_path):
+def test_h5_virtual_artifacts(tmp_path: Path):
     """
-    Simulates the PILATES workflow:
-    1. Create a monolithic H5 file (Container).
-    2. Log it.
-    3. Log 'Virtual Artifacts' for specific tables inside it.
-    4. Load and Ingest those virtual artifacts.
+    Tests Consist's ability to handle HDF5 files as containers for "virtual artifacts."
+
+    This scenario simulates a workflow where a single, large HDF5 file (e.g., a simulation
+    output) contains multiple internal tables or datasets. Consist treats the overall
+    HDF5 file as a container and allows specific internal paths within it to be logged
+    as individual "virtual artifacts." This is crucial for granular provenance tracking
+    within complex, multi-component data files.
+
+    What happens:
+    1. A monolithic HDF5 file (`pipeline.h5`) is created, containing two Pandas DataFrames
+       stored as tables at specific internal paths (`/2018/persons` and `/2018/households`).
+    2. The HDF5 file itself is logged as a Consist `Artifact` with `driver="h5"`.
+    3. A specific internal table (`/2018/persons`) is logged as a separate "virtual artifact"
+       with `driver="h5_table"` and its internal path stored in its metadata.
+    4. The virtual "persons" artifact is loaded from disk.
+    5. The virtual "persons" artifact is then ingested into the DuckDB.
+    6. The original HDF5 file is deleted to simulate "Ghost Mode."
+    7. The "persons" artifact is re-loaded.
+
+    What's checked:
+    -   **Initial Load (Cold)**: The `consist.load()` function correctly reads the specific
+        `/2018/persons` table from the HDF5 file when using `driver="h5_table"`.
+    -   **Ingestion (Hot)**: `tracker.ingest()` successfully extracts and loads the data
+        from the specified internal HDF5 table into the DuckDB.
+    -   **Ghost Mode**: After deleting the physical HDF5 file, `consist.load()` can
+        still retrieve the "persons" data from the DuckDB, demonstrating data recovery
+        and continued access even if the original file is lost.
     """
     run_dir = tmp_path / "runs"
     db_path = str(tmp_path / "provenance.duckdb")

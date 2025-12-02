@@ -10,8 +10,26 @@ from consist.integrations.dlt_loader import _handle_zarr_metadata
 
 def test_extract_zarr_structure(tmp_path):
     """
-    Verifies that _handle_zarr_metadata yields correct dictionary records
-    describing the variables and coordinates of a Zarr store.
+    Verifies that the `_handle_zarr_metadata` function correctly extracts and yields
+    structured metadata (variables, dimensions, shapes, data types, attributes)
+    from a Zarr store.
+
+    This unit test ensures that Consist can correctly introspect Zarr datasets
+    to build a metadata catalog without loading the potentially large raw data.
+
+    What happens:
+    1. A dummy Zarr store (`test_data.zarr`) is created in a temporary directory.
+       This Zarr store contains an `xarray.Dataset` with one data variable ("temperature")
+       and one coordinate ("x").
+    2. The `_handle_zarr_metadata` function is called with the path to this dummy store,
+       and its generator output is converted into a list of records.
+
+    What's checked:
+    - The `records` list contains exactly two entries, corresponding to the "temperature"
+      data variable and the "x" coordinate.
+    - Each record's `variable_name`, `variable_type`, `dims`, `shape`, `dtype`, and
+      `attributes` are correctly extracted and match the expected values from the
+      original `xarray.Dataset`.
     """
     # 1. Create a dummy Zarr store
     store_path = tmp_path / "test_data.zarr"

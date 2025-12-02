@@ -1,4 +1,12 @@
-# src/consist/cli.py
+"""
+Consist Command Line Interface (CLI)
+
+This module provides command-line utilities for interacting with Consist,
+primarily for inspecting provenance data stored in the DuckDB database.
+It offers functions like listing recent runs, providing a quick overview
+of the execution history and status of various models and workflows.
+"""
+
 import typer
 from pathlib import Path
 from rich.console import Console
@@ -12,11 +20,35 @@ console = Console()
 
 
 @app.command()
-def runs(db_path: str = "provenance.duckdb", limit: int = 10):
-    """List recent runs."""
+def runs(
+    db_path: str = typer.Option(
+        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    ),
+    limit: int = typer.Option(10, help="Maximum number of recent runs to display."),
+) -> None:
+    """
+    Lists the most recent Consist runs recorded in the provenance database.
+
+    This command provides a quick overview of past executions, showing their unique ID,
+    the model name, current status (e.g., completed, failed), and creation timestamp.
+    It's useful for monitoring the progress and outcomes of various Consist-managed workflows.
+
+    Parameters
+    ----------
+    db_path : str, default "provenance.duckdb"
+        The file path to the DuckDB database where Consist stores its provenance information.
+        This database is created by the `Tracker` when `db_path` is provided during initialization.
+    limit : int, default 10
+        The maximum number of the most recent runs to fetch and display from the database.
+
+    Raises
+    ------
+    typer.Exit
+        If the specified `db_path` does not point to an existing database file.
+    """
     if not Path(db_path).exists():
         console.print(f"[red]Database not found at {db_path}[/red]")
-        return
+        raise typer.Exit(1)
 
     tracker = Tracker(run_dir=Path("."), db_path=db_path)
 

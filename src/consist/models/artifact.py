@@ -62,22 +62,64 @@ class Artifact(SQLModel, table=True):
     def abs_path(self) -> Optional[str]:
         """
         Runtime-only helper to access the absolute path of this artifact.
-        Useful when chaining runs in the same script.
+
+        This property provides the resolved absolute file system path for the artifact.
+        It is not persisted to the database but is crucial for local file operations
+        and for chaining Consist runs within the same script or environment.
+
+        Returns
+        -------
+        Optional[str]
+            The absolute file system path of the artifact, or `None` if it has not
+            yet been resolved or set.
         """
         return self._abs_path
 
     @abs_path.setter
-    def abs_path(self, value: str):
+    def abs_path(self, value: str) -> None:
+        """
+        Sets the runtime-only absolute path of this artifact.
+
+        Parameters
+        ----------
+        value : str
+            The absolute file system path to set for the artifact.
+        """
         self._abs_path = value
 
     # --- Format Helpers ---
 
     @property
     def is_matrix(self) -> bool:
+        """
+        Indicates if the artifact represents a multi-dimensional array or matrix-like data.
+
+        This property helps in dispatching to appropriate data loaders or processing
+        functions that handle array-based data structures, such as those typically
+        found in scientific computing.
+
+        Returns
+        -------
+        bool
+            True if the artifact's driver is associated with matrix-like data formats
+            (e.g., Zarr, HDF5, NetCDF), False otherwise.
+        """
         return self.driver in ("zarr", "h5", "netcdf")
 
     @property
     def is_tabular(self) -> bool:
+        """
+        Indicates if the artifact represents tabular data (rows and columns).
+
+        This property assists in identifying artifacts that can be loaded and processed
+        using tools designed for structured, record-based data, such as Pandas DataFrames.
+
+        Returns
+        -------
+        bool
+            True if the artifact's driver is associated with tabular data formats
+            (e.g., Parquet, CSV, SQL), False otherwise.
+        """
         return self.driver in ("parquet", "csv", "sql")
 
     def get_meta(self, key: str, default: Any = None) -> Any:
@@ -94,8 +136,30 @@ class Artifact(SQLModel, table=True):
         """
         return self.meta.get(key, default)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
+        """
+        Returns a developer-friendly string representation of the Artifact object.
+
+        This representation is designed for debugging and logging, providing a concise
+        summary of the artifact's key attributes.
+
+        Returns
+        -------
+        str
+            A string in the format "<Artifact key='...' driver='...' uri='...'>".
+        """
         return f"<Artifact key='{self.key}' driver='{self.driver}' uri='{self.uri}'>"
 
-    def __str__(self):
+    def __str__(self) -> str:
+        """
+        Returns a user-friendly string representation of the Artifact object.
+
+        This representation is suitable for display to end-users, focusing on
+        the artifact's key and its portable URI.
+
+        Returns
+        -------
+        str
+            A string in the format "Artifact(key=..., path=...)".
+        """
         return f"Artifact(key={self.key}, path={self.uri})"

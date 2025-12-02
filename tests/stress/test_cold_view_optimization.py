@@ -1,10 +1,14 @@
 """
+Consist "Cold View" Optimization Stress Tests
+
 This module contains stress tests specifically designed to evaluate the performance
 and correctness of Consist's "cold view optimization" for large numbers of file-based
 artifacts.
 
 It focuses on verifying the efficiency of vectorized reads from numerous Parquet files
-and the graceful handling of schema drift without ingesting data into the database.
+and the graceful handling of schema drift across these files, all without requiring
+data ingestion into the DuckDB database. This ensures that Consist can efficiently
+query and integrate large volumes of data residing solely on disk.
 """
 
 import logging
@@ -19,11 +23,37 @@ from sqlmodel import text
 @pytest.mark.heavy
 def test_cold_vectorized_view(tmp_path):
     """
-    Verifies the "Zero-Storage" strategy:
-    1. Log 50 separate Parquet files across 5 runs.
-    2. Do NOT ingest them (keep them "Cold").
-    3. Verify that create_view() generates a single optimized query.
-    4. Verify Schema Drift handling (half the files have an extra column).
+    Tests the vectorized "cold view" creation and querying for a large number of
+    file-based artifacts, including schema drift handling.
+
+    This test validates Consist's "Zero-Storage" strategy, where views can be
+    created directly over many Parquet files without ingesting their contents
+    into the database. It specifically checks the efficiency of DuckDB's
+    `read_parquet` function when given a list of files and its `UNION ALL BY NAME`
+    mechanism for handling schema differences.
+
+    What happens:
+    1. A `Tracker` is initialized with `hashing_strategy="fast"`.
+    2. A loop creates 50 separate Parquet files across 5 distinct Consist runs.
+       - Each run generates 10 files.
+       - Some files (from later runs) are intentionally given an `extra_col`
+         to simulate schema drift.
+    3. Each generated Parquet file is logged as a "distributed_data" artifact
+       using `consist.log_artifact`, but *not* ingested.
+    4. A hybrid view named `v_cold` is created for the "distributed_data" concept.
+       This will internally trigger `_generate_cold_query_optimized`.
+    5. SQL queries are executed against `v_cold` to count rows, sum a column
+       with drift, and group by `consist_run_id`.
+
+    What's checked:
+    - The total number of rows in the `v_cold` view matches the sum of rows
+      from all generated Parquet files.
+    - The `SUM(extra_col)` from the view correctly reflects the sum of values
+      only from files that actually had that column, demonstrating schema drift
+      handling (missing values are treated as `NULL`).
+    - The `COUNT(*)` grouped by `consist_run_id` correctly shows 1000 rows
+      for each of the 5 runs, confirming that the view correctly aggregated
+      data from all 50 files and injected the `consist_run_id` metadata.
     """
     run_dir = tmp_path / "cold_runs"
     db_path = str(tmp_path / "cold.duckdb")

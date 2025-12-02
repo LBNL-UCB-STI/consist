@@ -1,4 +1,6 @@
 # tests/integration/test_loader.py
+from pathlib import Path
+
 import numpy as np
 import pytest
 import pandas as pd
@@ -16,12 +18,31 @@ except ImportError:
     has_zarr = False
 
 
-def test_loader_priority_and_ghost_mode(tmp_path):
+def test_loader_priority_and_ghost_mode(tmp_path: Path):
     """
-    Verifies the Universal Loader priority:
-    1. Disk (Primary)
-    2. Database (Fallback / Ghost Mode)
-    3. Failure
+    Tests the Consist Universal Loader's priority mechanism and "Ghost Mode" functionality.
+
+    This test verifies that the `consist.load()` function correctly prioritizes
+    reading data: first from the physical disk file, and then falling back to
+    the database if the file is missing but the artifact was previously ingested.
+    It also checks for proper error handling when data is neither on disk nor in the DB.
+
+    What happens:
+    1. A `Tracker` is initialized, and a dummy Parquet file (`data.parquet`) is created.
+    2. **Phase 1 (Standard Logging)**: The Parquet file is logged as an `Artifact` ("my_table")
+       within a run. `consist.load()` is then used to load this artifact from disk.
+    3. **Phase 2 (Ingestion)**: The same artifact is ingested into the DuckDB, marking
+       it as "is_ingested" in its metadata.
+    4. **Phase 3 (Ghost Mode)**: The original `data.parquet` file is deliberately deleted.
+       `consist.load()` is then called for the ingested artifact.
+    5. **Phase 4 (Failure Mode)**: A completely fake `Artifact` (not existing anywhere)
+       is created, and `consist.load()` is called for it.
+
+    What's checked:
+    -   **Phase 1**: `consist.load()` successfully loads the DataFrame from the physical file.
+    -   **Phase 3**: After the file is deleted, `consist.load()` successfully retrieves the
+        data from the DuckDB, demonstrating "Ghost Mode".
+    -   **Phase 4**: `consist.load()` raises a `FileNotFoundError` for the non-existent artifact.
     """
     # Setup
     run_dir = tmp_path / "runs"
@@ -90,10 +111,34 @@ def test_loader_priority_and_ghost_mode(tmp_path):
         load(fake_artifact, tracker=tracker)
 
 
-def test_loader_drivers(tmp_path):
+def test_loader_drivers(tmp_path: Path):
     """
-    Verifies that consist.load() dispatches to the correct reader
-    based on the artifact driver (CSV, Zarr).
+    Verifies that `consist.load()` correctly dispatches to the appropriate
+    underlying reader based on the artifact's specified `driver`.
+
+    This test ensures that Consist can seamlessly load data from various
+    file formats (CSV, Zarr) by invoking the correct parsing logic.
+
+    What happens:
+    1. A `Tracker` is initialized without a database (as this test focuses on disk loading).
+    2. **CSV Test**:
+       - A dummy CSV file (`test.csv`) is created with sample data.
+       - The CSV file is logged as an `Artifact` with `driver="csv"`.
+       - `consist.load()` is called for the CSV artifact.
+    3. **Zarr Test** (if xarray/zarr are installed):
+       - A dummy Zarr store (`test.zarr`) is created from an xarray Dataset.
+       - The Zarr directory is logged as an `Artifact` with `driver="zarr"`.
+       - `consist.load()` is called for the Zarr artifact.
+
+    What's checked:
+    -   **CSV Test**:
+        - The logged artifact's driver is correctly identified as "csv".
+        - `consist.load()` returns a Pandas DataFrame.
+        - The loaded DataFrame has the correct number of rows and column values.
+    -   **Zarr Test**:
+        - The logged artifact's driver is correctly identified as "zarr".
+        - `consist.load()` returns an xarray Dataset.
+        - The loaded Dataset contains the expected variable and dimensions.
     """
     run_dir = tmp_path / "runs_drivers"
     tracker = Tracker(run_dir=run_dir)  # No DB needed for disk loading tests

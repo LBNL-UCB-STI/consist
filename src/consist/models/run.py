@@ -92,7 +92,11 @@ class Run(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     def __repr__(self):
-        status_icon = "🟢" if self.status == "completed" else "🔴" if self.status == "failed" else "🟡"
+        status_icon = (
+            "🟢"
+            if self.status == "completed"
+            else "🔴" if self.status == "failed" else "🟡"
+        )
         return f"<{status_icon} Run id='{self.id}' model='{self.model_name}' status='{self.status}'>"
 
 

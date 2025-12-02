@@ -1,14 +1,20 @@
 # tests/unit/test_identity.py
 
 """
+Unit Tests for Consist's IdentityManager
+
 This module contains unit tests for the `IdentityManager` class within Consist's core,
 focusing on the various hashing mechanisms that establish the unique identity of runs
 and artifacts.
 
 It verifies the correctness of:
--   Configuration hashing (canonicalization, exclusions, data type handling).
--   Input artifact hashing (based on provenance or file content).
--   Code version detection (Git commit SHA and dirty state).
+-   **Configuration Hashing**: Ensuring canonicalization, proper handling of exclusions,
+    and correct conversion of various Python and NumPy data types.
+-   **Input Artifact Hashing**: Differentiating between provenance-based inputs
+    (linked to previous runs) and raw file content, and applying the configured
+    hashing strategy ("fast" vs. "full").
+-   **Code Version Detection**: Accurately detecting the Git commit SHA and
+    flagging "dirty" repository states to safeguard reproducibility.
 """
 import pytest
 import hashlib
@@ -35,13 +41,33 @@ class TestConfigHashing:
     """
     Tests the `compute_config_hash` method of `IdentityManager`.
 
-    These tests ensure that configuration hashing is deterministic, correctly
-    handles key exclusions, and properly converts different Python types
-    (including NumPy types) into a canonical, hashable representation.
+    These tests ensure that configuration hashing is:
+    -   **Deterministic**: Identical configurations produce identical hashes,
+        regardless of dictionary key order.
+    -   **Sensitive to relevant changes**: Changes in configuration values
+        result in different hashes.
+    -   **Robust to exclusions**: Specific keys can be excluded from hashing.
+    -   **Type-agnostic**: Correctly handles various Python and NumPy types,
+        converting them to a canonical, hashable representation.
     """
 
     def test_canonicalization(self):
-        """Test that dictionary key order does not affect the hash."""
+        """
+        Tests that `compute_config_hash` produces identical hashes for configurations
+        that are logically the same but have different dictionary key orders.
+
+        This verifies the "Canonical Config Hashing" principle, crucial for ensuring
+        that minor variations in config definition do not lead to false cache misses.
+
+        What happens:
+        1. Two configuration dictionaries (`config_a` and `config_b`) are defined.
+           They contain the same key-value pairs but with keys in a different order
+           (including nested dictionaries).
+        2. `compute_config_hash` is called for both configurations.
+
+        What's checked:
+        - The SHA256 hashes generated for `config_a` and `config_b` are identical.
+        """
         im = IdentityManager()
 
         config_a = {"a": 1, "b": 2, "c": {"x": 10, "y": 20}}
@@ -53,7 +79,25 @@ class TestConfigHashing:
         assert hash_a == hash_b
 
     def test_exclusions(self):
-        """Test that excluded keys do not affect the hash."""
+        """
+        Tests that `compute_config_hash` correctly excludes specified keys from the hashing process.
+
+        This is vital for handling non-deterministic values (e.g., timestamps, temporary IDs)
+        or sensitive information that should not impact the reproducibility hash.
+
+        What happens:
+        1. Two configuration dictionaries (`config_a` and `config_b`) are defined.
+           They are identical except for a 'timestamp' key, which has different values.
+        2. `compute_config_hash` is called for both configurations, with 'timestamp'
+           specified in `exclude_keys`.
+        3. A third hash (`hash_c`) is computed for `config_b` without any exclusions.
+
+        What's checked:
+        - When 'timestamp' is excluded, `hash_a` and `hash_b` are identical, proving
+          that the exclusion mechanism works.
+        - When 'timestamp' is *not* excluded, `hash_c` is different from `hash_a`,
+          confirming that the exclusion correctly changes the hash.
+        """
         im = IdentityManager()
 
         config_a = {"a": 1, "timestamp": 12345}
@@ -71,7 +115,25 @@ class TestConfigHashing:
 
     @pytest.mark.skipif(not HAS_NUMPY, reason="Numpy not installed")
     def test_numpy_cleaning(self):
-        """Test that numpy types are converted and result in consistent hashes."""
+        """
+        Tests that `compute_config_hash` correctly converts NumPy data types
+        to standard Python types before hashing.
+
+        This addresses "The NumPy Problem" by ensuring that configurations
+        using NumPy types (e.g., `np.int64`, `np.ndarray`) produce the same
+        hash as their standard Python equivalents, preventing serialization
+        errors and ensuring consistent hashing.
+
+        What happens:
+        1. A configuration dictionary (`config_std`) is defined using standard Python types.
+        2. Another configuration dictionary (`config_np`) is defined with equivalent values
+           but using NumPy types.
+        3. `compute_config_hash` is called for both configurations.
+
+        What's checked:
+        - The SHA256 hashes generated for `config_std` and `config_np` are identical,
+          proving that NumPy types are correctly converted and do not affect the final hash.
+        """
         im = IdentityManager()
 
         # Config with standard types
@@ -90,13 +152,34 @@ class TestInputHashing:
     """
     Tests the `compute_input_hash` method of `IdentityManager`.
 
-    These tests verify that input artifact hashing correctly differentiates between
-    provenance-based inputs (from previous runs) and raw file-based inputs,
-    and that the configured hashing strategy ("fast" vs. "full") is applied correctly.
+    These tests verify that input artifact hashing correctly:
+    -   Handles provenance-based inputs (from previous runs) by using their `run_id`.
+    -   Computes content or metadata hashes for raw file-based inputs.
+    -   Ensures order-independence of input lists.
+    -   Applies the configured hashing strategy ("fast" vs. "full") for files.
     """
 
     def test_provenance_based_inputs(self):
-        """Test hashing inputs that come from previous runs."""
+        """
+        Tests that `compute_input_hash` correctly uses `run_id` for artifacts
+        that originate from previous Consist runs and ensures order-independence.
+
+        This verifies that inputs with known provenance contribute to the Merkle DAG
+        identity based on their source run, and that the order in which they are
+        provided does not affect the final hash.
+
+        What happens:
+        1. Two `Artifact` objects (`art1`, `art2`) are created, each with a distinct `run_id`.
+        2. `compute_input_hash` is called with these artifacts in two different orders.
+        3. A third `Artifact` (`art3`) is created, identical to `art1` but with a different `run_id`.
+        4. `compute_input_hash` is called with `art3` and `art2`.
+
+        What's checked:
+        - The hash computed for `[art1, art2]` is identical to the hash for `[art2, art1]`,
+          proving order-independence.
+        - The hash computed with `art3` (different `run_id`) is different from the original,
+          proving sensitivity to provenance changes.
+        """
         im = IdentityManager()
 
         # Two artifacts from previous runs
@@ -115,7 +198,24 @@ class TestInputHashing:
         assert hash_a != hash_c
 
     def test_raw_file_inputs(self):
-        """Test hashing raw file inputs (no run_id)."""
+        """
+        Tests `compute_input_hash` for raw file inputs (i.e., artifacts with `run_id=None`).
+
+        This verifies that when an input is a direct file on the filesystem not
+        produced by a previous Consist run, its content is correctly hashed to
+        form part of the overall input identity.
+
+        What happens:
+        1. A temporary file is created with known content ("hello world").
+        2. An `Artifact` object is created to represent this raw file, with `run_id=None`.
+        3. A `path_resolver` function is provided to map the artifact's URI to the
+           temporary file's path.
+        4. `compute_input_hash` is called with this artifact and resolver.
+
+        What's checked:
+        - The computed input hash matches the expected SHA256 hash of the file's content,
+          wrapped in the "file:<hash>" composite structure.
+        """
         im = IdentityManager()
 
         with tempfile.NamedTemporaryFile(mode="wb", delete=False) as f:
@@ -144,8 +244,29 @@ class TestInputHashing:
                 os.remove(fname)
 
     def test_fast_vs_full_hashing(self):
-        """Test that fast mode uses metadata and detects mtime changes."""
+        """
+        Tests the difference between "full" (content-based) and "fast" (metadata-based)
+        hashing strategies for raw files.
 
+        This verifies that `full` hashing is sensitive only to content changes,
+        while `fast` hashing is sensitive to metadata changes like modification time,
+        even if content remains the same.
+
+        What happens:
+        1. A temporary file (`fname`) is created with initial content.
+        2. `compute_input_hash` is called using both "full" and "fast" strategies,
+           generating `hash_full_1` and `hash_fast_1`.
+        3. The file's modification timestamp is updated using `Path(fname).touch()`,
+           but its content remains unchanged.
+        4. `compute_input_hash` is called again for both strategies, generating
+           `hash_full_2` and `hash_fast_2`.
+
+        What's checked:
+        - `hash_full_1` is equal to `hash_full_2`, confirming that content hashing
+          is unaffected by metadata changes.
+        - `hash_fast_1` is *not* equal to `hash_fast_2`, confirming that fast hashing
+          is sensitive to metadata changes (specifically modification time).
+        """
         with tempfile.NamedTemporaryFile(mode="wb", delete=False) as f:
             f.write(b"hello")
             fname = f.name
@@ -186,12 +307,26 @@ class TestCodeVersion:
 
     These tests ensure that the Git code version (SHA) is correctly retrieved
     and that "dirty" repository states are appropriately flagged with a nonce,
-    safeguarding reproducibility.
+    safeguarding reproducibility by preventing false cache hits for uncommitted changes.
     """
 
     @patch("consist.core.identity.git")
-    def test_clean_repo(self, mock_git):
-        """Test behavior when git repo is clean."""
+    def test_clean_repo(self, mock_git: MagicMock):
+        """
+        Tests `get_code_version` when the Git repository is in a clean state (no uncommitted changes).
+
+        This verifies that for a clean repository, `get_code_version` returns the exact
+        commit SHA, which is crucial for identifying reproducible code versions.
+
+        What happens:
+        1. The `git` module and its `Repo` class are mocked.
+        2. The mock `Repo` is configured to report `is_dirty.return_value = False`
+           and `head.object.hexsha = "abc12345"`.
+        3. `get_code_version` is called.
+
+        What's checked:
+        - The returned code version is exactly the mocked Git commit SHA ("abc12345").
+        """
         im = IdentityManager()
 
         # Mock Repo structure
@@ -203,8 +338,27 @@ class TestCodeVersion:
         assert im.get_code_version() == "abc12345"
 
     @patch("consist.core.identity.git")
-    def test_dirty_repo(self, mock_git):
-        """Test behavior when git repo is dirty."""
+    def test_dirty_repo(self, mock_git: MagicMock):
+        """
+        Tests `get_code_version` when the Git repository is in a dirty state (has uncommitted changes).
+
+        This verifies that for a dirty repository, `get_code_version` appends a
+        timestamp/nonce to the commit SHA, ensuring that runs from an uncommitted
+        state do not incorrectly collide with runs from a clean commit. This is
+        crucial for safeguarding reproducibility.
+
+        What happens:
+        1. The `git` module and its `Repo` class are mocked.
+        2. The mock `Repo` is configured to report `is_dirty.return_value = True`
+           and `head.object.hexsha = "abc12345"`.
+        3. `get_code_version` is called.
+
+        What's checked:
+        - The returned code version starts with the mocked Git commit SHA and
+          is appended with "-dirty-".
+        - The appended part contains a nonce (timestamp), ensuring uniqueness
+          for different dirty states over time.
+        """
         im = IdentityManager()
 
         mock_repo = MagicMock()

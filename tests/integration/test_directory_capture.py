@@ -1,15 +1,15 @@
 import pytest
 from pathlib import Path
-from typing import List, Dict
+from typing import Dict
 from pydantic import BaseModel
 import pandas as pd
-import logging
 
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
 
 
 # --- Helpers ---
+
 
 class ModelConfig(BaseModel):
     learning_rate: float
@@ -18,10 +18,25 @@ class ModelConfig(BaseModel):
 
 # --- Tests ---
 
+
 def test_typed_configuration(tracker: Tracker):
     """
-    Verifies that a Pydantic model passed to start_run is correctly
-    serialized into a dictionary.
+    Tests that a Pydantic BaseModel instance provided as `config` to `tracker.start_run`
+    is correctly serialized into a dictionary and used for config hashing.
+
+    This test ensures that Consist can handle structured configuration objects,
+    converting them into a canonical dictionary format for provenance tracking
+    and identity computation.
+
+    What happens:
+    1. A `ModelConfig` Pydantic object is created with specific parameters.
+    2. A `tracker.start_run` context is initiated, passing this Pydantic object
+       as the `config`.
+
+    What's checked:
+    - The `tracker.current_consist.config` (the in-memory representation) is a dictionary.
+    - The values from the `ModelConfig` object are correctly reflected in the `current_consist.config` dictionary.
+    - The `config_hash` for the run is computed and is not None.
     """
     config_obj = ModelConfig(learning_rate=0.05)
 
@@ -35,10 +50,25 @@ def test_typed_configuration(tracker: Tracker):
 
 # --- The 3 Strict Modes of @task ---
 
+
 def test_task_mode_pipe(tracker: Tracker, run_dir: Path):
     """
-    Mode 1: The 'Pipe' (1-in, 1-out).
-    Contract: Function returns Path -> Decorator returns Artifact.
+    Tests the "Pipe" mode for a `@tracker.task` decorated function.
+
+    This mode represents a common scenario where a task function takes some input(s)
+    and produces a single output file (represented as a `Path` object). Consist
+    is expected to automatically convert this returned `Path` into an `Artifact`
+    and log it as an output of the run.
+
+    What happens:
+    1. A `@tracker.task` decorated function `clean_csv` is defined. It simulates
+       processing some content and writing it to a new file, returning the `Path` to this file.
+    2. `clean_csv` is called with sample data.
+
+    What's checked:
+    - The return value of the decorated function is an `Artifact` object.
+    - The `Artifact`'s `key` and `uri` correctly reflect the created file.
+    - The `tracker.last_run` object correctly reflects that one output artifact was logged.
     """
 
     @tracker.task()
@@ -64,8 +94,24 @@ def test_task_mode_pipe(tracker: Tracker, run_dir: Path):
 
 def test_task_mode_splitter(tracker: Tracker, run_dir: Path):
     """
-    Mode 2: The 'Splitter' (Explicit Dictionary).
-    Contract: Function returns Dict[str, Path] -> Decorator returns Dict[str, Artifact].
+    Tests the "Splitter" mode for a `@tracker.task` decorated function.
+
+    This mode handles scenarios where a task function produces multiple output files,
+    returning them as a dictionary where keys are semantic names and values are
+    `Path` objects. Consist is expected to convert each `Path` in the dictionary
+    into an `Artifact` and log them all as outputs of the run.
+
+    What happens:
+    1. A `@tracker.task` decorated function `split_data` is defined. It simulates
+       splitting data into training and testing sets, writing each to a file,
+       and returning a dictionary mapping semantic names to `Path` objects.
+    2. `split_data` is called.
+
+    What's checked:
+    - The return value of the decorated function is a dictionary.
+    - The dictionary contains the expected keys.
+    - The values in the returned dictionary are `Artifact` objects.
+    - The `tracker.last_run` object correctly reflects the model name of the task.
     """
 
     @tracker.task()
@@ -90,8 +136,23 @@ def test_task_mode_splitter(tracker: Tracker, run_dir: Path):
 
 def test_task_mode_wrapper(tracker: Tracker, run_dir: Path):
     """
-    Mode 3: The 'Wrapper' (Side-Effect Capture).
-    Contract: capture_dir set, returns None -> Decorator returns List[Artifact].
+    Tests the "Wrapper" mode for a `@tracker.task` decorated function, which uses `capture_dir`.
+
+    This mode is designed for tasks that produce outputs as side-effects (e.g., legacy code,
+    third-party tools) rather than returning them explicitly. Consist monitors a specified
+    directory and automatically logs any new or modified files within it as output artifacts.
+
+    What happens:
+    1. A `capture_dir` is created.
+    2. A `@tracker.task` decorated function `run_legacy_model` is defined with `capture_dir`
+       and `capture_pattern` specified. It simulates writing two `.txt` files into the `capture_dir`.
+       Crucially, it returns `None`.
+    3. `run_legacy_model` is called.
+
+    What's checked:
+    - The return value of the decorated function is a list of `Artifact` objects.
+    - The list contains two artifacts, corresponding to the two files written.
+    - The `key` attribute of the captured artifacts matches the filenames.
     """
     capture_dir = run_dir / "legacy_out"
     capture_dir.mkdir()
@@ -115,7 +176,24 @@ def test_task_mode_wrapper(tracker: Tracker, run_dir: Path):
 
 def test_task_strictness_errors(tracker: Tracker, run_dir: Path):
     """
-    Verifies that breaking the strict return type contracts raises errors.
+    Verifies that the `@tracker.task` decorator enforces strict return type contracts
+    and raises appropriate errors when these contracts are violated.
+
+    This ensures that task functions adhere to expected patterns for clarity and
+    correct provenance logging, preventing ambiguous or unsupported return types.
+
+    What happens:
+    1.  **Case A**: A task function `bad_return_type` is defined to return a list of `Path` objects,
+        which is an unsupported return type for the decorator's automatic logging.
+        It is then called within a `pytest.raises` context.
+    2.  **Case B**: A task function `bad_capture_return` is defined with `capture_dir` enabled
+        but incorrectly returns a `Path` object instead of `None`. It is then called
+        within a `pytest.raises` context.
+
+    What's checked:
+    -   **Case A**: A `TypeError` is raised with a message indicating an unsupported return type.
+    -   **Case B**: A `ValueError` is raised with a message indicating that a function
+        with `capture_dir` must return `None`.
     """
 
     # Case A: Returning a list (Ambiguous - not allowed)
@@ -137,10 +215,26 @@ def test_task_strictness_errors(tracker: Tracker, run_dir: Path):
 
 # --- Fallback to Context Manager ---
 
+
 def test_complex_manual_workflow(tracker: Tracker, run_dir: Path):
     """
-    Case 4: The 'Manual/Complex' Fallback.
-    Demonstrates a scenario where @task is insufficient.
+    Demonstrates using `tracker.start_run` as a context manager for manual, complex workflows.
+
+    This test highlights scenarios where the `@tracker.task` decorator might be
+    insufficient due to complex conditional logic, multiple granular logging steps,
+    or other custom requirements within a single logical run. It shows how users
+    can manually control the run lifecycle and artifact logging.
+
+    What happens:
+    1. A `tracker.start_run` context is manually initiated.
+    2. Inside the run, an output file `complex.parquet` is created.
+    3. Based on a `config` value (`mode="verbose"`), the artifact is logged with
+       additional metadata (`quality` and `rows`).
+    4. A second artifact (`metrics.json`) is explicitly logged.
+
+    What's checked:
+    - The `main_output` artifact is successfully retrieved from the tracker after the run.
+    - The `main_output` artifact's metadata (`quality`) is correctly persisted and accessible.
     """
     config = {"mode": "verbose"}
 
@@ -154,12 +248,7 @@ def test_complex_manual_workflow(tracker: Tracker, run_dir: Path):
         # 2. Conditional Logic unavailable in simple decorator
         if config["mode"] == "verbose":
             # FIX: Unpack kwargs properly
-            tracker.log_artifact(
-                out_path,
-                key="main_output",
-                quality="high",
-                rows=1000
-            )
+            tracker.log_artifact(out_path, key="main_output", quality="high", rows=1000)
         else:
             tracker.log_artifact(out_path, key="main_output")
 
@@ -177,9 +266,27 @@ def test_complex_manual_workflow(tracker: Tracker, run_dir: Path):
 
 # --- Introspection Features ---
 
+
 def test_tracker_introspection_and_history(tracker: Tracker, run_dir: Path):
     """
-    Verifies tracker.last_run and tracker.history().
+    Tests the introspection capabilities of the `Tracker`, specifically `tracker.last_run`
+    and `tracker.history()`.
+
+    This test verifies that Consist correctly maintains a record of the most
+    recently completed run and can provide a history of past runs, which are
+    essential for debugging, monitoring, and understanding workflow execution.
+
+    What happens:
+    1. Two simple `@tracker.task` functions (`task_a` and `task_b`) are defined and executed sequentially.
+    2. After each task, `tracker.last_run` is immediately checked.
+    3. After both tasks complete, `tracker.history()` is called to retrieve a DataFrame of past runs.
+
+    What's checked:
+    - `tracker.last_run` correctly reflects the `model_name` of the most recently completed task.
+    - `tracker.history()` returns a Pandas DataFrame.
+    - The DataFrame contains two entries (for `task_a` and `task_b`).
+    - The order of runs in the history DataFrame is correct (most recent first).
+    - The status of the runs in the history DataFrame is "completed".
     """
 
     # 1. Run a few tasks
@@ -214,7 +321,24 @@ def test_tracker_introspection_and_history(tracker: Tracker, run_dir: Path):
 
 def test_log_meta_and_reprs(tracker: Tracker, run_dir: Path):
     """
-    Verifies runtime metadata logging (log_meta) and object string representations.
+    Verifies the functionality of `tracker.log_meta` for adding runtime metadata
+    and ensures that the string representations (`__repr__`) of `Run` and `Artifact`
+    objects are informative and do not raise errors.
+
+    This test confirms that dynamic, runtime-generated metadata can be associated
+    with a run and that core Consist objects provide useful debugging information.
+
+    What happens:
+    1. A `tracker.start_run` context is initiated.
+    2. Inside the run, `tracker.log_meta` is used to add `accuracy` and `stage`
+       to the run's metadata.
+    3. An artifact (`data.csv`) is logged.
+    4. The `repr()` of the current `Run` and the logged `Artifact` are captured.
+
+    What's checked:
+    - The `__repr__` output for `Run` and `Artifact` contains expected key information.
+    - The `tracker.current_consist.run.meta` dictionary is updated with the logged metadata.
+    - After the run completes, `tracker.last_run.run.meta` also contains the persisted metadata.
     """
     with tracker.start_run("meta_test_run", model="repr_checker"):
         # 1. Log runtime metadata

@@ -8,9 +8,30 @@ from consist.integrations.containers.backends import SingularityBackend, DockerB
 
 
 def test_singularity_command_construction():
-    """Verify CLI arguments are assembled correctly."""
+    """
+    Tests that the `SingularityBackend` correctly constructs the `singularity run` CLI command
+    from the provided parameters.
 
-    # We must patch os.makedirs because SingularityBackend.__init__ tries to create cache dirs
+    This test ensures that host-to-container volume mappings, environment variables,
+    working directory, and the command itself are correctly translated into the
+    `singularity` command-line arguments.
+
+    What happens:
+    1. `os.makedirs` and `pathlib.Path.mkdir` are mocked to prevent actual filesystem operations
+       during `SingularityBackend` initialization and `run` method execution.
+    2. A `SingularityBackend` instance is created.
+    3. The `run` method is called with a sample image, command, volumes, environment variables,
+       and a working directory.
+    4. `subprocess.run` is mocked to capture the arguments it would receive.
+
+    What's checked:
+    - The captured command-line arguments passed to `subprocess.run` start with "singularity".
+    - Core Singularity flags like "run" and "--cleanenv" are present.
+    - Volume binds (`-B`) are correctly formatted with host and container paths.
+    - Environment variables (`--env`) are correctly formatted.
+    - The working directory (`--pwd`) is correctly specified.
+    - The image and command components are correctly appended at the end of the argument list.
+    """
     with (
         patch("os.makedirs"),
         patch("pathlib.Path.mkdir"),
@@ -61,12 +82,32 @@ def test_singularity_command_construction():
 @patch("os.statvfs")
 @patch("os.path.exists")
 @patch("os.access")
-@patch("os.makedirs")  # FIX: Mock filesystem write
+@patch("os.makedirs")
 def test_singularity_cache_selection(
-    mock_makedirs, mock_access, mock_exists, mock_statvfs
+    mock_makedirs: MagicMock,
+    mock_access: MagicMock,
+    mock_exists: MagicMock,
+    mock_statvfs: MagicMock,
 ):
     """
-    Test the PILATES logic: verify it picks the directory with free space.
+    Tests the `SingularityBackend`'s logic for selecting an appropriate cache directory.
+
+    This test verifies that `SingularityBackend` correctly prioritizes and selects
+    a cache location based on the availability of sufficient free disk space and
+    write permissions, as described in Consist's HPC optimization strategy.
+
+    What happens:
+    1. Mock `os.statvfs`, `os.path.exists`, and `os.access` to simulate a specific
+       filesystem state: a `/fast_local` directory exists, is writable, and has
+       more than 20GB of free space.
+    2. A `SingularityBackend` instance is initialized with `cache_base_options`
+       including `/fast_local`.
+
+    What's checked:
+    - The `APPTAINER_CACHEDIR` and `SINGULARITY_CACHEDIR` environment variables
+      are set to paths within the `/fast_local` directory, confirming that
+      the backend successfully identified and chose the preferred location.
+    - `os.makedirs` was called to create the necessary cache subdirectories within `/fast_local`.
     """
 
     # Setup: /fast_local exists, is writable, has tons of space
@@ -99,8 +140,24 @@ def test_singularity_cache_selection(
 
 
 def test_docker_command_list_handling():
-    """Verify we pass lists to Docker SDK, not strings."""
-    # Mock the docker client
+    """
+    Verifies that the `DockerBackend` passes the `command` argument as a list
+    directly to the Docker SDK's `containers.run` method, rather than joining it into a string.
+
+    This is important because Docker's SDK handles list-form commands correctly
+    (exec form), preserving arguments with spaces or special characters, unlike
+    shell-form strings which require careful quoting.
+
+    What happens:
+    1. The `docker` library and its `containers.run` method are mocked.
+    2. A `DockerBackend` instance is created.
+    3. The `run` method is called with a command specified as a list of strings.
+
+    What's checked:
+    - The `command` argument in the mocked `containers.run` call was passed
+      exactly as the original list of strings `["sh", "-c", "echo hi"]`,
+      and not as a single joined string.
+    """
     mock_client = MagicMock()
 
     # We need to mock the import in the backend module if docker isn't installed
@@ -122,7 +179,22 @@ def test_docker_command_list_handling():
 
 
 def test_docker_missing_dependency():
-    """Verify generic ImportError if docker module is missing."""
+    """
+    Verifies that `DockerBackend` raises an `ImportError` if the underlying
+    `docker` Python package is not installed.
+
+    This ensures that users receive a clear error message guiding them
+    to install the necessary dependency when attempting to use the `DockerBackend`.
+
+    What happens:
+    1. The `docker` module within `consist.integrations.containers.backends` is
+       mocked to `None`, simulating its absence.
+    2. An attempt is made to instantiate `DockerBackend`.
+
+    What's checked:
+    - Instantiating `DockerBackend` raises an `ImportError`.
+    - The error message explicitly states that the 'docker' package is required.
+    """
     with patch("consist.integrations.containers.backends.docker", None):
         with pytest.raises(ImportError) as exc:
             DockerBackend()
@@ -130,7 +202,28 @@ def test_docker_missing_dependency():
 
 
 def test_docker_digest_resolution_logic():
-    """Test pull behavior and digest fallback mechanisms."""
+    """
+    Tests the `DockerBackend`'s logic for resolving Docker image digests and handling
+    `pull_latest` behavior and fallback mechanisms.
+
+    This test ensures that `DockerBackend` can retrieve stable, content-addressable
+    image identifiers (`RepoDigests`) for reproducibility and correctly falls back
+    to local image IDs when `RepoDigests` are not available.
+
+    What happens:
+    1. A mock Docker client is set up to simulate Docker API responses.
+    2. **Case 1 (Pull Latest = True)**: A `DockerBackend` is initialized with `pull_latest=True`,
+       and `resolve_image_digest` is called. The mock client is configured to return a
+       `RepoDigest`.
+    3. **Case 2 (No RepoDigests)**: The mock image's attributes are changed to simulate
+       an image without `RepoDigests`, and `resolve_image_digest` is called again.
+
+    What's checked:
+    - **Case 1**: `mock_client.images.pull` is called (due to `pull_latest=True`),
+      and the returned digest is the expected `RepoDigest`.
+    - **Case 2**: When `RepoDigests` are absent, the method falls back to returning
+      the `id` of the mock image.
+    """
     mock_client = MagicMock()
     mock_img = MagicMock()
 
@@ -153,7 +246,22 @@ def test_docker_digest_resolution_logic():
 
 
 def test_docker_run_exception_handling():
-    """Verify run returns False gracefully on docker errors."""
+    """
+    Verifies that the `DockerBackend.run` method gracefully handles exceptions
+    raised by the Docker SDK during container execution, returning `False`.
+
+    This ensures that internal Docker errors do not propagate unexpectedly
+    and that `run_container` can reliably determine the success status of
+    the container operation.
+
+    What happens:
+    1. A mock Docker client is configured such that its `containers.run` method
+       raises an exception (simulating a Docker daemon being down or other API error).
+    2. The `DockerBackend.run` method is called.
+
+    What's checked:
+    - The `run` method returns `False`, indicating that the container execution failed.
+    """
     mock_client = MagicMock()
     mock_client.containers.run.side_effect = Exception("Docker Daemon Down")
 
@@ -171,10 +279,29 @@ def test_docker_run_exception_handling():
 @patch("os.access")
 @patch("os.makedirs")
 def test_singularity_cache_fallback(
-    mock_makedirs, mock_access, mock_exists, mock_statvfs
+    mock_makedirs: MagicMock,
+    mock_access: MagicMock,
+    mock_exists: MagicMock,
+    mock_statvfs: MagicMock,
 ):
     """
-    Verify fallback to CWD if no suitable cache storage is found.
+    Verifies that `SingularityBackend` correctly falls back to using the current
+    working directory as the cache base if no suitable fast local storage options
+    are found (e.g., due to insufficient disk space).
+
+    This test ensures robustness in HPC environments where dedicated scratch
+    space might be full or unavailable.
+
+    What happens:
+    1. `os.statvfs`, `os.path.exists`, and `os.access` are mocked to simulate
+       a scenario where all provided `cache_base_options` exist and are writable,
+       but none have sufficient free disk space (mocking `f_bavail` to 0).
+    2. `os.getcwd` is patched to return a predictable current working directory.
+    3. A `SingularityBackend` instance is initialized.
+
+    What's checked:
+    - The `APPTAINER_CACHEDIR` environment variable is set to a path within
+      the mocked current working directory, confirming the fallback mechanism.
     """
     # Everything exists and is writable...
     mock_exists.return_value = True
@@ -198,8 +325,23 @@ def test_singularity_cache_fallback(
 
 
 def test_singularity_executable_missing():
-    """Verify behavior when 'singularity' command is not found."""
-    # Patch makedirs so init doesn't fail
+    """
+    Verifies that the `SingularityBackend.run` method gracefully handles a `FileNotFoundError`
+    if the `singularity` executable is not found in the system's PATH.
+
+    This ensures that `run_container` can provide a clear indication of failure
+    when the underlying container runtime is not installed or accessible.
+
+    What happens:
+    1. `os.makedirs` and `pathlib.Path.mkdir` are mocked to prevent filesystem operations.
+    2. A `SingularityBackend` instance is initialized.
+    3. `subprocess.run` is mocked to raise a `FileNotFoundError`, simulating
+       the `singularity` command not being found.
+    4. The `SingularityBackend.run` method is called.
+
+    What's checked:
+    - The `run` method returns `False`, indicating a failed execution.
+    """
     with patch("os.makedirs"), patch("pathlib.Path.mkdir"):
         backend = SingularityBackend()
 

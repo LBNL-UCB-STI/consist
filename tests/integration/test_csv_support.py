@@ -9,10 +9,30 @@ from consist.api import load
 
 def test_csv_end_to_end(tmp_path):
     """
-    Verifies that CSV artifacts function correctly in:
-    1. Logging
-    2. loading (consist.load)
-    3. Querying (Hybrid Views via read_csv_auto)
+    Tests the end-to-end functionality for CSV artifacts within Consist.
+
+    This test verifies the seamless integration of CSV files across key Consist features:
+    artifact logging, data loading via `consist.load()`, and querying through
+    DuckDB's "Hybrid Views" using `read_csv_auto`.
+
+    What happens:
+    1. A `Tracker` is initialized with a database path.
+    2. A dummy CSV file (`my_data.csv`) is created with sample data.
+    3. **Artifact Logging**: The CSV file is logged as an `Artifact` ("cities_data")
+       within a `tracker.start_run` context.
+    4. **Data Loading**: `consist.load()` is used to load the CSV artifact.
+    5. **Hybrid View Creation**: A hybrid view named `v_cities` is created for the
+       "cities_data" concept.
+    6. **SQL Querying**: SQL queries are executed against `v_cities` to retrieve
+       aggregated data and individual records.
+
+    What's checked:
+    - The `artifact.driver` is correctly identified as "csv".
+    - `consist.load()` successfully loads the CSV data into a Pandas DataFrame,
+      and the content matches the original.
+    - The hybrid view `v_cities` is successfully created.
+    - SQL queries against `v_cities` return correct aggregated results (e.g., average score)
+      and individual records, demonstrating `read_csv_auto`'s functionality and type inference.
     """
     run_dir = tmp_path / "runs"
     db_path = str(tmp_path / "provenance.duckdb")

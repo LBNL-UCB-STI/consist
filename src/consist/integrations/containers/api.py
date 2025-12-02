@@ -1,3 +1,24 @@
+"""
+Consist Container API Module
+
+This module provides a high-level API for executing containerized steps
+(e.g., Docker, Singularity/Apptainer) with automatic provenance tracking
+and caching through Consist. It abstracts away the complexities of
+interacting directly with container runtimes and integrates seamlessly
+with Consist's `Tracker` to log container execution details, input
+dependencies, and output artifacts.
+
+Key functionalities include:
+-   **Container Execution with Provenance**: Wraps container execution
+    within a Consist `start_run` context, ensuring that container image
+    identity, commands, environment, and file I/O are fully tracked.
+-   **Backend Agnosticism**: Supports different container runtimes
+    (Docker, Singularity/Apptainer) via a unified interface.
+-   **Automated Input/Output Logging**: Automatically logs host-side
+    files as inputs and scans specified paths for outputs, linking them
+    to the container run.
+"""
+
 import logging
 from pathlib import Path
 from typing import List, Dict, Union, Optional
@@ -18,16 +39,64 @@ def run_container(
     volumes: Dict[str, str],
     inputs: List[Union[str, Artifact]],
     outputs: List[str],
-    environment: Dict[str, str] = None,
+    environment: Optional[Dict[str, str]] = None,
     working_dir: Optional[str] = None,
     backend_type: str = "docker",
     pull_latest: bool = False,
 ) -> bool:
     """
-    Executes a containerized step with full provenance tracking.
+    Executes a containerized step with full provenance tracking and caching via Consist.
 
-    Acts as a wrapper around `tracker.start_run`. The container's Image + Command
-    acts as the "Code/Config", and the host-side files act as Inputs/Outputs.
+    This function acts as a high-level wrapper that integrates container execution
+    with Consist's `Tracker`. It initiates a `Consist` run, uses the container's
+    image and command as part of the run's identity (code/config), and tracks
+    host-side files as inputs and outputs. It supports different container backends
+    like Docker and Singularity.
+
+    Parameters
+    ----------
+    tracker : Tracker
+        The active Consist `Tracker` instance to use for provenance logging.
+    run_id : str
+        A unique identifier for this container execution run within Consist.
+    image : str
+        The container image to use (e.g., "ubuntu:latest", "my_repo/my_image:tag").
+    command : Union[str, List[str]]
+        The command to execute inside the container. Can be a string or a list of strings
+        (for exec form).
+    volumes : Dict[str, str]
+        A dictionary mapping host paths to container paths for volume mounts.
+        Example: `{"/host/path": "/container/path"}`.
+    inputs : List[Union[str, Artifact]]
+        A list of paths (str) or `Artifact` objects on the host machine that serve
+        as inputs to the containerized process. These are logged as Consist inputs.
+    outputs : List[str]
+        A list of paths on the host machine that are expected to be generated or
+        modified by the containerized process. These paths will be scanned and
+        logged as Consist output artifacts.
+    environment : Optional[Dict[str, str]], optional
+        A dictionary of environment variables to set inside the container. Defaults to empty.
+    working_dir : Optional[str], optional
+        The working directory inside the container where the command will be executed.
+        If None, the default working directory of the container image will be used.
+    backend_type : str, default "docker"
+        The container runtime backend to use. Currently supports "docker" and "singularity".
+    pull_latest : bool, default False
+        If True, the Docker backend will attempt to pull the latest image before execution.
+        (Applicable only for 'docker' backend).
+
+    Returns
+    -------
+    bool
+        True if the container execution and all Consist logging were successful, False otherwise.
+
+    Raises
+    ------
+    ValueError
+        If an unknown `backend_type` is specified.
+    RuntimeError
+        If the container execution itself fails (e.g., non-zero exit code).
+        If the underlying backend fails to resolve image digest or run the container.
     """
     environment = environment or {}
 

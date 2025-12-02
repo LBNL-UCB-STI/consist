@@ -8,6 +8,22 @@ from dlt.pipeline.exceptions import PipelineStepFailed
 
 # Define a test schema for Strict Mode
 class MockTable(SQLModel, table=True):
+    """
+    A mock SQLModel schema used for testing the `dlt_loader`'s ingestion capabilities
+    in "Strict Mode" and schema enforcement scenarios.
+
+    This class defines a simple table structure with an `id` and `val` column,
+    which is used to guide `dlt` during data ingestion and validate that
+    Consist can correctly handle user-defined schemas.
+
+    Attributes
+    ----------
+    id : Optional[int]
+        A unique identifier for each record, serving as the primary key.
+    val : str
+        A string value associated with each record.
+    """
+
     __tablename__ = "mock_data"
     id: Optional[int] = Field(default=None, primary_key=True)
     val: str
@@ -15,27 +31,31 @@ class MockTable(SQLModel, table=True):
 
 def test_ingest_artifact_strict_dicts(tracker, engine):
     """
-    Tests the `ingest` method in "Strict Mode".
+    Tests the `tracker.ingest()` method's ability to ingest a list of dictionaries
+    ("scalar" ingestion) while enforcing a strict `SQLModel` schema and automatically
+    injecting Consist system columns.
 
-    This integration test verifies that `dlt_loader` correctly ingests data into DuckDB when a
-    specific SQLModel schema is provided. It checks that data is loaded into the correct table
-    and that the Consist-specific system columns (e.g., `consist_run_id`, `consist_year`) are
+    This integration test verifies that `dlt_loader` correctly processes and
+    loads data into DuckDB when a specific `SQLModel` schema is provided.
+    It confirms that data is loaded into the correct table, and that the
+    Consist-specific provenance columns (`consist_run_id`, `consist_year`) are
     automatically added and populated with the correct context from the run.
 
     What happens:
-    1. A run is started using the provided `tracker` fixture.
-    2. An artifact is logged, associating it with a specific SQLModel schema (`MockTable`).
-    3. A list of mock data records is created.
-    4. The test fixture's SQLAlchemy engine is disposed to simulate a separate process,
-       allowing the tracker's internal `ingest` method to acquire a lock on the database.
-    5. The tracker's `ingest` method is called with the artifact, data, and schema.
+    1. A run is started using the provided `tracker` fixture with a specific `year`.
+    2. An artifact is logged, associating it with a `MockTable` schema.
+    3. A list of mock data records (dictionaries) is created.
+    4. The test fixture's SQLAlchemy engine is temporarily disposed to simulate a
+       separate process or thread, ensuring the `tracker.ingest` method can
+       acquire a lock on the database for `dlt` operations.
+    5. The `tracker.ingest` method is called with the artifact, raw data, and `MockTable` schema.
 
     What's checked:
-    - After ingestion, the database is queried to ensure the data was loaded into the
+    - After ingestion, a query to the DuckDB confirms the data was loaded into the
       `global_tables.mock_data` table.
-    - The content of the loaded data is verified.
-    - The presence and correctness of the automatically injected system columns (`consist_run_id`,
-      `consist_year`) are confirmed.
+    - The content of the loaded data (id, val) is verified to match the input.
+    - The presence and correctness of the automatically injected system columns
+      (`consist_run_id`, `consist_year`) are confirmed in the loaded data.
     """
 
     # 1. Setup Run
@@ -76,8 +96,27 @@ def test_ingest_artifact_strict_dicts(tracker, engine):
 
 def test_ingest_vectorized_pandas(tracker, engine):
     """
-    Test 2: High-Performance Mode.
-    Ingesting a Pandas DataFrame directly (Vectorized).
+    Tests the `tracker.ingest()` method's ability to ingest a Pandas DataFrame
+    directly ("vectorized" ingestion) while enforcing a strict `SQLModel` schema
+    and automatically injecting Consist system columns.
+
+    This test verifies the "High-Performance Mode" of ingestion, where `dlt_loader`
+    can efficiently process entire DataFrames as single batches. It also confirms
+    that the system can append to an existing table if compatible schemas are used.
+
+    What happens:
+    1. A Pandas DataFrame `df` is created with sample data.
+    2. A run is started with a specific `iteration`.
+    3. An artifact is logged, associating it with the `MockTable` schema.
+    4. The test fixture's SQLAlchemy engine is disposed.
+    5. The `tracker.ingest` method is called with the artifact, the Pandas DataFrame,
+       and the `MockTable` schema.
+
+    What's checked:
+    - The data from the Pandas DataFrame is successfully appended to the `global_tables.mock_data`
+      table (which was potentially created by a previous test).
+    - The content of the loaded data is verified.
+    - The automatically injected `consist_iteration` column is present and correctly populated.
     """
     df = pd.DataFrame({"id": [10, 20, 30], "val": ["X", "Y", "Z"]})
 
@@ -105,8 +144,25 @@ def test_ingest_vectorized_pandas(tracker, engine):
 
 def test_ingest_streaming_parquet(tracker, engine, tmp_path):
     """
-    Test 3: Memory-Efficient Mode.
-    Ingesting directly from a Parquet file artifact (no data argument).
+    Tests the `tracker.ingest()` method's ability to ingest data directly from
+    a Parquet file artifact without providing the `data` argument ("Memory-Efficient Mode").
+
+    This test verifies that `dlt_loader` can automatically detect that the `data`
+    argument is `None` and stream the data from the artifact's file path,
+    demonstrating efficient processing for large files that might not fit into memory.
+
+    What happens:
+    1. A temporary directory is created for the run.
+    2. A Pandas DataFrame is created and saved as a Parquet file (`stream.parquet`).
+    3. A run is started.
+    4. The Parquet file is logged as an artifact ("my_data_stream") with a `MockTable` schema.
+    5. The test fixture's SQLAlchemy engine is disposed.
+    6. The `tracker.ingest` method is called with the artifact and schema, but `data=None`.
+
+    What's checked:
+    - The data from the Parquet file is successfully ingested into the
+      `global_tables.mock_data` table.
+    - The content of the loaded data is verified.
     """
     run_dir = tmp_path / "stream_run"
     run_dir.mkdir()
@@ -148,9 +204,27 @@ def test_ingest_streaming_parquet(tracker, engine, tmp_path):
 
 def test_schema_drift_warning(tracker, engine):
     """
-    Test 4: Schema Auditing.
-    Verifies that passing a DataFrame with extra columns triggers a warning
-    when a Strict Schema is provided.
+    Tests that `tracker.ingest()` in strict mode correctly raises an exception
+    when encountering data with extra columns not defined in the provided `SQLModel` schema.
+
+    This verifies Consist's "Schema Auditing" capability, ensuring that unexpected
+    schema changes in input data are detected and reported, preventing data quality
+    issues in the provenance database.
+
+    What happens:
+    1. A Pandas DataFrame `df_drift` is created that includes an extra column (`ghost_col`)
+       not present in the `MockTable` schema.
+    2. A run is started.
+    3. An artifact is logged, associating it with the `MockTable` schema.
+    4. The test fixture's SQLAlchemy engine is disposed.
+    5. The `tracker.ingest` method is called with the artifact, the drifting DataFrame,
+       and the `MockTable` schema.
+
+    What's checked:
+    - The `tracker.ingest` call raises a `dlt.pipeline.exceptions.PipelineStepFailed`
+      exception, as expected in strict mode when extra columns are present.
+    - The exception message contains phrases like "undefined columns" and mentions
+      the extra column "ghost_col", confirming the nature of the schema violation.
     """
     df_drift = pd.DataFrame(
         {"id": [999], "val": ["Ghost"], "ghost_col": [123]}  # <--- Not in MockTable
@@ -173,6 +247,24 @@ def test_schema_drift_warning(tracker, engine):
 
 
 class StrictPerson(SQLModel, table=True):
+    """
+    A strict SQLModel schema for a 'Person' entity, used to test data validation
+    during ingestion.
+
+    This schema defines the expected structure for person records, including
+    an integer `age` field, which is critical for testing that `dlt_loader`
+    correctly rejects data that does not conform to the specified types.
+
+    Attributes
+    ----------
+    id : Optional[int]
+        A unique integer identifier for the person, serving as the primary key.
+    name : str
+        The name of the person.
+    age : int
+        The age of the person, expected to be an integer.
+    """
+
     __tablename__ = "strict_person"
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
@@ -181,19 +273,31 @@ class StrictPerson(SQLModel, table=True):
 
 def test_ingest_with_invalid_data_in_strict_mode(tracker, engine):
     """
-    Tests that the dlt_loader in strict mode correctly raises an exception when it encounters
-    data that does not conform to the provided SQLModel schema.
+    Tests that `dlt_loader` in strict mode correctly raises an exception
+    when it encounters data with type mismatches that do not conform to
+    the provided `SQLModel` schema.
+
+    This verifies the "Data Validation" aspect of Consist's ingestion,
+    ensuring that only data meeting predefined schema constraints is
+    materialized into the database, preventing corrupt or inconsistent records.
 
     What happens:
-    1. A strict schema `StrictPerson` is defined, expecting `age` to be an integer.
-    2. A list of data is created, containing one valid record and one invalid record
-       (where `age` is a string).
-    3. The tracker attempts to ingest this data using the strict schema.
+    1. A strict `SQLModel` schema `StrictPerson` is defined, expecting `age` to be an integer.
+    2. A list of data records is prepared, containing one valid record and one
+       invalid record (where `age` is a string "thirty" instead of an integer).
+    3. A run is started, and an artifact ("people") is logged with the `StrictPerson` schema.
+    4. The test fixture's SQLAlchemy engine is disposed.
+    5. The `tracker.ingest` method is called with the artifact, the mixed data,
+       and the `StrictPerson` schema.
 
     What's checked:
-    - The `tracker.ingest` call raises a `dlt.pipeline.exceptions.PipelineStepFailed` exception.
-    - The exception message confirms a data validation error related to the `age` column.
-    - No data is loaded into the target `strict_person` table, as the transaction is aborted.
+    - The `tracker.ingest` call raises a `dlt.pipeline.exceptions.PipelineStepFailed`
+      exception, confirming that the ingestion process aborted due to invalid data.
+    - The exception message contains keywords indicating a schema contract violation
+      or data parsing error related to the `age` column.
+    - After the failed ingestion, the database is queried to ensure that the
+      `strict_person` table was *not* created, verifying that the transaction
+      was rolled back completely.
     """
     data = [
         {"id": 1, "name": "Alice", "age": 30},

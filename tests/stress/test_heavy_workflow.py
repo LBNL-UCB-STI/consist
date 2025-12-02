@@ -1,10 +1,13 @@
 """
+Consist Heavy Workflow Stress Tests
+
 This module contains stress tests designed to push Consist's performance and
 scalability with large datasets (millions of rows).
 
 It verifies the efficiency of data ingestion, complex SQL joins over large tables,
-and the seamless handling of schema evolution across different simulation runs,
-demonstrating Consist's capabilities in demanding analytical workflows.
+and the seamless handling of schema evolution across different simulation runs.
+These tests demonstrate Consist's capabilities in demanding analytical workflows
+where both speed and data integrity are crucial.
 """
 
 import logging
@@ -32,29 +35,32 @@ def test_simulation_pipeline_stress_v2(tmp_path):
     focusing on data ingestion efficiency and complex SQL join performance within Consist.
 
     This test simulates a common scenario in large-scale data analysis where
-    multiple tables need to be ingested and then joined for analytical purposes,
-    pushing the limits of Consist's DuckDB integration and vectorized operations.
+    multiple tables need to be ingested and then joined for analytical purposes.
+    It pushes the limits of Consist's DuckDB integration and vectorized operations
+    to verify its scalability and performance under demanding conditions.
 
     What happens:
-    1.  Two large Pandas DataFrames (`df_zones` - small, `df_census` - large) are generated,
-        representing typical simulation outputs.
-    2.  These DataFrames are saved to disk (Parquet for census, CSV for zones).
-    3.  Consist initiates a run (`run_join_test`).
+    1.  Two large Pandas DataFrames (`df_zones` - 1,000 rows, `df_census` - 5,000,000 rows)
+        are generated, representing typical simulation outputs.
+    2.  `df_census` is saved as a Parquet file, and `df_zones` as a CSV.
+    3.  A Consist run (`run_join_test`) is initiated.
     4.  Both the 'zones' and 'census' data are logged as artifacts and then ingested
-        into the Consist database, demonstrating efficient vectorized ingestion of large
-        Pandas DataFrames.
-    5.  Views are created over the ingested tables.
-    6.  A complex SQL query is executed that joins the large 'census' table (millions of rows)
-        with the 'zones' table, and then performs aggregations (count, average income, average
-        parking cost per mode).
+        into the Consist database. The test specifically measures the time taken
+        for the `consist.ingest` call for the large 'census' DataFrame.
+    5.  Hybrid views (`v_zones`, `v_census`) are created over the ingested tables.
+    6.  A complex SQL query is executed against the views. This query joins the
+        large 'census' table with the 'zones' table and performs aggregations
+        (count, average income, average parking cost per mode).
 
     What's checked:
-    -   The total time taken for data generation, ingestion, and query execution is printed,
-        demonstrating Consist's performance for this stress scenario.
-    -   The results of the SQL query are printed, providing a visual confirmation of the
-        aggregated data.
+    -   The total time taken for data generation, ingestion, and query execution is printed
+        to stdout, demonstrating Consist's performance for this stress scenario.
+    -   The results of the complex SQL query are printed to stdout, providing a visual
+        confirmation of the aggregated data (e.g., average income, average parking cost
+        per mode for different transportation modes).
     -   (Implicit) The test should complete without errors and within a reasonable time,
-        indicating the scalability of Consist's underlying mechanisms.
+        indicating the scalability and stability of Consist's underlying mechanisms for
+        handling large datasets and complex analytical operations.
     """
     run_dir = tmp_path / "stress_runs_v2"
     db_path = str(tmp_path / "stress_v2.duckdb")
@@ -171,26 +177,37 @@ def test_schema_evolution_and_comparison(tmp_path):
     and perform comparative analysis using hybrid views.
 
     This test simulates a scenario where a simulation's output schema changes over time
-    (e.g., adding new columns in a policy scenario), and verifies that Consist
-    can seamlessly query these evolving datasets as a single, unified view.
+    (e.g., adding new columns in a policy scenario). It verifies that Consist can
+    seamlessly query these evolving large datasets as a single, unified view,
+    gracefully handling schema differences.
 
     What happens:
-    1.  **Run 1 (Baseline):** Generates and ingests a large dataset (`N_ROWS`) with a
-        standard set of columns (e.g., `person_id`, `income`, `mode`).
-    2.  **Run 2 (Policy):** Generates and ingests another large dataset (`N_ROWS`),
-        but this one includes a new column (`ev_subsidy`) not present in Run 1,
-        simulating schema drift. It also includes new categorical values (`ev` mode).
-    3.  A hybrid view (`v_persons`) is created over both the baseline and policy run data.
-    4.  A SQL query is executed against this hybrid view to compare aggregated metrics
-        (count, average income, EV count, average subsidy) across the two runs.
+    1. A `Tracker` is initialized.
+    2. **Run 1 (Baseline Scenario)**: A large dataset (`N_ROWS`) with a standard schema
+       (`person_id`, `income`, `mode`) is generated, saved as Parquet, and then logged
+       and ingested as a "persons" artifact.
+    3. **Run 2 (Policy Scenario)**: Another large dataset (`N_ROWS`) is generated. This
+       dataset includes a new column (`ev_subsidy`) not present in Run 1, and also introduces
+       a new categorical value (`ev` mode) in the `mode` column. It's saved as Parquet,
+       logged as "persons" artifact (same key), and ingested.
+    4. A hybrid view (`v_persons`) is created over both the baseline and policy run data.
+       Consist's view factory will use `UNION ALL BY NAME` to combine these schemas.
+    5. A SQL query is executed against this hybrid view. The query groups by
+       `consist_run_id` and calculates aggregated metrics (count, average income,
+       count of 'ev' mode, and average `ev_subsidy`).
 
     What's checked:
-    -   Consist's view generation successfully unions the datasets with different schemas,
-        gracefully handling missing columns (e.g., `ev_subsidy` is `NULL` for the baseline run).
-    -   The SQL query correctly aggregates and compares data across runs, demonstrating
-        the power of the unified view for analytical purposes.
-    -   Assertions verify that the correct run IDs are present and that schema evolution
-        is handled as expected (e.g., `ev_subsidy` is `None` for the baseline).
+    - The `create_view` operation and subsequent SQL query execute successfully,
+      demonstrating that Consist's view generation properly handles schema evolution
+      between the two large datasets.
+    - The SQL query results confirm:
+        - Both `run_baseline` and `run_policy` IDs are present.
+        - The `ev_subsidy` column is correctly `NULL` for `run_baseline` (as it
+          didn't exist in its original schema).
+        - The `ev_subsidy` and `ev_count` for `run_policy` are correctly computed.
+        - Other aggregated metrics (like `avg_income`) are correctly calculated for both runs.
+    - Performance metrics (time taken) are implicitly validated by the test completing
+      within reasonable bounds.
     """
     run_dir = tmp_path / "stress_runs_v3"
     db_path = str(tmp_path / "stress_v3.duckdb")

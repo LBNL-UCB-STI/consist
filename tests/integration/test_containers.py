@@ -14,14 +14,46 @@ from consist.integrations.containers.backends import ContainerBackend
 
 class MockBackend(ContainerBackend):
     """
-    A dummy backend that simulates container execution by writing files
-    directly to the host paths provided in 'volumes'.
+    A dummy container backend implementation used for testing Consist's container integration logic.
+
+    This mock simulates container execution without actually interacting with a Docker
+    daemon or Singularity. It allows testing the caching, provenance tracking,
+    and input/output handling aspects of `run_container` in isolation.
+    It simulates side effects by creating dummy files in specified host output volumes.
+
+    Attributes
+    ----------
+    run_count : int
+        A counter that tracks how many times the `run` method of this mock backend has been called.
+        Useful for asserting cache hits/misses.
     """
 
-    def __init__(self, pull_latest=False):
+    def __init__(self, pull_latest: bool = False) -> None:
+        """
+        Initializes the MockBackend.
+
+        Parameters
+        ----------
+        pull_latest : bool, default False
+            A placeholder parameter to match the signature of real backends.
+            Has no functional effect in the mock.
+        """
         self.run_count = 0
 
     def resolve_image_digest(self, image: str) -> str:
+        """
+        Simulates resolving a container image to a mock digest.
+
+        Parameters
+        ----------
+        image : str
+            The image name or reference.
+
+        Returns
+        -------
+        str
+            A deterministic mock SHA digest string based on the image name.
+        """
         return f"sha256:mock_digest_for_{image}"
 
     def run(
@@ -32,6 +64,32 @@ class MockBackend(ContainerBackend):
         env: Dict[str, str],
         working_dir: Optional[str] = None,
     ) -> bool:
+        """
+        Simulates running a command within a container.
+
+        This mock method increments an internal counter and, if an output volume
+        is detected, creates a dummy `result.txt` file within the host path
+        of that volume to simulate container output.
+
+        Parameters
+        ----------
+        image : str
+            The container image to use (mocked).
+        command : Union[str, List[str]]
+            The command to execute inside the container (mocked).
+        volumes : Dict[str, str]
+            A dictionary mapping host paths to container paths for volume mounts.
+            Used to identify simulated output directories.
+        env : Dict[str, str]
+            Environment variables (mocked).
+        working_dir : Optional[str], optional
+            Working directory inside the container (mocked).
+
+        Returns
+        -------
+        bool
+            Always returns `True` to simulate a successful container execution.
+        """
         self.run_count += 1
         for host_path, container_path in volumes.items():
             if "out" in str(host_path):
@@ -44,16 +102,48 @@ class MockBackend(ContainerBackend):
 
 
 @pytest.fixture
-def clean_tracker(tmp_path):
-    """Returns a fresh Tracker instance with DB enabled for Caching."""
+def clean_tracker(tmp_path: Path) -> Tracker:
+    """
+    Pytest fixture that returns a fresh `Tracker` instance with a database enabled.
+
+    This fixture creates a new `Tracker` instance for each test, ensuring test
+    isolation. The tracker is configured to use a temporary directory for run logs
+    and a dedicated DuckDB file for provenance tracking, which is essential for
+    testing caching mechanisms.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        A `pytest` fixture providing a unique temporary directory for the test.
+
+    Returns
+    -------
+    Tracker
+        A newly initialized `Tracker` instance.
+    """
     return Tracker(
         run_dir=tmp_path / "runs", db_path=str(tmp_path / "provenance.duckdb")
     )
 
 
 @pytest.fixture
-def input_file(tmp_path):
-    """Creates a dummy input file."""
+def input_file(tmp_path: Path) -> Path:
+    """
+    Pytest fixture that creates a dummy input file in a temporary directory.
+
+    This fixture is used to provide a consistent and isolated input file
+    for container tests, simulating a host-side input dependency.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        A `pytest` fixture providing a unique temporary directory for the test.
+
+    Returns
+    -------
+    Path
+        The path to the created dummy input file (`data.csv`).
+    """
     p = tmp_path / "inputs" / "data.csv"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("input_data")
@@ -63,8 +153,26 @@ def input_file(tmp_path):
 # --- Tests ---
 
 
-def test_container_caching_logic(clean_tracker, input_file):
-    """The 'Usage Pattern' Test."""
+def test_container_caching_logic(clean_tracker: Tracker, input_file: Path):
+    """
+    Tests the core caching logic of `run_container`, including cache hits and misses.
+
+    This test verifies that `run_container` correctly identifies identical container
+    executions as cache hits and re-executes the container only when relevant
+    parameters (image, command, inputs, etc.) change.
+
+    What happens:
+    1. A `MockBackend` is used to simulate container execution.
+    2. **First Run**: `run_container` is called with a set of parameters.
+    3. **Second Run**: `run_container` is called with identical parameters to the first run.
+    4. **Third Run**: `run_container` is called with a modified command.
+
+    What's checked:
+    - After the first run, the `MockBackend.run_count` is 1 (container executed).
+    - After the second run (identical parameters), `MockBackend.run_count` remains 1 (cache hit).
+    - After the third run (modified command), `MockBackend.run_count` increments to 2 (cache miss, container re-executed).
+    - The expected output file exists on the host after the first run.
+    """
     mock_backend_instance = MockBackend()
     output_dir = clean_tracker.run_dir / "outputs_run1"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -114,9 +222,25 @@ def test_container_caching_logic(clean_tracker, input_file):
 # --- Singularity Mock Test ---
 
 
-def test_singularity_mocked_execution(clean_tracker, input_file):
-    """Verifies the Singularity flow using a Mocked subprocess."""
-    # Mock subprocess inside the backend module
+def test_singularity_mocked_execution(clean_tracker: Tracker, input_file: Path):
+    """
+    Tests the integration of the Singularity backend using a mocked `subprocess.run`.
+
+    This test verifies that `run_container` correctly constructs the `singularity`
+    command and interacts with the `SingularityBackend` when `backend_type="singularity"`
+    is specified, without requiring a live Singularity installation.
+
+    What happens:
+    1. The `subprocess.run` function within the `SingularityBackend` is mocked
+       to prevent actual execution and control its return value.
+    2. `run_container` is called with `backend_type="singularity"`, a sample image,
+       command, and inputs/outputs.
+
+    What's checked:
+    - The mocked `subprocess.run` was called.
+    - The arguments passed to `subprocess.run` start with "singularity", confirming
+      that the correct container command was constructed.
+    """
     with patch("consist.integrations.containers.backends.subprocess.run") as mock_sub:
         mock_sub.return_value.returncode = 0
 
@@ -150,10 +274,33 @@ def test_singularity_mocked_execution(clean_tracker, input_file):
     ],
 )
 def test_granular_cache_invalidation(
-    clean_tracker, input_file, change_type, change_val
+    clean_tracker: Tracker,
+    input_file: Path,
+    change_type: str,
+    change_val: Union[str, Dict],
 ):
     """
-    Verifies that changing SPECIFIC aspects of the container run trigger a Cache Miss.
+    Verifies that changing specific, granular aspects of a container run correctly
+    triggers a cache invalidation (cache miss), leading to re-execution.
+
+    This test parameterizes different types of changes (environment variables,
+    volumes, image, input content, backend type) to ensure that Consist's
+    hashing mechanism is sensitive to all relevant parameters that define
+    a container's identity.
+
+    What happens:
+    1. A `MockBackend` is used to simulate container execution, and both `DockerBackend`
+       and `SingularityBackend` are patched to use this mock, ensuring the `run_count`
+       is correctly tracked regardless of the `backend_type`.
+    2. **Base Run**: `run_container` is executed with a standard set of arguments.
+    3. **Modified Run**: A copy of the base arguments is made, and a single parameter
+       (`change_type`) is modified with `change_val`.
+    4. `run_container` is executed again with the modified arguments.
+
+    What's checked:
+    - After the base run, `mock_backend.run_count` is 1.
+    - After the modified run, `mock_backend.run_count` increments to 2, confirming
+      that the cache was invalidated and the container was re-executed due to the change.
     """
     mock_backend = MockBackend()
     output_dir = clean_tracker.run_dir / "outputs"
@@ -219,7 +366,18 @@ def test_granular_cache_invalidation(
 # --- Real Docker Integration Test ---
 
 
-def has_docker():
+def has_docker() -> bool:
+    """
+    Checks if Docker is installed and the Docker daemon is reachable.
+
+    This helper function is used to conditionally skip tests that require
+    a functional Docker environment.
+
+    Returns
+    -------
+    bool
+        True if Docker is available and responsive, False otherwise.
+    """
     try:
         import docker
 
@@ -231,8 +389,30 @@ def has_docker():
 
 
 @pytest.mark.skipif(not has_docker(), reason="Docker not available")
-def test_docker_real_execution(clean_tracker, tmp_path):
-    """Real Integration Test using Alpine."""
+def test_docker_real_execution(clean_tracker: Tracker, tmp_path: Path):
+    """
+    Tests `run_container` with a real Docker execution, verifying end-to-end functionality.
+
+    This integration test uses a simple `alpine` Docker image to perform a file
+    copy operation, confirming that `run_container` correctly orchestrates Docker
+    execution, handles volume mounts, and logs input/output artifacts. It also
+    verifies the caching mechanism with a real Docker run.
+
+    What happens:
+    1. A host input directory (`host_in_dir`) is created with an `input.txt` file.
+    2. A host output directory (`host_out_dir`) is created.
+    3. **First Docker Run**: `run_container` is called to execute a Docker command
+       that copies `input.txt` from the input volume to `output.txt` in the output volume.
+       `pull_latest` is set to True to ensure the image is available.
+    4. **Second Docker Run**: `run_container` is called again with identical parameters
+       to test the caching mechanism.
+
+    What's checked:
+    - The first `run_container` call returns `True`, indicating success.
+    - The `output.txt` file is correctly created in `host_out_dir` with the expected content.
+    - The second `run_container` call also returns `True`, confirming a cache hit
+      (i.e., the Docker command was not re-executed, but the result was "hydrated").
+    """
     host_in_dir = (tmp_path / "host_in").resolve()
     host_in_dir.mkdir(parents=True, exist_ok=True)
     (host_in_dir / "input.txt").write_text("hello world")

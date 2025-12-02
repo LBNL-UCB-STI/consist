@@ -1,14 +1,24 @@
 """
-This module provides the integration layer between Consist and the dlt (Data Load Tool) library.
-It is responsible for materializing artifact data into the DuckDB database, handling various
-data formats (Pandas DataFrames, Parquet, CSV, Zarr) and ensuring that Consist's system
-columns (e.g., run_id, artifact_id) are correctly injected for provenance.
+Consist dlt (Data Load Tool) Integration Module
+
+This module provides the integration layer between Consist and the `dlt` library,
+facilitating the robust and efficient ingestion of artifact data into the DuckDB database.
+It is responsible for materializing various data formats (e.g., Pandas DataFrames,
+Parquet, CSV, Zarr metadata) and ensuring that Consist's system-level provenance columns
+(such as `consist_run_id`, `consist_artifact_id`) are correctly injected into the data.
 
 Key functionalities include:
-- Dynamic extension of user-defined SQLModel schemas with Consist system columns.
-- Handling of different data ingestion strategies: vectorized (Pandas, PyArrow) and streaming.
-- Specialized handlers for common file formats (Parquet, CSV, Zarr metadata).
-- Integration with dlt pipeline for robust data loading, schema inference, and validation.
+-   **Dynamic Schema Extension**: User-defined `SQLModel` schemas are dynamically extended
+    with Consist's provenance-tracking system columns.
+-   **Flexible Ingestion Strategies**: Supports different data ingestion mechanisms,
+    including vectorized loading (for Pandas DataFrames, PyArrow tables) and streaming
+    for large datasets.
+-   **Format-Specific Handlers**: Contains specialized functions for processing and
+    preparing data from common file formats like Parquet, CSV, and extracting
+    structural metadata from Zarr archives.
+-   **dlt Pipeline Integration**: Leverages the `dlt` pipeline for robust data loading,
+    automatic schema inference, and optional strict validation, ensuring data quality
+    and consistency.
 """
 
 import dlt
@@ -37,8 +47,31 @@ except ImportError:
 
 def _handle_zarr_metadata(path: str) -> Iterable[Dict[str, Any]]:
     """
-    Handler for Zarr/NetCDF-like arrays.
-    Yields structural metadata (variables, dims, attrs) instead of raw pixel data.
+    Extracts and yields structural metadata from a Zarr or NetCDF-like array store.
+
+    Instead of yielding raw pixel or array data, this handler focuses on providing
+    metadata such as variable names, dimensions, shapes, data types, and attributes.
+    This is particularly useful for cataloging and understanding the structure of
+    large multi-dimensional datasets without ingesting their entire contents.
+
+    Parameters
+    ----------
+    path : str
+        The file system path to the Zarr store (directory).
+
+    Yields
+    ------
+    Dict[str, Any]
+        A dictionary representing the metadata for each data variable and coordinate
+        within the Zarr store. Each dictionary includes keys like 'variable_name',
+        'variable_type' (data or coordinate), 'dims', 'shape', 'dtype', and 'attributes'.
+
+    Raises
+    ------
+    ImportError
+        If `xarray` or `zarr` libraries are not installed.
+    ValueError
+        If an error occurs during the extraction of Zarr metadata from the specified path.
     """
     if not xr:
         raise ImportError("xarray and zarr are required for Zarr ingestion.")
@@ -75,22 +108,34 @@ def _handle_zarr_metadata(path: str) -> Iterable[Dict[str, Any]]:
 def _handle_parquet_path(path: str, ctx: Dict[str, Any]) -> Tuple[Any, bool]:
     """
     Handles ingestion of Parquet files, providing a streaming or vectorized data source
-    suitable for `dlt` ingestion.
+    suitable for `dlt` ingestion, with Consist system context injection.
 
-    Args:
-        path (str): The file system path to the Parquet file.
-        ctx (Dict[str, Any]): A dictionary of Consist system context values (e.g.,
-                               `consist_run_id`) to be injected into the data.
+    This function attempts to use `pyarrow` for efficient batch-wise streaming if available,
+    falling back to `pandas` for full file loading. It injects Consist's provenance-related
+    columns into each data batch or DataFrame before yielding it.
 
-    Returns:
-        Tuple[Any, bool]: A tuple containing:
-                          - The data source (either a Pandas DataFrame or a generator
-                            yielding Pandas DataFrames/batches).
-                          - A boolean indicating if the source is vectorized (True for DF,
-                            False for generator).
+    Parameters
+    ----------
+    path : str
+        The file system path to the Parquet file.
+    ctx : Dict[str, Any]
+        A dictionary containing Consist system context values (e.g., `consist_run_id`,
+        `consist_artifact_id`) to be injected as new columns into the data.
 
-    Raises:
-        ImportError: If neither Pandas nor PyArrow is available.
+    Returns
+    -------
+    Tuple[Any, bool]
+        A tuple where:
+        - The first element is the data source: either a Pandas DataFrame (for full load)
+          or a generator yielding Pandas DataFrames (for streaming batches).
+        - The second element is a boolean: `True` if the source is vectorized (DataFrame
+          or batch generator), `False` otherwise (not applicable here).
+
+    Raises
+    ------
+    ImportError
+        If neither `Pandas` nor `PyArrow` is available in the environment, which are
+        required for processing Parquet files.
     """
     if pa and pq:
 
@@ -117,21 +162,32 @@ def _handle_parquet_path(path: str, ctx: Dict[str, Any]) -> Tuple[Any, bool]:
 def _handle_csv_path(path: str, ctx: Dict[str, Any]) -> Tuple[Any, bool]:
     """
     Handles ingestion of CSV files, providing a streaming data source
-    suitable for `dlt` ingestion.
+    suitable for `dlt` ingestion, with Consist system context injection.
 
-    Args:
-        path (str): The file system path to the CSV file.
-        ctx (Dict[str, Any]): A dictionary of Consist system context values (e.g.,
-                               `consist_run_id`) to be injected into the data.
+    This function reads CSV files in chunks using `pandas.read_csv` and injects
+    Consist's provenance-related columns into each DataFrame chunk before yielding it.
 
-    Returns:
-        Tuple[Any, bool]: A tuple containing:
-                          - The data source (a generator yielding Pandas DataFrames/chunks).
-                          - A boolean indicating if the source is vectorized (True for generator
-                            with chunks, effectively).
+    Parameters
+    ----------
+    path : str
+        The file system path to the CSV file.
+    ctx : Dict[str, Any]
+        A dictionary containing Consist system context values (e.g., `consist_run_id`,
+        `consist_artifact_id`) to be injected as new columns into the data.
 
-    Raises:
-        ImportError: If Pandas is not available.
+    Returns
+    -------
+    Tuple[Any, bool]
+        A tuple where:
+        - The first element is the data source: a generator yielding Pandas DataFrames (chunks).
+        - The second element is a boolean: `True` indicating that the source
+          effectively operates in a vectorized, chunked manner.
+
+    Raises
+    ------
+    ImportError
+        If `Pandas` is not available in the environment, which is required for
+        processing CSV files.
     """
     if pd:
 
@@ -153,10 +209,52 @@ def ingest_artifact(
     db_path: str,
     data_iterable: Optional[Union[Iterable[Any], str, pd.DataFrame]] = None,
     schema_model: Optional[Type[SQLModel]] = None,
-):
+) -> Tuple[Any, str]:
     """
-    Ingests artifact data into DuckDB.
-    Supports Vectorized loading for Tables and Metadata loading for Matrices.
+    Ingests artifact data into a DuckDB database using the `dlt` (Data Load Tool) library.
+
+    This function supports various data sources (file paths, Pandas DataFrames, iterables of dicts)
+    and automatically injects Consist's provenance system columns (`consist_run_id`,
+    `consist_artifact_id`, `consist_year`, `consist_iteration`) into the data. It leverages
+    `dlt` for robust schema handling, including inference and optional strict validation
+    based on a provided `SQLModel`.
+
+    Parameters
+    ----------
+    artifact : Artifact
+        The Consist `Artifact` object representing the data to be ingested. Its driver
+        information is used to determine the appropriate data handler.
+    run_context : Run
+        The `Run` object providing the context (ID, year, iteration) for provenance tracking.
+    db_path : str
+        The file system path to the DuckDB database where the data will be loaded.
+    data_iterable : Optional[Union[Iterable[Any], str, pd.DataFrame]], optional
+        The data to ingest. Can be:
+        - A file path (str) to a Parquet, CSV, HDF5, JSON, or Zarr file.
+        - A Pandas DataFrame (will be treated as a single batch).
+        - An iterable (e.g., list of dicts, generator) where each item represents a row.
+        If `None`, it implies the data should be read directly from the `artifact`'s URI.
+    schema_model : Optional[Type[SQLModel]], optional
+        An optional `SQLModel` class that defines the expected schema for the data.
+        If provided, `dlt` will use this for strict validation and schema management.
+        If `None`, `dlt` will infer the schema.
+
+    Returns
+    -------
+    Tuple[dlt.LoadInfo, str]
+        A tuple containing:
+        - `dlt.LoadInfo`: An object providing detailed information about the data loading process.
+        - `str`: The actual normalized table name where the data was loaded in the database.
+
+    Raises
+    ------
+    ValueError
+        If no data is provided for ingestion, if the artifact driver is unsupported,
+        or if a `schema_model` is provided but a schema contract violation occurs
+        (e.g., new columns found in strict mode).
+    ImportError
+        If a required library for a specific driver (e.g., `pyarrow` for Parquet,
+        `tables` for HDF5, `xarray`/`zarr` for Zarr) is not installed.
     """
 
     # 1. Resolve Data Source (Streaming Batches)
@@ -306,7 +404,25 @@ def ingest_artifact(
     return info, real_table_name
 
 
-def _sqlmodel_to_dlt_columns(model: Type[SQLModel]) -> dict:
+def _sqlmodel_to_dlt_columns(model: Type[SQLModel]) -> Dict[str, Dict[str, Any]]:
+    """
+    Converts a SQLModel class definition into a `dlt` columns dictionary.
+
+    This function inspects the fields of a given `SQLModel` class and translates
+    them into a format suitable for `dlt`'s schema definition. It infers `dlt`
+    data types based on Python types and determines nullability.
+
+    Parameters
+    ----------
+    model : Type[SQLModel]
+        The `SQLModel` class to convert.
+
+    Returns
+    -------
+    Dict[str, Dict[str, Any]]
+        A dictionary where keys are column names and values are dictionaries
+        containing `dlt` column properties (e.g., `data_type`, `nullable`).
+    """
     columns = {}
     for name, field in model.model_fields.items():
         py_type = field.annotation
@@ -324,7 +440,32 @@ def _sqlmodel_to_dlt_columns(model: Type[SQLModel]) -> dict:
 # --- Generators ---
 
 
-def _yield_h5_batches(path: str, key: str):
+def _yield_h5_batches(path: str, key: str) -> Iterable[pd.DataFrame]:
+    """
+    Generator that yields Pandas DataFrames in chunks from an HDF5 table.
+
+    This function provides a memory-efficient way to process large HDF5 tables
+    by reading them in smaller batches, which can then be ingested by `dlt`.
+
+    Parameters
+    ----------
+    path : str
+        The file system path to the HDF5 file.
+    key : str
+        The HDF5 key (path within the HDF5 file) to the table to be read.
+
+    Yields
+    ------
+    pd.DataFrame
+        A chunk of the HDF5 table as a Pandas DataFrame.
+
+    Raises
+    ------
+    ImportError
+        If `PyTables` (the `tables` library) is not installed.
+    KeyError
+        If the specified `key` (table path) is not found within the HDF5 file.
+    """
     try:
         import tables
     except ImportError:
@@ -337,7 +478,29 @@ def _yield_h5_batches(path: str, key: str):
             yield chunk
 
 
-def _yield_parquet_batches(path: str):
+def _yield_parquet_batches(path: str) -> Iterable[pd.DataFrame]:
+    """
+    Generator that yields Pandas DataFrames in batches from a Parquet file.
+
+    This function provides a memory-efficient way to process large Parquet files
+    by reading them in smaller batches using `pyarrow`, which are then converted
+    to Pandas DataFrames for ingestion by `dlt`.
+
+    Parameters
+    ----------
+    path : str
+        The file system path to the Parquet file.
+
+    Yields
+    ------
+    pd.DataFrame
+        A batch of the Parquet file as a Pandas DataFrame.
+
+    Raises
+    ------
+    ImportError
+        If `pyarrow` library is not installed.
+    """
     import pyarrow.parquet as pq
 
     parquet_file = pq.ParquetFile(path)
@@ -345,6 +508,23 @@ def _yield_parquet_batches(path: str):
         yield batch.to_pandas()
 
 
-def _yield_csv_batches(path: str):
+def _yield_csv_batches(path: str) -> Iterable[pd.DataFrame]:
+    """
+    Generator that yields Pandas DataFrames in chunks from a CSV file.
+
+    This function provides a memory-efficient way to process large CSV files
+    by reading them in smaller chunks using `pandas.read_csv`'s `chunksize`
+    parameter, which can then be ingested by `dlt`.
+
+    Parameters
+    ----------
+    path : str
+        The file system path to the CSV file.
+
+    Yields
+    ------
+    pd.DataFrame
+        A chunk of the CSV file as a Pandas DataFrame.
+    """
     for chunk in pd.read_csv(path, chunksize=50000):
         yield chunk

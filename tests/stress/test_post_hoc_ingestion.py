@@ -1,12 +1,17 @@
 # tests/stress/test_post_hoc_ingestion.py
 
 """
-This module contains stress tests for Consist's "post-hoc" or "offline" ingestion capabilities,
-particularly relevant for High-Performance Computing (HPC) workflows.
+Consist Post-Hoc (Offline) Ingestion Stress Tests
 
-It verifies that Consist can track runs and artifacts by writing only JSON metadata during
-the primary computation phase, and then later (post-hoc) ingest the associated data into
-the database for analytical querying, correctly attributing provenance.
+This module contains stress tests for Consist's "post-hoc" or "offline" ingestion
+capabilities, which are particularly relevant for High-Performance Computing (HPC)
+or distributed computing workflows.
+
+It verifies that Consist can track runs and artifacts by writing only minimal
+JSON metadata during the primary computation phase. Later, the associated data
+can be ingested into the DuckDB database for analytical querying, correctly
+attributing provenance back to the original computation run. This decouples
+computation from data materialization.
 """
 import logging
 import pytest
@@ -25,9 +30,39 @@ N_ROWS = 1_000_000
 @pytest.mark.heavy
 def test_offline_ingestion(tmp_path):
     """
-    Demonstrates the "HPC Workflow":
-    1. Simulation Nodes run efficiently (creating Files + JSON only).
-    2. A Head Node runs later to ingest data into DuckDB for analysis.
+    Tests Consist's "post-hoc" or "offline" ingestion workflow, simulating an HPC scenario.
+
+    This test demonstrates a common High-Performance Computing (HPC) pattern:
+    1.  **Simulation Phase**: Computations run on a cluster, efficiently generating
+        large data files and minimal JSON metadata without taxing a shared database.
+    2.  **Ingestion Phase**: A separate "head node" process later collects the JSON
+        metadata and ingests the associated data files into a central DuckDB database
+        for analysis.
+
+    This verifies that Consist can correctly reconstruct run and artifact provenance
+    from JSON logs and attribute ingested data to historical runs.
+
+    What happens:
+    1. A `Tracker` is initialized with `hashing_strategy="fast"`.
+    2. **Phase 1 (HPC Simulation)**:
+       - A large Pandas DataFrame (`df_sim`) is created.
+       - A Consist run ("run_hpc_01") is started.
+       - The DataFrame is saved to a Parquet file.
+       - The Parquet file is logged as a "weather_data" artifact using `consist.log_artifact`.
+       - *Crucially, `tracker.ingest()` is NOT called in this phase.*
+    3. **Phase 2 (Nightly Ingestor - Post-Hoc)**:
+       - The `consist.json` file generated in Phase 1 is loaded.
+       - The `Run` and `Artifact` objects are reconstructed from the JSON metadata.
+       - The physical data (Parquet file) is loaded.
+       - `tracker.ingest()` is called, explicitly passing the `restored_artifact` and `restored_run`
+         to ensure the data is linked to the original run.
+    4. **Phase 3 (Verification)**: A view (`v_weather`) is created for "weather_data".
+
+    What's checked:
+    - After Phase 1, the `consist.json` file exists.
+    - After Phase 3, querying `v_weather` reveals that `consist_run_id` for the ingested
+      data correctly matches "run_hpc_01".
+    - The row count in the `v_weather` view matches the original `N_ROWS` from the simulation.
     """
     run_dir = tmp_path / "hpc_run_01"
     db_path = str(tmp_path / "central_warehouse.duckdb")

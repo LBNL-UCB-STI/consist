@@ -10,6 +10,25 @@ from consist.core.tracker import Tracker
 
 
 class Household(SQLModel, table=True):
+    """
+    A SQLModel schema representing a household entity, used for testing
+    data ingestion and hybrid view generation with varying schemas.
+
+    This model defines a basic household structure with an ID, income, and
+    an optional number of persons, which helps in demonstrating how Consist
+    handles schema drift between different data sources.
+
+    Attributes
+    ----------
+    id : int
+        A unique identifier for the household, serving as the primary key.
+    income : float
+        The income of the household.
+    persons : Optional[int], default None
+        The number of persons in the household. This field is optional
+        to facilitate testing schema drift scenarios.
+    """
+
     __tablename__ = "households"
     id: int = Field(primary_key=True)
     income: float
@@ -29,16 +48,24 @@ def test_hybrid_view_generation(tracker, tmp_path):
     "hot" data contains a column that the "cold" data lacks.
 
     What happens:
-    1. A Parquet file is created representing "cold" data, missing a 'persons' column.
-    2. A run is executed to log this file as a 'households' artifact.
-    3. A separate run ingests "hot" data (which includes the 'persons' column) into the
-       database, also for the 'households' concept.
-    4. A hybrid view `v_households` is created.
+    1. A `Tracker` is initialized.
+    2. **Cold Data Setup**: A Parquet file (`cold.parquet`) is created representing "cold"
+       data. This DataFrame contains 'id' and 'income' columns but explicitly *lacks*
+       a 'persons' column. This file is logged as a 'households' artifact within "run_cold".
+    3. **Hot Data Setup**: A list of dictionaries representing "hot" data is prepared.
+       This data *includes* the 'persons' column. It is then ingested into the database
+       as a 'households' artifact within "run_hot", using the `Household` SQLModel schema.
+    4. A hybrid view named `v_households` is created for the 'households' concept.
 
     What's checked:
-    - The final view contains records from both the hot and cold sources.
-    - The record from the "cold" source has a `NULL` (or `NaN`) value for the 'persons' column.
-    - The record from the "hot" source has the correct value for the 'persons' column.
+    - The final view `v_households` contains exactly two records, one from the cold source
+      and one from the hot source.
+    - The record originating from the "cold" source (year 2010) has a `NULL` (or `NaN`)
+      value for the 'persons' column, demonstrating correct schema reconciliation.
+    - The record originating from the "hot" source (year 2011) has the correct integer
+      value (3) for the 'persons' column.
+    - The `consist_year` column is correctly populated for both records, confirming
+      the injection of run metadata into the view.
     """
     # 1. Cold Data (Missing 'persons')
     cold_df = pd.DataFrame({"id": [1], "income": [50000.0]})
@@ -74,23 +101,27 @@ def test_hybrid_view_generation(tracker, tmp_path):
 
 def test_pure_cold_view(tracker, tmp_path):
     """
-    Tests the creation of a view when only "cold" (file-based) data exists.
+    Tests the creation of a hybrid view when only "cold" (file-based) data exists
+    for a given concept, without any corresponding "hot" (ingested) data.
 
     This test is critical for ensuring that Consist can operate in a "file-only" mode,
-    where no data has been materialized into the database yet. It verifies that the
-    `ViewFactory` can correctly create a view that unions multiple file-based artifacts.
+    where no data has been materialized into the database. It verifies that the
+    `ViewFactory` can correctly create a view that unions multiple file-based artifacts
+    and injects Consist's system columns.
 
     What happens:
-    1. Two distinct Parquet files are created.
-    2. Two separate runs are executed, each logging one of the files under the same
-       concept key ('zones').
-    3. A view `v_zones` is created for the 'zones' concept. At this point, no
-       `global_tables.zones` table exists in the database.
+    1. Two distinct Parquet files (`f1.parquet`, `f2.parquet`) are created with sample data.
+    2. Two separate runs ("r1", "r2") are executed. Each logs one of the Parquet files
+       under the same concept key ('zones'), effectively creating two "cold" artifacts.
+       No data is ingested into the database for this concept.
+    3. A hybrid view named `v_zones` is created for the 'zones' concept.
 
     What's checked:
-    - The resulting view contains the data from both Parquet files.
+    - The `create_view` operation completes successfully without errors, even though
+      no `global_tables.zones` materialized table exists.
+    - Querying the resulting view `v_zones` returns all records from both Parquet files.
     - The Consist system columns (e.g., `consist_run_id`) are correctly injected into
-      the view's output, even for file-only sources.
+      the view's output, associated with their respective runs.
     """
     # Create two parquet files
     df1 = pd.DataFrame({"id": [1], "val": ["A"]})
@@ -120,23 +151,30 @@ def test_pure_cold_view(tracker, tmp_path):
 
 def test_bidirectional_schema_drift(tracker, tmp_path):
     """
-    Tests the view's ability to handle bidirectional schema drift between "hot" and "cold" data.
+    Tests the hybrid view's ability to handle bidirectional schema drift between
+    "hot" and "cold" data sources.
 
-    This test verifies that DuckDB's `UNION ALL BY NAME` feature correctly handles cases
-    where the file-based data has a column that the database table lacks, and vice-versa.
-    The final view should contain all columns from both sources, with `NULL` values filling
-    in where a column is absent for a given record.
+    This test verifies that DuckDB's `UNION ALL BY NAME` feature, used by Consist's
+    `ViewFactory`, correctly handles scenarios where columns present in the file-based
+    data are missing from the database table, and vice-versa. The final view should
+    contain all columns from both sources, with `NULL` values filling in for missing data.
 
     What happens:
-    1. A "cold" Parquet file is created with a `legacy_col` but no `new_col`.
-    2. A "hot" data record is ingested into the database with a `new_col` but no `legacy_col`.
-    3. A hybrid view is created to union these two sources.
+    1. **Cold Data Setup**: A Parquet file (`drift.parquet`) is created representing
+       "cold" data. This file contains an `id` and a `legacy_col` but *no* `new_col`.
+       It is logged as a 'drift_test' artifact within "r_old".
+    2. **Hot Data Setup**: A list of dictionaries is prepared representing "hot" data.
+       This data contains an `id` and a `new_col` but *no* `legacy_col`. It is ingested
+       into the database as a 'drift_test' artifact within "r_new", using a dynamically
+       defined `DriftModel` schema.
+    3. A hybrid view named `v_drift` is created for the 'drift_test' concept.
 
     What's checked:
-    - The record originating from the "cold" source has the correct value for `legacy_col`
-      and a `NULL` value for `new_col`.
-    - The record originating from the "hot" source has a `NULL` value for `legacy_col`
-      and the correct value for `new_col`.
+    - The `v_drift` view successfully combines records from both sources.
+    - The record originating from the "cold" source (id=1) correctly shows its `legacy_col`
+      value and `NULL` (or `NaN`) for `new_col`.
+    - The record originating from the "hot" source (id=2) correctly shows its `new_col`
+      value and `NULL` (or `NaN`) for `legacy_col`.
     """
     # Cold: Has 'legacy_col', missing 'new_col'
     cold_df = pd.DataFrame({"id": [1], "legacy_col": ["old"]})
@@ -177,20 +215,23 @@ def test_bidirectional_schema_drift(tracker, tmp_path):
 
 def test_empty_state_safety(tracker):
     """
-    Tests the system's resilience when creating a view for a concept that does not exist.
+    Tests the `ViewFactory`'s resilience when creating a view for a concept that has
+    no associated data ("hot" or "cold").
 
     This test ensures that requesting a view for a `concept_key` that has neither
-    materialized data nor any file-based artifacts does not cause an error. The expected
-    behavior is the creation of a valid, but empty, SQL view.
+    materialized data in the database nor any file-based artifacts does not cause
+    an error. The expected behavior is the creation of a valid, but empty, SQL view,
+    allowing downstream queries to run without crashing.
 
     What happens:
-    - `create_view` is called with a `concept_key` ("ghost_concept") that has no associated
-      artifacts or database tables.
+    - `tracker.create_view` is called with a `concept_key` ("ghost_concept") that
+      is known not to have any corresponding `Artifact`s or database tables.
 
     What's checked:
-    - The operation completes without raising an exception.
-    - The resulting view (`v_ghost`) can be queried (e.g., `SELECT count(*)`).
-    - Querying the view returns an empty result set.
+    - The `create_view` operation completes without raising an exception.
+    - Querying the resulting view (`v_ghost`) for a `COUNT(*)` returns 0.
+    - A `pd.read_sql` query on the view also returns an empty DataFrame,
+      confirming the view's existence and emptiness.
     """
     tracker.create_view("v_ghost", "ghost_concept")
 
@@ -206,23 +247,29 @@ def test_empty_state_safety(tracker):
 
 def test_view_with_mounts(tmp_path):
     """
-    Tests that the ViewFactory correctly handles virtualized URIs using mounts.
+    Tests that the `ViewFactory` correctly resolves virtualized URIs using configured mounts
+    when creating a hybrid view.
 
-    This test ensures that when an artifact is logged with a path that falls under a
-    configured mount point, the `ViewFactory` can correctly resolve the virtualized URI
-    (e.g., "inputs://...") back to an absolute file path that DuckDB can use to read the file.
+    This test verifies a core aspect of Consist's "Path Virtualization" where portable
+    URIs (e.g., "inputs://...") stored in the provenance can be translated back into
+    absolute file system paths that DuckDB can use to read the actual data.
 
     What happens:
-    1. A Tracker is initialized with a specific `mounts` dictionary mapping "inputs" to a temp directory.
-    2. A Parquet file is created inside this mounted directory.
-    3. An artifact is logged using the file's absolute path.
-    4. A view is created for the concept associated with the artifact.
+    1. A `Tracker` is initialized with a specific `mounts` dictionary that maps the
+       "inputs" scheme to a temporary `data_dir`.
+    2. A Parquet file (`mounted.parquet`) is created inside this `data_dir`.
+    3. An artifact is logged using the file's absolute path. Consist's `Tracker`
+       should automatically convert this into a virtualized URI ("inputs://mounted.parquet").
+    4. A hybrid view named `v_mounted` is created for the "mounted_data" concept.
 
     What's checked:
-    - The `Artifact` table in the database correctly stores the virtualized URI ("inputs://...").
-    - The created view can be queried successfully, proving that the `ViewFactory` was able
-      to resolve the virtualized URI back to an absolute path for DuckDB's `read_parquet` function.
-    - The data in the view is correct.
+    - The `Artifact` table in the database correctly stores the virtualized URI
+      ("inputs://mounted.parquet") for the logged artifact.
+    - The created view (`v_mounted`) can be queried successfully. This implicitly
+      proves that the `ViewFactory` correctly resolved the virtualized URI back
+      to an absolute path that DuckDB's `read_parquet` function could access.
+    - The data retrieved from `v_mounted` is correct, confirming the integrity of
+      the data loading process through the virtualized path.
     """
     # Setup tracker with mounts (Cannot use default fixture here)
     data_dir = tmp_path / "data_mount"
@@ -264,21 +311,31 @@ def test_view_with_mounts(tmp_path):
 
 def test_hybrid_view_with_multiple_cold_schema_drift(tracker, tmp_path):
     """
-    Tests the ViewFactory's ability to create a hybrid view from multiple "cold" (file-based)
-    artifacts, where each file has a different schema, demonstrating schema drift handling
-    with only file-based data.
+    Tests the `ViewFactory`'s ability to create a hybrid view from multiple "cold"
+    (file-based) artifacts, where each file has a different schema, demonstrating
+    robust schema drift handling with only file-based data.
+
+    This test verifies that DuckDB's `UNION ALL BY NAME` capability (used by Consist)
+    correctly merges data from Parquet files with differing columns, ensuring that
+    all available data is present and missing columns are filled with `NULL`s.
 
     What happens:
-    1. A first run logs a Parquet file with columns `['id', 'value_a']`.
-    2. A second run logs another Parquet file for the same concept, but with an additional
-       column `value_b` (`['id', 'value_a', 'value_b']`).
-    3. A hybrid view is created combining these two cold data sources.
+    1. A `Tracker` is initialized.
+    2. **First Cold Data**: A Parquet file (`file1.parquet`) is created with columns
+       `['id', 'value_a']`. It is logged as a 'drift_concept' artifact within "run_cold_schema_1".
+    3. **Second Cold Data**: Another Parquet file (`file2.parquet`) is created for the
+       same 'drift_concept', but with an additional column `value_b` (`['id', 'value_a', 'value_b']`).
+       It is logged as a 'drift_concept' artifact within "run_cold_schema_2".
+    4. A hybrid view named `v_drift_concept` is created over the 'drift_concept' artifacts.
 
     What's checked:
-    - The final view contains all rows from both Parquet files.
-    - Rows from the first file (missing `value_b`) have `NaN` for `value_b`.
-    - Rows from the second file (having `value_b`) have the correct `value_b` data.
-    - System columns like `consist_run_id` are correctly associated with their respective runs.
+    - The final view contains all four rows from both Parquet files.
+    - Rows originating from `file1.parquet` (from `run_cold_schema_1`) correctly have `NaN`
+      for the `value_b` column, as it was missing in their original schema.
+    - Rows originating from `file2.parquet` (from `run_cold_schema_2`) correctly have the
+      `value_b` data.
+    - The `consist_run_id` system column is correctly associated with its respective runs
+      for all records in the view.
     """
     # 1. First Cold Data (Missing 'value_b')
     df1 = pd.DataFrame({"id": [1, 2], "value_a": [10, 20]})

@@ -12,7 +12,24 @@ import logging
 def test_start_run_with_exception(tracker):
     """
     Tests that if an exception is raised within a run context, the run's status is
-    marked as 'failed' in both the JSON log and the database.
+    correctly marked as 'failed' in both the JSON log and the database.
+
+    This ensures that Consist reliably captures failures in workflows and records
+    them in its provenance tracking system, providing accurate historical data
+    about execution outcomes.
+
+    What happens:
+    1. A `tracker.start_run` context is initiated.
+    2. Inside the run, an input artifact is logged.
+    3. A `ValueError` is intentionally raised, simulating a failure in the user's code.
+
+    What's checked:
+    - The `ValueError` is caught and re-raised by the context manager.
+    - The `consist.json` log file exists.
+    - The run's `status` in the JSON log is "failed".
+    - The `run.meta` in the JSON log contains an "error" entry with the exception message.
+    - In the DuckDB database, the corresponding `Run` record also has `status="failed"`
+      and the error message in its `meta` field.
     """
     with pytest.raises(ValueError, match="Something went wrong"):
         with tracker.start_run("run_exception", "error_model"):
@@ -39,8 +56,19 @@ def test_start_run_with_exception(tracker):
 
 def test_log_artifact_outside_of_run_context(tracker):
     """
-    Tests that calling `log_artifact` outside of an active run context
-    raises a RuntimeError, preventing improper use.
+    Tests that calling `tracker.log_artifact()` outside of an active run context
+    raises a `RuntimeError`.
+
+    This prevents improper use of `log_artifact` and ensures that all artifacts
+    are always associated with a specific `Run` for correct provenance tracking.
+
+    What happens:
+    1. `tracker.log_artifact()` is called directly, without being enclosed
+       in a `with tracker.start_run():` block.
+
+    What's checked:
+    - The call raises a `RuntimeError` with a message indicating that `log_artifact`
+      cannot be called outside a run context.
     """
     with pytest.raises(
         RuntimeError, match="Cannot log artifact outside of a run context"
@@ -50,12 +78,21 @@ def test_log_artifact_outside_of_run_context(tracker):
 
 def test_ingest_outside_of_run_context(tracker):
     """
-    Tests that calling `ingest` outside of an active run context
-    raises a RuntimeError, preventing improper use.
-    """
+    Tests that calling `tracker.ingest()` outside of an active run context
+    raises a `RuntimeError`.
 
-    # We need a dummy artifact to pass to the method.
-    # Crucially, we create it directly, not via tracker.log_artifact.
+    This ensures that all data ingestion operations are properly attributed
+    to a specific `Run`, maintaining the integrity of the provenance graph.
+
+    What happens:
+    1. A dummy `Artifact` is created (without logging it in a run).
+    2. `tracker.ingest()` is called with this dummy artifact, without being
+       enclosed in a `with tracker.start_run():` block.
+
+    What's checked:
+    - The call raises a `RuntimeError` with a message indicating that `ingest`
+      cannot be called outside an active run context.
+    """
     dummy_artifact = Artifact(key="dummy", uri="dummy.csv", driver="csv")
 
     with pytest.raises(
@@ -67,9 +104,28 @@ def test_ingest_outside_of_run_context(tracker):
 
 def test_tracker_db_write_failure_tolerated(tracker, mocker, caplog, run_dir):
     """
-    Tests that if the DuckDB write fails, the Consist Tracker tolerates the failure,
-    logs a warning, and still successfully writes the run and artifact data to the
-    consist.json file, upholding the 'JSON for Truth' principle.
+    Tests that Consist's `Tracker` tolerates database write failures, logs a warning,
+    and still successfully writes the run and artifact data to the `consist.json` file,
+    upholding the 'JSON for Truth' principle.
+
+    This test verifies the resilience mechanism of Consist's "dual-write" strategy,
+    ensuring that the workflow can complete even if the analytical database (`DuckDB`)
+    encounters issues, with the `consist.json` serving as the definitive record.
+
+    What happens:
+    1. The `sqlmodel.Session.commit` method is mocked to raise an exception, simulating
+       a database commit failure.
+    2. A `tracker.start_run` context is initiated, and an artifact is logged within it.
+       These operations would normally trigger database writes.
+
+    What's checked:
+    - The `tracker.start_run` context manager completes without an unhandled exception.
+    - Warning messages are logged indicating that both run and artifact synchronization
+      to the database failed.
+    - The `consist.json` file is successfully created and contains the complete run
+      and artifact details, proving the in-memory state was correctly persisted to JSON.
+    - Crucially, the DuckDB database does *not* contain records for the run or artifact,
+      confirming that the simulated database commit failure prevented persistence.
     """
     caplog.set_level(logging.WARNING)
 
@@ -130,18 +186,29 @@ def test_tracker_db_write_failure_tolerated(tracker, mocker, caplog, run_dir):
 
 def test_tracker_robustness_to_missing_input_file(tracker, caplog):
     """
-    Tests that the tracker gracefully handles a missing input file during hashing.
+    Tests that the `Tracker` gracefully handles a missing physical input file
+    when attempting to compute the run's input hash.
+
+    This test ensures that if a user logs an input artifact that points to a
+    non-existent file, Consist does not crash. Instead, it logs a warning
+    and marks the run's `input_hash` and `signature` as "error" to prevent
+    unreliable cache hits based on invalid input provenance.
 
     What happens:
-    1. A run is started, and an input file is logged that does not exist on the filesystem.
-    2. The tracker proceeds with the run. When it attempts to compute the `input_hash`
-       at the end of the `start_run` setup, the hashing will fail.
+    1. A `tracker.start_run` context is initiated.
+    2. An input artifact is logged, pointing to a file path (`missing_file_path`)
+       that does not exist on the filesystem.
+    3. The tracker proceeds with the run. When it attempts to compute the
+       `input_hash` during the `start_run` setup, the hashing of the missing
+       file will fail.
 
     What's checked:
-    - The run does not crash.
-    - A warning is logged indicating that the input hash computation failed.
-    - The `input_hash` and `signature` fields for the run are set to "error" in both
-      the JSON log and the database, preventing false cache hits in the future.
+    - The run completes its execution without crashing.
+    - A warning message is logged by Consist, indicating that the input hash
+      computation failed for the missing file.
+    - In both the `consist.json` log and the DuckDB database, the `input_hash`
+      and `signature` fields for the run are set to the string "error".
+    - The run's `status` remains "completed" if no other errors occur.
     """
     run_id = "run_missing_input"
     missing_file_path = "path/to/non_existent_input.csv"

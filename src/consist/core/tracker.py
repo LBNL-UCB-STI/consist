@@ -28,11 +28,24 @@ from consist.core.context import push_tracker, pop_tracker
 
 class OutputCapture:
     """
-    Helper object to hold artifacts captured during a 'capture_outputs' block.
-    Allows users to access the auto-logged artifacts immediately after the block.
+    A helper object to temporarily hold artifacts captured during a `capture_outputs` block.
+
+    This class provides a convenient way for users to access the artifacts that were
+    automatically logged by the system immediately after a `capture_outputs` context manager
+    finishes execution.
+
+    Attributes:
+        artifacts (List[Artifact]): A list of `Artifact` objects that were
+                                    captured and logged during the `capture_outputs` block.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
+        """
+        Initializes the OutputCapture object.
+
+        This constructor sets up an empty list to store `Artifact` objects that
+        will be captured during a `capture_outputs` context.
+        """
         self.artifacts: List[Artifact] = []
 
 
@@ -197,18 +210,23 @@ class Tracker:
 
     def _validate_run_outputs(self, run: Run) -> bool:
         """
-        Verifies that all output artifacts of a cached run are still accessible,
-        either on disk or marked as ingested in the database.
+        Verifies that all output artifacts of a cached run are still accessible.
 
         This method is crucial for implementing **"Ghost Mode"** (where data in DB
         allows cache hits even if files are missing) and **"Self-Healing"** (forcing
-        a re-run if data is missing from both disk and DB).
+        a re-run if data is missing from both disk and DB). It checks if each output
+        artifact associated with the given run exists on disk or is marked as ingested
+        in the database.
 
-        Args:
-            run (Run): The cached `Run` object whose outputs need validation.
+        Parameters
+        ----------
+        run : Run
+            The cached `Run` object whose outputs need validation.
 
-        Returns:
-            bool: True if all outputs are accessible, False otherwise.
+        Returns
+        -------
+        bool
+            True if all outputs are accessible (either on disk or ingested), False otherwise.
         """
         if not self.engine:
             return True
@@ -236,10 +254,38 @@ class Tracker:
 
     def _execute_with_retry(
         self, func: Callable, operation_name: str = "db_op", retries: int = 20
-    ):
+    ) -> Any:
         """
-        Executes a function with exponential backoff if a Database Lock occurs.
-        Crucial for concurrent DuckDB usage.
+        Executes a given function with retry logic and exponential backoff for database lock errors.
+
+        This method is crucial for handling concurrent access to the DuckDB database,
+        especially when multiple processes or threads might try to write simultaneously.
+        It specifically catches `OperationalError` and `DatabaseError` which often
+        indicate locking issues in DuckDB/SQLite.
+
+        Parameters
+        ----------
+        func : Callable
+            The function to execute. This function should contain the database operation
+            that might fail due to locking.
+        operation_name : str, default "db_op"
+            A descriptive name for the operation being performed, used in logging messages.
+        retries : int, default 20
+            The maximum number of times to retry the function execution before giving up.
+
+        Returns
+        -------
+        Any
+            The result of the executed function `func`.
+
+        Raises
+        ------
+        ConcurrentModificationError
+            If the function fails to execute successfully after all retries due to a
+            persistent database lock.
+        Exception
+            Any other exception raised by `func` that is not related to database locking
+            will be re-raised immediately.
         """
         for i in range(retries):
             try:
@@ -249,10 +295,10 @@ class Tracker:
                 msg = str(e)
                 # Broader check for lock messages
                 if (
-                        "Conflicting lock" in msg
-                        or "IO Error" in msg
-                        or "Could not set lock" in msg
-                        or "database is locked" in msg  # common in sqlite/duckdb
+                    "Conflicting lock" in msg
+                    or "IO Error" in msg
+                    or "Could not set lock" in msg
+                    or "database is locked" in msg  # common in sqlite/duckdb
                 ):
                     if i == retries - 1:
                         logging.error(
@@ -262,7 +308,7 @@ class Tracker:
 
                     # Exponential Backoff with Jitter
                     # slightly increased backoff factor to handling higher contention
-                    sleep_time = (0.1 * (1.5 ** i)) + random.uniform(0.05, 0.2)
+                    sleep_time = (0.1 * (1.5**i)) + random.uniform(0.05, 0.2)
                     sleep_time = min(sleep_time, 2.0)  # Cap at 2 seconds
                     sleep(sleep_time)
                 else:
@@ -277,11 +323,114 @@ class Tracker:
         depends_on: Optional[List[Union[str, Path, Artifact]]] = None,
         capture_dir: Optional[Union[str, Path]] = None,
         capture_pattern: str = "*",
-        **run_kwargs,
-    ):
-        def decorator(func):
+        **run_kwargs: Any,
+    ) -> Callable:
+        """
+        Decorator to register a function as a Consist task, enabling provenance tracking and caching.
+
+        This decorator wraps a function, automatically managing its execution within a
+        `Consist` run context. It handles:
+        -   **Argument Resolution**: Automatically detects `Artifact` objects passed as arguments
+            or within `depends_on` and logs them as inputs.
+        -   **Configuration Hashing**: Computes a configuration hash from the function's
+            arguments and `run_kwargs`.
+        -   **Cache Management**: Based on `cache_mode`, it performs cache lookups and
+            either reuses previous results (cache hit) or executes the function (cache miss).
+        -   **Output Capture**: If `capture_dir` is specified, it automatically logs new
+            or modified files in that directory as output artifacts.
+        -   **Return Value Handling**: Logs the function's return value (if it's a path or a dict of paths)
+            as an output artifact.
+
+        Parameters
+        ----------
+        cache_mode : str, default "reuse"
+            Strategy for caching.
+            "reuse": Attempts to find and reuse a previously cached run.
+            "overwrite": Executes the task and updates the cache with new results.
+            "readonly": Executes the task but does not save new results to the cache.
+        depends_on : Optional[List[Union[str, Path, Artifact]]], optional
+            A list of explicit dependencies for the task. These can be file paths (str or Path)
+            or `Artifact` objects. Files will be hashed as inputs. If a glob pattern is provided
+            for a path, all matching files will be included as dependencies.
+        capture_dir : Optional[Union[str, Path]], optional
+            If provided, Consist will automatically log any new or modified files
+            within this directory as output artifacts after the decorated function
+            completes. The function decorated with `capture_dir` must return `None`.
+        capture_pattern : str, default "*"
+            A glob pattern to filter files captured by `capture_dir`.
+        **run_kwargs : Any
+            Additional keyword arguments passed directly to the `start_run` method,
+            such as `year`, `iteration`, or custom metadata.
+
+        Returns
+        -------
+        Callable
+            The decorated function, which, when called, will execute within a Consist run context.
+
+        Raises
+        ------
+        ValueError
+            If `capture_dir` is used and the decorated function returns a non-None value.
+            If a dictionary is returned, but its values are not `Path` objects.
+        FileNotFoundError
+            If the task returns a path that does not exist.
+        TypeError
+            If the task returns an unsupported type.
+
+        Notes
+        -----
+        The decorated function's arguments can be `Artifact` objects directly,
+        which will automatically be logged as inputs.
+        """
+
+        def decorator(func: Callable) -> Callable:
+            """
+            The actual decorator function that wraps the user's task function.
+
+            Parameters
+            ----------
+            func : Callable
+                The user-defined function to be wrapped as a Consist task.
+
+            Returns
+            -------
+            Callable
+                A wrapped function that includes provenance tracking, caching, and output management.
+            """
+
             @functools.wraps(func)
-            def wrapper(*args, **kwargs):
+            def wrapper(*args: Any, **kwargs: Any) -> Any:
+                """
+                The wrapper function that executes the Consist task with provenance and caching.
+
+                This function intercepts the call to the original task function, sets up
+                the Consist run context, handles input/output logging, cache lookup,
+                and output capture, and then executes the original function if necessary.
+
+                Parameters
+                ----------
+                *args : Any
+                    Positional arguments passed to the original task function.
+                **kwargs : Any
+                    Keyword arguments passed to the original task function.
+
+                Returns
+                -------
+                Any
+                    The return value of the original task function, potentially
+                    wrapped as an `Artifact` or a dictionary of `Artifact`s if
+                    `capture_dir` is not used. If `capture_dir` is used, returns
+                    a list of captured `Artifact`s.
+
+                Raises
+                ------
+                ValueError
+                    If `capture_dir` is specified and the decorated function returns a non-None value.
+                FileNotFoundError
+                    If the task returns a path that does not exist.
+                TypeError
+                    If the task returns an unsupported type.
+                """
                 sig = inspect.signature(func)
                 try:
                     bound = sig.bind(*args, **kwargs)
@@ -333,7 +482,9 @@ class Tracker:
                                         inputs.append(str(match.resolve()))
 
                                 if not found_any:
-                                    logging.warning(f"[Consist] No files found matching dependency pattern: {dep}")
+                                    logging.warning(
+                                        f"[Consist] No files found matching dependency pattern: {dep}"
+                                    )
 
                             else:
                                 # Normal Path (File or Directory)
@@ -341,7 +492,9 @@ class Tracker:
                                 if p.exists():
                                     inputs.append(str(p))
                                 else:
-                                    logging.warning(f"[Consist] Dependency not found: {dep}")
+                                    logging.warning(
+                                        f"[Consist] Dependency not found: {dep}"
+                                    )
 
                 model_name = func.__name__
                 run_id = f"{model_name}_{uuid.uuid4().hex[:8]}"
@@ -407,7 +560,36 @@ class Tracker:
     @contextmanager
     def capture_outputs(
         self, directory: Union[str, Path], pattern: str = "*", recursive: bool = False
-    ):
+    ) -> OutputCapture:
+        """
+        A context manager to automatically capture and log new or modified files in a directory.
+
+        This context manager is used within a `@task` function or `start_run` block
+        to monitor a specified directory. Any files created or modified within this
+        directory during the execution of the `with` block will be automatically
+        logged as output artifacts of the current run.
+
+        Parameters
+        ----------
+        directory : Union[str, Path]
+            The path to the directory to monitor for new or modified files.
+        pattern : str, default "*"
+            A glob pattern (e.g., "*.csv", "data_*.parquet") to filter which files
+            are captured within the specified directory. Defaults to all files.
+        recursive : bool, default False
+            If True, the capture will recursively scan subdirectories within `directory`.
+
+        Yields
+        ------
+        OutputCapture
+            An `OutputCapture` object containing a list of `Artifact` objects that were
+            captured and logged after the `with` block finishes.
+
+        Raises
+        ------
+        RuntimeError
+            If `capture_outputs` is used outside of an active `start_run` context.
+        """
         if not self.current_consist:
             raise RuntimeError(
                 "capture_outputs must be used within a start_run context."
@@ -458,8 +640,53 @@ class Tracker:
         config: Union[Dict[str, Any], BaseModel, None] = None,
         inputs: Optional[List[Union[str, Artifact]]] = None,
         cache_mode: str = "reuse",
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> "Tracker":
+        """
+        Context manager to initiate and manage the lifecycle of a Consist run.
+
+        This is the core entry point for defining a reproducible and observable unit
+        of work. It handles the creation of a `Run` object, computes its identity
+        (hashes for configuration, inputs, and code), performs cache lookups,
+        and manages dual-write logging of provenance metadata.
+
+        Parameters
+        ----------
+        run_id : str
+            A unique identifier for the current run.
+        model : str
+            A descriptive name for the model or process being executed (e.g., "linear_regression", "data_ingestion").
+        config : Union[Dict[str, Any], BaseModel, None], optional
+            A dictionary or Pydantic `BaseModel` instance representing the configuration
+            parameters for this run. This configuration is hashed to form part of the run's identity.
+        inputs : Optional[List[Union[str, Artifact]]], optional
+            A list of input paths (strings) or `Artifact` objects that this run depends on.
+            These are used to compute the input hash and establish lineage.
+        cache_mode : str, default "reuse"
+            Strategy for caching:
+            - "reuse": Attempts to find a matching run in the cache. If found and valid,
+                       the current run becomes a cache hit and its outputs are hydrated.
+                       Otherwise, the run executes.
+            - "overwrite": The run will always execute, and its results will overwrite
+                           any existing cache entry for its signature.
+            - "readonly": The run will perform a cache lookup. If a hit, outputs are hydrated.
+                          If a miss, the run executes but its results are NOT saved to the cache.
+        **kwargs : Any
+            Additional metadata to store with the `Run` object in its `meta` field.
+            Special keywords `year` and `iteration` can be used.
+
+        Yields
+        ------
+        Tracker
+            The current `Tracker` instance, allowing access to `log_artifact`, `ingest`, etc.,
+            within the `with` block.
+
+        Raises
+        ------
+        Exception
+            Any exception raised within the `with` block will be caught, the run
+            status will be marked as "failed", and then the exception will be re-raised.
+        """
         if config is None:
             config = {}
         elif isinstance(config, BaseModel):
@@ -616,41 +843,51 @@ class Tracker:
         direction: str = "output",
         schema: Optional[Type[SQLModel]] = None,
         driver: Optional[str] = None,
-        **meta,
+        **meta: Any,
     ) -> Artifact:
         """
         Logs an artifact (file or data reference) within the current run context.
 
         This method supports:
-        - **Automatic Input Discovery**: If an input `path` matches a previously
-          logged output artifact, Consist automatically links them, building the
-          provenance graph. This is a key part of **"Auto-Forking"**.
-        - **Path Virtualization**: Converts absolute file system paths to portable URIs
-          (e.g., `inputs://data.csv`) using configured mounts, adhering to
-          **"Path Resolution & Mounts"**.
-        - **Schema Metadata Injection**: Embeds schema information (if provided) into the
-          artifact's metadata, useful for later "Strict Mode" validation or introspection.
+        -   **Automatic Input Discovery**: If an input `path` matches a previously
+            logged output artifact, Consist automatically links them, building the
+            provenance graph. This is a key part of **"Auto-Forking"**.
+        -   **Path Virtualization**: Converts absolute file system paths to portable URIs
+            (e.g., `inputs://data.csv`) using configured mounts, adhering to
+            **"Path Resolution & Mounts"**.
+        -   **Schema Metadata Injection**: Embeds schema information (if provided) into the
+            artifact's metadata, useful for later "Strict Mode" validation or introspection.
 
-        Args:
-            path (Union[str, Artifact]): The file path (str) or an existing `Artifact` object
-                                         to be logged.
-            key (Optional[str]): A semantic, human-readable name for the artifact (e.g., "households").
-                                 Required if `path` is a string.
-            direction (str): Specifies whether the artifact is an "input" or "output" for the
-                             current run. Defaults to "output".
-            schema (Optional[Type[SQLModel]]): An optional SQLModel class that defines the
-                                                expected schema for the artifact's data. Its
-                                                name will be stored in artifact metadata.
-            driver (Optional[str]): Explicitly specify the driver (e.g., 'h5_table').
-                                    If None, inferred from file extension.
-            **meta: Additional key-value pairs to store in the artifact's flexible `meta` field.
+        Parameters
+        ----------
+        path : Union[str, Artifact]
+            The file path (str) or an existing `Artifact` object to be logged.
+        key : Optional[str], optional
+            A semantic, human-readable name for the artifact (e.g., "households").
+            Required if `path` is a string.
+        direction : str, default "output"
+            Specifies whether the artifact is an "input" or "output" for the
+            current run. Defaults to "output".
+        schema : Optional[Type[SQLModel]], optional
+            An optional SQLModel class that defines the expected schema for the artifact's data.
+            Its name will be stored in artifact metadata.
+        driver : Optional[str], optional
+            Explicitly specify the driver (e.g., 'h5_table').
+            If None, the driver is inferred from the file extension.
+        **meta : Any
+            Additional key-value pairs to store in the artifact's flexible `meta` field.
 
-        Returns:
-            Artifact: The created or updated `Artifact` object.
+        Returns
+        -------
+        Artifact
+            The created or updated `Artifact` object.
 
-        Raises:
-            RuntimeError: If called outside an active run context.
-            ValueError: If `key` is not provided when `path` is a string.
+        Raises
+        ------
+        RuntimeError
+            If called outside an active run context.
+        ValueError
+            If `key` is not provided when `path` is a string.
         """
         if not self.current_consist:
             raise RuntimeError("Cannot log artifact outside of a run context.")
@@ -754,7 +991,7 @@ class Tracker:
         data: Optional[Union[Iterable[Dict[str, Any]], Any]] = None,
         schema: Optional[Type[SQLModel]] = None,
         run: Optional[Run] = None,
-    ):
+    ) -> Any:
         """
         Ingests data associated with an `Artifact` into the Consist DuckDB database.
 
@@ -763,24 +1000,36 @@ class Tracker:
         It leverages the `dlt` (Data Load Tool) integration for efficient and robust
         data loading, including support for schema inference and evolution.
 
-        Args:
-            artifact (Artifact): The artifact object representing the data being ingested.
-                                 Its metadata might include schema information.
-            data (Optional[Iterable[Dict[str, Any]]]): An iterable (e.g., list of dicts, generator)
-                                             where each item represents a row of data to be ingested.
-                                             If 'data' is omitted, Consist attempts to stream it
-                                             directly from the artifact's file URI, resolving the path.
-            schema (Optional[Type[SQLModel]]): An optional SQLModel class that defines the
-                                                expected schema for the ingested data. If provided,
-                                                `dlt` will use this for strict validation.
-            run (Optional[Run]): If provided, tags data with this run's ID (Offline Mode).
-                                 If None, uses the currently active run (Online Mode).
+        Parameters
+        ----------
+        artifact : Artifact
+            The artifact object representing the data being ingested. Its metadata
+            might include schema information.
+        data : Optional[Union[Iterable[Dict[str, Any]], Any]], optional
+            An iterable (e.g., list of dicts, generator) where each item represents a
+            row of data to be ingested. If `data` is omitted, Consist attempts to
+            stream it directly from the artifact's file URI, resolving the path.
+            Can also be other data types that `dlt` can handle directly (e.g., Pandas DataFrame).
+        schema : Optional[Type[SQLModel]], optional
+            An optional SQLModel class that defines the expected schema for the ingested data.
+            If provided, `dlt` will use this for strict validation.
+        run : Optional[Run], optional
+            If provided, tags data with this run's ID (Offline Mode).
+            If None, uses the currently active run (Online Mode).
 
-        Raises:
-            RuntimeError: If no database is configured (`db_path` was not provided during
-                          Tracker initialization) or if `ingest` is called outside of
-                          an active run context.
-            Exception: Any exception raised by the underlying `dlt` ingestion process.
+        Returns
+        -------
+        Any
+            The result information from the `dlt` ingestion process.
+
+        Raises
+        ------
+        RuntimeError
+            If no database is configured (`db_path` was not provided during
+            Tracker initialization) or if `ingest` is called outside of
+            an active run context.
+        Exception
+            Any exception raised by the underlying `dlt` ingestion process.
         """
         if not self.db_path:
             raise RuntimeError("Cannot ingest data: No database configured.")
@@ -845,17 +1094,21 @@ class Tracker:
         """
         Retrieves an Artifact by its semantic key or UUID.
 
-        Priority:
-        1. Checks current run's outputs (In-Memory).
-        2. Checks current run's inputs (In-Memory).
-        3. Queries Database (Persistence).
+        This method provides a flexible way to locate artifacts, first checking
+        the in-memory context of the current run, and then querying the database
+        for persistent records.
 
-        Args:
-            key_or_id (Union[str, uuid.UUID]): The artifact's 'key' (e.g. "households")
-                                               or its UUID.
+        Parameters
+        ----------
+        key_or_id : Union[str, uuid.UUID]
+            The artifact's 'key' (e.g., "households") or its unique UUID.
+            When a string is provided, the most recently created artifact matching
+            that key is returned.
 
-        Returns:
-            Optional[Artifact]: The found Artifact object, or None.
+        Returns
+        -------
+        Optional[Artifact]
+            The found `Artifact` object, or `None` if no matching artifact is found.
         """
         # 1. Check In-Memory Context (Current Run)
         if self.current_consist:
@@ -889,7 +1142,7 @@ class Tracker:
 
         return None
 
-    def create_view(self, view_name: str, concept_key: str):
+    def create_view(self, view_name: str, concept_key: str) -> Any:
         """
         Creates a hybrid SQL view that consolidates data from both materialized tables
         in DuckDB and raw file-based artifacts (e.g., Parquet, CSV).
@@ -898,11 +1151,21 @@ class Tracker:
         strategy, allowing transparent querying of data regardless of its underlying
         storage mechanism (hot/cold data).
 
-        Args:
-            view_name (str): The desired name for the generated SQL view.
-            concept_key (str): The semantic key (e.g., "households", "transactions")
-                               that identifies the logical concept this view represents.
-                               The view will union all artifacts with this key.
+        Parameters
+        ----------
+        view_name : str
+            The desired name for the generated SQL view. This will be the name by which
+            you query the combined data.
+        concept_key : str
+            The semantic key (e.g., "households", "transactions")
+            that identifies the logical concept this view represents.
+            The view will union all artifacts with this key.
+
+        Returns
+        -------
+        Any
+            The result of the `ViewFactory.create_hybrid_view` method, typically a
+            representation of the created view or confirmation of its creation.
         """
         factory = ViewFactory(self)
         return factory.create_hybrid_view(view_name, concept_key)
@@ -913,16 +1176,21 @@ class Tracker:
 
         This is the inverse operation of `_virtualize_path`, crucial for **"Path Resolution & Mounts"**.
         It uses the configured `mounts` and the `run_dir` to reconstruct the local
-        absolute path to an artifact, making runs portable.
+        absolute path to an artifact, making runs portable across different environments.
 
-        Args:
-            uri (str): The portable URI (e.g., "inputs://file.csv", "./output/data.parquet")
-                       to resolve.
+        Parameters
+        ----------
+        uri : str
+            The portable URI (e.g., "inputs://file.csv", "./output/data.parquet")
+            to resolve.
 
-        Returns:
-            str: The absolute file system path corresponding to the given URI.
-                 If the URI cannot be fully resolved (e.g., scheme not mounted),
-                 it returns the most resolved path or the original URI.
+        Returns
+        -------
+        str
+            The absolute file system path corresponding to the given URI.
+            If the URI cannot be fully resolved (e.g., scheme not mounted),
+            it returns the most resolved path or the original URI after
+            attempting to make it absolute.
         """
         path_str = uri
         # 1. Check schemes (mounts)
@@ -946,15 +1214,19 @@ class Tracker:
         replace parts of the absolute path with scheme-based URIs (e.g., "inputs://")
         if a matching mount is configured, or makes it relative to the `run_dir`
         if possible. This ensures artifact paths stored in the provenance are portable
-        across different execution environments.
+        across different execution environments, making Consist runs reproducible.
 
-        Args:
-            path (str): The absolute file system path to virtualize.
+        Parameters
+        ----------
+        path : str
+            The absolute file system path to virtualize.
 
-        Returns:
-            str: A portable URI representation of the path (e.g., "inputs://file.csv",
-                 "./output/data.parquet", or the original absolute path if no virtualization
-                 is possible).
+        Returns
+        -------
+        str
+            A portable URI representation of the path (e.g., "inputs://file.csv",
+            "./output/data.parquet"). If no virtualization is possible, the original
+            absolute path is returned.
         """
         abs_path = str(Path(path).resolve())
 
@@ -977,11 +1249,13 @@ class Tracker:
 
         return abs_path
 
-    def _flush_json(self):
+    def _flush_json(self) -> None:
         """
         Writes the current `ConsistRecord` (in-memory state of the run) to a `consist.json` file.
-        This operation is performed using an atomic write pattern (write to temp, then rename)
-        to ensure data integrity.
+
+        This operation is performed using an atomic write pattern (write to a temporary file,
+        then rename) to ensure data integrity and prevent corruption, even if the process
+        is interrupted.
 
         This is a critical part of the **"Dual-Write Safety"** strategy: the JSON file
         is always flushed first, ensuring that a human-readable record of the run exists
@@ -998,21 +1272,23 @@ class Tracker:
             f.write(json_str)
         tmp.rename(target)
 
-    def _sync_run_to_db(self, run: Run):
+    def _sync_run_to_db(self, run: Run) -> None:
         """
         Synchronizes the state of a `Run` object to the DuckDB database.
 
         This method either updates an existing run record or inserts a new one,
         ensuring that the database reflects the most current status and metadata
         of the run. It uses a **"Clone and Push"** strategy to avoid binding the
-        live run object to the session.
+        live run object to the session, which helps prevent potential ORM issues.
 
         As part of the **"Dual-Write Safety"** mechanism, this method
         tolerates database failures (logs a warning instead of crashing),
         prioritizing the completion of the user's run.
 
-        Args:
-            run (Run): The `Run` object whose state needs to be synchronized with the database.
+        Parameters
+        ----------
+        run : Run
+            The `Run` object whose state needs to be synchronized with the database.
         """
         if not self.engine:
             return
@@ -1049,22 +1325,25 @@ class Tracker:
                 f"[Consist Warning] Database sync failed for run {run.id}: {e}"
             )
 
-    def _sync_artifact_to_db(self, artifact: Artifact, direction: str):
+    def _sync_artifact_to_db(self, artifact: Artifact, direction: str) -> None:
         """
         Synchronizes an `Artifact` object and its `RunArtifactLink` to the DuckDB database.
 
         This method merges the artifact (either creating it or updating an existing one)
-        and creates a link entry associating it with the current run and its direction
-        (input/output).
+        into the database and creates a `RunArtifactLink` entry. This link explicitly
+        associates the artifact with the current run and its role (input or output).
 
         As part of the **"Dual-Write Safety"** mechanism, this method
         tolerates database failures (logs a warning instead of crashing),
         prioritizing the completion of the user's run.
 
-        Args:
-            artifact (Artifact): The `Artifact` object to synchronize.
-            direction (str): The direction of the artifact relative to the current run
-                             ("input" or "output").
+        Parameters
+        ----------
+        artifact : Artifact
+            The `Artifact` object to synchronize.
+        direction : str
+            The direction of the artifact relative to the current run
+            ("input" or "output").
         """
         if not self.engine or not self.current_consist:
             return
@@ -1088,13 +1367,21 @@ class Tracker:
         except Exception as e:
             logging.warning(f"[Consist Warning] Artifact sync failed: {e}")
 
-    def log_meta(self, **kwargs):
+    def log_meta(self, **kwargs: Any) -> None:
         """
         Updates the metadata for the current run.
-        Useful for logging metrics (accuracy, loss) or tags calculated at runtime.
 
-        Args:
-            **kwargs: Key-value pairs to merge into run.meta.
+        This method allows logging additional key-value pairs to the `meta` field
+        of the currently active `Run` object. This is particularly useful for
+        recording runtime metrics (e.g., accuracy, loss, F1-score), tags, or
+        any other arbitrary information generated during the run's execution.
+        The metadata is immediately flushed to both the JSON log and the database.
+
+        Parameters
+        ----------
+        **kwargs : Any
+            Arbitrary key-value pairs to merge into the `meta` dictionary of
+            the current run. Existing keys will be updated, and new keys will be added.
         """
         if not self.current_consist:
             logging.warning("[Consist] Cannot log_meta: No active run.")

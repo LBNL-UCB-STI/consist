@@ -16,13 +16,46 @@ from consist.integrations.containers.backends import ContainerBackend
 
 class MockChainingBackend(ContainerBackend):
     """
-    Simulates a container that writes specific output files.
+    A mock container backend used to simulate container execution for testing
+    Consist's chaining and caching logic.
+
+    This mock is designed to simulate a container that produces a specific
+    output file, allowing tests to verify how Consist tracks provenance
+    from containerized steps to subsequent Python steps.
+
+    Attributes
+    ----------
+    run_count : int
+        A counter that tracks how many times the `run` method of this mock backend has been called.
+        Used to assert whether a container execution was a cache hit or miss.
     """
 
-    def __init__(self, pull_latest=False):
+    def __init__(self, pull_latest: bool = False) -> None:
+        """
+        Initializes the MockChainingBackend.
+
+        Parameters
+        ----------
+        pull_latest : bool, default False
+            A placeholder parameter to match the signature of real backends.
+            Has no functional effect in the mock.
+        """
         self.run_count = 0
 
     def resolve_image_digest(self, image: str) -> str:
+        """
+        Simulates resolving a container image to a mock digest.
+
+        Parameters
+        ----------
+        image : str
+            The image name or reference.
+
+        Returns
+        -------
+        str
+            A deterministic mock SHA digest string based on the image name.
+        """
         return f"sha256:mock_digest_{image}"
 
     def run(
@@ -33,6 +66,32 @@ class MockChainingBackend(ContainerBackend):
         env: Dict[str, str],
         working_dir: Optional[str] = None,
     ) -> bool:
+        """
+        Simulates running a command within a container.
+
+        This mock method increments an internal counter and, if an output volume
+        is detected, creates a dummy `container_output.csv` file within the host path
+        of that volume to simulate container output.
+
+        Parameters
+        ----------
+        image : str
+            The container image to use (mocked).
+        command : Union[str, List[str]]
+            The command to execute inside the container (mocked).
+        volumes : Dict[str, str]
+            A dictionary mapping host paths to container paths for volume mounts.
+            Used to identify simulated output directories.
+        env : Dict[str, str]
+            Environment variables (mocked).
+        working_dir : Optional[str], optional
+            Working directory inside the container (mocked).
+
+        Returns
+        -------
+        bool
+            Always returns `True` to simulate a successful container execution.
+        """
         self.run_count += 1
 
         # Simulate the container writing the expected output file
@@ -49,9 +108,29 @@ class MockChainingBackend(ContainerBackend):
 # --- Existing Tests ---
 
 
-def test_pipeline_chaining(tmp_path):
+def test_pipeline_chaining(tmp_path: Path):
     """
-    Tests passing an Artifact object from one run directly into another.
+    Tests the fundamental pipeline chaining mechanism: passing an `Artifact` object
+    from one run directly into another as an input.
+
+    This test verifies Consist's ability to automatically establish lineage
+    between runs when an output `Artifact` of one run becomes an input to a subsequent run.
+    This is a core feature for building reproducible multi-step workflows.
+
+    What happens:
+    1. A `Tracker` instance is initialized.
+    2. **Phase 1 (Generation)**: A first run ("run_gen") creates a dummy `data.csv` file
+       and logs it as an output `Artifact` ("my_data").
+    3. **Phase 2 (Consumption)**: A second run ("run_con") is started, taking the
+       `generated_artifact` object directly as an input.
+    4. **Phase 3 (Verification)**: The database is queried for artifacts and links.
+
+    What's checked:
+    - The `generated_artifact` is correctly associated with "run_gen".
+    - The `input_artifact` in "run_con" correctly identifies the `generated_artifact`
+      by its key and URI.
+    - The database records reflect that there is one unique `Artifact` and two
+      `RunArtifactLink` entries (one for "run_gen" output, one for "run_con" input).
     """
     # Setup
     run_dir = tmp_path / "runs"
@@ -94,10 +173,28 @@ def test_pipeline_chaining(tmp_path):
         assert len(links) == 2
 
 
-def test_implicit_file_chaining(tmp_path):
+def test_implicit_file_chaining(tmp_path: Path):
     """
-    Tests that passing a FILE PATH string (not an Artifact object)
-    still correctly links to the previous run if the URI matches.
+    Tests implicit file chaining: when a `Path` string (not an `Artifact` object)
+    is passed as input, Consist should correctly link it to a previous run if the URI matches.
+
+    This test verifies Consist's "Auto-Forking" feature, where it can automatically
+    detect lineage from a file's URI. If a file path passed as an input matches the
+    URI of a previously logged output artifact, Consist should link them,
+    establishing the provenance chain.
+
+    What happens:
+    1. A `Tracker` instance is initialized.
+    2. **Run A**: Generates a file (`handoff.csv`) and logs it as an output artifact.
+    3. **Run B**: Takes the *file path string* (`handoff.csv`) as an input.
+    4. **Verification**: The database is queried for `RunArtifactLink` entries.
+
+    What's checked:
+    - In-memory state: The input artifact for "run_B" correctly has `run_id` set
+      to "run_A", indicating implicit lineage discovery.
+    - Database links: There are exactly two `RunArtifactLink` entries, and they both
+      refer to the same `artifact_id`, confirming that the same physical artifact
+      is linked as an output for "run_A" and an input for "run_B".
     """
     run_dir = tmp_path / "implicit_runs"
     db_path = str(tmp_path / "implicit.duckdb")
@@ -129,13 +226,36 @@ def test_implicit_file_chaining(tmp_path):
 # --- NEW TEST: Container Chaining & Caching ---
 
 
-def test_container_chaining_with_caching(tmp_path):
+def test_container_chaining_with_caching(tmp_path: Path):
     """
-    Tests the "Hybrid Workflow":
-    1. Container Run (Generator)
-    2. Python Run (Consumer) - Verifies lineage linkage.
-    3. Container Run (Repeat) - Verifies Cache Hit.
-    4. Container Run (Changed) - Verifies Cache Miss.
+    Tests a "Hybrid Workflow" scenario involving both containerized steps and Python steps,
+    with a focus on correct chaining and caching behavior.
+
+    This test verifies that:
+    1. Outputs from a containerized run can be correctly identified as inputs for a Python run.
+    2. Repeated containerized runs with identical parameters result in cache hits.
+    3. Changes in container parameters (e.g., image tag) correctly invalidate the cache.
+
+    What happens:
+    1. A `MockChainingBackend` is used to simulate container execution.
+    2. `IdentityManager.get_code_version` is patched to return a stable hash,
+       preventing spurious cache misses due to dirty Git states.
+    3. **Phase 1 (Container Generator)**: `run_container` is called to simulate
+       a container producing an output file (`container_output.csv`).
+    4. **Phase 2 (Python Consumer)**: A standard Python run (`tracker.start_run`)
+       takes the file generated by the container as an input.
+    5. **Phase 3 (Cache HIT)**: `run_container` is called again with the *exact same*
+       parameters as Phase 1 (except for a different `run_id`).
+    6. **Phase 4 (Cache MISS)**: `run_container` is called with a *modified image tag*
+       compared to Phase 1.
+
+    What's checked:
+    - After Phase 1, the mock backend's `run_count` is 1, and the expected output file exists.
+    - In Phase 2, the input artifact for the Python consumer correctly shows its `run_id`
+      as "container_run_1", demonstrating successful lineage tracking from containers.
+    - After Phase 3, the mock backend's `run_count` remains 1, confirming a cache hit.
+    - After Phase 4, the mock backend's `run_count` increments to 2, confirming a cache miss
+      due to the change in image tag.
     """
     run_dir = tmp_path / "hybrid_runs"
     db_path = str(tmp_path / "hybrid.duckdb")

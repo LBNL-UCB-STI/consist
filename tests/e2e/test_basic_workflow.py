@@ -11,25 +11,38 @@ from consist.core.identity import IdentityManager
 
 def test_dual_write_workflow(tmp_path):
     """
-    Tests the end-to-end "dual-write" functionality of the Tracker.
-        INCLUDING automatic Identity hashing (Config & Git).
+    Tests the end-to-end "dual-write" functionality of the `Tracker`,
+    including automatic identity hashing (Config & Git).
 
-
-    This test simulates a complete workflow and verifies that the Tracker correctly
-    logs provenance information to both the human-readable JSON file (`consist.json`)
+    This test simulates a complete Consist workflow, from initializing the `Tracker`
+    to logging input/output artifacts, and verifies that provenance information is
+    correctly recorded in both the human-readable JSON file (`consist.json`)
     and the analytical DuckDB database. It ensures that the primary record-keeping
-    mechanisms of Consist are functioning in harmony.
+    mechanisms of Consist are functioning in harmony and that key identity hashes
+    are correctly computed and stored.
 
     What happens:
-    1. A Tracker is initialized with temporary paths for the run directory and database.
-    2. A run context is started, simulating a model execution.
-    3. An input artifact and an output artifact are logged.
-    4. The run completes successfully.
+    1. A `Tracker` is initialized with temporary paths for the run directory and database.
+    2. A configuration dictionary is defined, and its expected hash is manually computed
+       using `IdentityManager` for later verification.
+    3. A run context ("run_1") is started using `tracker.start_run`, simulating a model execution
+       with the defined configuration.
+    4. An input artifact (`land_use.csv`) and an output artifact (`trips.csv`) are logged
+       within the run.
+    5. The run completes successfully.
 
     What's checked:
-    - The `consist.json` file is created and its contents are validated (run ID, status, artifacts, config).
-    - The DuckDB database is checked to ensure that the correct number of `Run` and `Artifact`
-      records were created, verifying the database indexing.
+    -   **JSON Log Verification**:
+        - The `consist.json` file is created in the run directory.
+        - Its contents are validated: the run ID, status ("completed"), presence of
+          one input and one output artifact, and the configuration.
+        - The `config_hash` and `git_hash` stored in the JSON match the expected values
+          (the `git_hash` is checked for existence and non-null status, as its exact
+          value depends on the Git environment).
+    -   **DuckDB Verification**:
+        - The DuckDB database is checked to ensure that one `Run` record with the
+          correct ID, `config_hash`, and `git_hash` was created.
+        - Two `Artifact` records (one input, one output) are found in the database.
     """
     # 1. Setup Paths
     run_dir = tmp_path / "test_run_1"

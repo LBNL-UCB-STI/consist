@@ -1,9 +1,13 @@
 """
+Consist Pipeline Scenarios Integration Tests
+
 This module contains integration tests for various pipeline scenarios, focusing on
 how Consist handles complex workflows, caching behaviors, and error recovery.
 
 It uses a `mock_model_step` helper function to simulate individual steps within a pipeline
 and verify Consist's tracking, caching, and lineage capabilities across these steps.
+These tests validate Consist's ability to ensure reproducibility and efficiency
+in multi-stage data processing and modeling pipelines.
 """
 
 import logging
@@ -12,28 +16,89 @@ import pytest
 import pandas as pd
 import time
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from consist.core.tracker import Tracker
 
 
 class PipelineContext:
+    """
+    A simple context object used in pipeline tests to track which mock steps
+    have actually been executed (i.e., were not a cache hit).
+
+    This helps in verifying the caching logic by providing an observable side effect
+    that indicates whether a particular step's code block was run.
+
+    Attributes
+    ----------
+    execution_log : List[str]
+        A list of strings, where each string represents the `step_name` of a
+        `mock_model_step` that was actually executed (not cached).
+    """
+
     def __init__(self):
         self.execution_log = []
 
-    def log_execution(self, step_name: str):
+    def log_execution(self, step_name: str) -> None:
+        """
+        Records that a specific pipeline step was executed (i.e., was not a cache hit).
+
+        Parameters
+        ----------
+        step_name : str
+            The name of the pipeline step that was executed.
+        """
         self.execution_log.append(step_name)
 
-    def clear_log(self):
+    def clear_log(self) -> None:
+        """
+        Clears the execution log.
+
+        This method is typically called between test phases to ensure that
+        execution counts are reset for subsequent assertions.
+        """
         self.execution_log = []
 
 
 @pytest.fixture
-def ctx():
+def ctx() -> PipelineContext:
+    """
+    Pytest fixture that provides a `PipelineContext` instance for tracking mock step executions.
+
+    This fixture ensures that each test function has a fresh `PipelineContext`
+    object, allowing for accurate tracking of which simulated pipeline steps
+    were actually run versus those that were cached.
+
+    Returns
+    -------
+    PipelineContext
+        A new `PipelineContext` instance.
+    """
     return PipelineContext()
 
 
 @pytest.fixture
-def tracker_setup(tmp_path):
+def tracker_setup(tmp_path: Path):
+    """
+    Pytest fixture that sets up a Consist `Tracker` instance with a stable identity for testing.
+
+    This fixture creates a `Tracker` configured with a temporary run directory and a
+    DuckDB database. Crucially, it patches the `IdentityManager.get_code_version`
+    method to return a stable string ("stable_v1"). This prevents spurious cache
+    misses in tests that rely on code identity, especially if the local Git repository
+    is "dirty" or changes between test runs.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        The built-in pytest fixture for creating unique temporary directories.
+
+    Returns
+    -------
+    Tuple[Tracker, Path]
+        A tuple containing:
+        - `Tracker`: An initialized Consist `Tracker` instance with a stable code identity.
+        - `Path`: The path to the temporary run directory.
+    """
     run_dir = tmp_path / "runs"
     db_path = str(tmp_path / "provenance.duckdb")
     tracker = Tracker(run_dir=run_dir, db_path=db_path)
@@ -47,27 +112,42 @@ def mock_model_step(
     ctx: PipelineContext,
     step_name: str,
     inputs: List[str],
-    config: dict = None,
-    cache_mode: str = "reuse",  # <--- NEW ARGUMENT
+    config: Optional[dict] = None,
+    cache_mode: str = "reuse",
 ) -> str:
     """
-    Simulates a single step in a data processing pipeline.
+    Simulates a single step in a data processing pipeline within the Consist framework.
 
-    This helper function creates a Consist run context for a given step, logs its inputs,
-    and either retrieves cached outputs or executes a dummy operation to generate a new output.
-    It's designed to be used repeatedly to build and test multi-step pipelines.
+    This helper function encapsulates the common pattern of a Consist-managed pipeline step:
+    it starts a run, logs inputs, checks for cached results, and either executes
+    a dummy operation (logging its execution) or returns a path to a cached output.
+    It is crucial for building and testing multi-step pipelines and their caching behavior.
 
-    Args:
-        tracker (Tracker): The Consist Tracker instance.
-        ctx (PipelineContext): A context object to log actual executions for verification.
-        step_name (str): The name of the simulated pipeline step (used as model name and key).
-        inputs (List[str]): A list of file paths (as strings) that serve as inputs to this step.
-        config (dict, optional): Configuration dictionary for the step. Defaults to an empty dict.
-        cache_mode (str): Consist caching behavior ("reuse", "overwrite", "readonly").
+    Parameters
+    ----------
+    tracker : Tracker
+        The Consist `Tracker` instance managing the pipeline's provenance.
+    ctx : PipelineContext
+        A `PipelineContext` object used to log whether this step actually executed
+        or was a cache hit.
+    step_name : str
+        The descriptive name of the simulated pipeline step. This is used as the
+        `model_name` for the Consist run and as the key for the output artifact.
+    inputs : List[str]
+        A list of file paths (as strings) that serve as inputs to this step. These
+        will be passed to `tracker.start_run` to establish lineage.
+    config : Optional[dict], optional
+        A dictionary representing the configuration for this step. This contributes
+        to the run's unique identity for caching. Defaults to an empty dictionary.
+    cache_mode : str, default "reuse"
+        Defines the caching behavior for this specific step. Options are "reuse"
+        (default), "overwrite", or "readonly".
 
-    Returns:
-        str: The resolved path to the output artifact generated or retrieved by this step.
-             This path is a host filesystem path, not a virtualized URI.
+    Returns
+    -------
+    str
+        The resolved host filesystem path to the primary output artifact generated
+        or retrieved by this step.
     """
     if config is None:
         config = {}
@@ -106,6 +186,35 @@ def mock_model_step(
 
 
 def test_pipeline_forking_cold_storage(tracker_setup, ctx):
+    """
+    Tests Consist's pipeline forking mechanism and caching for "cold storage" workflows.
+
+    This test demonstrates how Consist ensures that an entire downstream pipeline
+    can be reused (cache hit) if an upstream change does not affect its inputs,
+    and how only the affected parts of the pipeline are re-executed (cache miss)
+    if a change occurs in an upstream step.
+
+    What happens:
+    1. A `Tracker` and `run_dir` are set up, and the `IdentityManager.get_code_version`
+       is mocked for stable hashes.
+    2. **Phase 1 (Full Run)**: A four-step pipeline (A -> B -> C -> D) is executed
+       using `mock_model_step`. Each step generates an output that serves as an input
+       to the next.
+    3. **Phase 2 (Forked Run)**: The pipeline is re-executed, but this time, the
+       configuration for step "C" is intentionally changed (`p=999`).
+
+    What's checked:
+    -   **Phase 1**: All four steps (A, B, C, D) are logged in `ctx.execution_log`,
+        confirming actual execution.
+    -   **Phase 2**:
+        - Steps "A" and "B" are *not* in `ctx.execution_log`, indicating they
+          were cache hits.
+        - Steps "C" and "D" *are* in `ctx.execution_log`, confirming they were
+          re-executed due to the change in "C"'s configuration (cache miss for C,
+          and subsequent re-execution of its downstream D).
+        - The output path of "B" from both runs is identical, confirming cache hit.
+        - The output path of "C" from both runs is different, confirming re-execution.
+    """
     tracker, _ = tracker_setup
 
     logging.info("\n--- Phase 1: Full Run ---")
@@ -133,14 +242,27 @@ def test_pipeline_forking_cold_storage(tracker_setup, ctx):
 
 def test_cache_overwrite_mode(tracker_setup, ctx):
     """
-    SCENARIO 5: Explicit Overwrite.
+    Tests the `cache_mode="overwrite"` functionality within a pipeline step.
 
-    1. Run A (Normal).
-    2. Run A (Again) with cache_mode="overwrite".
+    This test verifies that when `cache_mode` is set to "overwrite", Consist
+    will always execute the step, ignoring any existing cache entries for the
+    same signature, and will update the cache with the results of the current run.
+    It ensures that new results can forcibly replace older cached ones.
 
-    Expectation:
-    - Run 1: Executes.
-    - Run 2: Executes (skips cache check), produces NEW artifact.
+    What happens:
+    1. A `Tracker` and `run_dir` are set up.
+    2. **Phase 1 (Normal Run)**: `mock_model_step` "A" is executed with default
+       `cache_mode="reuse"`. It executes and populates the cache.
+    3. **Phase 2 (Overwrite Run)**: `mock_model_step` "A" is executed again with
+       identical parameters but with `cache_mode="overwrite"`.
+
+    What's checked:
+    - After Phase 1, step "A" is in `ctx.execution_log`.
+    - After Phase 2, step "A" is *again* in `ctx.execution_log`, confirming it
+      re-executed despite a potential cache hit.
+    - The output path from Phase 2 is different from Phase 1, proving that a
+      physically new artifact was generated, and thus the cache was updated.
+    - The database eventually contains two completed runs for model "A".
     """
     tracker, _ = tracker_setup
 
@@ -172,6 +294,28 @@ def test_cache_overwrite_mode(tracker_setup, ctx):
 
 
 def test_ghost_mode_ingested(tracker_setup, ctx):
+    """
+    Tests Consist's "Ghost Mode" for ingested artifacts.
+
+    This test verifies that if a physical output file is deleted from disk
+    but its content was previously ingested into the DuckDB database, Consist
+    can still "hydrate" the output (i.e., provide a valid path to the artifact)
+    and successfully cache future runs that depend on it.
+
+    What happens:
+    1. A `mock_model_step` "A" is executed, producing an output file.
+    2. This output artifact is then explicitly ingested into the Consist DuckDB.
+    3. The physical output file generated by step "A" is deleted from disk.
+    4. `mock_model_step` "A" is executed again.
+
+    What's checked:
+    - The second execution of `mock_model_step` "A" is a cache hit (i.e., "A"
+      is *not* in `ctx.execution_log`), even though its physical output file
+      is missing. This confirms Ghost Mode.
+    - The output path returned by the "ghosted" step is still valid (it's the
+      original path where the file *would* be, even if empty).
+    - The DuckDB contains the ingested data, confirming data persistence.
+    """
     tracker, _ = tracker_setup
 
     out_a = mock_model_step(tracker, ctx, "A", [], {"p": 1})
@@ -206,6 +350,26 @@ def test_ghost_mode_ingested(tracker_setup, ctx):
 
 
 def test_broken_cache_recovery(tracker_setup, ctx):
+    """
+    Tests Consist's "Self-Healing" capability: automatically re-executing a run
+    if its cached output files are missing from disk (and not ingested).
+
+    This test ensures that Consist will detect a broken cache state (where a cached
+    run claims outputs exist, but they are physically missing and not recoverable
+    from the DB) and correctly force a re-execution to regenerate the missing data.
+
+    What happens:
+    1. A `mock_model_step` "A" is executed, producing an output file.
+    2. The physical output file generated by step "A" is deleted from disk.
+       (Crucially, this artifact was *not* ingested into the DB, so there's no "Ghost Mode" fallback).
+    3. `mock_model_step` "A" is executed again.
+
+    What's checked:
+    - The second execution of `mock_model_step` "A" is *not* a cache hit (i.e., "A"
+      is in `ctx.execution_log`), confirming that the cache was invalidated and
+      the step re-executed.
+    - The output file is regenerated and exists on disk after the re-execution.
+    """
     tracker, _ = tracker_setup
     out_a = mock_model_step(tracker, ctx, "A", [], {"p": 1})
     ctx.clear_log()

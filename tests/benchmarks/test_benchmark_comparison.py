@@ -1,14 +1,21 @@
 # tests/benchmarks/test_benchmark_comparison.py
 
 """
-This module contains comparative benchmarks for analytical queries across
-Pandas, Polars, and Consist's "cold" (zero-copy file reads) data paths.
+Consist Comparative Analytical Query Benchmarks
 
-The primary goal is to quantify the performance benefits of Consist's approach
-to data virtualization and optimized querying for large datasets, especially
-when handling schema drift and avoiding full data loads into memory.
+This module contains comparative benchmarks for analytical queries across
+Pandas, Polars, and Consist's "cold" data access path (zero-copy file reads).
+
+The primary goal is to quantify the performance and memory efficiency benefits
+of Consist's approach to data virtualization and optimized querying for large datasets,
+especially when handling schema drift and avoiding full data loads into memory.
+It serves to demonstrate how Consist, by leveraging DuckDB, can provide competitive
+or superior performance and resource usage compared to traditional Python data
+analysis libraries for certain workloads.
 """
 import logging
+from pathlib import Path
+
 import pytest
 import pandas as pd
 import numpy as np
@@ -37,7 +44,26 @@ N_ROWS = 5_000_000
 
 
 class Profiler:
-    """Helper to measure Time and Peak RAM."""
+    """
+    A context manager for measuring execution time and peak RAM usage of code blocks.
+
+    This utility helps in benchmarking different data processing approaches by
+    providing a consistent way to record performance metrics. It leverages
+    `psutil` for memory profiling if available.
+
+    Attributes
+    ----------
+    name : str
+        A descriptive name for the code block being profiled.
+    start_time : float
+        The timestamp when the profiling started (seconds since epoch).
+    start_mem : int
+        The Resident Set Size (RSS) memory usage of the process at the start
+        of profiling (bytes). Only available if `psutil` is installed.
+    peak_mem : int
+        (Not currently used, but could be for more advanced profiling)
+        The maximum RSS memory observed during the profiled block.
+    """
 
     def __init__(self, name):
         self.name = name
@@ -45,7 +71,20 @@ class Profiler:
         self.start_mem = 0
         self.peak_mem = 0
 
-    def __enter__(self):
+    def __enter__(self) -> "Profiler":
+        """
+        Starts the profiling timer and records initial memory usage.
+
+        Upon entering the `with` block, this method is called. It ensures that
+        garbage collection is performed to get a cleaner memory baseline before
+        recording the starting time and (if `psutil` is available) the initial
+        Resident Set Size (RSS) memory usage of the process.
+
+        Returns
+        -------
+        Profiler
+            The Profiler instance itself, allowing it to be used as a context manager.
+        """
         gc.collect()  # Clean up before starting
         self.start_time = time.time()
         if psutil:
@@ -53,7 +92,24 @@ class Profiler:
             self.start_mem = process.memory_info().rss
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """
+        Stops the profiling timer, calculates duration and peak RAM, and prints the results.
+
+        Upon exiting the `with` block, this method calculates the elapsed time
+        and (if `psutil` is available) the difference in Resident Set Size (RSS)
+        memory usage since `__enter__` was called. The results are then printed
+        to the console.
+
+        Parameters
+        ----------
+        exc_type : Optional[Type[BaseException]]
+            The exception type if an exception occurred within the `with` block, otherwise None.
+        exc_val : Optional[BaseException]
+            The exception instance if an exception occurred, otherwise None.
+        exc_tb : Optional[TracebackType]
+            The traceback object if an exception occurred, otherwise None.
+        """
         duration = time.time() - self.start_time
         mem_str = "N/A"
         if psutil:
@@ -68,7 +124,7 @@ class Profiler:
 
 
 @pytest.mark.heavy
-def test_comparative_analysis_benchmark(tmp_path):
+def test_comparative_analysis_benchmark(tmp_path: Path):
     """
     Benchmarks the performance (time and RAM) of a large-scale data analysis workflow
     involving loading, concatenation, and aggregation, using Pandas, Polars, and
@@ -76,29 +132,41 @@ def test_comparative_analysis_benchmark(tmp_path):
     includes a scenario with schema drift between datasets.
 
     This test highlights Consist's efficiency for analytical queries over large datasets
-    with varying schemas, especially when avoiding full data loads into memory.
+    with varying schemas, especially when avoiding full data loads into memory. It aims
+    to demonstrate Consist's ability to handle complex data integration scenarios
+    effectively, leveraging DuckDB's vectorized query engine.
 
     What happens:
-    1.  Two large Pandas DataFrames (df_a and df_b) are generated with `N_ROWS` records each.
-        -   df_a represents a "baseline" schema.
-        -   df_b represents a "policy" scenario with an additional column ('subsidy'),
-            simulating schema drift.
-    2.  These DataFrames are saved as Parquet files.
-    3.  Consist runs are initiated to log these Parquet files as artifacts under the
-        same `concept_key` ('results').
-    4.  The same data analysis workflow (read, combine, aggregate) is then applied using:
-        -   Pure Pandas (reading full files into memory, manual schema alignment via `pd.concat`).
-        -   Polars (lazy evaluation on Parquet files, `pl.concat(how="diagonal")` for drift).
-        -   Consist's "cold" path (creating a view directly over Parquet files and executing SQL
-            that naturally handles schema drift via `UNION ALL BY NAME`).
-    5.  Performance metrics (time and peak RAM) are recorded for each method.
+    1. Two large Pandas DataFrames (`df_a` and `df_b`) are generated, each with `N_ROWS` records.
+        - `df_a` has a "baseline" schema (id, val, category).
+        - `df_b` simulates "schema drift" by including an additional 'subsidy' column.
+    2. These DataFrames are saved as Parquet files to a temporary directory.
+    3. Consist runs are initiated to log these Parquet files as artifacts under the
+       same `concept_key` ('results'), ensuring they are discoverable by Consist's
+       view factory.
+    4. The same data analysis workflow (read, combine, and aggregate by 'run_id' to
+       calculate mean 'val' and 'subsidy') is then applied using three different methods:
+        -   **Pure Pandas**: Loads both Parquet files entirely into memory, manually adds
+            a `run_id` column, and uses `pd.concat` with `sort=False` to handle schema drift,
+            followed by a groupby aggregation.
+        -   **Polars (Lazy)**: Uses Polars' `scan_parquet` for lazy reading, adds a `run_id`
+            column, uses `pl.concat(how="diagonal")` to handle schema drift efficiently,
+            and then performs a groupby aggregation.
+        -   **Consist's "cold" path**: Creates a DuckDB view (`v_bench_cold`) directly over
+            the raw Parquet files (zero-copy access). This view is generated using `create_view`,
+            which employs SQL's `UNION ALL BY NAME` to intrinsically handle schema drift.
+            A SQL query is then executed against this view for aggregation.
+    5. Performance metrics (execution time and peak RAM usage) are recorded for each method
+       using the `Profiler` context manager.
 
     What's checked:
-    - The numerical results (aggregated mean values for 'val' and 'subsidy') from all
-      three methods are asserted to be equivalent, verifying the correctness of Consist's
-      query generation and schema drift handling.
-    - Performance metrics are printed to stdout (handled by Profiler class) for manual
-      comparison and analysis, demonstrating Consist's efficiency.
+    - The numerical results (aggregated mean values for 'val' and 'subsidy' per `run_id`)
+      from all three methods are asserted to be equivalent (within typical floating-point
+      precision). This verifies the correctness of Consist's query generation, schema
+      drift handling, and the equivalence of results across different data processing frameworks.
+    - Performance metrics are printed to stdout by the `Profiler` class, allowing for
+      manual comparison and analysis of efficiency gains. The number of rows in the
+      final aggregated results are also verified to be correct.
     """
     run_dir = tmp_path / "bench_runs"
     db_path = str(tmp_path / "bench.duckdb")

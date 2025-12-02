@@ -31,8 +31,23 @@ except ImportError:
 
 def current_tracker() -> "Tracker":
     """
-    Returns the currently active Tracker instance.
-    Useful for introspection (e.g. accessing .last_run) inside deep functions.
+    Retrieves the currently active `Tracker` instance from the global context.
+
+    This function provides a way to access the `Tracker` object that is managing
+    the current run. It's particularly useful when you need to interact with
+    Consist's features (like logging artifacts or querying run history) from
+    within a function that doesn't explicitly receive the `Tracker` object as an argument.
+
+    Returns
+    -------
+    Tracker
+        The `Tracker` instance currently active in the execution context.
+
+    Raises
+    ------
+    RuntimeError
+        If no `Tracker` is active in the current context. This typically happens
+        if called outside of a `consist.start_run` block or a `@consist.task` decorated function.
     """
     return get_active_tracker()
 
@@ -55,17 +70,36 @@ def log_artifact(
     It automatically links the artifact to the current run context, handles path
     virtualization, and performs lineage discovery.
 
-    Args:
-        path (Union[str, Artifact]): The file path (str) or an existing `Artifact` object.
-        key (Optional[str]): A semantic name for the artifact. Required if `path` is a string.
-        direction (str): "input" or "output". Defaults to "output".
-        schema (Optional[Type[SQLModel]]): Optional SQLModel class for schema metadata.
-        driver (Optional[str]): Explicitly specify the driver (e.g., 'h5_table').
-                                If None, inferred from file extension.
-        **meta: Additional metadata for the artifact.
+    Parameters
+    ----------
+    path : Union[str, Artifact]
+        The file path (str) or an existing `Artifact` object to be logged.
+    key : Optional[str], optional
+        A semantic, human-readable name for the artifact (e.g., "households").
+        Required if `path` is a string.
+    direction : str, default "output"
+        Specifies whether the artifact is an "input" or "output" for the
+        current run. Defaults to "output".
+    schema : Optional[Type[SQLModel]], optional
+        An optional SQLModel class that defines the expected schema for the artifact's data.
+        Its name will be stored in artifact metadata.
+    driver : Optional[str], optional
+        Explicitly specify the driver (e.g., 'h5_table').
+        If None, the driver is inferred from the file extension.
+    **meta : Any
+        Additional key-value pairs to store in the artifact's flexible `meta` field.
 
-    Returns:
-        Artifact: The created or updated `Artifact` object.
+    Returns
+    -------
+    Artifact
+        The created or updated `Artifact` object.
+
+    Raises
+    ------
+    RuntimeError
+        If called outside an active run context.
+    ValueError
+        If `key` is not provided when `path` is a string.
     """
     return get_active_tracker().log_artifact(
         path=path, key=key, direction=direction, schema=schema, driver=driver, **meta
@@ -77,20 +111,42 @@ def ingest(
     data: Optional[Union[Iterable[Dict[str, Any]], Any]] = None,
     schema: Optional[Type[SQLModel]] = None,
     run: Optional[Run] = None,
-):
+) -> Any:
     """
     Ingests data associated with an `Artifact` into the active run's database.
 
     This function is a convenient proxy to `consist.core.tracker.Tracker.ingest`.
     It materializes data into the DuckDB, leveraging `dlt` for efficient loading
-    and injecting provenance information.
+    and injecting provenance information. This is part of the "Hot Data Strategy".
 
-    Args:
-        artifact (Artifact): The artifact object representing the data being ingested.
-        data (Optional[Union[Iterable[Dict[str, Any]], Any]]): The data to ingest. Can be a
-                                                              file path, DataFrame, or iterable of dicts.
-        schema (Optional[Type[SQLModel]]): An optional SQLModel class defining the schema.
-        run (Optional[Run]): The run context for ingestion. Defaults to the active run.
+    Parameters
+    ----------
+    artifact : Artifact
+        The artifact object representing the data being ingested.
+    data : Optional[Union[Iterable[Dict[str, Any]], Any]], optional
+        The data to ingest. Can be an iterable of dictionaries (rows), a file path
+        (str or Path), a Pandas DataFrame, or any other data type that `dlt`
+        can handle. If `None`, Consist attempts to read the data directly
+        from the artifact's resolved file path.
+    schema : Optional[Type[SQLModel]], optional
+        An optional SQLModel class that defines the expected schema for the ingested data.
+        If provided, `dlt` will use this for strict validation and schema inference.
+    run : Optional[Run], optional
+        The `Run` context for ingestion. If provided, the data will be tagged with
+        this run's ID (Offline Mode). If `None`, it defaults to the currently active run (Online Mode).
+
+    Returns
+    -------
+    Any
+        The result information from the underlying `dlt` ingestion process.
+
+    Raises
+    ------
+    RuntimeError
+        If no database is configured for the active `Tracker` or if `ingest` is
+        called outside of an active run context.
+    Exception
+        Any exception raised by the underlying `dlt` ingestion process.
     """
     return get_active_tracker().ingest(
         artifact=artifact, data=data, schema=schema, run=run
@@ -99,18 +155,38 @@ def ingest(
 
 @contextmanager
 def capture_outputs(
-    directory: Union[str, Any], pattern: str = "*", recursive: bool = False
-):
+    directory: Union[str, Path], pattern: str = "*", recursive: bool = False
+) -> Any:
     """
-    Watches a directory for changes within the current active run context.
-    Proxy to `tracker.capture_outputs`.
+    Context manager to automatically capture and log new or modified files in a directory
+    within the current active run context.
 
-    Usage:
-        import consist
+    This function is a convenient proxy to `consist.core.tracker.Tracker.capture_outputs`.
+    It watches a specified `directory` for any file changes (creations or modifications)
+    that occur within its `with` block. These changes are then automatically logged
+    as output artifacts of the current Consist run.
 
-        # Inside a function where you don't have the 'tracker' object:
-        with consist.capture_outputs("./outputs"):
-             legacy_code.run()
+    Parameters
+    ----------
+    directory : Union[str, Path]
+        The path to the directory to monitor for new or modified files.
+    pattern : str, default "*"
+        A glob pattern (e.g., "*.csv", "data_*.parquet") to filter which files
+        are captured within the specified directory. Defaults to all files.
+    recursive : bool, default False
+        If True, the capture will recursively scan subdirectories within `directory`
+        for changes.
+
+    Yields
+    ------
+    OutputCapture
+        An `OutputCapture` object containing a list of `Artifact` objects that were
+        captured and logged after the `with` block finishes.
+
+    Raises
+    ------
+    RuntimeError
+        If `capture_outputs` is used outside of an active `start_run` context.
     """
     with get_active_tracker().capture_outputs(directory, pattern, recursive) as capture:
         yield capture
@@ -120,23 +196,43 @@ def capture_outputs(
 
 
 def load(
-    artifact: Artifact, tracker: Optional["Tracker"] = None, **kwargs
+    artifact: Artifact, tracker: Optional["Tracker"] = None, **kwargs: Any
 ) -> Union[pd.DataFrame, "xr.Dataset", Any]:
     """
     Smart loader that retrieves data for an artifact from the best available source.
 
-    Priority:
-    1. Disk (Fastest, Raw Format)
-    2. Database (Ghost Mode, if ingested)
+    This function attempts to load the data associated with an `Artifact` object.
+    It prioritizes loading from disk (raw format) if the file exists. If the file
+    is missing but the artifact is marked as ingested, it attempts to recover the data
+    from the Consist DuckDB database ("Ghost Mode").
 
-    Args:
-        artifact: The Consist Artifact to load.
-        tracker: The Tracker instance (required for path resolution/DB access).
-                 If None, attempts to use the active global tracker context.
-        **kwargs: Arguments passed to the underlying loader (e.g. read_parquet, read_sql).
+    Parameters
+    ----------
+    artifact : Artifact
+        The Consist `Artifact` object whose data is to be loaded.
+    tracker : Optional[Tracker], optional
+        The `Tracker` instance to use for path resolution and database access.
+        If `None`, the function attempts to use the active global tracker context.
+        Explicitly passing a `tracker` is recommended for clarity or when
+        no global context is available.
+    **kwargs : Any
+        Additional keyword arguments to pass to the underlying data loader function
+        (e.g., `pd.read_parquet`, `pd.read_csv`, `xr.open_zarr`, `pd.read_sql`).
 
-    Returns:
-        DataFrame, xarray.Dataset, or other data object depending on the artifact driver.
+    Returns
+    -------
+    Union[pd.DataFrame, xarray.Dataset, Any]
+        The loaded data, typically a Pandas DataFrame, an xarray Dataset (for Zarr),
+        or another data object depending on the artifact's `driver` and the data format.
+
+    Raises
+    ------
+    RuntimeError
+        If no `Tracker` instance can be resolved (neither provided nor active in context)
+        and the artifact's absolute path is not directly resolvable.
+        Also if the artifact is marked as ingested but no tracker with a DB connection is available.
+    FileNotFoundError
+        If the artifact's data cannot be found on disk or recovered from the database.
     """
 
     # 1. Resolve Tracker
@@ -188,8 +284,37 @@ def load(
     )
 
 
-def _load_from_disk(path: str, driver: str, **kwargs):
-    """Dispatches to the correct file reader."""
+def _load_from_disk(path: str, driver: str, **kwargs: Any) -> Any:
+    """
+    Dispatches to the correct file reader based on the artifact's driver.
+
+    This internal helper function is responsible for reading data directly from
+    a file path using appropriate libraries (e.g., pandas for Parquet/CSV, xarray for Zarr).
+
+    Parameters
+    ----------
+    path : str
+        The absolute file system path to the data file.
+    driver : str
+        The driver string indicating the format of the file (e.g., "parquet", "csv", "zarr", "h5_table").
+    **kwargs : Any
+        Additional keyword arguments to pass to the specific file reading function.
+
+    Returns
+    -------
+    Any
+        The loaded data, typically a Pandas DataFrame, an xarray Dataset, or
+        another format-specific data object.
+
+    Raises
+    ------
+    ImportError
+        If a required library for a specific driver (e.g., `xarray` for Zarr, `tables` for HDF5)
+        is not installed.
+    ValueError
+        If an unsupported `driver` is provided, or if essential metadata (like `table_path`
+        for 'h5_table' driver) is missing.
+    """
     if driver == "parquet":
         return pd.read_parquet(path, **kwargs)
     elif driver == "csv":
@@ -229,8 +354,36 @@ def _load_from_disk(path: str, driver: str, **kwargs):
         raise ValueError(f"Unsupported driver for disk load: {driver}")
 
 
-def _load_from_db(artifact: Artifact, tracker: "Tracker", **kwargs):
-    """Recovers data from the global tables."""
+def _load_from_db(
+    artifact: Artifact, tracker: "Tracker", **kwargs: Any
+) -> pd.DataFrame:
+    """
+    Recovers data for an artifact from the Consist DuckDB database.
+
+    This function is used when the artifact's file is not found on disk but it has
+    been previously ingested into the database. It constructs a SQL query to
+    retrieve the data from the appropriate global table, filtering by the artifact's ID.
+
+    Parameters
+    ----------
+    artifact : Artifact
+        The `Artifact` object whose data is to be recovered from the database.
+    tracker : Tracker
+        The `Tracker` instance, necessary to access the database engine.
+    **kwargs : Any
+        Additional keyword arguments to pass to `pd.read_sql`.
+
+    Returns
+    -------
+    pd.DataFrame
+        A Pandas DataFrame containing the recovered data.
+
+    Raises
+    ------
+    RuntimeError
+        If the data cannot be loaded from the database, for example, if the table
+        does not exist or a database error occurs.
+    """
     table_name = artifact.key
     query = f"SELECT * FROM global_tables.{table_name} WHERE consist_artifact_id = '{artifact.id}'"
     try:
@@ -240,12 +393,25 @@ def _load_from_db(artifact: Artifact, tracker: "Tracker", **kwargs):
         raise RuntimeError(f"Failed to load from DB table '{table_name}': {e}")
 
 
-def log_meta(**kwargs):
+def log_meta(**kwargs: Any) -> None:
     """
     Updates the active run's metadata with the provided key-value pairs.
-    Useful for logging metrics, tags, or execution stats at runtime.
 
-    Usage:
-        consist.log_meta(accuracy=0.95, rows_processed=1000)
+    This function is a convenient proxy to `consist.core.tracker.Tracker.log_meta`.
+    It allows users to log additional information about the current run, such as
+    performance metrics, experimental parameters, or tags, directly to the run's
+    metadata. This information is then persisted to both the JSON log and the
+    DuckDB database.
+
+    Parameters
+    ----------
+    **kwargs : Any
+        Arbitrary key-value pairs to merge into the `meta` dictionary of
+        the current run. Existing keys will be updated, and new keys will be added.
+
+    Raises
+    ------
+    RuntimeError
+        If called when no `Tracker` is active in the current context.
     """
     get_active_tracker().log_meta(**kwargs)

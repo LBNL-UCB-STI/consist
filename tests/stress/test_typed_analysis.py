@@ -1,10 +1,17 @@
 """
-This module contains stress tests for Consist's "typed analysis" workflow,
-leveraging SQLModel for schema definition and DLT for strict ingestion.
+Consist "Typed Analysis" Workflow Stress Tests
 
-It demonstrates how Consist can enforce data contracts and enable Pythonic,
-type-safe querying of large datasets via SQLAlchemy expressions, effectively
-bridging the gap between Python data science and SQL analytics.
+This module contains stress tests for Consist's "typed analysis" workflow.
+This workflow leverages `SQLModel` for schema definition, and `dlt` for
+strict ingestion. It demonstrates how Consist can enforce data contracts
+and enable Pythonic, type-safe querying of large datasets via SQLAlchemy
+expressions, effectively bridging the gap between Python data science
+and SQL analytics.
+
+These tests validate the end-to-end process of defining a schema,
+ingesting data according to that schema, and then querying the data
+using Python objects rather than raw SQL strings, all while handling
+large volumes of data efficiently.
 """
 
 import logging
@@ -28,12 +35,18 @@ class CensusRecord(SQLModel, table=True):
     `__tablename__`, it maps directly to the global Consist data model for "census_strict"
     records within the DuckDB database.
 
-    Attributes:
-        person_id (int): Unique identifier for each person, serving as the primary key.
-        age (int): Age of the person.
-        income (float): Income of the person.
-        mode (str): Primary mode of transport (e.g., "car", "transit", "walk").
-        city (Optional[str]): Optional field for the city of residence.
+    Attributes
+    ----------
+    person_id : int
+        Unique identifier for each person, serving as the primary key.
+    age : int
+        Age of the person.
+    income : float
+        Income of the person.
+    mode : str
+        Primary mode of transport (e.g., "car", "transit", "walk").
+    city : Optional[str]
+        Optional field for the city of residence.
     """
 
     __tablename__ = "census_strict"
@@ -52,30 +65,37 @@ class CensusRecord(SQLModel, table=True):
 @pytest.mark.heavy
 def test_typed_analysis_workflow(tmp_path):
     """
-    Tests an end-to-end "typed analysis" workflow using Consist, SQLModel, and DLT's
+    Tests an end-to-end "typed analysis" workflow using Consist, SQLModel, and `dlt`'s
     strict ingestion capabilities.
 
     This test demonstrates how Consist allows users to define explicit data schemas
-    using SQLModel, strictly ingest data according to those schemas, and then
+    using `SQLModel`, strictly ingest data according to those schemas, and then
     perform Pythonic, type-safe analytical queries directly against the data in DuckDB
-    using SQLAlchemy expressions, without writing raw SQL strings.
+    using SQLAlchemy expressions, without writing raw SQL strings. This approach
+    combines the benefits of type safety with the performance of a columnar database.
 
     What happens:
-    1.  A large Pandas DataFrame (`df`) is generated with synthetic census data.
-    2.  This DataFrame is ingested into Consist using `consist.ingest`, with `CensusRecord`
-        provided as a strict schema. This ensures data conforms to the defined types
-        and structures.
-    3.  A Pythonic analytical query is constructed using SQLModel (e.g., `select(CensusRecord.mode, ...)`)
-        to group data by mode, calculate count, and average income, with filtering.
-    4.  This query is executed via the `tracker.engine`, returning aggregated results.
-    5.  The results are also fetched as a Pandas DataFrame for further Python-based analysis.
+    1. A `Tracker` is initialized.
+    2. **Generate & Ingest**: A large Pandas DataFrame (`df`) is generated with
+       synthetic census data (100,000 rows). This DataFrame is then ingested into
+       Consist using `consist.ingest`, with `CensusRecord` provided as a strict
+       schema. This ensures the incoming data conforms to the defined types and structure.
+    3. **Pythonic Analysis**: A Pythonic analytical query is constructed using
+       SQLAlchemy expressions (e.g., `select(CensusRecord.mode, func.count(...))`)
+       to group data by mode, calculate the count of persons, and their average income,
+       filtered by age. This query is executed via the `tracker.engine`.
+    4. **Results as DataFrame**: The results of the SQLAlchemy query are also fetched
+       directly as a Pandas DataFrame for further Python-based analysis.
 
     What's checked:
-    -   The ingestion process successfully loads data into the `global_tables.census_strict` table.
-    -   The Pythonic SQLAlchemy query correctly translates into SQL and retrieves accurate
-        aggregated results from the DuckDB database.
-    -   The structure and content of the results are validated.
-    -   The conversion of aggregated results back into a Pandas DataFrame is successful.
+    - The ingestion process successfully loads data into the `global_tables.census_strict`
+      table, adhering to the `CensusRecord` schema.
+    - The Pythonic SQLAlchemy query correctly translates into SQL and retrieves accurate
+      aggregated results from the DuckDB database.
+    - The printed results confirm that `count` and `avg_income` values are positive
+      for each mode.
+    - The conversion of aggregated results back into a Pandas DataFrame (`df_agg`) is
+      successful, and its length matches the number of unique modes.
     """
     run_dir = tmp_path / "typed_run"
     db_path = str(tmp_path / "typed.duckdb")

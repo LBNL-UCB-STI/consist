@@ -14,4 +14,11 @@ from sqlmodel import SQLModel
 from consist.core.tracker import Tracker
 
 # API
-from consist.api import load, log_artifact, ingest, capture_outputs, current_tracker, log_meta
+from consist.api import (
+    load,
+    log_artifact,
+    ingest,
+    capture_outputs,
+    current_tracker,
+    log_meta,
+)

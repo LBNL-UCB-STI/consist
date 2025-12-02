@@ -1,13 +1,36 @@
+from pathlib import Path
+from typing import Tuple
+
 import pytest
 import multiprocessing
 import time
 from consist.core.tracker import Tracker
 
 
-def worker_routine(args):
+def worker_routine(args: Tuple[Path, str, int]) -> Tuple[bool, str]:
     """
-    A worker function that runs in a separate process.
-    It creates a tracker, starts a run, logs artifacts, and ingests data.
+    A worker function designed to run in a separate process to simulate concurrent Consist usage.
+
+    This function sets up its own `Tracker`, starts a run, simulates some work,
+    logs an artifact, and explicitly disposes of the database engine to release
+    file locks. It's used to stress-test Consist's handling of simultaneous database
+    access from multiple processes.
+
+    Parameters
+    ----------
+    args : Tuple[Path, str, int]
+        A tuple containing:
+        - `run_dir` (Path): The base directory for run logs and artifacts.
+        - `db_path` (str): The file path to the shared DuckDB database.
+        - `worker_id` (int): A unique identifier for the worker process, used to
+          create unique `run_id`s and artifact keys.
+
+    Returns
+    -------
+    Tuple[bool, str]
+        A tuple where the first element is `True` if the routine completed successfully
+        without exceptions, and `False` otherwise. The second element is an empty string
+        on success, or an error message on failure.
     """
     run_dir, db_path, worker_id = args
 
@@ -40,10 +63,34 @@ def worker_routine(args):
 
 
 @pytest.mark.timeout(60)  # Increased timeout for safer concurrency checks
-def test_multiprocess_contention(tmp_path):
+def test_multiprocess_contention(tmp_path: Path):
     """
-    Spawns multiple processes to hammer the same DuckDB file.
-    Verifies that Consist handles (or we identify the need to handle) locking.
+    Tests Consist's robustness and handling of concurrent database access from multiple processes.
+
+    This stress test spawns several worker processes that simultaneously attempt to
+    perform Consist operations (starting runs, logging artifacts) against a single
+    shared DuckDB provenance file. It verifies that these operations complete
+    without deadlocks or data corruption, highlighting Consist's ability to
+    handle concurrent writes.
+
+    What happens:
+    1. A temporary directory is set up for run logs and the shared DuckDB file.
+    2. The DuckDB schema is initialized once by a main `Tracker` instance to prevent
+       initial race conditions.
+    3. A pool of `num_workers` processes is created.
+    4. Each worker process executes `worker_routine`, which involves:
+       - Instantiating its own `Tracker`.
+       - Starting a Consist run.
+       - Simulating work and logging an artifact.
+       - Explicitly disposing the database engine to release file locks.
+    5. The main process waits for all worker processes to complete.
+
+    What's checked:
+    - No worker process reports an error during its execution, implying successful
+      handling of concurrent database operations.
+    - After all workers complete, a verification `Tracker` instance confirms that
+      the DuckDB contains `num_workers` completed `Run` entries, indicating that
+      all runs were successfully persisted.
     """
     run_dir = tmp_path / "runs"
     run_dir.mkdir()

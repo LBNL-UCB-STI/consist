@@ -1,4 +1,19 @@
-# src/consist/core/views.py
+"""
+Consist Core Views Module
+
+This module defines the `ViewFactory`, which is a central component of Consist's
+data virtualization layer. It enables the creation of "Hybrid Views" in DuckDB,
+allowing users to query data seamlessly regardless of whether it's stored
+in materialized database tables ("hot" data) or directly in file-based
+artifacts ("cold" data like Parquet or CSV).
+
+The module implements strategies for:
+-   **Hybrid Data Access**: Unifying "hot" and "cold" data sources under a single SQL interface.
+-   **View Optimization**: Leveraging DuckDB's native capabilities for efficient
+    vectorized reads from files to ensure query performance.
+-   **Schema Evolution**: Handling schema differences across various data sources
+    and runs through `UNION ALL BY NAME` clauses.
+"""
 
 import logging
 import os
@@ -21,16 +36,25 @@ class ViewFactory:
     with data directly from file-based artifacts (e.g., Parquet, CSV),
     providing a unified SQL interface to query both "hot" and "cold" data
     transparently. This approach is central to Consist's flexible data access strategy.
+
+    Attributes
+    ----------
+    tracker : Tracker
+        An instance of the Consist `Tracker`, which provides access to the database
+        engine, artifact resolution, and other run-time context necessary for
+        view creation.
     """
 
-    def __init__(self, tracker: "Tracker"):
+    def __init__(self, tracker: "Tracker") -> None:
         """
         Initializes the ViewFactory with a reference to the main Tracker.
 
-        Args:
-            tracker (Tracker): An instance of the Consist Tracker, which provides
-                               access to the database engine, artifact resolution,
-                               and other run-time context.
+        Parameters
+        ----------
+        tracker : Tracker
+            An instance of the Consist `Tracker`, which provides access to the
+            database engine, artifact resolution, and other run-time context
+            required for creating and managing views.
         """
         self.tracker = tracker
 
@@ -52,19 +76,29 @@ class ViewFactory:
         "Hot" data refers to records already materialized into a DuckDB table (e.g., via ingestion).
         "Cold" data refers to records still residing in file-based artifacts (e.g., Parquet, CSV).
 
-        Args:
-            view_name (str): The name to assign to the newly created or replaced SQL view.
-            concept_key (str): The semantic key identifying the data concept (e.g., "households").
-                               Artifacts and materialized tables matching this key will be included.
-            driver_filter (Optional[List[str]]): An optional list of artifact drivers (e.g., "parquet", "csv")
-                                                 to include when querying "cold" data. If None, "parquet"
-                                                 and "csv" drivers are considered by default.
+        Parameters
+        ----------
+        view_name : str
+            The name to assign to the newly created or replaced SQL view. This is the name
+            you will use in your SQL queries to access the combined data.
+        concept_key : str
+            The semantic key identifying the data concept (e.g., "households", "transactions").
+            Artifacts and materialized tables matching this key will be included in the view.
+        driver_filter : Optional[List[str]], optional
+            An optional list of artifact drivers (e.g., "parquet", "csv") to include
+            when querying "cold" data. If `None`, "parquet" and "csv" drivers are considered
+            by default.
 
-        Returns:
-            bool: True if the view creation was attempted (even if empty), False otherwise.
+        Returns
+        -------
+        bool
+            True if the view creation was attempted (even if the view ends up empty), False otherwise.
 
-        Raises:
-            RuntimeError: If the Tracker's database engine is not configured.
+        Raises
+        ------
+        RuntimeError
+            If the `Tracker`'s database engine is not configured (i.e., `db_path` was not
+            provided during `Tracker` initialization).
         """
         if not self.tracker.engine:
             raise RuntimeError("Cannot create views: No database engine configured.")
@@ -99,15 +133,54 @@ class ViewFactory:
 
         return True
 
+        # 1. Identify 'Hot' Data
+        hot_table_exists = self._check_table_exists(f"global_tables.{concept_key}")
+
+        # 2. Identify 'Cold' Artifacts (Optimized)
+        cold_sql = self._generate_cold_query_optimized(concept_key, driver_filter)
+
+        # 3. Construct the Union
+        parts = []
+
+        if hot_table_exists:
+            # Select everything from the materialized table
+            parts.append(f"SELECT * FROM global_tables.{concept_key}")
+
+        if cold_sql:
+            parts.append(cold_sql)
+
+        if not parts:
+            # Fallback: Create an empty view with a generic schema
+            query = "SELECT 1 as _empty WHERE 1=0"
+        else:
+            # UNION ALL BY NAME matches columns by name, nulling out missing ones.
+            query = "\nUNION ALL BY NAME\n".join(parts)
+
+        # 4. Execute
+        with self.tracker.engine.begin() as conn:
+            sql = f"CREATE OR REPLACE VIEW {view_name} AS \n{query}"
+            conn.execute(text(sql))
+
+        return True
+
     def _check_table_exists(self, table_path: str) -> bool:
         """
-        Checks if a specified table exists in the DuckDB information schema.
+        Checks if a specified table or view exists in the DuckDB information schema.
 
-        Args:
-            table_path (str): The full path to the table (e.g., "global_tables.my_table" or "my_table").
+        This internal helper function queries DuckDB's `information_schema.tables`
+        to determine the presence of a given table or view, which is useful
+        for differentiating between "hot" (materialized) and "cold" (file-based) data.
 
-        Returns:
-            bool: True if the table exists, False otherwise.
+        Parameters
+        ----------
+        table_path : str
+            The full path to the table or view (e.g., "global_tables.my_table"
+            or simply "my_table" for the default schema).
+
+        Returns
+        -------
+        bool
+            True if the table or view exists, False otherwise.
         """
         if "." in table_path:
             schema, table = table_path.split(".", 1)
@@ -131,15 +204,25 @@ class ViewFactory:
         This method is central to **"View Optimization"** by employing **"Vectorization"**:
         it uses DuckDB's `read_parquet` or `read_csv_auto` functions with a list of file paths
         for efficient, single-pass reads. It also dynamically injects run-specific metadata
-        (e.g., `consist_run_id`, `consist_year`) using a Common Table Expression (CTE)
-        to allow unified querying with hot data.
+        (e.g., `consist_run_id`, `consist_year`) into the loaded data using a Common Table Expression (CTE)
+        to allow unified querying with hot data. This approach significantly reduces query
+        complexity and improves performance when dealing with numerous file-based artifacts.
 
-        Args:
-            concept_key (str): The semantic key for which to generate the cold data query.
-            driver_filter (Optional[List[str]]): List of artifact drivers to include.
+        Parameters
+        ----------
+        concept_key : str
+            The semantic key for which to generate the cold data query.
+        driver_filter : Optional[List[str]], optional
+            An optional list of artifact drivers (e.g., "parquet", "csv") to include
+            when querying "cold" data. If `None`, "parquet" and "csv" drivers are considered
+            by default.
 
-        Returns:
-            Optional[str]: A SQL query string for the cold data, or None if no cold data is found.
+        Returns
+        -------
+        Optional[str]
+            A SQL query string that, when executed, will return the combined data
+            from all matching "cold" artifacts with injected provenance metadata.
+            Returns `None` if no cold data artifacts are found or eligible.
         """
         drivers = driver_filter or ["parquet", "csv"]
 
