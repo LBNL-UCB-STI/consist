@@ -128,6 +128,131 @@ class Tracker:
         # Introspection State (Last completed run)
         self._last_consist: Optional[ConsistRecord] = None
 
+        # Event Hooks (for extensibility)
+        self._on_run_start_hooks: List[Callable[[Run], None]] = []
+        self._on_run_complete_hooks: List[Callable[[Run, List[Artifact]], None]] = []
+        self._on_run_failed_hooks: List[Callable[[Run, Exception], None]] = []
+
+    # --- Event Hook Registration ---
+
+    def on_run_start(self, callback: Callable[[Run], None]) -> Callable[[Run], None]:
+        """
+        Register a callback to be invoked when a run starts.
+
+        The callback receives the `Run` object after it has been initialized
+        but before any user code executes. This is useful for external integrations
+        like OpenLineage event emission, logging, or notifications.
+
+        Parameters
+        ----------
+        callback : Callable[[Run], None]
+            A function that takes a `Run` object as its only argument.
+
+        Returns
+        -------
+        Callable[[Run], None]
+            The same callback, allowing use as a decorator.
+
+        Example
+        -------
+        ```python
+        @tracker.on_run_start
+        def log_start(run):
+            print(f"Starting run: {run.id}")
+
+        # Or without decorator:
+        tracker.on_run_start(my_callback_function)
+        ```
+        """
+        self._on_run_start_hooks.append(callback)
+        return callback
+
+    def on_run_complete(
+        self, callback: Callable[[Run, List[Artifact]], None]
+    ) -> Callable[[Run, List[Artifact]], None]:
+        """
+        Register a callback to be invoked when a run completes successfully.
+
+        The callback receives the `Run` object and a list of output `Artifact` objects.
+        This is useful for external integrations like OpenLineage event emission,
+        post-processing, notifications, or cleanup tasks.
+
+        Parameters
+        ----------
+        callback : Callable[[Run, List[Artifact]], None]
+            A function that takes a `Run` object and a list of `Artifact` objects.
+
+        Returns
+        -------
+        Callable[[Run, List[Artifact]], None]
+            The same callback, allowing use as a decorator.
+
+        Example
+        -------
+        ```python
+        @tracker.on_run_complete
+        def log_complete(run, outputs):
+            print(f"Run {run.id} completed with {len(outputs)} outputs")
+            print(f"Duration: {run.duration_seconds:.2f}s")
+        ```
+        """
+        self._on_run_complete_hooks.append(callback)
+        return callback
+
+    def on_run_failed(
+        self, callback: Callable[[Run, Exception], None]
+    ) -> Callable[[Run, Exception], None]:
+        """
+        Register a callback to be invoked when a run fails with an exception.
+
+        The callback receives the `Run` object and the `Exception` that caused the failure.
+        This is useful for error reporting, alerting, or cleanup tasks.
+
+        Parameters
+        ----------
+        callback : Callable[[Run, Exception], None]
+            A function that takes a `Run` object and an `Exception`.
+
+        Returns
+        -------
+        Callable[[Run, Exception], None]
+            The same callback, allowing use as a decorator.
+
+        Example
+        -------
+        ```python
+        @tracker.on_run_failed
+        def alert_failure(run, error):
+            send_alert(f"Run {run.id} failed: {error}")
+        ```
+        """
+        self._on_run_failed_hooks.append(callback)
+        return callback
+
+    def _emit_run_start(self, run: Run) -> None:
+        """Invoke all registered on_run_start hooks."""
+        for hook in self._on_run_start_hooks:
+            try:
+                hook(run)
+            except Exception as e:
+                logging.warning(f"[Consist] on_run_start hook failed: {e}")
+
+    def _emit_run_complete(self, run: Run, outputs: List[Artifact]) -> None:
+        """Invoke all registered on_run_complete hooks."""
+        for hook in self._on_run_complete_hooks:
+            try:
+                hook(run, outputs)
+            except Exception as e:
+                logging.warning(f"[Consist] on_run_complete hook failed: {e}")
+
+    def _emit_run_failed(self, run: Run, error: Exception) -> None:
+        """Invoke all registered on_run_failed hooks."""
+        for hook in self._on_run_failed_hooks:
+            try:
+                hook(run, error)
+            except Exception as e:
+                logging.warning(f"[Consist] on_run_failed hook failed: {e}")
+
     @property
     def last_run(self) -> Optional[ConsistRecord]:
         """
@@ -136,23 +261,50 @@ class Tracker:
         """
         return self._last_consist
 
-    def history(self, limit: int = 10) -> pd.DataFrame:
+    def history(self, limit: int = 10, tags: Optional[List[str]] = None) -> pd.DataFrame:
         """
         Returns a Pandas DataFrame of recent runs from the database.
         Useful for quickly verifying run status and provenance.
+
+        Parameters
+        ----------
+        limit : int, default 10
+            Maximum number of runs to return.
+        tags : Optional[List[str]], optional
+            If provided, filter runs to only those containing ALL specified tags.
+
+        Returns
+        -------
+        pd.DataFrame
+            A DataFrame containing run information including timing and duration.
         """
         if not self.engine:
             return pd.DataFrame()
 
         query = f"""
-            SELECT id, model_name, status, created_at, 
-                   config_hash, git_hash, input_hash
-            FROM run 
-            ORDER BY created_at DESC 
+            SELECT id, model_name, status, tags,
+                   started_at, ended_at,
+                   CASE
+                       WHEN ended_at IS NOT NULL AND started_at IS NOT NULL
+                       THEN EXTRACT(EPOCH FROM (ended_at - started_at))
+                       ELSE NULL
+                   END as duration_seconds,
+                   config_hash, git_hash, input_hash,
+                   created_at
+            FROM run
+            ORDER BY created_at DESC
             LIMIT {limit}
         """
         try:
-            return pd.read_sql(query, self.engine)
+            df = pd.read_sql(query, self.engine)
+            # Filter by tags if specified (post-query filtering for JSON column compatibility)
+            if tags and not df.empty:
+                def has_all_tags(run_tags):
+                    if run_tags is None:
+                        return False
+                    return all(t in run_tags for t in tags)
+                df = df[df['tags'].apply(has_all_tags)]
+            return df
         except Exception as e:
             logging.warning(f"Failed to fetch history: {e}")
             return pd.DataFrame()
@@ -639,6 +791,8 @@ class Tracker:
         model: str,
         config: Union[Dict[str, Any], BaseModel, None] = None,
         inputs: Optional[List[Union[str, Artifact]]] = None,
+        tags: Optional[List[str]] = None,
+        description: Optional[str] = None,
         cache_mode: str = "reuse",
         **kwargs: Any,
     ) -> "Tracker":
@@ -662,6 +816,12 @@ class Tracker:
         inputs : Optional[List[Union[str, Artifact]]], optional
             A list of input paths (strings) or `Artifact` objects that this run depends on.
             These are used to compute the input hash and establish lineage.
+        tags : Optional[List[str]], optional
+            A list of string labels for categorization and filtering (e.g., ["production", "urbansim"]).
+            Tags enable efficient querying of runs by category.
+        description : Optional[str], optional
+            A human-readable description of the run's purpose or expected outcome.
+            Useful for documentation and run identification in UIs.
         cache_mode : str, default "reuse"
             Strategy for caching:
             - "reuse": Attempts to find a matching run in the cache. If found and valid,
@@ -699,16 +859,20 @@ class Tracker:
         config_hash = self.identity.compute_config_hash(config)
         git_hash = self.identity.get_code_version()
 
+        now = datetime.now(UTC)
         run = Run(
             id=run_id,
             model_name=model,
+            description=description,
             year=year,
             iteration=iteration,
+            tags=tags or [],
             status="running",
             config_hash=config_hash,
             git_hash=git_hash,
             meta=kwargs,
-            created_at=datetime.now(UTC),
+            started_at=now,
+            created_at=now,
         )
 
         push_tracker(self)
@@ -812,6 +976,10 @@ class Tracker:
         self._flush_json()  # Always flush JSON first for "Dual-Write Safety"
         self._sync_run_to_db(run)
 
+        # 7. Emit on_run_start hooks
+        self._emit_run_start(run)
+
+        run_exception: Optional[Exception] = None
         try:
             yield self  # The user's code executes here
             # If we reached here, the run completed successfully
@@ -822,7 +990,7 @@ class Tracker:
         except Exception as e:
             run.status = "failed"
             run.meta["error"] = str(e)
-            raise e  # Re-raise the exception after logging
+            run_exception = e
         finally:
             pop_tracker()  # Clean up global tracker context
 
@@ -830,11 +998,27 @@ class Tracker:
             self._last_consist = self.current_consist
             # ----------------------------------------------------------
 
-            run.updated_at = datetime.now(UTC)
+            # Set timing fields
+            end_time = datetime.now(UTC)
+            run.ended_at = end_time
+            run.updated_at = end_time
+
             self._flush_json()
             if cache_mode != "readonly":  # Only sync to DB if not in readonly mode
                 self._sync_run_to_db(run)
+
+            # Emit lifecycle hooks based on outcome
+            if run_exception is not None:
+                self._emit_run_failed(run, run_exception)
+            elif run.status == "completed":
+                outputs = self.current_consist.outputs if self.current_consist else []
+                self._emit_run_complete(run, outputs)
+
             self.current_consist = None  # Clear current run context
+
+            # Re-raise exception after hooks have been called
+            if run_exception is not None:
+                raise run_exception
 
     def log_artifact(
         self,
@@ -953,10 +1137,20 @@ class Tracker:
                 if driver is None:
                     driver = Path(path).suffix.lstrip(".").lower() or "unknown"
 
+                # Compute content hash for the artifact
+                content_hash = None
+                try:
+                    content_hash = self.identity._compute_file_checksum(resolved_abs_path)
+                except Exception as e:
+                    logging.warning(
+                        f"[Consist Warning] Failed to compute hash for {path}: {e}"
+                    )
+
                 artifact_obj = Artifact(
                     key=key,
                     uri=uri,
                     driver=driver,
+                    hash=content_hash,
                     run_id=(
                         self.current_consist.run.id if direction == "output" else None
                     ),
@@ -984,6 +1178,76 @@ class Tracker:
         self._sync_artifact_to_db(artifact_obj, direction)
 
         return artifact_obj
+
+    def log_artifacts(
+        self,
+        paths: List[Union[str, Path]],
+        direction: str = "output",
+        driver: Optional[str] = None,
+        **shared_meta: Any,
+    ) -> List[Artifact]:
+        """
+        Log multiple artifacts in a single call for efficiency.
+
+        This is a convenience method for bulk artifact logging, particularly useful
+        when a model produces many output files or when registering multiple inputs.
+        Each path is logged as a separate artifact, with the filename stem used as the key.
+
+        Parameters
+        ----------
+        paths : List[Union[str, Path]]
+            A list of file paths to log as artifacts.
+        direction : str, default "output"
+            Specifies whether the artifacts are "input" or "output" for the current run.
+        driver : Optional[str], optional
+            Explicitly specify the driver for all artifacts. If None, driver is inferred
+            from each file's extension individually.
+        **shared_meta : Any
+            Metadata key-value pairs to apply to ALL logged artifacts.
+            Useful for tagging a batch of related files.
+
+        Returns
+        -------
+        List[Artifact]
+            A list of the created `Artifact` objects, in the same order as the input paths.
+
+        Raises
+        ------
+        RuntimeError
+            If called outside an active run context.
+
+        Example
+        -------
+        ```python
+        # Log all CSV files from a directory
+        csv_files = list(Path("./outputs").glob("*.csv"))
+        artifacts = tracker.log_artifacts(csv_files, direction="output", batch="run_001")
+
+        # Log specific input files
+        inputs = tracker.log_artifacts(
+            ["data/train.parquet", "data/test.parquet"],
+            direction="input",
+            dataset_version="v2"
+        )
+        ```
+        """
+        if not self.current_consist:
+            raise RuntimeError("Cannot log artifacts outside of a run context.")
+
+        artifacts = []
+        for path in paths:
+            path_obj = Path(path)
+            key = path_obj.stem
+            art = self.log_artifact(
+                str(path_obj),
+                key=key,
+                direction=direction,
+                driver=driver,
+                **shared_meta,
+            )
+            artifacts.append(art)
+
+        return artifacts
 
     def ingest(
         self,
@@ -1300,6 +1564,7 @@ class Tracker:
                 if db_run:
                     # Update existing DB row explicitly
                     db_run.status = run.status
+                    db_run.description = run.description
                     db_run.updated_at = run.updated_at
                     db_run.meta = run.meta
                     db_run.config_hash = run.config_hash
@@ -1307,6 +1572,9 @@ class Tracker:
                     db_run.input_hash = run.input_hash
                     db_run.signature = run.signature
                     db_run.parent_run_id = run.parent_run_id
+                    db_run.tags = run.tags
+                    db_run.started_at = run.started_at
+                    db_run.ended_at = run.ended_at
                     session.add(db_run)
                 else:
                     # Insert new: Create a fresh copy for the DB

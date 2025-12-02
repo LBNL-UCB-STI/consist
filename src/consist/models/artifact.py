@@ -21,9 +21,11 @@ class Artifact(SQLModel, table=True):
                    location (e.g., "inputs://land_use.csv").
         driver (str): The name of the format handler used to read or write the artifact
                       (e.g., "parquet", "csv", "zarr").
+        hash (Optional[str]): SHA256 content hash of the artifact's data, enabling content-addressable
+                              lookups and deduplication.
         run_id (Optional[str]): The ID of the run that generated this artifact. Null for inputs.
         meta (Dict[str, Any]): A flexible JSON field for storing arbitrary metadata, such as
-                               checksums, schema signatures, or data dimensions.
+                               schema signatures, or data dimensions.
         created_at (datetime): The timestamp when the artifact was first logged.
     """
 
@@ -41,11 +43,18 @@ class Artifact(SQLModel, table=True):
     # Driver Info
     driver: str = Field(description="Format handler: parquet, csv, zarr, h5, git")
 
+    # Content Hash (for deduplication and content-addressable lookups)
+    hash: Optional[str] = Field(
+        default=None,
+        index=True,
+        description="SHA256 content hash of the artifact's data",
+    )
+
     # Lineage
     run_id: Optional[str] = Field(default=None, index=True)
 
     # Metadata (Flexible JSON bag)
-    # Stores: checksums, schema signatures, matrix shapes, etc.
+    # Stores: schema signatures, matrix shapes, etc.
     # Uses SQLAlchemy's JSON type for efficient persistence of arbitrary JSON structures.
     meta: Dict[str, Any] = Field(default={}, sa_column=Column(JSON))
 

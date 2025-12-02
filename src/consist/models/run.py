@@ -2,7 +2,7 @@ import uuid
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from datetime import UTC
-from sqlalchemy import Column, JSON
+from sqlalchemy import Column, JSON, ARRAY, String
 from sqlmodel import Field, SQLModel
 from consist.models.artifact import Artifact
 
@@ -43,13 +43,17 @@ class Run(SQLModel, table=True):
         parent_run_id (Optional[str]): The ID of the parent run, if this is a nested execution.
         status (str): The current state of the run (e.g., "running", "completed", "failed").
         model_name (str): The name of the model or workflow being executed.
+        description (Optional[str]): Human-readable description of the run's purpose or outcome.
         year (Optional[int]): The simulation or data year, if applicable.
         iteration (Optional[int]): The iteration number, if applicable.
+        tags (List[str]): A list of string labels for categorization and filtering (e.g., ["production", "urbansim"]).
         config_hash (Optional[str]): A hash of the run's configuration, used for caching.
         git_hash (Optional[str]): The Git commit hash of the code version used for the run.
-        meta (Dict[str, Any]): A flexible dictionary for storing arbitrary metadata (e.g., hostname, tags).
-        created_at (datetime): The timestamp when the run was created.
-        updated_at (datetime): The timestamp when the run was last updated.
+        meta (Dict[str, Any]): A flexible dictionary for storing arbitrary metadata (e.g., hostname).
+        started_at (datetime): The timestamp when the run execution began.
+        ended_at (Optional[datetime]): The timestamp when the run execution completed or failed.
+        created_at (datetime): The timestamp when the run record was created.
+        updated_at (datetime): The timestamp when the run record was last updated.
     """
 
     __tablename__ = "run"
@@ -62,8 +66,20 @@ class Run(SQLModel, table=True):
 
     # Context
     model_name: str = Field(index=True)
+    description: Optional[str] = Field(
+        default=None,
+        description="Human-readable description of the run's purpose or outcome",
+    )
     year: Optional[int] = Field(default=None, index=True)
     iteration: Optional[int] = Field(default=None, index=True)
+
+    # Tags (for filtering and categorization)
+    # Note: DuckDB supports arrays natively. For SQLite compatibility, this would need JSON storage.
+    tags: List[str] = Field(
+        default=[],
+        sa_column=Column(JSON),  # Using JSON for broader DB compatibility
+        description="List of string labels for categorization and filtering",
+    )
 
     # Identity / Caching
     # These fields are crucial for Consist's Merkle DAG caching strategy, forming the "signature"
@@ -78,18 +94,41 @@ class Run(SQLModel, table=True):
         default=None,
         index=True,
         description="SHA256 hash derived from the provenance IDs of input artifacts.",
-    )  # NEW
+    )
     signature: Optional[str] = Field(
         default=None,
         index=True,
         description="Composite hash (SHA256) of code, config, and input hashes, defining the unique identity for caching.",
-    )  # NEW (The composite key)
+    )
 
     # Metadata
     # Uses SQLAlchemy's JSON type for efficient persistence of arbitrary JSON structures.
     meta: Dict[str, Any] = Field(default={}, sa_column=Column(JSON))
+
+    # Timing
+    started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    ended_at: Optional[datetime] = Field(default=None)
+
+    # Audit (record timestamps, distinct from execution timing)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    @property
+    def duration_seconds(self) -> Optional[float]:
+        """
+        Calculate the duration of the run in seconds.
+
+        Returns the elapsed time between `started_at` and `ended_at` if both are set,
+        otherwise returns None (e.g., if the run is still in progress).
+
+        Returns
+        -------
+        Optional[float]
+            The duration in seconds, or None if the run hasn't ended.
+        """
+        if self.ended_at and self.started_at:
+            return (self.ended_at - self.started_at).total_seconds()
+        return None
 
     def __repr__(self):
         status_icon = (
