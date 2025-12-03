@@ -1,7 +1,8 @@
 import uuid
 from typing import Dict, Any, List, Optional
 from datetime import datetime
-from datetime import UTC
+from datetime import timezone
+UTC = timezone.utc
 from sqlalchemy import Column, JSON
 from sqlmodel import Field, SQLModel
 from consist.models.artifact import Artifact
