@@ -6,7 +6,7 @@ import functools
 import inspect
 from pathlib import Path
 from time import sleep
-from typing import Dict, Optional, List, Any, Type, Iterable, Union, Callable
+from typing import Dict, Optional, List, Any, Type, Iterable, Union, Callable, Tuple
 from datetime import datetime, UTC
 from contextlib import contextmanager
 
@@ -127,6 +127,9 @@ class Tracker:
 
         # Introspection State (Last completed run)
         self._last_consist: Optional[ConsistRecord] = None
+
+        # Active run tracking (for imperative begin_run/end_run pattern)
+        self._active_run_cache_mode: Optional[str] = None
 
         # Event Hooks (for extensibility)
         self._on_run_start_hooks: List[Callable[[Run], None]] = []
@@ -261,7 +264,9 @@ class Tracker:
         """
         return self._last_consist
 
-    def history(self, limit: int = 10, tags: Optional[List[str]] = None) -> pd.DataFrame:
+    def history(
+        self, limit: int = 10, tags: Optional[List[str]] = None
+    ) -> pd.DataFrame:
         """
         Returns a Pandas DataFrame of recent runs from the database.
         Useful for quickly verifying run status and provenance.
@@ -299,11 +304,13 @@ class Tracker:
             df = pd.read_sql(query, self.engine)
             # Filter by tags if specified (post-query filtering for JSON column compatibility)
             if tags and not df.empty:
+
                 def has_all_tags(run_tags):
                     if run_tags is None:
                         return False
                     return all(t in run_tags for t in tags)
-                df = df[df['tags'].apply(has_all_tags)]
+
+                df = df[df["tags"].apply(has_all_tags)]
             return df
         except Exception as e:
             logging.warning(f"Failed to fetch history: {e}")
@@ -799,29 +806,24 @@ class Tracker:
         """
         Context manager to initiate and manage the lifecycle of a Consist run.
 
-        This is the core entry point for defining a reproducible and observable unit
-        of work. It handles the creation of a `Run` object, computes its identity
-        (hashes for configuration, inputs, and code), performs cache lookups,
-        and manages dual-write logging of provenance metadata.
+        This is the primary entry point for defining a reproducible and observable unit
+        of work. It wraps the imperative `begin_run()`/`end_run()` methods to provide
+        automatic cleanup and exception handling.
 
         Parameters
         ----------
         run_id : str
             A unique identifier for the current run.
         model : str
-            A descriptive name for the model or process being executed (e.g., "linear_regression", "data_ingestion").
+            A descriptive name for the model or process being executed.
         config : Union[Dict[str, Any], BaseModel, None], optional
-            A dictionary or Pydantic `BaseModel` instance representing the configuration
-            parameters for this run. This configuration is hashed to form part of the run's identity.
+            Configuration parameters for this run, hashed to form part of run identity.
         inputs : Optional[List[Union[str, Artifact]]], optional
-            A list of input paths (strings) or `Artifact` objects that this run depends on.
-            These are used to compute the input hash and establish lineage.
+            Input paths or Artifact objects that this run depends on.
         tags : Optional[List[str]], optional
-            A list of string labels for categorization and filtering (e.g., ["production", "urbansim"]).
-            Tags enable efficient querying of runs by category.
+            String labels for categorization and filtering.
         description : Optional[str], optional
-            A human-readable description of the run's purpose or expected outcome.
-            Useful for documentation and run identification in UIs.
+            Human-readable description of the run's purpose.
         cache_mode : str, default "reuse"
             Strategy for caching:
             - "reuse": Attempts to find a matching run in the cache. If found and valid,
@@ -832,21 +834,112 @@ class Tracker:
             - "readonly": The run will perform a cache lookup. If a hit, outputs are hydrated.
                           If a miss, the run executes but its results are NOT saved to the cache.
         **kwargs : Any
-            Additional metadata to store with the `Run` object in its `meta` field.
-            Special keywords `year` and `iteration` can be used.
+            Additional metadata. Special keywords `year` and `iteration` can be used.
 
         Yields
         ------
         Tracker
-            The current `Tracker` instance, allowing access to `log_artifact`, `ingest`, etc.,
-            within the `with` block.
+            The current `Tracker` instance for use within the `with` block.
 
         Raises
         ------
         Exception
             Any exception raised within the `with` block will be caught, the run
-            status will be marked as "failed", and then the exception will be re-raised.
+            marked as "failed", and then re-raised after cleanup.
+
+        See Also
+        --------
+        begin_run : Imperative alternative for starting runs.
+        end_run : Imperative alternative for ending runs.
         """
+        self.begin_run(
+            run_id=run_id,
+            model=model,
+            config=config,
+            inputs=inputs,
+            tags=tags,
+            description=description,
+            cache_mode=cache_mode,
+            **kwargs,
+        )
+        try:
+            yield self
+            self.end_run(status="completed")
+        except Exception as e:
+            self.end_run(status="failed", error=e)
+            raise
+
+    def begin_run(
+        self,
+        run_id: str,
+        model: str,
+        config: Union[Dict[str, Any], BaseModel, None] = None,
+        inputs: Optional[List[Union[str, Artifact]]] = None,
+        tags: Optional[List[str]] = None,
+        description: Optional[str] = None,
+        cache_mode: str = "reuse",
+        **kwargs: Any,
+    ) -> Run:
+        """
+        Start a run imperatively (without context manager).
+
+        Use this when run start and end are in separate methods, or when integrating
+        with frameworks that have their own lifecycle management. Returns the Run object.
+        Call end_run() when complete.
+
+        This provides an alternative to the context manager pattern when you need more
+        control over the run lifecycle, such as in PILATES-like integrations where
+        start_model_run() and complete_model_run() are separate method calls.
+
+        Parameters
+        ----------
+        run_id : str
+            A unique identifier for the current run.
+        model : str
+            A descriptive name for the model or process being executed.
+        config : Union[Dict[str, Any], BaseModel, None], optional
+            Configuration parameters for this run.
+        inputs : Optional[List[Union[str, Artifact]]], optional
+            A list of input paths or Artifact objects.
+        tags : Optional[List[str]], optional
+            A list of string labels for categorization and filtering.
+        description : Optional[str], optional
+            A human-readable description of the run's purpose.
+        cache_mode : str, default "reuse"
+            Strategy for caching: "reuse", "overwrite", or "readonly".
+        **kwargs : Any
+            Additional metadata. Special keywords `year` and `iteration` can be used.
+
+        Returns
+        -------
+        Run
+            The Run object representing the started run.
+
+        Raises
+        ------
+        RuntimeError
+            If there is already an active run.
+
+        Example
+        -------
+        ```python
+        run = tracker.begin_run("run_001", "urbansim", config={...})
+        try:
+            tracker.log_artifact(input_file, direction="input")
+            # ... do work ...
+            tracker.log_artifact(output_file, direction="output")
+            tracker.end_run("completed")
+        except Exception as e:
+            tracker.end_run("failed", error=e)
+            raise
+        ```
+        """
+        if self.current_consist is not None:
+            raise RuntimeError(
+                f"Cannot begin_run: A run is already active (id={self.current_consist.run.id}). "
+                "Call end_run() first."
+            )
+
         if config is None:
             config = {}
         elif isinstance(config, BaseModel):
@@ -877,38 +970,30 @@ class Tracker:
 
         push_tracker(self)
         self.current_consist = ConsistRecord(run=run, config=config)
+        self._active_run_cache_mode = cache_mode
 
-        # 2. Process Inputs & Auto-Forking
-        # This step involves resolving input paths and detecting lineage from previous runs.
+        # Process Inputs & Auto-Forking
         if inputs:
             for item in inputs:
-                # We reuse the existing log_artifact logic.
-                # This handles path resolution, linking, and DB syncing.
                 if isinstance(item, Artifact):
-                    # If it's an object, we use its key by default for logging
                     self.log_artifact(item, direction="input")
                 else:
-                    # Infer key from filename for convenience if a string path is given
                     key = Path(item).stem
                     self.log_artifact(item, key=key, direction="input")
 
-        # 3. Detect Parent Lineage for run.parent_run_id
-        # Automatically link to a parent run if any input artifact was an output of another run.
+        # Detect Parent Lineage
         parent_candidates = [
             a.run_id for a in self.current_consist.inputs if a.run_id is not None
         ]
         if parent_candidates:
-            # We pick the run_id of the last processed input artifact that has lineage
             run.parent_run_id = parent_candidates[-1]
 
-        # 4. Identity Completion: Compute Merkle DAG signature
+        # Identity Completion: Compute Merkle DAG signature
         try:
-            # Hash of all input artifacts' provenance (recursively)
             input_hash = self.identity.compute_input_hash(
                 self.current_consist.inputs, path_resolver=self.resolve_uri
             )
             run.input_hash = input_hash
-            # The composite signature for cache lookup
             run.signature = self.identity.calculate_run_signature(
                 code_hash=git_hash, config_hash=config_hash, input_hash=input_hash
             )
@@ -919,25 +1004,20 @@ class Tracker:
             run.input_hash = "error"
             run.signature = "error"
 
-        # 5. Cache Lookup (Smart Caching)
-        cached_run = None
-
+        # Cache Lookup (Smart Caching)
         if cache_mode == "reuse":
-            # Only perform cache lookup if mode is "reuse"
             cached_run = self.find_matching_run(
                 config_hash=run.config_hash,
                 input_hash=run.input_hash,
                 git_hash=run.git_hash,
             )
             if cached_run:
-                # Validate cached run outputs for "Ghost Mode" and "Self-Healing"
                 if self._validate_run_outputs(cached_run):
                     self.current_consist.cached_run = cached_run
                     logging.info(
                         f"✅ [Consist] Cache HIT! Matching run: {cached_run.id}"
                     )
-
-                    # HYDRATE OUTPUTS: Populate current run's outputs from the cached run
+                    # HYDRATE OUTPUTS
                     with Session(self.engine) as session:
                         statement = (
                             select(Artifact)
@@ -950,9 +1030,7 @@ class Tracker:
                         )
                         cached_outputs = session.exec(statement).all()
                         for art in cached_outputs:
-                            # Expunge from session to prevent conflicts and allow use outside session
                             session.expunge(art)
-                            # Ensure _abs_path is set for hydrated artifacts for consistency
                             art.abs_path = self.resolve_uri(art.uri)
                             self.current_consist.outputs.append(art)
                 else:
@@ -967,58 +1045,101 @@ class Tracker:
             logging.info(
                 "👁️ [Consist] Cache lookup in read-only mode. New results will not be saved."
             )
-            # In readonly, we still lookup but don't set cached_run so it executes, but also don't save new results.
-            # This current logic implies "readonly" still re-runs if no cache hit.
-            # If the intent for "readonly" is to *only* use cache and skip if not cached,
-            # further modification would be needed here (e.g., raise an error or exit).
 
-        # 6. Dual-Write Logging: Initial flush to JSON and DB
-        self._flush_json()  # Always flush JSON first for "Dual-Write Safety"
+        # Dual-Write Logging
+        self._flush_json()
         self._sync_run_to_db(run)
 
-        # 7. Emit on_run_start hooks
+        # Emit on_run_start hooks
         self._emit_run_start(run)
 
-        run_exception: Optional[Exception] = None
+        return run
+
+    def end_run(
+        self,
+        status: str = "completed",
+        error: Optional[Exception] = None,
+    ) -> Run:
+        """
+        End the current run started with begin_run().
+
+        This method finalizes the run, persists the final state to JSON and database,
+        and emits lifecycle hooks. It is idempotent - calling it multiple times
+        on an already-ended run will log a warning but not raise an error.
+
+        Parameters
+        ----------
+        status : str, default "completed"
+            The final status of the run. Typically "completed" or "failed".
+        error : Optional[Exception], optional
+            The exception that caused the failure, if status is "failed".
+            The error message will be stored in the run's metadata.
+
+        Returns
+        -------
+        Run
+            The completed Run object.
+
+        Raises
+        ------
+        RuntimeError
+            If there is no active run to end.
+
+        Example
+        -------
+        ```python
+        run = tracker.begin_run("run_001", "urbansim")
         try:
-            yield self  # The user's code executes here
-            # If we reached here, the run completed successfully
-            if cache_mode != "readonly":  # Only update status if not in readonly mode
-                run.status = "completed"
-            else:
-                run.status = "skipped_save"  # A new status for readonly completed runs
+            # ... do work ...
+            tracker.end_run("completed")
         except Exception as e:
-            run.status = "failed"
-            run.meta["error"] = str(e)
-            run_exception = e
-        finally:
-            pop_tracker()  # Clean up global tracker context
+            tracker.end_run("failed", error=e)
+            raise
+        ```
+        """
+        if not self.current_consist:
+            raise RuntimeError("No active run to end. Call begin_run() first.")
 
-            # --- Introspection: Snapshot the result before clearing ---
-            self._last_consist = self.current_consist
-            # ----------------------------------------------------------
+        run = self.current_consist.run
+        cache_mode = self._active_run_cache_mode or "reuse"
 
-            # Set timing fields
-            end_time = datetime.now(UTC)
-            run.ended_at = end_time
-            run.updated_at = end_time
+        # Update run status
+        if cache_mode != "readonly":
+            run.status = status
+        else:
+            run.status = "skipped_save" if status == "completed" else status
 
-            self._flush_json()
-            if cache_mode != "readonly":  # Only sync to DB if not in readonly mode
-                self._sync_run_to_db(run)
+        if error:
+            run.meta["error"] = str(error)
 
-            # Emit lifecycle hooks based on outcome
-            if run_exception is not None:
-                self._emit_run_failed(run, run_exception)
-            elif run.status == "completed":
-                outputs = self.current_consist.outputs if self.current_consist else []
-                self._emit_run_complete(run, outputs)
+        # Clean up global tracker context
+        pop_tracker()
 
-            self.current_consist = None  # Clear current run context
+        # Snapshot the result for introspection
+        self._last_consist = self.current_consist
 
-            # Re-raise exception after hooks have been called
-            if run_exception is not None:
-                raise run_exception
+        # Set timing fields
+        end_time = datetime.now(UTC)
+        run.ended_at = end_time
+        run.updated_at = end_time
+
+        # Persist final state
+        self._flush_json()
+        if cache_mode != "readonly":
+            self._sync_run_to_db(run)
+
+        # Emit lifecycle hooks
+        if error is not None:
+            self._emit_run_failed(run, error)
+        elif run.status == "completed":
+            outputs = self.current_consist.outputs if self.current_consist else []
+            self._emit_run_complete(run, outputs)
+
+        # Clear current run context
+        self.current_consist = None
+        self._active_run_cache_mode = None
+
+        return run
 
     def log_artifact(
         self,
@@ -1140,7 +1261,9 @@ class Tracker:
                 # Compute content hash for the artifact
                 content_hash = None
                 try:
-                    content_hash = self.identity._compute_file_checksum(resolved_abs_path)
+                    content_hash = self.identity._compute_file_checksum(
+                        resolved_abs_path
+                    )
                 except Exception as e:
                     logging.warning(
                         f"[Consist Warning] Failed to compute hash for {path}: {e}"
@@ -1248,6 +1371,205 @@ class Tracker:
             artifacts.append(art)
 
         return artifacts
+
+    def log_input(
+        self,
+        path: Union[str, Artifact],
+        key: Optional[str] = None,
+        **meta: Any,
+    ) -> Artifact:
+        """
+        Log an input artifact. Convenience wrapper for log_artifact(direction='input').
+
+        Parameters
+        ----------
+        path : Union[str, Artifact]
+            The file path (str) or an existing `Artifact` object to be logged.
+        key : Optional[str], optional
+            A semantic, human-readable name for the artifact.
+        **meta : Any
+            Additional key-value pairs to store in the artifact's `meta` field.
+
+        Returns
+        -------
+        Artifact
+            The created or updated `Artifact` object.
+        """
+        return self.log_artifact(path, key=key, direction="input", **meta)
+
+    def log_output(
+        self,
+        path: Union[str, Artifact],
+        key: Optional[str] = None,
+        **meta: Any,
+    ) -> Artifact:
+        """
+        Log an output artifact. Convenience wrapper for log_artifact(direction='output').
+
+        Parameters
+        ----------
+        path : Union[str, Artifact]
+            The file path (str) or an existing `Artifact` object to be logged.
+        key : Optional[str], optional
+            A semantic, human-readable name for the artifact.
+        **meta : Any
+            Additional key-value pairs to store in the artifact's `meta` field.
+
+        Returns
+        -------
+        Artifact
+            The created or updated `Artifact` object.
+        """
+        return self.log_artifact(path, key=key, direction="output", **meta)
+
+    def log_h5_container(
+        self,
+        path: Union[str, Path],
+        key: Optional[str] = None,
+        direction: str = "output",
+        discover_tables: bool = True,
+        table_filter: Optional[Union[Callable[[str], bool], List[str]]] = None,
+        **meta: Any,
+    ) -> Tuple[Artifact, List[Artifact]]:
+        """
+        Log an HDF5 file and optionally discover its internal tables.
+
+        This method provides first-class HDF5 container support, automatically
+        discovering and logging internal tables as child artifacts. This is
+        particularly useful for PILATES-like workflows that extensively use
+        HDF5 files containing multiple tables.
+
+        Parameters
+        ----------
+        path : Union[str, Path]
+            Path to the HDF5 file.
+        key : Optional[str], optional
+            Semantic name for the container. If not provided, uses the file stem.
+        direction : str, default "output"
+            Whether this is an "input" or "output" artifact.
+        discover_tables : bool, default True
+            If True, scan the file and create child artifacts for each table/dataset.
+        table_filter : Optional[Union[Callable[[str], bool], List[str]]], optional
+            Filter which tables to log. Can be:
+            - A callable that takes a table name and returns True to include
+            - A list of table names to include (exact match)
+            If None, all tables are included.
+        **meta : Any
+            Additional metadata for the container artifact.
+
+        Returns
+        -------
+        Tuple[Artifact, List[Artifact]]
+            A tuple of (container_artifact, list_of_table_artifacts).
+
+        Raises
+        ------
+        RuntimeError
+            If called outside an active run context.
+        ImportError
+            If h5py is not installed and discover_tables is True.
+
+        Example
+        -------
+        ```python
+        # Log HDF5 file with auto-discovery of all tables
+        container, tables = tracker.log_h5_container("data.h5", key="urbansim_data")
+        print(f"Logged {len(tables)} tables from container")
+
+        # Filter tables by callable
+        container, tables = tracker.log_h5_container(
+            "data.h5",
+            key="urbansim_data",
+            table_filter=lambda name: name.startswith("/2025/")
+        )
+
+        # Filter tables by list of names
+        container, tables = tracker.log_h5_container(
+            "data.h5",
+            key="urbansim_data",
+            table_filter=["households", "persons", "buildings"]
+        )
+        ```
+        """
+        if not self.current_consist:
+            raise RuntimeError("Cannot log artifact outside of a run context.")
+
+        path_obj = Path(path)
+        if key is None:
+            key = path_obj.stem
+
+        # Log the container artifact
+        container = self.log_artifact(
+            str(path_obj),
+            key=key,
+            direction=direction,
+            driver="h5",
+            is_container=True,
+            **meta,
+        )
+
+        table_artifacts: List[Artifact] = []
+
+        if discover_tables:
+            try:
+                import h5py
+            except ImportError:
+                logging.warning(
+                    "[Consist] h5py not installed. Cannot discover HDF5 tables. "
+                    "Install with: pip install h5py"
+                )
+                return container, table_artifacts
+
+            # Build filter function
+            if table_filter is None:
+                filter_fn = lambda name: True
+            elif isinstance(table_filter, list):
+                # Convert list to set for O(1) lookup
+                filter_set = set(table_filter)
+                filter_fn = (
+                    lambda name: name in filter_set or name.lstrip("/") in filter_set
+                )
+            else:
+                filter_fn = table_filter
+
+            try:
+                with h5py.File(str(path_obj), "r") as f:
+
+                    def visit_datasets(name: str, obj: Any) -> None:
+                        """Visitor function to find all datasets in the HDF5 file."""
+                        import h5py as h5
+
+                        if isinstance(obj, h5.Dataset):
+                            if filter_fn(name):
+                                # Create a unique key for this table
+                                table_key = f"{key}_{name.replace('/', '_')}"
+
+                                table_art = self.log_artifact(
+                                    str(path_obj),
+                                    key=table_key,
+                                    direction=direction,
+                                    driver="h5_table",
+                                    parent_id=str(container.id),
+                                    table_path=name,
+                                    shape=list(obj.shape),
+                                    dtype=str(obj.dtype),
+                                )
+                                table_artifacts.append(table_art)
+
+                    f.visititems(visit_datasets)
+
+            except Exception as e:
+                logging.warning(f"[Consist] Failed to discover HDF5 tables: {e}")
+
+        # Update container metadata with table info
+        container.meta["table_count"] = len(table_artifacts)
+        container.meta["table_ids"] = [str(t.id) for t in table_artifacts]
+
+        # Re-sync the container with updated metadata
+        self._flush_json()
+        self._sync_artifact_to_db(container, direction)
+
+        return container, table_artifacts
 
     def ingest(
         self,
@@ -1401,6 +1723,51 @@ class Tracker:
 
             try:
                 return self._execute_with_retry(_query, operation_name="get_artifact")
+            except Exception:
+                return None
+
+        return None
+
+    def get_artifact_by_uri(self, uri: str) -> Optional[Artifact]:
+        """
+        Find an artifact by its URI.
+
+        Useful for checking if a specific file has been logged,
+        or for retrieving artifact metadata by path.
+
+        Parameters
+        ----------
+        uri : str
+            The portable URI to search for (e.g., "inputs://households.csv").
+
+        Returns
+        -------
+        Optional[Artifact]
+            The found `Artifact` object, or `None` if no matching artifact is found.
+        """
+        # 1. Check In-Memory Context (Current Run)
+        if self.current_consist:
+            for art in self.current_consist.inputs + self.current_consist.outputs:
+                if art.uri == uri:
+                    return art
+
+        # 2. Check Database
+        if self.engine:
+
+            def _query():
+                with Session(self.engine) as session:
+                    statement = (
+                        select(Artifact)
+                        .where(Artifact.uri == uri)
+                        .order_by(Artifact.created_at.desc())
+                        .limit(1)
+                    )
+                    return session.exec(statement).first()
+
+            try:
+                return self._execute_with_retry(
+                    _query, operation_name="get_artifact_by_uri"
+                )
             except Exception:
                 return None
 

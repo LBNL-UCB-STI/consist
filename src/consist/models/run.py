@@ -2,7 +2,7 @@ import uuid
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from datetime import UTC
-from sqlalchemy import Column, JSON, ARRAY, String
+from sqlalchemy import Column, JSON
 from sqlmodel import Field, SQLModel
 from consist.models.artifact import Artifact
 

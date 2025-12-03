@@ -131,6 +131,20 @@ class Artifact(SQLModel, table=True):
         """
         return self.driver in ("parquet", "csv", "sql")
 
+    @property
+    def created_at_iso(self) -> Optional[str]:
+        """
+        Return created_at as an ISO 8601 formatted string.
+
+        Useful for serialization to external systems that expect string timestamps.
+
+        Returns
+        -------
+        Optional[str]
+            The created_at timestamp as ISO 8601 string, or None if not set.
+        """
+        return self.created_at.isoformat() if self.created_at else None
+
     def get_meta(self, key: str, default: Any = None) -> Any:
         """
         Safely retrieves a value from the 'meta' dictionary.
