@@ -7,7 +7,8 @@ import inspect
 from pathlib import Path
 from time import sleep
 from typing import Dict, Optional, List, Any, Type, Iterable, Union, Callable, Tuple
-from datetime import datetime, UTC
+from datetime import datetime, timezone
+UTC = timezone.utc
 from contextlib import contextmanager
 
 import pandas as pd
