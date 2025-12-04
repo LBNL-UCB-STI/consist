@@ -1,6 +1,5 @@
 import pytest
 from pathlib import Path
-import os
 from sqlmodel import SQLModel
 
 # Import core library classes
@@ -14,6 +13,7 @@ from consist.models.artifact import Artifact
 
 # --- Global Test Configuration ---
 
+
 def pytest_addoption(parser):
     """Adds the --persist-db-path option to pytest for manual DB inspection."""
     parser.addoption(
@@ -25,6 +25,7 @@ def pytest_addoption(parser):
 
 
 # --- Core Fixtures ---
+
 
 @pytest.fixture(autouse=True)
 def reset_context():

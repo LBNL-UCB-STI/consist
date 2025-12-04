@@ -39,9 +39,17 @@ def runs(
         "provenance.duckdb", help="Path to the Consist DuckDB database."
     ),
     limit: int = typer.Option(10, help="Maximum number of recent runs to display."),
-    model_name: Optional[str] = typer.Option(None, "--model", help="Filter by model name."),
-    tag: Optional[List[str]] = typer.Option(None, "--tag", help="Filter by runs containing a tag. Can be used multiple times."),
-    status: Optional[str] = typer.Option(None, "--status", help="Filter by run status (e.g., 'completed', 'failed')."),
+    model_name: Optional[str] = typer.Option(
+        None, "--model", help="Filter by model name."
+    ),
+    tag: Optional[List[str]] = typer.Option(
+        None,
+        "--tag",
+        help="Filter by runs containing a tag. Can be used multiple times.",
+    ),
+    status: Optional[str] = typer.Option(
+        None, "--status", help="Filter by run status (e.g., 'completed', 'failed')."
+    ),
 ) -> None:
     """
     Lists the most recent Consist runs recorded in the provenance database.
@@ -61,7 +69,7 @@ def runs(
         if status:
             title_parts.append(f"with status [bold]{status}[/bold]")
 
-        table = Table(title=' '.join(title_parts))
+        table = Table(title=" ".join(title_parts))
         table.add_column("ID", style="cyan")
         table.add_column("Model", style="green")
         table.add_column("Status")
@@ -112,12 +120,13 @@ def artifacts(
         [a for a in artifacts_with_direction if a[1] == "input"], key=lambda x: x[0].key
     )
     outputs = sorted(
-        [a for a in artifacts_with_direction if a[1] == "output"], key=lambda x: x[0].key
+        [a for a in artifacts_with_direction if a[1] == "output"],
+        key=lambda x: x[0].key,
     )
 
     for artifact, direction in inputs:
         table.add_row(
-            f"[blue]Input[/blue]",
+            "[blue]Input[/blue]",
             artifact.key,
             artifact.uri,
             artifact.driver,
@@ -129,7 +138,7 @@ def artifacts(
 
     for artifact, direction in outputs:
         table.add_row(
-            f"[green]Output[/green]",
+            "[green]Output[/green]",
             artifact.key,
             artifact.uri,
             artifact.driver,
@@ -199,6 +208,7 @@ def lineage(
 
     console.print(tree)
 
+
 @app.command()
 def summary(
     db_path: str = typer.Option(
@@ -210,8 +220,10 @@ def summary(
     with Session(tracker.engine) as session:
         summary_data = queries.get_summary(session)
 
-    if summary_data['total_runs'] == 0:
-        console.print(Panel("[yellow]No runs found in the database.[/yellow]", title="Summary"))
+    if summary_data["total_runs"] == 0:
+        console.print(
+            Panel("[yellow]No runs found in the database.[/yellow]", title="Summary")
+        )
         raise typer.Exit()
 
     panel_content = (
@@ -225,7 +237,7 @@ def summary(
     model_table = Table(title="Runs per Model")
     model_table.add_column("Model Name", style="green")
     model_table.add_column("Run Count", style="magenta")
-    for model, count in summary_data['models_distribution']:
+    for model, count in summary_data["models_distribution"]:
         model_table.add_row(model, str(count))
 
     console.print(model_table)
@@ -233,7 +245,9 @@ def summary(
 
 @app.command()
 def preview(
-    artifact_key: str = typer.Argument(..., help="The key or ID of the artifact to preview."),
+    artifact_key: str = typer.Argument(
+        ..., help="The key or ID of the artifact to preview."
+    ),
     db_path: str = typer.Option(
         "provenance.duckdb", help="Path to the Consist DuckDB database."
     ),
@@ -249,14 +263,18 @@ def preview(
         if not artifact:
             console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
         elif artifact.driver not in ["csv", "parquet"]:
-            console.print(f"[yellow]Preview is not supported for driver '{artifact.driver}'.[/yellow]")
+            console.print(
+                f"[yellow]Preview is not supported for driver '{artifact.driver}'.[/yellow]"
+            )
         else:
-            console.print(f"[red]Could not load or preview artifact '{artifact_key}'. The file may be missing or corrupt.[/red]")
+            console.print(
+                f"[red]Could not load or preview artifact '{artifact_key}'. The file may be missing or corrupt.[/red]"
+            )
         raise typer.Exit(1)
 
     console.print(f"Preview: {artifact_key}")
     table = Table()
-    
+
     # Use pandas types to set column styles
     for col_name in df.columns:
         style = "cyan"
@@ -268,7 +286,7 @@ def preview(
 
     for _, row in df.iterrows():
         table.add_row(*[str(item) for item in row])
-        
+
     console.print(table)
 
 

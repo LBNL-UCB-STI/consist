@@ -16,6 +16,7 @@ runner = CliRunner()
 
 # --- Helpers ---
 
+
 @pytest.fixture
 def mock_data(tmp_path):
     """Creates mock data objects."""
@@ -91,7 +92,20 @@ def mock_data(tmp_path):
     )
     link3 = RunArtifactLink(run_id="run3", artifact_id=art4.id, direction="output")
 
-    return [run1, art1, link1, run2, art2, art3, link2_in1, link2_in2, link2_out, run3, art4, link3]
+    return [
+        run1,
+        art1,
+        link1,
+        run2,
+        art2,
+        art3,
+        link2_in1,
+        link2_in2,
+        link2_out,
+        run3,
+        art4,
+        link3,
+    ]
 
 
 @pytest.fixture
@@ -123,6 +137,7 @@ def mock_db_session(mock_data, tmp_path):
 
 # --- Tests ---
 
+
 def test_runs_no_db():
     with patch("pathlib.Path.exists", return_value=False):
         result = runner.invoke(app, ["runs", "--db-path", "nonexistent.db"])
@@ -131,9 +146,10 @@ def test_runs_no_db():
 
 
 def test_runs_with_db(mock_db_session):
-    with patch("pathlib.Path.exists", return_value=True), patch(
-            "consist.cli.get_tracker"
-    ) as mock_get_tracker:
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker") as mock_get_tracker,
+    ):
         mock_tracker = MagicMock()
         mock_tracker.engine = mock_db_session.get_bind()
         mock_get_tracker.return_value = mock_tracker
@@ -149,7 +165,10 @@ def test_runs_with_db(mock_db_session):
 
 
 def test_runs_filter_by_model(mock_db_session):
-    with patch("pathlib.Path.exists", return_value=True), patch("consist.cli.get_tracker") as m:
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker") as m,
+    ):
         m.return_value.engine = mock_db_session.get_bind()
         result = runner.invoke(app, ["runs", "--model", "create_data"])
         assert result.exit_code == 0
@@ -159,7 +178,10 @@ def test_runs_filter_by_model(mock_db_session):
 
 
 def test_runs_filter_by_tag(mock_db_session):
-    with patch("pathlib.Path.exists", return_value=True), patch("consist.cli.get_tracker") as m:
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker") as m,
+    ):
         m.return_value.engine = mock_db_session.get_bind()
         result = runner.invoke(app, ["runs", "--tag", "prod"])
         assert result.exit_code == 0
@@ -168,7 +190,10 @@ def test_runs_filter_by_tag(mock_db_session):
 
 
 def test_runs_filter_by_status(mock_db_session):
-    with patch("pathlib.Path.exists", return_value=True), patch("consist.cli.get_tracker") as m:
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker") as m,
+    ):
         m.return_value.engine = mock_db_session.get_bind()
         result = runner.invoke(app, ["runs", "--status", "failed"])
         assert result.exit_code == 0
@@ -177,7 +202,10 @@ def test_runs_filter_by_status(mock_db_session):
 
 
 def test_artifacts_with_db(mock_db_session, tmp_path):
-    with patch("pathlib.Path.exists", return_value=True), patch("consist.cli.get_tracker") as m:
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker") as m,
+    ):
         tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
         tracker.engine = mock_db_session.get_bind()
         m.return_value = tracker
@@ -190,7 +218,10 @@ def test_artifacts_with_db(mock_db_session, tmp_path):
 
 
 def test_lineage_with_db(mock_db_session, tmp_path):
-    with patch("pathlib.Path.exists", return_value=True), patch("consist.cli.get_tracker") as m:
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker") as m,
+    ):
         tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
         tracker.engine = mock_db_session.get_bind()
         m.return_value = tracker
@@ -203,7 +234,10 @@ def test_lineage_with_db(mock_db_session, tmp_path):
 
 
 def test_summary_command(mock_db_session):
-    with patch("pathlib.Path.exists", return_value=True), patch("consist.cli.get_tracker") as m:
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker") as m,
+    ):
         m.return_value.engine = mock_db_session.get_bind()
         result = runner.invoke(app, ["summary"])
         assert result.exit_code == 0
@@ -213,9 +247,11 @@ def test_summary_command(mock_db_session):
 
 
 def test_preview_command_success(mock_db_session):
-    with patch("pathlib.Path.exists", return_value=True), \
-            patch("consist.cli.get_tracker"), \
-            patch("consist.cli.queries.get_artifact_preview") as mock_get_preview:
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker"),
+        patch("consist.cli.queries.get_artifact_preview") as mock_get_preview,
+    ):
         mock_df = pd.DataFrame({"col1": [1, 2], "col2": ["a", "b"]})
         mock_get_preview.return_value = mock_df
 
@@ -228,7 +264,10 @@ def test_preview_command_success(mock_db_session):
 
 
 def test_preview_command_artifact_not_found(mock_db_session, tmp_path):
-    with patch("pathlib.Path.exists", return_value=True), patch("consist.cli.get_tracker") as m:
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker") as m,
+    ):
         tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
         tracker.engine = mock_db_session.get_bind()
         m.return_value = tracker
@@ -239,7 +278,10 @@ def test_preview_command_artifact_not_found(mock_db_session, tmp_path):
 
 
 def test_preview_command_unsupported_driver(mock_db_session, tmp_path):
-    with patch("pathlib.Path.exists", return_value=True), patch("consist.cli.get_tracker") as m:
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker") as m,
+    ):
         tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
         tracker.engine = mock_db_session.get_bind()
         m.return_value = tracker

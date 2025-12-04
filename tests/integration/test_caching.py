@@ -1,4 +1,3 @@
-from pathlib import Path
 import pytest
 import pandas as pd
 import logging
@@ -47,7 +46,7 @@ def test_caching_and_forking(tracker, dummy_input):
     # 1. Run A: The Base Run
     logging.info("\n--- Starting Run A ---")
     with tracker.start_run(
-            "run_A", model="test_model", config=config, inputs=[input_path]
+        "run_A", model="test_model", config=config, inputs=[input_path]
     ) as t:
         # Create an output
         df = pd.DataFrame({"a": [1, 2]})
@@ -58,7 +57,7 @@ def test_caching_and_forking(tracker, dummy_input):
     # 2. Run B: The Identical Twin (Cache Test)
     logging.info("\n--- Starting Run B (Expect Cache Hit) ---")
     with tracker.start_run(
-            "run_B", model="test_model", config=config, inputs=[input_path]
+        "run_B", model="test_model", config=config, inputs=[input_path]
     ) as t:
         cached = t.current_consist.cached_run
         assert cached is not None, "Run B should have found Run A in cache"
@@ -70,7 +69,7 @@ def test_caching_and_forking(tracker, dummy_input):
     prev_output = str(tracker.run_dir / "run_A_out.parquet")
 
     with tracker.start_run(
-            "run_C", model="downstream_model", inputs=[prev_output]
+        "run_C", model="downstream_model", inputs=[prev_output]
     ) as t:
         current_run = t.current_consist.run
         assert current_run.parent_run_id == "run_A"
@@ -110,29 +109,29 @@ def test_cache_overwrite_mode(tracker, dummy_input):
 
     # 1. Run A: Populate cache
     with tracker.start_run(
-            "run_A_overwrite", "overwrite_model", config=config, inputs=[input_path]
+        "run_A_overwrite", "overwrite_model", config=config, inputs=[input_path]
     ):
         pass
 
         # 2. Run B: Overwrite the cache
     logging.info("--- Starting Run B (Overwrite Mode) ---")
     with tracker.start_run(
-            "run_B_overwrite",
-            "overwrite_model",
-            config=config,
-            inputs=[input_path],
-            cache_mode="overwrite",
+        "run_B_overwrite",
+        "overwrite_model",
+        config=config,
+        inputs=[input_path],
+        cache_mode="overwrite",
     ) as t:
         assert not t.is_cached, "Run B in overwrite mode should not be cached."
 
     # 3. Run C: Check which run is now cached
     logging.info("--- Starting Run C (Expect Cache Hit on Run B) ---")
     with tracker.start_run(
-            "run_C_overwrite",
-            "overwrite_model",
-            config=config,
-            inputs=[input_path],
-            cache_mode="reuse",
+        "run_C_overwrite",
+        "overwrite_model",
+        config=config,
+        inputs=[input_path],
+        cache_mode="reuse",
     ) as t:
         assert t.is_cached, "Run C should have a cache hit."
         cached_run = t.current_consist.cached_run

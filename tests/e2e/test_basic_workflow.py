@@ -1,6 +1,6 @@
 import logging
 import json
-from sqlmodel import Session, select, create_engine
+from sqlmodel import Session, select
 
 # Note: Because of 'src' layout, this import works if environment is set up right
 from consist.core.tracker import Tracker

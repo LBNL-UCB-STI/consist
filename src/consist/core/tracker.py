@@ -8,6 +8,7 @@ from pathlib import Path
 from time import sleep
 from typing import Dict, Optional, List, Any, Type, Iterable, Union, Callable, Tuple
 from datetime import datetime, timezone
+
 UTC = timezone.utc
 from contextlib import contextmanager
 
@@ -2025,9 +2026,7 @@ class Tracker:
         except Exception:
             return None
 
-    def get_artifacts_for_run(
-        self, run_id: str
-    ) -> List[Tuple[Artifact, str]]:
+    def get_artifacts_for_run(self, run_id: str) -> List[Tuple[Artifact, str]]:
         """
         Retrieves all artifacts associated with a given run, indicating their direction.
 
@@ -2045,9 +2044,7 @@ class Tracker:
             with Session(self.engine) as session:
                 statement = (
                     select(Artifact, RunArtifactLink.direction)
-                    .join(
-                        RunArtifactLink, Artifact.id == RunArtifactLink.artifact_id
-                    )
+                    .join(RunArtifactLink, Artifact.id == RunArtifactLink.artifact_id)
                     .where(RunArtifactLink.run_id == run_id)
                 )
                 results = session.exec(statement).all()
@@ -2098,9 +2095,7 @@ class Tracker:
             return None
 
         # 2. Recursive function to build the tree
-        def _trace(
-            artifact: Artifact, visited_runs: set
-        ) -> Dict[str, Any]:
+        def _trace(artifact: Artifact, visited_runs: set) -> Dict[str, Any]:
             lineage_node: Dict[str, Any] = {"artifact": artifact, "producing_run": None}
 
             # Find the run that produced this artifact

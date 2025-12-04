@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 import pandas as pd
 from consist.core.tracker import Tracker

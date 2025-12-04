@@ -14,5 +14,8 @@ def stable_identity():
     We place this in tests/integration/conftest.py so it does NOT affect
     unit tests (which specifically test the logic of IdentityManager).
     """
-    with patch("consist.core.identity.IdentityManager.get_code_version", return_value="static_test_hash"):
+    with patch(
+        "consist.core.identity.IdentityManager.get_code_version",
+        return_value="static_test_hash",
+    ):
         yield
