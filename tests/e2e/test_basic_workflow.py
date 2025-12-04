@@ -9,7 +9,7 @@ from consist.models.artifact import Artifact
 from consist.core.identity import IdentityManager
 
 
-def test_dual_write_workflow(tmp_path):
+def test_dual_write_workflow(tracker: Tracker):
     """
     Tests the end-to-end "dual-write" functionality of the `Tracker`,
     including automatic identity hashing (Config & Git).
@@ -44,13 +44,6 @@ def test_dual_write_workflow(tmp_path):
           correct ID, `config_hash`, and `git_hash` was created.
         - Two `Artifact` records (one input, one output) are found in the database.
     """
-    # 1. Setup Paths
-    run_dir = tmp_path / "test_run_1"
-    db_path = str(tmp_path / "provenance.duckdb")
-
-    # 2. Initialize Tracker
-    tracker = Tracker(run_dir=run_dir, db_path=db_path)
-
     # 3. Run a Fake Workflow
     config = {"random_seed": 42, "scenario": "test"}
 
@@ -65,7 +58,7 @@ def test_dual_write_workflow(tmp_path):
 
         # Log an output
         tracker.log_artifact(
-            path=str(run_dir / "trips.csv"),
+            path=str(tracker.run_dir / "trips.csv"),
             key="trips",
             direction="output",
             meta={"rows": 100},
@@ -74,7 +67,7 @@ def test_dual_write_workflow(tmp_path):
     # --- ASSERTION TIME ---
 
     # 4. Check JSON (The Truth)
-    json_file = run_dir / "consist.json"
+    json_file = tracker.run_dir / "consist.json"
     assert json_file.exists(), "JSON log was not created!"
 
     with open(json_file) as f:
@@ -99,8 +92,7 @@ def test_dual_write_workflow(tmp_path):
     logging.info(f"\nJSON Output content: {json.dumps(data, indent=2)}")
 
     # 5. Check SQL (The Index)
-    engine = create_engine(f"duckdb:///{db_path}")
-    with Session(engine) as session:
+    with Session(tracker.engine) as session:
         # Check Run
         runs = session.exec(select(Run)).all()
         assert len(runs) == 1

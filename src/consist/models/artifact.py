@@ -3,8 +3,39 @@ from datetime import datetime, timezone
 UTC = timezone.utc
 from typing import Dict, Any, Optional
 from sqlalchemy import Column, JSON
+from sqlalchemy.types import TypeDecorator, CHAR
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID # Import for potential postgresql compatibility
+
 from sqlmodel import Field, SQLModel
 from pydantic import PrivateAttr
+
+
+class UUIDType(TypeDecorator):
+    """Platform-independent UUID type.
+    Uses PostgreSQL's UUID type, otherwise uses
+    CHAR(36), storing UUIDs as strings."""
+    impl = CHAR(36) # Explicitly use CHAR(36) for storage
+
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == 'postgresql':
+            return dialect.type_descriptor(PG_UUID(as_uuid=True))
+        return dialect.type_descriptor(CHAR(36))
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return value
+        if not isinstance(value, uuid.UUID):
+            raise ValueError(f"Expected UUID object, got {type(value)}")
+        return str(value) # Convert UUID object to string for storage
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return value
+        if isinstance(value, uuid.UUID): # If the dialect already returned a UUID object
+            return value
+        return uuid.UUID(value) # Convert string to UUID object
 
 
 class Artifact(SQLModel, table=True):
@@ -33,7 +64,12 @@ class Artifact(SQLModel, table=True):
     __tablename__ = "artifact"
 
     # Core Identity
-    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        primary_key=True,
+        sa_type=UUIDType,
+        sa_column_kwargs={"autoincrement": False},
+    )
     key: str = Field(index=True, description="Semantic name, e.g., 'households'")
 
     # Location (Virtualized)

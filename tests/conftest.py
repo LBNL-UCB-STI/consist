@@ -1,114 +1,98 @@
-# tests/conftest.py
 import pytest
 from pathlib import Path
+import os
+from sqlmodel import SQLModel
 
-from consist.models.artifact import Artifact
-from consist.models.run import Run, RunArtifactLink
-from sqlmodel import create_engine, SQLModel
+# Import core library classes
 from consist.core.tracker import Tracker
+from consist.core import context
+
+# Import specific models
+from consist.models.run import Run, RunArtifactLink
+from consist.models.artifact import Artifact
+
+
+# --- Global Test Configuration ---
+
+def pytest_addoption(parser):
+    """Adds the --persist-db-path option to pytest for manual DB inspection."""
+    parser.addoption(
+        "--persist-db-path",
+        action="store",
+        default=None,
+        help="Specify a file path to create a persistent DuckDB for manual inspection (e.g., test_debug.db).",
+    )
+
+
+# --- Core Fixtures ---
+
+@pytest.fixture(autouse=True)
+def reset_context():
+    """
+    Automatically resets the global Consist context before and after each test.
+    This prevents state (like active runs) from leaking between tests.
+    """
+    if hasattr(context, "_TRACKER_STACK"):
+        context._TRACKER_STACK.clear()
+    yield
+    if hasattr(context, "_TRACKER_STACK"):
+        context._TRACKER_STACK.clear()
 
 
 @pytest.fixture
 def run_dir(tmp_path: Path) -> Path:
     """
-    Pytest fixture that creates and returns a temporary directory for Consist run artifacts.
-
-    This fixture provides an isolated directory for each test function, ensuring that
-    tests do not interfere with each other's file-based outputs and providing a clean
-    slate for each test involving filesystem operations.
-
-    Parameters
-    ----------
-    tmp_path : Path
-        The built-in pytest fixture for creating unique temporary directories
-        for each test.
-
-    Returns
-    -------
-    Path
-        The path to the created 'runs' subdirectory within the temporary test directory.
+    Provides a isolated temporary directory for run outputs.
+    Exposed as a fixture so tests can access the file system location directly.
     """
-    d = tmp_path / "runs"
-    d.mkdir()
-    return d
+    path = tmp_path / "consist_runs"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 @pytest.fixture
-def db_path(tmp_path: Path) -> str:
+def tracker(request, run_dir: Path, tmp_path: Path) -> Tracker:
     """
-    Pytest fixture that returns the path to a temporary, empty DuckDB database file.
+    Provides a fresh, isolated Tracker instance for each test function.
 
-    This ensures that each test function operates on a clean, isolated database,
-    preventing state from leaking between tests and providing a consistent
-    starting point for database-related assertions.
-
-    Parameters
-    ----------
-    tmp_path : Path
-        The built-in pytest fixture for creating unique temporary directories
-        for each test.
-
-    Returns
-    -------
-    str
-        The string path to the temporary DuckDB database file (e.g., ".../test_provenance.duckdb").
+    Handles:
+    1. DB Persistence via --persist-db-path
+    2. Schema filtering (fixing the SERIAL/MockTable error)
+    3. Transaction/Table cleaning (fixing IntegrityErrors)
     """
-    return str(tmp_path / "test_provenance.duckdb")
+    persist_path = request.config.getoption("--persist-db-path")
+
+    if persist_path:
+        # Use the user-provided path for persistence
+        db_path = str(Path(persist_path).resolve())
+    else:
+        # Standard test isolation: use a temp file
+        db_path = str(tmp_path / "provenance.db")
+
+    # Initialize the Tracker
+    test_tracker = Tracker(run_dir=run_dir, db_path=db_path)
+
+    # --- CRITICAL DATABASE SETUP ---
+    # We restrict operations to ONLY these tables to prevent 'create_all'
+    # from trying to build 'MockTable' (from dlt tests) which uses 'SERIAL' types.
+    core_tables = [Run.__table__, Artifact.__table__, RunArtifactLink.__table__]
+
+    # Clean Slate Policy:
+    # We drop and recreate ONLY the core tables before every test.
+    if test_tracker.engine:
+        with test_tracker.engine.connect() as connection:
+            with connection.begin():
+                SQLModel.metadata.drop_all(connection, tables=core_tables)
+                SQLModel.metadata.create_all(connection, tables=core_tables)
+
+    yield test_tracker
+
+    # Teardown
+    if test_tracker.engine:
+        test_tracker.engine.dispose()
 
 
 @pytest.fixture
-def engine(db_path: str):
-    """
-    Pytest fixture that provides a SQLAlchemy engine connected to the test database.
-
-    This fixture initializes the database by creating all necessary `SQLModel` tables
-    (`Run`, `Artifact`, `RunArtifactLink`), ensuring the database is ready to be
-    used by test functions for direct SQLModel interactions.
-
-    Parameters
-    ----------
-    db_path : str
-        The path to the temporary DuckDB file, provided by the `db_path` fixture.
-
-    Yields
-    ------
-    sqlalchemy.engine.Engine
-        A SQLAlchemy `Engine` instance connected to the test DuckDB database.
-        The engine is automatically disposed after the test.
-    """
-    eng = create_engine(f"duckdb:///{db_path}")
-
-    SQLModel.metadata.create_all(
-        eng, tables=[Run.__table__, Artifact.__table__, RunArtifactLink.__table__]
-    )
-    yield eng  # Use yield to ensure engine is disposed after test
-    eng.dispose()
-
-
-@pytest.fixture
-def tracker(run_dir: Path, db_path: str) -> Tracker:
-    """
-    Pytest fixture that provides a fully initialized Consist `Tracker` instance for tests.
-
-    This fixture combines the `run_dir` and `db_path` fixtures to create a complete,
-    isolated environment for testing the `Tracker`'s functionality. The returned
-    `Tracker` is configured to use a temporary directory for run logs and a dedicated
-    DuckDB file for provenance tracking.
-
-    Parameters
-    ----------
-    run_dir : Path
-        The temporary run directory, provided by the `run_dir` fixture.
-    db_path : str
-        The path to the temporary database, provided by the `db_path` fixture.
-
-    Returns
-    -------
-    Tracker
-        A fully configured `Tracker` instance ready for use in a test function.
-        The `Tracker`'s database engine is explicitly disposed after the test.
-    """
-    t = Tracker(run_dir=run_dir, db_path=db_path)
-    yield t
-    if t.engine:
-        t.engine.dispose()
+def engine(tracker: Tracker):
+    """Provides direct access to the active tracker's SQLAlchemy engine."""
+    return tracker.engine

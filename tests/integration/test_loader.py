@@ -18,7 +18,7 @@ except ImportError:
     has_zarr = False
 
 
-def test_loader_priority_and_ghost_mode(tmp_path: Path):
+def test_loader_priority_and_ghost_mode(tracker: Tracker):
     """
     Tests the Consist Universal Loader's priority mechanism and "Ghost Mode" functionality.
 
@@ -44,14 +44,9 @@ def test_loader_priority_and_ghost_mode(tmp_path: Path):
         data from the DuckDB, demonstrating "Ghost Mode".
     -   **Phase 4**: `consist.load()` raises a `FileNotFoundError` for the non-existent artifact.
     """
-    # Setup
-    run_dir = tmp_path / "runs"
-    db_path = str(tmp_path / "provenance.duckdb")
-    tracker = Tracker(run_dir=run_dir, db_path=db_path)
-
     # Create dummy data
     df = pd.DataFrame({"id": [1, 2, 3], "val": ["a", "b", "c"]})
-    file_path = run_dir / "data.parquet"
+    file_path = tracker.run_dir / "data.parquet"
     file_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(file_path)
 
@@ -104,14 +99,14 @@ def test_loader_priority_and_ghost_mode(tmp_path: Path):
         key="fake",
         uri="inputs://fake.csv",
         driver="csv",
-        abs_path=str(run_dir / "fake.csv"),
+        abs_path=str(tracker.run_dir / "fake.csv"),
     )
 
     with pytest.raises(FileNotFoundError):
         load(fake_artifact, tracker=tracker)
 
 
-def test_loader_drivers(tmp_path: Path):
+def test_loader_drivers(run_dir: Path):
     """
     Verifies that `consist.load()` correctly dispatches to the appropriate
     underlying reader based on the artifact's specified `driver`.
@@ -140,7 +135,6 @@ def test_loader_drivers(tmp_path: Path):
         - `consist.load()` returns an xarray Dataset.
         - The loaded Dataset contains the expected variable and dimensions.
     """
-    run_dir = tmp_path / "runs_drivers"
     tracker = Tracker(run_dir=run_dir)  # No DB needed for disk loading tests
 
     # --- 1. CSV Test ---

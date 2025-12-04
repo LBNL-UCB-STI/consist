@@ -2,7 +2,7 @@ from pathlib import Path
 from unittest.mock import patch
 from typing import List, Dict, Optional, Union
 
-from sqlmodel import Session, select, create_engine
+from sqlmodel import Session, select
 
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
@@ -108,7 +108,7 @@ class MockChainingBackend(ContainerBackend):
 # --- Existing Tests ---
 
 
-def test_pipeline_chaining(tmp_path: Path):
+def test_pipeline_chaining(tracker: Tracker):
     """
     Tests the fundamental pipeline chaining mechanism: passing an `Artifact` object
     from one run directly into another as an input.
@@ -132,16 +132,11 @@ def test_pipeline_chaining(tmp_path: Path):
     - The database records reflect that there is one unique `Artifact` and two
       `RunArtifactLink` entries (one for "run_gen" output, one for "run_con" input).
     """
-    # Setup
-    run_dir = tmp_path / "runs"
-    db_path = str(tmp_path / "provenance.duckdb")
-    tracker = Tracker(run_dir=run_dir, db_path=db_path)
-
     # --- Phase 1: Generation ---
     generated_artifact = None
 
     with tracker.start_run("run_gen", model="generator"):
-        outfile = run_dir / "data.csv"
+        outfile = tracker.run_dir / "data.csv"
         outfile.parent.mkdir(parents=True, exist_ok=True)
         outfile.write_text("id,val\n1,100")
 
@@ -163,8 +158,7 @@ def test_pipeline_chaining(tmp_path: Path):
         assert input_artifact.uri == generated_artifact.uri
 
     # --- Phase 3: Verification (Database) ---
-    engine = create_engine(f"duckdb:///{db_path}")
-    with Session(engine) as session:
+    with Session(tracker.engine) as session:
         artifacts = session.exec(select(Artifact)).all()
         assert len(artifacts) == 1
         db_art = artifacts[0]
@@ -173,7 +167,7 @@ def test_pipeline_chaining(tmp_path: Path):
         assert len(links) == 2
 
 
-def test_implicit_file_chaining(tmp_path: Path):
+def test_implicit_file_chaining(tracker: Tracker):
     """
     Tests implicit file chaining: when a `Path` string (not an `Artifact` object)
     is passed as input, Consist should correctly link it to a previous run if the URI matches.
@@ -196,12 +190,8 @@ def test_implicit_file_chaining(tmp_path: Path):
       refer to the same `artifact_id`, confirming that the same physical artifact
       is linked as an output for "run_A" and an input for "run_B".
     """
-    run_dir = tmp_path / "implicit_runs"
-    db_path = str(tmp_path / "implicit.duckdb")
-    tracker = Tracker(run_dir=run_dir, db_path=db_path)
-
     # 1. Run A generates a file
-    file_path = run_dir / "handoff.csv"
+    file_path = tracker.run_dir / "handoff.csv"
     file_path.parent.mkdir(parents=True, exist_ok=True)
 
     with tracker.start_run("run_A", model="step1"):
@@ -216,8 +206,7 @@ def test_implicit_file_chaining(tmp_path: Path):
         assert inp.run_id == "run_A"
 
         # 3. Verify Database Links
-    engine = create_engine(f"duckdb:///{db_path}")
-    with Session(engine) as session:
+    with Session(tracker.engine) as session:
         links = session.exec(select(RunArtifactLink)).all()
         assert len(links) == 2
         assert links[0].artifact_id == links[1].artifact_id
@@ -226,7 +215,7 @@ def test_implicit_file_chaining(tmp_path: Path):
 # --- NEW TEST: Container Chaining & Caching ---
 
 
-def test_container_chaining_with_caching(tmp_path: Path):
+def test_container_chaining_with_caching(tracker: Tracker):
     """
     Tests a "Hybrid Workflow" scenario involving both containerized steps and Python steps,
     with a focus on correct chaining and caching behavior.
@@ -257,12 +246,8 @@ def test_container_chaining_with_caching(tmp_path: Path):
     - After Phase 4, the mock backend's `run_count` increments to 2, confirming a cache miss
       due to the change in image tag.
     """
-    run_dir = tmp_path / "hybrid_runs"
-    db_path = str(tmp_path / "hybrid.duckdb")
-    tracker = Tracker(run_dir=run_dir, db_path=db_path)
-
     # Setup directories
-    host_out_dir = (run_dir / "host_outputs").resolve()
+    host_out_dir = (tracker.run_dir / "host_outputs").resolve()
     host_out_dir.mkdir(parents=True, exist_ok=True)
 
     expected_output_file = host_out_dir / "container_output.csv"

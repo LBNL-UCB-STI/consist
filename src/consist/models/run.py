@@ -3,9 +3,9 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 from datetime import timezone
 UTC = timezone.utc
-from sqlalchemy import Column, JSON
+from sqlalchemy import Column, JSON, String
 from sqlmodel import Field, SQLModel
-from consist.models.artifact import Artifact
+from consist.models.artifact import Artifact, UUIDType
 
 
 class RunArtifactLink(SQLModel, table=True):
@@ -25,8 +25,10 @@ class RunArtifactLink(SQLModel, table=True):
 
     __tablename__ = "run_artifact_link"
 
-    run_id: str = Field(primary_key=True)
-    artifact_id: uuid.UUID = Field(primary_key=True)
+    run_id: str = Field(primary_key=True, sa_column_kwargs={"autoincrement": False})
+    artifact_id: uuid.UUID = Field(
+        primary_key=True, sa_type=UUIDType, sa_column_kwargs={"autoincrement": False}
+    )
 
     direction: str  # "input" or "output"
     is_implicit: bool = Field(default=False)
@@ -59,7 +61,7 @@ class Run(SQLModel, table=True):
 
     __tablename__ = "run"
 
-    id: str = Field(primary_key=True)
+    id: str = Field(primary_key=True, sa_column_kwargs={"autoincrement": False})
     parent_run_id: Optional[str] = Field(default=None, foreign_key="run.id", index=True)
 
     # State

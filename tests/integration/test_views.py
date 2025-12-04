@@ -245,7 +245,29 @@ def test_empty_state_safety(tracker):
         assert len(df) == 0
 
 
-def test_view_with_mounts(tmp_path):
+import pytest
+from pathlib import Path
+
+
+@pytest.fixture
+def mounted_tracker(tmp_path: Path):
+    """
+    Provides a Tracker instance configured with a specific 'inputs' mount for testing
+    path virtualization.
+    """
+    data_dir = tmp_path / "data_mount"
+    data_dir.mkdir()
+    t = Tracker(
+        run_dir=tmp_path / "runs",
+        db_path=str(tmp_path / "provenance.duckdb"),
+        mounts={"inputs": str(data_dir)},
+    )
+    yield t, data_dir
+    if t.engine:
+        t.engine.dispose()
+
+
+def test_view_with_mounts(mounted_tracker):
     """
     Tests that the `ViewFactory` correctly resolves virtualized URIs using configured mounts
     when creating a hybrid view.
@@ -271,16 +293,7 @@ def test_view_with_mounts(tmp_path):
     - The data retrieved from `v_mounted` is correct, confirming the integrity of
       the data loading process through the virtualized path.
     """
-    # Setup tracker with mounts (Cannot use default fixture here)
-    data_dir = tmp_path / "data_mount"
-    data_dir.mkdir()
-
-    tracker = Tracker(
-        run_dir=tmp_path / "runs",
-        db_path=str(tmp_path / "provenance.duckdb"),
-        mounts={"inputs": str(data_dir)},
-    )
-
+    tracker, data_dir = mounted_tracker
     # Create file inside the mount point
     df = pd.DataFrame({"x": [100]})
     p_path = data_dir / "mounted.parquet"

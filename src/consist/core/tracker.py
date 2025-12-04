@@ -2003,6 +2003,134 @@ class Tracker:
         except Exception as e:
             logging.warning(f"[Consist Warning] Artifact sync failed: {e}")
 
+    def get_run(self, run_id: str) -> Optional[Run]:
+        """
+        Retrieves a single Run by its ID from the database.
+
+        Args:
+            run_id (str): The unique identifier of the run to retrieve.
+
+        Returns:
+            Optional[Run]: The found Run object, or None if not found.
+        """
+        if not self.engine:
+            return None
+
+        def _query():
+            with Session(self.engine) as session:
+                return session.get(Run, run_id)
+
+        try:
+            return self._execute_with_retry(_query, operation_name="get_run")
+        except Exception:
+            return None
+
+    def get_artifacts_for_run(
+        self, run_id: str
+    ) -> List[Tuple[Artifact, str]]:
+        """
+        Retrieves all artifacts associated with a given run, indicating their direction.
+
+        Args:
+            run_id (str): The ID of the run to retrieve artifacts for.
+
+        Returns:
+            List[Tuple[Artifact, str]]: A list of tuples, where each tuple contains
+                                        an Artifact object and its direction ("input" or "output").
+        """
+        if not self.engine:
+            return []
+
+        def _query() -> List[Tuple[Artifact, str]]:
+            with Session(self.engine) as session:
+                statement = (
+                    select(Artifact, RunArtifactLink.direction)
+                    .join(
+                        RunArtifactLink, Artifact.id == RunArtifactLink.artifact_id
+                    )
+                    .where(RunArtifactLink.run_id == run_id)
+                )
+                results = session.exec(statement).all()
+                return results
+
+        try:
+            return self._execute_with_retry(
+                _query, operation_name="get_artifacts_for_run"
+            )
+        except Exception as e:
+            logging.warning(
+                f"[Consist Warning] Failed to get artifacts for run {run_id}: {e}"
+            )
+            return []
+
+    def get_artifact_lineage(
+        self, artifact_key_or_id: Union[str, uuid.UUID]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Recursively builds a lineage tree for a given artifact.
+
+        The tree shows the run that produced the artifact, and recursively, the
+        input artifacts for that run and the runs that produced them.
+
+        Args:
+            artifact_key_or_id (Union[str, uuid.UUID]): The key or ID of the artifact to trace.
+
+        Returns:
+            A dictionary representing the lineage tree, or None if the artifact is not found.
+            Example structure:
+            {
+                "artifact": <Artifact>,
+                "producing_run": {
+                    "run": <Run>,
+                    "inputs": [
+                        {"artifact": <Artifact>, "producing_run": ...},
+                        ...
+                    ]
+                }
+            }
+        """
+        if not self.engine:
+            return None
+
+        # 1. Get the starting artifact
+        start_artifact = self.get_artifact(key_or_id=artifact_key_or_id)
+        if not start_artifact:
+            return None
+
+        # 2. Recursive function to build the tree
+        def _trace(
+            artifact: Artifact, visited_runs: set
+        ) -> Dict[str, Any]:
+            lineage_node: Dict[str, Any] = {"artifact": artifact, "producing_run": None}
+
+            # Find the run that produced this artifact
+            producing_run_id = artifact.run_id
+            if not producing_run_id or producing_run_id in visited_runs:
+                return lineage_node
+
+            visited_runs.add(producing_run_id)
+            producing_run = self.get_run(producing_run_id)
+            if not producing_run:
+                return lineage_node
+
+            # Get the inputs for that run
+            input_artifacts_with_direction = self.get_artifacts_for_run(
+                producing_run.id
+            )
+
+            run_node: Dict[str, Any] = {"run": producing_run, "inputs": []}
+            for input_artifact, direction in input_artifacts_with_direction:
+                if direction == "input":
+                    # Recurse on each input
+                    run_node["inputs"].append(
+                        _trace(input_artifact, visited_runs.copy())
+                    )
+
+            lineage_node["producing_run"] = run_node
+            return lineage_node
+
+        return _trace(start_artifact, set())
+
     def log_meta(self, **kwargs: Any) -> None:
         """
         Updates the metadata for the current run.

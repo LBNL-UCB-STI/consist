@@ -15,7 +15,7 @@ except ImportError:
 
 
 @pytest.mark.skipif(not has_tables, reason="PyTables not installed")
-def test_h5_virtual_artifacts(tmp_path: Path):
+def test_h5_virtual_artifacts(tracker: Tracker):
     """
     Tests Consist's ability to handle HDF5 files as containers for "virtual artifacts."
 
@@ -45,12 +45,8 @@ def test_h5_virtual_artifacts(tmp_path: Path):
         still retrieve the "persons" data from the DuckDB, demonstrating data recovery
         and continued access even if the original file is lost.
     """
-    run_dir = tmp_path / "runs"
-    db_path = str(tmp_path / "provenance.duckdb")
-    tracker = Tracker(run_dir=run_dir, db_path=db_path)
-
     # 1. Create H5 File
-    h5_path = run_dir / "pipeline.h5"
+    h5_path = tracker.run_dir / "pipeline.h5"
     h5_path.parent.mkdir(parents=True, exist_ok=True)
 
     df_persons = pd.DataFrame({"pid": [1, 2], "age": [30, 40]})

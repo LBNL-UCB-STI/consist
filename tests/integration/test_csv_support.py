@@ -7,7 +7,7 @@ from consist.core.tracker import Tracker
 from consist.api import load
 
 
-def test_csv_end_to_end(tmp_path):
+def test_csv_end_to_end(tracker: Tracker):
     """
     Tests the end-to-end functionality for CSV artifacts within Consist.
 
@@ -34,12 +34,8 @@ def test_csv_end_to_end(tmp_path):
     - SQL queries against `v_cities` return correct aggregated results (e.g., average score)
       and individual records, demonstrating `read_csv_auto`'s functionality and type inference.
     """
-    run_dir = tmp_path / "runs"
-    db_path = str(tmp_path / "provenance.duckdb")
-    tracker = Tracker(run_dir=run_dir, db_path=db_path)
-
     # Setup Dummy Data
-    csv_path = run_dir / "my_data.csv"
+    csv_path = tracker.run_dir / "my_data.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Create CSV
