@@ -151,6 +151,7 @@ def test_runs_with_db(mock_db_session):
         patch("consist.cli.get_tracker") as mock_get_tracker,
     ):
         mock_tracker = MagicMock()
+        # For MagicMock, we CAN assign to 'engine' even if it's a property on the real class
         mock_tracker.engine = mock_db_session.get_bind()
         mock_get_tracker.return_value = mock_tracker
 
@@ -206,8 +207,10 @@ def test_artifacts_with_db(mock_db_session, tmp_path):
         patch("pathlib.Path.exists", return_value=True),
         patch("consist.cli.get_tracker") as m,
     ):
+        # We need a real Tracker to exercise the get_artifacts_for_run delegation logic
         tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        tracker.engine = mock_db_session.get_bind()
+        # Fix: Inject the mock engine into the DatabaseManager, not the Tracker property
+        tracker.db.engine = mock_db_session.get_bind()
         m.return_value = tracker
 
         result = runner.invoke(app, ["artifacts", "run2"])
@@ -223,7 +226,8 @@ def test_lineage_with_db(mock_db_session, tmp_path):
         patch("consist.cli.get_tracker") as m,
     ):
         tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        tracker.engine = mock_db_session.get_bind()
+        # Fix: Inject the mock engine into the DatabaseManager
+        tracker.db.engine = mock_db_session.get_bind()
         m.return_value = tracker
 
         result = runner.invoke(app, ["lineage", "processed_data"])
@@ -269,7 +273,8 @@ def test_preview_command_artifact_not_found(mock_db_session, tmp_path):
         patch("consist.cli.get_tracker") as m,
     ):
         tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        tracker.engine = mock_db_session.get_bind()
+        # Fix: Inject the mock engine into the DatabaseManager
+        tracker.db.engine = mock_db_session.get_bind()
         m.return_value = tracker
 
         result = runner.invoke(app, ["preview", "nonexistent_artifact"])
@@ -283,7 +288,8 @@ def test_preview_command_unsupported_driver(mock_db_session, tmp_path):
         patch("consist.cli.get_tracker") as m,
     ):
         tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        tracker.engine = mock_db_session.get_bind()
+        # Fix: Inject the mock engine into the DatabaseManager
+        tracker.db.engine = mock_db_session.get_bind()
         m.return_value = tracker
 
         result = runner.invoke(app, ["preview", "params"])

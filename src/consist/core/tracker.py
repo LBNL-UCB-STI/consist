@@ -1,29 +1,25 @@
 import logging
-import os
-import random
 import uuid
 import functools
 import inspect
 from pathlib import Path
-from time import sleep
 from typing import Dict, Optional, List, Any, Type, Iterable, Union, Callable, Tuple
 from datetime import datetime, timezone
+
+from sqlmodel import SQLModel
 
 UTC = timezone.utc
 from contextlib import contextmanager
 
 import pandas as pd
 
-from sqlalchemy.exc import OperationalError, DatabaseError
-from sqlalchemy.orm.exc import ConcurrentModificationError
-from sqlmodel import create_engine, Session, select, SQLModel, col
-
-from sqlalchemy.pool import NullPool
 from pydantic import BaseModel
 
 from consist.core.views import ViewFactory
+from consist.core.fs import FileSystemManager
+from consist.core.persistence import DatabaseManager
 from consist.models.artifact import Artifact
-from consist.models.run import Run, RunArtifactLink, ConsistRecord
+from consist.models.run import Run, ConsistRecord
 from consist.core.identity import IdentityManager
 from consist.core.context import push_tracker, pop_tracker
 
@@ -97,32 +93,21 @@ class Tracker:
                                 to compute relative paths for code hashing and artifact virtualization.
                                 Defaults to the current working directory ".".
         """
-        # Force absolute resolve on run_dir to prevent /var vs /private/var mismatches
-        self.run_dir = Path(run_dir).resolve()
-        self.run_dir.mkdir(parents=True, exist_ok=True)
-        self.mounts = mounts or {}
+        # 1. Initialize FileSystem Service
+        # (This handles the mkdir and path resolution internally now)
+        self.fs = FileSystemManager(run_dir, mounts)
+
+        self.mounts = self.fs.mounts
+        self.run_dir = self.fs.run_dir
+
         self.db_path = db_path
         self.identity = IdentityManager(
             project_root=project_root, hashing_strategy=hashing_strategy
         )
 
-        self.engine = None
+        self.db = None
         if db_path:
-            # Using NullPool ensures the file lock is released when the session closes
-            self.engine = create_engine(f"duckdb:///{db_path}", poolclass=NullPool)
-
-            # WRAP: Schema creation in retry logic
-            self._execute_with_retry(
-                lambda: SQLModel.metadata.create_all(
-                    self.engine,
-                    tables=[
-                        Run.__table__,
-                        Artifact.__table__,
-                        RunArtifactLink.__table__,
-                    ],
-                ),
-                operation_name="init_schema",
-            )
+            self.db = DatabaseManager(db_path)
 
         # In-Memory State (The Source of Truth)
         self.current_consist: Optional[ConsistRecord] = None
@@ -138,18 +123,23 @@ class Tracker:
         self._on_run_complete_hooks: List[Callable[[Run, List[Artifact]], None]] = []
         self._on_run_failed_hooks: List[Callable[[Run, Exception], None]] = []
 
+    @property
+    def engine(self):
+        """Delegates to the DatabaseManager engine."""
+        return self.db.engine if self.db else None
+
     # --- Run Management ---
 
     def begin_run(
-        self,
-        run_id: str,
-        model: str,
-        config: Union[Dict[str, Any], BaseModel, None] = None,
-        inputs: Optional[List[Union[str, Artifact]]] = None,
-        tags: Optional[List[str]] = None,
-        description: Optional[str] = None,
-        cache_mode: str = "reuse",
-        **kwargs: Any,
+            self,
+            run_id: str,
+            model: str,
+            config: Union[Dict[str, Any], BaseModel, None] = None,
+            inputs: Optional[List[Union[str, Artifact]]] = None,
+            tags: Optional[List[str]] = None,
+            description: Optional[str] = None,
+            cache_mode: str = "reuse",
+            **kwargs: Any,
     ) -> Run:
         """
         Start a run imperatively (without context manager).
@@ -216,12 +206,10 @@ class Tracker:
         elif isinstance(config, BaseModel):
             config = config.model_dump()
 
-        # Extract explicit Run fields from kwargs to prevent them being buried in 'meta'
+        # Extract explicit Run fields
         year = kwargs.pop("year", None)
         iteration = kwargs.pop("iteration", None)
-        parent_run_id = kwargs.pop(
-            "parent_run_id", None
-        )  # Explicitly extract parent_run_id
+        parent_run_id = kwargs.pop("parent_run_id", None)
 
         # Compute core identity hashes early
         config_hash = self.identity.compute_config_hash(config)
@@ -234,7 +222,7 @@ class Tracker:
             description=description,
             year=year,
             iteration=iteration,
-            parent_run_id=parent_run_id,  # Assigned to the column
+            parent_run_id=parent_run_id,
             tags=tags or [],
             status="running",
             config_hash=config_hash,
@@ -257,9 +245,7 @@ class Tracker:
                     key = Path(item).stem
                     self.log_artifact(item, key=key, direction="input")
 
-        # Auto-Lineage: Overwrite parent_run_id if inputs imply a specific predecessor
-        # (Only if parent wasn't manually set, or we decide inputs take precedence)
-        # For Header Pattern, we usually set parent manually, so we prioritize the manual set if present
+        # Auto-Lineage
         if not run.parent_run_id:
             parent_candidates = [
                 a.run_id for a in self.current_consist.inputs if a.run_id is not None
@@ -282,6 +268,7 @@ class Tracker:
             run.input_hash = "error"
             run.signature = "error"
 
+        # --- Cache Logic (Refactored) ---
         if cache_mode == "reuse":
             cached_run = self.find_matching_run(
                 config_hash=run.config_hash,
@@ -291,18 +278,11 @@ class Tracker:
             if cached_run and self._validate_run_outputs(cached_run):
                 self.current_consist.cached_run = cached_run
                 logging.info(f"✅ [Consist] Cache HIT! Matching run: {cached_run.id}")
-                with Session(self.engine) as session:
-                    statement = (
-                        select(Artifact)
-                        .join(
-                            RunArtifactLink, Artifact.id == RunArtifactLink.artifact_id
-                        )
-                        .where(RunArtifactLink.run_id == cached_run.id)
-                        .where(RunArtifactLink.direction == "output")
-                    )
-                    cached_outputs = session.exec(statement).all()
-                    for art in cached_outputs:
-                        session.expunge(art)
+
+                # Hydrate outputs using service (No Session!)
+                cached_items = self.get_artifacts_for_run(cached_run.id)
+                for art, direction in cached_items:
+                    if direction == "output":
                         art.abs_path = self.resolve_uri(art.uri)
                         self.current_consist.outputs.append(art)
             else:
@@ -483,47 +463,9 @@ class Tracker:
         """
         Retrieves a list of Runs matching the specified criteria.
         """
-        if not self.engine:
-            return []
-
-        def _query():
-            with Session(self.engine) as session:
-                statement = select(Run).order_by(Run.created_at.desc())
-
-                if status:
-                    statement = statement.where(Run.status == status)
-                if model:
-                    statement = statement.where(Run.model_name == model)
-                if year is not None:
-                    statement = statement.where(Run.year == year)
-                if parent_id:
-                    statement = statement.where(Run.parent_run_id == parent_id)
-
-                if tags:
-                    for tag in tags:
-                        statement = statement.where(col(Run.tags).contains(tag))
-
-                results = session.exec(statement.limit(limit)).all()
-
-                if metadata:
-                    filtered = []
-                    for r in results:
-                        match = True
-                        for k, v in metadata.items():
-                            if r.meta.get(k) != v:
-                                match = False
-                                break
-                        if match:
-                            filtered.append(r)
-                    return filtered
-
-                return results
-
-        try:
-            return self._execute_with_retry(_query, operation_name="find_runs")
-        except Exception as e:
-            logging.warning(f"Failed to find runs: {e}")
-            return []
+        if self.db:
+            return self.db.find_runs(tags, year, model, status, parent_id, metadata, limit)
+        return []
 
     # --- Artifact Logging & Ingestion ---
 
@@ -611,32 +553,15 @@ class Tracker:
 
             # 1. Lineage Discovery (Automatic Input Discovery)
             # For input artifacts, check if an artifact with this URI was previously output by another run.
-            if direction == "input" and self.engine:
-                try:
-                    with Session(self.engine) as session:
-                        # Find the most recent artifact created at this location with a run_id
-                        statement = (
-                            select(Artifact)
-                            .where(Artifact.uri == uri)
-                            .where(Artifact.run_id.is_not(None))
-                            .order_by(Artifact.created_at.desc())
-                            .limit(1)
-                        )
-                        parent = session.exec(statement).first()
-
-                        if parent:
-                            # LINEAGE FOUND! Reuse the existing artifact object to link to its creator run.
-                            # Detach from session so we can use it in our current flow without binding issues
-                            session.expunge(parent)
-                            artifact_obj = parent
-                            if driver:
-                                artifact_obj.driver = driver
-                            if meta:
-                                artifact_obj.meta.update(meta)
-                except Exception as e:
-                    logging.warning(
-                        f"[Consist Warning] Lineage discovery failed for {uri}: {e}"
-                    )
+            if direction == "input" and self.db:
+                parent = self.db.find_latest_artifact_at_uri(uri)
+                if parent:
+                    # LINEAGE FOUND!
+                    artifact_obj = parent
+                    if driver:
+                        artifact_obj.driver = driver
+                    if meta:
+                        artifact_obj.meta.update(meta)
 
             # 2. If no parent artifact found or it's an output, create a fresh Artifact object
             if artifact_obj is None:
@@ -1022,27 +947,12 @@ class Tracker:
                 schema_model=schema,
             )
 
-            # FORCE Metadata update
-            # We must wrap this in retry logic because dlt might be releasing the lock
-            def _update_metadata():
-                if self.engine:
-                    with Session(self.engine) as session:
-                        # Re-fetch or merge to ensure attached to session
-                        # We modify the object first
-                        new_meta = dict(artifact.meta)
-                        new_meta["is_ingested"] = True
-                        new_meta["dlt_table_name"] = resource_name
-                        artifact.meta = new_meta
-                        session.merge(artifact)
-                        session.commit()
-
-            self._execute_with_retry(
-                _update_metadata, operation_name="ingest_metadata_update"
-            )
-            if self.engine:
-                with Session(self.engine) as session:
-                    session.merge(artifact)
-                    session.commit()
+            # FORCE Metadata update via Service
+            if self.db:
+                self.db.update_artifact_meta(
+                    artifact,
+                    {"is_ingested": True, "dlt_table_name": resource_name}
+                )
             return info
 
         except Exception as e:
@@ -1076,34 +986,8 @@ class Tracker:
         Optional[Artifact]
             The found `Artifact` object, or `None` if no matching artifact is found.
         """
-        # 1. Check In-Memory Context (Current Run)
-        if self.current_consist:
-            for art in reversed(self.current_consist.outputs):
-                if art.key == key_or_id or art.id == key_or_id:
-                    return art
-            for art in self.current_consist.inputs:
-                if art.key == key_or_id or art.id == key_or_id:
-                    return art
-
-        # 2. Check Database with Retry
-        if self.engine:
-
-            def _query():
-                with Session(self.engine) as session:
-                    if isinstance(key_or_id, uuid.UUID):
-                        return session.get(Artifact, key_or_id)
-                    else:
-                        return session.exec(
-                            select(Artifact)
-                            .where(Artifact.key == key_or_id)
-                            .order_by(Artifact.created_at.desc())
-                            .limit(1)
-                        ).first()
-
-            try:
-                return self._execute_with_retry(_query)
-            except Exception:
-                return None
+        if self.db:
+            return self.db.get_artifact(key_or_id)
         return None
 
     def get_artifact_by_uri(self, uri: str) -> Optional[Artifact]:
@@ -1129,21 +1013,10 @@ class Tracker:
                 if art.uri == uri:
                     return art
 
-        if self.engine:
+        # 2. Check Database
+        if self.db:
+            return self.db.get_artifact_by_uri(uri)
 
-            def _query():
-                with Session(self.engine) as session:
-                    return session.exec(
-                        select(Artifact)
-                        .where(Artifact.uri == uri)
-                        .order_by(Artifact.created_at.desc())
-                        .limit(1)
-                    ).first()
-
-            try:
-                return self._execute_with_retry(_query)
-            except Exception:
-                return None
         return None
 
     def get_run(self, run_id: str) -> Optional[Run]:
@@ -1156,35 +1029,14 @@ class Tracker:
         Returns:
             Optional[Run]: The found Run object, or None if not found.
         """
-        if not self.engine:
-            return None
-
-        def _query():
-            with Session(self.engine) as session:
-                return session.get(Run, run_id)
-
-        try:
-            return self._execute_with_retry(_query)
-        except Exception:
-            return None
+        if self.db:
+            return self.db.get_run(run_id)
+        return None
 
     def get_artifacts_for_run(self, run_id: str) -> List[Tuple[Artifact, str]]:
-        if not self.engine:
-            return []
-
-        def _query():
-            with Session(self.engine) as session:
-                return session.exec(
-                    select(Artifact, RunArtifactLink.direction)
-                    .join(RunArtifactLink, Artifact.id == RunArtifactLink.artifact_id)
-                    .where(RunArtifactLink.run_id == run_id)
-                ).all()
-
-        try:
-            return self._execute_with_retry(_query)
-        except Exception as e:
-            logging.warning(f"[Consist Warning] Failed to get artifacts: {e}")
-            return []
+        if self.db:
+            return self.db.get_artifacts_for_run(run_id)
+        return []
 
     def find_matching_run(
         self, config_hash: str, input_hash: str, git_hash: str
@@ -1193,27 +1045,9 @@ class Tracker:
         Attempts to find a previously "completed" run that matches the given
         identity hashes.
         """
-        if not self.engine:
-            return None
-
-        def _query():
-            with Session(self.engine) as session:
-                statement = (
-                    select(Run)
-                    .where(Run.status == "completed")
-                    .where(Run.config_hash == config_hash)
-                    .where(Run.input_hash == input_hash)
-                    .where(Run.git_hash == git_hash)
-                    .order_by(Run.created_at.desc())
-                    .limit(1)
-                )
-                return session.exec(statement).first()
-
-        try:
-            return self._execute_with_retry(_query, operation_name="cache_lookup")
-        except Exception as e:
-            logging.warning(f"[Consist Warning] Cache lookup failed: {e}")
-            return None
+        if self.db:
+            return self.db.find_matching_run(config_hash, input_hash, git_hash)
+        return None
 
     def get_artifact_lineage(
         self, artifact_key_or_id: Union[str, uuid.UUID]
@@ -1261,6 +1095,8 @@ class Tracker:
 
     def resolve_uri(self, uri: str) -> str:
         """
+        ** Delegates to FileSystemManager. **
+
         Converts a portable Consist URI back into an absolute file system path.
 
         This is the inverse operation of `_virtualize_path`, crucial for **"Path Resolution & Mounts"**.
@@ -1281,22 +1117,12 @@ class Tracker:
             it returns the most resolved path or the original URI after
             attempting to make it absolute.
         """
-        path_str = uri
-        # 1. Check schemes (mounts)
-        if "://" in uri:
-            scheme, rel_path = uri.split("://", 1)
-            if scheme in self.mounts:
-                path_str = str(Path(self.mounts[scheme]) / rel_path)
-            elif scheme == "file":
-                path_str = rel_path
-        elif uri.startswith("./"):
-            path_str = str(self.run_dir / uri[2:])
-
-        # Ensure we always return absolute, resolved paths
-        return str(Path(path_str).resolve())
+        return self.fs.resolve_uri(uri)
 
     def _virtualize_path(self, path: str) -> str:
         """
+        ** Delegates to FileSystemManager. **
+
         Converts an absolute file system path into a portable Consist URI.
 
         This method is a key part of **"Path Resolution & Mounts"**, attempting to
@@ -1317,20 +1143,7 @@ class Tracker:
             "./output/data.parquet"). If no virtualization is possible, the original
             absolute path is returned.
         """
-        abs_path = str(Path(path).resolve())
-        for name, root in sorted(
-            self.mounts.items(), key=lambda x: len(x[1]), reverse=True
-        ):
-            root_abs = str(Path(root).resolve())
-            if abs_path.startswith(root_abs):
-                return f"{name}://{os.path.relpath(abs_path, root_abs)}"
-        try:
-            rel = os.path.relpath(abs_path, self.run_dir)
-            if not rel.startswith(".."):
-                return f"./{rel}"
-        except ValueError:
-            pass
-        return abs_path
+        return self.fs.virtualize_path(path)
 
     # --- Hooks ---
 
@@ -1412,7 +1225,7 @@ class Tracker:
         if not self.current_consist:
             return
         json_str = self.current_consist.model_dump_json(indent=2)
-        target = self.run_dir / "consist.json"
+        target = self.fs.run_dir / "consist.json"
         tmp = target.with_suffix(".tmp")
         with open(tmp, "w") as f:
             f.write(json_str)
@@ -1436,25 +1249,8 @@ class Tracker:
         run : Run
             The `Run` object whose state needs to be synchronized with the database.
         """
-        if not self.engine:
-            return
-
-        def _do_sync():
-            with Session(self.engine) as session:
-                db_run = session.get(Run, run.id)
-                if db_run:
-                    for k, v in run.model_dump(exclude={"id"}).items():
-                        setattr(db_run, k, v)
-                    session.add(db_run)
-                else:
-                    session.add(Run(**run.model_dump()))
-                session.commit()
-
-        try:
-            self._execute_with_retry(_do_sync, operation_name="sync_run")
-        except Exception as e:
-            # FIX: Updated message to match tests
-            logging.warning(f"Database sync failed: {e}")
+        if self.db:
+            self.db.sync_run(run)
 
     def _sync_artifact_to_db(self, artifact: Artifact, direction: str) -> None:
         """
@@ -1476,135 +1272,30 @@ class Tracker:
             The direction of the artifact relative to the current run
             ("input" or "output").
         """
-        if not self.engine or not self.current_consist:
-            return
-
-        def _do_sync():
-            with Session(self.engine) as session:
-                # Merge artifact (create or update)
-                db_artifact = session.merge(artifact)
-
-                # Create Link
-                link = RunArtifactLink(
-                    run_id=self.current_consist.run.id,
-                    artifact_id=db_artifact.id,
-                    direction=direction,
-                )
-                session.merge(link)
-                session.commit()
-
-        try:
-            self._execute_with_retry(_do_sync, operation_name="sync_artifact")
-        except Exception as e:
-            logging.warning(f"Artifact sync failed: {e}")
-
-    def _execute_with_retry(
-        self, func: Callable, operation_name: str = "db_op", retries: int = 20
-    ) -> Any:
-        """
-        Executes a given function with retry logic and exponential backoff for database lock errors.
-
-        This method is crucial for handling concurrent access to the DuckDB database,
-        especially when multiple processes or threads might try to write simultaneously.
-        It specifically catches `OperationalError` and `DatabaseError` which often
-        indicate locking issues in DuckDB/SQLite.
-
-        Parameters
-        ----------
-        func : Callable
-            The function to execute. This function should contain the database operation
-            that might fail due to locking.
-        operation_name : str, default "db_op"
-            A descriptive name for the operation being performed, used in logging messages.
-        retries : int, default 20
-            The maximum number of times to retry the function execution before giving up.
-
-        Returns
-        -------
-        Any
-            The result of the executed function `func`.
-
-        Raises
-        ------
-        ConcurrentModificationError
-            If the function fails to execute successfully after all retries due to a
-            persistent database lock.
-        Exception
-            Any other exception raised by `func` that is not related to database locking
-            will be re-raised immediately.
-        """
-        for i in range(retries):
-            try:
-                return func()
-            except (OperationalError, DatabaseError) as e:
-                msg = str(e)
-                if "lock" in msg or "IO Error" in msg or "database is locked" in msg:
-                    if i == retries - 1:
-                        raise e
-                    sleep(min((0.1 * (1.5**i)) + random.uniform(0.05, 0.2), 2.0))
-                else:
-                    raise e
-        raise ConcurrentModificationError("Concurrency problem")
+        if self.db and self.current_consist:
+            self.db.sync_artifact(artifact, self.current_consist.run.id, direction)
 
     def _validate_run_outputs(self, run: Run) -> bool:
-        if not self.engine:
+        if not self.db:
             return True
-        with Session(self.engine) as session:
-            outputs = session.exec(
-                select(Artifact)
-                .join(RunArtifactLink, Artifact.id == RunArtifactLink.artifact_id)
-                .where(RunArtifactLink.run_id == run.id)
-                .where(RunArtifactLink.direction == "output")
-            ).all()
-            for art in outputs:
+
+            # Use service instead of raw SQL
+        artifacts_links = self.db.get_artifacts_for_run(run.id)
+
+        for art, direction in artifacts_links:
+            if direction == "output":
                 resolved_path = self.resolve_uri(art.uri)
-                if not Path(resolved_path).exists() and not art.meta.get(
-                    "is_ingested", False
-                ):
+                if not Path(resolved_path).exists() and not art.meta.get("is_ingested", False):
                     logging.warning(f"⚠️ Cache Validation Failed. Missing: {art.uri}")
                     return False
-            return True
+        return True
 
     def history(
         self, limit: int = 10, tags: Optional[List[str]] = None
     ) -> pd.DataFrame:
-        if not self.engine:
-            return pd.DataFrame()
-
-        query = f"SELECT * FROM run ORDER BY created_at DESC LIMIT {limit}"
-        try:
-            df = pd.read_sql(query, self.engine)
-
-            if not df.empty:
-                # Filter by tags if requested
-                if tags:
-
-                    def has_all_tags(run_tags):
-                        if run_tags is None:
-                            return False
-                        # Handle both JSON-string or list format from DB driver
-                        if isinstance(run_tags, str):
-                            import json
-
-                            try:
-                                run_tags = json.loads(run_tags)
-                            except:
-                                pass
-                        return all(t in (run_tags or []) for t in tags)
-
-                    df = df[df["tags"].apply(has_all_tags)]
-
-                # Fix: Calculate duration_seconds
-                if "started_at" in df.columns and "ended_at" in df.columns:
-                    # Ensure datetime objects
-                    start = pd.to_datetime(df["started_at"])
-                    end = pd.to_datetime(df["ended_at"])
-                    df["duration_seconds"] = (end - start).dt.total_seconds()
-
-            return df
-        except Exception as e:
-            logging.warning(f"Failed to fetch history: {e}")
-            return pd.DataFrame()
+        if self.db:
+            return self.db.get_history(limit, tags)
+        return pd.DataFrame()
 
     @contextmanager
     def capture_outputs(
@@ -1640,29 +1331,17 @@ class Tracker:
             If `capture_outputs` is used outside of an active `start_run` context.
         """
         if not self.current_consist:
-            raise RuntimeError(
-                "capture_outputs must be used within a start_run context."
-            )
+            raise RuntimeError("capture_outputs must be used within a start_run context.")
 
-        dir_path = Path(directory).resolve()
-        if not dir_path.exists():
-            dir_path.mkdir(parents=True, exist_ok=True)
-
-        def _scan():
-            files = {}
-            iterator = dir_path.rglob(pattern) if recursive else dir_path.glob(pattern)
-            for f in iterator:
-                if f.is_file():
-                    files[f] = f.stat().st_mtime_ns
-            return files
-
-        before_state = _scan()
+        # Use FS service to scan
+        before_state = self.fs.scan_directory(directory, pattern, recursive)
         capture_result = OutputCapture()
 
         try:
             yield capture_result
         finally:
-            after_state = _scan()
+            after_state = self.fs.scan_directory(directory, pattern, recursive)
+
             for f_path, mtime in after_state.items():
                 # Check if file is new or modified
                 if f_path not in before_state or mtime > before_state[f_path]:

@@ -48,7 +48,7 @@ def test_db_failure_does_not_crash_run(tracker):
         # Mock the Session object that the method uses internally.
         # This simulates the DB blowing up, while letting the method handle it.
         with patch(
-            "consist.core.tracker.Session", side_effect=Exception("DB EXPLODED")
+            "consist.core.persistence.Session", side_effect=Exception("DB EXPLODED")
         ):
             tracker.log_artifact("test.csv", "test")
 
