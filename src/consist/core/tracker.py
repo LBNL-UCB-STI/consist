@@ -1,7 +1,5 @@
 import logging
 import uuid
-import functools
-import inspect
 from pathlib import Path
 from typing import Dict, Optional, List, Any, Type, Iterable, Union, Callable, Tuple
 from datetime import datetime, timezone
@@ -18,6 +16,8 @@ from pydantic import BaseModel
 from consist.core.views import ViewFactory
 from consist.core.fs import FileSystemManager
 from consist.core.persistence import DatabaseManager
+from consist.core.decorators import create_task_decorator
+from consist.core.events import EventManager
 from consist.models.artifact import Artifact
 from consist.models.run import Run, ConsistRecord
 from consist.core.identity import IdentityManager
@@ -96,6 +96,7 @@ class Tracker:
         # 1. Initialize FileSystem Service
         # (This handles the mkdir and path resolution internally now)
         self.fs = FileSystemManager(run_dir, mounts)
+        self.events = EventManager()
 
         self.mounts = self.fs.mounts
         self.run_dir = self.fs.run_dir
@@ -117,11 +118,6 @@ class Tracker:
 
         # Active run tracking (for imperative begin_run/end_run pattern)
         self._active_run_cache_mode: Optional[str] = None
-
-        # Event Hooks (for extensibility)
-        self._on_run_start_hooks: List[Callable[[Run], None]] = []
-        self._on_run_complete_hooks: List[Callable[[Run, List[Artifact]], None]] = []
-        self._on_run_failed_hooks: List[Callable[[Run, Exception], None]] = []
 
     @property
     def engine(self):
@@ -1176,37 +1172,22 @@ class Tracker:
         tracker.on_run_start(my_callback_function)
         ```
         """
-        self._on_run_start_hooks.append(callback)
-        return callback
+        return self.events.on_run_start(callback)
 
     def on_run_complete(self, callback: Callable[[Run, List[Artifact]], None]):
-        self._on_run_complete_hooks.append(callback)
-        return callback
+        return self.events.on_run_complete(callback)
 
     def on_run_failed(self, callback: Callable[[Run, Exception], None]):
-        self._on_run_failed_hooks.append(callback)
-        return callback
+        return self.events.on_run_failed(callback)
 
     def _emit_run_start(self, run: Run):
-        for hook in self._on_run_start_hooks:
-            try:
-                hook(run)
-            except Exception as e:
-                logging.warning(f"Hook failed: {e}")
+        self.events.emit_start(run)
 
     def _emit_run_complete(self, run: Run, outputs: List[Artifact]):
-        for hook in self._on_run_complete_hooks:
-            try:
-                hook(run, outputs)
-            except Exception as e:
-                logging.warning(f"Hook failed: {e}")
+        self.events.emit_complete(run, outputs)
 
     def _emit_run_failed(self, run: Run, error: Exception):
-        for hook in self._on_run_failed_hooks:
-            try:
-                hook(run, error)
-            except Exception as e:
-                logging.warning(f"Hook failed: {e}")
+        self.events.emit_failed(run, error)
 
     # --- Internal Persistence ---
 
@@ -1390,99 +1371,8 @@ class Tracker:
         # We also sync to DB immediately so external monitors can see progress/tags
         self._sync_run_to_db(self.current_consist.run)
 
-    def task(
-        self,
-        cache_mode: str = "reuse",
-        depends_on: Optional[List[Union[str, Path, Artifact]]] = None,
-        capture_dir: Optional[Union[str, Path]] = None,
-        capture_pattern: str = "*",
-        **run_kwargs: Any,
-    ) -> Callable:
-        def decorator(func: Callable) -> Callable:
-            @functools.wraps(func)
-            def wrapper(*args: Any, **kwargs: Any) -> Any:
-                sig = inspect.signature(func)
-                try:
-                    bound = sig.bind(*args, **kwargs)
-                except TypeError:
-                    bound = None
-
-                config = {}
-                inputs = []
-                if bound:
-                    bound.apply_defaults()
-                    for k, v in bound.arguments.items():
-                        if isinstance(v, Artifact):
-                            inputs.append(v)
-                            config[k] = v.uri
-                        elif isinstance(v, list) and v and isinstance(v[0], Artifact):
-                            inputs.extend(v)
-                            config[k] = [a.uri for a in v]
-                        else:
-                            config[k] = v
-
-                if depends_on:
-                    for dep in depends_on:
-                        if isinstance(dep, Artifact):
-                            inputs.append(dep)
-                            config[f"dep_{dep.key}"] = dep.uri
-                        elif isinstance(dep, (str, Path)):
-                            if any(c in str(dep) for c in "*?["):
-                                # glob
-                                pass
-                            else:
-                                inputs.append(str(Path(dep).resolve()))
-
-                model_name = func.__name__
-                run_id = f"{model_name}_{uuid.uuid4().hex[:8]}"
-
-                with self.start_run(
-                    run_id=run_id,
-                    model=model_name,
-                    config=config,
-                    inputs=inputs,
-                    cache_mode=cache_mode,
-                    **run_kwargs,
-                ):
-                    if self.is_cached:
-                        outputs = self.current_consist.outputs
-                        if capture_dir:
-                            return outputs
-                        if not outputs:
-                            return None
-                        if len(outputs) == 1:
-                            return outputs[0]
-                        return outputs
-
-                    if capture_dir:
-                        with self.capture_outputs(
-                            capture_dir, pattern=capture_pattern
-                        ) as cap:
-                            result = func(*args, **kwargs)
-                        if result is not None:
-                            raise ValueError("Task with capture_dir must return None")
-                        return cap.artifacts
-                    else:
-                        result = func(*args, **kwargs)
-                        if isinstance(result, (str, Path)):
-                            return self.log_artifact(
-                                Path(result), key=Path(result).stem
-                            )
-                        elif isinstance(result, dict):
-                            return {
-                                k: self.log_artifact(v, key=k)
-                                for k, v in result.items()
-                            }
-                        elif result is None:
-                            return None
-                        else:
-                            raise TypeError(
-                                f"Task returned unsupported type {type(result)}"
-                            )
-
-            return wrapper
-
-        return decorator
+    def task(self, **kwargs) -> Callable:
+        return create_task_decorator(self, **kwargs)
 
     @property
     def last_run(self) -> Optional[ConsistRecord]:
