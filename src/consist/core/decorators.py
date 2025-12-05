@@ -27,7 +27,44 @@ def create_task_decorator(
     """
 
     def decorator(func: Callable) -> Callable:
+        """
+        Factory that creates a decorator for a Consist tracker task.
+
+        Parameters
+        ----------
+        func : Callable
+            The function to be wrapped by the decorator.
+
+        Returns
+        -------
+        Callable
+            A decorator that returns a wrapped function.
+        """
         @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            """
+            Wrapper that executes the target function within a Consist tracking run.
+
+            This wrapper handles:
+            - Inspection of the function signature to build ``config`` and ``inputs``.
+            - Processing of manual dependencies via ``depends_on``.
+            - Creation of a unique ``run_id``.
+            - Execution within ``tracker.start_run`` context.
+            - Cache handling, artifact logging, and capture of output artifacts.
+
+            Parameters
+            ----------
+            *args : Any
+                Positional arguments passed to the wrapped function.
+            **kwargs : Any
+                Keyword arguments passed to the wrapped function.
+
+            Returns
+            -------
+            Any
+                The result of the wrapped function, potentially transformed into
+                logged ``Artifact`` objects according to Consist conventions.
+            """
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             # 1. Inspect Signature to build Config & Inputs
             sig = inspect.signature(func)
