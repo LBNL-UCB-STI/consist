@@ -47,11 +47,11 @@ class DatabaseManager:
         self.execute_with_retry(_create, operation_name="init_schema")
 
     def execute_with_retry(
-            self,
-            func: Callable,
-            operation_name: str = "db_op",
-            retries: int = 20,
-            **kwargs  # <--- Add this to absorb extra arguments
+        self,
+        func: Callable,
+        operation_name: str = "db_op",
+        retries: int = 20,
+        **kwargs,  # <--- Add this to absorb extra arguments
     ) -> Any:
         """Executes a function with exponential backoff for DB locks."""
         for i in range(retries):
@@ -62,7 +62,7 @@ class DatabaseManager:
                 if "lock" in msg or "IO Error" in msg or "database is locked" in msg:
                     if i == retries - 1:
                         raise e
-                    sleep_time = min((0.1 * (1.5 ** i)) + random.uniform(0.05, 0.2), 2.0)
+                    sleep_time = min((0.1 * (1.5**i)) + random.uniform(0.05, 0.2), 2.0)
                     time.sleep(sleep_time)
                 else:
                     raise e
@@ -164,7 +164,7 @@ class DatabaseManager:
         return self.execute_with_retry(_query)
 
     def find_matching_run(
-            self, config_hash: str, input_hash: str, git_hash: str
+        self, config_hash: str, input_hash: str, git_hash: str
     ) -> Optional[Run]:
         def _query():
             with Session(self.engine) as session:
@@ -221,14 +221,14 @@ class DatabaseManager:
             return []
 
     def find_runs(
-            self,
-            tags: Optional[List[str]] = None,
-            year: Optional[int] = None,
-            model: Optional[str] = None,
-            status: Optional[str] = None,
-            parent_id: Optional[str] = None,
-            metadata: Optional[Dict[str, Any]] = None,
-            limit: int = 100,
+        self,
+        tags: Optional[List[str]] = None,
+        year: Optional[int] = None,
+        model: Optional[str] = None,
+        status: Optional[str] = None,
+        parent_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        limit: int = 100,
     ) -> List[Run]:
         def _query():
             with Session(self.engine) as session:
@@ -293,9 +293,11 @@ class DatabaseManager:
                 # Basic client-side tag filtering for simplicity
                 def has_all_tags(run_tags):
                     # (Implementation of tag parsing logic from original code)
-                    if not run_tags: return False
+                    if not run_tags:
+                        return False
                     if isinstance(run_tags, str):
                         import json
+
                         try:
                             run_tags = json.loads(run_tags)
                         except:

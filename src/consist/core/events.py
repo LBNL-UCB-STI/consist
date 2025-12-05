@@ -1,5 +1,5 @@
 import logging
-from typing import Callable, List, Optional
+from typing import Callable, List
 from consist.models.run import Run
 from consist.models.artifact import Artifact
 

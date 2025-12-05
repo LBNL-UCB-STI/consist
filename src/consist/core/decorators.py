@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional, List, Union
 
 from consist.models.artifact import Artifact
+
 # Use TYPE_CHECKING to avoid circular imports if needed
 from typing import TYPE_CHECKING
 
@@ -13,12 +14,12 @@ if TYPE_CHECKING:
 
 
 def create_task_decorator(
-        tracker: "Tracker",
-        cache_mode: str = "reuse",
-        depends_on: Optional[List[Union[str, Path, Artifact]]] = None,
-        capture_dir: Optional[Union[str, Path]] = None,
-        capture_pattern: str = "*",
-        **run_kwargs: Any,
+    tracker: "Tracker",
+    cache_mode: str = "reuse",
+    depends_on: Optional[List[Union[str, Path, Artifact]]] = None,
+    capture_dir: Optional[Union[str, Path]] = None,
+    capture_pattern: str = "*",
+    **run_kwargs: Any,
 ) -> Callable:
     """
     Factory that creates the decorator for tracker.task().
@@ -67,12 +68,12 @@ def create_task_decorator(
 
             # 3. Execution Wrapper
             with tracker.start_run(
-                    run_id=run_id,
-                    model=model_name,
-                    config=config,
-                    inputs=inputs,
-                    cache_mode=cache_mode,
-                    **run_kwargs,
+                run_id=run_id,
+                model=model_name,
+                config=config,
+                inputs=inputs,
+                cache_mode=cache_mode,
+                **run_kwargs,
             ):
                 # Cache Hit Handling
                 if tracker.is_cached:
@@ -88,7 +89,7 @@ def create_task_decorator(
                 # Execution & Capture
                 if capture_dir:
                     with tracker.capture_outputs(
-                            capture_dir, pattern=capture_pattern
+                        capture_dir, pattern=capture_pattern
                     ) as cap:
                         result = func(*args, **kwargs)
                     if result is not None:
@@ -99,13 +100,10 @@ def create_task_decorator(
 
                     # Return Value Handling
                     if isinstance(result, (str, Path)):
-                        return tracker.log_artifact(
-                            Path(result), key=Path(result).stem
-                        )
+                        return tracker.log_artifact(Path(result), key=Path(result).stem)
                     elif isinstance(result, dict):
                         return {
-                            k: tracker.log_artifact(v, key=k)
-                            for k, v in result.items()
+                            k: tracker.log_artifact(v, key=k) for k, v in result.items()
                         }
                     elif result is None:
                         return None

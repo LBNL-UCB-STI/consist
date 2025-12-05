@@ -127,15 +127,15 @@ class Tracker:
     # --- Run Management ---
 
     def begin_run(
-            self,
-            run_id: str,
-            model: str,
-            config: Union[Dict[str, Any], BaseModel, None] = None,
-            inputs: Optional[List[Union[str, Artifact]]] = None,
-            tags: Optional[List[str]] = None,
-            description: Optional[str] = None,
-            cache_mode: str = "reuse",
-            **kwargs: Any,
+        self,
+        run_id: str,
+        model: str,
+        config: Union[Dict[str, Any], BaseModel, None] = None,
+        inputs: Optional[List[Union[str, Artifact]]] = None,
+        tags: Optional[List[str]] = None,
+        description: Optional[str] = None,
+        cache_mode: str = "reuse",
+        **kwargs: Any,
     ) -> Run:
         """
         Start a run imperatively (without context manager).
@@ -460,7 +460,9 @@ class Tracker:
         Retrieves a list of Runs matching the specified criteria.
         """
         if self.db:
-            return self.db.find_runs(tags, year, model, status, parent_id, metadata, limit)
+            return self.db.find_runs(
+                tags, year, model, status, parent_id, metadata, limit
+            )
         return []
 
     # --- Artifact Logging & Ingestion ---
@@ -946,8 +948,7 @@ class Tracker:
             # FORCE Metadata update via Service
             if self.db:
                 self.db.update_artifact_meta(
-                    artifact,
-                    {"is_ingested": True, "dlt_table_name": resource_name}
+                    artifact, {"is_ingested": True, "dlt_table_name": resource_name}
                 )
             return info
 
@@ -1266,7 +1267,9 @@ class Tracker:
         for art, direction in artifacts_links:
             if direction == "output":
                 resolved_path = self.resolve_uri(art.uri)
-                if not Path(resolved_path).exists() and not art.meta.get("is_ingested", False):
+                if not Path(resolved_path).exists() and not art.meta.get(
+                    "is_ingested", False
+                ):
                     logging.warning(f"⚠️ Cache Validation Failed. Missing: {art.uri}")
                     return False
         return True
@@ -1312,7 +1315,9 @@ class Tracker:
             If `capture_outputs` is used outside of an active `start_run` context.
         """
         if not self.current_consist:
-            raise RuntimeError("capture_outputs must be used within a start_run context.")
+            raise RuntimeError(
+                "capture_outputs must be used within a start_run context."
+            )
 
         # Use FS service to scan
         before_state = self.fs.scan_directory(directory, pattern, recursive)

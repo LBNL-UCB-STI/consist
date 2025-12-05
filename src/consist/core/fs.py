@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Dict, Optional, Union, Dict
+from typing import Optional, Union, Dict
 
 
 class FileSystemManager:
@@ -13,7 +13,9 @@ class FileSystemManager:
     3. bidirectional conversion between Absolute Paths and Portable URIs.
     """
 
-    def __init__(self, run_dir: Union[str, Path], mounts: Optional[Dict[str, str]] = None):
+    def __init__(
+        self, run_dir: Union[str, Path], mounts: Optional[Dict[str, str]] = None
+    ):
         """
         Args:
             run_dir: The root directory for run logs and outputs.
@@ -55,7 +57,7 @@ class FileSystemManager:
 
         # 1. Check Mounts (Sort by length descending to match most specific mount first)
         for name, root in sorted(
-                self.mounts.items(), key=lambda x: len(x[1]), reverse=True
+            self.mounts.items(), key=lambda x: len(x[1]), reverse=True
         ):
             root_abs = str(Path(root).resolve())
             if abs_path.startswith(root_abs):
@@ -72,8 +74,9 @@ class FileSystemManager:
         # 3. Fallback to absolute
         return abs_path
 
-    def scan_directory(self, directory: Union[str, Path], pattern: str = "*", recursive: bool = False) -> Dict[
-        Path, int]:
+    def scan_directory(
+        self, directory: Union[str, Path], pattern: str = "*", recursive: bool = False
+    ) -> Dict[Path, int]:
         """
         Scans a directory and returns a map of {Path: mtime_ns}.
         Used for change detection (capture_outputs).
