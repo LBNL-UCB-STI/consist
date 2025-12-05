@@ -21,4 +21,5 @@ from consist.api import (
     capture_outputs,
     current_tracker,
     log_meta,
+    view,
 )

@@ -104,96 +104,49 @@ class ViewFactory:
             raise RuntimeError("Cannot create views: No database engine configured.")
 
         # 1. Identify 'Hot' Data
-        hot_table_exists = self._check_table_exists(f"global_tables.{concept_key}")
+        # Explicitly check for the table in global_tables schema
+        hot_table_exists = self._check_table_exists("global_tables", concept_key)
 
-        # 2. Identify 'Cold' Artifacts (Optimized)
+        # 2. Identify 'Cold' Artifacts
         cold_sql = self._generate_cold_query_optimized(concept_key, driver_filter)
 
-        # 3. Construct the Union
         parts = []
 
         if hot_table_exists:
-            # Select everything from the materialized table
             parts.append(f"SELECT * FROM global_tables.{concept_key}")
 
         if cold_sql:
             parts.append(cold_sql)
 
         if not parts:
-            # Fallback: Create an empty view with a generic schema
-            query = "SELECT 1 as _empty WHERE 1=0"
+            # FIX: Create an empty dummy view so queries don't crash
+            # DuckDB allows typed empty selects, but simplest is a generic empty set
+            query = "SELECT 1 AS _empty_marker WHERE 1=0"
         else:
-            # UNION ALL BY NAME matches columns by name, nulling out missing ones.
             query = "\nUNION ALL BY NAME\n".join(parts)
 
-        # 4. Execute
         with self.tracker.engine.begin() as conn:
-            sql = f"CREATE OR REPLACE VIEW {view_name} AS \n{query}"
+            conn.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
+            sql = f"CREATE VIEW {view_name} AS \n{query}"
             conn.execute(text(sql))
 
         return True
 
-        # 1. Identify 'Hot' Data
-        hot_table_exists = self._check_table_exists(f"global_tables.{concept_key}")
-
-        # 2. Identify 'Cold' Artifacts (Optimized)
-        cold_sql = self._generate_cold_query_optimized(concept_key, driver_filter)
-
-        # 3. Construct the Union
-        parts = []
-
-        if hot_table_exists:
-            # Select everything from the materialized table
-            parts.append(f"SELECT * FROM global_tables.{concept_key}")
-
-        if cold_sql:
-            parts.append(cold_sql)
-
-        if not parts:
-            # Fallback: Create an empty view with a generic schema
-            query = "SELECT 1 as _empty WHERE 1=0"
-        else:
-            # UNION ALL BY NAME matches columns by name, nulling out missing ones.
-            query = "\nUNION ALL BY NAME\n".join(parts)
-
-        # 4. Execute
-        with self.tracker.engine.begin() as conn:
-            sql = f"CREATE OR REPLACE VIEW {view_name} AS \n{query}"
-            conn.execute(text(sql))
-
-        return True
-
-    def _check_table_exists(self, table_path: str) -> bool:
+    def _check_table_exists(self, schema: str, table: str) -> bool:
         """
-        Checks if a specified table or view exists in the DuckDB information schema.
-
-        This internal helper function queries DuckDB's `information_schema.tables`
-        to determine the presence of a given table or view, which is useful
-        for differentiating between "hot" (materialized) and "cold" (file-based) data.
-
-        Parameters
-        ----------
-        table_path : str
-            The full path to the table or view (e.g., "global_tables.my_table"
-            or simply "my_table" for the default schema).
-
-        Returns
-        -------
-        bool
-            True if the table or view exists, False otherwise.
+        Robustly checks if a table exists in a specific schema.
         """
-        if "." in table_path:
-            schema, table = table_path.split(".", 1)
-        else:
-            schema = "main"
-            table = table_path
-
-        # Use text() for SQLAlchemy 2.0 compatibility
         sql = text(
-            "SELECT count(*) FROM information_schema.tables WHERE table_schema = :schema AND table_name = :table"
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_schema = :schema AND table_name = :table"
         )
-        with self.tracker.engine.connect() as conn:
-            return conn.execute(sql, {"schema": schema, "table": table}).scalar() > 0
+        try:
+            with self.tracker.engine.connect() as conn:
+                count = conn.execute(sql, {"schema": schema, "table": table}).scalar()
+                return count > 0
+        except Exception as e:
+            logging.warning(f"Failed to check table existence: {e}")
+            return False
 
     def _generate_cold_query_optimized(
         self, concept_key: str, driver_filter: Optional[List[str]] = None
@@ -284,9 +237,10 @@ class ViewFactory:
             for item in items:
                 # Escape single quotes in paths for SQL safety
                 safe_path = item["path"].replace("'", "''")
+                # Quote the path for the list
                 path_list.append(f"'{safe_path}'")
 
-                # Meta row: (path, run_id, art_id, year, iter)
+                # Meta row
                 row = (
                     f"'{safe_path}'",
                     f"'{item['run_id']}'",
@@ -296,23 +250,19 @@ class ViewFactory:
                 )
                 meta_rows.append(f"({', '.join(row)})")
 
-            # 2. Define Reader
             if driver == "parquet":
-                # union_by_name=True handles schema drift across files!
+                # union_by_name=True handles schema drift
                 reader_func = f"read_parquet([{', '.join(path_list)}], union_by_name=true, filename=true)"
             elif driver == "csv":
-                # normalize_names=true helps with CSV header inconsistencies (case/spacing)
                 reader_func = f"read_csv_auto([{', '.join(path_list)}], union_by_name=true, filename=true, normalize_names=true)"
             else:
-                continue  # Unknown driver fallback
+                continue
 
-            # 3. Construct Query with CTE
-            # The CTE 'file_meta' acts as our lookup table
+            cte_name = f"meta_{driver}_{concept_key}"
             cte_values = ",\n        ".join(meta_rows)
 
-            # Using a unique alias for the CTE to prevent collisions if multiple drivers exist
-            cte_name = f"meta_{driver}"
-
+            # NOTE: We simply match on filename.
+            # DuckDB's read_parquet usually returns the path provided in the list.
             query = f"""
             SELECT 
                 data.* EXCLUDE (filename), 
