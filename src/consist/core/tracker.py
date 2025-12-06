@@ -211,6 +211,8 @@ class Tracker:
         config_hash = self.identity.compute_config_hash(config)
         git_hash = self.identity.get_code_version()
 
+        kwargs["_physical_run_dir"] = str(self.run_dir)
+
         now = datetime.now(UTC)
         run = Run(
             id=run_id,
@@ -1015,6 +1017,19 @@ class Tracker:
             return self.db.get_artifact_by_uri(uri)
 
         return None
+
+    def resolve_historical_path(self, artifact: Artifact, run: Run) -> Path:
+        """
+        Helper to find the physical location of an artifact from a past run.
+        """
+        if not run:
+            return Path(self.resolve_uri(artifact.uri))
+
+        old_dir = run.meta.get("_physical_run_dir")
+
+        # Delegate the path math to the FS service
+        path_str = self.fs.resolve_historical_path(artifact.uri, old_dir)
+        return Path(path_str)
 
     def get_run(self, run_id: str) -> Optional[Run]:
         """

@@ -92,3 +92,31 @@ class FileSystemManager:
             if f.is_file():
                 files[f] = f.stat().st_mtime_ns
         return files
+
+    def resolve_historical_path(self, uri: str, original_run_dir: Optional[str]) -> str:
+        """
+        Resolves a URI as if it were in the context of a previous run.
+
+        This is crucial for hydration: we need to find where the file *was*
+        to copy it to where it *is*.
+
+        Args:
+            uri: The portable URI of the artifact (e.g. "workspace://outputs/data.h5")
+            original_run_dir: The absolute path where the previous run executed.
+        """
+        # Case 1: Workspace scheme (Ephemeral)
+        # If the URI is virtualized to the workspace, its physical location
+        # depends entirely on where that run happened.
+        if uri.startswith("workspace://") and original_run_dir:
+            rel_path = uri.replace("workspace://", "").lstrip("/")
+            return str(Path(original_run_dir) / rel_path)
+
+        # Case 2: Relative path (Ephemeral)
+        # If it was stored as relative ("./outputs/foo.csv"), it's relative to that run's root.
+        if uri.startswith("./") and original_run_dir:
+            return str(Path(original_run_dir) / uri[2:])
+
+        # Case 3: Shared Mounts or Absolute Paths
+        # If it's "inputs://data.csv" and "inputs" points to a shared /data drive
+        # that is mounted in the current config, standard resolution works fine.
+        return self.resolve_uri(uri)
