@@ -20,6 +20,7 @@ Key functionalities include:
 """
 
 import logging
+import time
 from pathlib import Path
 from typing import List, Dict, Union, Optional
 
@@ -133,21 +134,8 @@ def run_container(
             p = Path(i).resolve()
             resolved_inputs.append(str(p))
 
-    # 5. Execute Run Context
-    with tracker.start_run(
-        run_id=run_id,
-        model="container_step",
-        config=config.to_hashable_config(),
-        inputs=resolved_inputs,
-    ) as t:
-
-        # A. Cache Hit
-        if t.is_cached:
-            logger.info(f"✅ [Consist] Container Cache Hit: {run_id} ({image})")
-            # Outputs automatically hydrated (virtualized) by Consist
-            return True
-
-        # B. Execution
+    # Helper: The actual work of execution
+    def _execute_backend_and_log_outputs(active_tracker: Tracker):
         # Ensure output directories exist on HOST before mounting
         # (Docker often creates them as root if they don't exist, causing permission issues)
         for host_path in volumes.keys():
@@ -165,14 +153,57 @@ def run_container(
         if not success:
             raise RuntimeError(f"Container execution failed for run_id: {run_id}")
 
-        # C. Log Outputs
         # Scan expected output paths on HOST and log them
         for host_out in outputs:
             path_obj = Path(host_out).resolve()
             if path_obj.exists():
                 # Log artifact (Consist handles auto-detecting file vs dir)
-                t.log_artifact(path_obj, key=path_obj.name, direction="output")
+                active_tracker.log_artifact(
+                    path_obj, key=path_obj.name, direction="output"
+                )
             else:
                 logger.warning(f"⚠️ [Consist] Expected output not found: {host_out}")
+
+    # 5. Execute Run Context
+
+    # CASE A: Nested Mode (Run already active)
+    if tracker.current_consist:
+        logger.info(
+            f"🔄 [Consist] Container '{run_id}' running as step in active run '{tracker.current_consist.run.id}'"
+        )
+
+        # 1. Log Inputs to current run
+        for item in resolved_inputs:
+            if isinstance(item, Artifact):
+                tracker.log_artifact(item, direction="input")
+            else:
+                # resolved_inputs are strings (already resolved in step 4)
+                p = Path(item)
+                tracker.log_artifact(str(p), key=p.stem, direction="input")
+
+        # 2. Log Config to Meta (so we don't lose the container context)
+        step_key = f"container_step_{int(time.time())}"
+        tracker.log_meta(**{step_key: config.to_hashable_config()})
+
+        # 3. Execute
+        _execute_backend_and_log_outputs(tracker)
+        return True
+
+    # CASE B: Standalone Mode (Start new run)
+    with tracker.start_run(
+        run_id=run_id,
+        model="container_step",
+        config=config.to_hashable_config(),
+        inputs=resolved_inputs,
+    ) as t:
+
+        # 1. Cache Hit Check
+        if t.is_cached:
+            logger.info(f"✅ [Consist] Container Cache Hit: {run_id} ({image})")
+            # Outputs automatically hydrated (virtualized) by Consist
+            return True
+
+        # 2. Execute
+        _execute_backend_and_log_outputs(t)
 
     return True

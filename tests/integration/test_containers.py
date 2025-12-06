@@ -92,6 +92,7 @@ class MockBackend(ContainerBackend):
         """
         self.run_count += 1
         for host_path, container_path in volumes.items():
+            # Create mock output if the path suggests it's an output directory
             if "out" in str(host_path):
                 Path(host_path).mkdir(parents=True, exist_ok=True)
                 (Path(host_path) / "result.txt").write_text("mock data")
@@ -217,6 +218,72 @@ def test_container_caching_logic(clean_tracker: Tracker, input_file: Path):
             outputs=[output_dir / "result.txt"],
         )
         assert mock_backend_instance.run_count == 2
+
+
+def test_nested_container_execution(clean_tracker: Tracker, input_file: Path):
+    """
+    Tests that `run_container` correctly behaves as a step when called inside
+    an existing active run (Nested Mode).
+
+    Verifies:
+    1. It detects the active run.
+    2. It executes the backend directly (does not start a new run).
+    3. It logs inputs/outputs to the *parent* run.
+    4. It logs the container config to the *parent* run's metadata.
+    """
+    mock_backend = MockBackend()
+
+    # Setup output directory
+    output_dir = clean_tracker.run_dir / "nested_out"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    expected_output_file = output_dir / "result.txt"
+
+    with patch(
+        "consist.integrations.containers.api.DockerBackend",
+        return_value=mock_backend,
+    ):
+        # 1. Start a PARENT run explicitly
+        with clean_tracker.start_run(run_id="parent_run", model="pipeline_root"):
+            assert clean_tracker.current_consist is not None
+
+            # 2. Call run_container nested inside
+            success = run_container(
+                tracker=clean_tracker,
+                run_id="inner_step_1",  # This ID is used for logs, not a DB Run
+                image="nested_image:v1",
+                command=["echo", "nested"],
+                volumes={str(input_file.parent): "/in", str(output_dir): "/out"},
+                inputs=[input_file],
+                outputs=[expected_output_file],
+                backend_type="docker",
+            )
+
+            assert success is True
+
+            # --- Assertions on Parent Run State ---
+
+            # A. Check backend execution
+            assert mock_backend.run_count == 1
+
+            # B. Check Artifact Logging to Parent
+            inputs = clean_tracker.current_consist.inputs
+            outputs = clean_tracker.current_consist.outputs
+
+            # Input file should be logged
+            assert any(str(input_file.name) in a.uri for a in inputs)
+            # Mock backend created result.txt, so it should be logged as output
+            assert any("result.txt" in a.uri for a in outputs)
+
+            # C. Check Metadata Injection
+            meta = clean_tracker.current_consist.run.meta
+            # Ensure keys like "container_step_<timestamp>" exist
+            step_keys = [k for k in meta.keys() if k.startswith("container_step_")]
+            assert len(step_keys) == 1
+
+            # Check content of the metadata config
+            config_dump = meta[step_keys[0]]
+            assert config_dump["image"] == "nested_image:v1"
+            assert config_dump["backend"] == "docker"
 
 
 # --- Singularity Mock Test ---

@@ -40,6 +40,7 @@ def create_task_decorator(
         Callable
             A decorator that returns a wrapped function.
         """
+
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             """
@@ -65,6 +66,7 @@ def create_task_decorator(
                 The result of the wrapped function, potentially transformed into
                 logged ``Artifact`` objects according to Consist conventions.
             """
+
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             # 1. Inspect Signature to build Config & Inputs
             sig = inspect.signature(func)
