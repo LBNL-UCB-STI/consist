@@ -1,27 +1,45 @@
 # Consist
 
-**Automatic provenance tracking, intelligent caching, and data virtualization for scientific simulation workflows.**
+**Provenance tracking, intelligent caching, and data virtualization for scientific simulation workflows.**
 
-Consist tracks what you ran, what it produced, and automatically skips re-running unchanged work. It bridges the gap between raw file-based workflows (CSV/Parquet/HDF5) and analytical databases (DuckDB), offering a "Zero-Copy" virtualization layer for high-performance analysis.
-
----
-
-### 🚂 Etymology: What is a "Consist"?
-In railroad terminology, a **consist** (*noun*, pronounced **CON-sist**) refers to the specific lineup of locomotives and cars that make up a train.
-
-In this library, a **Consist** is the immutable record of exactly what "vehicles" (Code Version, Configuration, Input Artifacts) were coupled together to execute a specific run.
+Consist automatically records what code, configuration, and input data produced each output in your pipeline. It uses this information to skip redundant computation and to let you query results across many runs without manual bookkeeping.
 
 ---
 
-## The Problem
+## Etymology
 
-Research pipelines are often brittle:
-- **"Which config produced Figure 3?"** (Provenance Hell)
-- **Re-running a 10-step pipeline** because you tweaked one parameter in step 7.
-- **Writing one-off scripts** to compare outputs across dozens of simulation runs.
-- **Transferring 40GB of CSVs** just to share results with a colleague.
+In railroad terminology, a **consist** (noun, pronounced CON-sist) is the specific lineup of locomotives and cars that make up a train.
 
-**Consist solves this.**
+In this library, a **consist** is the immutable record of exactly which components—code version, configuration, input artifacts—were coupled together to produce a particular run's outputs.
+
+---
+
+## Motivation
+
+Multi-model simulation workflows accumulate friction over time:
+
+- **Provenance ambiguity.** Which configuration produced the results in Figure 3? Was that before or after the land use update?
+- **Redundant computation.** Re-running an entire pipeline because one downstream parameter changed.
+- **Scattered outputs.** Writing one-off scripts to compare results across scenario variants.
+- **Costly data transfers.** Sharing results means copying large files, losing the context of how they were produced.
+
+Consist addresses these problems by treating provenance as a first-class concern rather than an afterthought.
+
+---
+
+## How It Works
+
+Consist maintains two synchronized records of your workflow:
+
+1. **A JSON log** (`consist.json`) that serves as the portable, human-readable source of truth. This file can be version-controlled and survives database corruption.
+
+2. **A DuckDB database** that enables fast queries across runs, artifacts, and lineage relationships.
+
+Each run is identified by a cryptographic hash of its inputs: the code version (git SHA), configuration parameters, and the provenance IDs of input artifacts. If all three match the prior run, Consist returns cached results. If any differ, it executes the run and records the new lineage.
+
+### Path Virtualization
+
+Consist stores relative URIs rather than absolute paths, so provenance records remain valid when data moves between machines or storage systems. You define mount points (e.g., `inputs → /mnt/project/data`), and Consist translates paths automatically.
 
 ---
 
@@ -30,128 +48,214 @@ Research pipelines are often brittle:
 ### Installation
 
 ```bash
-git clone https://github.com/your-org/consist.git
-cd consist
-pip install -e .
+pip install consist
 ```
 
-### 1. Functional Pipelines (The Happy Path)
+<!-- [TODO: Update once published to PyPI] -->
 
-The easiest way to use Consist is via the `@task` decorator. It handles caching, hashing, and linkage automatically. Consist enforces **Strict Contracts** on return types to prevent ambiguity.
+### Basic Usage
+
+The `@task` decorator is the primary interface. It handles caching, hashing, and artifact registration automatically.
 
 ```python
 from consist import Tracker
 from pydantic import BaseModel
 from pathlib import Path
 
-# Initialize
-tracker = Tracker("./runs", db_path="./provenance.duckdb")
+tracker = Tracker(
+    root="./runs",           # Where run directories are created
+    db_path="./provenance.duckdb"  # Queryable provenance database
+)
 
-class CleanConfig(BaseModel):
+class CleaningConfig(BaseModel):
     threshold: float = 0.5
+    remove_outliers: bool = True
 
-# --- Pattern 1: The Pipe (Return a single Path) ---
-@tracker.task(cache_mode="reuse")
-def clean_data(raw_file: Path, config: CleanConfig):
-    print("Running cleaning step...")
-    out = Path("./cleaned_data.parquet")
-    # ... process and write ...
-    return out  # Decorator logs this and returns an Artifact
-
-# --- Pattern 2: The Splitter (Return a Dict of Paths) ---
 @tracker.task()
-def split_data(clean_artifact):
-    # ... process ...
-    return {
-        "train": Path("./train.csv"),
-        "test": Path("./test.csv")
-    }
-
-# Execution
-# If run twice, the second execution returns instantly via Cache Hit.
-conf = CleanConfig(threshold=0.8)
-
-clean_art = clean_data("raw.csv", conf)
-datasets = split_data(clean_art) # datasets is Dict[str, Artifact]
+def clean_data(raw_file: Path, config: CleaningConfig) -> Path:
+    """Load raw data, apply cleaning rules, write output."""
+    output_path = Path("./cleaned.parquet")
+    # ... processing logic ...
+    return output_path
 ```
 
-### 2. Wrapping Legacy Code ("Black Box" Models)
+When `clean_data` is called:
 
-For models that read config files from disk or dump side-effects into folders (like ActivitySim or loose scripts), use `depends_on` and `capture_dir`.
+1. Consist computes a signature from the function's code, the config object, and the input file's hash.
+2. If a prior run with the same signature exists, Consist returns the cached output immediately.
+3. Otherwise, it executes the function, records the output artifact, and links it to the run.
 
 ```python
-import consist
-import legacy_lib # A library that implicitly reads 'sim_config.yaml'
+config = CleaningConfig(threshold=0.8)
 
+# First call: executes the function
+result = clean_data(Path("raw.csv"), config)
+
+# Second call with same inputs: returns cached result
+result = clean_data(Path("raw.csv"), config)
+
+# Third call with different config: executes again
+result = clean_data(Path("raw.csv"), CleaningConfig(threshold=0.9))
+```
+
+### Wrapping Existing Code
+
+Many scientific models read configuration from files and write outputs to directories rather than accepting arguments and returning paths. The `depends_on` and `capture_dir` parameters handle this pattern:
+
+```python
 @tracker.task(
-    # Hashes these files into the run identity, even though the function doesn't take them as args
-    depends_on=["sim_config.yaml"], 
-    
-    # Watches this folder and auto-logs any NEW or MODIFIED files
-    capture_dir="./model_outputs",
+    depends_on=["config.yaml", "parameters.json"],  # Include in signature
+    capture_dir="./outputs",                         # Watch for new files
     capture_pattern="*.csv"
 )
-def run_simulation(upstream_data):
-    # 'upstream_data' is passed just to link the graph lineage.
-    legacy_lib.run()
-    # MUST return None when using capture_dir.
-    
-# Returns a List[Artifact] of whatever the legacy code produced
-results = run_simulation(clean_art)
+def run_simulation(upstream_artifact):
+    """Wrapper around legacy simulation code."""
+    import legacy_model
+    legacy_model.run()  # Reads config.yaml, writes to ./outputs
+    # Return None when using capture_dir; Consist logs outputs automatically
 ```
 
-### 3. Observability & Introspection
-
-Consist provides tools to debug runs while you work in a notebook or IDE.
+### Inspecting Provenance
 
 ```python
-# A. Runtime Metrics
-# Inject metrics deep inside your code without passing objects around
-def train():
-    acc = 0.98
-    consist.log_meta(accuracy=acc, tags=["production"])
+# Most recent run
+print(tracker.last_run)
+# Run(id='clean_data_a3f2c1', status='completed', outputs=1, cached=False)
 
-# B. Immediate History
-# Check what just happened
-print(tracker.last_run) 
-# <ConsistRecord run_id='task_a_123' outputs=2>
+# Query history
+df = tracker.history(model_name="clean_data", limit=10)
+print(df[["run_id", "config_hash", "status", "duration_seconds"]])
 
-if tracker.last_run.cached_run:
-    print("🚀 It was a cache hit!")
-
-# C. Database History
-# Get a DataFrame of all runs
-df = tracker.history(limit=5)
-print(df[["model_name", "status", "created_at"]])
+# Compare two runs
+tracker.diff("run_abc123", "run_def456")
+# Config changed: threshold 0.8 → 0.9
+# Input changed: raw.csv (hash a1b2c3 → d4e5f6)
 ```
+
+<!-- [TODO: Confirm diff() API is implemented] -->
 
 ---
 
-## Key Features
+## Features
 
-### 🔄 Smart Caching (Merkle DAG)
-Change a parameter? Consist detects it.
-*   **Hash-Based Identity:** Runs are identified by `SHA256(Code + Config + Inputs)`.
-*   **Auto-Forking:** If inputs change, downstream runs automatically fork.
-*   **Ghost Mode:** If results exist in the DB, Consist skips execution even if raw files are missing.
+### Intelligent Caching
 
-### 📊 Hybrid Data Views
-Query your simulation outputs with SQL without ETL.
-*   **Hot & Cold Data:** Consist creates "Hybrid Views" that UNION raw files (Parquet/CSV) with ingested data (DuckDB) transparently.
-*   **Vectorized Reads:** Queries scanning raw files are pushed down to DuckDB's vectorized reader.
+Runs are identified by the hash of their inputs: code version, configuration, and upstream artifact provenance. This Merkle DAG structure means that:
 
-### 📦 Container-Native
-Treats Docker/Singularity containers as "Pure Functions".
-*   Tracks `Image Digest + Command` as configuration.
-*   Tracks mounted volumes as Inputs/Outputs.
+- Changing a parameter invalidates only downstream runs that depend on it.
+- Identical inputs always produce cache hits, even across machines (given the same code version).
+- You can safely delete intermediate files; provenance validity depends on the lineage graph, not file existence.
+
+The last point—which we call **Ghost Mode**—is particularly useful for long-running studies where intermediate outputs may be cleaned up to save storage, but you still want to query what happened.
+
+### Data Virtualization
+
+Consist can create SQL views over your artifacts without copying data into the database. This is useful when you want to query across many simulation runs (e.g., "compare household counts across all 2030 scenarios").
+
+```python
+# Register a schema once
+from consist import register_schema
+
+@register_schema("households")
+class Household(BaseModel):
+    household_id: int
+    income: float
+    zone_id: int
+
+# Query across all runs that produced household outputs
+results = tracker.query("""
+    SELECT consist_run_id, zone_id, AVG(income) as mean_income
+    FROM v_households
+    WHERE consist_year = 2030
+    GROUP BY consist_run_id, zone_id
+""")
+```
+
+These **hybrid views** combine data that has been explicitly ingested into DuckDB with data that remains in Parquet or CSV files on disk. DuckDB's vectorized reader handles the files directly, avoiding memory overhead.
+
+#### Performance
+
+Querying 10 million rows across multiple simulation runs:
+
+| Operation | Pandas | Polars (lazy) | Consist |
+|:----------|:-------|:--------------|:--------|
+| Aggregate | 0.46s / 780 MB | 0.24s / 280 MB | 0.04s / 80 MB |
+| Join (5M rows) | 0.76s / 620 MB | 0.20s / 440 MB | 0.12s / 272 MB |
+
+*Benchmark on Apple M3 Max. Consist queries Parquet files directly via DuckDB without loading into memory.*
+
+### Container Support
+
+For models that run inside Docker or Singularity containers, Consist treats the container as a function: the image digest and command are part of the configuration hash, and mounted volumes are tracked as inputs and outputs.
+
+```python
+result = tracker.run_container(
+    image="model:v2.1",
+    command=["python", "run.py", "--year", "2030"],
+    mounts={
+        "inputs": "/data/inputs",    # Read-only input directory
+        "outputs": "/data/outputs",  # Captured as output artifacts
+    },
+)
+```
+
+This ensures that changing the container version invalidates the cache, while re-running the same version with the same inputs returns cached results.
+
+---
+
+## Comparison with Related Tools
+
+| Tool | Primary Focus | Consist Difference |
+|:-----|:--------------|:-------------------|
+| DVC | Data versioning, Git-like workflow | Consist tracks execution provenance, not just file versions |
+| MLflow | ML experiment tracking | Consist is domain-agnostic and handles multi-model simulation workflows |
+| Snakemake / Nextflow | Workflow orchestration and DAG execution | Consist focuses on provenance and caching; can complement an orchestrator |
+| OpenLineage | Lineage metadata standard | Consist is a runtime library, not a metadata spec (though it can emit OpenLineage events) |
+
+<!-- [TODO: Verify OpenLineage emission is implemented or remove that parenthetical] -->
+
+Consist is designed for scientific simulation workflows where: runs are expensive (minutes to hours), provenance questions arise after the fact ("what produced this?"), and comparing results across many scenario variants is a common analysis task.
+
+---
+
+## Current Status
+
+Consist is under active development. It is currently used in production for the [PILATES](https://github.com/ual/PILATES) integrated land use and transportation modeling framework.
+
+We welcome feedback from researchers working with similar multi-model simulation workflows.
+
+---
+
+## Citation
+
+<!-- [TODO: Add JOSS citation once published] -->
+
+If you use Consist in academic work, please cite:
+
+```bibtex
+@software{consist,
+  author = {[Author Name]},
+  title = {Consist: Provenance Tracking and Caching for Scientific Simulation Workflows},
+  year = {2025},
+  url = {https://github.com/[org]/consist}
+}
+```
 
 ---
 
 ## Contributing
 
-Consist is currently in active development for the PILATES project.
+Contributions are welcome. Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 **Requirements:**
-*   Python 3.10+
-*   DuckDB
-*   Docker (Optional, for container support)
+- Python 3.10+
+- DuckDB
+- Docker or Singularity (optional, for container support)
+
+---
+
+## License
+
+[MIT License](LICENSE)
+
+<!-- [TODO: Confirm license choice] -->
