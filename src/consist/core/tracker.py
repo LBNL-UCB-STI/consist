@@ -124,6 +124,21 @@ class Tracker:
         """Delegates to the DatabaseManager engine."""
         return self.db.engine if self.db else None
 
+    def _resolve_run_signature(self, run_id: str) -> Optional[str]:
+        """
+        Internal helper to look up a run's signature (Merkle identity) via the database.
+        Used by IdentityManager to stabilize input hashes against ephemeral Run IDs.
+        """
+        # 1. Check active run (unlikely for inputs, but good for completeness)
+        if self.current_consist and self.current_consist.run.id == run_id:
+            return self.current_consist.run.signature
+        # 2. Check Database
+        if self.db:
+            run = self.db.get_run(run_id)
+            if run:
+                return run.signature
+        return None
+
     # --- Run Management ---
 
     def begin_run(
@@ -253,7 +268,9 @@ class Tracker:
 
         try:
             input_hash = self.identity.compute_input_hash(
-                self.current_consist.inputs, path_resolver=self.resolve_uri
+                self.current_consist.inputs,
+                path_resolver=self.resolve_uri,
+                signature_lookup=self._resolve_run_signature,
             )
             run.input_hash = input_hash
             run.signature = self.identity.calculate_run_signature(

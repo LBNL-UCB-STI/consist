@@ -130,6 +130,7 @@ class IdentityManager:
         self,
         inputs: List["Artifact"],
         path_resolver: Optional[Callable[[str], str]] = None,
+        signature_lookup: Optional[Callable[[str], str]] = None,
     ) -> str:
         """
         Generates a deterministic hash representing the state of all input artifacts.
@@ -155,6 +156,7 @@ class IdentityManager:
             A function that takes an `Artifact` URI (a portable string like "inputs://data.csv")
             and returns an absolute file path on the local filesystem. This is required
             for hashing the content of raw files.
+        signature_lookup : Optional[Callable[[str], str]], optional
 
         Returns
         -------
@@ -174,9 +176,15 @@ class IdentityManager:
 
         for artifact in inputs:
             if artifact.run_id:
-                # Scenario A: Provenance Exists (Artifact from previous run)
-                # We trust the run_id as the signature of this input's state.
-                sig = f"run:{artifact.run_id}"
+                # Try to use signature if available
+                tmp = None
+                if signature_lookup:
+                    tmp = signature_lookup(artifact.run_id)
+
+                if tmp:
+                    sig = f"sig:{tmp}"
+                else:
+                    sig = f"run:{artifact.run_id}"
             else:
                 # Scenario B: Raw File (External input)
                 # We must compute the checksum of the physical file.
