@@ -1,7 +1,14 @@
+"""
+consist/core/identity.py
+
+Manages the cryptographic identity of Runs and Artifacts.
+"""
+
 import logging
 import hashlib
 import json
 import time
+import inspect
 from typing import Dict, List, Any, Optional, Callable, Set
 from pathlib import Path
 
@@ -26,7 +33,7 @@ if TYPE_CHECKING:
 class IdentityManager:
     """
     Manages the cryptographic identity of a Run, which is fundamental to Consist's
-    **reproducibility** and **caching** features, leveraging a **Merkle DAG** approach.
+    **reproducibility** and **caching** features.
 
     To achieve robust caching and "run forking", a Run's identity is defined as a
     composite SHA256 hash, ensuring that any change in code, configuration, or
@@ -37,53 +44,128 @@ class IdentityManager:
 
     def __init__(self, project_root: str = ".", hashing_strategy: str = "full") -> None:
         """
-        Initializes the IdentityManager.
-
         Parameters
         ----------
-        project_root : str, default "."
-            Path to the root of the code repository. This is used to resolve
-            relative paths and to initialize the Git repository object.
-        hashing_strategy : str, default "full"
-            Defines how file and directory checksums are computed:
-            - 'full': (Default) Reads entire file content (SHA256). Provides strong
-                      cryptographic integrity, crucial for **bitwise reproducibility**,
-                      but can be slow for very large files or directories.
-            - 'fast': Hashes file metadata (Size + MTime). Offers instant checksums
-                      but is less robust for reproducibility as it relies on
-                      filesystem timestamps and does not detect content changes if
-                      size/mtime are the same.
+        project_root : str
+            Path to the root of the code repository.
+        hashing_strategy : str
+            'full' (content-based) or 'fast' (metadata-based).
         """
-        self.project_root = Path(project_root)
+        self.project_root = Path(project_root).resolve()
         self.hashing_strategy = hashing_strategy
+
+    # --- Run Signature Calculation ---
 
     def calculate_run_signature(
         self, code_hash: str, config_hash: str, input_hash: str
     ) -> str:
         """
-        Computes the final cryptographic signature (the unique **cache key**) for a run.
+        Computes the final cryptographic signature (cache key) for a run.
+        """
+        composite = f"code:{code_hash}|conf:{config_hash}|in:{input_hash}"
+        return hashlib.sha256(composite.encode("utf-8")).hexdigest()
 
-        This signature is a composite hash of the code version, configuration, and input data,
-        forming the **Merkle-DAG identity** of the run. Any significant change in these components
-        will result in a different signature, enabling precise caching and reproducibility.
+    # --- Component 1: Code Identity ---
+
+    def get_code_version(self) -> str:
+        """
+        Retrieves the global 'Code Identity' using the Git Commit SHA.
+
+        This uses GitPython directly to avoid subprocess overhead and parsing fragility.
+        """
+        if git is None:
+            return "no_git_module_found"
+
+        try:
+            # search_parent_directories=True helps if running from a subdir
+            repo = git.Repo(self.project_root, search_parent_directories=True)
+            sha = repo.head.object.hexsha
+
+            if repo.is_dirty():
+                # If dirty, we append a nonce.
+                # improvement: We could hash the diff here for a "Dirty Content Hash",
+                # but a timestamp is safer to prevent false cache hits during dev.
+                nonce = int(time.time())
+                return f"{sha}-dirty-{nonce}"
+
+            return sha
+        except (git.InvalidGitRepositoryError, git.NoSuchPathError):
+            return "unknown_code_version"
+
+    def compute_callable_hash(
+        self,
+        func: Callable,
+        strategy: str = "module",
+        extra_deps: Optional[List[str]] = None,
+    ) -> str:
+        """
+        Computes a hash for a specific Python function/callable.
+
+        This allows for granular caching (ignoring global repo changes) by focusing
+        on the relevant code.
+
+        Strategies:
+        -----------
+        'source':
+            Hashes ONLY the function's source code (via `inspect.getsource`).
+            Use this for pure functions with no external dependencies.
+        'module':
+            Hashes the entire file (.py) where the function is defined.
+            This is the robust "in-between": it captures helper functions and
+            constants in the same file, but ignores changes in unrelated files.
 
         Parameters
         ----------
-        code_hash : str
-            The hash representing the code version (e.g., Git commit SHA).
-        config_hash : str
-            The hash representing the run's configuration, generated by `compute_config_hash`.
-        input_hash : str
-            The hash representing the state of all input artifacts, generated by `compute_input_hash`.
-
-        Returns
-        -------
-        str
-            A SHA256 hex digest representing the unique signature of the run.
+        func : Callable
+            The function to hash.
+        strategy : str, default "module"
+            The hashing strategy ("source" or "module").
+        extra_deps : List[str], optional
+            List of additional file paths (relative to project root) that this
+            function depends on. Their content will be mixed into the hash.
         """
-        # We use a separator to prevent collision attacks
-        composite = f"code:{code_hash}|conf:{config_hash}|in:{input_hash}"
+        hashes = []
+
+        # 1. Base Strategy
+        try:
+            if strategy == "source":
+                src = inspect.getsource(func)
+                hashes.append(f"src:{hashlib.sha256(src.encode('utf-8')).hexdigest()}")
+
+            elif strategy == "module":
+                module_path = inspect.getfile(func)
+                # We reuse the file checksum logic
+                file_hash = self._compute_file_checksum(module_path)
+                hashes.append(f"mod:{file_hash}")
+
+            else:
+                raise ValueError(f"Unknown code hashing strategy: {strategy}")
+
+        except (OSError, TypeError) as e:
+            # Fallback if inspect fails (e.g. dynamically defined functions, REPL)
+            logging.warning(
+                f"Could not inspect source for {func}: {e}. Fallback to timestamp."
+            )
+            hashes.append(f"fallback:{time.time()}")
+
+        # 2. Extra Dependencies (e.g., utils.py, config files)
+        if extra_deps:
+            for dep in extra_deps:
+                # Resolve relative to project root
+                full_path = self.project_root / dep
+                if full_path.exists():
+                    d_hash = self._compute_file_checksum(str(full_path))
+                    hashes.append(f"dep:{dep}:{d_hash}")
+                else:
+                    # If dependency is missing, we must affect the hash to warn or fail?
+                    # For caching safety, a missing dependency changes the hash.
+                    hashes.append(f"dep:{dep}:MISSING")
+
+        # 3. Composite Hash
+        composite = "|".join(sorted(hashes))
         return hashlib.sha256(composite.encode("utf-8")).hexdigest()
+
+    # --- Component 2: Config Identity ---
 
     def compute_config_hash(
         self, config: Dict[str, Any], exclude_keys: Optional[List[str]] = None
@@ -125,6 +207,8 @@ class IdentityManager:
 
         # 3. Hash
         return hashlib.sha256(json_str.encode("utf-8")).hexdigest()
+
+    # --- Component 3: Input Identity ---
 
     def compute_input_hash(
         self,
@@ -176,14 +260,16 @@ class IdentityManager:
 
         for artifact in inputs:
             if artifact.run_id:
-                # Try to use signature if available
+                # Scenario A: Consist-produced artifact (Provenance Link)
                 tmp = None
                 if signature_lookup:
                     tmp = signature_lookup(artifact.run_id)
 
                 if tmp:
+                    # Link to the signature of the producing run (Merkle Link)
                     sig = f"sig:{tmp}"
                 else:
+                    # Fallback to run_id if signature unknown
                     sig = f"run:{artifact.run_id}"
             else:
                 # Scenario B: Raw File (External input)
@@ -206,43 +292,7 @@ class IdentityManager:
         composite = "|".join(signatures)
         return hashlib.sha256(composite.encode("utf-8")).hexdigest()
 
-    def get_code_version(self) -> str:
-        """
-        Retrieves the **"Code Identity"** for the current execution context.
-
-        This method attempts to determine the Git commit hash of the project.
-        Crucially, it also detects if the working directory is "dirty" (i.e., has
-        uncommitted changes). If dirty, it appends a timestamp/nonce to the SHA
-        to ensure that runs from an uncommitted state do not incorrectly
-        collide with runs from a clean commit, thus safeguarding **reproducibility**.
-
-        Returns
-        -------
-        str
-            The Git commit SHA (e.g., "a1b2c3d") or a modified SHA indicating
-            a dirty state (e.g., "a1b2c3d-dirty-1678886400"). Returns
-            "no_git_module_found" if the 'git' package is not installed, or
-            "unknown_code_version" if the project is not a Git repository.
-        """
-        if git is None:
-            return "no_git_module_found"
-
-        try:
-            repo = git.Repo(self.project_root, search_parent_directories=True)
-            sha = repo.head.object.hexsha
-
-            if repo.is_dirty():
-                # If dirty, we cannot rely on the commit SHA alone.
-                # We append a timestamp/nonce to ensure this "dirty" run
-                # doesn't collide with the clean commit or other dirty states.
-                nonce = int(time.time())
-                return f"{sha}-dirty-{nonce}"
-
-            return sha
-        except (git.InvalidGitRepositoryError, git.NoSuchPathError):
-            return "unknown_code_version"
-
-    # --- Internals ---
+    # --- Internal Utilities ---
 
     def _clean_structure(self, obj: Any, exclude_keys: Set[str]) -> Any:
         """
@@ -326,7 +376,7 @@ class IdentityManager:
         """
         path = Path(file_path)
         if not path.exists():
-            raise FileNotFoundError(f"Input artifact not found at: {file_path}")
+            raise FileNotFoundError(f"File not found for hashing: {file_path}")
 
         # --- Directory Handling (e.g. Zarr) ---
         if path.is_dir():
@@ -358,7 +408,7 @@ class IdentityManager:
                                 sha256.update(chunk)
                 return sha256.hexdigest()
 
-        # --- Single File Handling (Existing Logic) ---
+        # Single File Handling
         if self.hashing_strategy == "fast":
             stat = path.stat()
             meta_str = f"{stat.st_size}_{stat.st_mtime_ns}"
