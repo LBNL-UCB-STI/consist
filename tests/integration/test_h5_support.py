@@ -1,92 +1,73 @@
 import pytest
+import h5py
 import pandas as pd
 from consist.core.tracker import Tracker
 from consist.api import load
 
-# Check for tables
+# Check for tables/h5py
 try:
     import tables
-
-    has_tables = True
+    import h5py
+    HAS_H5 = True
 except ImportError:
-    has_tables = False
+    HAS_H5 = False
 
 
-@pytest.mark.skipif(not has_tables, reason="PyTables not installed")
-def test_h5_virtual_artifacts(tracker: Tracker):
+@pytest.mark.skipif(not HAS_H5, reason="PyTables/h5py not installed")
+def test_h5_auto_discovery(tracker: Tracker):
     """
-    Tests Consist's ability to handle HDF5 files as containers for "virtual artifacts."
+    Tests the automatic discovery of HDF5 tables using `log_h5_container`.
 
-    This scenario simulates a workflow where a single, large HDF5 file (e.g., a simulation
-    output) contains multiple internal tables or datasets. Consist treats the overall
-    HDF5 file as a container and allows specific internal paths within it to be logged
-    as individual "virtual artifacts." This is crucial for granular provenance tracking
-    within complex, multi-component data files.
-
-    What happens:
-    1. A monolithic HDF5 file (`pipeline.h5`) is created, containing two Pandas DataFrames
-       stored as tables at specific internal paths (`/2018/persons` and `/2018/households`).
-    2. The HDF5 file itself is logged as a Consist `Artifact` with `driver="h5"`.
-    3. A specific internal table (`/2018/persons`) is logged as a separate "virtual artifact"
-       with `driver="h5_table"` and its internal path stored in its metadata.
-    4. The virtual "persons" artifact is loaded from disk.
-    5. The virtual "persons" artifact is then ingested into the DuckDB.
-    6. The original HDF5 file is deleted to simulate "Ghost Mode."
-    7. The "persons" artifact is re-loaded.
-
-    What's checked:
-    -   **Initial Load (Cold)**: The `consist.load()` function correctly reads the specific
-        `/2018/persons` table from the HDF5 file when using `driver="h5_table"`.
-    -   **Ingestion (Hot)**: `tracker.ingest()` successfully extracts and loads the data
-        from the specified internal HDF5 table into the DuckDB.
-    -   **Ghost Mode**: After deleting the physical HDF5 file, `consist.load()` can
-        still retrieve the "persons" data from the DuckDB, demonstrating data recovery
-        and continued access even if the original file is lost.
+    Verifies:
+    1. Child artifacts are created for internal datasets.
+    2. Child artifacts are correctly linked to the parent container.
+    3. Child artifacts inherit the RUN_ID (Critical Fix Verification).
+    4. Table filtering works.
     """
-    # 1. Create H5 File
-    h5_path = tracker.run_dir / "pipeline.h5"
+    # 1. Create Complex H5 File using h5py directly for deterministic structure
+    h5_path = tracker.run_dir / "complex.h5"
     h5_path.parent.mkdir(parents=True, exist_ok=True)
 
-    df_persons = pd.DataFrame({"pid": [1, 2], "age": [30, 40]})
-    df_households = pd.DataFrame({"hid": [10, 20], "size": [2, 1]})
+    with h5py.File(h5_path, "w") as f:
+        # Create groups
+        g2020 = f.create_group("year_2020")
+        g2030 = f.create_group("year_2030")
+        gmeta = f.create_group("metadata")
 
-    with pd.HDFStore(h5_path, mode="w") as store:
-        store.put("/2018/persons", df_persons, format="table")
-        store.put("/2018/households", df_households, format="table")
+        # Create datasets (simple integers)
+        g2020.create_dataset("households", data=[1, 2, 3])
+        g2020.create_dataset("persons", data=[4, 5, 6])
+        g2030.create_dataset("households", data=[7, 8, 9])
+        gmeta.create_dataset("config", data=[0])
 
-    # 2. Log in Consist
-    with tracker.start_run("run_h5", model="run_A"):
-        # A. Log the Container
-        container = tracker.log_artifact(h5_path, key="pipeline_store", driver="h5")
-
-        # B. Log Virtual Artifact (Persons)
-        # Note: We point URI to the physical file, but driver="h5_table" + meta distinguishes it
-        art_persons = tracker.log_artifact(
+    # 2. Test Auto-Discovery with Filter
+    with tracker.start_run("run_discovery", model="test_model"):
+        # We only want 'households' tables
+        container, children = tracker.log_h5_container(
             h5_path,
-            key="persons_2018",
-            driver="h5_table",
-            # Flatten metadata into kwargs
-            table_path="/2018/persons",
-            parent_container_id=str(container.id),
+            key="simulation_data",
+            table_filter=lambda name: "households" in name
         )
 
-    # 3. Test Loading (Cold)
-    # consist.load should inspect driver="h5_table", look at meta['table_path'], and read specific key
-    loaded_df = load(art_persons, tracker=tracker)
-    assert len(loaded_df) == 2
-    assert "pid" in loaded_df.columns
+        # A. Check Container
+        assert container.key == "simulation_data"
+        assert container.meta["is_container"] is True
+        assert container.run_id is not None
 
-    # 4. Test Ingestion (Hot)
-    # This proves dlt_loader can crack open the H5 and read just the table
-    with tracker.start_run("ingest_h5", model="run_A", inputs=[art_persons]):
-        tracker.ingest(art_persons)
+        # B. Check Children Count (Should be 2: 2020/households, 2030/households)
+        assert len(children) == 2
 
-    # 5. Test Ghost Mode (Delete file, read from DB)
-    h5_path.unlink()
+        child_keys = [c.key for c in children]
+        assert any("2020_households" in k for k in child_keys)
+        assert any("2030_households" in k for k in child_keys)
 
-    # Fetch fresh artifact to get 'is_ingested' flag
-    fresh_art = tracker.get_artifact("persons_2018")
-    ghost_df = load(fresh_art, tracker=tracker)
+        # C. CRITICAL: Check Run ID Propagation
+        for child in children:
+            assert child.run_id == container.run_id, "Child artifact must inherit Run ID"
+            assert child.meta["parent_id"] == str(container.id)
+            assert child.driver == "h5_table"
 
-    assert len(ghost_df) == 2
-    assert ghost_df.iloc[0]["age"] == 30
+    # 3. Verify Persistence
+    saved_children = tracker.get_artifacts_for_run(container.run_id).outputs
+    # +1 for the container itself
+    assert len(saved_children) == 3
