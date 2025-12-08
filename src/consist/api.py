@@ -1,4 +1,3 @@
-import types
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Union, Any, Type, Iterable, Dict, TYPE_CHECKING
@@ -8,6 +7,7 @@ from sqlalchemy import text
 
 # Internal imports
 from consist.core.context import get_active_tracker
+from consist.core.views import create_view_model
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 
@@ -28,7 +28,7 @@ except ImportError:
 # In consist/api.py
 
 from typing import TypeVar
-from sqlmodel import SQLModel, Field
+from sqlmodel import SQLModel
 
 T = TypeVar("T", bound=SQLModel)
 
@@ -38,52 +38,7 @@ def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
     Creates a dynamic SQLModel class that maps to a Consist Hybrid View.
     Ensures table=True is passed to the metaclass.
     """
-
-    # 1. Determine View Name
-    if name:
-        view_name = name
-    elif hasattr(model, "__tablename__"):
-        view_name = f"v_{model.__tablename__}"
-    else:
-        view_name = f"v_{model.__name__.lower()}"
-
-    # 2. Clone Annotations
-    annotations = model.__annotations__.copy()
-    annotations.update(
-        {
-            "consist_run_id": str,
-            "consist_year": Optional[int],
-            "consist_iteration": Optional[int],
-            "consist_artifact_id": Optional[str],
-            "consist_scenario_id": Optional[str],
-        }
-    )
-
-    # 3. Construct Namespace
-    namespace = {
-        "__tablename__": view_name,
-        "__table_args__": {"extend_existing": True},
-        "__annotations__": annotations,
-        "consist_run_id": Field(primary_key=True),
-        "consist_year": Field(default=None, nullable=True),
-        "consist_iteration": Field(default=None, nullable=True),
-        "consist_artifact_id": Field(default=None, nullable=True),
-        "consist_scenario_id": Field(default=None, nullable=True),
-    }
-
-    # 4. Clone Fields
-    for field_name, field_info in model.model_fields.items():
-        if field_name not in namespace:
-            namespace[field_name] = field_info
-
-    # 5. Create Dynamic Class
-    def exec_body(ns):
-        ns.update(namespace)
-
-    # Pass {"table": True} to the keyword args of class creation
-    return types.new_class(
-        f"Virtual{model.__name__}", (SQLModel,), {"table": True}, exec_body
-    )
+    return create_view_model(model, name)
 
 
 # --- Core Access ---

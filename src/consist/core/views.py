@@ -1,30 +1,110 @@
-"""
-Consist Core Views Module
-
-This module defines the `ViewFactory`, which is a central component of Consist's
-data virtualization layer. It enables the creation of "Hybrid Views" in DuckDB,
-allowing users to query data seamlessly regardless of whether it's stored
-in materialized database tables ("hot" data) or directly in file-based
-artifacts ("cold" data like Parquet or CSV).
-
-The module implements strategies for:
--   **Hybrid Data Access**: Unifying "hot" and "cold" data sources under a single SQL interface.
--   **View Optimization**: Leveraging DuckDB's native capabilities for efficient
-    vectorized reads from files to ensure query performance.
--   **Schema Evolution**: Handling schema differences across various data sources
-    and runs through `UNION ALL BY NAME` clauses.
-"""
-
 import logging
 import os
-from typing import List, Optional, TYPE_CHECKING
-from sqlmodel import select, Session, text
+import types
+from typing import List, Optional, TYPE_CHECKING, Type, TypeVar, Dict, Tuple
+from sqlmodel import select, Session, text, SQLModel, Field
 
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
+
+T = TypeVar("T", bound=SQLModel)
+
+
+def create_view_model(model: Type[T], name: Optional[str] = None) -> Type[T]:
+    """
+    Creates a dynamic SQLModel class that maps to a Consist Hybrid View.
+    Ensures table=True is passed to the metaclass.
+    """
+    # 1. Determine View Name
+    if name:
+        view_name = name
+    elif hasattr(model, "__tablename__"):
+        view_name = f"v_{model.__tablename__}"
+    else:
+        view_name = f"v_{model.__name__.lower()}"
+
+    # 2. Clone Annotations
+    annotations = model.__annotations__.copy()
+    annotations.update(
+        {
+            "consist_run_id": str,
+            "consist_year": Optional[int],
+            "consist_iteration": Optional[int],
+            "consist_artifact_id": Optional[str],
+            "consist_scenario_id": Optional[str],
+        }
+    )
+
+    # 3. Construct Namespace
+    namespace = {
+        "__tablename__": view_name,
+        "__table_args__": {"extend_existing": True},
+        "__annotations__": annotations,
+        "consist_run_id": Field(primary_key=True),
+        "consist_year": Field(default=None, nullable=True),
+        "consist_iteration": Field(default=None, nullable=True),
+        "consist_artifact_id": Field(default=None, nullable=True),
+        "consist_scenario_id": Field(default=None, nullable=True),
+    }
+
+    # 4. Clone Fields
+    for field_name, field_info in model.model_fields.items():
+        if field_name not in namespace:
+            namespace[field_name] = field_info
+
+    # 5. Create Dynamic Class
+    def exec_body(ns):
+        ns.update(namespace)
+
+    # Pass {"table": True} to the keyword args of class creation
+    return types.new_class(
+        f"Virtual{model.__name__}", (SQLModel,), {"table": True}, exec_body
+    )
+
+
+class ViewRegistry:
+    """
+    Registry for dynamic view classes.
+    Accessing a view (e.g. registry.Person) automatically refreshes
+    the underlying DuckDB SQL definition to include new files.
+    """
+
+    def __init__(self, tracker: "Tracker"):
+        self._tracker = tracker
+        # Stores (ModelClass, ConceptKey)
+        self._registry: Dict[str, Tuple[Type[SQLModel], Optional[str]]] = {}
+        # Caches the Python class object to ensure identity stability
+        self._class_cache: Dict[str, Type[SQLModel]] = {}
+
+    def register(self, model: Type[SQLModel], key: Optional[str] = None):
+        self._registry[model.__name__] = (model, key)
+
+    def __getattr__(self, name: str) -> Type[SQLModel]:
+        # 1. Check if registered
+        if name in self._registry:
+            model, key = self._registry[name]
+
+            # 2. Refresh the SQL View in DB
+            # We assume accessing the property means the user wants to query it now.
+            # Recreating the view ensures all files on disk are picked up.
+            factory = ViewFactory(self._tracker)
+
+            # This calls create_hybrid_view inside
+            # We don't need the return value (the python class) necessarily
+            # if we have it cached, but the factory method does both.
+            view_cls = factory.create_view_from_model(model, key)
+
+            # 3. Update Cache & Return
+            self._class_cache[name] = view_cls
+            return view_cls
+
+        raise AttributeError(f"'ViewRegistry' object has no attribute '{name}'")
+
+    def __repr__(self):
+        return f"<ViewRegistry registered={list(self._registry.keys())}>"
 
 
 class ViewFactory:
@@ -58,11 +138,26 @@ class ViewFactory:
         """
         self.tracker = tracker
 
+    def create_view_from_model(
+        self, model: Type[SQLModel], key: Optional[str] = None
+    ) -> Type[SQLModel]:
+        """
+        Creates both the SQL View and the Python SQLModel class for a given schema.
+        """
+        concept_key = key or getattr(model, "__tablename__", model.__name__.lower())
+        view_name = f"v_{concept_key}"
+
+        # Pass schema_model to handle empty states
+        self.create_hybrid_view(view_name, concept_key, schema_model=model)
+
+        return create_view_model(model, name=view_name)
+
     def create_hybrid_view(
         self,
         view_name: str,
         concept_key: str,
         driver_filter: Optional[List[str]] = None,
+        schema_model: Optional[Type[SQLModel]] = None,
     ) -> bool:
         """
         Creates or replaces a DuckDB SQL VIEW that combines "hot" and "cold" data for a given concept.
@@ -88,6 +183,8 @@ class ViewFactory:
             An optional list of artifact drivers (e.g., "parquet", "csv") to include
             when querying "cold" data. If `None`, "parquet" and "csv" drivers are considered
             by default.
+        schema_model : Type[SQLModel], optional
+            SQL table definition for underlying data
 
         Returns
         -------
@@ -116,19 +213,38 @@ class ViewFactory:
             # Join 'run' table to get parent_run_id as consist_scenario_id
             # We use an alias 't' for the data table and 'r' for the run table
             hot_query = f"""
-                        SELECT t.*, r.parent_run_id AS consist_scenario_id
-                        FROM global_tables.{concept_key} t
-                        LEFT JOIN run r ON t.consist_run_id = r.id
-                    """
+                SELECT t.*, r.parent_run_id AS consist_scenario_id
+                FROM global_tables.{concept_key} t
+                LEFT JOIN run r ON t.consist_run_id = r.id
+            """
             parts.append(hot_query)
 
         if cold_sql:
             parts.append(cold_sql)
 
         if not parts:
-            # FIX: Create an empty dummy view so queries don't crash
-            # DuckDB allows typed empty selects, but simplest is a generic empty set
-            query = "SELECT 1 AS _empty_marker WHERE 1=0"
+            # --- NEW: Typed Empty View ---
+            if schema_model:
+                # Generate a SELECT 1 WHERE 0 but with typed NULL columns
+                # This prevents "Binder Error: Table does not have column X"
+                cols = []
+                # Consist System Columns
+                cols.append("CAST(NULL AS VARCHAR) as consist_run_id")
+                cols.append("CAST(NULL AS INTEGER) as consist_year")
+                cols.append("CAST(NULL AS INTEGER) as consist_iteration")
+                cols.append("CAST(NULL AS VARCHAR) as consist_artifact_id")
+                cols.append("CAST(NULL AS VARCHAR) as consist_scenario_id")
+
+                # User Schema Columns
+                for name in schema_model.model_fields.keys():
+                    if name.startswith("consist_"):
+                        continue
+                    # We cast to NULL, DuckDB handles the type inference loosely for empty views
+                    cols.append(f"NULL as {name}")
+
+                query = f"SELECT {', '.join(cols)} WHERE 1=0"
+            else:
+                query = "SELECT 1 AS _empty_marker WHERE 1=0"
         else:
             query = "\nUNION ALL BY NAME\n".join(parts)
 
@@ -249,9 +365,9 @@ class ViewFactory:
                 path_list.append(f"'{safe_path}'")
 
                 # Handle None/NULL for scenario
-                scenario_val = f"'{item['scenario']}'" if item['scenario'] else "NULL"
-                year_val = f"{item['year']}" if item['year'] is not None else "NULL"
-                iter_val = f"{item['iter']}" if item['iter'] is not None else "NULL"
+                scenario_val = f"'{item['scenario']}'" if item["scenario"] else "NULL"
+                year_val = f"{item['year']}" if item["year"] is not None else "NULL"
+                iter_val = f"{item['iter']}" if item["iter"] is not None else "NULL"
 
                 # Row format: (path, run_id, art_id, year, iter, scenario)
                 row = (
@@ -260,7 +376,7 @@ class ViewFactory:
                     f"'{item['art_id']}'",
                     year_val,
                     iter_val,
-                    scenario_val
+                    scenario_val,
                 )
                 meta_rows.append(f"({', '.join(row)})")
 
@@ -275,19 +391,19 @@ class ViewFactory:
             cte_values = ",\n        ".join(meta_rows)
 
             query = f"""
-                    SELECT 
-                        data.* EXCLUDE (filename), 
-                        {cte_name}.run_id as consist_run_id,
-                        {cte_name}.art_id as consist_artifact_id,
-                        CAST({cte_name}.year AS INTEGER) as consist_year,
-                        CAST({cte_name}.iter AS INTEGER) as consist_iteration,
-                        {cte_name}.scenario as consist_scenario_id
-                    FROM {reader_func} data
-                    JOIN (
-                        VALUES {cte_values}
-                    ) as {cte_name}(fpath, run_id, art_id, year, iter, scenario)
-                    ON data.filename = {cte_name}.fpath
-                    """
+            SELECT 
+                data.* EXCLUDE (filename), 
+                {cte_name}.run_id as consist_run_id,
+                {cte_name}.art_id as consist_artifact_id,
+                CAST({cte_name}.year AS INTEGER) as consist_year,
+                CAST({cte_name}.iter AS INTEGER) as consist_iteration,
+                {cte_name}.scenario as consist_scenario_id
+            FROM {reader_func} data
+            JOIN (
+                VALUES {cte_values}
+            ) as {cte_name}(fpath, run_id, art_id, year, iter, scenario)
+            ON data.filename = {cte_name}.fpath
+            """
             union_parts.append(query)
 
         if not union_parts:

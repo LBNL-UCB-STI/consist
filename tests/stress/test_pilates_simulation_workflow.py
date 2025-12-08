@@ -33,11 +33,11 @@ def run_simulation_scenario(tracker, scenario_name, base_trips, years, storage_m
     # Header
     scenario_id = f"scenario_{scenario_name}"
     with tracker.scenario(
-            scenario_name,
-            config={"mode": storage_mode},
-            model="pilates_orchestrator",
-            tags=["scenario_header"],) as scenario:
-
+        scenario_name,
+        config={"mode": storage_mode},
+        model="pilates_orchestrator",
+        tags=["scenario_header"],
+    ) as scenario:
 
         # Init
         with scenario.step(
@@ -85,46 +85,41 @@ def run_simulation_scenario(tracker, scenario_name, base_trips, years, storage_m
 def test_pilates_header_pattern(tmp_path):
     run_dir = tmp_path / "runs"
     db_path = str(tmp_path / "provenance.duckdb")
-    tracker = Tracker(run_dir=run_dir, db_path=db_path)
+    tracker = Tracker(run_dir=run_dir, db_path=db_path, schemas=[Household, Person])
     tracker.identity.hashing_strategy = "fast"
 
     years = [2020, 2030]
     run_simulation_scenario(tracker, "baseline", 10, years, "cold")
     run_simulation_scenario(tracker, "high_gas", 5, years, "hot")
 
-    tracker.create_view("v_persons", "persons")
-    tracker.create_view("v_households", "households")
-
     # Generate Dynamic View Models
-    VPerson = consist.view(Person)
-    VHousehold = consist.view(Household)
+    VPerson = tracker.views.Person
+    VHousehold = tracker.views.Household
 
     # Q1: Comparing Scenarios
     logging.info("\n--- Query 1: Scenario Comparison ---")
     with Session(tracker.engine) as session:
         query = (
             select(
-                VPerson.consist_scenario_id,
+                VPerson.consist_scenario_id.label("scenario_id"),
                 VPerson.consist_year,
                 func.avg(VPerson.number_of_trips).label("avg_trips"),
             )
             .select_from(VPerson)
             .where(VPerson.consist_scenario_id.in_(["baseline", "high_gas"]))
             .group_by(VPerson.consist_scenario_id, VPerson.consist_year)
-            .order_by(VPerson.consist_scenario_id, "consist_year")
+            .order_by("scenario_id", "consist_year")
         )
 
         results = session.exec(query).all()
         for r in results:
-            logging.info(f"{r.consist_scenario_id:<20} {r.consist_year}: {r.avg_trips:.2f}")
+            logging.info(f"{r.scenario_id:<20} {r.consist_year}: {r.avg_trips:.2f}")
 
         assert len(results) == 4
 
         # Validation Logic
-        res_map = {(r.consist_scenario_id, r.consist_year): r.avg_trips for r in results}
-        assert (
-            res_map[("high_gas", 2030)] < res_map[("baseline", 2030)]
-        )
+        res_map = {(r.scenario_id, r.consist_year): r.avg_trips for r in results}
+        assert res_map[("high_gas", 2030)] < res_map[("baseline", 2030)]
 
     # Q2: Complex Join
     logging.info("\n--- Query 2: Trips by Region ---")
@@ -140,10 +135,10 @@ def test_pilates_header_pattern(tmp_path):
             .join(VHousehold, VPerson.household_id == VHousehold.household_id)
             # Ensure we are joining data from same scenario context
             .where(VPerson.consist_scenario_id == VHousehold.consist_scenario_id)
-            .group_by(VPerson.consist_scenario_id, VHousehold.region, VPerson.consist_year)
-            .order_by(
-                "scenario", VHousehold.region, VPerson.consist_year
+            .group_by(
+                VPerson.consist_scenario_id, VHousehold.region, VPerson.consist_year
             )
+            .order_by("scenario", VHousehold.region, VPerson.consist_year)
         )
 
         results = session.exec(query).all()

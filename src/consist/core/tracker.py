@@ -14,7 +14,7 @@ import pandas as pd
 
 from pydantic import BaseModel
 
-from consist.core.views import ViewFactory
+from consist.core.views import ViewFactory, ViewRegistry
 from consist.core.fs import FileSystemManager
 from consist.core.persistence import DatabaseManager
 from consist.core.decorators import create_task_decorator
@@ -253,6 +253,7 @@ class Tracker:
         mounts: Dict[str, str] = None,
         project_root: str = ".",
         hashing_strategy: str = "full",
+        schemas: Optional[List[Type[SQLModel]]] = None,
     ):
         """
         Initializes the Consist Tracker.
@@ -276,6 +277,9 @@ class Tracker:
             project_root (str): The root directory of the project, used by the `IdentityManager`
                                 to compute relative paths for code hashing and artifact virtualization.
                                 Defaults to the current working directory ".".
+            schemas (Optional[List[Type[SQLModel]]]): A list of SQLModel definitions for artifacts that will be
+                                                      registered. Will allow them to be joined to runs table and
+                                                      efficiently queried.
         """
         # 1. Initialize FileSystem Service
         # (This handles the mkdir and path resolution internally now)
@@ -293,6 +297,16 @@ class Tracker:
         self.db = None
         if db_path:
             self.db = DatabaseManager(db_path)
+
+        self.views = ViewRegistry(self)
+        if schemas:
+            if not self.db:
+                logging.warning(
+                    "[Consist] Schemas provided but no database configured. Views will not be created."
+                )
+            else:
+                for schema in schemas:
+                    self.view(schema)
 
         # In-Memory State (The Source of Truth)
         self.current_consist: Optional[ConsistRecord] = None
@@ -1212,6 +1226,28 @@ class Tracker:
             raise e
 
     # --- View Factory ---
+
+    def view(self, model: Type[SQLModel], key: Optional[str] = None) -> Type[SQLModel]:
+        """
+        Creates a Hybrid View (SQL + Python) for a given SQLModel schema
+        and registers it to tracker.views.
+
+        Args:
+            model: The SQLModel schema defining the data structure.
+            key: Optional override for the concept key (defaults to __tablename__).
+
+        Returns:
+            The dynamic SQLModel view class.
+        """
+        if not self.db:
+            raise RuntimeError("Database required to create views.")
+
+        # 1. Register metadata (so __getattr__ works later)
+        self.views.register(model, key)
+
+        # 2. Trigger immediate creation/refresh
+        # This returns the dynamic class
+        return getattr(self.views, model.__name__)
 
     def create_view(self, view_name: str, concept_key: str) -> Any:
         factory = ViewFactory(self)
