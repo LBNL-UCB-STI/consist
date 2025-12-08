@@ -3,6 +3,8 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 from datetime import timezone
 
+from pydantic import BaseModel
+
 UTC = timezone.utc
 from sqlalchemy import Column, JSON
 from sqlmodel import Field, SQLModel
@@ -141,6 +143,22 @@ class Run(SQLModel, table=True):
             else "🔴" if self.status == "failed" else "🟡"
         )
         return f"<{status_icon} Run id='{self.id}' model='{self.model_name}' status='{self.status}'>"
+
+
+class RunArtifacts(BaseModel):
+    """
+    Structured container for artifacts associated with a run.
+    Allows dictionary-style access by artifact key.
+
+    Usage:
+        artifacts.outputs['persons'] -> Artifact(...)
+        artifacts.inputs['config'] -> Artifact(...)
+    """
+    inputs: Dict[str, Artifact] = {}
+    outputs: Dict[str, Artifact] = {}
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
 class ConsistRecord(SQLModel):

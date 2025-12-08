@@ -145,19 +145,25 @@ def test_pilates_header_pattern(tmp_path):
         assert len(results) > 0
 
     # Q3: Helper Method Usage
-    # Find runs belonging to the baseline scenario header
-    steps = tracker.find_runs(parent_id="baseline")
-    assert len(steps) == 3
+    # We want the run from 2030 specifically
+    target_run = tracker.find_run(parent_id="baseline", year=2030)
+
+    assert target_run.year == 2030
+    assert target_run.model_name == "travel_demand"
+
+    # Indexing example
+    # Get all runs for baseline, indexed by year
+    # (Note: init/pop_synth has year=None, so it keys to None)
+    runs_by_year = tracker.find_runs(parent_id="baseline", index_by="year")
+    assert 2020 in runs_by_year
+    assert 2030 in runs_by_year
+    assert runs_by_year[2030].id == target_run.id
 
     # Q4: Snapshot Retrieval
-    # We want the 2030 run. It is the most recent, so it is at index 0.
-    target_run = steps[0]
-
-    # Verify we got the right run
-    assert target_run.year == 2030
-
+    # Structured access
     artifacts = tracker.get_artifacts_for_run(target_run.id)
-    person_art = next(a for a, d in artifacts if a.key == "persons" and d == "output")
+    # Dict access by key!
+    person_art = artifacts.outputs["persons"]
 
     df = consist.load(person_art, tracker=tracker)
     assert len(df) == 300

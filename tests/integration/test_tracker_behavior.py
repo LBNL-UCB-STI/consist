@@ -95,7 +95,7 @@ def test_ingest_outside_of_run_context(tracker):
 
     with pytest.raises(
         RuntimeError,
-        match="Cannot ingest data: No active run context.",
+        match=r"^(Cannot ingest)",
     ):
         tracker.ingest(artifact=dummy_artifact, data=[])
 

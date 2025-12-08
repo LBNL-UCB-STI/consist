@@ -107,7 +107,8 @@ def artifacts(
         console.print(f"[red]Run with ID '{run_id}' not found.[/red]")
         raise typer.Exit(1)
 
-    artifacts_with_direction = tracker.get_artifacts_for_run(run_id)
+    # NEW: Returns RunArtifacts object
+    run_artifacts = tracker.get_artifacts_for_run(run_id)
 
     table = Table(title=f"Artifacts for Run [cyan]{run_id}[/cyan]")
     table.add_column("Direction", style="yellow")
@@ -116,15 +117,11 @@ def artifacts(
     table.add_column("Driver")
     table.add_column("Hash", style="magenta")
 
-    inputs = sorted(
-        [a for a in artifacts_with_direction if a[1] == "input"], key=lambda x: x[0].key
-    )
-    outputs = sorted(
-        [a for a in artifacts_with_direction if a[1] == "output"],
-        key=lambda x: x[0].key,
-    )
+    # NEW: Access via .inputs and .outputs dicts
+    inputs = sorted(run_artifacts.inputs.values(), key=lambda x: x.key)
+    outputs = sorted(run_artifacts.outputs.values(), key=lambda x: x.key)
 
-    for artifact, direction in inputs:
+    for artifact in inputs:
         table.add_row(
             "[blue]Input[/blue]",
             artifact.key,
@@ -136,7 +133,7 @@ def artifacts(
     if inputs and outputs:
         table.add_section()
 
-    for artifact, direction in outputs:
+    for artifact in outputs:
         table.add_row(
             "[green]Output[/green]",
             artifact.key,

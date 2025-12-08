@@ -1,7 +1,7 @@
 import logging
 import uuid
 from pathlib import Path
-from typing import Dict, Optional, List, Any, Type, Iterable, Union, Callable, Tuple
+from typing import Dict, Optional, List, Any, Type, Iterable, Union, Callable, Tuple, Literal
 from datetime import datetime, timezone
 from types import MappingProxyType
 
@@ -20,10 +20,11 @@ from consist.core.persistence import DatabaseManager
 from consist.core.decorators import create_task_decorator
 from consist.core.events import EventManager
 from consist.models.artifact import Artifact
-from consist.models.run import Run, ConsistRecord
+from consist.models.run import Run, ConsistRecord, RunArtifacts
 from consist.core.identity import IdentityManager
 from consist.core.context import push_tracker, pop_tracker
 
+AccessMode = Literal["standard", "analysis", "read_only"]
 
 class OutputCapture:
     """
@@ -254,6 +255,7 @@ class Tracker:
         project_root: str = ".",
         hashing_strategy: str = "full",
         schemas: Optional[List[Type[SQLModel]]] = None,
+        access_mode: AccessMode = "standard"
     ):
         """
         Initializes the Consist Tracker.
@@ -280,6 +282,14 @@ class Tracker:
             schemas (Optional[List[Type[SQLModel]]]): A list of SQLModel definitions for artifacts that will be
                                                       registered. Will allow them to be joined to runs table and
                                                       efficiently queried.
+            access_mode (AccessMode): The access mode of the DuckDB database. Defaults to "standard".
+                                      "standard" (Default): Full permissions. Create runs, log artifacts, ingest data.
+                                      "analysis":
+                                            Allowed: ingest() (Backfill/optimize existing data), create_view(), reflect_view(), find_run().
+                                            Blocked: start_run(), log_artifact() (Cannot create new provenance nodes).
+                                      "read_only":
+                                            Allowed: create_view(), reflect_view(), find_run().
+                                            Blocked: ingest(), start_run(), log_artifact() (No permanent DB writes).
         """
         # 1. Initialize FileSystem Service
         # (This handles the mkdir and path resolution internally now)
@@ -288,6 +298,8 @@ class Tracker:
 
         self.mounts = self.fs.mounts
         self.run_dir = self.fs.run_dir
+
+        self.access_mode = access_mode
 
         self.db_path = db_path
         self.identity = IdentityManager(
@@ -404,6 +416,7 @@ class Tracker:
             raise
         ```
         """
+        self._ensure_write_provenance()
         if self.current_consist is not None:
             raise RuntimeError(
                 f"Cannot begin_run: A run is already active (id={self.current_consist.run.id}). "
@@ -494,10 +507,12 @@ class Tracker:
 
                 # Hydrate outputs using service (No Session!)
                 cached_items = self.get_artifacts_for_run(cached_run.id)
-                for art, direction in cached_items:
-                    if direction == "output":
-                        art.abs_path = self.resolve_uri(art.uri)
-                        self.current_consist.outputs.append(art)
+
+                # We only need to hydrate outputs into current_consist
+                for art in cached_items.outputs.values():
+                    art.abs_path = self.resolve_uri(art.uri)
+                    self.current_consist.outputs.append(art)
+
             else:
                 logging.info("🔄 [Consist] Cache Miss. Running...")
         elif cache_mode == "overwrite":
@@ -712,23 +727,75 @@ class Tracker:
     # --- Query Helpers ---
 
     def find_runs(
-        self,
-        tags: Optional[List[str]] = None,
-        year: Optional[int] = None,
-        model: Optional[str] = None,
-        status: Optional[str] = None,
-        parent_id: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        limit: int = 100,
-    ) -> List[Run]:
+            self,
+            tags: Optional[List[str]] = None,
+            year: Optional[int] = None,
+            model: Optional[str] = None,
+            status: Optional[str] = None,
+            parent_id: Optional[str] = None,
+            metadata: Optional[Dict[str, Any]] = None,
+            limit: int = 100,
+            index_by: Optional[str] = None,  # <--- NEW ARGUMENT
+    ) -> Union[List[Run], Dict[Any, Run]]:
         """
         Retrieves a list of Runs matching the specified criteria.
+
+        Args:
+            ... (existing args) ...
+            index_by: If provided, returns a dictionary keyed by this attribute
+                      of the Run object (e.g., "year", "iteration").
+                      Warning: If multiple runs share the same key, the last one wins.
         """
+        runs = []
         if self.db:
-            return self.db.find_runs(
+            runs = self.db.find_runs(
                 tags, year, model, status, parent_id, metadata, limit
             )
-        return []
+
+        if index_by:
+            # Create dictionary keyed by the requested attribute
+            return {getattr(r, index_by): r for r in runs}
+
+        return runs
+
+    def find_run(self, **kwargs) -> Run:
+        """
+        Finds exactly one run matching the criteria.
+        Raises ValueError if 0 or >1 runs match.
+
+        Args:
+            id (str): Optional alias for run_id lookup.
+            run_id (str): Direct lookup by primary key.
+            **kwargs: Same arguments as find_runs (tags, year, parent_id, etc.)
+        """
+        # 1. Primary Key Lookup Optimization
+        # If the user asks for a specific ID, we skip the search query and use get_run.
+        # We accept 'id' or 'run_id' for ergonomics.
+        run_id = kwargs.pop("id", None) or kwargs.pop("run_id", None)
+
+        if run_id:
+            run = self.get_run(run_id)
+            if not run:
+                raise ValueError(f"No run found with ID: {run_id}")
+            # If other filters were passed (e.g. year=2020), strictly we should check them,
+            # but ID lookup usually implies absolute intent.
+            return run
+
+        # 2. Standard Search
+        # Enforce limit=2 to optimize checking for multiple results
+        kwargs["limit"] = 2
+
+        # Note: We popped 'id'/'run_id' above, so kwargs now only contains
+        # arguments valid for find_runs (assuming user didn't pass bad args).
+        results = self.find_runs(**kwargs)
+
+        if not results:
+            raise ValueError(f"No run found matching criteria: {kwargs}")
+
+        if len(results) > 1:
+            raise ValueError(f"Multiple runs ({len(results)}+) found matching criteria: {kwargs}. Narrow your search.")
+
+        return results[0]
 
     # --- Artifact Logging & Ingestion ---
 
@@ -785,6 +852,8 @@ class Tracker:
         ValueError
             If `key` is not provided when `path` is a string.
         """
+        self._ensure_write_provenance()
+
         if not self.current_consist:
             raise RuntimeError(
                 "Cannot log artifact: no active run. "
@@ -1189,11 +1258,23 @@ class Tracker:
         Exception
             Any exception raised by the underlying `dlt` ingestion process.
         """
-        if not self.db_path:
-            raise RuntimeError("Cannot ingest data: No database configured.")
-        target_run = run or (self.current_consist.run if self.current_consist else None)
+        self._ensure_write_data()
+
+        # 1. Determine Context
+        target_run = run
+
+        if not target_run and not self.current_consist:
+            # AUTO-DISCOVERY: Use the run that created the artifact
+            if artifact.run_id:
+                target_run = self.get_run(artifact.run_id)
+                logging.info(f"[Consist] Ingesting in Analysis Mode. Attributing to Run: {target_run.id}")
+
+        # Fallback to active run if available
+        if not target_run and self.current_consist:
+            target_run = self.current_consist.run
+
         if not target_run:
-            raise RuntimeError("Cannot ingest data: No active run context.")
+            raise RuntimeError("Cannot ingest: Could not determine associated Run context.")
 
         if self.engine:
             self.engine.dispose()
@@ -1335,10 +1416,26 @@ class Tracker:
             return self.db.get_run(run_id)
         return None
 
-    def get_artifacts_for_run(self, run_id: str) -> List[Tuple[Artifact, str]]:
-        if self.db:
-            return self.db.get_artifacts_for_run(run_id)
-        return []
+    def get_artifacts_for_run(self, run_id: str) -> RunArtifacts:
+        """
+        Retrieves inputs and outputs for a specific run, organized by key.
+        """
+        if not self.db:
+            return RunArtifacts()
+
+        # Get raw list [(Artifact, "input"), (Artifact, "output")]
+        raw_list = self.db.get_artifacts_for_run(run_id)
+
+        inputs = {}
+        outputs = {}
+
+        for artifact, direction in raw_list:
+            if direction == "input":
+                inputs[artifact.key] = artifact
+            elif direction == "output":
+                outputs[artifact.key] = artifact
+
+        return RunArtifacts(inputs=inputs, outputs=outputs)
 
     def find_matching_run(
         self, config_hash: str, input_hash: str, git_hash: str
@@ -1352,7 +1449,7 @@ class Tracker:
         return None
 
     def get_artifact_lineage(
-        self, artifact_key_or_id: Union[str, uuid.UUID]
+            self, artifact_key_or_id: Union[str, uuid.UUID]
     ) -> Optional[Dict[str, Any]]:
         """
         Recursively builds a lineage tree for a given artifact.
@@ -1377,21 +1474,39 @@ class Tracker:
                 return lineage_node
 
             # Recursively find inputs
-            input_artifacts_with_direction = self.get_artifacts_for_run(
-                producing_run.id
-            )
+            # NEW: Returns RunArtifacts object
+            run_artifacts = self.get_artifacts_for_run(producing_run.id)
 
             run_node: Dict[str, Any] = {"run": producing_run, "inputs": []}
-            for input_artifact, direction in input_artifacts_with_direction:
-                if direction == "input":
-                    run_node["inputs"].append(
-                        _trace(input_artifact, visited_runs.copy())
-                    )
+
+            # NEW: Iterate over inputs dict
+            for input_artifact in run_artifacts.inputs.values():
+                run_node["inputs"].append(
+                    _trace(input_artifact, visited_runs.copy())
+                )
 
             lineage_node["producing_run"] = run_node
             return lineage_node
 
         return _trace(start_artifact, set())
+
+        # --- Permission Helpers ---
+
+    def _ensure_write_provenance(self):
+            """Guard for start_run, log_artifact"""
+            if self.access_mode != "standard":
+                raise RuntimeError(
+                    f"Operation forbidden in '{self.access_mode}' mode. "
+                    "Switch to access_mode='standard' to create new runs or artifacts."
+                )
+
+    def _ensure_write_data(self):
+            """Guard for ingest"""
+            if self.access_mode == "read_only":
+                raise RuntimeError(
+                    "Ingestion forbidden in 'read_only' mode. "
+                    "Switch to access_mode='analysis' or 'standard'."
+                )
 
     # --- Path Resolution & Utils ---
 
