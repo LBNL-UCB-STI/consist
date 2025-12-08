@@ -3,6 +3,7 @@ import uuid
 from pathlib import Path
 from typing import Dict, Optional, List, Any, Type, Iterable, Union, Callable, Tuple
 from datetime import datetime, timezone
+from types import MappingProxyType
 
 from sqlmodel import SQLModel
 
@@ -45,6 +46,189 @@ class OutputCapture:
         will be captured during a `capture_outputs` context.
         """
         self.artifacts: List[Artifact] = []
+
+
+class ScenarioContext:
+    """
+    Context manager for managing a Scenario Header Run and its constituent steps.
+
+    This class is returned by `tracker.scenario()` and manages the lifecycle of a parent
+    "header" run. It temporarily suspends the header run to allow child "step" runs
+    to execute sequentially without violating the tracker's single-active-run constraint.
+    """
+
+    def __init__(
+        self,
+        tracker: "Tracker",
+        name: str,
+        config: Optional[Dict[str, Any]] = None,
+        tags: Optional[List[str]] = None,
+        model: str = "scenario",
+        **kwargs: Any,
+    ):
+        self.tracker = tracker
+        self.name = name
+        self.model = model
+        self.config_arg = config or {}
+        self.tags = tags or []
+        self.kwargs = kwargs
+
+        # Internal State
+        self._header_record: Optional[ConsistRecord] = None
+        self._inputs: Dict[str, Artifact] = {}
+        self._first_step_started: bool = False
+        self._last_step_name: Optional[str] = None
+
+    @property
+    def run_id(self) -> str:
+        """The Run ID of the scenario header."""
+        return self._header_record.run.id if self._header_record else self.name
+
+    @property
+    def config(self) -> MappingProxyType:
+        """Read-only view of the scenario configuration."""
+        if self._header_record:
+            return MappingProxyType(self._header_record.config)
+        return MappingProxyType(self.config_arg)
+
+    @property
+    def inputs(self) -> MappingProxyType:
+        """Read-only view of registered exogenous inputs."""
+        return MappingProxyType(self._inputs)
+
+    def add_input(self, path: Union[str, Path], key: str, **kwargs) -> Artifact:
+        """
+        Register an exogenous input to the scenario header.
+
+        Must be called before any steps are started. These inputs are logged to the
+        header run to represent data entering the workflow.
+
+        Args:
+            path: File path to the input.
+            key: Semantic key for the input (e.g., "population").
+            **kwargs: Additional metadata for the artifact.
+
+        Returns:
+            Artifact: The logged input artifact.
+
+        Raises:
+            RuntimeError: If called after `step()` has been used.
+        """
+        if self._first_step_started:
+            raise RuntimeError(
+                "Cannot add scenario inputs after first step has started. "
+                "Register all inputs before calling scenario.step()."
+            )
+
+        if not self._header_record:
+            raise RuntimeError("Scenario not active. Use within 'with' block.")
+
+        # Temporarily restore header context to log artifact
+        # This allows us to use standard log_artifact logic without keeping run active
+        prev_consist = self.tracker.current_consist
+        self.tracker.current_consist = self._header_record
+        try:
+            artifact = self.tracker.log_artifact(
+                path, key=key, direction="input", **kwargs
+            )
+        finally:
+            self.tracker.current_consist = prev_consist
+
+        self._inputs[key] = artifact
+        return artifact
+
+    @contextmanager
+    def step(self, name: str, **kwargs):
+        """
+        Execute a step run within the scenario.
+
+        Wraps `tracker.start_run` with logic to:
+        1. Auto-generate Run ID: `{scenario_id}_{step_name}`
+        2. Link parent_run_id to the scenario.
+
+        Args:
+            name (str): Name of the step.
+            **kwargs: Arguments passed to `tracker.start_run` (model, config, etc).
+
+        Yields:
+            Tracker: The tracker instance.
+        """
+        if not self._header_record:
+            raise RuntimeError("Scenario not active.")
+
+        self._first_step_started = True
+        self._last_step_name = name
+
+        # 1. Construct Hierarchical ID & Enforce Linkage
+        # Default ID: scenario_name + "_" + step_name
+        run_id = kwargs.pop("run_id", f"{self.run_id}_{name}")
+        kwargs["parent_run_id"] = self.run_id
+
+        # Default model name to step name if not provided
+        if "model" not in kwargs:
+            kwargs["model"] = name
+
+        # 2. Delegate to standard start_run
+        # The tracker is currently suspended (current_consist is None), so this is allowed.
+        with self.tracker.start_run(run_id=run_id, **kwargs) as t:
+            yield t
+
+    def __enter__(self):
+        # Enforce No Nesting
+        if self.tracker.current_consist is not None:
+            raise RuntimeError(
+                "Cannot start scenario: another run or scenario is active. "
+                "Nested scenarios are not supported."
+            )
+
+        # Ensure tag exists
+        if "scenario_header" not in self.tags:
+            self.tags.append("scenario_header")
+
+        # 1. Start Header Run
+        # We use begin_run directly to initialize state
+        run_id = self.kwargs.pop("run_id", self.name)
+        self.tracker.begin_run(
+            run_id=run_id,
+            model=self.model,
+            config=self.config_arg,
+            tags=self.tags,
+            **self.kwargs,
+        )
+
+        # 2. Capture & Suspend
+        # Save the record and clear the tracker's active state
+        self._header_record = self.tracker.current_consist
+        self.tracker.current_consist = None
+
+        # Note: We leave the tracker pushed to the global context stack.
+        # This ensures calls to `consist.log_artifact()` fail with our custom error
+        # rather than "No active tracker".
+
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # 1. Restore Header Context
+        self.tracker.current_consist = self._header_record
+
+        # 2. Handle Status
+        status = "failed" if exc_type else "completed"
+        if exc_type:
+            # Enrich metadata with failure context
+            self._header_record.run.meta["failed_with"] = str(exc_val)
+            if self._last_step_name:
+                self._header_record.run.meta["failed_step"] = self._last_step_name
+
+        # 3. End Run
+        # This handles DB sync, JSON flush, and event emission
+        self.tracker.end_run(status=status)
+
+        # 4. Final Cleanup
+        # end_run sets current_consist to None, but we ensure it matches expected state
+        self.tracker.current_consist = None
+        self._header_record = None
+
+        return False  # Propagate exceptions
 
 
 class Tracker:
@@ -377,6 +561,54 @@ class Tracker:
             self.end_run(status="failed", error=e)
             raise
 
+    def scenario(
+        self,
+        name: str,
+        config: Optional[Dict[str, Any]] = None,
+        tags: Optional[List[str]] = None,
+        model: str = "scenario",
+        **kwargs: Any,
+    ) -> ScenarioContext:
+        """
+        Create a ScenarioContext to manage a grouped workflow of steps.
+
+        This method initializes a scenario context manager that acts as a "header"
+        run. It allows defining multiple steps (runs) that are automatically
+        linked to this header run via `parent_run_id`, without manual threading.
+
+        The scenario run is started, then immediately suspended (allowing steps
+        to run), and finally restored and completed when the context exits.
+
+        Parameters
+        ----------
+        name : str
+            The name of the scenario. This will become the Run ID.
+        config : Optional[Dict[str, Any]], optional
+            Scenario-level configuration. Stored on the header run but NOT
+            automatically inherited by steps.
+        tags : Optional[List[str]], optional
+            Tags for the scenario. "scenario_header" is automatically appended.
+        model : str, default "scenario"
+            The model name for the header run.
+        **kwargs : Any
+            Additional metadata or arguments for the header run.
+
+        Returns
+        -------
+        ScenarioContext
+            A context manager object that provides `.step()` and `.add_input()` methods.
+
+        Example
+        -------
+        ```python
+        with tracker.scenario("baseline", config={"mode": "test"}) as sc:
+            sc.add_input("data.csv", key="data")
+            with sc.step("init"):
+                ...
+        ```
+        """
+        return ScenarioContext(self, name, config, tags, model, **kwargs)
+
     def end_run(
         self,
         status: str = "completed",
@@ -540,7 +772,12 @@ class Tracker:
             If `key` is not provided when `path` is a string.
         """
         if not self.current_consist:
-            raise RuntimeError("Cannot log artifact outside of a run context.")
+            raise RuntimeError(
+                "Cannot log artifact: no active run. "
+                "Are you inside a scenario but outside a step? "
+                "Use scenario.add_input() for scenario-level inputs, "
+                "or wrap your code in scenario.step()."
+            )
 
         artifact_obj = None
         resolved_abs_path = None

@@ -55,6 +55,7 @@ def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
             "consist_year": Optional[int],
             "consist_iteration": Optional[int],
             "consist_artifact_id": Optional[str],
+            "consist_scenario_id": Optional[str],
         }
     )
 
@@ -67,6 +68,7 @@ def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
         "consist_year": Field(default=None, nullable=True),
         "consist_iteration": Field(default=None, nullable=True),
         "consist_artifact_id": Field(default=None, nullable=True),
+        "consist_scenario_id": Field(default=None, nullable=True),
     }
 
     # 4. Clone Fields

@@ -113,7 +113,14 @@ class ViewFactory:
         parts = []
 
         if hot_table_exists:
-            parts.append(f"SELECT * FROM global_tables.{concept_key}")
+            # Join 'run' table to get parent_run_id as consist_scenario_id
+            # We use an alias 't' for the data table and 'r' for the run table
+            hot_query = f"""
+                        SELECT t.*, r.parent_run_id AS consist_scenario_id
+                        FROM global_tables.{concept_key} t
+                        LEFT JOIN run r ON t.consist_run_id = r.id
+                    """
+            parts.append(hot_query)
 
         if cold_sql:
             parts.append(cold_sql)
@@ -217,6 +224,7 @@ class ViewFactory:
                     "art_id": str(artifact.id),
                     "year": run.year,
                     "iter": run.iteration,
+                    "scenario": run.parent_run_id,
                 }
             )
 
@@ -240,18 +248,23 @@ class ViewFactory:
                 # Quote the path for the list
                 path_list.append(f"'{safe_path}'")
 
-                # Meta row
+                # Handle None/NULL for scenario
+                scenario_val = f"'{item['scenario']}'" if item['scenario'] else "NULL"
+                year_val = f"{item['year']}" if item['year'] is not None else "NULL"
+                iter_val = f"{item['iter']}" if item['iter'] is not None else "NULL"
+
+                # Row format: (path, run_id, art_id, year, iter, scenario)
                 row = (
                     f"'{safe_path}'",
                     f"'{item['run_id']}'",
                     f"'{item['art_id']}'",
-                    f"{item['year'] or 'NULL'}",
-                    f"{item['iter'] or 'NULL'}",
+                    year_val,
+                    iter_val,
+                    scenario_val
                 )
                 meta_rows.append(f"({', '.join(row)})")
 
             if driver == "parquet":
-                # union_by_name=True handles schema drift
                 reader_func = f"read_parquet([{', '.join(path_list)}], union_by_name=true, filename=true)"
             elif driver == "csv":
                 reader_func = f"read_csv_auto([{', '.join(path_list)}], union_by_name=true, filename=true, normalize_names=true)"
@@ -261,21 +274,20 @@ class ViewFactory:
             cte_name = f"meta_{driver}_{concept_key}"
             cte_values = ",\n        ".join(meta_rows)
 
-            # NOTE: We simply match on filename.
-            # DuckDB's read_parquet usually returns the path provided in the list.
             query = f"""
-            SELECT 
-                data.* EXCLUDE (filename), 
-                {cte_name}.run_id as consist_run_id,
-                {cte_name}.art_id as consist_artifact_id,
-                CAST({cte_name}.year AS INTEGER) as consist_year,
-                CAST({cte_name}.iter AS INTEGER) as consist_iteration
-            FROM {reader_func} data
-            JOIN (
-                VALUES {cte_values}
-            ) as {cte_name}(fpath, run_id, art_id, year, iter)
-            ON data.filename = {cte_name}.fpath
-            """
+                    SELECT 
+                        data.* EXCLUDE (filename), 
+                        {cte_name}.run_id as consist_run_id,
+                        {cte_name}.art_id as consist_artifact_id,
+                        CAST({cte_name}.year AS INTEGER) as consist_year,
+                        CAST({cte_name}.iter AS INTEGER) as consist_iteration,
+                        {cte_name}.scenario as consist_scenario_id
+                    FROM {reader_func} data
+                    JOIN (
+                        VALUES {cte_values}
+                    ) as {cte_name}(fpath, run_id, art_id, year, iter, scenario)
+                    ON data.filename = {cte_name}.fpath
+                    """
             union_parts.append(query)
 
         if not union_parts:

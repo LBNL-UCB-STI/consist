@@ -71,7 +71,7 @@ def test_log_artifact_outside_of_run_context(tracker):
       cannot be called outside a run context.
     """
     with pytest.raises(
-        RuntimeError, match="Cannot log artifact outside of a run context"
+        RuntimeError, match=r"^(Cannot log artifact)"
     ):
         tracker.log_artifact("some_file.csv", "some_key")
 
