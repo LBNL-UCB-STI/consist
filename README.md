@@ -62,9 +62,15 @@ from consist import Tracker
 from pydantic import BaseModel
 from pathlib import Path
 
+# Schemas allow Consist to create virtual tables for your outputs
+class CleanedData(BaseModel):
+    id: int
+    value: float
+
 tracker = Tracker(
-    root="./runs",           # Where run directories are created
-    db_path="./provenance.duckdb"  # Queryable provenance database
+    root="./runs",                 # Where run directories are created
+    db_path="./provenance.duckdb", # Queryable provenance database
+    schemas=[CleanedData]          # Register schemas for querying
 )
 
 class CleaningConfig(BaseModel):
@@ -117,22 +123,44 @@ def run_simulation(upstream_artifact):
 
 ### Inspecting Provenance
 
+Consist provides ergonomic tools to find specific runs and load their results without manually traversing directory paths.
+
 ```python
-# Most recent run
-print(tracker.last_run)
-# Run(id='clean_data_a3f2c1', status='completed', outputs=1, cached=False)
+# Find a specific run using filters
+# options: find_run() for one, find_runs() for many
+run = tracker.find_run(
+    model_name="clean_data",
+    tags=["production"],
+    year=2030
+)
 
-# Query history
-df = tracker.history(model_name="clean_data", limit=10)
-print(df[["run_id", "config_hash", "status", "duration_seconds"]])
+# Access artifacts using structured keys
+# No need to parse file paths manually
+artifacts = tracker.get_artifacts_for_run(run.id)
+cleaned_file = artifacts.outputs["cleaned_parquet"]
 
-# Compare two runs
-tracker.diff("run_abc123", "run_def456")
-# Config changed: threshold 0.8 → 0.9
-# Input changed: raw.csv (hash a1b2c3 → d4e5f6)
+# Load data (handles path resolution automatically)
+df = consist.load(cleaned_file)
 ```
 
-<!-- [TODO: Confirm diff() API is implemented] -->
+### Scenario Workflows
+
+For complex simulations involving multiple steps (e.g., Year 1 → Year 2 → Year 3), Consist offers the `scenario` context. This automatically links child steps to a parent "Header Run" and names them predictably.
+
+```python
+with tracker.scenario("baseline_scenario") as scenario:
+    # 1. Register exogenous inputs once for the whole scenario
+    scenario.add_input("population_forecast.csv", key="pop_growth")
+    
+    # 2. Run steps (automatically linked to parent "baseline_scenario")
+    with scenario.step("year_2020", model="travel_demand"):
+        run_model(year=2020)
+        
+    with scenario.step("year_2030", model="travel_demand"):
+        run_model(year=2030)
+```
+
+In the database, these runs will share a `consist_scenario_id="baseline_scenario"`, making it trivial to group results.
 
 ---
 
@@ -152,23 +180,21 @@ The last point—which we call **Ghost Mode**—is particularly useful for long-
 
 Consist can create SQL views over your artifacts without copying data into the database. This is useful when you want to query across many simulation runs (e.g., "compare household counts across all 2030 scenarios").
 
+Because Consist knows your schemas (registered via `Tracker(schemas=[...])`) and the file locations, it generates **Smart Views** that automatically union data from disk.
+
 ```python
-# Register a schema once
-from consist import register_schema
+# 1. Access the auto-generated view for your schema
+VHousehold = tracker.views.Household
 
-@register_schema("households")
-class Household(BaseModel):
-    household_id: int
-    income: float
-    zone_id: int
+# 2. Query using SQLModel (or raw SQL)
+# Note: 'consist_scenario_id' is automatically injected for easy grouping
+query = select(
+    VHousehold.consist_scenario_id,
+    VHousehold.income,
+    VHousehold.zone_id
+).where(VHousehold.consist_year == 2030)
 
-# Query across all runs that produced household outputs
-results = tracker.query("""
-    SELECT consist_run_id, zone_id, AVG(income) as mean_income
-    FROM v_households
-    WHERE consist_year = 2030
-    GROUP BY consist_run_id, zone_id
-""")
+results = session.exec(query).all()
 ```
 
 These **hybrid views** combine data that has been explicitly ingested into DuckDB with data that remains in Parquet or CSV files on disk. DuckDB's vectorized reader handles the files directly, avoiding memory overhead.
@@ -177,9 +203,9 @@ These **hybrid views** combine data that has been explicitly ingested into DuckD
 
 Querying 10 million rows across multiple simulation runs:
 
-| Operation | Pandas | Polars (lazy) | Consist |
-|:----------|:-------|:--------------|:--------|
-| Aggregate | 0.46s / 780 MB | 0.24s / 280 MB | 0.04s / 80 MB |
+| Operation      | Pandas         | Polars (lazy)  | Consist        |
+|:---------------|:---------------|:---------------|:---------------|
+| Aggregate      | 0.46s / 780 MB | 0.24s / 280 MB | 0.04s / 80 MB  |
 | Join (5M rows) | 0.76s / 620 MB | 0.20s / 440 MB | 0.12s / 272 MB |
 
 *Benchmark on Apple M3 Max. Consist queries Parquet files directly via DuckDB without loading into memory.*
@@ -205,14 +231,12 @@ This ensures that changing the container version invalidates the cache, while re
 
 ## Comparison with Related Tools
 
-| Tool | Primary Focus | Consist Difference |
-|:-----|:--------------|:-------------------|
-| DVC | Data versioning, Git-like workflow | Consist tracks execution provenance, not just file versions |
-| MLflow | ML experiment tracking | Consist is domain-agnostic and handles multi-model simulation workflows |
-| Snakemake / Nextflow | Workflow orchestration and DAG execution | Consist focuses on provenance and caching; can complement an orchestrator |
-| OpenLineage | Lineage metadata standard | Consist is a runtime library, not a metadata spec (though it can emit OpenLineage events) |
-
-<!-- [TODO: Verify OpenLineage emission is implemented or remove that parenthetical] -->
+| Tool                 | Primary Focus                            | Consist Difference                                                                        |
+|:---------------------|:-----------------------------------------|:------------------------------------------------------------------------------------------|
+| DVC                  | Data versioning, Git-like workflow       | Consist tracks execution provenance, not just file versions                               |
+| MLflow               | ML experiment tracking                   | Consist is domain-agnostic and handles multi-model simulation workflows                   |
+| Snakemake / Nextflow | Workflow orchestration and DAG execution | Consist focuses on provenance and caching; can complement an orchestrator                 |
+| OpenLineage          | Lineage metadata standard                | Consist is a runtime library, not a metadata spec (though it can emit OpenLineage events) |
 
 Consist is designed for scientific simulation workflows where: runs are expensive (minutes to hours), provenance questions arise after the fact ("what produced this?"), and comparing results across many scenario variants is a common analysis task.
 
@@ -228,7 +252,7 @@ We welcome feedback from researchers working with similar multi-model simulation
 
 ## Citation
 
-<!-- [TODO: Add JOSS citation once published] -->
+<!-- [TODO: Add citation once published] -->
 
 If you use Consist in academic work, please cite:
 
