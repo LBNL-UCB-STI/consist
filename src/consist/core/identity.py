@@ -296,7 +296,7 @@ class IdentityManager:
 
     def _clean_structure(self, obj: Any, exclude_keys: Set[str]) -> Any:
         """
-        Recursively cleans a Python structure (dictionary, list, tuple) for canonical hashing.
+        Recursively cleans a Python structure (dictionary, list, tuple, Pydantic model) for canonical hashing.
 
         This method is vital for:
         -   **Canonical Config Hashing**: By recursively removing specified `exclude_keys`
@@ -309,37 +309,51 @@ class IdentityManager:
             `json.dumps` and ensures that hashes are consistent even if input types
             vary between NumPy and standard Python, which is common in scientific computing.
 
-        Parameters
-        ----------
-        obj : Any
-            The Python object (dictionary, list, tuple, or scalar) to clean.
-        exclude_keys : Set[str]
-            A set of keys whose values should be entirely removed from dictionaries
-            during the cleaning process.
-
-        Returns
-        -------
-        Any
-            The cleaned object, with specified keys removed from dictionaries and
-            NumPy types converted to standard Python types.
+        Updates:
+        - Handles Pydantic models (v1 and v2)
+        - Handles Sets (converts to sorted list for determinism)
+        - Handles NumPy types
         """
+        # 1. Handle Pydantic Models (Native Support)
+        # Check for v2 'model_dump' first, then v1 'dict'
+        if hasattr(obj, "model_dump"):
+            return self._clean_structure(obj.model_dump(mode='json'), exclude_keys)
+        elif hasattr(obj, "dict") and hasattr(obj, "json"):  # Pydantic v1 heuristic
+            return self._clean_structure(obj.dict(), exclude_keys)
+
+        # 2. Handle Dictionaries
         if isinstance(obj, dict):
             return {
                 k: self._clean_structure(v, exclude_keys)
                 for k, v in obj.items()
                 if k not in exclude_keys
             }
+
+        # 3. Handle Lists and Tuples
         elif isinstance(obj, (list, tuple)):
             return [self._clean_structure(x, exclude_keys) for x in obj]
 
-        # Handle Numpy conversions
+        # 4. Handle Sets (CRITICAL for hashing)
+        # Sets must be sorted to ensure the hash is identical regardless of memory layout
+        elif isinstance(obj, set):
+            try:
+                # Attempt to sort; requires items to be comparable
+                return sorted([self._clean_structure(x, exclude_keys) for x in obj])
+            except TypeError:
+                # Fallback if items aren't comparable (rare in configs, but possible)
+                # We convert to list to allow JSON serialization, but warn about non-determinism
+                logging.warning("Consist: Encountered unsortable set in config. Hash stability not guaranteed.")
+                return [self._clean_structure(x, exclude_keys) for x in obj]
+
+        # 5. Handle Numpy conversions (Existing logic)
         if np:
             if isinstance(obj, np.integer):
                 return int(obj)
             elif isinstance(obj, np.floating):
                 return float(obj)
             elif isinstance(obj, np.ndarray):
-                return obj.tolist()
+                # Recursive call ensures arrays of Pydantic objects or sets are handled
+                return self._clean_structure(obj.tolist(), exclude_keys)
             elif isinstance(obj, np.bool_):
                 return bool(obj)
 

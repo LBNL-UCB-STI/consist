@@ -52,27 +52,57 @@ class FileSystemManager:
         """
         Converts an absolute file system path into a portable Consist URI.
         Attempts to match configured mounts or make relative to run_dir.
+
+        Updated to handle symlinks: Checks the logical path (symlink) FIRST,
+        then falls back to the resolved physical path.
         """
-        abs_path = str(Path(path).resolve())
+        path_obj = Path(path)
 
-        # 1. Check Mounts (Sort by length descending to match most specific mount first)
-        for name, root in sorted(
+        # 1. Identify Candidates
+        # Candidate A: The Logical Path (Absolute, but symlinks preserved)
+        # This matches paths like 'PILATES/pilates/beam/skims.omx' -> 'inputs://...'
+        candidates = [path_obj.absolute()]
+
+        # Candidate B: The Physical Path (Symlinks followed)
+        # This matches paths where Python code already resolved the symlink
+        resolved_path = path_obj.resolve()
+        if resolved_path != candidates[0]:
+            candidates.append(resolved_path)
+
+        # 2. Sort mounts by specificity (longest paths first)
+        sorted_mounts = sorted(
             self.mounts.items(), key=lambda x: len(x[1]), reverse=True
-        ):
-            root_abs = str(Path(root).resolve())
-            if abs_path.startswith(root_abs):
-                return f"{name}://{os.path.relpath(abs_path, root_abs)}"
+        )
 
-        # 2. Check Run Directory
+        # 3. Check Candidates against Mounts
+        for candidate in candidates:
+            # Convert to string for matching against string mounts
+            candidate_abs = str(candidate)
+
+            for name, root in sorted_mounts:
+                root_path = Path(root).resolve()
+                root_str = str(root_path)
+
+                # Check if candidate is inside root
+                # (Logic handles /data vs /database prefix issues)
+                if candidate_abs.startswith(root_str):
+                    if len(candidate_abs) == len(root_str) or candidate_abs[len(root_str)] == os.sep:
+                        rel_path = os.path.relpath(candidate_abs, root_str)
+                        # Normalize slashes for portable URI
+                        return f"{name}://{Path(rel_path).as_posix()}"
+
+        # 4. Check Run Directory (Workspace)
+        # We use the resolved path for workspace checks to ensure we aren't
+        # accidentally aliasing the workspace itself.
         try:
-            rel = os.path.relpath(abs_path, self.run_dir)
+            rel = os.path.relpath(resolved_path, self.run_dir)
             if not rel.startswith(".."):
-                return f"./{rel}"
+                return f"./{Path(rel).as_posix()}"
         except ValueError:
             pass
 
-        # 3. Fallback to absolute
-        return abs_path
+        # 5. Fallback to absolute
+        return str(resolved_path)
 
     def scan_directory(
         self, directory: Union[str, Path], pattern: str = "*", recursive: bool = False
