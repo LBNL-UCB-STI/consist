@@ -83,7 +83,7 @@ class ScenarioContext:
         """Read-only view of registered exogenous inputs."""
         return MappingProxyType(self._inputs)
 
-    def add_input(self, path: Union[str, Path], key: str, **kwargs) -> Artifact:
+    def add_input(self, path: Union[str, Path, Artifact], key: str, **kwargs) -> Artifact:
         """
         Register an exogenous input to the scenario header.
 
@@ -155,10 +155,97 @@ class ScenarioContext:
         if "model" not in kwargs:
             kwargs["model"] = name
 
-        # 2. Delegate to standard start_run
-        # The tracker is currently suspended (current_consist is None), so this is allowed.
-        with self.tracker.start_run(run_id=run_id, **kwargs) as t:
-            yield t
+        # Containers for the captured state
+        child_run = None
+        child_inputs = []
+        child_outputs = []
+
+        try:
+            # We open the tracker context...
+            with self.tracker.start_run(run_id=run_id, **kwargs) as t:
+                try:
+                    # 1. Yield to let the user code run (This populates the artifacts)
+                    yield t
+                finally:
+                    # 2. Capture State NOW (After code ran, but before tracker closes)
+                    # We wrap in finally to ensure we capture partial state even if the step fails
+
+                    # Resolve the context object (Run wrapper)
+                    ctx = t.current_consist
+
+                    if ctx:
+                        # Capture Run Object
+                        child_run = getattr(ctx, "run", ctx)
+
+                        # Capture Artifacts (Copy to list so they survive context exit)
+                        # Check 'current_inputs' (tracker attr) or 'inputs' (context attr)
+                        if hasattr(t, "current_inputs"):
+                            child_inputs = list(t.current_inputs)
+                        elif hasattr(ctx, "inputs"):
+                            child_inputs = list(ctx.inputs)
+
+                        if hasattr(t, "current_outputs"):
+                            child_outputs = list(t.current_outputs)
+                        elif hasattr(ctx, "outputs"):
+                            child_outputs = list(ctx.outputs)
+
+        finally:
+            # 3. Bubble Up (Tracker is now closed, but we have our copies)
+            if child_run and self._header_record:
+                self._record_step_in_parent(child_run, child_inputs, child_outputs)
+
+    def _record_step_in_parent(self, child_run, child_inputs, child_outputs):
+        # Resolve Parent Lists (assuming header_record is the wrapper)
+        # If header_record is just a Run, you need to capture its lists in __enter__ too.
+        if hasattr(self._header_record, "inputs"):
+            parent_run = self._header_record.run
+            parent_inputs_list = self._header_record.inputs
+            parent_outputs_list = self._header_record.outputs
+        else:
+            # Fallback if header is weird, but ideally this shouldn't happen with the fix above
+            parent_run = self._header_record
+            parent_inputs_list = []
+            parent_outputs_list = []
+
+        # --- Smart Merge Logic ---
+        parent_output_ids = {a.id for a in parent_outputs_list}
+        parent_input_ids = {a.id for a in parent_inputs_list}
+
+        # Merge Outputs
+        for artifact in child_outputs:
+            if artifact.id not in parent_output_ids:
+                parent_outputs_list.append(artifact)
+                parent_output_ids.add(artifact.id)
+
+        # Merge Inputs
+        for artifact in child_inputs:
+            if artifact.id not in parent_input_ids and artifact.id not in parent_output_ids:
+                parent_inputs_list.append(artifact)
+                parent_input_ids.add(artifact.id)
+
+        # --- Record Metadata ---
+        summary = {
+            "id": child_run.id,
+            "model": child_run.model_name,
+            "status": child_run.status,
+            "description": child_run.description,
+            "started_at": child_run.started_at.isoformat() if child_run.started_at else None,
+            "ended_at": child_run.ended_at.isoformat() if child_run.ended_at else None,
+            "duration_seconds": child_run.duration_seconds,
+            "inputs": {a.id: a.key for a in child_inputs},
+            "outputs": {a.id: a.key for a in child_outputs}
+        }
+
+        if "steps" not in parent_run.meta:
+            parent_run.meta["steps"] = []
+
+        parent_run.meta["steps"].append(summary)
+
+        # --- Force Flush ---
+        current_state = self.tracker.current_consist
+        self.tracker.current_consist = self._header_record
+        self.tracker._flush_json()
+        self.tracker.current_consist = current_state
 
     def __enter__(self):
         # Enforce No Nesting
