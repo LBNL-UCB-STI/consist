@@ -6,7 +6,7 @@ from datetime import timezone
 from pydantic import BaseModel
 
 UTC = timezone.utc
-from sqlalchemy import Column, JSON
+from sqlalchemy import Column, JSON, String
 from sqlmodel import Field, SQLModel
 from consist.models.artifact import Artifact, UUIDType
 
@@ -65,7 +65,14 @@ class Run(SQLModel, table=True):
     __tablename__ = "run"
 
     id: str = Field(primary_key=True, sa_column_kwargs={"autoincrement": False})
-    parent_run_id: Optional[str] = Field(default=None, foreign_key="run.id", index=True)
+    parent_run_id: Optional[str] = Field(
+        default=None,
+        sa_column=Column(
+            String,
+            nullable=True,
+            index=True,
+        ),
+    )
 
     # State
     status: str = Field(default="running", index=True)

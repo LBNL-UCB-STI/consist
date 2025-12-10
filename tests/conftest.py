@@ -85,6 +85,9 @@ def tracker(request, run_dir: Path, tmp_path: Path) -> Tracker:
             with connection.begin():
                 SQLModel.metadata.drop_all(connection, tables=core_tables)
                 SQLModel.metadata.create_all(connection, tables=core_tables)
+                # Ensure run.parent_run_id FK is NOT ENFORCED (DuckDB limitation workaround)
+                if test_tracker.db:
+                    test_tracker.db._relax_run_parent_fk()
 
     yield test_tracker
 

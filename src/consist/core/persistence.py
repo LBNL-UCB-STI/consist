@@ -43,8 +43,24 @@ class DatabaseManager:
                     RunArtifactLink.__table__,
                 ],
             )
+            # DuckDB self-referential FK on run.parent_run_id blocks status updates.
+            self._relax_run_parent_fk()
 
         self.execute_with_retry(_create, operation_name="init_schema")
+
+    def _relax_run_parent_fk(self):
+        """Ensure run.parent_run_id FK is NOT ENFORCED (DuckDB self-FK workaround)."""
+        try:
+            with self.engine.begin() as conn:
+                conn.exec_driver_sql(
+                    "ALTER TABLE run DROP CONSTRAINT IF EXISTS fk_run_parent"
+                )
+                conn.exec_driver_sql(
+                    "ALTER TABLE run ADD CONSTRAINT fk_run_parent "
+                    "FOREIGN KEY (parent_run_id) REFERENCES run(id) NOT ENFORCED"
+                )
+        except Exception as e:
+            logging.warning(f"Failed to relax run.parent_run_id FK: {e}")
 
     def execute_with_retry(
         self,
@@ -97,21 +113,39 @@ class DatabaseManager:
 
         def _do_sync():
             with Session(self.engine) as session:
-                db_run = session.get(Run, run.id)
-                if db_run:
-                    # Update existing
-                    for k, v in run.model_dump(exclude={"id"}).items():
-                        setattr(db_run, k, v)
-                    session.add(db_run)
-                else:
-                    # Create new
-                    session.add(Run(**run.model_dump()))
+                # Use merge for a simple upsert. DuckDB's MERGE semantics via SQLModel
+                # handle inserts and updates in one call and avoid stale state issues.
+                logging.debug(f"[DB sync_run] upserting run={run.id} status={run.status}")
+                session.merge(run)
                 session.commit()
+                # Read-back to verify persisted status for diagnostics
+                persisted = session.get(Run, run.id)
+                logging.debug(
+                    f"[DB sync_run] persisted run={run.id} status={getattr(persisted, 'status', None)}"
+                )
 
         try:
             self.execute_with_retry(_do_sync, operation_name="sync_run")
         except Exception as e:
-            logging.warning(f"Database sync failed for run {run.id}: {e}")
+            logging.warning(f"Database sync failed: {e}")
+
+    def link_artifact_to_run(self, artifact_id: uuid.UUID, run_id: str, direction: str) -> None:
+        """Creates a link between an artifact and a run without syncing the artifact itself."""
+
+        def _do_link():
+            with Session(self.engine) as session:
+                link = RunArtifactLink(
+                    run_id=run_id,
+                    artifact_id=artifact_id,
+                    direction=direction,
+                )
+                session.merge(link)
+                session.commit()
+
+        try:
+            self.execute_with_retry(_do_link, operation_name="link_artifact")
+        except Exception as e:
+            logging.warning(f"Failed to link artifact {artifact_id} to run {run_id}: {e}")
 
     def sync_artifact(self, artifact: Artifact, run_id: str, direction: str) -> None:
         """Upserts an Artifact and links it to the Run."""
@@ -120,18 +154,12 @@ class DatabaseManager:
             with Session(self.engine) as session:
                 # Merge artifact (create or update)
                 db_artifact = session.merge(artifact)
-
-                # Create Link
-                link = RunArtifactLink(
-                    run_id=run_id,
-                    artifact_id=db_artifact.id,
-                    direction=direction,
-                )
-                session.merge(link)
                 session.commit()
 
         try:
             self.execute_with_retry(_do_sync, operation_name="sync_artifact")
+            # Now create the link
+            self.link_artifact_to_run(artifact.id, run_id, direction)
         except Exception as e:
             logging.warning(f"Artifact sync failed for {artifact.key}: {e}")
 
@@ -221,14 +249,14 @@ class DatabaseManager:
             return []
 
     def find_runs(
-        self,
-        tags: Optional[List[str]] = None,
-        year: Optional[int] = None,
-        model: Optional[str] = None,
-        status: Optional[str] = None,
-        parent_id: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        limit: int = 100,
+            self,
+            tags: Optional[List[str]] = None,
+            year: Optional[int] = None,
+            model: Optional[str] = None,
+            status: Optional[str] = None,
+            parent_id: Optional[str] = None,
+            metadata: Optional[Dict[str, Any]] = None,
+            limit: int = 100,
     ) -> List[Run]:
         def _query():
             with Session(self.engine) as session:
@@ -249,7 +277,7 @@ class DatabaseManager:
 
                 results = session.exec(statement.limit(limit)).all()
 
-                # Client-side filtering for JSON metadata (simpler than complex SQL JSON ops)
+                # Client-side filtering for JSON metadata
                 if metadata:
                     filtered = []
                     for r in results:
@@ -260,7 +288,16 @@ class DatabaseManager:
                                 break
                         if match:
                             filtered.append(r)
-                    return filtered
+                    results = filtered
+
+                # CRITICAL: Make objects independent of the session
+                # This allows them to be used after the session closes
+                for run in results:
+                    # Force load all attributes while session is still open
+                    _ = run.meta  # Access to load
+                    _ = run.tags
+                    # Then expunge so SQLAlchemy stops tracking them
+                    session.expunge(run)
 
                 return results
 
