@@ -11,9 +11,11 @@ from consist.core.context import get_active_tracker
 from consist.core.views import create_view_model
 from consist.models.artifact import Artifact
 from consist.models.run import Run
+from consist.core.tracker import Tracker
 
 if TYPE_CHECKING:
-    from consist.core.tracker import Tracker
+    # Type-only imports already handled above; kept for static checkers
+    pass
 
 # Import loaders for specific formats
 try:
@@ -100,6 +102,39 @@ def current_tracker() -> "Tracker":
         if called outside of a `consist.start_run` block or a `@consist.task` decorated function.
     """
     return get_active_tracker()
+
+
+# --- Cache helpers ---
+
+
+def cached_artifacts(direction: str = "output") -> Dict[str, Artifact]:
+    """
+    Returns hydrated cached artifacts for the active run, if any.
+
+    Parameters
+    ----------
+    direction : str, default "output"
+        "output" or "input".
+
+    Returns
+    -------
+    Dict[str, Artifact]
+        Mapping from artifact key to Artifact, or empty dict if no cache hit.
+    """
+    return current_tracker().cached_artifacts(direction=direction)
+
+
+def cached_output(key: Optional[str] = None) -> Optional[Artifact]:
+    """
+    Convenience to fetch a hydrated cached output artifact for the active run.
+
+    Parameters
+    ----------
+    key : Optional[str]
+        If provided, returns the artifact with this key; otherwise returns the
+        first available cached output.
+    """
+    return current_tracker().cached_output(key=key)
 
 
 # --- Proxy Functions ---

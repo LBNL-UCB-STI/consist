@@ -30,11 +30,18 @@ def run_simulation_scenario(tracker, scenario_name, base_trips, years, storage_m
     n_hh = 100
     n_per = 300
 
+    def advance_people(df_in: pd.DataFrame) -> pd.DataFrame:
+        """Task-like helper: increment age and regenerate trips for next year."""
+        df_out = df_in.copy()
+        df_out["age"] = df_out["age"] + 1
+        df_out["number_of_trips"] = rng.poisson(lam=base_trips, size=len(df_out))
+        return df_out
+
     # Header
     scenario_id = f"scenario_{scenario_name}"
     with tracker.scenario(
         scenario_name,
-        config={"mode": storage_mode},
+        config={"mode": storage_mode, "base_trips": base_trips},
         model="pilates_orchestrator",
         tags=["scenario_header"],
     ) as scenario:
@@ -52,34 +59,59 @@ def run_simulation_scenario(tracker, scenario_name, base_trips, years, storage_m
                     "income_segment": rng.choice(["Low", "Med", "High"], size=n_hh),
                 }
             )
-            path = tracker.run_dir / f"{scenario_name}_households.parquet"
-            df_hh.to_parquet(path)
-            art = consist.log_artifact(str(path), key="households")
-            if storage_mode == "hot":
-                consist.ingest(art, df_hh, schema=Household)
+            consist.log_dataframe(df_hh, key="households", schema=Household)
 
-        # Years
-        for year in years:
+            # Seed persons for the first year with zero trips
+            seed_year = years[0]
+            df_seed = pd.DataFrame(
+                {
+                    "person_id": np.arange(n_per),
+                    "household_id": rng.integers(0, n_hh, size=n_per),
+                    "age": rng.integers(18, 80, size=n_per),
+                    "number_of_trips": np.zeros(n_per, dtype=int) + base_trips,
+                }
+            )
+            seed_art = consist.log_dataframe(
+                df_seed,
+                key="persons",
+                schema=Person,
+                direction="output",
+            )
+
+        prev_person_art = seed_art
+
+        # Years (propagate previous year's persons into the next)
+        for idx, year in enumerate(years):
             with scenario.step(
                 run_id=f"{scenario_id}_year_{year}",
                 name="travel_demand",
                 year=year,
                 tags=["simulation"],
+                config={"year": year},
             ):
-                trips = rng.poisson(lam=base_trips, size=n_per)
-                df_per = pd.DataFrame(
-                    {
-                        "person_id": np.arange(n_per),
-                        "household_id": rng.integers(0, n_hh, size=n_per),
-                        "age": rng.integers(18, 80, size=n_per),
-                        "number_of_trips": trips,
-                    }
+                # Link prior year's output as an input for lineage
+                if prev_person_art is not None:
+                    tracker.log_artifact(prev_person_art, direction="input")
+
+                # If this step is a cache hit, Consist has already hydrated outputs.
+                if tracker.is_cached:
+                    cached_persons = tracker.cached_output("persons")
+                    if cached_persons:
+                        prev_person_art = cached_persons
+                        continue
+
+                if idx == 0:
+                    df_per = df_seed
+                else:
+                    prev_df = consist.load(prev_person_art, tracker=tracker)
+                    df_per = advance_people(prev_df)
+
+                prev_person_art = consist.log_dataframe(
+                    df_per,
+                    key="persons",
+                    schema=Person,
+                    direction="output",
                 )
-                path = tracker.run_dir / f"{scenario_name}_persons_{year}.parquet"
-                df_per.to_parquet(path)
-                art = tracker.log_artifact(str(path), key="persons")
-                if storage_mode == "hot":
-                    tracker.ingest(art, df_per, schema=Person)
 
 
 def test_pilates_header_pattern(tmp_path):
@@ -106,6 +138,7 @@ def test_pilates_header_pattern(tmp_path):
         )
         .select_from(VPerson)
         .where(VPerson.consist_scenario_id.in_(["baseline", "high_gas"]))
+        .where(VPerson.consist_year.is_not(None))
         .group_by(VPerson.consist_scenario_id, VPerson.consist_year)
         .order_by("scenario_id", "consist_year")
     )
@@ -121,8 +154,7 @@ def test_pilates_header_pattern(tmp_path):
 
     # Q2: Complex Join
     logging.info("\n--- Query 2: Trips by Region ---")
-    with Session(tracker.engine) as session:
-        query = (
+    query = (
             select(
                 VPerson.consist_scenario_id.label("scenario"),
                 VHousehold.region,
@@ -139,8 +171,8 @@ def test_pilates_header_pattern(tmp_path):
             .order_by("scenario", VHousehold.region, VPerson.consist_year)
         )
 
-        results = session.exec(query).all()
-        assert len(results) > 0
+    results = consist.run_query(query, tracker=tracker)
+    assert len(results) > 0
 
     # Q3: Helper Method Usage
     # We want the run from 2030 specifically

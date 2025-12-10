@@ -36,6 +36,10 @@ class ContainerDefinition(BaseModel):
     environment: Dict[str, str]
     backend: str
 
+    working_dir: Optional[str] = None
+    volumes: Dict[str, str] = {}
+    declared_outputs: Optional[List[str]] = None
+
     # Extra args that might affect execution (e.g. resource limits)
     extra_args: Dict[str, Any] = {}
 
@@ -53,4 +57,13 @@ class ContainerDefinition(BaseModel):
             A dictionary containing the essential configuration parameters of the
             container, stripped of any `None` values, ready for hashing.
         """
-        return self.model_dump(exclude_none=True)
+        # Deterministic representation for hashing
+        return {
+            "image_digest": self.image_digest,
+            "command": tuple(self.command or ()),
+            "environment": tuple(sorted((self.environment or {}).items())),
+            "volumes": tuple(sorted((self.volumes or {}).items())),
+            "working_dir": self.working_dir,
+            "backend": self.backend,
+            "extra_args": tuple(sorted((self.extra_args or {}).items())),
+        }

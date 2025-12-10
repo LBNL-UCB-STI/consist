@@ -19,17 +19,141 @@ Key functionalities include:
     to the container run.
 """
 
+import hashlib
+import json
 import logging
 import time
 from pathlib import Path
 from typing import List, Dict, Union, Optional
 
+from sqlmodel import Session, select
+
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
 from consist.integrations.containers.models import ContainerDefinition
 from consist.integrations.containers.backends import DockerBackend, SingularityBackend
+from consist.models.run import RunArtifactLink
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_image_digest(backend, image: str, pull_latest: bool) -> str:
+    """Resolve image digest (backend handles pull_latest internally if supported)."""
+    if getattr(backend, "resolve_image_digest", None):
+        return backend.resolve_image_digest(image)
+    return image
+
+
+def _hash_inputs(tracker: Tracker, items: List[Union[str, Artifact]]) -> List[str]:
+    """Return deterministic hashes for container inputs."""
+    hashes: List[str] = []
+    for item in items:
+        if isinstance(item, Artifact):
+            hashes.append(item.hash)
+        else:
+            p = Path(item).resolve()
+            if not p.exists():
+                hashes.append(f"missing:{p}")
+            else:
+                # Use identity manager file checksum (fast/ full based on strategy)
+                checksum = tracker.identity._compute_file_checksum(str(p))
+                hashes.append(checksum)
+    return sorted(hashes)
+
+
+def _container_signature(defn: ContainerDefinition, inputs: List[Union[str, Artifact]], tracker: Tracker) -> str:
+    payload = {
+        "config": defn.to_hashable_config(),
+        "inputs": _hash_inputs(tracker, inputs),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _reuse_or_execute_container(
+    tracker: Tracker,
+    defn: ContainerDefinition,
+    inputs: List[Union[str, Artifact]],
+    run_id: str,
+    execute_fn,
+):
+    """Cache-aware wrapper. Executes execute_fn on miss; reuses artifacts on hit."""
+    signature = _container_signature(defn, inputs, tracker)
+    requested_outputs = defn.declared_outputs or []
+
+    cached = tracker.db.find_run_by_signature(signature) if tracker.db else None
+
+    if cached:
+        cached_outputs = (cached.meta or {}).get("declared_outputs", [])
+        if not cached_outputs:
+            # If older run lacks declared outputs metadata, assume coverage to avoid false misses
+            cached_outputs = requested_outputs
+        if set(requested_outputs).issubset(set(cached_outputs)):
+            logger.info(f"✅ [Consist] Container cache hit: {run_id} -> {cached.id}")
+            # re-link cached artifacts to current run
+            if tracker.db:
+                with Session(tracker.engine) as session:
+                    links = session.exec(
+                        select(RunArtifactLink).where(RunArtifactLink.run_id == cached.id)
+                    ).all()
+                    for link in links:
+                        session.merge(
+                            RunArtifactLink(
+                                run_id=run_id,
+                                artifact_id=link.artifact_id,
+                                direction=link.direction,
+                            )
+                    )
+                session.commit()
+            tracker.db.update_run_meta(
+                run_id,
+                {
+                    "cache_hit": True,
+                    "cache_source": cached.id,
+                    "declared_outputs": requested_outputs,
+                },
+            )
+            tracker.db.update_run_signature(run_id, signature)
+            # Keep in-memory run in sync to avoid later overwrite during end_run
+            if getattr(tracker, "current_consist", None):
+                run_obj = tracker.current_consist.run
+                run_obj.signature = signature
+                meta = run_obj.meta or {}
+                meta.update(
+                    {
+                        "cache_hit": True,
+                        "cache_source": cached.id,
+                        "declared_outputs": requested_outputs,
+                    }
+                )
+                run_obj.meta = meta
+            return True
+
+    # Cache miss (or missing outputs) -> execute
+    execute_fn()
+    if tracker.db:
+        tracker.db.update_run_meta(
+            run_id,
+            {
+                "cache_hit": False,
+                "declared_outputs": requested_outputs,
+                "signature": signature,
+            },
+        )
+        tracker.db.update_run_signature(run_id, signature)
+    # Sync in-memory run to avoid overwrite on end_run
+    if getattr(tracker, "current_consist", None):
+        run_obj = tracker.current_consist.run
+        run_obj.signature = signature
+        meta = run_obj.meta or {}
+        meta.update(
+            {
+                "cache_hit": False,
+                "declared_outputs": requested_outputs,
+                "signature": signature,
+            }
+        )
+        run_obj.meta = meta
+    return False
 
 
 def run_container(
@@ -39,7 +163,7 @@ def run_container(
     command: Union[str, List[str]],
     volumes: Dict[str, str],
     inputs: List[Union[str, Artifact]],
-    outputs: List[str],
+    outputs: List[Union[str, Path]],
     environment: Optional[Dict[str, str]] = None,
     working_dir: Optional[str] = None,
     backend_type: str = "docker",
@@ -110,8 +234,9 @@ def run_container(
         raise ValueError(f"Unknown backend type: {backend_type}")
 
     # 2. Resolve Container Identity (Image Digest)
-    image_digest = backend.resolve_image_digest(image)
+    image_digest = _resolve_image_digest(backend, image, pull_latest=pull_latest)
     cmd_list = command.split() if isinstance(command, str) else command
+    outputs_str = [str(o) for o in outputs]
 
     # 3. Create Config Object for Hashing
     config = ContainerDefinition(
@@ -120,7 +245,10 @@ def run_container(
         command=cmd_list,
         environment=environment,
         backend=backend_type,
-        extra_args={"volumes": volumes, "working_dir": working_dir},
+        working_dir=working_dir,
+        volumes=volumes,
+        declared_outputs=outputs_str,
+        extra_args={},
     )
 
     # 4. Resolve Input Paths for Consist Hashing
@@ -154,7 +282,7 @@ def run_container(
             raise RuntimeError(f"Container execution failed for run_id: {run_id}")
 
         # Scan expected output paths on HOST and log them
-        for host_out in outputs:
+        for host_out in outputs_str:
             path_obj = Path(host_out).resolve()
             if path_obj.exists():
                 # Log artifact (Consist handles auto-detecting file vs dir)
@@ -183,10 +311,19 @@ def run_container(
 
         # 2. Log Config to Meta (so we don't lose the container context)
         step_key = f"container_step_{int(time.time())}"
-        tracker.log_meta(**{step_key: config.to_hashable_config()})
+        # Record human-readable image tag alongside hashable config
+        meta_cfg = config.to_hashable_config()
+        meta_cfg["image"] = image
+        tracker.log_meta(**{step_key: meta_cfg})
 
-        # 3. Execute
-        _execute_backend_and_log_outputs(tracker)
+        # 3. Execute with cache-aware wrapper
+        _reuse_or_execute_container(
+            tracker=tracker,
+            defn=config,
+            inputs=resolved_inputs,
+            run_id=tracker.current_consist.run.id,
+            execute_fn=lambda: _execute_backend_and_log_outputs(tracker),
+        )
         return True
 
     # CASE B: Standalone Mode (Start new run)
@@ -197,13 +334,12 @@ def run_container(
         inputs=resolved_inputs,
     ) as t:
 
-        # 1. Cache Hit Check
-        if t.is_cached:
-            logger.info(f"✅ [Consist] Container Cache Hit: {run_id} ({image})")
-            # Outputs automatically hydrated (virtualized) by Consist
-            return True
-
-        # 2. Execute
-        _execute_backend_and_log_outputs(t)
+        _reuse_or_execute_container(
+            tracker=t,
+            defn=config,
+            inputs=resolved_inputs,
+            run_id=run_id,
+            execute_fn=lambda: _execute_backend_and_log_outputs(t),
+        )
 
     return True

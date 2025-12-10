@@ -1519,3 +1519,49 @@ class Tracker:
     @property
     def is_cached(self) -> bool:
         return self.current_consist and self.current_consist.cached_run is not None
+
+    def cached_artifacts(self, direction: str = "output"):
+        """
+        Returns hydrated artifacts for the active run when it is a cache hit.
+
+        Parameters
+        ----------
+        direction : str, default "output"
+            "output" or "input" to filter hydrated artifacts.
+
+        Returns
+        -------
+        Dict[str, Artifact]
+            Mapping of artifact key to Artifact for the specified direction.
+            Returns an empty dict if no cache hit or no artifacts.
+        """
+        if not self.current_consist or not self.current_consist.cached_run:
+            return {}
+        if direction == "output":
+            return {a.key: a for a in self.current_consist.outputs}
+        if direction == "input":
+            return {a.key: a for a in self.current_consist.inputs}
+        return {}
+
+    def cached_output(self, key: Optional[str] = None):
+        """
+        Convenience to fetch a hydrated cached output artifact for the current run.
+
+        Parameters
+        ----------
+        key : Optional[str]
+            If provided, returns the artifact with this key; otherwise returns the
+            first available cached output.
+
+        Returns
+        -------
+        Optional[Artifact]
+            The cached output artifact, or None if not cached / not found.
+        """
+        outputs = self.cached_artifacts(direction="output")
+        if not outputs:
+            return None
+        if key:
+            return outputs.get(key)
+        # return an arbitrary output (consistent ordering not guaranteed)
+        return next(iter(outputs.values()))

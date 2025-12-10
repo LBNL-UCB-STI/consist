@@ -23,6 +23,8 @@ from consist.api import (
     current_tracker,
     log_meta,
     view,
+    cached_output,
+    cached_artifacts,
     scenario,
     single_step_scenario,
     register_views,

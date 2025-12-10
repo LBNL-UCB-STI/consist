@@ -129,6 +129,42 @@ class DatabaseManager:
         except Exception as e:
             logging.warning(f"Database sync failed: {e}")
 
+    def update_run_meta(self, run_id: str, meta_updates: Dict[str, Any]) -> None:
+        """Updates a run's meta field with a partial dict."""
+
+        def _update():
+            with Session(self.engine) as session:
+                db_run = session.get(Run, run_id)
+                if not db_run:
+                    return
+                current = db_run.meta or {}
+                current.update(meta_updates)
+                db_run.meta = current
+                session.add(db_run)
+                session.commit()
+
+        try:
+            self.execute_with_retry(_update, operation_name="update_run_meta")
+        except Exception as e:
+            logging.warning(f"Failed to update run meta for {run_id}: {e}")
+
+    def update_run_signature(self, run_id: str, signature: str) -> None:
+        """Sets the signature field for a run."""
+
+        def _update():
+            with Session(self.engine) as session:
+                db_run = session.get(Run, run_id)
+                if not db_run:
+                    return
+                db_run.signature = signature
+                session.add(db_run)
+                session.commit()
+
+        try:
+            self.execute_with_retry(_update, operation_name="update_run_signature")
+        except Exception as e:
+            logging.warning(f"Failed to update signature for {run_id}: {e}")
+
     def link_artifact_to_run(self, artifact_id: uuid.UUID, run_id: str, direction: str) -> None:
         """Creates a link between an artifact and a run without syncing the artifact itself."""
 
@@ -211,6 +247,26 @@ class DatabaseManager:
             return self.execute_with_retry(_query, operation_name="cache_lookup")
         except Exception as e:
             logging.warning(f"Cache lookup failed: {e}")
+            return None
+
+    def find_run_by_signature(self, signature: str) -> Optional[Run]:
+        """Find a completed run by its composite signature."""
+
+        def _query():
+            with Session(self.engine) as session:
+                statement = (
+                    select(Run)
+                    .where(Run.status == "completed")
+                    .where(Run.signature == signature)
+                    .order_by(Run.created_at.desc())
+                    .limit(1)
+                )
+                return session.exec(statement).first()
+
+        try:
+            return self.execute_with_retry(_query, operation_name="find_run_by_signature")
+        except Exception as e:
+            logging.warning(f"Signature lookup failed: {e}")
             return None
 
     def get_artifact(self, key_or_id: str) -> Optional[Artifact]:
