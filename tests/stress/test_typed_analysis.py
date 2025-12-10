@@ -118,12 +118,14 @@ def test_typed_analysis_workflow(tmp_path):
     )
 
     with tracker.start_run("run_strict_01", model="asim"):
-        # We explicitly pass the SQLModel class to ingest()
-        # This tells Consist/dlt: "Ensure the table matches this class exactly"
-        art = consist.log_artifact("census.parquet", key="census_strict")
-        df.to_parquet(run_dir / "census.parquet")
-
-        consist.ingest(artifact=art, data=df, schema=CensusRecord)  # <--- STRICT MODE
+        # Log + ingest in one step via the convenience helper.
+        consist.log_dataframe(
+            df,
+            key="census_strict",
+            schema=CensusRecord,  # strict schema enforcement
+            tracker=tracker,
+            path=run_dir / "census.parquet",
+        )
 
     # =========================================================================
     # 2. ANALYSIS (The "Pandas-like" SQL Way)
@@ -134,33 +136,29 @@ def test_typed_analysis_workflow(tmp_path):
     # This is efficient: It generates the SQL query, sends it to DuckDB,
     # and only fetches the aggregated results (not 100k objects).
 
-    from sqlmodel import Session
-
-    with Session(tracker.engine) as session:
-        # Query: "Group by Mode, calculate Avg Income and Count"
-        # Look how Pythonic this is:
-        statement = (
-            select(
-                CensusRecord.mode,
-                func.count(CensusRecord.person_id).label("count"),
-                func.avg(CensusRecord.income).label("avg_income"),
-            )
-            .where(CensusRecord.age > 30)  # easy filtering
-            .group_by(CensusRecord.mode)
-            .order_by(func.avg(CensusRecord.income).desc())
+    # Query: "Group by Mode, calculate Avg Income and Count"
+    statement = (
+        select(
+            CensusRecord.mode,
+            func.count(CensusRecord.person_id).label("count"),
+            func.avg(CensusRecord.income).label("avg_income"),
         )
+        .where(CensusRecord.age > 30)  # easy filtering
+        .group_by(CensusRecord.mode)
+        .order_by(func.avg(CensusRecord.income).desc())
+    )
 
-        results = session.exec(statement).all()
+    results = consist.run_query(statement, tracker=tracker)
 
-        logging.info(f"\n{'Mode':<10} {'Count':<10} {'Avg Income':<15}")
-        logging.info("-" * 35)
-        for row in results:
-            # Row matches the select() structure
-            mode, count, avg_inc = row
-            logging.info(f"{mode:<10} {count:<10} ${avg_inc:,.2f}")
+    logging.info(f"\n{'Mode':<10} {'Count':<10} {'Avg Income':<15}")
+    logging.info("-" * 35)
+    for row in results:
+        # Row matches the select() structure
+        mode, count, avg_inc = row
+        logging.info(f"{mode:<10} {count:<10} ${avg_inc:,.2f}")
 
-            assert count > 0
-            assert avg_inc > 0
+        assert count > 0
+        assert avg_inc > 0
 
     # =========================================================================
     # 3. BONUS: Into DataFrame
@@ -168,9 +166,13 @@ def test_typed_analysis_workflow(tmp_path):
     # If you really want a DataFrame back for plotting:
     logging.info("\n[Step 3] Fetching aggregated result as DataFrame...")
 
-    with tracker.engine.connect() as conn:
-        # You can pass the SQLAlchemy statement directly to read_sql
-        df_agg = pd.read_sql(statement, conn)
+    with consist.db_session(tracker=tracker) as session:
+        df_agg = pd.read_sql(statement, session.connection())
 
     logging.info(df_agg)
     assert len(df_agg) == 3
+
+    # Extra check: confirm run persisted with completed status via top-level helper
+    run_meta = consist.find_run(tracker=tracker, id="run_strict_01")
+    assert run_meta is not None
+    assert run_meta.status == "completed"

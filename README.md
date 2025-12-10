@@ -55,7 +55,11 @@ pip install consist
 
 ### Basic Usage
 
-The `@task` decorator is the primary interface. It handles caching, hashing, and artifact registration automatically.
+Consist exposes two complementary interfaces:
+- **Tasks (`@task`)**: Best for pure-ish units where you want signature-based caching and automatic artifact registration. Call a task multiple times with the same inputs to get cache hits.
+- **Scenarios/Steps (`scenario` / `scenario.step`)**: Best for hierarchical, multi-step workflows with a parent header run and child step runs (e.g., multi-year simulations). Steps capture lineage and grouping; you can still call cached tasks inside steps for reuse.
+
+#### Example: Task
 
 ```python
 from consist import Tracker
@@ -104,6 +108,20 @@ result = clean_data(Path("raw.csv"), config)
 result = clean_data(Path("raw.csv"), CleaningConfig(threshold=0.9))
 ```
 
+#### Example: Scenario/Step
+
+```python
+from consist import scenario, log_dataframe
+
+with scenario("baseline", tracker=tracker, model="travel_demand") as sc:
+    sc.add_input("population.csv", key="pop")
+    with sc.step("year_2030", model="travel_demand"):
+        # do work, log artifacts
+        log_dataframe(df_result, key="persons_2030")
+```
+
+You can mix both: call cached `@task` functions inside `scenario.step` to reuse heavy computations.
+
 ### Wrapping Existing Code
 
 Many scientific models read configuration from files and write outputs to directories rather than accepting arguments and returning paths. The `depends_on` and `capture_dir` parameters handle this pattern:
@@ -127,8 +145,9 @@ Consist provides ergonomic tools to find specific runs and load their results wi
 
 ```python
 # Find a specific run using filters
-# options: find_run() for one, find_runs() for many
-run = tracker.find_run(
+# options: consist.find_run() for one, consist.find_runs() for many
+run = consist.find_run(
+    tracker=tracker,
     model_name="clean_data",
     tags=["production"],
     year=2030
@@ -148,7 +167,7 @@ df = consist.load(cleaned_file)
 For complex simulations involving multiple steps (e.g., Year 1 → Year 2 → Year 3), Consist offers the `scenario` context. This automatically links child steps to a parent "Header Run" and names them predictably.
 
 ```python
-with tracker.scenario("baseline_scenario") as scenario:
+with consist.scenario("baseline_scenario", tracker=tracker) as scenario:
     # 1. Register exogenous inputs once for the whole scenario
     scenario.add_input("population_forecast.csv", key="pop_growth")
     
@@ -161,6 +180,8 @@ with tracker.scenario("baseline_scenario") as scenario:
 ```
 
 In the database, these runs will share a `consist_scenario_id="baseline_scenario"`, making it trivial to group results.
+
+Tip: use `consist.log_dataframe(df, key="households", schema=Household)` inside a step to write, log, and ingest a DataFrame in one call, and `consist.run_query(query, tracker=tracker)` to execute SQLModel/SQLAlchemy queries without manually managing sessions.
 
 ---
 
@@ -194,7 +215,7 @@ query = select(
     VHousehold.zone_id
 ).where(VHousehold.consist_year == 2030)
 
-results = session.exec(query).all()
+results = consist.run_query(query, tracker=tracker)
 ```
 
 These **hybrid views** combine data that has been explicitly ingested into DuckDB with data that remains in Parquet or CSV files on disk. DuckDB's vectorized reader handles the files directly, avoiding memory overhead.

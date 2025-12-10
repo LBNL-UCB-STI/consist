@@ -98,28 +98,26 @@ def test_pilates_header_pattern(tmp_path):
 
     # Q1: Comparing Scenarios
     logging.info("\n--- Query 1: Scenario Comparison ---")
-    with Session(tracker.engine) as session:
-        query = (
-            select(
-                VPerson.consist_scenario_id.label("scenario_id"),
-                VPerson.consist_year,
-                func.avg(VPerson.number_of_trips).label("avg_trips"),
-            )
-            .select_from(VPerson)
-            .where(VPerson.consist_scenario_id.in_(["baseline", "high_gas"]))
-            .group_by(VPerson.consist_scenario_id, VPerson.consist_year)
-            .order_by("scenario_id", "consist_year")
+    query = (
+        select(
+            VPerson.consist_scenario_id.label("scenario_id"),
+            VPerson.consist_year,
+            func.avg(VPerson.number_of_trips).label("avg_trips"),
         )
+        .select_from(VPerson)
+        .where(VPerson.consist_scenario_id.in_(["baseline", "high_gas"]))
+        .group_by(VPerson.consist_scenario_id, VPerson.consist_year)
+        .order_by("scenario_id", "consist_year")
+    )
+    results = consist.run_query(query, tracker=tracker)
+    for r in results:
+        logging.info(f"{r.scenario_id:<20} {r.consist_year}: {r.avg_trips:.2f}")
 
-        results = session.exec(query).all()
-        for r in results:
-            logging.info(f"{r.scenario_id:<20} {r.consist_year}: {r.avg_trips:.2f}")
+    assert len(results) == 4
 
-        assert len(results) == 4
-
-        # Validation Logic
-        res_map = {(r.scenario_id, r.consist_year): r.avg_trips for r in results}
-        assert res_map[("high_gas", 2030)] < res_map[("baseline", 2030)]
+    # Validation Logic
+    res_map = {(r.scenario_id, r.consist_year): r.avg_trips for r in results}
+    assert res_map[("high_gas", 2030)] < res_map[("baseline", 2030)]
 
     # Q2: Complex Join
     logging.info("\n--- Query 2: Trips by Region ---")
@@ -167,3 +165,72 @@ def test_pilates_header_pattern(tmp_path):
 
     df = consist.load(person_art, tracker=tracker)
     assert len(df) == 300
+
+
+def test_pilates_header_pattern_api(tmp_path):
+    """
+    Same workflow as above, but exercising the top-level API shortcuts.
+    """
+    run_dir = tmp_path / "runs_api"
+    db_path = str(tmp_path / "provenance_api.duckdb")
+    tracker = Tracker(run_dir=run_dir, db_path=db_path, schemas=[Household, Person])
+    tracker.identity.hashing_strategy = "fast"
+
+    years = [2025, 2035]
+    scenarios = [("baseline_api", 10, "cold"), ("high_gas_api", 5, "hot")]
+
+    rng = np.random.default_rng(7)
+    n_hh = 60
+    n_per = 200
+
+    for name, base_trips, mode in scenarios:
+        with consist.scenario(
+            name,
+            tracker=tracker,
+            model="pilates_orchestrator",
+            tags=["scenario_header"],
+        ) as sc:
+            with sc.step(name="pop_synth", run_id=f"{name}_init", tags=["init"]):
+                df_hh = pd.DataFrame(
+                    {
+                        "household_id": np.arange(n_hh),
+                        "region": rng.choice(["North", "South", "East"], size=n_hh),
+                        "income_segment": rng.choice(["Low", "Med", "High"], size=n_hh),
+                    }
+                )
+                consist.log_dataframe(df_hh, key="households", schema=Household)
+
+            for year in years:
+                with sc.step(
+                    name="travel_demand",
+                    run_id=f"{name}_{year}",
+                    year=year,
+                    tags=["simulation"],
+                ):
+                    trips = rng.poisson(lam=base_trips, size=n_per)
+                    df_per = pd.DataFrame(
+                        {
+                            "person_id": np.arange(n_per),
+                            "household_id": rng.integers(0, n_hh, size=n_per),
+                            "age": rng.integers(18, 80, size=n_per),
+                            "number_of_trips": trips,
+                        }
+                    )
+                    consist.log_dataframe(
+                        df_per, key="persons", schema=Person, direction="output"
+                    )
+
+    target_run = consist.find_run(tracker=tracker, parent_id="baseline_api", year=2035)
+    assert target_run is not None
+    assert target_run.year == 2035
+    assert target_run.model_name == "travel_demand"
+
+    runs_by_year = consist.find_runs(
+        tracker=tracker, parent_id="baseline_api", index_by="year"
+    )
+    assert runs_by_year[2035].id == target_run.id
+
+    artifacts = tracker.get_artifacts_for_run(target_run.id)
+    person_art = artifacts.outputs["persons"]
+    df = consist.load(person_art, tracker=tracker)
+    assert len(df) == n_per

@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Optional, Union, Any, Type, Iterable, Dict, TYPE_CHECKING
 
 import pandas as pd
+import tempfile
 from sqlalchemy import text
 
 # Internal imports
@@ -28,7 +29,7 @@ except ImportError:
 # In consist/api.py
 
 from typing import TypeVar
-from sqlmodel import SQLModel
+from sqlmodel import SQLModel, Session
 
 T = TypeVar("T", bound=SQLModel)
 
@@ -42,6 +43,40 @@ def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
 
 
 # --- Core Access ---
+
+
+@contextmanager
+def scenario(name: str, tracker: Optional["Tracker"] = None, **kwargs: Any):
+    """
+    Proxy for Tracker.scenario for ergonomic top-level usage.
+
+    Example:
+        with consist.scenario("baseline", model="pilates_orchestrator"):
+            ...
+    """
+    tr = tracker or current_tracker()
+    with tr.scenario(name, **kwargs) as sc:
+        yield sc
+
+
+@contextmanager
+def single_step_scenario(
+    name: str,
+    step_name: Optional[str] = None,
+    tracker: Optional["Tracker"] = None,
+    **kwargs: Any,
+):
+    """
+    Convenience wrapper: create a scenario with a single step.
+
+    Example:
+        with consist.single_step_scenario("baseline_2025", model="travel_demand") as step:
+            ...  # do work inside the sole step
+    """
+    tr = tracker or current_tracker()
+    with tr.scenario(name, **kwargs) as sc:
+        with sc.step(step_name or name):
+            yield sc
 
 
 def current_tracker() -> "Tracker":
@@ -168,6 +203,110 @@ def ingest(
     )
 
 
+def log_dataframe(
+    df: pd.DataFrame,
+    key: str,
+    schema: Optional[Type[SQLModel]] = None,
+    direction: str = "output",
+    tracker: Optional["Tracker"] = None,
+    path: Optional[Union[str, Path]] = None,
+    driver: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
+    **to_file_kwargs: Any,
+) -> Artifact:
+    """
+    Convenience helper: write a DataFrame to disk, log it, and optionally ingest.
+
+    Example:
+        art = consist.log_dataframe(df, key="persons", schema=Person)
+    """
+    tr = tracker or current_tracker()
+    # Resolve path and driver
+    if path is None:
+        base_dir = getattr(tr, "run_dir", None) or Path(tempfile.mkdtemp())
+        resolved_path = Path(base_dir) / f"{key}.{driver or 'parquet'}"
+    else:
+        resolved_path = Path(path)
+
+    inferred_driver = driver
+    if inferred_driver is None:
+        suffix = resolved_path.suffix.lower().lstrip(".")
+        inferred_driver = suffix or "parquet"
+
+    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    if inferred_driver == "parquet":
+        df.to_parquet(resolved_path, **to_file_kwargs)
+    elif inferred_driver == "csv":
+        df.to_csv(resolved_path, index=False, **to_file_kwargs)
+    else:
+        raise ValueError(f"Unsupported driver for log_dataframe: {inferred_driver}")
+
+    meta_payload = meta or {}
+    art = tr.log_artifact(
+        resolved_path, key=key, direction=direction, schema=schema, **meta_payload
+    )
+    if schema is not None:
+        tr.ingest(art, df, schema=schema)
+    return art
+
+
+def register_views(*models: Type[SQLModel]) -> Dict[str, Type[SQLModel]]:
+    """
+    Create view models for the provided SQLModel schemas on the active tracker.
+
+    Returns a dict keyed by model name for quick access.
+    """
+    return {m.__name__: create_view_model(m) for m in models}
+
+
+def find_run(tracker: Optional["Tracker"] = None, **filters: Any) -> Optional[Run]:
+    """
+    Proxy to Tracker.find_run for quick querying.
+
+    Example:
+        run = consist.find_run(parent_id="baseline", year=2030)
+    """
+    tr = tracker or current_tracker()
+    return tr.find_run(**filters)
+
+
+def find_runs(tracker: Optional["Tracker"] = None, **filters: Any):
+    """
+    Proxy to Tracker.find_runs for quick querying.
+
+    Example:
+        runs_by_year = consist.find_runs(parent_id="baseline", index_by="year")
+    """
+    tr = tracker or current_tracker()
+    return tr.find_runs(**filters)
+
+
+@contextmanager
+def db_session(tracker: Optional["Tracker"] = None) -> Session:
+    """
+    Context manager for a SQLModel Session on the active tracker engine.
+
+    Example:
+        with consist.db_session() as session:
+            results = session.exec(query).all()
+    """
+    tr = tracker or current_tracker()
+    with Session(tr.engine) as session:
+        yield session
+
+
+def run_query(query: Any, tracker: Optional["Tracker"] = None) -> list:
+    """
+    Execute a SQLModel/SQLAlchemy query against the active tracker engine.
+
+    Example:
+        results = consist.run_query(select(Model), tracker=my_tracker)
+    """
+    tr = tracker or current_tracker()
+    with Session(tr.engine) as session:
+        return session.exec(query).all()
+
+
 @contextmanager
 def capture_outputs(
     directory: Union[str, Path], pattern: str = "*", recursive: bool = False
@@ -275,8 +414,16 @@ def load(
     else:
         path = artifact.abs_path
 
-    load_kwargs = artifact.meta.copy()
-    load_kwargs.update(kwargs)
+    # Only pass caller-provided kwargs to the loader; artifact.meta can contain
+    # flags (e.g., schema_name) not accepted by pandas/xarray readers.
+    load_kwargs = dict(kwargs)
+
+    # Driver-specific hints from metadata
+    if artifact.driver == "h5_table":
+        if "table_path" not in load_kwargs:
+            table_path = artifact.meta.get("table_path") or artifact.meta.get("sub_path")
+            if table_path:
+                load_kwargs["table_path"] = table_path
 
     # 3. Try Disk Load (Priority 1)
     if Path(path).exists():
