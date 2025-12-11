@@ -1,16 +1,17 @@
 """TODO: add unit coverage for query/helper utilities when expanded (tools.queries, pagination)."""
-import pandas as pd
-from typer.testing import CliRunner
-from unittest.mock import patch, MagicMock
-import pytest
-from sqlmodel import Session, SQLModel, create_engine
-from datetime import datetime
 import uuid
+from datetime import datetime
+from unittest.mock import MagicMock, patch
+
+import pandas as pd
+import pytest
+from sqlmodel import SQLModel, Session, create_engine
+from typer.testing import CliRunner
 
 from consist import Tracker
-from consist.cli import app
-from consist.models.run import Run, RunArtifactLink
+from consist.cli import ConsistShell, app
 from consist.models.artifact import Artifact
+from consist.models.run import Run, RunArtifactLink
 
 runner = CliRunner()
 
@@ -203,6 +204,23 @@ def test_runs_filter_by_status(mock_db_session):
         assert "run1" not in result.stdout
 
 
+def test_show_uses_renderer(mock_db_session):
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker") as m_tracker,
+        patch("consist.cli._render_run_details") as render_details,
+    ):
+        tracker = MagicMock()
+        tracker.engine = mock_db_session.get_bind()
+        tracker.get_run.return_value = MagicMock()
+        m_tracker.return_value = tracker
+
+        result = runner.invoke(app, ["show", "run1"])
+
+        assert result.exit_code == 0
+        render_details.assert_called_once()
+
+
 def test_artifacts_with_db(mock_db_session, tmp_path):
     with (
         patch("pathlib.Path.exists", return_value=True),
@@ -300,3 +318,102 @@ def test_preview_command_unsupported_driver(mock_db_session, tmp_path):
         result = runner.invoke(app, ["preview", "params"])
         assert result.exit_code == 1
         assert "Preview is not supported for driver 'json'" in result.stdout
+
+
+def test_summary_no_runs_exits_cleanly(tmp_path):
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker") as m_tracker,
+        patch("consist.cli.queries.get_summary") as m_summary,
+    ):
+        tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
+        tracker.db.engine = create_engine("duckdb:///:memory:")
+        m_tracker.return_value = tracker
+        m_summary.return_value = {
+            "total_runs": 0,
+            "completed_runs": 0,
+            "failed_runs": 0,
+            "total_artifacts": 0,
+            "first_run_at": datetime(2025, 1, 1),
+            "last_run_at": datetime(2025, 1, 1),
+            "models_distribution": [],
+        }
+
+        result = runner.invoke(app, ["summary"])
+        assert result.exit_code == 0
+        assert "No runs found in the database" in result.stdout
+
+
+# --- Shell command tests ---
+
+
+def test_shell_command_invokes_cmdloop():
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker") as m_tracker,
+        patch("consist.cli.ConsistShell") as m_shell,
+    ):
+        tracker = MagicMock()
+        m_tracker.return_value = tracker
+        result = runner.invoke(app, ["shell", "--db-path", "mock.db"])
+        assert result.exit_code == 0
+        m_shell.assert_called_once_with(tracker)
+        m_shell.return_value.cmdloop.assert_called_once()
+
+
+def test_shell_runs_parsing_calls_helper():
+    tracker = MagicMock()
+    shell = ConsistShell(tracker)
+    with patch("consist.cli._render_runs_table") as render:
+        shell.do_runs("--limit 5 --model create --status failed --tag dev --tag prod")
+    render.assert_called_once_with(tracker, 5, "create", ["dev", "prod"], "failed")
+
+
+def test_shell_artifacts_checks_existence(capsys):
+    tracker = MagicMock()
+    tracker.get_run.return_value = None
+    shell = ConsistShell(tracker)
+    shell.do_artifacts("missing_run")
+    out = capsys.readouterr().out
+    assert "not found" in out
+
+
+def test_shell_artifacts_calls_renderer():
+    tracker = MagicMock()
+    tracker.get_run.return_value = MagicMock()
+    shell = ConsistShell(tracker)
+    with patch("consist.cli._render_artifacts_table") as render:
+        shell.do_artifacts("run1")
+    render.assert_called_once_with(tracker, "run1")
+
+
+def test_shell_summary_uses_renderer():
+    tracker = MagicMock()
+    tracker.engine = MagicMock()
+    shell = ConsistShell(tracker)
+    fake_summary = {"total_runs": 1}
+    with (
+        patch("consist.cli.Session") as session_cls,
+        patch("consist.cli.queries.get_summary", return_value=fake_summary),
+        patch("consist.cli._render_summary") as render,
+    ):
+        session_ctx = MagicMock()
+        session_cls.return_value.__enter__.return_value = session_ctx
+        shell.do_summary("")
+        render.assert_called_once_with(fake_summary)
+
+
+def test_shell_scenarios_limit_parsing_flag():
+    tracker = MagicMock()
+    shell = ConsistShell(tracker)
+    with patch("consist.cli._render_scenarios") as render:
+        shell.do_scenarios("--limit 5")
+    render.assert_called_once_with(tracker, 5)
+
+
+def test_shell_scenarios_limit_parsing_positional():
+    tracker = MagicMock()
+    shell = ConsistShell(tracker)
+    with patch("consist.cli._render_scenarios") as render:
+        shell.do_scenarios("3")
+    render.assert_called_once_with(tracker, 3)

@@ -7,15 +7,18 @@ It offers functions like listing recent runs, providing a quick overview
 of the execution history and status of various models and workflows.
 """
 
-from typing import Dict, Any, Optional, List
-import typer
+import cmd
+import shlex
 from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import pandas as pd
+import typer
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
-from rich.panel import Panel
 from sqlmodel import Session
-import pandas as pd
 
 from consist import Tracker
 from consist.tools import queries
@@ -62,6 +65,192 @@ def get_tracker(db_path: Optional[str] = None) -> Tracker:
         console.print("[yellow]Hint: Use --db-path to specify location or set CONSIST_DB environment variable[/yellow]")
         raise typer.Exit(1)
     return Tracker(run_dir=Path("."), db_path=resolved_path)
+
+
+def _render_runs_table(
+    tracker: Tracker,
+    limit: int = 10,
+    model_name: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    status: Optional[str] = None,
+) -> None:
+    """Shared logic for displaying runs."""
+    with Session(tracker.engine) as session:
+        results = queries.get_runs(
+            session, limit=limit, model_name=model_name, tags=tags, status=status
+        )
+
+        title_parts = ["Recent Runs"]
+        if model_name:
+            title_parts.append(f"for model [green]{model_name}[/green]")
+        if tags:
+            title_parts.append(f"with tags [yellow]{', '.join(tags)}[/yellow]")
+        if status:
+            title_parts.append(f"with status [bold]{status}[/bold]")
+
+        table = Table(title=" ".join(title_parts))
+        table.add_column("ID", style="cyan")
+        table.add_column("Model", style="green")
+        table.add_column("Status")
+        table.add_column("Tags", style="yellow")
+        table.add_column("Created", style="dim")
+        table.add_column("Duration (s)", style="magenta")
+
+        for run in results:
+            status_style = "green" if run.status == "completed" else "red"
+            duration = f"{run.duration_seconds:.2f}" if run.duration_seconds else "N/A"
+            tags_str = ", ".join(run.tags) if run.tags else ""
+            table.add_row(
+                run.id,
+                run.model_name,
+                f"[{status_style}]{run.status}[/]",
+                tags_str,
+                run.created_at.strftime("%Y-%m-%d %H:%M"),
+                duration,
+            )
+
+        console.print(table)
+
+
+def _render_artifacts_table(tracker: Tracker, run_id: str) -> None:
+    """Shared logic for displaying artifacts for a run."""
+    run_artifacts = tracker.get_artifacts_for_run(run_id)
+
+    table = Table(title=f"Artifacts for Run [cyan]{run_id}[/cyan]")
+    table.add_column("Direction", style="yellow")
+    table.add_column("Key", style="green")
+    table.add_column("URI", style="dim")
+    table.add_column("Driver")
+    table.add_column("Hash", style="magenta")
+
+    inputs = sorted(run_artifacts.inputs.values(), key=lambda x: x.key)
+    outputs = sorted(run_artifacts.outputs.values(), key=lambda x: x.key)
+
+    for artifact in inputs:
+        table.add_row(
+            "[blue]Input[/blue]",
+            artifact.key,
+            artifact.uri,
+            artifact.driver,
+            artifact.hash[:12] if artifact.hash else "N/A",
+        )
+
+    if inputs and outputs:
+        table.add_section()
+
+    for artifact in outputs:
+        table.add_row(
+            "[green]Output[/green]",
+            artifact.key,
+            artifact.uri,
+            artifact.driver,
+            artifact.hash[:12] if artifact.hash else "N/A",
+        )
+
+    console.print(table)
+
+
+def _render_run_details(run: Any) -> None:
+    """Shared logic for displaying run details, config, and metadata."""
+    scenario_value = getattr(run, "scenario_id", None)
+
+    info = Table.grid(padding=(0, 2))
+    info.add_column(style="bold cyan")
+    info.add_column()
+
+    info.add_row("ID", run.id)
+    info.add_row("Model", run.model_name)
+    info.add_row("Status", f"[{'green' if run.status == 'completed' else 'red'}]{run.status}[/]")
+    info.add_row("Parent", run.parent_run_id or "[dim]None[/dim]")
+    info.add_row("Scenario", scenario_value or "[dim]None[/dim]")
+    if run.year:
+        info.add_row("Year", str(run.year))
+    info.add_row("Created", run.created_at.strftime("%Y-%m-%d %H:%M:%S"))
+    if run.duration_seconds:
+        info.add_row("Duration", f"{run.duration_seconds:.2f}s")
+    if run.tags:
+        info.add_row("Tags", ", ".join(run.tags))
+    info.add_row("Signature", run.signature[:16] + "..." if run.signature else "[dim]None[/dim]")
+
+    console.print(Panel(info, title="Run Details", border_style="cyan"))
+
+    config_data = getattr(run, "config", None)
+    if config_data:
+        import json
+        console.print("\n[bold]Configuration:[/]")
+        console.print(Panel(json.dumps(config_data, indent=2), border_style="dim"))
+
+    if run.meta:
+        console.print("\n[bold]Metadata:[/]")
+        meta_table = Table(show_header=False, box=None)
+        meta_table.add_column(style="yellow")
+        meta_table.add_column()
+        for key, value in run.meta.items():
+            meta_table.add_row(f"  {key}", str(value))
+        console.print(meta_table)
+
+
+def _render_summary(summary_data: Dict[str, Any]) -> None:
+    """Shared logic for displaying database summary and model breakdown."""
+    if summary_data["total_runs"] == 0:
+        console.print(
+            Panel("[yellow]No runs found in the database.[/yellow]", title="Summary")
+        )
+        return
+
+    panel_content = (
+        f"[bold]Runs[/]: {summary_data['total_runs']} "
+        f"([green]{summary_data['completed_runs']} completed[/], [red]{summary_data['failed_runs']} failed[/])\n"
+        f"[bold]Artifacts[/]: {summary_data['total_artifacts']}\n"
+        f"[bold]Date Range[/]: {summary_data['first_run_at'].strftime('%Y-%m-%d')} to {summary_data['last_run_at'].strftime('%Y-%m-%d')}"
+    )
+    console.print(Panel(panel_content, title="Database Summary", expand=False))
+
+    model_table = Table(title="Runs per Model")
+    model_table.add_column("Model Name", style="green")
+    model_table.add_column("Run Count", style="magenta")
+    for model, count in summary_data["models_distribution"]:
+        model_table.add_row(model, str(count))
+
+    console.print(model_table)
+
+
+def _render_scenarios(tracker: Tracker, limit: int = 20) -> None:
+    """Shared logic for displaying scenario overview."""
+    with Session(tracker.engine) as session:
+        from consist.models.run import Run
+        from sqlmodel import func, select
+
+        query = (
+            select(
+                Run.scenario_id,
+                func.count(Run.id).label("run_count"),
+                func.min(Run.created_at).label("first_run"),
+                func.max(Run.created_at).label("last_run"),
+            )
+            .where(Run.scenario_id.is_not(None))
+            .group_by(Run.scenario_id)
+            .order_by(func.max(Run.created_at).desc())
+            .limit(limit)
+        )
+
+        results = session.exec(query).all()
+
+    table = Table(title="Scenarios")
+    table.add_column("Scenario ID", style="cyan")
+    table.add_column("Runs", style="magenta")
+    table.add_column("First Run", style="dim")
+    table.add_column("Last Run", style="green")
+
+    for row in results:
+        table.add_row(
+            row.scenario_id,
+            str(row.run_count),
+            row.first_run.strftime("%Y-%m-%d %H:%M"),
+            row.last_run.strftime("%Y-%m-%d %H:%M"),
+        )
+
+    console.print(table)
 
 
 @app.command()
@@ -165,42 +354,7 @@ def scenarios(
 ) -> None:
     """List all scenarios and their run counts."""
     tracker = get_tracker(db_path)
-
-    with Session(tracker.engine) as session:
-        from consist.models.run import Run
-        from sqlmodel import select, func, distinct
-
-        # Get scenarios with counts
-        query = (
-            select(
-                Run.scenario_id,
-                func.count(Run.id).label("run_count"),
-                func.min(Run.created_at).label("first_run"),
-                func.max(Run.created_at).label("last_run"),
-            )
-            .where(Run.scenario_id.is_not(None))
-            .group_by(Run.scenario_id)
-            .order_by(func.max(Run.created_at).desc())
-            .limit(limit)
-        )
-
-        results = session.exec(query).all()
-
-        table = Table(title="Scenarios")
-        table.add_column("Scenario ID", style="cyan")
-        table.add_column("Runs", style="magenta")
-        table.add_column("First Run", style="dim")
-        table.add_column("Last Run", style="green")
-
-        for row in results:
-            table.add_row(
-                row.scenario_id,
-                str(row.run_count),
-                row.first_run.strftime("%Y-%m-%d %H:%M"),
-                row.last_run.strftime("%Y-%m-%d %H:%M"),
-            )
-
-        console.print(table)
+    _render_scenarios(tracker, limit)
 
 
 @app.command()
@@ -263,42 +417,7 @@ def runs(
     Lists the most recent Consist runs recorded in the provenance database.
     """
     tracker = get_tracker(db_path)
-
-    with Session(tracker.engine) as session:
-        results = queries.get_runs(
-            session, limit=limit, model_name=model_name, tags=tag, status=status
-        )
-
-        title_parts = ["Recent Runs"]
-        if model_name:
-            title_parts.append(f"for model [green]{model_name}[/green]")
-        if tag:
-            title_parts.append(f"with tags [yellow]{', '.join(tag)}[/yellow]")
-        if status:
-            title_parts.append(f"with status [bold]{status}[/bold]")
-
-        table = Table(title=" ".join(title_parts))
-        table.add_column("ID", style="cyan")
-        table.add_column("Model", style="green")
-        table.add_column("Status")
-        table.add_column("Tags", style="yellow")
-        table.add_column("Created", style="dim")
-        table.add_column("Duration (s)", style="magenta")
-
-        for run in results:
-            status_style = "green" if run.status == "completed" else "red"
-            duration = f"{run.duration_seconds:.2f}" if run.duration_seconds else "N/A"
-            tags_str = ", ".join(run.tags) if run.tags else ""
-            table.add_row(
-                run.id,
-                run.model_name,
-                f"[{status_style}]{run.status}[/]",
-                tags_str,
-                run.created_at.strftime("%Y-%m-%d %H:%M"),
-                duration,
-            )
-
-        console.print(table)
+    _render_runs_table(tracker, limit, model_name, tag, status)
 
 
 @app.command()
@@ -315,42 +434,7 @@ def artifacts(
         console.print(f"[red]Run with ID '{run_id}' not found.[/red]")
         raise typer.Exit(1)
 
-    # NEW: Returns RunArtifacts object
-    run_artifacts = tracker.get_artifacts_for_run(run_id)
-
-    table = Table(title=f"Artifacts for Run [cyan]{run_id}[/cyan]")
-    table.add_column("Direction", style="yellow")
-    table.add_column("Key", style="green")
-    table.add_column("URI", style="dim")
-    table.add_column("Driver")
-    table.add_column("Hash", style="magenta")
-
-    # NEW: Access via .inputs and .outputs dicts
-    inputs = sorted(run_artifacts.inputs.values(), key=lambda x: x.key)
-    outputs = sorted(run_artifacts.outputs.values(), key=lambda x: x.key)
-
-    for artifact in inputs:
-        table.add_row(
-            "[blue]Input[/blue]",
-            artifact.key,
-            artifact.uri,
-            artifact.driver,
-            artifact.hash[:12] if artifact.hash else "N/A",
-        )
-
-    if inputs and outputs:
-        table.add_section()
-
-    for artifact in outputs:
-        table.add_row(
-            "[green]Output[/green]",
-            artifact.key,
-            artifact.uri,
-            artifact.driver,
-            artifact.hash[:12] if artifact.hash else "N/A",
-        )
-
-    console.print(table)
+    _render_artifacts_table(tracker, run_id)
 
 
 def _build_lineage_tree(
@@ -425,27 +509,9 @@ def summary(
     with Session(tracker.engine) as session:
         summary_data = queries.get_summary(session)
 
+    _render_summary(summary_data)
     if summary_data["total_runs"] == 0:
-        console.print(
-            Panel("[yellow]No runs found in the database.[/yellow]", title="Summary")
-        )
         raise typer.Exit()
-
-    panel_content = (
-        f"[bold]Runs[/]: {summary_data['total_runs']} "
-        f"([green]{summary_data['completed_runs']} completed[/], [red]{summary_data['failed_runs']} failed[/])\n"
-        f"[bold]Artifacts[/]: {summary_data['total_artifacts']}\n"
-        f"[bold]Date Range[/]: {summary_data['first_run_at'].strftime('%Y-%m-%d')} to {summary_data['last_run_at'].strftime('%Y-%m-%d')}"
-    )
-    console.print(Panel(panel_content, title="Database Summary", expand=False))
-
-    model_table = Table(title="Runs per Model")
-    model_table.add_column("Model Name", style="green")
-    model_table.add_column("Run Count", style="magenta")
-    for model, count in summary_data["models_distribution"]:
-        model_table.add_row(model, str(count))
-
-    console.print(model_table)
 
 
 @app.command()
@@ -499,6 +565,124 @@ def preview(
     console.print(table)
 
 
+class ConsistShell(cmd.Cmd):
+    """Interactive shell for exploring Consist provenance."""
+
+    intro = "Welcome to Consist Shell. Type help or ? to list commands.\n"
+    prompt = "(consist) "
+
+    def __init__(self, tracker: Tracker):
+        super().__init__()
+        self.tracker = tracker
+
+    def do_runs(self, arg: str) -> None:
+        """List recent runs. Usage: runs [--limit N] [--model NAME] [--status STATUS] [--tag TAG]"""
+        try:
+            args = shlex.split(arg)
+            limit = 10
+            model_name = None
+            status = None
+            tags: List[str] = []
+
+            i = 0
+            while i < len(args):
+                if args[i] == "--limit" and i + 1 < len(args):
+                    limit = int(args[i + 1])
+                    i += 2
+                elif args[i] == "--model" and i + 1 < len(args):
+                    model_name = args[i + 1]
+                    i += 2
+                elif args[i] == "--status" and i + 1 < len(args):
+                    status = args[i + 1]
+                    i += 2
+                elif args[i] == "--tag" and i + 1 < len(args):
+                    tags.append(args[i + 1])
+                    i += 2
+                else:
+                    i += 1
+
+            _render_runs_table(self.tracker, limit, model_name, tags if tags else None, status)
+        except Exception as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+
+    def do_show(self, arg: str) -> None:
+        """Show details for a run. Usage: show <run_id>"""
+        if not arg.strip():
+            console.print("[red]Error: run_id required[/red]")
+            return
+
+        try:
+            run = self.tracker.get_run(arg.strip())
+            if not run:
+                console.print(f"[red]Run '{arg.strip()}' not found.[/red]")
+                return
+            _render_run_details(run)
+        except Exception as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+
+    def do_artifacts(self, arg: str) -> None:
+        """Show artifacts for a run. Usage: artifacts <run_id>"""
+        if not arg.strip():
+            console.print("[red]Error: run_id required[/red]")
+            return
+
+        try:
+            run = self.tracker.get_run(arg.strip())
+            if not run:
+                console.print(f"[red]Run '{arg.strip()}' not found.[/red]")
+                return
+            _render_artifacts_table(self.tracker, arg.strip())
+        except Exception as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+
+    def do_summary(self, arg: str) -> None:
+        """Display database summary. Usage: summary"""
+        try:
+            with Session(self.tracker.engine) as session:
+                summary_data = queries.get_summary(session)
+            _render_summary(summary_data)
+        except Exception as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+
+    def do_scenarios(self, arg: str) -> None:
+        """List scenarios. Usage: scenarios [--limit N]"""
+        args = shlex.split(arg)
+        limit = 20
+
+        if args:
+            try:
+                if args[0] == "--limit" and len(args) > 1:
+                    limit = int(args[1])
+                else:
+                    limit = int(args[0])
+            except ValueError:
+                console.print("[red]Error: limit must be an integer[/red]")
+                return
+
+        try:
+            _render_scenarios(self.tracker, limit)
+        except Exception as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+
+    def do_exit(self, arg: str) -> bool:
+        """Exit the shell."""
+        console.print("Goodbye!")
+        return True
+
+    def do_quit(self, arg: str) -> bool:
+        """Exit the shell (alias)."""
+        return self.do_exit(arg)
+
+    def do_EOF(self, arg: str) -> bool:
+        """Handle Ctrl+D."""
+        print()
+        return self.do_exit(arg)
+
+    def emptyline(self) -> None:
+        """Do nothing on empty line (prevent repeating last command)."""
+        pass
+
+
 @app.command()
 def show(
         run_id: str = typer.Argument(..., help="The ID of the run to inspect."),
@@ -511,42 +695,22 @@ def show(
         console.print(f"[red]Run '{run_id}' not found.[/red]")
         raise typer.Exit(1)
 
-    # Build a rich display
-    info = Table.grid(padding=(0, 2))
-    info.add_column(style="bold cyan")
-    info.add_column()
+    _render_run_details(run)
 
-    info.add_row("ID", run.id)
-    info.add_row("Model", run.model_name)
-    info.add_row("Status", f"[{'green' if run.status == 'completed' else 'red'}]{run.status}[/]")
-    info.add_row("Parent", run.parent_run_id or "[dim]None[/dim]")
-    info.add_row("Scenario", run.scenario_id or "[dim]None[/dim]")
-    if run.year:
-        info.add_row("Year", str(run.year))
-    info.add_row("Created", run.created_at.strftime("%Y-%m-%d %H:%M:%S"))
-    if run.duration_seconds:
-        info.add_row("Duration", f"{run.duration_seconds:.2f}s")
-    if run.tags:
-        info.add_row("Tags", ", ".join(run.tags))
-    info.add_row("Signature", run.signature[:16] + "..." if run.signature else "[dim]None[/dim]")
 
-    console.print(Panel(info, title=f"Run Details", border_style="cyan"))
-
-    # Config section
-    if run.config:
-        import json
-        console.print("\n[bold]Configuration:[/]")
-        console.print(Panel(json.dumps(run.config, indent=2), border_style="dim"))
-
-    # Metadata section (cache info, etc.)
-    if run.meta:
-        console.print("\n[bold]Metadata:[/]")
-        meta_table = Table(show_header=False, box=None)
-        meta_table.add_column(style="yellow")
-        meta_table.add_column()
-        for key, value in run.meta.items():
-            meta_table.add_row(f"  {key}", str(value))
-        console.print(meta_table)
+@app.command()
+def shell(
+    db_path: str = typer.Option(
+        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    ),
+) -> None:
+    """
+    Start an interactive shell for exploring the provenance database.
+    The database is loaded once and reused across shell commands.
+    """
+    tracker = get_tracker(db_path)
+    console.print(f"[green]✓ Loaded database: {db_path}[/green]")
+    ConsistShell(tracker).cmdloop()
 
 
 if __name__ == "__main__":

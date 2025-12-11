@@ -85,7 +85,9 @@ def get_artifact_preview(
 
     # Use the universal loader to get the data
     try:
-        data = tracker.load(artifact)
+        from consist import load as load_artifact
+
+        data = load_artifact(artifact, tracker=tracker)
         if isinstance(data, pd.DataFrame):
             return data.head(limit)
     except Exception:

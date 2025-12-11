@@ -1,110 +1,140 @@
-"""TODO: add future end-to-end variants (CLI + web API once implemented)."""
-import logging
 import json
+from pathlib import Path
+from unittest.mock import patch
+
+import pandas as pd
 from sqlmodel import Session, select
+from typer.testing import CliRunner
 
-# Note: Because of 'src' layout, this import works if environment is set up right
-from consist.core.tracker import Tracker
-from consist.models.run import Run
-from consist.models.artifact import Artifact
+from consist.cli import app as cli_app
 from consist.core.identity import IdentityManager
+from consist.core.tracker import Tracker
+from consist.models.artifact import Artifact
+from consist.models.run import Run
 
 
-def test_dual_write_workflow(tracker: Tracker):
+def _write_csv(path: Path, rows: int = 5) -> None:
+    df = pd.DataFrame({"value": range(rows), "category": ["a"] * rows})
+    df.to_csv(path, index=False)
+
+
+def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     """
-    Tests the end-to-end "dual-write" functionality of the `Tracker`,
-    including automatic identity hashing (Config & Git).
-
-    This test simulates a complete Consist workflow, from initializing the `Tracker`
-    to logging input/output artifacts, and verifies that provenance information is
-    correctly recorded in both the human-readable JSON file (`consist.json`)
-    and the analytical DuckDB database. It ensures that the primary record-keeping
-    mechanisms of Consist are functioning in harmony and that key identity hashes
-    are correctly computed and stored.
-
-    What happens:
-    1. A `Tracker` is initialized with temporary paths for the run directory and database.
-    2. A configuration dictionary is defined, and its expected hash is manually computed
-       using `IdentityManager` for later verification.
-    3. A run context ("run_1") is started using `tracker.start_run`, simulating a model execution
-       with the defined configuration.
-    4. An input artifact (`land_use.csv`) and an output artifact (`trips.csv`) are logged
-       within the run.
-    5. The run completes successfully.
-
-    What's checked:
-    -   **JSON Log Verification**:
-        - The `consist.json` file is created in the run directory.
-        - Its contents are validated: the run ID, status ("completed"), presence of
-          one input and one output artifact, and the configuration.
-        - The `config_hash` and `git_hash` stored in the JSON match the expected values
-          (the `git_hash` is checked for existence and non-null status, as its exact
-          value depends on the Git environment).
-    -   **DuckDB Verification**:
-        - The DuckDB database is checked to ensure that one `Run` record with the
-          correct ID, `config_hash`, and `git_hash` was created.
-        - Two `Artifact` records (one input, one output) are found in the database.
+    End-to-end regression: scenario header + two steps, dual-write to JSON/DB,
+    and CLI introspection on the resulting provenance.
     """
-    # 3. Run a Fake Workflow
-    config = {"random_seed": 42, "scenario": "test"}
+    runner = CliRunner()
+    tracker.identity.hashing_strategy = "fast"
 
-    # Calculate what we expect the hash to be manually
-    expected_config_hash = IdentityManager().compute_config_hash(config)
+    scenario_id = "demo_scenario"
+    ingest_run_id = f"{scenario_id}_ingest"
+    transform_run_id = f"{scenario_id}_transform"
+    raw_path = run_dir / "raw.csv"
+    features_path = run_dir / "features.csv"
 
-    with tracker.start_run(run_id="run_1", model="test_model", config=config):
-        # Log an input
-        tracker.log_artifact(
-            path="/inputs/land_use.csv", key="land_use", direction="input"
-        )
+    with tracker.scenario(
+        scenario_id, config={"seed": 7}, tags=["e2e", "scenario_header"]
+    ) as scenario:
+        with scenario.step(
+            name="ingest",
+            run_id=ingest_run_id,
+            tags=["ingest"],
+            year=2024,
+        ):
+            _write_csv(raw_path, rows=6)
+            raw_art = tracker.log_artifact(
+                path=raw_path,
+                key="raw_table",
+                direction="output",
+                driver="csv",
+                meta={"rows": 6},
+            )
+            scenario.coupler.set("raw", raw_art)
 
-        # Log an output
-        tracker.log_artifact(
-            path=str(tracker.run_dir / "trips.csv"),
-            key="trips",
-            direction="output",
-            meta={"rows": 100},
-        )
+        with scenario.step(
+            name="transform",
+            run_id=transform_run_id,
+            tags=["transform"],
+            year=2025,
+            inputs=[scenario.coupler.get("raw")],
+        ):
+            df_raw = pd.read_csv(raw_path)
+            df_raw["value_doubled"] = df_raw["value"] * 2
+            df_raw.to_csv(features_path, index=False)
+            features_art = tracker.log_artifact(
+                path=features_path,
+                key="features",
+                direction="output",
+                driver="csv",
+                meta={"rows": len(df_raw)},
+            )
+            scenario.coupler.set("features", features_art)
 
-    # --- ASSERTION TIME ---
-
-    # 4. Check JSON (The Truth)
+    # JSON snapshot
     json_file = tracker.run_dir / "consist.json"
     assert json_file.exists(), "JSON log was not created!"
-
     with open(json_file) as f:
         data = json.load(f)
-
-    # Standard checks
-    assert data["run"]["id"] == "run_1"
+    assert data["run"]["id"] == scenario_id
     assert data["run"]["status"] == "completed"
-    assert len(data["inputs"]) == 1
-    assert len(data["outputs"]) == 1
-    assert data["config"]["random_seed"] == 42
-
-    # Hashing checks
-    assert (
-        data["run"]["config_hash"] == expected_config_hash
-    ), "Config hash mismatch in JSON"
-    assert "git_hash" in data["run"], "Git hash field missing in JSON"
-    # Note: git_hash might be 'no_git_module_found' or 'unknown' depending on environment,
-    # but it should not be None/Null.
+    assert len(data["outputs"]) >= 1
+    assert data["config"]["seed"] == 7
+    assert data["run"]["config_hash"] == IdentityManager().compute_config_hash(
+        {"seed": 7}
+    )
     assert data["run"]["git_hash"] is not None
 
-    logging.info(f"\nJSON Output content: {json.dumps(data, indent=2)}")
-
-    # 5. Check SQL (The Index)
+    # Database snapshot
     with Session(tracker.engine) as session:
-        # Check Run
         runs = session.exec(select(Run)).all()
-        assert len(runs) == 1
-        db_run = runs[0]
+        run_ids = {r.id for r in runs}
+        assert {scenario_id, ingest_run_id, transform_run_id} <= run_ids
+        assert all(r.status == "completed" for r in runs)
 
-        assert db_run.id == "run_1"
-        assert db_run.config_hash == expected_config_hash, "Config hash mismatch in DB"
-        assert db_run.git_hash is not None, "Git hash missing in DB"
-
-        # Check Artifacts
         artifacts = session.exec(select(Artifact)).all()
-        assert len(artifacts) == 2  # 1 input + 1 output
+        keys = {a.key for a in artifacts}
+        assert {"raw_table", "features"} <= keys
 
-        logging.info(f"\nDB Artifacts found: {[a.key for a in artifacts]}")
+        # Ensure parent linkage captured by scenario header
+        child_parents = {
+            r.id: r.parent_run_id for r in runs if r.id != scenario_id
+        }
+        assert child_parents[ingest_run_id] == scenario_id
+        assert child_parents[transform_run_id] == scenario_id
+
+    # CLI sanity: runs/show/artifacts/summary/preview
+    db_path = str(tracker.db_path)
+    with patch("consist.cli.get_tracker", return_value=tracker):
+        runs_result = runner.invoke(
+            cli_app, ["runs", "--db-path", db_path, "--limit", "5"]
+        )
+        assert runs_result.exit_code == 0
+        # Rich tables may truncate IDs; check the stable prefixes and model names.
+        assert scenario_id[:10] in runs_result.stdout
+        assert "transform" in runs_result.stdout
+
+        show_result = runner.invoke(
+            cli_app, ["show", transform_run_id, "--db-path", db_path]
+        )
+        assert show_result.exit_code == 0
+        assert transform_run_id in show_result.stdout
+        assert "Status" in show_result.stdout
+
+        artifacts_result = runner.invoke(
+            cli_app, ["artifacts", transform_run_id, "--db-path", db_path]
+        )
+        assert artifacts_result.exit_code == 0
+        assert "features" in artifacts_result.stdout
+        assert "raw_table" in artifacts_result.stdout
+
+        summary_result = runner.invoke(cli_app, ["summary", "--db-path", db_path])
+        assert summary_result.exit_code == 0
+        assert "Runs" in summary_result.stdout
+        assert "Artifacts" in summary_result.stdout
+
+        preview_result = runner.invoke(
+            cli_app, ["preview", "features", "--db-path", db_path, "--rows", "2"]
+        )
+        assert preview_result.exit_code == 0
+        assert "value" in preview_result.stdout
+        assert "value_doubled" in preview_result.stdout
