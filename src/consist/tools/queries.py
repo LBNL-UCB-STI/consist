@@ -79,17 +79,16 @@ def get_artifact_preview(
     if not artifact:
         return None
 
-    # We can only preview drivers we know how to load into a DataFrame
-    if artifact.driver not in ["parquet", "csv"]:
-        return None
-
-    # Use the universal loader to get the data
     try:
-        from consist import load as load_artifact
+        # Use the public API instead of assuming tracker.load exists
+        import consist
 
-        data = load_artifact(artifact, tracker=tracker)
+        data = consist.load(artifact, tracker=tracker)
         if isinstance(data, pd.DataFrame):
             return data.head(limit)
+    except FileNotFoundError:
+        # Propagate so CLI can give a precise message
+        raise
     except Exception:
         # Could fail if file is missing, etc.
         return None

@@ -110,7 +110,9 @@ class TestCreatedAtIso:
         parsed_dt = datetime.fromisoformat(iso_string)
         assert abs((parsed_dt - artifact.created_at).total_seconds()) < 0.001
 
-    def test_created_at_iso_from_database_roundtrip(self, tracker, engine, run_dir: Path):
+    def test_created_at_iso_from_database_roundtrip(
+        self, tracker, engine, run_dir: Path
+    ):
         test_file = run_dir / "artifact_db.csv"
         test_file.write_text("test\n")
 
@@ -143,7 +145,9 @@ class TestGetArtifactByUri:
         assert found.uri == uri
         assert found.key == "find_me"
 
-    def test_get_artifact_by_uri_finds_in_database(self, tracker, engine, run_dir: Path):
+    def test_get_artifact_by_uri_finds_in_database(
+        self, tracker, engine, run_dir: Path
+    ):
         test_file = run_dir / "db_search.csv"
         test_file.write_text("data\n")
 
@@ -228,7 +232,9 @@ class TestLogH5Container:
 
         assert container.key == "auto_named"
 
-    def test_log_h5_container_outside_run_context_raises_error(self, tracker, run_dir: Path):
+    def test_log_h5_container_outside_run_context_raises_error(
+        self, tracker, run_dir: Path
+    ):
         h5_file = run_dir / "error.h5"
         h5_file.write_text("h5 data")
 

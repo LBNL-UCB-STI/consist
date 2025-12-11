@@ -9,6 +9,7 @@ of the execution history and status of various models and workflows.
 
 import cmd
 import shlex
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -18,6 +19,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
+from sqlalchemy import select
 from sqlmodel import Session
 
 from consist import Tracker
@@ -26,9 +28,11 @@ from consist.tools import queries
 app = typer.Typer(rich_markup_mode="markdown")
 console = Console()
 
+
 def output_json(data: Any) -> None:
     """Helper to output data as JSON."""
     import json
+
     print(json.dumps(data, default=str, indent=2))
 
 
@@ -39,6 +43,7 @@ def find_db_path(explicit_path: Optional[str] = None) -> str:
 
     # Check environment variable
     import os
+
     if env_path := os.getenv("CONSIST_DB"):
         return env_path
 
@@ -62,7 +67,9 @@ def get_tracker(db_path: Optional[str] = None) -> Tracker:
     resolved_path = find_db_path(db_path)
     if not Path(resolved_path).exists():
         console.print(f"[red]Database not found at {resolved_path}[/red]")
-        console.print("[yellow]Hint: Use --db-path to specify location or set CONSIST_DB environment variable[/yellow]")
+        console.print(
+            "[yellow]Hint: Use --db-path to specify location or set CONSIST_DB environment variable[/yellow]"
+        )
         raise typer.Exit(1)
     return Tracker(run_dir=Path("."), db_path=resolved_path)
 
@@ -152,35 +159,58 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> None:
 
 def _render_run_details(run: Any) -> None:
     """Shared logic for displaying run details, config, and metadata."""
-    scenario_value = getattr(run, "scenario_id", None)
-
     info = Table.grid(padding=(0, 2))
     info.add_column(style="bold cyan")
     info.add_column()
 
-    info.add_row("ID", run.id)
-    info.add_row("Model", run.model_name)
-    info.add_row("Status", f"[{'green' if run.status == 'completed' else 'red'}]{run.status}[/]")
-    info.add_row("Parent", run.parent_run_id or "[dim]None[/dim]")
-    info.add_row("Scenario", scenario_value or "[dim]None[/dim]")
-    if run.year:
+    run_id = getattr(run, "id", None) or "[dim]unknown[/dim]"
+    model_name = getattr(run, "model_name", None) or "[dim]unknown[/dim]"
+    status_value = getattr(run, "status", None) or "unknown"
+    status_style = (
+        "green"
+        if status_value == "completed"
+        else "red" if status_value == "failed" else "yellow"
+    )
+
+    info.add_row("ID", run_id)
+    info.add_row("Model", model_name)
+    info.add_row("Status", f"[{status_style}]{status_value}[/]")
+
+    parent_id = getattr(run, "parent_run_id", None)
+    if parent_id:
+        info.add_row("Parent", parent_id)
+
+    scenario_value = getattr(run, "scenario_id", None)
+    if scenario_value:
+        info.add_row("Scenario", scenario_value)
+
+    if getattr(run, "year", None):
         info.add_row("Year", str(run.year))
-    info.add_row("Created", run.created_at.strftime("%Y-%m-%d %H:%M:%S"))
-    if run.duration_seconds:
+
+    created_at = getattr(run, "created_at", None)
+    if created_at:
+        info.add_row("Created", created_at.strftime("%Y-%m-%d %H:%M:%S"))
+
+    if getattr(run, "duration_seconds", None):
         info.add_row("Duration", f"{run.duration_seconds:.2f}s")
-    if run.tags:
+
+    if getattr(run, "tags", None):
         info.add_row("Tags", ", ".join(run.tags))
-    info.add_row("Signature", run.signature[:16] + "..." if run.signature else "[dim]None[/dim]")
+
+    signature = getattr(run, "signature", None)
+    if signature:
+        info.add_row("Signature", signature[:16] + "...")
 
     console.print(Panel(info, title="Run Details", border_style="cyan"))
 
     config_data = getattr(run, "config", None)
     if config_data:
         import json
+
         console.print("\n[bold]Configuration:[/]")
         console.print(Panel(json.dumps(config_data, indent=2), border_style="dim"))
 
-    if run.meta:
+    if getattr(run, "meta", None):
         console.print("\n[bold]Metadata:[/]")
         meta_table = Table(show_header=False, box=None)
         meta_table.add_column(style="yellow")
@@ -216,25 +246,30 @@ def _render_summary(summary_data: Dict[str, Any]) -> None:
 
 
 def _render_scenarios(tracker: Tracker, limit: int = 20) -> None:
-    """Shared logic for displaying scenario overview."""
+    """Shared logic for displaying scenario overview (scenarios are parent runs)."""
     with Session(tracker.engine) as session:
         from consist.models.run import Run
         from sqlmodel import func, select
 
+        # Find parent runs by looking for distinct parent_run_ids
         query = (
             select(
-                Run.scenario_id,
+                Run.parent_run_id.label("scenario_id"),  # ← Fixed: was Run.id
                 func.count(Run.id).label("run_count"),
                 func.min(Run.created_at).label("first_run"),
                 func.max(Run.created_at).label("last_run"),
             )
-            .where(Run.scenario_id.is_not(None))
-            .group_by(Run.scenario_id)
+            .where(Run.parent_run_id.is_not(None))
+            .group_by(Run.parent_run_id)
             .order_by(func.max(Run.created_at).desc())
             .limit(limit)
         )
 
         results = session.exec(query).all()
+
+        if not results:
+            console.print("[yellow]No scenarios found.[/yellow]")
+            return
 
     table = Table(title="Scenarios")
     table.add_column("Scenario ID", style="cyan")
@@ -244,10 +279,10 @@ def _render_scenarios(tracker: Tracker, limit: int = 20) -> None:
 
     for row in results:
         table.add_row(
-            row.scenario_id,
-            str(row.run_count),
-            row.first_run.strftime("%Y-%m-%d %H:%M"),
-            row.last_run.strftime("%Y-%m-%d %H:%M"),
+            row[0],  # scenario_id (parent_run_id)
+            str(row[1]),  # run_count
+            row[2].strftime("%Y-%m-%d %H:%M"),  # first_run
+            row[3].strftime("%Y-%m-%d %H:%M"),  # last_run
         )
 
     console.print(table)
@@ -255,16 +290,20 @@ def _render_scenarios(tracker: Tracker, limit: int = 20) -> None:
 
 @app.command()
 def search(
-        query: str = typer.Argument(..., help="Search term (searches run IDs, model names, tags)."),
-        db_path: str = typer.Option("provenance.duckdb", help="Path to the DuckDB database."),
-        limit: int = typer.Option(20, help="Maximum results."),
+    query: str = typer.Argument(
+        ..., help="Search term (searches run IDs, model names, tags)."
+    ),
+    db_path: str = typer.Option(
+        "provenance.duckdb", help="Path to the DuckDB database."
+    ),
+    limit: int = typer.Option(20, help="Maximum results."),
 ) -> None:
     """Search for runs by ID, model name, or tags."""
     tracker = get_tracker(db_path)
 
     with Session(tracker.engine) as session:
         from consist.models.run import Run
-        from sqlmodel import select, or_, col
+        from sqlmodel import select, or_
 
         # Search in multiple fields
         search_query = (
@@ -298,7 +337,7 @@ def search(
             table.add_row(
                 run.id,
                 run.model_name,
-                run.scenario_id or "-",
+                getattr(run, "scenario_id", "-"),
                 f"[{status_style}]{run.status}[/]",
                 run.created_at.strftime("%Y-%m-%d %H:%M"),
             )
@@ -308,14 +347,19 @@ def search(
 
 @app.command()
 def validate(
-        db_path: str = typer.Option("provenance.duckdb", help="Path to the DuckDB database."),
-        fix: bool = typer.Option(False, help="Attempt to fix issues (mark artifacts as missing)."),
+    db_path: str = typer.Option(
+        "provenance.duckdb", help="Path to the DuckDB database."
+    ),
+    fix: bool = typer.Option(
+        False, help="Attempt to fix issues (mark artifacts as missing)."
+    ),
 ) -> None:
     """Check that artifacts referenced in DB actually exist on disk."""
     tracker = get_tracker(db_path)
 
     with Session(tracker.engine) as session:
         from consist.models.artifact import Artifact
+
         artifacts = session.exec(select(Artifact)).all()
 
         missing = []
@@ -324,7 +368,7 @@ def validate(
                 abs_path = tracker.resolve_uri(art.uri)
                 if not Path(abs_path).exists():
                     missing.append(art)
-            except Exception as e:
+            except Exception:
                 missing.append(art)
 
         if not missing:
@@ -349,8 +393,10 @@ def validate(
 
 @app.command()
 def scenarios(
-        db_path: str = typer.Option("provenance.duckdb", help="Path to the DuckDB database."),
-        limit: int = typer.Option(20, help="Maximum scenarios to display."),
+    db_path: str = typer.Option(
+        "provenance.duckdb", help="Path to the DuckDB database."
+    ),
+    limit: int = typer.Option(20, help="Maximum scenarios to display."),
 ) -> None:
     """List all scenarios and their run counts."""
     tracker = get_tracker(db_path)
@@ -359,18 +405,19 @@ def scenarios(
 
 @app.command()
 def scenario(
-        scenario_id: str = typer.Argument(..., help="The scenario ID to inspect."),
-        db_path: str = typer.Option("provenance.duckdb", help="Path to the DuckDB database."),
+    scenario_id: str = typer.Argument(..., help="The scenario ID to inspect."),
+    db_path: str = typer.Option(
+        "provenance.duckdb", help="Path to the DuckDB database."
+    ),
 ) -> None:
     """Show all runs in a scenario."""
     tracker = get_tracker(db_path)
 
     with Session(tracker.engine) as session:
         from consist.models.run import Run
+
         query = (
-            select(Run)
-            .where(Run.scenario_id == scenario_id)
-            .order_by(Run.created_at)
+            select(Run).where(Run.parent_run_id == scenario_id).order_by(Run.created_at)
         )
         results = session.exec(query).all()
 
@@ -395,12 +442,16 @@ def scenario(
 
         console.print(table)
 
+
 @app.command()
 def runs(
     db_path: str = typer.Option(
         "provenance.duckdb", help="Path to the Consist DuckDB database."
     ),
     limit: int = typer.Option(10, help="Maximum number of recent runs to display."),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output runs as JSON for scripting/testing."
+    ),
     model_name: Optional[str] = typer.Option(
         None, "--model", help="Filter by model name."
     ),
@@ -417,6 +468,30 @@ def runs(
     Lists the most recent Consist runs recorded in the provenance database.
     """
     tracker = get_tracker(db_path)
+    if json_output:
+        with Session(tracker.engine) as session:
+            results = queries.get_runs(
+                session, limit=limit, model_name=model_name, tags=tag, status=status
+            )
+            output = []
+            for r in results:
+                created_at = getattr(r, "created_at", None)
+                output.append(
+                    {
+                        "id": getattr(r, "id", None),
+                        "model": getattr(r, "model_name", None),
+                        "status": getattr(r, "status", None),
+                        "scenario_id": getattr(r, "scenario_id", None),
+                        "year": getattr(r, "year", None),
+                        "created_at": created_at.isoformat() if created_at else None,
+                        "duration_seconds": getattr(r, "duration_seconds", None),
+                        "tags": getattr(r, "tags", None),
+                        "meta": getattr(r, "meta", None),
+                    }
+                )
+            print(json.dumps(output, indent=2))
+            return
+
     _render_runs_table(tracker, limit, model_name, tag, status)
 
 
@@ -536,11 +611,24 @@ def preview(
     # Only certain drivers are previewable
     if artifact.driver not in ["csv", "parquet"]:
         console.print(
-            f"[yellow]Preview is not supported for driver '{artifact.driver}'.[/yellow]"
+            f"[yellow]Cannot preview artifact with driver '{artifact.driver}'.[/yellow]\n"
+            "Preview supports: csv, parquet\n"
+            "Use 'consist load' or load the artifact programmatically."
         )
         raise typer.Exit(1)
 
-    df = queries.get_artifact_preview(tracker, artifact_key, limit=n_rows)
+    try:
+        df = queries.get_artifact_preview(tracker, artifact_key, limit=n_rows)
+    except FileNotFoundError:
+        console.print(
+            f"[red]Artifact file not found at: {artifact.uri}[/red]\n"
+            "The artifact may have been deleted or moved."
+        )
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Error loading artifact: {e}[/red]")
+        raise typer.Exit(1)
+
     if df is None:
         console.print(
             f"[red]Could not load or preview artifact '{artifact_key}'. The file may be missing or corrupt.[/red]"
@@ -601,7 +689,9 @@ class ConsistShell(cmd.Cmd):
                 else:
                     i += 1
 
-            _render_runs_table(self.tracker, limit, model_name, tags if tags else None, status)
+            _render_runs_table(
+                self.tracker, limit, model_name, tags if tags else None, status
+            )
         except Exception as exc:
             console.print(f"[red]Error: {exc}[/red]")
 
@@ -685,8 +775,10 @@ class ConsistShell(cmd.Cmd):
 
 @app.command()
 def show(
-        run_id: str = typer.Argument(..., help="The ID of the run to inspect."),
-        db_path: str = typer.Option("provenance.duckdb", help="Path to the DuckDB database."),
+    run_id: str = typer.Argument(..., help="The ID of the run to inspect."),
+    db_path: str = typer.Option(
+        "provenance.duckdb", help="Path to the DuckDB database."
+    ),
 ) -> None:
     """Display detailed information about a specific run."""
     tracker = get_tracker(db_path)

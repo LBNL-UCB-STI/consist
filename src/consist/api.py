@@ -9,7 +9,6 @@ from sqlalchemy import text
 # Internal imports
 from consist.core.context import get_active_tracker
 from consist.core.views import create_view_model
-from consist.core.coupler import Coupler
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 from consist.core.tracker import Tracker
@@ -447,9 +446,15 @@ def load(
             tracker = None
 
     if tracker is None:
-        # If we have an absolute path cached in runtime, we might get lucky without a tracker
-        # but usually we need the tracker to resolve 'inputs://' or access the DB.
-        if artifact.abs_path and Path(artifact.abs_path).exists():
+        tracker_ref = getattr(artifact, "_tracker", None)
+        if tracker_ref:
+            attached_tracker = tracker_ref()
+            if attached_tracker:
+                tracker = attached_tracker
+
+    if tracker is None:
+        # If we have a resolved path available, allow direct disk loading without a tracker.
+        if artifact.path and Path(artifact.path).exists():
             pass
         else:
             raise RuntimeError(
@@ -462,7 +467,7 @@ def load(
     if tracker:
         path = tracker.resolve_uri(artifact.uri)
     else:
-        path = artifact.abs_path
+        path = artifact.path
 
     # Only pass caller-provided kwargs to the loader; artifact.meta can contain
     # flags (e.g., schema_name) not accepted by pandas/xarray readers.

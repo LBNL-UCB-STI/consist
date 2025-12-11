@@ -1,6 +1,10 @@
-import pytest
 from pathlib import Path
+from unittest.mock import patch
+
+import pandas as pd
+import pytest
 from sqlmodel import SQLModel
+from typer.testing import CliRunner
 
 # Import core library classes
 from consist.core.tracker import Tracker
@@ -100,3 +104,30 @@ def tracker(request, run_dir: Path, tmp_path: Path) -> Tracker:
 def engine(tracker: Tracker):
     """Provides direct access to the active tracker's SQLAlchemy engine."""
     return tracker.engine
+
+
+@pytest.fixture
+def cli_runner(tracker: Tracker) -> CliRunner:
+    """
+    Provides a Typer CliRunner with get_tracker patched to use the shared test tracker.
+    Simplifies CLI command testing without repetitive patching.
+    """
+    runner = CliRunner()
+    with patch("consist.cli.get_tracker", return_value=tracker):
+        yield runner
+
+
+@pytest.fixture
+def sample_csv(tmp_path):
+    """
+    Factory fixture to generate sample CSV files with optional custom columns.
+    """
+
+    def _make_csv(name: str, rows: int = 5, **columns):
+        path = tmp_path / name
+        if not columns:
+            columns = {"value": range(rows), "category": ["a"] * rows}
+        pd.DataFrame(columns).to_csv(path, index=False)
+        return path
+
+    return _make_csv

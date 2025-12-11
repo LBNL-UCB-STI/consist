@@ -320,6 +320,10 @@ class IdentityManager:
         - Handles Sets (converts to sorted list for determinism)
         - Handles NumPy types
         """
+
+        if isinstance(obj, Path):
+            return str(obj)
+
         # 1. Handle Pydantic Models (Native Support)
         # Check for v2 'model_dump' first, then v1 'dict'
         if hasattr(obj, "model_dump"):

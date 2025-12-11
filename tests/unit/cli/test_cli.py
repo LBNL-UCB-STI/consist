@@ -1,4 +1,6 @@
 """TODO: add unit coverage for query/helper utilities when expanded (tools.queries, pagination)."""
+
+import json
 import uuid
 from datetime import datetime
 from unittest.mock import MagicMock, patch
@@ -204,6 +206,31 @@ def test_runs_filter_by_status(mock_db_session):
         assert "run1" not in result.stdout
 
 
+def test_runs_json_output(mock_db_session):
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker") as m,
+    ):
+        m.return_value.engine = mock_db_session.get_bind()
+        result = runner.invoke(app, ["runs", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        assert any(item["id"] == "run1" for item in data)
+        run2 = next(item for item in data if item["id"] == "run2")
+        assert run2["tags"] == ["prod"]
+
+
+def test_cli_runner_fixture_runs_json(cli_runner, tracker, sample_csv):
+    # Create a run using the shared tracker and log an output so it persists
+    with tracker.start_run("fixture_run", "demo") as t:
+        t.log_output(sample_csv("fixture.csv"), key="fixture")
+
+    result = cli_runner.invoke(app, ["runs", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert any(item["id"] == "fixture_run" for item in data)
+
+
 def test_show_uses_renderer(mock_db_session):
     with (
         patch("pathlib.Path.exists", return_value=True),
@@ -317,7 +344,8 @@ def test_preview_command_unsupported_driver(mock_db_session, tmp_path):
 
         result = runner.invoke(app, ["preview", "params"])
         assert result.exit_code == 1
-        assert "Preview is not supported for driver 'json'" in result.stdout
+        assert "Cannot preview artifact with driver 'json'" in result.stdout
+        assert "Preview supports: csv, parquet" in result.stdout
 
 
 def test_summary_no_runs_exits_cleanly(tmp_path):

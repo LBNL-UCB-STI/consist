@@ -1,5 +1,6 @@
 import logging
 import uuid
+import weakref
 from pathlib import Path
 from typing import (
     Dict,
@@ -696,6 +697,7 @@ class Tracker:
                 artifact_obj.meta[k] = v
 
         # TRACKER HANDLES STATE & PERSISTENCE
+        artifact_obj._tracker = weakref.ref(self)
         if direction == "input":
             self.current_consist.inputs.append(artifact_obj)
         else:
@@ -825,6 +827,15 @@ class Tracker:
             The created or updated `Artifact` object.
         """
         return self.log_artifact(path, key=key, direction="output", **meta)
+
+    def load(self, artifact: Artifact, **kwargs: Any) -> Any:
+        """
+        Convenience method to load an artifact using the public API while
+        automatically passing this tracker for context.
+        """
+        from consist.api import load as api_load
+
+        return api_load(artifact, tracker=self, **kwargs)
 
     def log_h5_container(
         self,
@@ -1622,9 +1633,11 @@ class Tracker:
         if not outputs:
             return None
         artifact = outputs.get(key) if key else next(iter(outputs.values()))
-        if artifact and not artifact.abs_path:
-            try:
-                artifact.abs_path = self.resolve_uri(artifact.uri)
-            except Exception:
-                pass
+        if artifact:
+            if not artifact.abs_path:
+                try:
+                    artifact.abs_path = self.resolve_uri(artifact.uri)
+                except Exception:
+                    pass
+            artifact._tracker = weakref.ref(self)
         return artifact

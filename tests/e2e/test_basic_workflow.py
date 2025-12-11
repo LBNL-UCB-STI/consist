@@ -96,9 +96,7 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
         assert {"raw_table", "features"} <= keys
 
         # Ensure parent linkage captured by scenario header
-        child_parents = {
-            r.id: r.parent_run_id for r in runs if r.id != scenario_id
-        }
+        child_parents = {r.id: r.parent_run_id for r in runs if r.id != scenario_id}
         assert child_parents[ingest_run_id] == scenario_id
         assert child_parents[transform_run_id] == scenario_id
 

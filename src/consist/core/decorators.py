@@ -1,6 +1,7 @@
 import functools
 import inspect
 import uuid
+import weakref
 from pathlib import Path
 from typing import Any, Callable, Optional, List, Union
 
@@ -43,31 +44,6 @@ def create_task_decorator(
 
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            """
-            Wrapper that executes the target function within a Consist tracking run.
-
-            This wrapper handles:
-            - Inspection of the function signature to build ``config`` and ``inputs``.
-            - Processing of manual dependencies via ``depends_on``.
-            - Creation of a unique ``run_id``.
-            - Execution within ``tracker.start_run`` context.
-            - Cache handling, artifact logging, and capture of output artifacts.
-
-            Parameters
-            ----------
-            *args : Any
-                Positional arguments passed to the wrapped function.
-            **kwargs : Any
-                Keyword arguments passed to the wrapped function.
-
-            Returns
-            -------
-            Any
-                The result of the wrapped function, potentially transformed into
-                logged ``Artifact`` objects according to Consist conventions.
-            """
-
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
             # 1. Inspect Signature to build Config & Inputs
             sig = inspect.signature(func)
             try:
@@ -75,17 +51,32 @@ def create_task_decorator(
             except TypeError:
                 bound = None
 
-            config = {}
-            inputs = []
+            config: dict[str, Any] = {}
+            inputs: List[Any] = []
+            resolved_args: Optional[inspect.BoundArguments] = None
             if bound:
                 bound.apply_defaults()
+                resolved_args = bound
                 for k, v in bound.arguments.items():
                     if isinstance(v, Artifact):
+                        v._tracker = weakref.ref(tracker)
                         inputs.append(v)
-                        config[k] = v.uri
-                    elif isinstance(v, list) and v and isinstance(v[0], Artifact):
+                        resolved_args.arguments[k] = v.path
+                    elif (
+                        isinstance(v, list)
+                        and v
+                        and all(isinstance(item, Artifact) for item in v)
+                    ):
+                        for item in v:
+                            item._tracker = weakref.ref(tracker)
                         inputs.extend(v)
-                        config[k] = [a.uri for a in v]
+                        resolved_args.arguments[k] = [item.path for item in v]
+                    elif isinstance(v, Path):
+                        path_artifact = tracker.artifacts.create_artifact(
+                            path=str(v), run_id=None, key=k, direction="input"
+                        )
+                        inputs.append(path_artifact)
+                        resolved_args.arguments[k] = v
                     else:
                         config[k] = v
 
@@ -93,8 +84,8 @@ def create_task_decorator(
             if depends_on:
                 for dep in depends_on:
                     if isinstance(dep, Artifact):
+                        dep._tracker = weakref.ref(tracker)
                         inputs.append(dep)
-                        config[f"dep_{dep.key}"] = dep.uri
                     elif isinstance(dep, (str, Path)):
                         # Simple path resolution logic
                         if any(c in str(dep) for c in "*?["):
@@ -116,7 +107,15 @@ def create_task_decorator(
             ):
                 # Cache Hit Handling
                 if tracker.is_cached:
+                    cache_source_id = None
+                    if tracker.current_consist and tracker.current_consist.cached_run:
+                        cache_source_id = tracker.current_consist.cached_run.id
+                    tracker.log_meta(cache_hit=True)
+                    if cache_source_id:
+                        tracker.log_meta(cache_source=cache_source_id)
                     outputs = tracker.current_consist.outputs
+                    for art in outputs or []:
+                        art._tracker = weakref.ref(tracker)
                     if capture_dir:
                         return outputs
                     if not outputs:
@@ -130,15 +129,42 @@ def create_task_decorator(
                     with tracker.capture_outputs(
                         capture_dir, pattern=capture_pattern
                     ) as cap:
-                        result = func(*args, **kwargs)
+                        if resolved_args:
+                            result = func(*resolved_args.args, **resolved_args.kwargs)
+                        else:
+                            result = func(*args, **kwargs)
                     if result is not None:
                         raise ValueError("Task with capture_dir must return None")
                     return cap.artifacts
                 else:
-                    result = func(*args, **kwargs)
+                    if resolved_args:
+                        result = func(*resolved_args.args, **resolved_args.kwargs)
+                    else:
+                        result = func(*args, **kwargs)
 
                     # Return Value Handling
-                    if isinstance(result, (str, Path)):
+                    if isinstance(result, Artifact):
+                        if result not in tracker.current_consist.outputs:
+                            result = tracker.log_artifact(
+                                result, key=result.key, direction="output"
+                            )
+                        result._tracker = weakref.ref(tracker)
+                        return result
+                    elif isinstance(result, dict) and all(
+                        isinstance(v, Artifact) for v in result.values()
+                    ):
+                        logged_results = {}
+                        for k, v in result.items():
+                            if v not in tracker.current_consist.outputs:
+                                logged = tracker.log_artifact(
+                                    v, key=v.key or k, direction="output"
+                                )
+                            else:
+                                logged = v
+                            logged._tracker = weakref.ref(tracker)
+                            logged_results[k] = logged
+                        return logged_results
+                    elif isinstance(result, (str, Path)):
                         return tracker.log_artifact(Path(result), key=Path(result).stem)
                     elif isinstance(result, dict):
                         return {

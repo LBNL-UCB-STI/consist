@@ -1,4 +1,6 @@
 import uuid
+import weakref
+from pathlib import Path
 from datetime import datetime, timezone
 
 UTC = timezone.utc
@@ -109,6 +111,7 @@ class Artifact(SQLModel, table=True):
     # but is needed at runtime, aligning with "Path Resolution & Mounts" and "Artifact Chaining"
     # as described in the architecture documentation.
     _abs_path: Optional[str] = PrivateAttr(default=None)
+    _tracker: Optional[weakref.ReferenceType[Any]] = PrivateAttr(default=None)
 
     @property
     def abs_path(self) -> Optional[str]:
@@ -142,6 +145,27 @@ class Artifact(SQLModel, table=True):
             The absolute file system path to set for the artifact.
         """
         self._abs_path = value
+
+    @property
+    def path(self) -> Path:
+        """
+        Resolve this artifact to a filesystem Path.
+
+        Uses the tracker when available to handle mount-aware URIs; otherwise falls
+        back to the cached absolute path or the raw URI.
+        """
+        tracker_ref = getattr(self, "_tracker", None)
+        if tracker_ref is not None:
+            tracker_obj = tracker_ref()
+            if tracker_obj is not None:
+                try:
+                    return Path(tracker_obj.resolve_uri(self.uri))
+                except Exception:
+                    pass
+
+        if self.abs_path:
+            return Path(self.abs_path)
+        return Path(self.uri)
 
     # --- Format Helpers ---
 
