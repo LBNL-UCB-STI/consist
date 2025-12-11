@@ -1,6 +1,5 @@
 import pytest
 from consist.core.tracker import Tracker
-from consist.core.workflow import ScenarioContext
 
 
 def test_scenario_lifecycle(tracker: Tracker):

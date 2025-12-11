@@ -31,9 +31,7 @@ def build_lineage_tree(tracker: "Tracker", artifact_key_or_id: str) -> Dict[str,
 
         # Recursively trace inputs
         for input_artifact in run_artifacts.inputs.values():
-            run_node["inputs"].append(
-                _trace(input_artifact, visited_runs.copy())
-            )
+            run_node["inputs"].append(_trace(input_artifact, visited_runs.copy()))
 
         lineage_node["producing_run"] = run_node
         return lineage_node

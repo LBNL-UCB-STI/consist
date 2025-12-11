@@ -1,13 +1,12 @@
 import pytest
 import h5py
-import pandas as pd
 from consist.core.tracker import Tracker
-from consist.api import load
 
 # Check for tables/h5py
 try:
     import tables
     import h5py
+
     HAS_H5 = True
 except ImportError:
     HAS_H5 = False
@@ -46,7 +45,7 @@ def test_h5_auto_discovery(tracker: Tracker):
         container, children = tracker.log_h5_container(
             h5_path,
             key="simulation_data",
-            table_filter=lambda name: "households" in name
+            table_filter=lambda name: "households" in name,
         )
 
         # A. Check Container
@@ -63,7 +62,9 @@ def test_h5_auto_discovery(tracker: Tracker):
 
         # C. CRITICAL: Check Run ID Propagation
         for child in children:
-            assert child.run_id == container.run_id, "Child artifact must inherit Run ID"
+            assert (
+                child.run_id == container.run_id
+            ), "Child artifact must inherit Run ID"
             assert child.meta["parent_id"] == str(container.id)
             assert child.driver == "h5_table"
 

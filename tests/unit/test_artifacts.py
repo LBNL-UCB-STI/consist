@@ -2,7 +2,6 @@ import pytest
 from unittest.mock import MagicMock
 from pathlib import Path
 from consist.core.artifacts import ArtifactManager
-from consist.models.artifact import Artifact
 
 
 @pytest.fixture
@@ -17,11 +16,7 @@ def mock_tracker():
 def test_create_artifact_stateless(mock_tracker):
     manager = ArtifactManager(mock_tracker)
 
-    art = manager.create_artifact(
-        path="/tmp/test.csv",
-        key="test",
-        run_id="run_ABC"
-    )
+    art = manager.create_artifact(path="/tmp/test.csv", key="test", run_id="run_ABC")
 
     assert art.run_id == "run_ABC"
     assert art.key == "test"

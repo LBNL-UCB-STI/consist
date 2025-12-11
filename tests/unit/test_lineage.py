@@ -1,4 +1,3 @@
-import pytest
 from unittest.mock import MagicMock
 from consist.core.lineage import build_lineage_tree
 from consist.models.artifact import Artifact
@@ -24,13 +23,17 @@ def test_build_lineage_tree():
 
     # Mock Tracker lookups
     def get_artifact(key_or_id):
-        if key_or_id == "a2": return art_2
-        if key_or_id == "a1": return art_1
+        if key_or_id == "a2":
+            return art_2
+        if key_or_id == "a1":
+            return art_1
         return None
 
     def get_run(run_id):
-        if run_id == "run_a": return run_a
-        if run_id == "run_b": return run_b
+        if run_id == "run_a":
+            return run_a
+        if run_id == "run_b":
+            return run_b
         return None
 
     def get_artifacts_for_run(run_id):

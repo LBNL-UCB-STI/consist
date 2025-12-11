@@ -252,21 +252,25 @@ def preview(
 ) -> None:
     """Shows a preview of a tabular artifact (e.g., CSV, Parquet)."""
     tracker = get_tracker(db_path)
-    df = queries.get_artifact_preview(tracker, artifact_key, limit=n_rows)
 
+    # Fetch artifact first to give a precise message (unsupported driver vs missing)
+    artifact = tracker.get_artifact(artifact_key)
+    if not artifact:
+        console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
+        raise typer.Exit(1)
+
+    # Only certain drivers are previewable
+    if artifact.driver not in ["csv", "parquet"]:
+        console.print(
+            f"[yellow]Preview is not supported for driver '{artifact.driver}'.[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    df = queries.get_artifact_preview(tracker, artifact_key, limit=n_rows)
     if df is None:
-        # Check why it failed
-        artifact = tracker.get_artifact(artifact_key)
-        if not artifact:
-            console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
-        elif artifact.driver not in ["csv", "parquet"]:
-            console.print(
-                f"[yellow]Preview is not supported for driver '{artifact.driver}'.[/yellow]"
-            )
-        else:
-            console.print(
-                f"[red]Could not load or preview artifact '{artifact_key}'. The file may be missing or corrupt.[/red]"
-            )
+        console.print(
+            f"[red]Could not load or preview artifact '{artifact_key}'. The file may be missing or corrupt.[/red]"
+        )
         raise typer.Exit(1)
 
     console.print(f"Preview: {artifact_key}")

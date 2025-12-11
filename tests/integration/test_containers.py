@@ -183,7 +183,7 @@ def test_container_caching_logic(clean_tracker: Tracker, input_file: Path):
         return_value=mock_backend_instance,
     ):
         # 1. First Run (Cold)
-        run_container(
+        result1 = run_container(
             tracker=clean_tracker,
             run_id="run_1",
             image="my_model:v1",
@@ -193,10 +193,11 @@ def test_container_caching_logic(clean_tracker: Tracker, input_file: Path):
             outputs=[output_dir / "result.txt"],
         )
         assert mock_backend_instance.run_count == 1
+        assert result1.cache_hit is False
         assert (output_dir / "result.txt").exists()
 
         # 2. Second Run (Identical) -> Cache Hit
-        run_container(
+        result2 = run_container(
             tracker=clean_tracker,
             run_id="run_2",
             image="my_model:v1",
@@ -206,9 +207,10 @@ def test_container_caching_logic(clean_tracker: Tracker, input_file: Path):
             outputs=[output_dir / "result.txt"],
         )
         assert mock_backend_instance.run_count == 1
+        assert result2.cache_hit is True
 
         # 3. Third Run (Changed Command) -> Execute
-        run_container(
+        result3 = run_container(
             tracker=clean_tracker,
             run_id="run_3",
             image="my_model:v1",
@@ -218,6 +220,7 @@ def test_container_caching_logic(clean_tracker: Tracker, input_file: Path):
             outputs=[output_dir / "result.txt"],
         )
         assert mock_backend_instance.run_count == 2
+        assert result3.cache_hit is False
 
 
 def test_nested_container_execution(clean_tracker: Tracker, input_file: Path):
@@ -247,7 +250,7 @@ def test_nested_container_execution(clean_tracker: Tracker, input_file: Path):
             assert clean_tracker.current_consist is not None
 
             # 2. Call run_container nested inside
-            success = run_container(
+            result = run_container(
                 tracker=clean_tracker,
                 run_id="inner_step_1",  # This ID is used for logs, not a DB Run
                 image="nested_image:v1",
@@ -258,7 +261,7 @@ def test_nested_container_execution(clean_tracker: Tracker, input_file: Path):
                 backend_type="docker",
             )
 
-            assert success is True
+            assert result.cache_hit is False
 
             # --- Assertions on Parent Run State ---
 
@@ -493,7 +496,7 @@ def test_docker_real_execution(clean_tracker: Tracker, tmp_path: Path):
     volumes = {str(host_in_dir): "/data/in", str(host_out_dir): "/data/out"}
 
     # Run 1
-    success = run_container(
+    result = run_container(
         tracker=clean_tracker,
         run_id="docker_real_1",
         image=image,
@@ -504,12 +507,12 @@ def test_docker_real_execution(clean_tracker: Tracker, tmp_path: Path):
         backend_type="docker",
         pull_latest=True,
     )
-    assert success is True
+    assert result.cache_hit is False
     assert (host_out_dir / "output.txt").read_text().strip() == "hello world"
 
     # Run 2 (Cache Hit)
     tracker2 = Tracker(run_dir=clean_tracker.run_dir, db_path=clean_tracker.db_path)
-    success_2 = run_container(
+    result_2 = run_container(
         tracker=tracker2,
         run_id="docker_real_2",
         image=image,
@@ -519,4 +522,4 @@ def test_docker_real_execution(clean_tracker: Tracker, tmp_path: Path):
         outputs=[host_out_dir / "output.txt"],
         backend_type="docker",
     )
-    assert success_2 is True
+    assert result_2.cache_hit is True

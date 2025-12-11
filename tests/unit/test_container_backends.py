@@ -1,5 +1,4 @@
 import os
-import pytest
 from unittest.mock import patch, MagicMock
 from consist.integrations.containers.backends import SingularityBackend, DockerBackend
 
@@ -176,29 +175,6 @@ def test_docker_command_list_handling():
 
 
 # --- Additional Docker Tests ---
-
-
-def test_docker_missing_dependency():
-    """
-    Verifies that `DockerBackend` raises an `ImportError` if the underlying
-    `docker` Python package is not installed.
-
-    This ensures that users receive a clear error message guiding them
-    to install the necessary dependency when attempting to use the `DockerBackend`.
-
-    What happens:
-    1. The `docker` module within `consist.integrations.containers.backends` is
-       mocked to `None`, simulating its absence.
-    2. An attempt is made to instantiate `DockerBackend`.
-
-    What's checked:
-    - Instantiating `DockerBackend` raises an `ImportError`.
-    - The error message explicitly states that the 'docker' package is required.
-    """
-    with patch("consist.integrations.containers.backends.docker", None):
-        with pytest.raises(ImportError) as exc:
-            DockerBackend()
-        assert "package is required" in str(exc.value)
 
 
 def test_docker_digest_resolution_logic():

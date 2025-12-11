@@ -18,7 +18,14 @@ def test_parent_status_update_not_blocked(tracker: Tracker):
     now = datetime.datetime.now(datetime.timezone.utc)
 
     with Session(db.engine) as session:
-        parent = Run(id="parent_run", model_name="model", status="running", tags=[], started_at=now, created_at=now)
+        parent = Run(
+            id="parent_run",
+            model_name="model",
+            status="running",
+            tags=[],
+            started_at=now,
+            created_at=now,
+        )
         child = Run(
             id="child_run",
             model_name="model",

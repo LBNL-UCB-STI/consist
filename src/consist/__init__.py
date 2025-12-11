@@ -25,6 +25,7 @@ from consist.api import (
     view,
     cached_output,
     cached_artifacts,
+    get_artifact,
     scenario,
     single_step_scenario,
     register_views,

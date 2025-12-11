@@ -115,7 +115,9 @@ class DatabaseManager:
             with Session(self.engine) as session:
                 # Use merge for a simple upsert. DuckDB's MERGE semantics via SQLModel
                 # handle inserts and updates in one call and avoid stale state issues.
-                logging.debug(f"[DB sync_run] upserting run={run.id} status={run.status}")
+                logging.debug(
+                    f"[DB sync_run] upserting run={run.id} status={run.status}"
+                )
                 session.merge(run)
                 session.commit()
                 # Read-back to verify persisted status for diagnostics
@@ -159,13 +161,18 @@ class DatabaseManager:
                 db_run.signature = signature
                 session.add(db_run)
                 session.commit()
+                logging.debug(
+                    "[db] update_run_signature run=%s signature=%s", run_id, signature
+                )
 
         try:
             self.execute_with_retry(_update, operation_name="update_run_signature")
         except Exception as e:
             logging.warning(f"Failed to update signature for {run_id}: {e}")
 
-    def link_artifact_to_run(self, artifact_id: uuid.UUID, run_id: str, direction: str) -> None:
+    def link_artifact_to_run(
+        self, artifact_id: uuid.UUID, run_id: str, direction: str
+    ) -> None:
         """Creates a link between an artifact and a run without syncing the artifact itself."""
 
         def _do_link():
@@ -181,7 +188,9 @@ class DatabaseManager:
         try:
             self.execute_with_retry(_do_link, operation_name="link_artifact")
         except Exception as e:
-            logging.warning(f"Failed to link artifact {artifact_id} to run {run_id}: {e}")
+            logging.warning(
+                f"Failed to link artifact {artifact_id} to run {run_id}: {e}"
+            )
 
     def sync_artifact(self, artifact: Artifact, run_id: str, direction: str) -> None:
         """Upserts an Artifact and links it to the Run."""
@@ -264,7 +273,9 @@ class DatabaseManager:
                 return session.exec(statement).first()
 
         try:
-            return self.execute_with_retry(_query, operation_name="find_run_by_signature")
+            return self.execute_with_retry(
+                _query, operation_name="find_run_by_signature"
+            )
         except Exception as e:
             logging.warning(f"Signature lookup failed: {e}")
             return None
@@ -305,14 +316,15 @@ class DatabaseManager:
             return []
 
     def find_runs(
-            self,
-            tags: Optional[List[str]] = None,
-            year: Optional[int] = None,
-            model: Optional[str] = None,
-            status: Optional[str] = None,
-            parent_id: Optional[str] = None,
-            metadata: Optional[Dict[str, Any]] = None,
-            limit: int = 100,
+        self,
+        tags: Optional[List[str]] = None,
+        year: Optional[int] = None,
+        model: Optional[str] = None,
+        status: Optional[str] = None,
+        parent_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        limit: int = 100,
+        name: Optional[str] = None,
     ) -> List[Run]:
         def _query():
             with Session(self.engine) as session:
@@ -326,6 +338,8 @@ class DatabaseManager:
                     statement = statement.where(Run.year == year)
                 if parent_id:
                     statement = statement.where(Run.parent_run_id == parent_id)
+                if name:
+                    statement = statement.where(Run.description == name)
 
                 if tags:
                     for tag in tags:

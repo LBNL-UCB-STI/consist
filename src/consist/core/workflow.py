@@ -83,7 +83,9 @@ class ScenarioContext:
         """Read-only view of registered exogenous inputs."""
         return MappingProxyType(self._inputs)
 
-    def add_input(self, path: Union[str, Path, Artifact], key: str, **kwargs) -> Artifact:
+    def add_input(
+        self, path: Union[str, Path, Artifact], key: str, **kwargs
+    ) -> Artifact:
         """
         Register an exogenous input to the scenario header.
 
@@ -219,7 +221,10 @@ class ScenarioContext:
 
         # Merge Inputs
         for artifact in child_inputs:
-            if artifact.id not in parent_input_ids and artifact.id not in parent_output_ids:
+            if (
+                artifact.id not in parent_input_ids
+                and artifact.id not in parent_output_ids
+            ):
                 parent_inputs_list.append(artifact)
                 parent_input_ids.add(artifact.id)
 
@@ -229,11 +234,13 @@ class ScenarioContext:
             "model": child_run.model_name,
             "status": child_run.status,
             "description": child_run.description,
-            "started_at": child_run.started_at.isoformat() if child_run.started_at else None,
+            "started_at": (
+                child_run.started_at.isoformat() if child_run.started_at else None
+            ),
             "ended_at": child_run.ended_at.isoformat() if child_run.ended_at else None,
             "duration_seconds": child_run.duration_seconds,
             "inputs": {str(a.id): a.key for a in child_inputs},
-            "outputs": {str(a.id): a.key for a in child_outputs}
+            "outputs": {str(a.id): a.key for a in child_outputs},
         }
 
         if "steps" not in parent_run.meta:
@@ -254,18 +261,14 @@ class ScenarioContext:
             # The database merge() handles duplicate links gracefully
             for artifact in child_outputs:
                 self.tracker.db.link_artifact_to_run(
-                    artifact_id=artifact.id,
-                    run_id=parent_run.id,
-                    direction="output"
+                    artifact_id=artifact.id, run_id=parent_run.id, direction="output"
                 )
 
             for artifact in child_inputs:
                 # Only link as input if not already an output
                 if artifact.id not in parent_output_ids:
                     self.tracker.db.link_artifact_to_run(
-                        artifact_id=artifact.id,
-                        run_id=parent_run.id,
-                        direction="input"
+                        artifact_id=artifact.id, run_id=parent_run.id, direction="input"
                     )
 
         self.tracker.current_consist = current_state
@@ -322,7 +325,10 @@ class ScenarioContext:
         # 3. End Run
         # This handles DB sync, JSON flush, and event emission
         import logging
-        logging.debug(f"[ScenarioContext] Ending header {self.run_id} with status={status}")
+
+        logging.debug(
+            f"[ScenarioContext] Ending header {self.run_id} with status={status}"
+        )
         self.tracker.end_run(status=status)
 
         # Defensive: ensure header status/meta are persisted even if future end_run

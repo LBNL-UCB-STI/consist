@@ -20,7 +20,6 @@ def test_single_step_scenario_simple(tmp_path):
         art = consist.log_dataframe(df, key="table1")
         assert art.key == "table1"
 
-
     # Header and step runs should be persisted and completed
     header = tracker.get_run("scenario_single")
     step_run = tracker.get_run("scenario_single_scenario_single")

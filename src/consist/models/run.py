@@ -161,6 +161,7 @@ class RunArtifacts(BaseModel):
         artifacts.outputs['persons'] -> Artifact(...)
         artifacts.inputs['config'] -> Artifact(...)
     """
+
     inputs: Dict[str, Artifact] = {}
     outputs: Dict[str, Artifact] = {}
 

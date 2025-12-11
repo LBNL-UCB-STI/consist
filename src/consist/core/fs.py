@@ -86,7 +86,10 @@ class FileSystemManager:
                 # Check if candidate is inside root
                 # (Logic handles /data vs /database prefix issues)
                 if candidate_abs.startswith(root_str):
-                    if len(candidate_abs) == len(root_str) or candidate_abs[len(root_str)] == os.sep:
+                    if (
+                        len(candidate_abs) == len(root_str)
+                        or candidate_abs[len(root_str)] == os.sep
+                    ):
                         rel_path = os.path.relpath(candidate_abs, root_str)
                         # Normalize slashes for portable URI
                         return f"{name}://{Path(rel_path).as_posix()}"

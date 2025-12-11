@@ -55,7 +55,9 @@ def test_structured_artifact_access(tracker: Tracker, run_dir):
     with tracker.start_run("io_test", "model_io"):
         # FIX: Use absolute paths from run_dir to avoid CWD resolution issues
         tracker.log_artifact(run_dir / "in.csv", key="config_file", direction="input")
-        tracker.log_artifact(run_dir / "out.csv", key="results_data", direction="output")
+        tracker.log_artifact(
+            run_dir / "out.csv", key="results_data", direction="output"
+        )
 
     # Test
     artifacts = tracker.get_artifacts_for_run("io_test")
@@ -91,9 +93,7 @@ def test_access_modes(tracker: Tracker, run_dir):
     # --- TEST: Analysis Mode ---
     # Create a NEW tracker instance pointing to same DB
     analysis_tracker = Tracker(
-        run_dir=run_dir,
-        db_path=tracker.db_path,
-        access_mode="analysis"
+        run_dir=run_dir, db_path=tracker.db_path, access_mode="analysis"
     )
 
     # 1. Allowed: Ingest (Backfill)
@@ -107,9 +107,7 @@ def test_access_modes(tracker: Tracker, run_dir):
 
     # --- TEST: Read-Only Mode ---
     ro_tracker = Tracker(
-        run_dir=run_dir,
-        db_path=tracker.db_path,
-        access_mode="read_only"
+        run_dir=run_dir, db_path=tracker.db_path, access_mode="read_only"
     )
 
     # 1. Allowed: Find Run

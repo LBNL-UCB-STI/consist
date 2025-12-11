@@ -261,16 +261,22 @@ class IdentityManager:
         for artifact in inputs:
             if artifact.run_id:
                 # Scenario A: Consist-produced artifact (Provenance Link)
+                sig_parts = []
                 tmp = None
                 if signature_lookup:
                     tmp = signature_lookup(artifact.run_id)
 
                 if tmp:
                     # Link to the signature of the producing run (Merkle Link)
-                    sig = f"sig:{tmp}"
+                    sig_parts.append(f"sig:{tmp}")
                 else:
                     # Fallback to run_id if signature unknown
-                    sig = f"run:{artifact.run_id}"
+                    sig_parts.append(f"run:{artifact.run_id}")
+
+                # Mix in the artifact content hash if available to catch diverging data
+                if getattr(artifact, "hash", None):
+                    sig_parts.append(f"hash:{artifact.hash}")
+                sig = "|".join(sig_parts)
             else:
                 # Scenario B: Raw File (External input)
                 # We must compute the checksum of the physical file.
@@ -317,7 +323,7 @@ class IdentityManager:
         # 1. Handle Pydantic Models (Native Support)
         # Check for v2 'model_dump' first, then v1 'dict'
         if hasattr(obj, "model_dump"):
-            return self._clean_structure(obj.model_dump(mode='json'), exclude_keys)
+            return self._clean_structure(obj.model_dump(mode="json"), exclude_keys)
         elif hasattr(obj, "dict") and hasattr(obj, "json"):  # Pydantic v1 heuristic
             return self._clean_structure(obj.dict(), exclude_keys)
 
@@ -342,7 +348,9 @@ class IdentityManager:
             except TypeError:
                 # Fallback if items aren't comparable (rare in configs, but possible)
                 # We convert to list to allow JSON serialization, but warn about non-determinism
-                logging.warning("Consist: Encountered unsortable set in config. Hash stability not guaranteed.")
+                logging.warning(
+                    "Consist: Encountered unsortable set in config. Hash stability not guaranteed."
+                )
                 return [self._clean_structure(x, exclude_keys) for x in obj]
 
         # 5. Handle Numpy conversions (Existing logic)

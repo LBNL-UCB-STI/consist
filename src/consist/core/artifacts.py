@@ -14,14 +14,14 @@ class ArtifactManager:
         self.tracker = tracker
 
     def create_artifact(
-            self,
-            path: Union[str, Artifact],
-            run_id: Optional[str] = None,
-            key: Optional[str] = None,
-            direction: str = "output",
-            schema: Optional[Type[SQLModel]] = None,
-            driver: Optional[str] = None,
-            **meta: Any,
+        self,
+        path: Union[str, Artifact],
+        run_id: Optional[str] = None,
+        key: Optional[str] = None,
+        direction: str = "output",
+        schema: Optional[Type[SQLModel]] = None,
+        driver: Optional[str] = None,
+        **meta: Any,
     ) -> Artifact:
         artifact_obj = None
         resolved_abs_path = None
@@ -84,23 +84,26 @@ class ArtifactManager:
         return artifact_obj
 
     def scan_h5_container(
-            self,
-            container: Artifact,
-            path_obj: Path,
-            key: str,
-            direction: str,
-            filter_fn: Callable[[str], bool],
+        self,
+        container: Artifact,
+        path_obj: Path,
+        key: str,
+        direction: str,
+        filter_fn: Callable[[str], bool],
     ) -> List[Artifact]:
         try:
             import h5py
         except ImportError:
-            logging.warning("[Consist] h5py not installed. Cannot discover HDF5 tables.")
+            logging.warning(
+                "[Consist] h5py not installed. Cannot discover HDF5 tables."
+            )
             return []
 
         table_artifacts: List[Artifact] = []
 
         try:
             with h5py.File(str(path_obj), "r") as f:
+
                 def visit_datasets(name: str, obj: Any) -> None:
                     if isinstance(obj, h5py.Dataset):
                         if filter_fn(name):

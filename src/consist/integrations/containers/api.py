@@ -23,8 +23,10 @@ import hashlib
 import json
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Union, Optional
+from typing import Dict, List, Optional, Union
+import shutil
 
 from sqlmodel import Session, select
 
@@ -35,6 +37,15 @@ from consist.integrations.containers.backends import DockerBackend, SingularityB
 from consist.models.run import RunArtifactLink
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ContainerResult:
+    """Return value for run_container with cached output artifacts."""
+
+    artifacts: Dict[str, Artifact]
+    cache_hit: bool
+    cache_source: Optional[str] = None
 
 
 def _resolve_image_digest(backend, image: str, pull_latest: bool) -> str:
@@ -61,12 +72,24 @@ def _hash_inputs(tracker: Tracker, items: List[Union[str, Artifact]]) -> List[st
     return sorted(hashes)
 
 
-def _container_signature(defn: ContainerDefinition, inputs: List[Union[str, Artifact]], tracker: Tracker) -> str:
+def _container_signature(
+    defn: ContainerDefinition, inputs: List[Union[str, Artifact]], tracker: Tracker
+) -> str:
+    logger.debug(
+        "[container.signature] hashable_config=%s",
+        defn.to_hashable_config(),
+    )
+    input_hashes = _hash_inputs(tracker, inputs)
+    logger.debug("[container.signature] input_hashes=%s", input_hashes)
     payload = {
         "config": defn.to_hashable_config(),
-        "inputs": _hash_inputs(tracker, inputs),
+        "inputs": input_hashes,
     }
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    sig = hashlib.sha256(
+        json.dumps(payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    logger.debug("[container.signature] signature=%s payload=%s", sig, payload)
+    return sig
 
 
 def _reuse_or_execute_container(
@@ -83,17 +106,29 @@ def _reuse_or_execute_container(
     cached = tracker.db.find_run_by_signature(signature) if tracker.db else None
 
     if cached:
+        logger.debug(
+            "[container.cache] signature match run=%s requested_outputs=%s",
+            cached.id,
+            requested_outputs,
+        )
         cached_outputs = (cached.meta or {}).get("declared_outputs", [])
         if not cached_outputs:
             # If older run lacks declared outputs metadata, assume coverage to avoid false misses
             cached_outputs = requested_outputs
+        logger.debug(
+            "[container.cache] cached_outputs=%s requested=%s",
+            cached_outputs,
+            requested_outputs,
+        )
         if set(requested_outputs).issubset(set(cached_outputs)):
             logger.info(f"✅ [Consist] Container cache hit: {run_id} -> {cached.id}")
             # re-link cached artifacts to current run
             if tracker.db:
                 with Session(tracker.engine) as session:
                     links = session.exec(
-                        select(RunArtifactLink).where(RunArtifactLink.run_id == cached.id)
+                        select(RunArtifactLink).where(
+                            RunArtifactLink.run_id == cached.id
+                        )
                     ).all()
                     for link in links:
                         session.merge(
@@ -102,8 +137,48 @@ def _reuse_or_execute_container(
                                 artifact_id=link.artifact_id,
                                 direction=link.direction,
                             )
+                        )
+                    session.commit()
+
+                # Hydrate outputs onto the host so callers see expected files
+                with Session(tracker.engine) as session:
+                    linked_outputs = session.exec(
+                        select(Artifact, RunArtifactLink.direction)
+                        .join(
+                            RunArtifactLink, Artifact.id == RunArtifactLink.artifact_id
+                        )
+                        .where(RunArtifactLink.run_id == cached.id)
+                    ).all()
+                output_arts = [
+                    a for a, direction in linked_outputs if direction == "output"
+                ]
+
+                for host_out in requested_outputs:
+                    target = Path(host_out).resolve()
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    match = next(
+                        (
+                            a
+                            for a in output_arts
+                            if a.key == target.name or Path(a.uri).name == target.name
+                        ),
+                        None,
                     )
-                session.commit()
+                    if not match:
+                        logger.warning(
+                            f"⚠️ [Consist] Cache hit but no matching artifact for requested output: {host_out}"
+                        )
+                        continue
+                    try:
+                        src_path = Path(tracker.resolve_uri(match.uri)).resolve()
+                        if src_path.is_dir():
+                            shutil.copytree(src_path, target, dirs_exist_ok=True)
+                        else:
+                            shutil.copy2(src_path, target)
+                    except Exception as e:
+                        logger.warning(
+                            f"⚠️ [Consist] Failed to hydrate cached output {host_out} from {match.uri}: {e}"
+                        )
             tracker.db.update_run_meta(
                 run_id,
                 {
@@ -128,6 +203,7 @@ def _reuse_or_execute_container(
                 run_obj.meta = meta
             return True
 
+    logger.debug("[container.cache] miss_or_reexec for run=%s", run_id)
     # Cache miss (or missing outputs) -> execute
     execute_fn()
     if tracker.db:
@@ -168,7 +244,7 @@ def run_container(
     working_dir: Optional[str] = None,
     backend_type: str = "docker",
     pull_latest: bool = False,
-) -> bool:
+) -> ContainerResult:
     """
     Executes a containerized step with full provenance tracking and caching via Consist.
 
@@ -212,8 +288,8 @@ def run_container(
 
     Returns
     -------
-    bool
-        True if the container execution and all Consist logging were successful, False otherwise.
+    ContainerResult
+        Structured result containing logged output artifacts and cache metadata.
 
     Raises
     ------
@@ -286,11 +362,41 @@ def run_container(
             path_obj = Path(host_out).resolve()
             if path_obj.exists():
                 # Log artifact (Consist handles auto-detecting file vs dir)
-                active_tracker.log_artifact(
+                logged = active_tracker.log_artifact(
                     path_obj, key=path_obj.name, direction="output"
                 )
+                try:
+                    object.__setattr__(logged, "_abs_path", str(path_obj))
+                except Exception:
+                    pass
             else:
                 logger.warning(f"⚠️ [Consist] Expected output not found: {host_out}")
+
+    def _collect_result(
+        active_tracker: Tracker, run_identifier: str
+    ) -> ContainerResult:
+        """
+        Collect cache metadata and output artifacts for a run.
+
+        Prefer in-memory state when the run is still active because DB writes may
+        not have flushed yet inside the context manager.
+        """
+        run_meta = {}
+        if (
+            active_tracker.current_consist
+            and active_tracker.current_consist.run.id == run_identifier
+        ):
+            run_meta = active_tracker.current_consist.run.meta or {}
+        else:
+            run_obj = active_tracker.get_run(run_identifier)
+            run_meta = run_obj.meta if run_obj else {}
+
+        cache_hit = (run_meta or {}).get("cache_hit", False)
+        cache_source = (run_meta or {}).get("cache_source")
+        artifacts = active_tracker.get_artifacts_for_run(run_identifier).outputs
+        return ContainerResult(
+            artifacts=artifacts, cache_hit=cache_hit, cache_source=cache_source
+        )
 
     # 5. Execute Run Context
 
@@ -324,7 +430,7 @@ def run_container(
             run_id=tracker.current_consist.run.id,
             execute_fn=lambda: _execute_backend_and_log_outputs(tracker),
         )
-        return True
+        return _collect_result(tracker, tracker.current_consist.run.id)
 
     # CASE B: Standalone Mode (Start new run)
     with tracker.start_run(
@@ -342,4 +448,4 @@ def run_container(
             execute_fn=lambda: _execute_backend_and_log_outputs(t),
         )
 
-    return True
+        return _collect_result(tracker, run_id)

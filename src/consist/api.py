@@ -137,6 +137,20 @@ def cached_output(key: Optional[str] = None) -> Optional[Artifact]:
     return current_tracker().cached_output(key=key)
 
 
+def get_artifact(
+    run_id: str,
+    key: Optional[str] = None,
+    key_contains: Optional[str] = None,
+    direction: str = "output",
+) -> Optional[Artifact]:
+    """
+    Fetch a single artifact for a run by exact key or substring.
+    """
+    return current_tracker().get_artifact(
+        run_id, key=key, key_contains=key_contains, direction=direction
+    )
+
+
 # --- Proxy Functions ---
 
 
@@ -456,7 +470,9 @@ def load(
     # Driver-specific hints from metadata
     if artifact.driver == "h5_table":
         if "table_path" not in load_kwargs:
-            table_path = artifact.meta.get("table_path") or artifact.meta.get("sub_path")
+            table_path = artifact.meta.get("table_path") or artifact.meta.get(
+                "sub_path"
+            )
             if table_path:
                 load_kwargs["table_path"] = table_path
 

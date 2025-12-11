@@ -58,7 +58,7 @@ class ContainerDefinition(BaseModel):
             container, stripped of any `None` values, ready for hashing.
         """
         # Deterministic representation for hashing
-        return {
+        cfg = {
             "image_digest": self.image_digest,
             "command": tuple(self.command or ()),
             "environment": tuple(sorted((self.environment or {}).items())),
@@ -67,3 +67,4 @@ class ContainerDefinition(BaseModel):
             "backend": self.backend,
             "extra_args": tuple(sorted((self.extra_args or {}).items())),
         }
+        return cfg

@@ -1,9 +1,19 @@
 import logging
 import uuid
 from pathlib import Path
-from typing import Dict, Optional, List, Any, Type, Iterable, Union, Callable, Tuple, Literal
+from typing import (
+    Dict,
+    Optional,
+    List,
+    Any,
+    Type,
+    Iterable,
+    Union,
+    Callable,
+    Tuple,
+    Literal,
+)
 from datetime import datetime, timezone
-from types import MappingProxyType
 
 from sqlmodel import SQLModel
 
@@ -29,6 +39,7 @@ from consist.core.context import push_tracker, pop_tracker
 
 AccessMode = Literal["standard", "analysis", "read_only"]
 
+
 class Tracker:
     """
     The central orchestrator for Consist, managing the lifecycle of a Run and its associated Artifacts.
@@ -52,7 +63,7 @@ class Tracker:
         project_root: str = ".",
         hashing_strategy: str = "full",
         schemas: Optional[List[Type[SQLModel]]] = None,
-        access_mode: AccessMode = "standard"
+        access_mode: AccessMode = "standard",
     ):
         """
         Initializes the Consist Tracker.
@@ -526,15 +537,16 @@ class Tracker:
     # --- Query Helpers ---
 
     def find_runs(
-            self,
-            tags: Optional[List[str]] = None,
-            year: Optional[int] = None,
-            model: Optional[str] = None,
-            status: Optional[str] = None,
-            parent_id: Optional[str] = None,
-            metadata: Optional[Dict[str, Any]] = None,
-            limit: int = 100,
-            index_by: Optional[str] = None,  # <--- NEW ARGUMENT
+        self,
+        tags: Optional[List[str]] = None,
+        year: Optional[int] = None,
+        model: Optional[str] = None,
+        status: Optional[str] = None,
+        parent_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        limit: int = 100,
+        index_by: Optional[str] = None,  # <--- NEW ARGUMENT
+        name: Optional[str] = None,
     ) -> Union[List[Run], Dict[Any, Run]]:
         """
         Retrieves a list of Runs matching the specified criteria.
@@ -548,7 +560,7 @@ class Tracker:
         runs = []
         if self.db:
             runs = self.db.find_runs(
-                tags, year, model, status, parent_id, metadata, limit
+                tags, year, model, status, parent_id, metadata, limit, name
             )
 
         if index_by:
@@ -592,7 +604,9 @@ class Tracker:
             raise ValueError(f"No run found matching criteria: {kwargs}")
 
         if len(results) > 1:
-            raise ValueError(f"Multiple runs ({len(results)}+) found matching criteria: {kwargs}. Narrow your search.")
+            raise ValueError(
+                f"Multiple runs ({len(results)}+) found matching criteria: {kwargs}. Narrow your search."
+            )
 
         return results[0]
 
@@ -980,14 +994,18 @@ class Tracker:
             # AUTO-DISCOVERY: Use the run that created the artifact
             if artifact.run_id:
                 target_run = self.get_run(artifact.run_id)
-                logging.info(f"[Consist] Ingesting in Analysis Mode. Attributing to Run: {target_run.id}")
+                logging.info(
+                    f"[Consist] Ingesting in Analysis Mode. Attributing to Run: {target_run.id}"
+                )
 
         # Fallback to active run if available
         if not target_run and self.current_consist:
             target_run = self.current_consist.run
 
         if not target_run:
-            raise RuntimeError("Cannot ingest: Could not determine associated Run context.")
+            raise RuntimeError(
+                "Cannot ingest: Could not determine associated Run context."
+            )
 
         if self.engine:
             self.engine.dispose()
@@ -1150,6 +1168,32 @@ class Tracker:
 
         return RunArtifacts(inputs=inputs, outputs=outputs)
 
+    def get_run_artifact(
+        self,
+        run_id: str,
+        key: Optional[str] = None,
+        key_contains: Optional[str] = None,
+        direction: str = "output",
+    ) -> Optional[Artifact]:
+        """
+        Convenience helper to fetch a single artifact for a specific run.
+
+        Args:
+            run_id: Run identifier.
+            key: Exact key to match (if present in logged artifacts).
+            key_contains: Optional substring to match when the exact key is unknown.
+            direction: \"output\" (default) or \"input\".
+        """
+        record = self.get_artifacts_for_run(run_id)
+        collection = record.outputs if direction == "output" else record.inputs
+        if key and key in collection:
+            return collection[key]
+        if key_contains:
+            for k, art in collection.items():
+                if key_contains in k:
+                    return art
+        return next(iter(collection.values()), None)
+
     def find_matching_run(
         self, config_hash: str, input_hash: str, git_hash: str
     ) -> Optional[Run]:
@@ -1162,7 +1206,7 @@ class Tracker:
         return None
 
     def get_artifact_lineage(
-            self, artifact_key_or_id: Union[str, uuid.UUID]
+        self, artifact_key_or_id: Union[str, uuid.UUID]
     ) -> Optional[Dict[str, Any]]:
         """
         Recursively builds a lineage tree for a given artifact.
@@ -1194,9 +1238,7 @@ class Tracker:
 
             # NEW: Iterate over inputs dict
             for input_artifact in run_artifacts.inputs.values():
-                run_node["inputs"].append(
-                    _trace(input_artifact, visited_runs.copy())
-                )
+                run_node["inputs"].append(_trace(input_artifact, visited_runs.copy()))
 
             lineage_node["producing_run"] = run_node
             return lineage_node
@@ -1206,20 +1248,20 @@ class Tracker:
         # --- Permission Helpers ---
 
     def _ensure_write_provenance(self):
-            """Guard for start_run, log_artifact"""
-            if self.access_mode != "standard":
-                raise RuntimeError(
-                    f"Operation forbidden in '{self.access_mode}' mode. "
-                    "Switch to access_mode='standard' to create new runs or artifacts."
-                )
+        """Guard for start_run, log_artifact"""
+        if self.access_mode != "standard":
+            raise RuntimeError(
+                f"Operation forbidden in '{self.access_mode}' mode. "
+                "Switch to access_mode='standard' to create new runs or artifacts."
+            )
 
     def _ensure_write_data(self):
-            """Guard for ingest"""
-            if self.access_mode == "read_only":
-                raise RuntimeError(
-                    "Ingestion forbidden in 'read_only' mode. "
-                    "Switch to access_mode='analysis' or 'standard'."
-                )
+        """Guard for ingest"""
+        if self.access_mode == "read_only":
+            raise RuntimeError(
+                "Ingestion forbidden in 'read_only' mode. "
+                "Switch to access_mode='analysis' or 'standard'."
+            )
 
     # --- Path Resolution & Utils ---
 

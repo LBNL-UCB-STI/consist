@@ -131,10 +131,12 @@ class DockerBackend(ContainerBackend):
             If the 'docker' Python package is not installed.
         """
         if not docker:
-            raise ImportError(
-                "The 'docker' python package is required for the DockerBackend."
-            )
-        self.client = client or docker.from_env()
+            # Allow instantiation without the docker SDK (tests/mocks).
+            # Actual execution will error later if a real client is required.
+            logger.warning("Docker SDK not installed; DockerBackend will be inert.")
+            self.client = None
+        else:
+            self.client = client or docker.from_env()
         self.pull_latest = pull_latest
 
     def resolve_image_digest(self, image: str) -> str:
@@ -206,6 +208,10 @@ class DockerBackend(ContainerBackend):
         bool
             True if the Docker container ran successfully and exited with code 0, False otherwise.
         """
+        if not self.client:
+            raise RuntimeError(
+                "Docker client not available. Install the 'docker' package or provide a client."
+            )
         # FIX: Pass command directly to Docker (it handles lists correctly for exec form).
         # Joining list to string breaks commands like ["sh", "-c", "complex > redirect"]
         run_command = command

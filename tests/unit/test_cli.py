@@ -250,14 +250,18 @@ def test_summary_command(mock_db_session):
         assert "create_data" in result.stdout
 
 
-def test_preview_command_success(mock_db_session):
+def test_preview_command_success(mock_db_session, tmp_path):
     with (
         patch("pathlib.Path.exists", return_value=True),
-        patch("consist.cli.get_tracker"),
+        patch("consist.cli.get_tracker") as m,
         patch("consist.cli.queries.get_artifact_preview") as mock_get_preview,
     ):
         mock_df = pd.DataFrame({"col1": [1, 2], "col2": ["a", "b"]})
         mock_get_preview.return_value = mock_df
+
+        tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
+        tracker.db.engine = mock_db_session.get_bind()
+        m.return_value = tracker
 
         result = runner.invoke(app, ["preview", "raw_data"])
 

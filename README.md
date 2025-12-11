@@ -53,76 +53,131 @@ pip install consist
 
 <!-- [TODO: Update once published to PyPI] -->
 
-### Basic Usage
+### Which Approach Should I Use?
 
-Consist exposes two complementary interfaces:
-- **Tasks (`@task`)**: Best for pure-ish units where you want signature-based caching and automatic artifact registration. Call a task multiple times with the same inputs to get cache hits.
-- **Scenarios/Steps (`scenario` / `scenario.step`)**: Best for hierarchical, multi-step workflows with a parent header run and child step runs (e.g., multi-year simulations). Steps capture lineage and grouping; you can still call cached tasks inside steps for reuse.
+Consist provides two complementary ways to structure your workflow:
 
-#### Example: Task
+**Use `@task` decorators if:**
+- You have individual processing functions that should be cached independently
+- Each function takes clear inputs and returns outputs
+- You want automatic signature-based caching without manual run management
+- Your workflow is a simple chain of function calls
+
+**Use `scenario` + `step` contexts if:**
+- You have multi-step workflows that naturally group together (e.g., multi-year simulations)
+- You need a parent "header" run that summarizes the entire workflow
+- You want to query and compare results across scenario variants
+- Your steps involve imperative code blocks, not just pure functions
+
+**Use both together if:**
+- You have complex workflows where some steps are reusable functions (tasks) and others are larger orchestration blocks (scenarios/steps)
+
+### Example 1: Single-Step Processing with Tasks
+
+Tasks are best for functions that transform data in a cacheable way. Consist inspects the function signature to determine inputs and configuration automatically.
 
 ```python
 from consist import Tracker
 from pydantic import BaseModel
 from pathlib import Path
 
-# Schemas allow Consist to create virtual tables for your outputs
+# Define your configuration and output schemas
+class CleaningConfig(BaseModel):
+    threshold: float = 0.5
+    remove_outliers: bool = True
+
 class CleanedData(BaseModel):
     id: int
     value: float
 
+# Initialize the tracker
 tracker = Tracker(
     root="./runs",                 # Where run directories are created
     db_path="./provenance.duckdb", # Queryable provenance database
     schemas=[CleanedData]          # Register schemas for querying
 )
 
-class CleaningConfig(BaseModel):
-    threshold: float = 0.5
-    remove_outliers: bool = True
-
+# Decorate your function
 @tracker.task()
 def clean_data(raw_file: Path, config: CleaningConfig) -> Path:
     """Load raw data, apply cleaning rules, write output."""
     output_path = Path("./cleaned.parquet")
     # ... processing logic ...
     return output_path
-```
 
-When `clean_data` is called:
-
-1. Consist computes a signature from the function's code, the config object, and the input file's hash.
-2. If a prior run with the same signature exists, Consist returns the cached output immediately.
-3. Otherwise, it executes the function, records the output artifact, and links it to the run.
-
-```python
+# Use it like a normal function - caching happens automatically
 config = CleaningConfig(threshold=0.8)
+result = clean_data(Path("raw.csv"), config)  # First call: executes
+result = clean_data(Path("raw.csv"), config)  # Second call: cached!
 
-# First call: executes the function
-result = clean_data(Path("raw.csv"), config)
-
-# Second call with same inputs: returns cached result
-result = clean_data(Path("raw.csv"), config)
-
-# Third call with different config: executes again
+# Different config = different signature = new execution
 result = clean_data(Path("raw.csv"), CleaningConfig(threshold=0.9))
+
+# Control cache behavior with cache_mode
+@tracker.task(cache_mode="overwrite")  # Always re-execute, update cache
+def clean_data_fresh(raw_file: Path, config: CleaningConfig) -> Path:
+    ...
+
+@tracker.task(cache_mode="readonly")  # Use cache but don't persist changes
+def clean_data_whatif(raw_file: Path, config: CleaningConfig) -> Path:
+    ...
 ```
 
-#### Example: Scenario/Step
+When `clean_data` is called, Consist computes a signature from the function's code, the config object, and the input file's hash. Matching signatures return cached results immediately; otherwise the function executes and the output is recorded.
+
+### Example 2: Multi-Step Workflows with Scenarios
+
+For complex simulations with multiple sequential steps, scenarios provide structure and grouping. Each scenario creates a header run that links all its steps together.
 
 ```python
 from consist import scenario, log_dataframe
 
+# The scenario context creates a parent "header" run
 with scenario("baseline", tracker=tracker, model="travel_demand") as sc:
+    # Register inputs that apply to the whole scenario
     sc.add_input("population.csv", key="pop")
+    sc.add_input("network.geojson", key="road_network")
+    
+    # Each step is a child run, automatically linked to the parent
+    with sc.step("year_2020", model="travel_demand"):
+        df_2020 = run_model(year=2020)
+        log_dataframe(df_2020, key="persons_2020")
+    
     with sc.step("year_2030", model="travel_demand"):
-        # do work, log artifacts
-        log_dataframe(df_result, key="persons_2030")
+        df_2030 = run_model(year=2030)
+        log_dataframe(df_2030, key="persons_2030")
+    
+    with sc.step("year_2040", model="travel_demand"):
+        df_2040 = run_model(year=2040)
+        log_dataframe(df_2040, key="persons_2040")
 ```
 
-You can mix both: call cached `@task` functions inside `scenario.step` to reuse heavy computations.
+All steps share the same `consist_scenario_id="baseline"` in the database, making it easy to query results across years or compare different scenario variants.
 
-### Wrapping Existing Code
+### Mixing Tasks and Scenarios
+
+You can call cached `@task` functions inside scenario steps to reuse heavy computations:
+
+```python
+@tracker.task()
+def preprocess_network(network_file: Path, year: int) -> Path:
+    """Expensive preprocessing that should be cached."""
+    # ... processing logic ...
+    return output_path
+
+with scenario("baseline", tracker=tracker) as sc:
+    sc.add_input("raw_network.geojson", key="network")
+    
+    with sc.step("preprocess"):
+        # This task is cached independently - running multiple scenarios
+        # with the same network won't recompute preprocessing
+        processed = preprocess_network(Path("raw_network.geojson"), year=2020)
+    
+    with sc.step("simulate"):
+        run_simulation(processed)
+```
+
+### Wrapping Legacy Code
 
 Many scientific models read configuration from files and write outputs to directories rather than accepting arguments and returning paths. The `depends_on` and `capture_dir` parameters handle this pattern:
 
@@ -139,49 +194,47 @@ def run_simulation(upstream_artifact):
     # Return None when using capture_dir; Consist logs outputs automatically
 ```
 
-### Inspecting Provenance
+Consist will hash the configuration files, execute the function, capture any CSV files created in `./outputs`, and register them as output artifacts.
 
-Consist provides ergonomic tools to find specific runs and load their results without manually traversing directory paths.
+### Querying Results
+
+Consist provides tools to find runs and load their artifacts without manually parsing directory paths:
 
 ```python
 # Find a specific run using filters
-# options: consist.find_run() for one, consist.find_runs() for many
 run = consist.find_run(
     tracker=tracker,
-    model_name="clean_data",
-    tags=["production"],
+    model_name="travel_demand",
+    tags=["baseline"],
     year=2030
 )
 
 # Access artifacts using structured keys
-# No need to parse file paths manually
 artifacts = tracker.get_artifacts_for_run(run.id)
-cleaned_file = artifacts.outputs["cleaned_parquet"]
+persons_file = artifacts.outputs["persons_2030"]
 
 # Load data (handles path resolution automatically)
-df = consist.load(cleaned_file)
+df = consist.load(persons_file)
 ```
 
-### Scenario Workflows
-
-For complex simulations involving multiple steps (e.g., Year 1 → Year 2 → Year 3), Consist offers the `scenario` context. This automatically links child steps to a parent "Header Run" and names them predictably.
+For cross-run queries, use Consist's data virtualization to query artifacts as if they were database tables:
 
 ```python
-with consist.scenario("baseline_scenario", tracker=tracker) as scenario:
-    # 1. Register exogenous inputs once for the whole scenario
-    scenario.add_input("population_forecast.csv", key="pop_growth")
-    
-    # 2. Run steps (automatically linked to parent "baseline_scenario")
-    with scenario.step("year_2020", model="travel_demand"):
-        run_model(year=2020)
-        
-    with scenario.step("year_2030", model="travel_demand"):
-        run_model(year=2030)
+from sqlmodel import select
+
+# Access the auto-generated view for your schema
+VCleanedData = tracker.views.CleanedData
+
+# Query across all runs that produced this type of artifact
+query = select(
+    VCleanedData.consist_scenario_id,
+    VCleanedData.value
+).where(VCleanedData.consist_year == 2030)
+
+results = consist.run_query(query, tracker=tracker)
 ```
 
-In the database, these runs will share a `consist_scenario_id="baseline_scenario"`, making it trivial to group results.
-
-Tip: use `consist.log_dataframe(df, key="households", schema=Household)` inside a step to write, log, and ingest a DataFrame in one call, and `consist.run_query(query, tracker=tracker)` to execute SQLModel/SQLAlchemy queries without manually managing sessions.
+These views combine ingested data and files on disk, allowing you to query millions of rows across multiple runs without loading everything into memory.
 
 ---
 
@@ -189,13 +242,51 @@ Tip: use `consist.log_dataframe(df, key="households", schema=Household)` inside 
 
 ### Intelligent Caching
 
-Runs are identified by the hash of their inputs: code version, configuration, and upstream artifact provenance. This Merkle DAG structure means that:
+Consist identifies runs using a three-part signature: `SHA256(code_hash | config_hash | input_hash)`.
+
+- **Code hash**: Captured from your Git commit SHA. If your working tree has uncommitted changes, Consist appends a `-dirty-<timestamp>` suffix to ensure edited code invalidates the cache. For `@task` decorators, you can choose to hash just the function or the entire module.
+  
+- **Config hash**: A canonical representation of your configuration dictionary, normalized to handle dict ordering and numeric type variations (e.g., `int` vs `float`).
+  
+- **Input hash**: For Consist-produced artifacts, this references the *signature of the run that produced them* (Merkle linking). For raw files, Consist hashes the file contents or metadata.
+
+This Merkle DAG structure means that:
 
 - Changing a parameter invalidates only downstream runs that depend on it.
 - Identical inputs always produce cache hits, even across machines (given the same code version).
 - You can safely delete intermediate files; provenance validity depends on the lineage graph, not file existence.
 
 The last point—which we call **Ghost Mode**—is particularly useful for long-running studies where intermediate outputs may be cleaned up to save storage, but you still want to query what happened.
+
+#### Cache Modes
+
+Control caching behavior with the `cache_mode` parameter:
+
+- **`reuse` (default)**: Look up runs with matching signatures. On a cache hit, return the cached outputs without re-execution. This is the standard behavior for reproducible workflows.
+
+- **`overwrite`**: Always execute the run, but update the cache entry for that signature. Useful when you've fixed a bug and want to regenerate results without changing the signature.
+
+- **`readonly`**: Use cached results when available, but don't persist any changes. Ideal for sandbox or what-if explorations where you don't want to pollute the provenance database.
+
+```python
+# Default: reuse existing results
+@tracker.task()
+def process_data(input_file: Path) -> Path:
+    ...
+
+# Always regenerate, update cache
+@tracker.task(cache_mode="overwrite")
+def process_data_fresh(input_file: Path) -> Path:
+    ...
+
+# Read from cache but don't save changes
+with tracker.start_run(..., cache_mode="readonly"):
+    ...
+```
+
+#### Automatic Lineage Tracking
+
+When an input artifact was produced by Consist, the tracker automatically sets `parent_run_id` to link runs together. This creates an explicit provenance chain: if `run_B` consumes an artifact from `run_A`, querying `run_B`'s lineage will recursively show that it depends on `run_A`, along with `run_A`'s configuration and inputs. You can export this full DAG to understand exactly what produced any result.
 
 ### Data Virtualization
 
@@ -204,10 +295,10 @@ Consist can create SQL views over your artifacts without copying data into the d
 Because Consist knows your schemas (registered via `Tracker(schemas=[...])`) and the file locations, it generates **Smart Views** that automatically union data from disk.
 
 ```python
-# 1. Access the auto-generated view for your schema
+# Access the auto-generated view for your schema
 VHousehold = tracker.views.Household
 
-# 2. Query using SQLModel (or raw SQL)
+# Query using SQLModel (or raw SQL)
 # Note: 'consist_scenario_id' is automatically injected for easy grouping
 query = select(
     VHousehold.consist_scenario_id,
