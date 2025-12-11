@@ -1,3 +1,4 @@
+"""TODO: add unit coverage for query/helper utilities when expanded (tools.queries, pagination)."""
 import pandas as pd
 from typer.testing import CliRunner
 from unittest.mock import patch, MagicMock

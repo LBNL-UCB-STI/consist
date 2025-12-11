@@ -6,7 +6,7 @@ from typing import List, Optional, Dict, Any, Union
 from consist import Artifact
 from consist.models.run import ConsistRecord
 from typing import TYPE_CHECKING
-from consist.core.chain import OutputChain
+from consist.core.coupler import Coupler
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
@@ -66,7 +66,7 @@ class ScenarioContext:
         self._inputs: Dict[str, Artifact] = {}
         self._first_step_started: bool = False
         self._last_step_name: Optional[str] = None
-        self.chain = OutputChain(tracker)
+        self.coupler = Coupler(tracker)
 
     @property
     def run_id(self) -> str:

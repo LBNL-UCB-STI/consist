@@ -9,7 +9,7 @@ from sqlalchemy import text
 # Internal imports
 from consist.core.context import get_active_tracker
 from consist.core.views import create_view_model
-from consist.core.chain import OutputChain
+from consist.core.coupler import Coupler
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 from consist.core.tracker import Tracker

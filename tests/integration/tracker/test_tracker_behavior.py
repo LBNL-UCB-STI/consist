@@ -100,7 +100,7 @@ def test_ingest_outside_of_run_context(tracker):
         tracker.ingest(artifact=dummy_artifact, data=[])
 
 
-def test_tracker_db_write_failure_tolerated(tracker, mocker, caplog, run_dir):
+def test_tracker_db_write_failure_tolerated(tracker, monkeypatch, caplog, run_dir):
     """
     Tests that Consist's `Tracker` tolerates database write failures, logs a warning,
     and still successfully writes the run and artifact data to the `consist.json` file,
@@ -129,7 +129,7 @@ def test_tracker_db_write_failure_tolerated(tracker, mocker, caplog, run_dir):
 
     # Mock Session.commit to raise an exception, simulating a DB write failure
     mock_commit = MagicMock(side_effect=Exception("Simulated DB commit failure"))
-    mocker.patch.object(sqlmodel.Session, "commit", new=mock_commit)
+    monkeypatch.setattr(sqlmodel.Session, "commit", mock_commit)
 
     test_run_id = "run_with_db_fail"
     test_artifact_key = "output_data"

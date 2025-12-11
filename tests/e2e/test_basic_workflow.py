@@ -1,3 +1,4 @@
+"""TODO: add future end-to-end variants (CLI + web API once implemented)."""
 import logging
 import json
 from sqlmodel import Session, select

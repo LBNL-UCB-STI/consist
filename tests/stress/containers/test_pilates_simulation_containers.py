@@ -83,7 +83,7 @@ def run_simulation_scenario(
         model="pilates_orchestrator",
         tags=["scenario_header"],
     ) as scenario:
-        chain = scenario.chain
+        coupler = scenario.coupler
 
         # Init
         with scenario.step(
@@ -117,11 +117,11 @@ def run_simulation_scenario(
                 direction="output",
             )
 
-        chain.set("persons", seed_art)
+        coupler.set("persons", seed_art)
 
         # Years (propagate previous year's persons into the next)
         for idx, year in enumerate(years):
-            current_person_art = chain.get("persons")
+            current_person_art = coupler.get("persons")
             step_inputs = [current_person_art] if current_person_art else None
 
             # Step 1: advance people (age only)
@@ -133,11 +133,11 @@ def run_simulation_scenario(
                 config={"year": year},
                 inputs=step_inputs,
             ):
-                cached_persons = chain.get_cached("persons")
+                cached_persons = coupler.get_cached("persons")
                 if cached_persons:
-                    chain.set("persons", cached_persons)
+                    coupler.set("persons", cached_persons)
                 else:
-                    prev_person_art = chain.get("persons")
+                    prev_person_art = coupler.get("persons")
                     df_adv = df_seed if idx == 0 else consist.load(prev_person_art)
                     if idx != 0:
                         delta = advance_delta_by_year.get(year, 1)
@@ -149,7 +149,7 @@ def run_simulation_scenario(
                         schema=Person,
                         direction="output",
                     )
-                    chain.set("persons", prev_person_art)
+                    coupler.set("persons", prev_person_art)
 
             # Step 2: generate trips via mocked container (updates number_of_trips)
             with scenario.step(
@@ -161,12 +161,12 @@ def run_simulation_scenario(
                     "year": year,
                     "base_trips": base_trips_by_year.get(year, base_trips),
                 },
-                inputs=[chain.get("persons")],
+                inputs=[coupler.get("persons")],
             ):
                 # Resolve from cache if present; otherwise execute container and log output.
-                persons_art = chain.get_cached_output("persons")
+                persons_art = coupler.get_cached_output("persons")
                 if not persons_art:
-                    df_adv = consist.load(chain.get("persons"))
+                    df_adv = consist.load(coupler.get("persons"))
                     # Use a stable host path for container outputs so identical scenarios can reuse cache
                     container_out_dir = (container_out_root / str(year)).resolve()
                     container_out_dir.mkdir(parents=True, exist_ok=True)
@@ -192,7 +192,7 @@ def run_simulation_scenario(
                             image="mock/generate_trips:latest",
                             command=["generate_trips"],
                             volumes={str(container_out_dir): "/out"},
-                            inputs=[chain.get("persons")],
+                            inputs=[coupler.get("persons")],
                             outputs={"persons": output_path},
                             environment={"BASE_TRIPS": str(trips_lambda)},
                             backend_type="docker",
@@ -201,7 +201,7 @@ def run_simulation_scenario(
                         persons_art = result.artifacts["persons"]
                         assert persons_art is not None, "No persons output logged"
 
-                chain.set("persons", persons_art)
+                coupler.set("persons", persons_art)
 
 
 def test_pilates_header_pattern(tmp_path):

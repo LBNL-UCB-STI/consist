@@ -23,15 +23,223 @@ from consist.tools import queries
 app = typer.Typer(rich_markup_mode="markdown")
 console = Console()
 
+def output_json(data: Any) -> None:
+    """Helper to output data as JSON."""
+    import json
+    print(json.dumps(data, default=str, indent=2))
 
-def get_tracker(db_path: str) -> Tracker:
-    """Initializes and returns a Tracker instance, handling DB existence checks."""
-    if not Path(db_path).exists():
-        console.print(f"[red]Database not found at {db_path}[/red]")
+
+def find_db_path(explicit_path: Optional[str] = None) -> str:
+    """Find the provenance database, checking common locations."""
+    if explicit_path:
+        return explicit_path
+
+    # Check environment variable
+    import os
+    if env_path := os.getenv("CONSIST_DB"):
+        return env_path
+
+    # Check current directory
+    if Path("provenance.duckdb").exists():
+        return "provenance.duckdb"
+
+    # Check common subdirectories
+    for subdir in [".", "data", "db", ".consist"]:
+        candidate = Path(subdir) / "provenance.duckdb"
+        if candidate.exists():
+            return str(candidate)
+
+    # Fall back to default
+    return "provenance.duckdb"
+
+
+# Then update get_tracker:
+def get_tracker(db_path: Optional[str] = None) -> Tracker:
+    """Initializes and returns a Tracker instance."""
+    resolved_path = find_db_path(db_path)
+    if not Path(resolved_path).exists():
+        console.print(f"[red]Database not found at {resolved_path}[/red]")
+        console.print("[yellow]Hint: Use --db-path to specify location or set CONSIST_DB environment variable[/yellow]")
         raise typer.Exit(1)
-    # run_dir is not critical for read-only CLI operations
-    return Tracker(run_dir=Path("."), db_path=db_path)
+    return Tracker(run_dir=Path("."), db_path=resolved_path)
 
+
+@app.command()
+def search(
+        query: str = typer.Argument(..., help="Search term (searches run IDs, model names, tags)."),
+        db_path: str = typer.Option("provenance.duckdb", help="Path to the DuckDB database."),
+        limit: int = typer.Option(20, help="Maximum results."),
+) -> None:
+    """Search for runs by ID, model name, or tags."""
+    tracker = get_tracker(db_path)
+
+    with Session(tracker.engine) as session:
+        from consist.models.run import Run
+        from sqlmodel import select, or_, col
+
+        # Search in multiple fields
+        search_query = (
+            select(Run)
+            .where(
+                or_(
+                    Run.id.contains(query),
+                    Run.model_name.contains(query),
+                    Run.scenario_id.contains(query) if query else False,
+                )
+            )
+            .order_by(Run.created_at.desc())
+            .limit(limit)
+        )
+
+        results = session.exec(search_query).all()
+
+        if not results:
+            console.print(f"[yellow]No runs found matching '{query}'[/yellow]")
+            return
+
+        table = Table(title=f"Search Results: '{query}'")
+        table.add_column("ID", style="cyan")
+        table.add_column("Model", style="green")
+        table.add_column("Scenario", style="yellow")
+        table.add_column("Status")
+        table.add_column("Created", style="dim")
+
+        for run in results:
+            status_style = "green" if run.status == "completed" else "red"
+            table.add_row(
+                run.id,
+                run.model_name,
+                run.scenario_id or "-",
+                f"[{status_style}]{run.status}[/]",
+                run.created_at.strftime("%Y-%m-%d %H:%M"),
+            )
+
+        console.print(table)
+
+
+@app.command()
+def validate(
+        db_path: str = typer.Option("provenance.duckdb", help="Path to the DuckDB database."),
+        fix: bool = typer.Option(False, help="Attempt to fix issues (mark artifacts as missing)."),
+) -> None:
+    """Check that artifacts referenced in DB actually exist on disk."""
+    tracker = get_tracker(db_path)
+
+    with Session(tracker.engine) as session:
+        from consist.models.artifact import Artifact
+        artifacts = session.exec(select(Artifact)).all()
+
+        missing = []
+        for art in artifacts:
+            try:
+                abs_path = tracker.resolve_uri(art.uri)
+                if not Path(abs_path).exists():
+                    missing.append(art)
+            except Exception as e:
+                missing.append(art)
+
+        if not missing:
+            console.print("[green]✓ All artifacts validated successfully[/green]")
+            return
+
+        console.print(f"[yellow]⚠ Found {len(missing)} missing artifacts:[/yellow]\n")
+
+        table = Table()
+        table.add_column("Key", style="yellow")
+        table.add_column("URI", style="dim")
+        table.add_column("Run ID", style="cyan")
+
+        for art in missing[:50]:  # Limit display
+            table.add_row(art.key, art.uri, art.run_id or "-")
+
+        console.print(table)
+
+        if len(missing) > 50:
+            console.print(f"\n[dim]... and {len(missing) - 50} more[/dim]")
+
+
+@app.command()
+def scenarios(
+        db_path: str = typer.Option("provenance.duckdb", help="Path to the DuckDB database."),
+        limit: int = typer.Option(20, help="Maximum scenarios to display."),
+) -> None:
+    """List all scenarios and their run counts."""
+    tracker = get_tracker(db_path)
+
+    with Session(tracker.engine) as session:
+        from consist.models.run import Run
+        from sqlmodel import select, func, distinct
+
+        # Get scenarios with counts
+        query = (
+            select(
+                Run.scenario_id,
+                func.count(Run.id).label("run_count"),
+                func.min(Run.created_at).label("first_run"),
+                func.max(Run.created_at).label("last_run"),
+            )
+            .where(Run.scenario_id.is_not(None))
+            .group_by(Run.scenario_id)
+            .order_by(func.max(Run.created_at).desc())
+            .limit(limit)
+        )
+
+        results = session.exec(query).all()
+
+        table = Table(title="Scenarios")
+        table.add_column("Scenario ID", style="cyan")
+        table.add_column("Runs", style="magenta")
+        table.add_column("First Run", style="dim")
+        table.add_column("Last Run", style="green")
+
+        for row in results:
+            table.add_row(
+                row.scenario_id,
+                str(row.run_count),
+                row.first_run.strftime("%Y-%m-%d %H:%M"),
+                row.last_run.strftime("%Y-%m-%d %H:%M"),
+            )
+
+        console.print(table)
+
+
+@app.command()
+def scenario(
+        scenario_id: str = typer.Argument(..., help="The scenario ID to inspect."),
+        db_path: str = typer.Option("provenance.duckdb", help="Path to the DuckDB database."),
+) -> None:
+    """Show all runs in a scenario."""
+    tracker = get_tracker(db_path)
+
+    with Session(tracker.engine) as session:
+        from consist.models.run import Run
+        query = (
+            select(Run)
+            .where(Run.scenario_id == scenario_id)
+            .order_by(Run.created_at)
+        )
+        results = session.exec(query).all()
+
+        if not results:
+            console.print(f"[red]No runs found for scenario '{scenario_id}'[/red]")
+            raise typer.Exit(1)
+
+        table = Table(title=f"Runs in Scenario: [cyan]{scenario_id}[/cyan]")
+        table.add_column("Model", style="green")
+        table.add_column("Year", style="yellow")
+        table.add_column("Status")
+        table.add_column("Created", style="dim")
+
+        for run in results:
+            status_style = "green" if run.status == "completed" else "red"
+            table.add_row(
+                run.model_name,
+                str(run.year) if run.year else "-",
+                f"[{status_style}]{run.status}[/]",
+                run.created_at.strftime("%Y-%m-%d %H:%M"),
+            )
+
+        console.print(table)
 
 @app.command()
 def runs(
@@ -289,6 +497,56 @@ def preview(
         table.add_row(*[str(item) for item in row])
 
     console.print(table)
+
+
+@app.command()
+def show(
+        run_id: str = typer.Argument(..., help="The ID of the run to inspect."),
+        db_path: str = typer.Option("provenance.duckdb", help="Path to the DuckDB database."),
+) -> None:
+    """Display detailed information about a specific run."""
+    tracker = get_tracker(db_path)
+    run = tracker.get_run(run_id)
+    if not run:
+        console.print(f"[red]Run '{run_id}' not found.[/red]")
+        raise typer.Exit(1)
+
+    # Build a rich display
+    info = Table.grid(padding=(0, 2))
+    info.add_column(style="bold cyan")
+    info.add_column()
+
+    info.add_row("ID", run.id)
+    info.add_row("Model", run.model_name)
+    info.add_row("Status", f"[{'green' if run.status == 'completed' else 'red'}]{run.status}[/]")
+    info.add_row("Parent", run.parent_run_id or "[dim]None[/dim]")
+    info.add_row("Scenario", run.scenario_id or "[dim]None[/dim]")
+    if run.year:
+        info.add_row("Year", str(run.year))
+    info.add_row("Created", run.created_at.strftime("%Y-%m-%d %H:%M:%S"))
+    if run.duration_seconds:
+        info.add_row("Duration", f"{run.duration_seconds:.2f}s")
+    if run.tags:
+        info.add_row("Tags", ", ".join(run.tags))
+    info.add_row("Signature", run.signature[:16] + "..." if run.signature else "[dim]None[/dim]")
+
+    console.print(Panel(info, title=f"Run Details", border_style="cyan"))
+
+    # Config section
+    if run.config:
+        import json
+        console.print("\n[bold]Configuration:[/]")
+        console.print(Panel(json.dumps(run.config, indent=2), border_style="dim"))
+
+    # Metadata section (cache info, etc.)
+    if run.meta:
+        console.print("\n[bold]Metadata:[/]")
+        meta_table = Table(show_header=False, box=None)
+        meta_table.add_column(style="yellow")
+        meta_table.add_column()
+        for key, value in run.meta.items():
+            meta_table.add_row(f"  {key}", str(value))
+        console.print(meta_table)
 
 
 if __name__ == "__main__":
