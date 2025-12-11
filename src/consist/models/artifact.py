@@ -125,6 +125,10 @@ class Artifact(SQLModel, table=True):
             The absolute file system path of the artifact, or `None` if it has not
             yet been resolved or set.
         """
+        # Some ORM-loaded artifacts may not initialize private state; guard for None.
+        private_state = getattr(self, "__pydantic_private__", None)
+        if private_state is None:
+            return None
         return self._abs_path
 
     @abs_path.setter

@@ -45,6 +45,7 @@ def run_simulation_scenario(
 
     base_trips_by_year = base_trips_by_year or {}
     advance_delta_by_year = advance_delta_by_year or {}
+    container_out_root = (tracker.run_dir / "container_out").resolve()
 
     def advance_people(df_in: pd.DataFrame, delta: int = 1) -> pd.DataFrame:
         """Task-like helper: increment age for next year."""
@@ -82,6 +83,7 @@ def run_simulation_scenario(
         model="pilates_orchestrator",
         tags=["scenario_header"],
     ) as scenario:
+        chain = scenario.chain
 
         # Init
         with scenario.step(
@@ -115,10 +117,13 @@ def run_simulation_scenario(
                 direction="output",
             )
 
-        prev_person_art = seed_art
+        chain.set("persons", seed_art)
 
         # Years (propagate previous year's persons into the next)
         for idx, year in enumerate(years):
+            current_person_art = chain.get("persons")
+            step_inputs = [current_person_art] if current_person_art else None
+
             # Step 1: advance people (age only)
             with scenario.step(
                 run_id=f"{scenario_id}_year_{year}_advance",
@@ -126,32 +131,17 @@ def run_simulation_scenario(
                 year=year,
                 tags=["simulation", "advance"],
                 config={"year": year},
-                inputs=[prev_person_art],
+                inputs=step_inputs,
             ):
-                cached_persons = None
-                if prev_person_art is not None:
-                    # Ensure absolute path is present for DB-loaded artifacts
-                    abs_candidate = Path(prev_person_art.uri)
-                    if not abs_candidate.is_absolute():
-                        abs_candidate = (tracker.run_dir / abs_candidate).resolve()
-                    object.__setattr__(prev_person_art, "_abs_path", str(abs_candidate))
-                    tracker.log_artifact(prev_person_art, direction="input")
-
-                if tracker.is_cached:
-                    cached_persons = tracker.cached_output("persons")
-                    if cached_persons:
-                        prev_person_art = cached_persons
-                        # Skip recomputation but allow downstream steps to proceed
-                    else:
-                        cached_persons = None
-
-                if not (tracker.is_cached and cached_persons):
-                    if idx == 0:
-                        df_adv = df_seed
-                    else:
-                        prev_df = consist.load(prev_person_art, tracker=tracker)
+                cached_persons = chain.get_cached("persons")
+                if cached_persons:
+                    chain.set("persons", cached_persons)
+                else:
+                    prev_person_art = chain.get("persons")
+                    df_adv = df_seed if idx == 0 else consist.load(prev_person_art)
+                    if idx != 0:
                         delta = advance_delta_by_year.get(year, 1)
-                        df_adv = advance_people(prev_df, delta=delta)
+                        df_adv = advance_people(df_adv, delta=delta)
 
                     prev_person_art = consist.log_dataframe(
                         df_adv,
@@ -159,6 +149,7 @@ def run_simulation_scenario(
                         schema=Person,
                         direction="output",
                     )
+                    chain.set("persons", prev_person_art)
 
             # Step 2: generate trips via mocked container (updates number_of_trips)
             with scenario.step(
@@ -170,55 +161,47 @@ def run_simulation_scenario(
                     "year": year,
                     "base_trips": base_trips_by_year.get(year, base_trips),
                 },
-                inputs=[prev_person_art],
+                inputs=[chain.get("persons")],
             ):
-                # Link the advanced persons as input
-                abs_candidate = Path(prev_person_art.uri)
-                if not abs_candidate.is_absolute():
-                    abs_candidate = (tracker.run_dir / abs_candidate).resolve()
-                object.__setattr__(prev_person_art, "_abs_path", str(abs_candidate))
-                tracker.log_artifact(prev_person_art, direction="input")
+                # Resolve from cache if present; otherwise execute container and log output.
+                persons_art = chain.get_cached_output("persons")
+                if not persons_art:
+                    df_adv = consist.load(chain.get("persons"))
+                    # Use a stable host path for container outputs so identical scenarios can reuse cache
+                    container_out_dir = (container_out_root / str(year)).resolve()
+                    container_out_dir.mkdir(parents=True, exist_ok=True)
+                    output_path = (container_out_dir / "persons.parquet").resolve()
 
-                df_adv = consist.load(prev_person_art, tracker=tracker)
-                # Use a stable host path for container outputs so identical scenarios can reuse cache
-                container_out_dir = (tracker.run_dir / "container_out").resolve()
-                container_out_dir.mkdir(parents=True, exist_ok=True)
-                output_path = (
-                    container_out_dir / f"year_{year}_persons.parquet"
-                ).resolve()
+                    trips_lambda = base_trips_by_year.get(year, base_trips)
 
-                trips_lambda = base_trips_by_year.get(year, base_trips)
-
-                mock_backend = MockTripsBackend(
-                    df_source=df_adv, base_trips=trips_lambda, output_path=output_path
-                )
-
-                with patch(
-                    "consist.integrations.containers.api.DockerBackend",
-                    return_value=mock_backend,
-                ):
-                    # Nested mode: run_container detects the active step and does NOT create
-                    # a new Run row; signature/meta/artifacts are attached to the step run.
-                    result = run_container(
-                        tracker=tracker,
-                        run_id=f"{scenario_id}_year_{year}_trips_container",
-                        image="mock/generate_trips:latest",
-                        command=["generate_trips"],
-                        volumes={str(container_out_dir): "/out"},
-                        inputs=[prev_person_art],
-                        outputs=[output_path],
-                        environment={"BASE_TRIPS": str(trips_lambda)},
-                        backend_type="docker",
+                    mock_backend = MockTripsBackend(
+                        df_source=df_adv,
+                        base_trips=trips_lambda,
+                        output_path=output_path,
                     )
 
-                    # Prefer named output, fallback to first
-                    persons_art = result.artifacts.get(
-                        "persons",
-                        next(iter(result.artifacts.values()), None),
-                    )
-                    assert persons_art is not None, "No persons output logged"
-                    prev_person_art = persons_art
-                    object.__setattr__(prev_person_art, "_abs_path", str(output_path))
+                    with patch(
+                        "consist.integrations.containers.api.DockerBackend",
+                        return_value=mock_backend,
+                    ):
+                        # Nested mode: run_container detects the active step and does NOT create
+                        # a new Run row; signature/meta/artifacts are attached to the step run.
+                        result = run_container(
+                            tracker=tracker,
+                            run_id=f"{scenario_id}_year_{year}_trips_container",
+                            image="mock/generate_trips:latest",
+                            command=["generate_trips"],
+                            volumes={str(container_out_dir): "/out"},
+                            inputs=[chain.get("persons")],
+                            outputs={"persons": output_path},
+                            environment={"BASE_TRIPS": str(trips_lambda)},
+                            backend_type="docker",
+                        )
+
+                        persons_art = result.artifacts["persons"]
+                        assert persons_art is not None, "No persons output logged"
+
+                chain.set("persons", persons_art)
 
 
 def test_pilates_header_pattern(tmp_path):
@@ -258,6 +241,16 @@ def test_pilates_header_pattern(tmp_path):
     # Validation Logic
     res_map = {(r.scenario_id, r.consist_year): r.avg_trips for r in results}
     assert res_map[("high_gas", 2030)] < res_map[("baseline", 2030)]
+
+    # Verify artifact metadata inherited step year/tags
+    art_2020 = tracker.get_run_artifact(
+        tracker.find_run(parent_id="baseline", year=2020, model="generate_trips").id,
+        key_contains="persons",
+        direction="output",
+    )
+    assert art_2020 is not None
+    assert art_2020.meta.get("year") == 2020
+    assert "simulation" in (art_2020.meta.get("tags") or [])
 
     # Q2: Complex Join
     logging.info("\n--- Query 2: Trips by Region ---")
@@ -483,7 +476,7 @@ def test_pilates_cache_hydrates_across_run_dirs(tmp_path):
     ):
         run_simulation_scenario(tracker2, "baseline_replay", 10, years, "cold")
 
-    out_path = tracker2.run_dir / "container_out" / "year_2020_persons.parquet"
+    out_path = tracker2.run_dir / "container_out" / "2020" / "persons.parquet"
     assert out_path.exists(), "Cache reuse should materialize output in the new run_dir"
 
     replay_run = tracker2.find_run(
@@ -562,5 +555,5 @@ def test_pilates_cache_replay_with_ingested_outputs(tmp_path):
     assert len(df) == 300
 
     # Hydration should materialize the file in the new run_dir
-    out_path = tracker2.run_dir / "container_out" / "year_2020_persons.parquet"
+    out_path = tracker2.run_dir / "container_out" / "2020" / "persons.parquet"
     assert out_path.exists()

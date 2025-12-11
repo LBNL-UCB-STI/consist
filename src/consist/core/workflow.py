@@ -6,6 +6,7 @@ from typing import List, Optional, Dict, Any, Union
 from consist import Artifact
 from consist.models.run import ConsistRecord
 from typing import TYPE_CHECKING
+from consist.core.chain import OutputChain
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
@@ -65,6 +66,7 @@ class ScenarioContext:
         self._inputs: Dict[str, Artifact] = {}
         self._first_step_started: bool = False
         self._last_step_name: Optional[str] = None
+        self.chain = OutputChain(tracker)
 
     @property
     def run_id(self) -> str:
@@ -134,6 +136,7 @@ class ScenarioContext:
         Wraps `tracker.start_run` with logic to:
         1. Auto-generate Run ID: `{scenario_id}_{step_name}`
         2. Link parent_run_id to the scenario.
+        3. Automatically log any provided `inputs` as run inputs (via Tracker.begin_run).
 
         Args:
             name (str): Name of the step.

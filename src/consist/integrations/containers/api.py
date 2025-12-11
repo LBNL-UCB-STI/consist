@@ -47,6 +47,11 @@ class ContainerResult:
     cache_hit: bool
     cache_source: Optional[str] = None
 
+    @property
+    def output(self) -> Optional[Artifact]:
+        """Convenience: return the first (or only) output artifact if present."""
+        return next(iter(self.artifacts.values()), None)
+
 
 def _resolve_image_digest(backend, image: str, pull_latest: bool) -> str:
     """Resolve image digest (backend handles pull_latest internally if supported)."""
@@ -98,6 +103,7 @@ def _reuse_or_execute_container(
     inputs: List[Union[str, Artifact]],
     run_id: str,
     execute_fn,
+    output_key_map: Optional[Dict[str, str]] = None,
 ):
     """Cache-aware wrapper. Executes execute_fn on miss; reuses artifacts on hit."""
     signature = _container_signature(defn, inputs, tracker)
@@ -130,15 +136,15 @@ def _reuse_or_execute_container(
                             RunArtifactLink.run_id == cached.id
                         )
                     ).all()
-                    for link in links:
-                        session.merge(
-                            RunArtifactLink(
-                                run_id=run_id,
-                                artifact_id=link.artifact_id,
-                                direction=link.direction,
-                            )
-                        )
-                    session.commit()
+            for link in links:
+                session.merge(
+                    RunArtifactLink(
+                        run_id=run_id,
+                        artifact_id=link.artifact_id,
+                        direction=link.direction,
+                    )
+                )
+                session.commit()
 
                 # Hydrate outputs onto the host so callers see expected files
                 with Session(tracker.engine) as session:
@@ -160,7 +166,12 @@ def _reuse_or_execute_container(
                         (
                             a
                             for a in output_arts
-                            if a.key == target.name or Path(a.uri).name == target.name
+                            if a.key == target.name
+                            or Path(a.uri).name == target.name
+                            or (
+                                output_key_map
+                                and output_key_map.get(str(target)) == a.key
+                            )
                         ),
                         None,
                     )
@@ -239,7 +250,9 @@ def run_container(
     command: Union[str, List[str]],
     volumes: Dict[str, str],
     inputs: List[Union[str, Artifact]],
-    outputs: List[Union[str, Path]],
+    outputs: Union[
+        List[Union[str, Path]], Dict[str, Union[str, Path]]
+    ],  # Allow key->path mapping
     environment: Optional[Dict[str, str]] = None,
     working_dir: Optional[str] = None,
     backend_type: str = "docker",
@@ -275,6 +288,9 @@ def run_container(
         A list of paths on the host machine that are expected to be generated or
         modified by the containerized process. These paths will be scanned and
         logged as Consist output artifacts.
+    outputs : Dict[str, str]
+        Alternatively, pass a mapping of logical output keys to host paths.
+        The artifact will be logged with the provided key instead of the filename.
     environment : Optional[Dict[str, str]], optional
         A dictionary of environment variables to set inside the container. Defaults to empty.
     working_dir : Optional[str], optional
@@ -312,7 +328,15 @@ def run_container(
     # 2. Resolve Container Identity (Image Digest)
     image_digest = _resolve_image_digest(backend, image, pull_latest=pull_latest)
     cmd_list = command.split() if isinstance(command, str) else command
-    outputs_str = [str(o) for o in outputs]
+    # Normalize outputs into (key, path) tuples
+    output_specs: List[tuple[str, str]] = []
+    if isinstance(outputs, dict):
+        for logical_key, host_path in outputs.items():
+            output_specs.append((str(logical_key), str(host_path)))
+    else:
+        output_specs = [(Path(o).name, str(o)) for o in outputs]
+
+    outputs_str = [p for _, p in output_specs]
 
     # 3. Create Config Object for Hashing
     config = ContainerDefinition(
@@ -358,12 +382,14 @@ def run_container(
             raise RuntimeError(f"Container execution failed for run_id: {run_id}")
 
         # Scan expected output paths on HOST and log them
-        for host_out in outputs_str:
+        for output_key, host_out in output_specs:
             path_obj = Path(host_out).resolve()
             if path_obj.exists():
                 # Log artifact (Consist handles auto-detecting file vs dir)
                 logged = active_tracker.log_artifact(
-                    path_obj, key=path_obj.name, direction="output"
+                    path_obj,
+                    key=output_key or path_obj.name,
+                    direction="output",
                 )
                 try:
                     object.__setattr__(logged, "_abs_path", str(path_obj))
@@ -429,6 +455,7 @@ def run_container(
             inputs=resolved_inputs,
             run_id=tracker.current_consist.run.id,
             execute_fn=lambda: _execute_backend_and_log_outputs(tracker),
+            output_key_map={p: k for k, p in output_specs},
         )
         return _collect_result(tracker, tracker.current_consist.run.id)
 
@@ -446,6 +473,7 @@ def run_container(
             inputs=resolved_inputs,
             run_id=run_id,
             execute_fn=lambda: _execute_backend_and_log_outputs(t),
+            output_key_map={p: k for k, p in output_specs},
         )
 
         return _collect_result(tracker, run_id)

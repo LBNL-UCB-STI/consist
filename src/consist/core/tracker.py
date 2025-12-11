@@ -323,6 +323,11 @@ class Tracker:
                     art.abs_path = self.resolve_uri(art.uri)
                     self.current_consist.outputs.append(art)
 
+                # Mirror cache metadata on the active run for downstream checks (e.g., tests)
+                run.meta["cache_hit"] = True
+                run.meta["cache_source"] = cached_run.id
+                run.meta["declared_outputs"] = list(cached_items.outputs.keys())
+
             else:
                 logging.info("🔄 [Consist] Cache Miss. Running...")
         elif cache_mode == "overwrite":
@@ -676,6 +681,19 @@ class Tracker:
         artifact_obj = self.artifacts.create_artifact(
             path, run_id, key, direction, schema, driver, **meta
         )
+
+        # Inherit selected run metadata onto the artifact unless already present
+        run_ctx = self.current_consist.run
+        inherited_fields = {
+            "year": run_ctx.year,
+            "iteration": run_ctx.iteration,
+            "tags": run_ctx.tags or [],
+        }
+        if artifact_obj.meta is None:
+            artifact_obj.meta = {}
+        for k, v in inherited_fields.items():
+            if v is not None and k not in artifact_obj.meta:
+                artifact_obj.meta[k] = v
 
         # TRACKER HANDLES STATE & PERSISTENCE
         if direction == "input":
@@ -1603,7 +1621,10 @@ class Tracker:
         outputs = self.cached_artifacts(direction="output")
         if not outputs:
             return None
-        if key:
-            return outputs.get(key)
-        # return an arbitrary output (consistent ordering not guaranteed)
-        return next(iter(outputs.values()))
+        artifact = outputs.get(key) if key else next(iter(outputs.values()))
+        if artifact and not artifact.abs_path:
+            try:
+                artifact.abs_path = self.resolve_uri(artifact.uri)
+            except Exception:
+                pass
+        return artifact
