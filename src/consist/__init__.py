@@ -33,5 +33,4 @@ from consist.api import (
     find_runs,
     db_session,
     run_query,
-    Coupler,
 )
