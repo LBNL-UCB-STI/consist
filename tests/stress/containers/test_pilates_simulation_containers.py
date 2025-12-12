@@ -46,6 +46,11 @@ def run_simulation_scenario(
     base_trips_by_year = base_trips_by_year or {}
     advance_delta_by_year = advance_delta_by_year or {}
     container_out_root = (tracker.run_dir / "container_out").resolve()
+    # Example "external config bundle" that should affect identity but not be stored in DB.
+    external_cfg_dir = (tracker.run_dir / "external_configs" / "generate_trips").resolve()
+    external_cfg_dir.mkdir(parents=True, exist_ok=True)
+    (external_cfg_dir / "model.conf").write_text("version=1\n")
+    (external_cfg_dir / ".ignored").write_text("ignore_me=1\n")
 
     def advance_people(df_in: pd.DataFrame, delta: int = 1) -> pd.DataFrame:
         """Task-like helper: increment age for next year."""
@@ -81,6 +86,7 @@ def run_simulation_scenario(
         scenario_name,
         config={"mode": storage_mode, "base_trips": base_trips},
         model="pilates_orchestrator",
+        facet={"mode": storage_mode, "base_trips": base_trips},
         tags=["scenario_header"],
     ) as scenario:
         coupler = scenario.coupler
@@ -131,6 +137,7 @@ def run_simulation_scenario(
                 year=year,
                 tags=["simulation", "advance"],
                 config={"year": year},
+                facet={"delta": advance_delta_by_year.get(year, 1)},
                 inputs=step_inputs,
             ):
                 cached_persons = coupler.get_cached("persons")
@@ -161,6 +168,10 @@ def run_simulation_scenario(
                     "year": year,
                     "base_trips": base_trips_by_year.get(year, base_trips),
                 },
+                facet={
+                    "base_trips": base_trips_by_year.get(year, base_trips),
+                },
+                hash_inputs=[("generate_trips_config", external_cfg_dir)],
                 inputs=[coupler.get("persons")],
             ):
                 # Resolve from cache if present; otherwise execute container and log output.

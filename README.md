@@ -94,4 +94,4 @@ We welcome feedback from researchers working with multi-model simulation workflo
 
 ## License
 
-[MIT License](LICENSE)
+TODO: Open source permissive preferred

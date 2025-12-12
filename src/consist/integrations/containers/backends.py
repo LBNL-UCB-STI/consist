@@ -132,13 +132,16 @@ class DockerBackend(ContainerBackend):
         ImportError
             If the 'docker' Python package is not installed.
         """
-        if not docker:
-            # Allow instantiation without the docker SDK (tests/mocks).
+        if client is not None:
+            # Allow unit tests to inject a mock client even if the docker SDK isn't installed.
+            self.client = client
+        elif not docker:
+            # Allow instantiation without the docker SDK (e.g., non-docker environments).
             # Actual execution will error later if a real client is required.
             logger.warning("Docker SDK not installed; DockerBackend will be inert.")
             self.client = None
         else:
-            self.client = client or docker.from_env()
+            self.client = docker.from_env()
         self.pull_latest = pull_latest
 
     def resolve_image_digest(self, image: str) -> str:

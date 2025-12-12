@@ -193,3 +193,7 @@ class ConsistRecord(SQLModel):
     cached_run: Optional[Run] = None  # NEW: Stores the potential cache hit
 
     config: Dict[str, Any] = {}
+
+    # Optional, minimal, queryable config facet (not persisted to Run table).
+    # This is included in the per-run `consist.json` snapshot for inspection/debugging.
+    facet: Dict[str, Any] = {}

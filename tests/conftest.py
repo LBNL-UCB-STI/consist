@@ -9,10 +9,13 @@ from typer.testing import CliRunner
 # Import core library classes
 from consist.core.tracker import Tracker
 from consist.core import context
+from consist.core.identity import IdentityManager
 
 # Import specific models
 from consist.models.run import Run, RunArtifactLink
 from consist.models.artifact import Artifact
+from consist.models.config_facet import ConfigFacet
+from consist.models.run_config_kv import RunConfigKV
 
 
 # --- Global Test Configuration ---
@@ -42,6 +45,23 @@ def reset_context():
     yield
     if hasattr(context, "_TRACKER_STACK"):
         context._TRACKER_STACK.clear()
+
+
+@pytest.fixture(autouse=True)
+def stable_code_version(request):
+    """
+    Stabilize the code hash for tests so cache/signature behavior is deterministic
+    even when the working tree is dirty during local development.
+
+    Skip for IdentityManager unit tests that explicitly validate git behavior.
+    """
+    if "tests/unit/core/test_identity.py" in request.node.nodeid:
+        yield
+    else:
+        with patch.object(
+            IdentityManager, "get_code_version", return_value="static_test_hash"
+        ):
+            yield
 
 
 @pytest.fixture
@@ -80,7 +100,13 @@ def tracker(request, run_dir: Path, tmp_path: Path) -> Tracker:
     # --- CRITICAL DATABASE SETUP ---
     # We restrict operations to ONLY these tables to prevent 'create_all'
     # from trying to build 'MockTable' (from dlt tests) which uses 'SERIAL' types.
-    core_tables = [Run.__table__, Artifact.__table__, RunArtifactLink.__table__]
+    core_tables = [
+        Run.__table__,
+        Artifact.__table__,
+        RunArtifactLink.__table__,
+        ConfigFacet.__table__,
+        RunConfigKV.__table__,
+    ]
 
     # Clean Slate Policy:
     # We drop and recreate ONLY the core tables before every test.

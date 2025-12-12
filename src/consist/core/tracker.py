@@ -1,6 +1,9 @@
 import logging
+import json
+import hashlib
 import uuid
 import weakref
+import fnmatch
 from pathlib import Path
 from typing import (
     Dict,
@@ -34,7 +37,9 @@ from consist.core.persistence import DatabaseManager
 from consist.core.decorators import create_task_decorator
 from consist.core.events import EventManager
 from consist.models.artifact import Artifact
+from consist.models.config_facet import ConfigFacet
 from consist.models.run import Run, ConsistRecord, RunArtifacts
+from consist.models.run_config_kv import RunConfigKV
 from consist.core.identity import IdentityManager
 from consist.core.context import push_tracker, pop_tracker
 
@@ -140,6 +145,11 @@ class Tracker:
         # Active run tracking (for imperative begin_run/end_run pattern)
         self._active_run_cache_mode: Optional[str] = None
 
+        # In-process cache index to avoid DB timing/lock flakiness for immediate re-runs.
+        # Keyed by (config_hash, input_hash, git_hash) to match cache lookup semantics.
+        self._local_cache_index: Dict[Tuple[str, str, str], Run] = {}
+        self._local_cache_max_entries: int = 1024
+
     @property
     def engine(self):
         """Delegates to the DatabaseManager engine."""
@@ -171,6 +181,11 @@ class Tracker:
         tags: Optional[List[str]] = None,
         description: Optional[str] = None,
         cache_mode: str = "reuse",
+        *,
+        facet: Union[Dict[str, Any], BaseModel, None] = None,
+        hash_inputs: Optional[List[Union[Path, str, Tuple[str, Union[Path, str]]]]] = None,
+        facet_schema_version: Optional[Union[str, int]] = None,
+        facet_index: bool = True,
         **kwargs: Any,
     ) -> Run:
         """
@@ -234,10 +249,26 @@ class Tracker:
                 "Call end_run() first."
             )
 
+        raw_config_model: Optional[BaseModel] = config if isinstance(config, BaseModel) else None
+
         if config is None:
-            config = {}
+            config_dict: Dict[str, Any] = {}
         elif isinstance(config, BaseModel):
-            config = config.model_dump()
+            config_dict = config.model_dump()
+        else:
+            config_dict = config
+
+        if hash_inputs:
+            config_dict = dict(config_dict)
+            digest_map = self._compute_hash_inputs_digests(hash_inputs)
+            # Fold into config identity so it contributes to config_hash/signature.
+            if "__consist_hash_inputs__" in config_dict:
+                logging.warning(
+                    "[Consist] Overwriting user-provided '__consist_hash_inputs__' in config for run %s.",
+                    run_id,
+                )
+            config_dict["__consist_hash_inputs__"] = digest_map
+            kwargs["consist_hash_inputs"] = digest_map
 
         # Extract explicit Run fields
         year = kwargs.pop("year", None)
@@ -245,7 +276,7 @@ class Tracker:
         parent_run_id = kwargs.pop("parent_run_id", None)
 
         # Compute core identity hashes early
-        config_hash = self.identity.compute_config_hash(config)
+        config_hash = self.identity.compute_config_hash(config_dict)
         git_hash = self.identity.get_code_version()
 
         kwargs["_physical_run_dir"] = str(self.run_dir)
@@ -268,8 +299,25 @@ class Tracker:
         )
 
         push_tracker(self)
-        self.current_consist = ConsistRecord(run=run, config=config)
+        self.current_consist = ConsistRecord(run=run, config=config_dict)
         self._active_run_cache_mode = cache_mode
+
+        # Persist a queryable facet (optional)
+        facet_dict = self._resolve_facet_dict(
+            model=model,
+            raw_config_model=raw_config_model,
+            facet=facet,
+        )
+        if facet_dict is not None:
+            self.current_consist.facet = facet_dict
+            self._persist_facet(
+                run=run,
+                model=model,
+                facet_dict=facet_dict,
+                schema_name=self._infer_schema_name(raw_config_model, facet),
+                schema_version=facet_schema_version,
+                index_kv=facet_index,
+            )
 
         # Process Inputs & Auto-Forking
         if inputs:
@@ -307,11 +355,15 @@ class Tracker:
 
         # --- Cache Logic (Refactored) ---
         if cache_mode == "reuse":
-            cached_run = self.find_matching_run(
-                config_hash=run.config_hash,
-                input_hash=run.input_hash,
-                git_hash=run.git_hash,
-            )
+            cache_key = (run.config_hash, run.input_hash, run.git_hash)
+
+            cached_run = self._local_cache_index.get(cache_key)
+            if cached_run is None:
+                cached_run = self.find_matching_run(
+                    config_hash=run.config_hash,
+                    input_hash=run.input_hash,
+                    git_hash=run.git_hash,
+                )
             if cached_run and self._validate_run_outputs(cached_run):
                 self.current_consist.cached_run = cached_run
                 # Hydrate outputs using service (No Session!)
@@ -354,6 +406,283 @@ class Tracker:
         self._emit_run_start(run)
 
         return run
+
+    def _infer_schema_name(
+        self, raw_config_model: Optional[BaseModel], facet: Union[Dict[str, Any], BaseModel, None]
+    ) -> str:
+        if isinstance(facet, BaseModel):
+            return facet.__class__.__name__
+        if raw_config_model is not None:
+            return raw_config_model.__class__.__name__
+        return "dict"
+
+    def _canonical_json_str(self, obj: Dict[str, Any]) -> str:
+        cleaned = self.identity._clean_structure(obj, set())  # canonicalize types, sort later
+        return json.dumps(cleaned, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+
+    def _resolve_facet_dict(
+        self,
+        model: str,
+        raw_config_model: Optional[BaseModel],
+        facet: Union[Dict[str, Any], BaseModel, None],
+    ) -> Optional[Dict[str, Any]]:
+        # 1) Explicit facet always wins
+        if facet is not None:
+            if isinstance(facet, BaseModel):
+                return facet.model_dump(mode="json") if hasattr(facet, "model_dump") else facet.model_dump()
+            return facet
+
+        # 2) Convention hook on Pydantic config models
+        if raw_config_model is not None and hasattr(raw_config_model, "to_consist_facet"):
+            try:
+                extracted = raw_config_model.to_consist_facet()
+            except Exception as exc:
+                logging.warning(
+                    "[Consist] to_consist_facet() failed for model=%s run=%s: %s",
+                    model,
+                    getattr(self.current_consist, "run", None) and self.current_consist.run.id,
+                    exc,
+                )
+                extracted = None
+            if extracted is not None:
+                if isinstance(extracted, BaseModel):
+                    return (
+                        extracted.model_dump(mode="json")
+                        if hasattr(extracted, "model_dump")
+                        else extracted.model_dump()
+                    )
+                return extracted
+
+        # Dict configs (and Pydantic configs without to_consist_facet) do not auto-become facets
+        # to avoid surprising DB bloat and unexpected indexing.
+        return None
+
+    def _persist_facet(
+        self,
+        run: Run,
+        model: str,
+        facet_dict: Dict[str, Any],
+        schema_name: str,
+        schema_version: Optional[Union[str, int]],
+        index_kv: bool,
+        max_facet_bytes: int = 16_384,
+        max_kv_rows: int = 500,
+    ) -> None:
+        if not self.db:
+            return
+
+        canonical = self._canonical_json_str(facet_dict)
+        if len(canonical.encode("utf-8")) > max_facet_bytes:
+            logging.info(
+                "[Consist] Skipping facet persistence for run %s (facet too large: %d bytes).",
+                run.id,
+                len(canonical.encode("utf-8")),
+            )
+            return
+
+        facet_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+        self.db.upsert_config_facet(
+            ConfigFacet(
+                id=facet_id,
+                namespace=model,
+                schema_name=schema_name,
+                schema_version=str(schema_version) if schema_version is not None else None,
+                facet_json=facet_dict,
+            )
+        )
+
+        run.meta["config_facet_id"] = facet_id
+        run.meta["config_facet_namespace"] = model
+        run.meta["config_facet_schema"] = schema_name
+        if schema_version is not None:
+            run.meta["config_facet_schema_version"] = schema_version
+
+        if not index_kv:
+            return
+
+        rows = self._flatten_facet_to_kv_rows(
+            run_id=run.id,
+            facet_id=facet_id,
+            namespace=model,
+            facet_dict=facet_dict,
+        )
+        if len(rows) > max_kv_rows:
+            logging.info(
+                "[Consist] Skipping facet KV indexing for run %s (too many keys: %d).",
+                run.id,
+                len(rows),
+            )
+            return
+        self.db.insert_run_config_kv_bulk(rows)
+
+    def _flatten_facet_to_kv_rows(
+        self,
+        run_id: str,
+        facet_id: str,
+        namespace: str,
+        facet_dict: Dict[str, Any],
+    ) -> List[RunConfigKV]:
+        rows: List[RunConfigKV] = []
+
+        def walk(prefix: str, value: Any) -> None:
+            if isinstance(value, dict):
+                for k, v in value.items():
+                    key_part = str(k).replace(".", "\\.")
+                    new_prefix = f"{prefix}.{key_part}" if prefix else key_part
+                    walk(new_prefix, v)
+                return
+
+            # scalar leaf types
+            if value is None:
+                rows.append(
+                    RunConfigKV(
+                        run_id=run_id,
+                        facet_id=facet_id,
+                        namespace=namespace,
+                        key=prefix,
+                        value_type="null",
+                    )
+                )
+                return
+            if isinstance(value, bool):
+                rows.append(
+                    RunConfigKV(
+                        run_id=run_id,
+                        facet_id=facet_id,
+                        namespace=namespace,
+                        key=prefix,
+                        value_type="bool",
+                        value_bool=value,
+                    )
+                )
+                return
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                rows.append(
+                    RunConfigKV(
+                        run_id=run_id,
+                        facet_id=facet_id,
+                        namespace=namespace,
+                        key=prefix,
+                        value_type="float" if isinstance(value, float) else "int",
+                        value_num=float(value),
+                    )
+                )
+                return
+            if isinstance(value, str):
+                rows.append(
+                    RunConfigKV(
+                        run_id=run_id,
+                        facet_id=facet_id,
+                        namespace=namespace,
+                        key=prefix,
+                        value_type="str",
+                        value_str=value,
+                    )
+                )
+                return
+
+            # fallback: store as JSON (not intended for numeric comparisons initially)
+            rows.append(
+                RunConfigKV(
+                    run_id=run_id,
+                    facet_id=facet_id,
+                    namespace=namespace,
+                    key=prefix,
+                    value_type="json",
+                    value_json=value,
+                )
+            )
+
+        walk("", facet_dict)
+        return [r for r in rows if r.key]
+
+    def _compute_hash_inputs_digests(
+        self,
+        hash_inputs: List[Union[Path, str, Tuple[str, Union[Path, str]]]],
+        ignore_dotfiles: bool = True,
+        allowlist: Optional[List[str]] = None,
+    ) -> Dict[str, str]:
+        """
+        Compute digests for external "hash-only" config inputs (files or directories).
+
+        - Dotfiles are ignored by default (any path component starting with '.').
+        - Directories are hashed deterministically using relative paths + per-file checksums.
+        """
+        digest_map: Dict[str, str] = {}
+
+        def to_path(p: Union[str, Path]) -> Path:
+            return p if isinstance(p, Path) else Path(p)
+
+        for item in hash_inputs:
+            if isinstance(item, tuple):
+                label, p = item
+                path = to_path(p)
+            else:
+                path = to_path(item)
+                label = self._label_for_hash_input(path)
+
+            try:
+                digest_map[label] = self._digest_path(
+                    path,
+                    ignore_dotfiles=ignore_dotfiles,
+                    allowlist=allowlist,
+                )
+            except Exception as exc:
+                digest_map[label] = f"ERROR:{exc}"
+                logging.warning(
+                    "[Consist] Failed to compute hash_input digest for %s (%s): %s",
+                    label,
+                    path,
+                    exc,
+                )
+
+        return digest_map
+
+    def _label_for_hash_input(self, path: Path) -> str:
+        try:
+            return str(path.resolve().relative_to(self.identity.project_root))
+        except Exception:
+            return str(path)
+
+    def _digest_path(
+        self,
+        path: Path,
+        ignore_dotfiles: bool,
+        allowlist: Optional[List[str]],
+    ) -> str:
+        resolved = path.resolve()
+        if not resolved.exists():
+            raise FileNotFoundError(str(resolved))
+
+        if resolved.is_file():
+            return self.identity._compute_file_checksum(str(resolved))
+
+        # Directory digest: include rel path + per-file digest, deterministic ordering.
+        sha = hashlib.sha256()
+        for file_path in sorted(resolved.rglob("*")):
+            if not file_path.is_file():
+                continue
+            rel = file_path.relative_to(resolved).as_posix()
+            if ignore_dotfiles and any(part.startswith(".") for part in Path(rel).parts):
+                continue
+            if allowlist is not None and not any(fnmatch.fnmatch(rel, pat) for pat in allowlist):
+                continue
+
+            if self.identity.hashing_strategy == "fast":
+                stat = file_path.stat()
+                leaf = f"{rel}:{stat.st_size}:{stat.st_mtime_ns}"
+                sha.update(leaf.encode("utf-8"))
+            else:
+                # Hash each file content but keep path boundaries stable
+                sha.update(f"{rel}:".encode("utf-8"))
+                with open(file_path, "rb") as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        sha.update(chunk)
+        return sha.hexdigest()
 
     @contextmanager
     def start_run(
@@ -539,6 +868,15 @@ class Tracker:
         self._flush_json()
         if cache_mode != "readonly":
             self._sync_run_to_db(run)
+
+        # Update in-process cache index (best-effort) so immediate re-runs can cache-hit
+        # even if the DB is briefly locked or slow to reflect status updates.
+        if cache_mode != "readonly" and run.status == "completed":
+            cache_key = (run.config_hash or "", run.input_hash or "", run.git_hash or "")
+            self._local_cache_index[cache_key] = run
+            if len(self._local_cache_index) > self._local_cache_max_entries:
+                # FIFO eviction (dict preserves insertion order).
+                self._local_cache_index.pop(next(iter(self._local_cache_index)))
 
         # Emit lifecycle hooks
         if error is not None:

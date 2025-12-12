@@ -31,15 +31,22 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     transform_run_id = f"{scenario_id}_transform"
     raw_path = run_dir / "raw.csv"
     features_path = run_dir / "features.csv"
+    scenario_cfg_path = run_dir / "scenario_config.json"
+    scenario_cfg_path.write_text(json.dumps({"seed": 7, "note": "external config"}))
 
     with tracker.scenario(
-        scenario_id, config={"seed": 7}, tags=["e2e", "scenario_header"]
+        scenario_id,
+        config={"seed": 7},  # identity config (hashed)
+        facet={"seed": 7, "region": "demo"},  # queryable config facet (optional)
+        hash_inputs=[("scenario_config", scenario_cfg_path)],  # hash-only attachment(s)
+        tags=["e2e", "scenario_header"],
     ) as scenario:
         with scenario.step(
             name="ingest",
             run_id=ingest_run_id,
             tags=["ingest"],
             year=2024,
+            facet={"step": "ingest", "rows_written": 6},
         ):
             _write_csv(raw_path, rows=6)
             raw_art = tracker.log_artifact(
@@ -57,6 +64,7 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
             tags=["transform"],
             year=2025,
             inputs=[scenario.coupler.get("raw")],
+            facet={"step": "transform", "multiplier": 2},
         ):
             df_raw = pd.read_csv(raw_path)
             df_raw["value_doubled"] = df_raw["value"] * 2
@@ -79,8 +87,13 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     assert data["run"]["status"] == "completed"
     assert len(data["outputs"]) >= 1
     assert data["config"]["seed"] == 7
+    assert data["facet"]["seed"] == 7
+    assert data["run"]["meta"]["consist_hash_inputs"]["scenario_config"] is not None
     assert data["run"]["config_hash"] == IdentityManager().compute_config_hash(
-        {"seed": 7}
+        {
+            "seed": 7,
+            "__consist_hash_inputs__": data["run"]["meta"]["consist_hash_inputs"],
+        }
     )
     assert data["run"]["git_hash"] is not None
 

@@ -11,7 +11,9 @@ from sqlalchemy.pool import NullPool
 from sqlmodel import create_engine, Session, select, SQLModel, col
 
 from consist.models.artifact import Artifact
+from consist.models.config_facet import ConfigFacet
 from consist.models.run import Run, RunArtifactLink
+from consist.models.run_config_kv import RunConfigKV
 
 
 class DatabaseManager:
@@ -41,6 +43,8 @@ class DatabaseManager:
                     Run.__table__,
                     Artifact.__table__,
                     RunArtifactLink.__table__,
+                    ConfigFacet.__table__,
+                    RunConfigKV.__table__,
                 ],
             )
             # DuckDB self-referential FK on run.parent_run_id blocks status updates.
@@ -169,6 +173,34 @@ class DatabaseManager:
             self.execute_with_retry(_update, operation_name="update_run_signature")
         except Exception as e:
             logging.warning(f"Failed to update signature for {run_id}: {e}")
+
+    def upsert_config_facet(self, facet: ConfigFacet) -> None:
+        """Upserts a ConfigFacet (deduped by facet.id)."""
+
+        def _upsert():
+            with Session(self.engine) as session:
+                session.merge(facet)
+                session.commit()
+
+        try:
+            self.execute_with_retry(_upsert, operation_name="upsert_config_facet")
+        except Exception as e:
+            logging.warning(f"Failed to upsert config facet {facet.id}: {e}")
+
+    def insert_run_config_kv_bulk(self, rows: List[RunConfigKV]) -> None:
+        """Bulk inserts RunConfigKV rows."""
+        if not rows:
+            return
+
+        def _insert():
+            with Session(self.engine) as session:
+                session.add_all(rows)
+                session.commit()
+
+        try:
+            self.execute_with_retry(_insert, operation_name="insert_run_config_kv_bulk")
+        except Exception as e:
+            logging.warning(f"Failed to insert run config kv rows: {e}")
 
     def link_artifact_to_run(
         self, artifact_id: uuid.UUID, run_id: str, direction: str

@@ -22,6 +22,14 @@ class CleaningConfig(BaseModel):
     remove_outliers: bool = True
     min_value: float = 0.0
 
+    def to_consist_facet(self) -> dict:
+        # Only expose the knobs that are useful for filtering/diffing.
+        return {
+            "threshold": self.threshold,
+            "remove_outliers": self.remove_outliers,
+            "min_value": self.min_value,
+        }
+
 @pytest.mark.flaky(reruns=3) # flaky due to db sync
 def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     """
@@ -180,6 +188,18 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     artifact_keys = {a.key for a in artifacts}
     assert any("cleaned" in k for k in artifact_keys)
     assert any("analysis" in k for k in artifact_keys)
+
+    # === Example: new config pattern for "legacy reads config files" workflows ===
+    # The config files should affect the run identity (hash_inputs) without being shoved into DB meta,
+    # while a small facet stays queryable.
+    with tracker.start_run(
+        run_id="manual_config_demo",
+        model="manual_config_demo",
+        config={"purpose": "demo"},
+        facet={"purpose": "demo", "mode": "strict"},
+        hash_inputs=[("cleaning_config", config_path), ("params", params_path)],
+    ):
+        tracker.log_artifact(raw_data_path, key="raw_data", direction="input")
 
     import time
 
