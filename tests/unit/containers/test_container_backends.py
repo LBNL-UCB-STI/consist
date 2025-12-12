@@ -78,6 +78,44 @@ def test_singularity_command_construction():
             assert args[-1] == "script.py"
 
 
+def test_singularity_env_with_spaces_uses_passthrough_env():
+    """
+    Values with whitespace (e.g., JAVA_OPTS) should NOT be passed via `--env` because
+    Singularity/Apptainer parses `--env` as a list of KEY=VALUE pairs and can split
+    whitespace-containing values.
+
+    Instead, Consist should pass these via host env vars SINGULARITYENV_/APPTAINERENV_.
+    """
+    with (
+        patch("os.makedirs"),
+        patch("pathlib.Path.mkdir"),
+    ):
+        backend = SingularityBackend(cache_base_options=["/tmp"])
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+
+            backend.run(
+                image="my_image.sif",
+                command=["python", "script.py"],
+                volumes={"/host/data": "/data"},
+                env={"JAVA_OPTS": "-Xms1g -Xmx1g", "DEBUG": "1"},
+                working_dir="/work",
+            )
+
+            cmd_args = mock_run.call_args[0][0]
+            run_env = mock_run.call_args[1]["env"]
+
+            # DEBUG can still go through --env
+            assert "--env" in cmd_args
+            assert "DEBUG=1" in cmd_args
+
+            # JAVA_OPTS should be passed via SINGULARITYENV_/APPTAINERENV_
+            assert "JAVA_OPTS=-Xms1g -Xmx1g" not in cmd_args
+            assert run_env["SINGULARITYENV_JAVA_OPTS"] == "-Xms1g -Xmx1g"
+            assert run_env["APPTAINERENV_JAVA_OPTS"] == "-Xms1g -Xmx1g"
+
+
 @patch("os.statvfs")
 @patch("os.path.exists")
 @patch("os.access")

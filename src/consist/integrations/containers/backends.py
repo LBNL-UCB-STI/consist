@@ -19,6 +19,8 @@ Key features include:
 import abc
 import os
 import logging
+import os
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Union, Any
@@ -411,10 +413,22 @@ class SingularityBackend(ContainerBackend):
 
         bind_str = ",".join(bind_list)
 
-        # Prepare Environment "--env KEY=VAL"
-        env_args = []
-        for k, v in env.items():
-            env_args.extend(["--env", f"{k}={v}"])
+        # Prepare environment variables.
+        #
+        # Singularity/Apptainer's `--env` flag parses its argument(s) as a list of
+        # `KEY=VALUE` pairs, and values containing spaces can get split/invalidated.
+        # For robust handling (e.g., JAVA_OPTS with many space-separated JVM args),
+        # pass such variables via the SINGULARITYENV_/APPTAINERENV_ host environment
+        # instead of `--env`.
+        env_args: List[str] = []
+        passthrough_env: Dict[str, str] = {}
+        for k, v in (env or {}).items():
+            value = "" if v is None else str(v)
+            if any(ch.isspace() for ch in value):
+                passthrough_env[f"SINGULARITYENV_{k}"] = value
+                passthrough_env[f"APPTAINERENV_{k}"] = value
+            else:
+                env_args.extend(["--env", f"{k}={value}"])
 
         cmd_list = ["singularity", "run", "--cleanenv", "--writable-tmpfs"]
         if bind_str:
@@ -429,13 +443,22 @@ class SingularityBackend(ContainerBackend):
         if isinstance(command, list):
             cmd_list.extend(command)
         else:
-            cmd_list.extend(command.split())
+            cmd_list.extend(shlex.split(command))
 
         cmd_str = " ".join(cmd_list)
         logger.info(f"🔮 Running Singularity: {cmd_str}")
+        if passthrough_env:
+            logger.info(
+                "🔮 Passing %d env var(s) via SINGULARITYENV_/APPTAINERENV_ "
+                "(values contain whitespace): %s",
+                len(passthrough_env) // 2,
+                ", ".join(sorted({k.replace("SINGULARITYENV_", "") for k in passthrough_env if k.startswith("SINGULARITYENV_")})),
+            )
 
         try:
-            res = subprocess.run(cmd_list, check=False)
+            process_env = os.environ.copy()
+            process_env.update(passthrough_env)
+            res = subprocess.run(cmd_list, check=False, env=process_env)
             return res.returncode == 0
         except FileNotFoundError:
             logger.error("Singularity executable not found.")
