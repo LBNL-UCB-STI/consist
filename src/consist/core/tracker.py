@@ -314,10 +314,23 @@ class Tracker:
             )
             if cached_run and self._validate_run_outputs(cached_run):
                 self.current_consist.cached_run = cached_run
-                logging.info(f"✅ [Consist] Cache HIT! Matching run: {cached_run.id}")
-
                 # Hydrate outputs using service (No Session!)
                 cached_items = self.get_artifacts_for_run(cached_run.id)
+
+                scenario_hint = (
+                    f", scenario='{cached_run.parent_run_id}'"
+                    if getattr(cached_run, "parent_run_id", None)
+                    else ""
+                )
+                logging.info(
+                    "✅ [Consist] Cache HIT for step '%s': matched cached run '%s'%s "
+                    "(signature=config+inputs+code, inputs=%d, outputs=%d).",
+                    run_id,
+                    cached_run.id,
+                    scenario_hint,
+                    len(cached_items.inputs),
+                    len(cached_items.outputs),
+                )
 
                 # We only need to hydrate outputs into current_consist
                 for art in cached_items.outputs.values():
