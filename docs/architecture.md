@@ -61,6 +61,21 @@ Key fields for workflow tracking:
 - `Run.tags` — String labels for filtering (stored as JSON array)
 - `Artifact.hash` — SHA256 content hash for deduplication and verification
 
+### Config queryability (facets + hash-only attachments)
+
+Consist separates configuration into:
+
+- **Identity config**: `Tracker.begin_run(..., config=...)` drives `Run.config_hash` and caching identity, but is not stored as a queryable blob in DuckDB.
+- **Facet (queryable config)**: `Tracker.begin_run(..., facet=...)` stores a minimal JSON snapshot (deduped) and optionally indexes flattened keys for filtering.
+- **Hash-only attachments**: `Tracker.begin_run(..., hash_inputs=[...])` folds file/directory digests into the run identity (via `__consist_hash_inputs__`) without storing the raw configs in DuckDB (useful for BEAM HOCON trees, ActivitySim config folders, etc.). Dotfiles are ignored by default for directory hashing.
+
+DuckDB tables used:
+
+- `config_facet`: deduped facet JSON keyed by a canonical hash, namespaced by `Run.model_name`
+- `run_config_kv`: flattened, typed key/value index for facet filtering (`str|num|bool|json|null`)
+
+Note: time-series filtering should use `Run.year` (a first-class indexed column) rather than duplicating `year` in the facet.
+
 ---
 
 ## Dual-Write Persistence
