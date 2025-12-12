@@ -330,6 +330,44 @@ def test_singularity_mocked_execution(clean_tracker: Tracker, input_file: Path):
         assert cmd_args[0] == "singularity"
 
 
+def test_no_lineage_mode_executes_without_tracking(
+    clean_tracker: Tracker, input_file: Path
+):
+    """
+    When lineage_mode="none", run_container should:
+    - Execute the backend.
+    - Not create a Consist run row.
+    - Not scan or log output artifacts.
+    - Return a stable manifest_hash for callers to incorporate upstream.
+    """
+    mock_backend_instance = MockBackend()
+    output_dir = clean_tracker.run_dir / "no_lineage_out"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    expected_output_file = output_dir / "result.txt"
+
+    with patch(
+        "consist.integrations.containers.api.DockerBackend",
+        return_value=mock_backend_instance,
+    ):
+        result = run_container(
+            tracker=clean_tracker,
+            run_id="no_lineage_run",
+            image="my_model:v1",
+            command=["python", "run.py"],
+            volumes={str(input_file.parent): "/inputs", str(output_dir): "/outputs"},
+            inputs=[input_file],
+            outputs=[expected_output_file],
+            lineage_mode="none",
+        )
+
+    assert mock_backend_instance.run_count == 1
+    assert clean_tracker.get_run("no_lineage_run") is None
+    assert result.artifacts == {}
+    assert result.cache_hit is False
+    assert result.manifest_hash is not None
+    assert result.image_digest is not None
+
+
 # --- Granular Hashing Tests ---
 
 

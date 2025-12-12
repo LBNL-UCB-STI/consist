@@ -25,7 +25,7 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 import shutil
 
 from sqlmodel import Session, select
@@ -46,6 +46,9 @@ class ContainerResult:
     artifacts: Dict[str, Artifact]
     cache_hit: bool
     cache_source: Optional[str] = None
+    manifest: Optional[Dict[str, Any]] = None
+    manifest_hash: Optional[str] = None
+    image_digest: Optional[str] = None
 
     @property
     def output(self) -> Optional[Artifact]:
@@ -95,6 +98,41 @@ def _container_signature(
     ).hexdigest()
     logger.debug("[container.signature] signature=%s payload=%s", sig, payload)
     return sig
+
+
+def _build_container_manifest(
+    *,
+    image: str,
+    image_digest: str,
+    command: List[str],
+    environment: Dict[str, str],
+    working_dir: Optional[str],
+    backend_type: str,
+    volumes: Dict[str, str],
+) -> Dict[str, Any]:
+    """
+    Build a stable manifest of container semantics for upstream hashing.
+
+    Host paths are intentionally excluded because they often contain run-specific
+    directories and are already covered by step-level inputs/outputs.
+    """
+    container_mounts = sorted(set(volumes.values()))
+    env_items = sorted(environment.items())
+    return {
+        "image": image,
+        "image_digest": image_digest,
+        "command": command,
+        "environment": env_items,
+        "working_dir": working_dir,
+        "backend": backend_type,
+        "container_mounts": container_mounts,
+    }
+
+
+def _container_manifest_hash(manifest: Dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(manifest, sort_keys=True).encode("utf-8")
+    ).hexdigest()
 
 
 def _reuse_or_execute_container(
@@ -257,15 +295,17 @@ def run_container(
     working_dir: Optional[str] = None,
     backend_type: str = "docker",
     pull_latest: bool = False,
+    lineage_mode: Literal["full", "none"] = "full",
 ) -> ContainerResult:
     """
-    Executes a containerized step with full provenance tracking and caching via Consist.
+    Executes a containerized step with optional provenance tracking and caching via Consist.
 
     This function acts as a high-level wrapper that integrates container execution
-    with Consist's `Tracker`. It initiates a `Consist` run, uses the container's
-    image and command as part of the run's identity (code/config), and tracks
-    host-side files as inputs and outputs. It supports different container backends
-    like Docker and Singularity.
+    with Consist's `Tracker`. In lineage mode "full" it initiates a `Consist` run
+    (or attaches to an active run), uses the container's image and command as part
+    of the run's identity (code/config), and tracks host-side files as inputs and
+    outputs. In lineage mode "none" it only executes the container and returns a
+    stable manifest/hash for callers to incorporate into an enclosing step's identity.
 
     Parameters
     ----------
@@ -301,6 +341,9 @@ def run_container(
     pull_latest : bool, default False
         If True, the Docker backend will attempt to pull the latest image before execution.
         (Applicable only for 'docker' backend).
+    lineage_mode : Literal["full", "none"], default "full"
+        "full" performs Consist provenance tracking, caching, and output scanning.
+        "none" skips Consist logging/caching and does not scan outputs.
 
     Returns
     -------
@@ -337,6 +380,17 @@ def run_container(
         output_specs = [(Path(o).name, str(o)) for o in outputs]
 
     outputs_str = [p for _, p in output_specs]
+
+    manifest = _build_container_manifest(
+        image=image,
+        image_digest=image_digest,
+        command=cmd_list,
+        environment=environment,
+        working_dir=working_dir,
+        backend_type=backend_type,
+        volumes=volumes,
+    )
+    manifest_hash = _container_manifest_hash(manifest)
 
     # 3. Create Config Object for Hashing
     config = ContainerDefinition(
@@ -421,7 +475,12 @@ def run_container(
         cache_source = (run_meta or {}).get("cache_source")
         artifacts = active_tracker.get_artifacts_for_run(run_identifier).outputs
         return ContainerResult(
-            artifacts=artifacts, cache_hit=cache_hit, cache_source=cache_source
+            artifacts=artifacts,
+            cache_hit=cache_hit,
+            cache_source=cache_source,
+            manifest=manifest,
+            manifest_hash=manifest_hash,
+            image_digest=image_digest,
         )
 
     # 5. Execute Run Context
@@ -431,6 +490,31 @@ def run_container(
         logger.info(
             f"🔄 [Consist] Container '{run_id}' running as step in active run '{tracker.current_consist.run.id}'"
         )
+
+        if lineage_mode == "none":
+            # Pure execution mode: do not log inputs/outputs/metadata or use caching.
+            for host_path in volumes.keys():
+                Path(host_path).mkdir(parents=True, exist_ok=True)
+            logger.info(f"🔄 [Consist] Executing Container (no-lineage): {run_id}")
+            success = backend.run(
+                image=image,
+                command=cmd_list,
+                volumes=volumes,
+                env=environment,
+                working_dir=working_dir,
+            )
+            if not success:
+                raise RuntimeError(
+                    f"Container execution failed for run_id (no-lineage): {run_id}"
+                )
+            return ContainerResult(
+                artifacts={},
+                cache_hit=False,
+                cache_source=None,
+                manifest=manifest,
+                manifest_hash=manifest_hash,
+                image_digest=image_digest,
+            )
 
         # 1. Log Inputs to current run
         for item in resolved_inputs:
@@ -460,6 +544,30 @@ def run_container(
         return _collect_result(tracker, tracker.current_consist.run.id)
 
     # CASE B: Standalone Mode (Start new run)
+    if lineage_mode == "none":
+        for host_path in volumes.keys():
+            Path(host_path).mkdir(parents=True, exist_ok=True)
+        logger.info(f"🔄 [Consist] Executing Container (no-lineage): {run_id}")
+        success = backend.run(
+            image=image,
+            command=cmd_list,
+            volumes=volumes,
+            env=environment,
+            working_dir=working_dir,
+        )
+        if not success:
+            raise RuntimeError(
+                f"Container execution failed for run_id (no-lineage): {run_id}"
+            )
+        return ContainerResult(
+            artifacts={},
+            cache_hit=False,
+            cache_source=None,
+            manifest=manifest,
+            manifest_hash=manifest_hash,
+            image_digest=image_digest,
+        )
+
     with tracker.start_run(
         run_id=run_id,
         model="container_step",
