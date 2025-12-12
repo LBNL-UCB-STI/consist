@@ -31,6 +31,8 @@ import pandas as pd
 
 from pydantic import BaseModel
 
+from consist.types import FacetLike, HasConsistFacet, HasFacetSchemaVersion
+
 from consist.core.views import ViewFactory, ViewRegistry
 from consist.core.fs import FileSystemManager
 from consist.core.persistence import DatabaseManager
@@ -182,7 +184,7 @@ class Tracker:
         description: Optional[str] = None,
         cache_mode: str = "reuse",
         *,
-        facet: Union[Dict[str, Any], BaseModel, None] = None,
+        facet: Optional[FacetLike] = None,
         hash_inputs: Optional[List[Union[Path, str, Tuple[str, Union[Path, str]]]]] = None,
         facet_schema_version: Optional[Union[str, int]] = None,
         facet_index: bool = True,
@@ -310,12 +312,17 @@ class Tracker:
         )
         if facet_dict is not None:
             self.current_consist.facet = facet_dict
+            schema_version = facet_schema_version
+            if schema_version is None and raw_config_model is not None and isinstance(
+                raw_config_model, HasFacetSchemaVersion
+            ):
+                schema_version = raw_config_model.facet_schema_version
             self._persist_facet(
                 run=run,
                 model=model,
                 facet_dict=facet_dict,
                 schema_name=self._infer_schema_name(raw_config_model, facet),
-                schema_version=facet_schema_version,
+                schema_version=schema_version,
                 index_kv=facet_index,
             )
 
@@ -408,7 +415,7 @@ class Tracker:
         return run
 
     def _infer_schema_name(
-        self, raw_config_model: Optional[BaseModel], facet: Union[Dict[str, Any], BaseModel, None]
+        self, raw_config_model: Optional[BaseModel], facet: Optional[FacetLike]
     ) -> str:
         if isinstance(facet, BaseModel):
             return facet.__class__.__name__
@@ -424,7 +431,7 @@ class Tracker:
         self,
         model: str,
         raw_config_model: Optional[BaseModel],
-        facet: Union[Dict[str, Any], BaseModel, None],
+        facet: Optional[FacetLike],
     ) -> Optional[Dict[str, Any]]:
         # 1) Explicit facet always wins
         if facet is not None:
@@ -433,7 +440,7 @@ class Tracker:
             return facet
 
         # 2) Convention hook on Pydantic config models
-        if raw_config_model is not None and hasattr(raw_config_model, "to_consist_facet"):
+        if raw_config_model is not None and isinstance(raw_config_model, HasConsistFacet):
             try:
                 extracted = raw_config_model.to_consist_facet()
             except Exception as exc:
