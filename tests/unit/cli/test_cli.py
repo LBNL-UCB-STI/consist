@@ -300,10 +300,10 @@ def test_preview_command_success(mock_db_session, tmp_path):
     with (
         patch("pathlib.Path.exists", return_value=True),
         patch("consist.cli.get_tracker") as m,
-        patch("consist.cli.queries.get_artifact_preview") as mock_get_preview,
+        patch("consist.load") as mock_load,
     ):
         mock_df = pd.DataFrame({"col1": [1, 2], "col2": ["a", "b"]})
-        mock_get_preview.return_value = mock_df
+        mock_load.return_value = mock_df
 
         tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
         tracker.db.engine = mock_db_session.get_bind()
@@ -332,20 +332,59 @@ def test_preview_command_artifact_not_found(mock_db_session, tmp_path):
         assert "Artifact 'nonexistent_artifact' not found" in result.stdout
 
 
-def test_preview_command_unsupported_driver(mock_db_session, tmp_path):
+def test_preview_command_unsupported_loaded_type(mock_db_session, tmp_path):
     with (
         patch("pathlib.Path.exists", return_value=True),
         patch("consist.cli.get_tracker") as m,
+        patch("consist.load") as mock_load,
     ):
+        mock_load.return_value = {"not": "a dataframe"}
+
         tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
         # Fix: Inject the mock engine into the DatabaseManager
         tracker.db.engine = mock_db_session.get_bind()
         m.return_value = tracker
 
         result = runner.invoke(app, ["preview", "params"])
+        assert result.exit_code == 0
+        assert "Preview not implemented" in result.stdout
+
+
+def test_schema_command_success_json(mock_db_session, tmp_path):
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker") as m,
+        patch("consist.load") as mock_load,
+    ):
+        mock_df = pd.DataFrame({"col1": [1, 2], "col2": ["a", "b"]})
+        mock_load.return_value = mock_df
+
+        tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
+        tracker.db.engine = mock_db_session.get_bind()
+        m.return_value = tracker
+
+        result = runner.invoke(app, ["schema", "raw_data", "--json"])
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["type"] == "dataframe"
+        assert payload["driver"] == "csv"
+        assert payload["columns"] == 2
+        assert payload["dtypes"]["col1"] in {"int64", "int32"}
+        assert payload["dtypes"]["col2"] == "object"
+
+
+def test_schema_command_artifact_not_found(mock_db_session, tmp_path):
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker") as m,
+    ):
+        tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
+        tracker.db.engine = mock_db_session.get_bind()
+        m.return_value = tracker
+
+        result = runner.invoke(app, ["schema", "nonexistent_artifact"])
         assert result.exit_code == 1
-        assert "Cannot preview artifact with driver 'json'" in result.stdout
-        assert "Preview supports: csv, parquet" in result.stdout
+        assert "Artifact 'nonexistent_artifact' not found" in result.stdout
 
 
 def test_summary_no_runs_exits_cleanly(tmp_path):

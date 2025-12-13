@@ -599,7 +599,7 @@ def preview(
     ),
     n_rows: int = typer.Option(5, "--rows", "-n", help="Number of rows to display."),
 ) -> None:
-    """Shows a preview of a tabular artifact (e.g., CSV, Parquet)."""
+    """Shows a small preview of an artifact (tabular or array-like when supported)."""
     tracker = get_tracker(db_path)
 
     # Fetch artifact first to give a precise message (unsupported driver vs missing)
@@ -608,49 +608,275 @@ def preview(
         console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
         raise typer.Exit(1)
 
-    # Only certain drivers are previewable
-    if artifact.driver not in ["csv", "parquet"]:
-        console.print(
-            f"[yellow]Cannot preview artifact with driver '{artifact.driver}'.[/yellow]\n"
-            "Preview supports: csv, parquet\n"
-            "Use 'consist load' or load the artifact programmatically."
-        )
-        raise typer.Exit(1)
-
     try:
-        df = queries.get_artifact_preview(tracker, artifact_key, limit=n_rows)
+        import consist
+
+        load_kwargs: Dict[str, Any] = {}
+        if artifact.driver == "csv":
+            # Avoid loading the full file when we only need a head() preview.
+            load_kwargs["nrows"] = n_rows
+
+        data = consist.load(artifact, tracker=tracker, **load_kwargs)
     except FileNotFoundError:
         console.print(
             f"[red]Artifact file not found at: {artifact.uri}[/red]\n"
             "The artifact may have been deleted or moved."
         )
         raise typer.Exit(1)
+    except ImportError as e:
+        console.print(f"[red]Missing optional dependency while loading artifact: {e}[/red]")
+        if artifact.driver == "zarr":
+            console.print(
+                "[yellow]Hint:[/] install Zarr support: `pip install -e '.[zarr]'`"
+            )
+        elif artifact.driver in {"h5", "hdf5", "h5_table"}:
+            console.print(
+                "[yellow]Hint:[/] install HDF5 support: `pip install -e '.[hdf5]'`"
+            )
+        raise typer.Exit(1)
+    except ValueError as e:
+        console.print(f"[red]Unsupported artifact driver '{artifact.driver}': {e}[/red]")
+        raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Error loading artifact: {e}[/red]")
         raise typer.Exit(1)
 
-    if df is None:
-        console.print(
-            f"[red]Could not load or preview artifact '{artifact_key}'. The file may be missing or corrupt.[/red]"
-        )
+    console.print(f"Preview: {artifact_key} [dim]({artifact.driver})[/dim]")
+
+    if isinstance(data, pd.DataFrame):
+        df = data.head(n_rows)
+        table = Table()
+
+        # Use pandas types to set column styles
+        for col_name in df.columns:
+            style = "cyan"
+            if pd.api.types.is_numeric_dtype(df[col_name]):
+                style = "magenta"
+            elif pd.api.types.is_datetime64_any_dtype(df[col_name]):
+                style = "green"
+            table.add_column(str(col_name), style=style)
+
+        for _, row in df.iterrows():
+            table.add_row(*[str(item) for item in row])
+
+        console.print(table)
+        return
+
+    try:
+        import xarray as xr  # type: ignore[import-not-found]
+    except ImportError:
+        xr = None
+
+    if xr is not None and isinstance(data, (xr.Dataset, xr.DataArray)):
+        ds: xr.Dataset
+        if isinstance(data, xr.DataArray):
+            ds = data.to_dataset(name=getattr(data, "name", None) or "data")
+        else:
+            ds = data
+
+        dims_table = Table(title="Dimensions")
+        dims_table.add_column("Dim", style="cyan")
+        dims_table.add_column("Size", style="magenta")
+        for dim_name, dim_size in ds.sizes.items():
+            dims_table.add_row(str(dim_name), str(dim_size))
+        console.print(dims_table)
+
+        if not ds.data_vars:
+            console.print("[yellow]No data variables found.[/yellow]")
+            return
+
+        vars_table = Table(title="Data Variables")
+        vars_table.add_column("Name", style="cyan")
+        vars_table.add_column("Dtype", style="magenta")
+        vars_table.add_column("Dims", style="green")
+        vars_table.add_column("Shape", style="yellow")
+
+        for var_name, da in ds.data_vars.items():
+            vars_table.add_row(
+                str(var_name),
+                str(da.dtype),
+                ", ".join(map(str, da.dims)),
+                str(tuple(int(x) for x in da.shape)),
+            )
+        console.print(vars_table)
+
+        # Best-effort sample values from the first variable.
+        first_name = next(iter(ds.data_vars))
+        da0 = ds[first_name]
+        indexers: Dict[str, Any] = {}
+        for i, dim in enumerate(da0.dims):
+            if i == 0:
+                indexers[dim] = slice(0, min(n_rows, int(da0.sizes[dim])))
+            else:
+                indexers[dim] = 0
+        try:
+            sample = da0.isel(indexers).values
+            console.print(
+                Panel(
+                    str(sample),
+                    title=f"Sample: {first_name} (isel {indexers})",
+                    border_style="dim",
+                )
+            )
+        except Exception:
+            console.print(
+                f"[yellow]Could not materialize sample values for '{first_name}'.[/yellow]"
+            )
+        return
+
+    console.print(
+        f"[yellow]Preview not implemented for loaded type: {type(data).__name__}[/yellow]"
+    )
+    console.print(
+        "[dim]Hint: load programmatically via `consist.load(artifact, tracker=...)`[/dim]"
+    )
+
+
+@app.command()
+def schema(
+    artifact_key: str = typer.Argument(
+        ..., help="The key or ID of the artifact to inspect."
+    ),
+    db_path: str = typer.Option(
+        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output schema info as JSON for scripting/testing."
+    ),
+) -> None:
+    """Shows schema/structure information for an artifact (df.dtypes-style for tables)."""
+    tracker = get_tracker(db_path)
+
+    artifact = tracker.get_artifact(artifact_key)
+    if not artifact:
+        console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
         raise typer.Exit(1)
 
-    console.print(f"Preview: {artifact_key}")
-    table = Table()
+    try:
+        import consist
 
-    # Use pandas types to set column styles
-    for col_name in df.columns:
-        style = "cyan"
-        if pd.api.types.is_numeric_dtype(df[col_name]):
-            style = "magenta"
-        elif pd.api.types.is_datetime64_any_dtype(df[col_name]):
-            style = "green"
-        table.add_column(col_name, style=style)
+        data = consist.load(artifact, tracker=tracker)
+    except FileNotFoundError:
+        console.print(
+            f"[red]Artifact file not found at: {artifact.uri}[/red]\n"
+            "The artifact may have been deleted or moved."
+        )
+        raise typer.Exit(1)
+    except ImportError as e:
+        console.print(f"[red]Missing optional dependency while loading artifact: {e}[/red]")
+        if artifact.driver == "zarr":
+            console.print(
+                "[yellow]Hint:[/] install Zarr support: `pip install -e '.[zarr]'`"
+            )
+        elif artifact.driver in {"h5", "hdf5", "h5_table"}:
+            console.print(
+                "[yellow]Hint:[/] install HDF5 support: `pip install -e '.[hdf5]'`"
+            )
+        raise typer.Exit(1)
+    except ValueError as e:
+        console.print(f"[red]Unsupported artifact driver '{artifact.driver}': {e}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Error loading artifact: {e}[/red]")
+        raise typer.Exit(1)
 
-    for _, row in df.iterrows():
-        table.add_row(*[str(item) for item in row])
+    if isinstance(data, pd.DataFrame):
+        payload = {
+            "type": "dataframe",
+            "driver": artifact.driver,
+            "rows": int(data.shape[0]),
+            "columns": int(data.shape[1]),
+            "dtypes": {str(k): str(v) for k, v in data.dtypes.items()},
+        }
+        if json_output:
+            output_json(payload)
+            return
 
-    console.print(table)
+        console.print(f"Schema: {artifact_key} [dim]({artifact.driver})[/dim]")
+        table = Table()
+        table.add_column("Column", style="cyan")
+        table.add_column("Dtype", style="magenta")
+        for col_name, dtype in data.dtypes.items():
+            table.add_row(str(col_name), str(dtype))
+        console.print(table)
+        console.print(
+            f"[dim]{int(data.shape[0])} rows × {int(data.shape[1])} columns[/dim]"
+        )
+        return
+
+    try:
+        import xarray as xr  # type: ignore[import-not-found]
+    except ImportError:
+        xr = None
+
+    if xr is not None and isinstance(data, (xr.Dataset, xr.DataArray)):
+        ds: xr.Dataset
+        if isinstance(data, xr.DataArray):
+            ds = data.to_dataset(name=getattr(data, "name", None) or "data")
+        else:
+            ds = data
+
+        payload = {
+            "type": "xarray_dataset",
+            "driver": artifact.driver,
+            "dims": {str(k): int(v) for k, v in ds.sizes.items()},
+            "data_vars": {
+                str(name): {
+                    "dtype": str(da.dtype),
+                    "dims": [str(d) for d in da.dims],
+                    "shape": [int(x) for x in da.shape],
+                }
+                for name, da in ds.data_vars.items()
+            },
+            "coords": list(map(str, ds.coords.keys())),
+        }
+        if json_output:
+            output_json(payload)
+            return
+
+        console.print(f"Schema: {artifact_key} [dim]({artifact.driver})[/dim]")
+        dims_table = Table(title="Dimensions")
+        dims_table.add_column("Dim", style="cyan")
+        dims_table.add_column("Size", style="magenta")
+        for dim_name, dim_size in ds.sizes.items():
+            dims_table.add_row(str(dim_name), str(dim_size))
+        console.print(dims_table)
+
+        vars_table = Table(title="Data Variables")
+        vars_table.add_column("Name", style="cyan")
+        vars_table.add_column("Dtype", style="magenta")
+        vars_table.add_column("Dims", style="green")
+        vars_table.add_column("Shape", style="yellow")
+        for var_name, da in ds.data_vars.items():
+            vars_table.add_row(
+                str(var_name),
+                str(da.dtype),
+                ", ".join(map(str, da.dims)),
+                str(tuple(int(x) for x in da.shape)),
+            )
+        console.print(vars_table)
+        if ds.coords:
+            console.print(
+                Panel(
+                    ", ".join(map(str, ds.coords.keys())),
+                    title="Coordinates",
+                    border_style="dim",
+                )
+            )
+        return
+
+    payload = {
+        "type": type(data).__name__,
+        "driver": artifact.driver,
+        "repr": repr(data),
+    }
+    if json_output:
+        output_json(payload)
+        return
+
+    console.print(f"Schema: {artifact_key} [dim]({artifact.driver})[/dim]")
+    console.print(f"[yellow]Unsupported loaded type: {type(data).__name__}[/yellow]")
+    console.print(Panel(repr(data), title="repr()", border_style="dim"))
 
 
 class ConsistShell(cmd.Cmd):
