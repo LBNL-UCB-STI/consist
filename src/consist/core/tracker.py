@@ -1769,11 +1769,31 @@ class Tracker:
         if not self.current_consist:
             return
         json_str = self.current_consist.model_dump_json(indent=2)
-        target = self.fs.run_dir / "consist.json"
-        tmp = target.with_suffix(".tmp")
-        with open(tmp, "w") as f:
+
+        # NOTE:
+        # `Tracker.run_dir` is often a *scenario* directory that contains many runs (steps).
+        # Writing a single `run_dir/consist.json` would overwrite previous steps and can look
+        # "broken" to users expecting multiple steps. To preserve backward compatibility,
+        # we still write `run_dir/consist.json` as the "latest snapshot", but we also write
+        # a stable per-run snapshot in `run_dir/consist_runs/<run_id>.json`.
+        run_id = self.current_consist.run.id
+        safe_run_id = "".join(
+            c if (c.isalnum() or c in ("-", "_", ".")) else "_" for c in run_id
+        )
+
+        per_run_dir = self.fs.run_dir / "consist_runs"
+        per_run_dir.mkdir(parents=True, exist_ok=True)
+        per_run_target = per_run_dir / f"{safe_run_id}.json"
+        per_run_tmp = per_run_target.with_suffix(".tmp")
+        with open(per_run_tmp, "w") as f:
             f.write(json_str)
-        tmp.rename(target)
+        per_run_tmp.rename(per_run_target)
+
+        latest_target = self.fs.run_dir / "consist.json"
+        latest_tmp = latest_target.with_suffix(".tmp")
+        with open(latest_tmp, "w") as f:
+            f.write(json_str)
+        latest_tmp.rename(latest_target)
 
     def _sync_run_to_db(self, run: Run) -> None:
         """
