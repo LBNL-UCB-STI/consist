@@ -951,6 +951,177 @@ class ConsistShell(cmd.Cmd):
         except Exception as exc:
             console.print(f"[red]Error: {exc}[/red]")
 
+    def do_preview(self, arg: str) -> None:
+        """Preview an artifact. Usage: preview <artifact_key> [--rows N]"""
+        try:
+            args = shlex.split(arg)
+            if not args:
+                console.print("[red]Error: artifact_key required[/red]")
+                return
+
+            artifact_key = args[0]
+            n_rows = 5
+            i = 1
+            while i < len(args):
+                if args[i] in {"--rows", "-n"} and i + 1 < len(args):
+                    n_rows = int(args[i + 1])
+                    i += 2
+                else:
+                    i += 1
+
+            artifact = self.tracker.get_artifact(artifact_key)
+            if not artifact:
+                console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
+                return
+
+            try:
+                import consist
+
+                load_kwargs: Dict[str, Any] = {}
+                if artifact.driver == "csv":
+                    load_kwargs["nrows"] = n_rows
+                data = consist.load(artifact, tracker=self.tracker, **load_kwargs)
+            except FileNotFoundError:
+                console.print(
+                    f"[red]Artifact file not found at: {artifact.uri}[/red]\n"
+                    "The artifact may have been deleted or moved."
+                )
+                return
+            except ImportError as e:
+                console.print(
+                    f"[red]Missing optional dependency while loading artifact: {e}[/red]"
+                )
+                return
+            except ValueError as e:
+                console.print(
+                    f"[red]Unsupported artifact driver '{artifact.driver}': {e}[/red]"
+                )
+                return
+            except Exception as e:
+                console.print(f"[red]Error loading artifact: {e}[/red]")
+                return
+
+            console.print(f"Preview: {artifact_key} [dim]({artifact.driver})[/dim]")
+
+            if isinstance(data, pd.DataFrame):
+                df = data.head(n_rows)
+                table = Table()
+                for col_name in df.columns:
+                    style = "cyan"
+                    if pd.api.types.is_numeric_dtype(df[col_name]):
+                        style = "magenta"
+                    elif pd.api.types.is_datetime64_any_dtype(df[col_name]):
+                        style = "green"
+                    table.add_column(str(col_name), style=style)
+                for _, row in df.iterrows():
+                    table.add_row(*[str(item) for item in row])
+                console.print(table)
+                return
+
+            try:
+                import xarray as xr  # type: ignore[import-not-found]
+            except ImportError:
+                xr = None
+
+            if xr is not None and isinstance(data, (xr.Dataset, xr.DataArray)):
+                ds: xr.Dataset
+                if isinstance(data, xr.DataArray):
+                    ds = data.to_dataset(name=getattr(data, "name", None) or "data")
+                else:
+                    ds = data
+
+                dims_table = Table(title="Dimensions")
+                dims_table.add_column("Dim", style="cyan")
+                dims_table.add_column("Size", style="magenta")
+                for dim_name, dim_size in ds.sizes.items():
+                    dims_table.add_row(str(dim_name), str(dim_size))
+                console.print(dims_table)
+                return
+
+            console.print(
+                f"[yellow]Preview not implemented for loaded type: {type(data).__name__}[/yellow]"
+            )
+        except Exception as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+
+    def do_schema(self, arg: str) -> None:
+        """Show artifact schema. Usage: schema <artifact_key>"""
+        try:
+            args = shlex.split(arg)
+            if not args:
+                console.print("[red]Error: artifact_key required[/red]")
+                return
+
+            artifact_key = args[0]
+            artifact = self.tracker.get_artifact(artifact_key)
+            if not artifact:
+                console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
+                return
+
+            try:
+                import consist
+
+                data = consist.load(artifact, tracker=self.tracker)
+            except FileNotFoundError:
+                console.print(
+                    f"[red]Artifact file not found at: {artifact.uri}[/red]\n"
+                    "The artifact may have been deleted or moved."
+                )
+                return
+            except ImportError as e:
+                console.print(
+                    f"[red]Missing optional dependency while loading artifact: {e}[/red]"
+                )
+                return
+            except ValueError as e:
+                console.print(
+                    f"[red]Unsupported artifact driver '{artifact.driver}': {e}[/red]"
+                )
+                return
+            except Exception as e:
+                console.print(f"[red]Error loading artifact: {e}[/red]")
+                return
+
+            console.print(f"Schema: {artifact_key} [dim]({artifact.driver})[/dim]")
+
+            if isinstance(data, pd.DataFrame):
+                table = Table()
+                table.add_column("Column", style="cyan")
+                table.add_column("Dtype", style="magenta")
+                for col_name, dtype in data.dtypes.items():
+                    table.add_row(str(col_name), str(dtype))
+                console.print(table)
+                console.print(
+                    f"[dim]{int(data.shape[0])} rows × {int(data.shape[1])} columns[/dim]"
+                )
+                return
+
+            try:
+                import xarray as xr  # type: ignore[import-not-found]
+            except ImportError:
+                xr = None
+
+            if xr is not None and isinstance(data, (xr.Dataset, xr.DataArray)):
+                ds: xr.Dataset
+                if isinstance(data, xr.DataArray):
+                    ds = data.to_dataset(name=getattr(data, "name", None) or "data")
+                else:
+                    ds = data
+
+                dims_table = Table(title="Dimensions")
+                dims_table.add_column("Dim", style="cyan")
+                dims_table.add_column("Size", style="magenta")
+                for dim_name, dim_size in ds.sizes.items():
+                    dims_table.add_row(str(dim_name), str(dim_size))
+                console.print(dims_table)
+                return
+
+            console.print(
+                f"[yellow]Schema not implemented for loaded type: {type(data).__name__}[/yellow]"
+            )
+        except Exception as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+
     def do_summary(self, arg: str) -> None:
         """Display database summary. Usage: summary"""
         try:

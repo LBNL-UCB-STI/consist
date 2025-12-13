@@ -484,3 +484,12 @@ def test_shell_scenarios_limit_parsing_positional():
     with patch("consist.cli._render_scenarios") as render:
         shell.do_scenarios("3")
     render.assert_called_once_with(tracker, 3)
+
+
+def test_shell_help_lists_preview_and_schema(capsys):
+    tracker = MagicMock()
+    shell = ConsistShell(tracker)
+    shell.onecmd("help")
+    out = capsys.readouterr().out
+    assert "preview" in out
+    assert "schema" in out
