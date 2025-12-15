@@ -59,7 +59,7 @@ class ArtifactManager:
 
                 content_hash = None
                 try:
-                    content_hash = self.tracker.identity._compute_file_checksum(
+                    content_hash = self.tracker.identity.compute_file_checksum(
                         resolved_abs_path
                     )
                 except Exception as e:

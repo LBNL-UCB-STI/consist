@@ -30,6 +30,23 @@ class CleaningConfig(BaseModel):
             "min_value": self.min_value,
         }
 
+
+class ManualConfigDemo(BaseModel):
+    """
+    Example of a "real world" config model where only a small subset should be queryable.
+
+    In practice this might be a pipeline config containing large nested structures,
+    secrets, or non-queryable blobs; `to_consist_facet()` lets you keep the DB index slim.
+    """
+
+    mode: str = "strict"
+    purpose: str = "demo"
+    notes: str = "This field is intentionally NOT indexed via facet."
+    facet_schema_version: int = 1
+
+    def to_consist_facet(self) -> dict:
+        return {"mode": self.mode, "purpose": self.purpose}
+
 @pytest.mark.flaky(reruns=3) # flaky due to db sync
 def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     """
@@ -195,11 +212,26 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     with tracker.start_run(
         run_id="manual_config_demo",
         model="manual_config_demo",
-        config={"purpose": "demo"},
-        facet={"purpose": "demo", "mode": "strict"},
+        config=ManualConfigDemo(mode="strict", purpose="demo"),
         hash_inputs=[("cleaning_config", config_path), ("params", params_path)],
     ):
         tracker.log_artifact(raw_data_path, key="raw_data", direction="input")
+
+    # Facet value: find runs by a queryable knob without loading/parsing full configs.
+    matching = tracker.find_runs_by_facet_kv(
+        namespace="manual_config_demo",
+        key="mode",
+        value_str="strict",
+    )
+    assert any(r.id == "manual_config_demo" for r in matching)
+
+    facets = tracker.get_config_facets(namespace="manual_config_demo")
+    assert facets and facets[0].facet_json == {"mode": "strict", "purpose": "demo"}
+
+    # `find_runs(..., index_by=...)` can return a "runs by knob" map.
+    # Prefer the typed helper for IDE/type-checker friendliness.
+    by_mode = tracker.find_runs(model="manual_config_demo", index_by=consist.index_by_facet("mode"))
+    assert by_mode["strict"].id == "manual_config_demo"
 
     import time
 

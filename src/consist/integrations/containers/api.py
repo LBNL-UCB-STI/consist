@@ -75,7 +75,7 @@ def _hash_inputs(tracker: Tracker, items: List[Union[str, Artifact]]) -> List[st
                 hashes.append(f"missing:{p}")
             else:
                 # Use identity manager file checksum (fast/ full based on strategy)
-                checksum = tracker.identity._compute_file_checksum(str(p))
+                checksum = tracker.identity.compute_file_checksum(p)
                 hashes.append(checksum)
     return sorted(hashes)
 

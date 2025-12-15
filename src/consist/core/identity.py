@@ -9,7 +9,8 @@ import hashlib
 import json
 import time
 import inspect
-from typing import Dict, List, Any, Optional, Callable, Set
+import fnmatch
+from typing import Dict, List, Any, Optional, Callable, Set, Union, Tuple
 from pathlib import Path
 
 # Try importing git, handle error if missing (optional dependency)
@@ -53,6 +54,22 @@ class IdentityManager:
         """
         self.project_root = Path(project_root).resolve()
         self.hashing_strategy = hashing_strategy
+
+    # --- Canonical JSON utilities ---
+
+    def canonical_json_str(self, obj: Any) -> str:
+        """
+        Return a stable JSON string for hashing/IDs.
+
+        Uses `_clean_structure` to normalize types and then dumps with deterministic
+        key ordering and compact separators.
+        """
+        cleaned = self._clean_structure(obj, set())
+        return json.dumps(cleaned, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+
+    def canonical_json_sha256(self, obj: Any) -> str:
+        """SHA256 hex digest of `canonical_json_str(obj)`."""
+        return hashlib.sha256(self.canonical_json_str(obj).encode("utf-8")).hexdigest()
 
     # --- Run Signature Calculation ---
 
@@ -371,7 +388,7 @@ class IdentityManager:
 
         return obj
 
-    def _compute_file_checksum(self, file_path: str) -> str:
+    def compute_file_checksum(self, file_path: Union[str, Path]) -> str:
         """
         Computes a cryptographic identifier for a given file or directory based on the configured hashing strategy.
 
@@ -400,9 +417,9 @@ class IdentityManager:
             If 'full' content hashing is performed on a directory, as this can be
             computationally expensive for large directories.
         """
-        path = Path(file_path)
+        path = file_path if isinstance(file_path, Path) else Path(file_path)
         if not path.exists():
-            raise FileNotFoundError(f"File not found for hashing: {file_path}")
+            raise FileNotFoundError(f"File not found for hashing: {path}")
 
         # --- Directory Handling (e.g. Zarr) ---
         if path.is_dir():
@@ -449,3 +466,112 @@ class IdentityManager:
                         break
                     sha256.update(chunk)
             return sha256.hexdigest()
+
+    # Backwards-compatible alias (internal callers / integrations).
+    def _compute_file_checksum(self, file_path: Union[str, Path]) -> str:
+        return self.compute_file_checksum(file_path)
+
+    # --- External "hash-only" config inputs ---
+
+    def label_for_hash_input(self, path: Union[str, Path]) -> str:
+        p = path if isinstance(path, Path) else Path(path)
+        try:
+            return str(p.resolve().relative_to(self.project_root))
+        except Exception:
+            return str(p)
+
+    def digest_path(
+        self,
+        path: Union[str, Path],
+        *,
+        ignore_dotfiles: bool = True,
+        allowlist: Optional[List[str]] = None,
+    ) -> str:
+        """
+        Digest a file or directory with optional filtering.
+
+        - Files: delegated to `compute_file_checksum` (honors hashing_strategy).
+        - Directories: deterministic digest over relative paths + (content or metadata).
+
+        Parameters
+        ----------
+        ignore_dotfiles:
+            If True, ignore any file whose relative path includes a component starting with '.'.
+        allowlist:
+            If provided, only include files whose relative path matches at least one glob pattern.
+        """
+        resolved = (path if isinstance(path, Path) else Path(path)).resolve()
+        if not resolved.exists():
+            raise FileNotFoundError(str(resolved))
+
+        if resolved.is_file():
+            return self.compute_file_checksum(resolved)
+
+        sha = hashlib.sha256()
+        for file_path in sorted(resolved.rglob("*")):
+            if not file_path.is_file():
+                continue
+
+            rel = file_path.relative_to(resolved).as_posix()
+            if ignore_dotfiles and any(part.startswith(".") for part in Path(rel).parts):
+                continue
+            if allowlist is not None and not any(fnmatch.fnmatch(rel, pat) for pat in allowlist):
+                continue
+
+            if self.hashing_strategy == "fast":
+                stat = file_path.stat()
+                leaf = f"{rel}:{stat.st_size}:{stat.st_mtime_ns}"
+                sha.update(leaf.encode("utf-8"))
+            else:
+                sha.update(f"{rel}:".encode("utf-8"))
+                with open(file_path, "rb") as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        sha.update(chunk)
+        return sha.hexdigest()
+
+    def compute_hash_inputs_digests(
+        self,
+        hash_inputs: List[Union[Path, str, Tuple[str, Union[Path, str]]]],
+        *,
+        ignore_dotfiles: bool = True,
+        allowlist: Optional[List[str]] = None,
+    ) -> Dict[str, str]:
+        """
+        Compute digests for external "hash-only" config inputs (files or directories).
+
+        Items may be:
+        - A path (str/Path): label derived from project-relative path when possible.
+        - A (label, path) tuple: explicit label.
+        """
+        digest_map: Dict[str, str] = {}
+
+        def to_path(p: Union[str, Path]) -> Path:
+            return p if isinstance(p, Path) else Path(p)
+
+        for item in hash_inputs:
+            if isinstance(item, tuple):
+                label, p = item
+                path_obj = to_path(p)
+            else:
+                path_obj = to_path(item)
+                label = self.label_for_hash_input(path_obj)
+
+            try:
+                digest_map[label] = self.digest_path(
+                    path_obj,
+                    ignore_dotfiles=ignore_dotfiles,
+                    allowlist=allowlist,
+                )
+            except Exception as exc:
+                digest_map[label] = f"ERROR:{exc}"
+                logging.warning(
+                    "[Consist] Failed to compute hash_input digest for %s (%s): %s",
+                    label,
+                    path_obj,
+                    exc,
+                )
+
+        return digest_map

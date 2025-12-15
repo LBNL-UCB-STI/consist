@@ -424,6 +424,183 @@ class DatabaseManager:
         except Exception:
             return None
 
+    def get_config_facet(self, facet_id: str) -> Optional[ConfigFacet]:
+        def _query():
+            with Session(self.engine) as session:
+                facet = session.get(ConfigFacet, facet_id)
+                if facet is not None:
+                    _ = facet.facet_json
+                    session.expunge(facet)
+                return facet
+
+        try:
+            return self.execute_with_retry(_query)
+        except Exception:
+            return None
+
+    def get_config_facets(
+        self,
+        *,
+        namespace: Optional[str] = None,
+        schema_name: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[ConfigFacet]:
+        def _query():
+            with Session(self.engine) as session:
+                statement = select(ConfigFacet).order_by(ConfigFacet.created_at.desc())
+                if namespace:
+                    statement = statement.where(ConfigFacet.namespace == namespace)
+                if schema_name:
+                    statement = statement.where(ConfigFacet.schema_name == schema_name)
+
+                results = session.exec(statement.limit(limit)).all()
+                for facet in results:
+                    _ = facet.facet_json
+                    session.expunge(facet)
+                return results
+
+        try:
+            return self.execute_with_retry(_query)
+        except Exception:
+            return []
+
+    def get_run_config_kv(
+        self,
+        run_id: str,
+        *,
+        namespace: Optional[str] = None,
+        prefix: Optional[str] = None,
+        limit: int = 10_000,
+    ) -> List[RunConfigKV]:
+        """
+        Return flattened facet key/value rows for a run.
+
+        Notes:
+        - `key` values are the stored/escaped representation (e.g., dict keys with "." are
+          written as "\\." in `RunConfigKV.key`).
+        - `prefix` is matched against the stored key representation.
+        """
+
+        def _query():
+            with Session(self.engine) as session:
+                statement = select(RunConfigKV).where(RunConfigKV.run_id == run_id)
+                if namespace:
+                    statement = statement.where(RunConfigKV.namespace == namespace)
+                if prefix:
+                    statement = statement.where(RunConfigKV.key.like(f"{prefix}%"))
+                results = session.exec(statement.limit(limit)).all()
+                for row in results:
+                    session.expunge(row)
+                return results
+
+        try:
+            return self.execute_with_retry(_query)
+        except Exception:
+            return []
+
+    def find_runs_by_facet_kv(
+        self,
+        *,
+        namespace: str,
+        key: str,
+        value_type: Optional[str] = None,
+        value_str: Optional[str] = None,
+        value_num: Optional[float] = None,
+        value_bool: Optional[bool] = None,
+        limit: int = 100,
+    ) -> List[Run]:
+        """
+        Find completed runs by a single facet KV predicate.
+
+        This is intended as an ergonomic wrapper around querying `run_config_kv` for
+        real-world filtering, e.g.:
+        - model="clean_data" and threshold==0.5
+        - model="beam" and sample==0.1
+        """
+
+        def _query():
+            with Session(self.engine) as session:
+                statement = (
+                    select(Run)
+                    .join(RunConfigKV, RunConfigKV.run_id == Run.id)
+                    .where(Run.status == "completed")
+                    .where(RunConfigKV.namespace == namespace)
+                    .where(RunConfigKV.key == key)
+                )
+
+                if value_type is not None:
+                    statement = statement.where(RunConfigKV.value_type == value_type)
+
+                if value_str is not None:
+                    statement = statement.where(RunConfigKV.value_str == value_str)
+                elif value_num is not None:
+                    statement = statement.where(RunConfigKV.value_num == float(value_num))
+                elif value_bool is not None:
+                    statement = statement.where(RunConfigKV.value_bool == value_bool)
+
+                results = session.exec(statement.limit(limit)).all()
+                for run in results:
+                    _ = run.meta
+                    _ = run.tags
+                    session.expunge(run)
+                return results
+
+        try:
+            return self.execute_with_retry(_query, operation_name="find_runs_by_facet_kv")
+        except Exception as e:
+            logging.warning("Failed to find runs by facet kv: %s", e)
+            return []
+
+    def get_facet_values_for_runs(
+        self,
+        run_ids: List[str],
+        *,
+        key: str,
+        namespace: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Fetch facet KV values for a set of runs.
+
+        Returns a map of run_id -> Python value (str/bool/int/float/json/None).
+        """
+        if not run_ids:
+            return {}
+
+        def _query():
+            with Session(self.engine) as session:
+                statement = select(RunConfigKV).where(RunConfigKV.run_id.in_(run_ids))
+                statement = statement.where(RunConfigKV.key == key)
+                if namespace:
+                    statement = statement.where(RunConfigKV.namespace == namespace)
+                rows = session.exec(statement).all()
+                for row in rows:
+                    session.expunge(row)
+                return rows
+
+        try:
+            rows = self.execute_with_retry(_query, operation_name="get_facet_values_for_runs")
+        except Exception as e:
+            logging.warning("Failed to get facet values for runs: %s", e)
+            return {}
+
+        values: Dict[str, Any] = {}
+        for row in rows:
+            if row.value_type == "null":
+                value: Any = None
+            elif row.value_type == "bool":
+                value = row.value_bool
+            elif row.value_type == "int":
+                value = int(row.value_num) if row.value_num is not None else None
+            elif row.value_type == "float":
+                value = row.value_num
+            elif row.value_type == "str":
+                value = row.value_str
+            else:
+                value = row.value_json
+            values[row.run_id] = value
+
+        return values
+
     def get_history(self, limit: int = 10, tags: List[str] = None) -> pd.DataFrame:
         query = f"SELECT * FROM run ORDER BY created_at DESC LIMIT {limit}"
         try:

@@ -1,9 +1,7 @@
 import logging
 import json
-import hashlib
 import uuid
 import weakref
-import fnmatch
 from pathlib import Path
 from typing import (
     Dict,
@@ -31,17 +29,17 @@ import pandas as pd
 
 from pydantic import BaseModel
 
-from consist.types import FacetLike, HasConsistFacet, HasFacetSchemaVersion
+from consist.types import FacetLike, HasFacetSchemaVersion
 
 from consist.core.views import ViewFactory, ViewRegistry
 from consist.core.fs import FileSystemManager
 from consist.core.persistence import DatabaseManager
+from consist.core.config_facets import ConfigFacetManager
+from consist.core.indexing import FacetIndex, IndexBySpec, RunFieldIndex
 from consist.core.decorators import create_task_decorator
 from consist.core.events import EventManager
 from consist.models.artifact import Artifact
-from consist.models.config_facet import ConfigFacet
 from consist.models.run import Run, ConsistRecord, RunArtifacts
-from consist.models.run_config_kv import RunConfigKV
 from consist.core.identity import IdentityManager
 from consist.core.context import push_tracker, pop_tracker
 
@@ -127,6 +125,7 @@ class Tracker:
             self.db = DatabaseManager(db_path)
 
         self.artifacts = ArtifactManager(self)
+        self.config_facets = ConfigFacetManager(db=self.db, identity=self.identity)
 
         self.views = ViewRegistry(self)
         if schemas:
@@ -262,7 +261,7 @@ class Tracker:
 
         if hash_inputs:
             config_dict = dict(config_dict)
-            digest_map = self._compute_hash_inputs_digests(hash_inputs)
+            digest_map = self.identity.compute_hash_inputs_digests(hash_inputs)
             # Fold into config identity so it contributes to config_hash/signature.
             if "__consist_hash_inputs__" in config_dict:
                 logging.warning(
@@ -305,10 +304,8 @@ class Tracker:
         self._active_run_cache_mode = cache_mode
 
         # Persist a queryable facet (optional)
-        facet_dict = self._resolve_facet_dict(
-            model=model,
-            raw_config_model=raw_config_model,
-            facet=facet,
+        facet_dict = self.config_facets.resolve_facet_dict(
+            model=model, raw_config_model=raw_config_model, facet=facet, run_id=run.id
         )
         if facet_dict is not None:
             self.current_consist.facet = facet_dict
@@ -317,11 +314,11 @@ class Tracker:
                 raw_config_model, HasFacetSchemaVersion
             ):
                 schema_version = raw_config_model.facet_schema_version
-            self._persist_facet(
+            self.config_facets.persist_facet(
                 run=run,
                 model=model,
                 facet_dict=facet_dict,
-                schema_name=self._infer_schema_name(raw_config_model, facet),
+                schema_name=self.config_facets.infer_schema_name(raw_config_model, facet),
                 schema_version=schema_version,
                 index_kv=facet_index,
             )
@@ -413,283 +410,6 @@ class Tracker:
         self._emit_run_start(run)
 
         return run
-
-    def _infer_schema_name(
-        self, raw_config_model: Optional[BaseModel], facet: Optional[FacetLike]
-    ) -> str:
-        if isinstance(facet, BaseModel):
-            return facet.__class__.__name__
-        if raw_config_model is not None:
-            return raw_config_model.__class__.__name__
-        return "dict"
-
-    def _canonical_json_str(self, obj: Dict[str, Any]) -> str:
-        cleaned = self.identity._clean_structure(obj, set())  # canonicalize types, sort later
-        return json.dumps(cleaned, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
-
-    def _resolve_facet_dict(
-        self,
-        model: str,
-        raw_config_model: Optional[BaseModel],
-        facet: Optional[FacetLike],
-    ) -> Optional[Dict[str, Any]]:
-        # 1) Explicit facet always wins
-        if facet is not None:
-            if isinstance(facet, BaseModel):
-                return facet.model_dump(mode="json") if hasattr(facet, "model_dump") else facet.model_dump()
-            return facet
-
-        # 2) Convention hook on Pydantic config models
-        if raw_config_model is not None and isinstance(raw_config_model, HasConsistFacet):
-            try:
-                extracted = raw_config_model.to_consist_facet()
-            except Exception as exc:
-                logging.warning(
-                    "[Consist] to_consist_facet() failed for model=%s run=%s: %s",
-                    model,
-                    getattr(self.current_consist, "run", None) and self.current_consist.run.id,
-                    exc,
-                )
-                extracted = None
-            if extracted is not None:
-                if isinstance(extracted, BaseModel):
-                    return (
-                        extracted.model_dump(mode="json")
-                        if hasattr(extracted, "model_dump")
-                        else extracted.model_dump()
-                    )
-                return extracted
-
-        # Dict configs (and Pydantic configs without to_consist_facet) do not auto-become facets
-        # to avoid surprising DB bloat and unexpected indexing.
-        return None
-
-    def _persist_facet(
-        self,
-        run: Run,
-        model: str,
-        facet_dict: Dict[str, Any],
-        schema_name: str,
-        schema_version: Optional[Union[str, int]],
-        index_kv: bool,
-        max_facet_bytes: int = 16_384,
-        max_kv_rows: int = 500,
-    ) -> None:
-        if not self.db:
-            return
-
-        canonical = self._canonical_json_str(facet_dict)
-        if len(canonical.encode("utf-8")) > max_facet_bytes:
-            logging.info(
-                "[Consist] Skipping facet persistence for run %s (facet too large: %d bytes).",
-                run.id,
-                len(canonical.encode("utf-8")),
-            )
-            return
-
-        facet_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-        self.db.upsert_config_facet(
-            ConfigFacet(
-                id=facet_id,
-                namespace=model,
-                schema_name=schema_name,
-                schema_version=str(schema_version) if schema_version is not None else None,
-                facet_json=facet_dict,
-            )
-        )
-
-        run.meta["config_facet_id"] = facet_id
-        run.meta["config_facet_namespace"] = model
-        run.meta["config_facet_schema"] = schema_name
-        if schema_version is not None:
-            run.meta["config_facet_schema_version"] = schema_version
-
-        if not index_kv:
-            return
-
-        rows = self._flatten_facet_to_kv_rows(
-            run_id=run.id,
-            facet_id=facet_id,
-            namespace=model,
-            facet_dict=facet_dict,
-        )
-        if len(rows) > max_kv_rows:
-            logging.info(
-                "[Consist] Skipping facet KV indexing for run %s (too many keys: %d).",
-                run.id,
-                len(rows),
-            )
-            return
-        self.db.insert_run_config_kv_bulk(rows)
-
-    def _flatten_facet_to_kv_rows(
-        self,
-        run_id: str,
-        facet_id: str,
-        namespace: str,
-        facet_dict: Dict[str, Any],
-    ) -> List[RunConfigKV]:
-        rows: List[RunConfigKV] = []
-
-        def walk(prefix: str, value: Any) -> None:
-            if isinstance(value, dict):
-                for k, v in value.items():
-                    key_part = str(k).replace(".", "\\.")
-                    new_prefix = f"{prefix}.{key_part}" if prefix else key_part
-                    walk(new_prefix, v)
-                return
-
-            # scalar leaf types
-            if value is None:
-                rows.append(
-                    RunConfigKV(
-                        run_id=run_id,
-                        facet_id=facet_id,
-                        namespace=namespace,
-                        key=prefix,
-                        value_type="null",
-                    )
-                )
-                return
-            if isinstance(value, bool):
-                rows.append(
-                    RunConfigKV(
-                        run_id=run_id,
-                        facet_id=facet_id,
-                        namespace=namespace,
-                        key=prefix,
-                        value_type="bool",
-                        value_bool=value,
-                    )
-                )
-                return
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                rows.append(
-                    RunConfigKV(
-                        run_id=run_id,
-                        facet_id=facet_id,
-                        namespace=namespace,
-                        key=prefix,
-                        value_type="float" if isinstance(value, float) else "int",
-                        value_num=float(value),
-                    )
-                )
-                return
-            if isinstance(value, str):
-                rows.append(
-                    RunConfigKV(
-                        run_id=run_id,
-                        facet_id=facet_id,
-                        namespace=namespace,
-                        key=prefix,
-                        value_type="str",
-                        value_str=value,
-                    )
-                )
-                return
-
-            # fallback: store as JSON (not intended for numeric comparisons initially)
-            rows.append(
-                RunConfigKV(
-                    run_id=run_id,
-                    facet_id=facet_id,
-                    namespace=namespace,
-                    key=prefix,
-                    value_type="json",
-                    value_json=value,
-                )
-            )
-
-        walk("", facet_dict)
-        return [r for r in rows if r.key]
-
-    def _compute_hash_inputs_digests(
-        self,
-        hash_inputs: List[Union[Path, str, Tuple[str, Union[Path, str]]]],
-        ignore_dotfiles: bool = True,
-        allowlist: Optional[List[str]] = None,
-    ) -> Dict[str, str]:
-        """
-        Compute digests for external "hash-only" config inputs (files or directories).
-
-        - Dotfiles are ignored by default (any path component starting with '.').
-        - Directories are hashed deterministically using relative paths + per-file checksums.
-        """
-        digest_map: Dict[str, str] = {}
-
-        def to_path(p: Union[str, Path]) -> Path:
-            return p if isinstance(p, Path) else Path(p)
-
-        for item in hash_inputs:
-            if isinstance(item, tuple):
-                label, p = item
-                path = to_path(p)
-            else:
-                path = to_path(item)
-                label = self._label_for_hash_input(path)
-
-            try:
-                digest_map[label] = self._digest_path(
-                    path,
-                    ignore_dotfiles=ignore_dotfiles,
-                    allowlist=allowlist,
-                )
-            except Exception as exc:
-                digest_map[label] = f"ERROR:{exc}"
-                logging.warning(
-                    "[Consist] Failed to compute hash_input digest for %s (%s): %s",
-                    label,
-                    path,
-                    exc,
-                )
-
-        return digest_map
-
-    def _label_for_hash_input(self, path: Path) -> str:
-        try:
-            return str(path.resolve().relative_to(self.identity.project_root))
-        except Exception:
-            return str(path)
-
-    def _digest_path(
-        self,
-        path: Path,
-        ignore_dotfiles: bool,
-        allowlist: Optional[List[str]],
-    ) -> str:
-        resolved = path.resolve()
-        if not resolved.exists():
-            raise FileNotFoundError(str(resolved))
-
-        if resolved.is_file():
-            return self.identity._compute_file_checksum(str(resolved))
-
-        # Directory digest: include rel path + per-file digest, deterministic ordering.
-        sha = hashlib.sha256()
-        for file_path in sorted(resolved.rglob("*")):
-            if not file_path.is_file():
-                continue
-            rel = file_path.relative_to(resolved).as_posix()
-            if ignore_dotfiles and any(part.startswith(".") for part in Path(rel).parts):
-                continue
-            if allowlist is not None and not any(fnmatch.fnmatch(rel, pat) for pat in allowlist):
-                continue
-
-            if self.identity.hashing_strategy == "fast":
-                stat = file_path.stat()
-                leaf = f"{rel}:{stat.st_size}:{stat.st_mtime_ns}"
-                sha.update(leaf.encode("utf-8"))
-            else:
-                # Hash each file content but keep path boundaries stable
-                sha.update(f"{rel}:".encode("utf-8"))
-                with open(file_path, "rb") as f:
-                    while True:
-                        chunk = f.read(65536)
-                        if not chunk:
-                            break
-                        sha.update(chunk)
-        return sha.hexdigest()
 
     @contextmanager
     def start_run(
@@ -909,7 +629,7 @@ class Tracker:
         parent_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         limit: int = 100,
-        index_by: Optional[str] = None,  # <--- NEW ARGUMENT
+        index_by: Optional[Union[str, IndexBySpec]] = None,
         name: Optional[str] = None,
     ) -> Union[List[Run], Dict[Any, Run]]:
         """
@@ -919,6 +639,10 @@ class Tracker:
             ... (existing args) ...
             index_by: If provided, returns a dictionary keyed by this attribute
                       of the Run object (e.g., "year", "iteration").
+                      Special case: use `index_by="facet.<key>"` (or `"facet:<key>"`) to
+                      key by a persisted facet value (requires DB + facet indexing).
+                      Prefer the typed helpers `index_by_field(...)` / `index_by_facet(...)`
+                      for IDE/type-checker assistance.
                       Warning: If multiple runs share the same key, the last one wins.
         """
         runs = []
@@ -928,7 +652,41 @@ class Tracker:
             )
 
         if index_by:
+            if isinstance(index_by, FacetIndex):
+                facet_key = index_by.key
+                if not self.db:
+                    return {}
+                values_by_run = self.db.get_facet_values_for_runs(
+                    [r.id for r in runs],
+                    key=facet_key,
+                    namespace=model,
+                )
+                return {values_by_run[r.id]: r for r in runs if r.id in values_by_run}
+
+            if isinstance(index_by, RunFieldIndex):
+                return {getattr(r, index_by.field): r for r in runs}
+
+            if isinstance(index_by, str) and (
+                index_by.startswith("facet.") or index_by.startswith("facet:")
+            ):
+                if not self.db:
+                    return {}
+                facet_key = (
+                    index_by.split(".", 1)[1]
+                    if index_by.startswith("facet.")
+                    else index_by.split(":", 1)[1]
+                )
+                values_by_run = self.db.get_facet_values_for_runs(
+                    [r.id for r in runs],
+                    key=facet_key,
+                    namespace=model,
+                )
+                # Only include runs that have this facet key present.
+                return {values_by_run[r.id]: r for r in runs if r.id in values_by_run}
+
             # Create dictionary keyed by the requested attribute
+            if not isinstance(index_by, str):
+                raise TypeError(f"Unsupported index_by type: {type(index_by)}")
             return {getattr(r, index_by): r for r in runs}
 
         return runs
@@ -1506,6 +1264,63 @@ class Tracker:
             return self.db.get_artifact_by_uri(uri)
 
         return None
+
+    # --- Config Facet Query Helpers ---
+
+    def get_config_facet(self, facet_id: str):
+        if not self.db:
+            return None
+        return self.db.get_config_facet(facet_id)
+
+    def get_config_facets(
+        self,
+        *,
+        namespace: Optional[str] = None,
+        schema_name: Optional[str] = None,
+        limit: int = 100,
+    ):
+        if not self.db:
+            return []
+        return self.db.get_config_facets(
+            namespace=namespace, schema_name=schema_name, limit=limit
+        )
+
+    def get_run_config_kv(
+        self,
+        run_id: str,
+        *,
+        namespace: Optional[str] = None,
+        prefix: Optional[str] = None,
+        limit: int = 10_000,
+    ):
+        if not self.db:
+            return []
+        return self.db.get_run_config_kv(
+            run_id, namespace=namespace, prefix=prefix, limit=limit
+        )
+
+    def find_runs_by_facet_kv(
+        self,
+        *,
+        namespace: str,
+        key: str,
+        value_type: Optional[str] = None,
+        value_str: Optional[str] = None,
+        value_num: Optional[float] = None,
+        value_bool: Optional[bool] = None,
+        limit: int = 100,
+    ):
+        if not self.db:
+            return []
+        return self.db.find_runs_by_facet_kv(
+            namespace=namespace,
+            key=key,
+            value_type=value_type,
+            value_str=value_str,
+            value_num=value_num,
+            value_bool=value_bool,
+            limit=limit,
+        )
 
     def resolve_historical_path(self, artifact: Artifact, run: Run) -> Path:
         """
