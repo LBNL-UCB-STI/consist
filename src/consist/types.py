@@ -10,16 +10,35 @@ These are intentionally minimal and dependency-tolerant:
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional, Protocol, TypeAlias, Union, runtime_checkable
+from pathlib import Path
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Mapping,
+    Optional,
+    Protocol,
+    TypeAlias,
+    Union,
+    runtime_checkable,
+)
 
 try:
     from pydantic import BaseModel  # type: ignore
 except Exception:  # pragma: no cover
     BaseModel = object  # type: ignore[misc,assignment]
 
+if TYPE_CHECKING:  # pragma: no cover
+    from consist.models.artifact import Artifact
 
 FacetDict: TypeAlias = Mapping[str, Any]
 FacetLike: TypeAlias = Union[FacetDict, BaseModel]
+
+# Common “path-like” / “artifact-like” helper types.
+PathLike: TypeAlias = Union[str, Path]
+ArtifactRef: TypeAlias = Union["Artifact", PathLike]
+
+HashInput: TypeAlias = Union[PathLike, tuple[str, PathLike]]
+HashInputs: TypeAlias = Optional[list[HashInput]]
 
 
 @runtime_checkable

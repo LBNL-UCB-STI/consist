@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional, List, Union
 
 from consist.models.artifact import Artifact
+from consist.types import ArtifactRef
 
 # Use TYPE_CHECKING to avoid circular imports if needed
 from typing import TYPE_CHECKING
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
 def create_task_decorator(
     tracker: "Tracker",
     cache_mode: str = "reuse",
-    depends_on: Optional[List[Union[str, Path, Artifact]]] = None,
+    depends_on: Optional[list[ArtifactRef]] = None,
     capture_dir: Optional[Union[str, Path]] = None,
     capture_pattern: str = "*",
     **run_kwargs: Any,

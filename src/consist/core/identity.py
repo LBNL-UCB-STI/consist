@@ -10,7 +10,7 @@ import json
 import time
 import inspect
 import fnmatch
-from typing import Dict, List, Any, Optional, Callable, Set, Union, Tuple
+from typing import Dict, List, Any, Optional, Callable, Set, Union
 from pathlib import Path
 
 # Try importing git, handle error if missing (optional dependency)
@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from consist.models.artifact import Artifact
+    from consist.types import HashInput
 
 
 class IdentityManager:
@@ -540,7 +541,7 @@ class IdentityManager:
 
     def compute_hash_inputs_digests(
         self,
-        hash_inputs: List[Union[Path, str, Tuple[str, Union[Path, str]]]],
+        hash_inputs: List["HashInput"],
         *,
         ignore_dotfiles: bool = True,
         allowlist: Optional[List[str]] = None,

@@ -1,12 +1,12 @@
 from contextlib import contextmanager
-from pathlib import Path
 from types import MappingProxyType
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any
 
 from consist import Artifact
 from consist.models.run import ConsistRecord
 from typing import TYPE_CHECKING
 from consist.core.coupler import Coupler
+from consist.types import ArtifactRef
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
@@ -77,15 +77,13 @@ class ScenarioContext:
         """Read-only view of registered exogenous inputs."""
         return MappingProxyType(self._inputs)
 
-    def add_input(
-        self, path: Union[str, Path, Artifact], key: str, **kwargs
-    ) -> Artifact:
+    def add_input(self, path: ArtifactRef, key: str, **kwargs) -> Artifact:
         """
         Log an external input artifact to the scenario header run.
 
         Parameters
         ----------
-        path : Union[str, Path, Artifact]
+        path : ArtifactRef
             Path (or prebuilt ``Artifact``) representing the input.
         key : str
             Semantic key for the artifact.

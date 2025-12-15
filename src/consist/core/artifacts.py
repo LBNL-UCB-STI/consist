@@ -1,9 +1,10 @@
 import logging
 from pathlib import Path
-from typing import Union, List, Optional, Any, Type, TYPE_CHECKING, Callable
+from typing import List, Optional, Any, Type, TYPE_CHECKING, Callable
 
 from sqlmodel import SQLModel
 from consist.models.artifact import Artifact
+from consist.types import ArtifactRef
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
@@ -22,7 +23,7 @@ class ArtifactManager:
 
     def create_artifact(
         self,
-        path: Union[str, Artifact],
+        path: ArtifactRef,
         run_id: Optional[str] = None,
         key: Optional[str] = None,
         direction: str = "output",
@@ -35,8 +36,8 @@ class ArtifactManager:
 
         Parameters
         ----------
-        path : Union[str, Artifact]
-            File system path or existing ``Artifact`` to log.
+        path : ArtifactRef
+            File system path or an existing ``Artifact`` reference to log.
         run_id : Optional[str], optional
             Identifier of the run that produced the artifact.
         key : Optional[str], optional
@@ -62,6 +63,8 @@ class ArtifactManager:
         """
         artifact_obj = None
         resolved_abs_path = None
+        mount_scheme: Optional[str] = None
+        mount_root: Optional[str] = None
 
         if isinstance(path, Artifact):
             artifact_obj = path
@@ -76,10 +79,16 @@ class ArtifactManager:
                 artifact_obj.meta.update(meta)
         else:
             if key is None:
-                raise ValueError("Argument 'key' required when 'path' is a string.")
+                raise ValueError("Argument 'key' required when 'path' is a path-like.")
 
             resolved_abs_path = str(Path(path).resolve())
             uri = self.tracker.fs.virtualize_path(resolved_abs_path)
+
+            if "://" in uri:
+                scheme = uri.split("://", 1)[0]
+                if scheme in self.tracker.mounts:
+                    mount_scheme = scheme
+                    mount_root = str(Path(self.tracker.mounts[scheme]).resolve())
 
             if direction == "input" and self.tracker.db:
                 parent = self.tracker.db.find_latest_artifact_at_uri(uri)
@@ -116,6 +125,13 @@ class ArtifactManager:
         if schema:
             artifact_obj.meta["schema_name"] = schema.__name__
             artifact_obj.meta["has_strict_schema"] = True
+
+        if artifact_obj.meta is None:
+            artifact_obj.meta = {}
+        if mount_scheme and "mount_scheme" not in artifact_obj.meta:
+            artifact_obj.meta["mount_scheme"] = mount_scheme
+        if mount_root and "mount_root" not in artifact_obj.meta:
+            artifact_obj.meta["mount_root"] = mount_root
 
         artifact_obj.abs_path = resolved_abs_path
         return artifact_obj

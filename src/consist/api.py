@@ -12,6 +12,7 @@ from consist.core.views import create_view_model
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 from consist.core.tracker import Tracker
+from consist.types import ArtifactRef
 
 if TYPE_CHECKING:
     # Type-only imports already handled above; kept for static checkers
@@ -208,7 +209,7 @@ def get_artifact(
 
 
 def log_artifact(
-    path: Union[str, Artifact],
+    path: ArtifactRef,
     key: Optional[str] = None,
     direction: str = "output",
     schema: Optional[Type[SQLModel]] = None,
@@ -224,11 +225,11 @@ def log_artifact(
 
     Parameters
     ----------
-    path : Union[str, Artifact]
-        The file path (str) or an existing `Artifact` object to be logged.
+    path : ArtifactRef
+        A file path (str/Path) or an existing `Artifact` reference to be logged.
     key : Optional[str], optional
         A semantic, human-readable name for the artifact (e.g., "households").
-        Required if `path` is a string.
+        Required if `path` is a path-like (str/Path).
     direction : str, default "output"
         Specifies whether the artifact is an "input" or "output" for the
         current run. Defaults to "output".
@@ -251,7 +252,7 @@ def log_artifact(
     RuntimeError
         If called outside an active run context.
     ValueError
-        If `key` is not provided when `path` is a string.
+        If `key` is not provided when `path` is a path-like (str/Path).
     """
     return get_active_tracker().log_artifact(
         path=path, key=key, direction=direction, schema=schema, driver=driver, **meta

@@ -11,6 +11,11 @@ from sqlalchemy.pool import NullPool
 from sqlmodel import create_engine, Session, select, SQLModel, col
 
 from consist.models.artifact import Artifact
+from consist.models.artifact_schema import (
+    ArtifactSchema,
+    ArtifactSchemaField,
+    ArtifactSchemaObservation,
+)
 from consist.models.config_facet import ConfigFacet
 from consist.models.run import Run, RunArtifactLink
 from consist.models.run_config_kv import RunConfigKV
@@ -45,6 +50,9 @@ class DatabaseManager:
                     RunArtifactLink.__table__,
                     ConfigFacet.__table__,
                     RunConfigKV.__table__,
+                    ArtifactSchema.__table__,
+                    ArtifactSchemaField.__table__,
+                    ArtifactSchemaObservation.__table__,
                 ],
             )
             # DuckDB self-referential FK on run.parent_run_id blocks status updates.
@@ -201,6 +209,52 @@ class DatabaseManager:
             self.execute_with_retry(_insert, operation_name="insert_run_config_kv_bulk")
         except Exception as e:
             logging.warning(f"Failed to insert run config kv rows: {e}")
+
+    def upsert_artifact_schema(
+        self, schema: ArtifactSchema, fields: List[ArtifactSchemaField]
+    ) -> None:
+        """
+        Upsert a deduped artifact schema and its per-field rows.
+
+        Notes
+        -----
+        - `ArtifactSchema.id` is expected to be a stable hash of the canonical schema JSON.
+        - Field rows are keyed by (schema_id, name) to prevent duplication.
+        """
+
+        def _upsert():
+            with Session(self.engine) as session:
+                session.merge(schema)
+                if fields:
+                    session.add_all(fields)
+                session.commit()
+
+        try:
+            self.execute_with_retry(_upsert, operation_name="upsert_artifact_schema")
+        except Exception as e:
+            logging.warning(f"Failed to upsert artifact schema {schema.id}: {e}")
+
+    def insert_artifact_schema_observation(
+        self, observation: ArtifactSchemaObservation
+    ) -> None:
+        """Insert a new schema observation row."""
+
+        def _insert():
+            with Session(self.engine) as session:
+                session.add(observation)
+                session.commit()
+
+        try:
+            self.execute_with_retry(
+                _insert, operation_name="insert_artifact_schema_observation"
+            )
+        except Exception as e:
+            logging.warning(
+                "Failed to insert artifact schema observation artifact=%s schema=%s: %s",
+                getattr(observation, "artifact_id", None),
+                getattr(observation, "schema_id", None),
+                e,
+            )
 
     def link_artifact_to_run(
         self, artifact_id: uuid.UUID, run_id: str, direction: str

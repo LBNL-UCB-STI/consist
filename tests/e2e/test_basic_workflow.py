@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Optional
 from unittest.mock import patch
 
 import pandas as pd
@@ -10,18 +11,56 @@ from consist.cli import app as cli_app
 from consist.core.identity import IdentityManager
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
+from consist.models.artifact_schema import (
+    ArtifactSchema,
+    ArtifactSchemaField,
+    ArtifactSchemaObservation,
+)
 from consist.models.run import Run
 
 
 def _write_csv(path: Path, rows: int = 5) -> None:
+    """
+    Helper to generate a tiny, deterministic CSV.
+
+    This keeps the workflow readable by avoiding inline DataFrame setup in the test.
+    """
     df = pd.DataFrame({"value": range(rows), "category": ["a"] * rows})
     df.to_csv(path, index=False)
 
 
 def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     """
-    End-to-end regression: scenario header + two steps, dual-write to JSON/DB,
-    and CLI introspection on the resulting provenance.
+    Basic Consist workflow template (end-to-end).
+
+    This test is meant to be a readable starting point for new workflows. It shows:
+
+    1) **Scenario header run**
+       Use `tracker.scenario(...)` to create a parent run that groups multiple steps
+       under a single scenario identifier (useful for multi-step pipelines/simulations).
+
+    2) **Step runs + artifact lineage**
+       Each `scenario.step(...)` creates a child run. Within a step:
+       - write some data
+       - `tracker.log_artifact(...)` to register outputs (and optionally inputs)
+       - use `scenario.coupler` to pass artifacts between steps
+
+    3) **Dual-write provenance**
+       Consist writes a human-inspectable JSON snapshot (`consist.json`) and (when
+       configured with `db_path`) persists runs/artifacts to DuckDB for querying.
+
+    4) **Hot-data ingestion + schema persistence**
+       Calling `tracker.ingest(artifact)` materializes the artifact into DuckDB (via dlt)
+       and (as of this feature) persists a deduped schema profile referenced from
+       `artifact.meta` (`schema_id`, `schema_summary`).
+
+    5) **CLI introspection**
+       Demonstrates how developers can inspect the resulting provenance via the CLI.
+
+    Developers can adapt this by:
+    - swapping CSV for Parquet/Zarr/HDF5 artifacts,
+    - adding more steps and richer facets/tags,
+    - ingesting selected outputs for query performance and schema tracking.
     """
     runner = CliRunner()
     tracker.identity.hashing_strategy = "fast"
@@ -33,6 +72,7 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     features_path = run_dir / "features.csv"
     scenario_cfg_path = run_dir / "scenario_config.json"
     scenario_cfg_path.write_text(json.dumps({"seed": 7, "note": "external config"}))
+    features_artifact: Optional[Artifact] = None
 
     with tracker.scenario(
         scenario_id,
@@ -76,6 +116,7 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
                 driver="csv",
                 meta={"rows": len(df_raw)},
             )
+            features_artifact = features_art
             scenario.coupler.set("features", features_art)
 
     # JSON snapshot
@@ -89,6 +130,7 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     assert data["config"]["seed"] == 7
     assert data["facet"]["seed"] == 7
     assert data["run"]["meta"]["consist_hash_inputs"]["scenario_config"] is not None
+    assert isinstance(data["run"]["meta"]["mounts"], dict)
     assert data["run"]["config_hash"] == IdentityManager().compute_config_hash(
         {
             "seed": 7,
@@ -112,6 +154,28 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
         child_parents = {r.id: r.parent_run_id for r in runs if r.id != scenario_id}
         assert child_parents[ingest_run_id] == scenario_id
         assert child_parents[transform_run_id] == scenario_id
+
+    # Schema persistence: ingest an artifact and verify schema discovery is persisted.
+    assert features_artifact is not None
+    tracker.ingest(features_artifact)
+    assert "schema_id" in features_artifact.meta
+    assert "schema_summary" in features_artifact.meta
+
+    with Session(tracker.engine) as session:
+        schema_id = features_artifact.meta["schema_id"]
+        assert session.get(ArtifactSchema, schema_id) is not None
+        fields = session.exec(
+            select(ArtifactSchemaField).where(
+                ArtifactSchemaField.schema_id == schema_id
+            )
+        ).all()
+        assert {f.name for f in fields} >= {"value", "category", "value_doubled"}
+        observations = session.exec(
+            select(ArtifactSchemaObservation).where(
+                ArtifactSchemaObservation.schema_id == schema_id
+            )
+        ).all()
+        assert len(observations) >= 1
 
     # CLI sanity: runs/show/artifacts/summary/preview
     db_path = str(tracker.db_path)

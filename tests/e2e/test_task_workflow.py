@@ -236,7 +236,6 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     )
     assert by_mode["strict"].id == "manual_config_demo"
 
-
     if tracker.db:
         tracker.db.session.commit() if hasattr(tracker.db, "session") else None
 

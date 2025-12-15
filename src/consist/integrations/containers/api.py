@@ -35,6 +35,7 @@ from consist.models.artifact import Artifact
 from consist.integrations.containers.models import ContainerDefinition
 from consist.integrations.containers.backends import DockerBackend, SingularityBackend
 from consist.models.run import RunArtifactLink
+from consist.types import ArtifactRef
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ def _resolve_image_digest(backend, image: str, pull_latest: bool) -> str:
     return image
 
 
-def _hash_inputs(tracker: Tracker, items: List[Union[str, Artifact]]) -> List[str]:
+def _hash_inputs(tracker: Tracker, items: List[ArtifactRef]) -> List[str]:
     """Return deterministic hashes for container inputs."""
     hashes: List[str] = []
     for item in items:
@@ -81,7 +82,9 @@ def _hash_inputs(tracker: Tracker, items: List[Union[str, Artifact]]) -> List[st
 
 
 def _container_signature(
-    defn: ContainerDefinition, inputs: List[Union[str, Artifact]], tracker: Tracker
+    defn: ContainerDefinition,
+    inputs: List[ArtifactRef],
+    tracker: Tracker,
 ) -> str:
     logger.debug(
         "[container.signature] hashable_config=%s",
@@ -138,7 +141,7 @@ def _container_manifest_hash(manifest: Dict[str, Any]) -> str:
 def _reuse_or_execute_container(
     tracker: Tracker,
     defn: ContainerDefinition,
-    inputs: List[Union[str, Artifact]],
+    inputs: List[ArtifactRef],
     run_id: str,
     execute_fn,
     output_key_map: Optional[Dict[str, str]] = None,
@@ -287,7 +290,7 @@ def run_container(
     image: str,
     command: Union[str, List[str]],
     volumes: Dict[str, str],
-    inputs: List[Union[str, Artifact]],
+    inputs: List[ArtifactRef],
     outputs: Union[
         List[Union[str, Path]], Dict[str, Union[str, Path]]
     ],  # Allow key->path mapping
@@ -321,8 +324,8 @@ def run_container(
     volumes : Dict[str, str]
         A dictionary mapping host paths to container paths for volume mounts.
         Example: `{"/host/path": "/container/path"}`.
-    inputs : List[Union[str, Artifact]]
-        A list of paths (str) or `Artifact` objects on the host machine that serve
+    inputs : List[ArtifactRef]
+        A list of paths (str/Path) or `Artifact` objects on the host machine that serve
         as inputs to the containerized process. These are logged as Consist inputs.
     outputs : List[str]
         A list of paths on the host machine that are expected to be generated or

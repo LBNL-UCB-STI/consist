@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from sqlmodel import SQLModel
 
 from consist.core.artifacts import ArtifactManager
+from consist.core.artifact_schemas import ArtifactSchemaManager
 from consist.core.workflow import ScenarioContext, OutputCapture
 
 UTC = timezone.utc
@@ -28,7 +29,7 @@ import pandas as pd
 
 from pydantic import BaseModel
 
-from consist.types import FacetLike, HasFacetSchemaVersion
+from consist.types import ArtifactRef, FacetLike, HasFacetSchemaVersion, HashInputs
 
 from consist.core.views import ViewFactory, ViewRegistry
 from consist.core.fs import FileSystemManager
@@ -71,38 +72,33 @@ class Tracker:
         access_mode: AccessMode = "standard",
     ):
         """
-        Initializes the Consist Tracker.
+        Initialize a Consist Tracker.
 
         Sets up the directory for run logs, configures path virtualization mounts,
         and optionally initializes the DuckDB database connection.
 
-        Args:
-            run_dir (Path): The root directory where run-specific logs (e.g., `consist.json`)
-                            and potentially other run outputs will be stored. This directory
-                            will be created if it does not exist.
-            db_path (Optional[str]): The file path to the DuckDB database. If provided,
-                                     the tracker will persist run and artifact metadata
-                                     to this database as part of the **dual-write mechanism**.
-                                     If None, database features are disabled.
-            mounts (Optional[Dict[str, str]]): A dictionary mapping scheme names (e.g., "inputs", "outputs")
-                                             to absolute file system paths. These mounts are used for
-                                             **path virtualization**, allowing Consist to store portable URIs
-                                             instead of absolute paths, making runs reproducible across environments.
-                                             Defaults to an empty dictionary if None.
-            project_root (str): The root directory of the project, used by the `IdentityManager`
-                                to compute relative paths for code hashing and artifact virtualization.
-                                Defaults to the current working directory ".".
-            schemas (Optional[List[Type[SQLModel]]]): A list of SQLModel definitions for artifacts that will be
-                                                      registered. Will allow them to be joined to runs table and
-                                                      efficiently queried.
-            access_mode (AccessMode): The access mode of the DuckDB database. Defaults to "standard".
-                                      "standard" (Default): Full permissions. Create runs, log artifacts, ingest data.
-                                      "analysis":
-                                            Allowed: ingest() (Backfill/optimize existing data), create_view(), reflect_view(), find_run().
-                                            Blocked: start_run(), log_artifact() (Cannot create new provenance nodes).
-                                      "read_only":
-                                            Allowed: create_view(), reflect_view(), find_run().
-                                            Blocked: ingest(), start_run(), log_artifact() (No permanent DB writes).
+        Parameters
+        ----------
+        run_dir : Path
+            Root directory where run logs (e.g., `consist.json`) and run outputs are written.
+        db_path : Optional[str], default None
+            Path to the DuckDB database. If provided, Consist dual-writes provenance to DB
+            in addition to JSON. If None, DB-backed features are disabled.
+        mounts : Optional[Dict[str, str]], default None
+            Mapping of URI schemes to absolute filesystem roots for path virtualization,
+            e.g. `{"inputs": "/abs/inputs", "outputs": "/abs/outputs"}`.
+        project_root : str, default "."
+            Project root for identity hashing (e.g., Git discovery and relative file hashing).
+        hashing_strategy : str, default "full"
+            Hashing strategy for file inputs (`"full"` content hash, or `"fast"` metadata-based).
+        schemas : Optional[List[Type[SQLModel]]], default None
+            Optional SQLModel table definitions to register as hybrid views.
+        access_mode : AccessMode, default "standard"
+            Database access policy:
+            - `"standard"`: Full read/write (runs, artifacts, ingestion).
+            - `"analysis"`: Read-oriented; blocks creating new provenance nodes but allows
+              ingest/backfill and view/query helpers.
+            - `"read_only"`: No permanent DB writes.
         """
         # 1. Initialize FileSystem Service
         # (This handles the mkdir and path resolution internally now)
@@ -125,6 +121,7 @@ class Tracker:
 
         self.artifacts = ArtifactManager(self)
         self.config_facets = ConfigFacetManager(db=self.db, identity=self.identity)
+        self.artifact_schemas = ArtifactSchemaManager(self)
 
         self.views = ViewRegistry(self)
         if schemas:
@@ -177,15 +174,13 @@ class Tracker:
         run_id: str,
         model: str,
         config: Union[Dict[str, Any], BaseModel, None] = None,
-        inputs: Optional[List[Union[str, Artifact]]] = None,
+        inputs: Optional[list[ArtifactRef]] = None,
         tags: Optional[List[str]] = None,
         description: Optional[str] = None,
         cache_mode: str = "reuse",
         *,
         facet: Optional[FacetLike] = None,
-        hash_inputs: Optional[
-            List[Union[Path, str, Tuple[str, Union[Path, str]]]]
-        ] = None,
+        hash_inputs: HashInputs = None,
         facet_schema_version: Optional[Union[str, int]] = None,
         facet_index: bool = True,
         **kwargs: Any,
@@ -209,14 +204,25 @@ class Tracker:
             A descriptive name for the model or process being executed.
         config : Union[Dict[str, Any], BaseModel, None], optional
             Configuration parameters for this run.
-        inputs : Optional[List[Union[str, Artifact]]], optional
-            A list of input paths or Artifact objects.
+        inputs : Optional[list[ArtifactRef]], optional
+            A list of input paths (str/Path) or Artifact references.
         tags : Optional[List[str]], optional
             A list of string labels for categorization and filtering.
         description : Optional[str], optional
             A human-readable description of the run's purpose.
         cache_mode : str, default "reuse"
             Strategy for caching: "reuse", "overwrite", or "readonly".
+        facet : Optional[FacetLike], optional
+            Optional small, queryable configuration facet to persist alongside the run.
+            This is distinct from `config` (which is hashed and stored in the JSON snapshot).
+        hash_inputs : HashInputs, optional
+            Extra inputs to include in the run identity hash without logging them as run
+            inputs/outputs. Useful for config bundles or auxiliary files. Each entry is
+            either a path (str/Path) or a named tuple `(name, path)`.
+        facet_schema_version : Optional[Union[str, int]], optional
+            Optional schema version tag for the persisted facet.
+        facet_index : bool, default True
+            Whether to flatten and index facet keys/values for DB querying.
         **kwargs : Any
             Additional metadata. Special keywords `year` and `iteration` can be used.
 
@@ -301,6 +307,10 @@ class Tracker:
             started_at=now,
             created_at=now,
         )
+
+        if run.meta is None:
+            run.meta = {}
+        run.meta.setdefault("mounts", dict(self.mounts))
 
         push_tracker(self)
         self.current_consist = ConsistRecord(run=run, config=config_dict)
@@ -440,8 +450,8 @@ class Tracker:
             A descriptive name for the model or process being executed.
         config : Union[Dict[str, Any], BaseModel, None], optional
             Configuration parameters for this run, hashed to form part of run identity.
-        inputs : Optional[List[Union[str, Artifact]]], optional
-            Input paths or Artifact objects that this run depends on.
+        inputs : Optional[list[ArtifactRef]], optional
+            Input paths (str/Path) or Artifact references that this run depends on.
         tags : Optional[List[str]], optional
             String labels for categorization and filtering.
         description : Optional[str], optional
@@ -644,17 +654,44 @@ class Tracker:
         name: Optional[str] = None,
     ) -> Union[List[Run], Dict[Any, Run]]:
         """
-        Retrieves a list of Runs matching the specified criteria.
+        Retrieve runs matching the specified criteria.
 
-        Args:
-            ... (existing args) ...
-            index_by: If provided, returns a dictionary keyed by this attribute
-                      of the Run object (e.g., "year", "iteration").
-                      Special case: use `index_by="facet.<key>"` (or `"facet:<key>"`) to
-                      key by a persisted facet value (requires DB + facet indexing).
-                      Prefer the typed helpers `index_by_field(...)` / `index_by_facet(...)`
-                      for IDE/type-checker assistance.
-                      Warning: If multiple runs share the same key, the last one wins.
+        Parameters
+        ----------
+        tags : Optional[List[str]], optional
+            Filter runs that contain all provided tags.
+        year : Optional[int], optional
+            Filter by run year.
+        model : Optional[str], optional
+            Filter by run model name.
+        status : Optional[str], optional
+            Filter by run status (e.g., "completed", "failed").
+        parent_id : Optional[str], optional
+            Filter by scenario/header parent id.
+        metadata : Optional[Dict[str, Any]], optional
+            Filter by exact matches in `Run.meta` (client-side filter).
+        limit : int, default 100
+            Maximum number of runs to return.
+        index_by : Optional[Union[str, IndexBySpec]], optional
+            If provided, returns a dict keyed by a run attribute or facet value.
+            Supported forms:
+            - `"year"` / `"iteration"` / any Run attribute name
+            - `"facet.<key>"` or `"facet:<key>"` to key by a persisted facet value
+            - `IndexBySpec` helpers like `index_by_field(...)` / `index_by_facet(...)`
+
+            Note: if multiple runs share the same key, the last one wins.
+        name : Optional[str], optional
+            Filter by `Run.model_name`/name alias used by DatabaseManager.
+
+        Returns
+        -------
+        Union[List[Run], Dict[Any, Run]]
+            List of runs, or a dict keyed by `index_by` when requested.
+
+        Raises
+        ------
+        TypeError
+            If `index_by` is an unsupported type.
         """
         runs = []
         if self.db:
@@ -704,13 +741,26 @@ class Tracker:
 
     def find_run(self, **kwargs) -> Run:
         """
-        Finds exactly one run matching the criteria.
-        Raises ValueError if 0 or >1 runs match.
+        Find exactly one run matching the criteria.
 
-        Args:
-            id (str): Optional alias for run_id lookup.
-            run_id (str): Direct lookup by primary key.
-            **kwargs: Same arguments as find_runs (tags, year, parent_id, etc.)
+        This is a convenience wrapper around `find_runs(...)` that enforces uniqueness.
+
+        Parameters
+        ----------
+        **kwargs : Any
+            Filters forwarded to `find_runs(...)`.
+            Special cases:
+            - `id` or `run_id`: if provided, performs a direct primary-key lookup.
+
+        Returns
+        -------
+        Run
+            The matching run.
+
+        Raises
+        ------
+        ValueError
+            If no runs match, or more than one run matches.
         """
         # 1. Primary Key Lookup Optimization
         # If the user asks for a specific ID, we skip the search query and use get_run.
@@ -747,7 +797,7 @@ class Tracker:
 
     def log_artifact(
         self,
-        path: Union[str, Artifact],
+        path: ArtifactRef,
         key: Optional[str] = None,
         direction: str = "output",
         schema: Optional[Type[SQLModel]] = None,
@@ -769,11 +819,13 @@ class Tracker:
 
         Parameters
         ----------
-        path : Union[str, Artifact]
-            The file path (str) or an existing `Artifact` object to be logged.
+        path : ArtifactRef
+            A file path (str/Path) or an existing `Artifact` reference to be logged.
+            Passing an `Artifact` is useful for explicitly linking an already-logged artifact
+            as an input or output in the current run.
         key : Optional[str], optional
             A semantic, human-readable name for the artifact (e.g., "households").
-            Required if `path` is a string.
+            Required if `path` is a path-like (str/Path).
         direction : str, default "output"
             Specifies whether the artifact is an "input" or "output" for the
             current run. Defaults to "output".
@@ -796,7 +848,7 @@ class Tracker:
         RuntimeError
             If called outside an active run context.
         ValueError
-            If `key` is not provided when `path` is a string.
+            If `key` is not provided when `path` is a path-like (str/Path).
         """
         self._ensure_write_provenance()
 
@@ -809,6 +861,25 @@ class Tracker:
         artifact_obj = self.artifacts.create_artifact(
             path, run_id, key, direction, schema, driver, **meta
         )
+
+        # Artifact contract clarification:
+        # - If the caller passes an existing Artifact reference, `artifact.run_id` is treated as the
+        #   producing run id (and is not overwritten), but we warn when the caller attempts to log it
+        #   as an output of a different run.
+        # - If an Artifact has no producing run_id yet and is logged as an output, we attribute it to
+        #   the current run.
+        if isinstance(path, Artifact) and direction == "output":
+            producing_run_id = artifact_obj.run_id
+            if producing_run_id is None:
+                artifact_obj.run_id = run_id
+            elif producing_run_id != run_id:
+                logging.warning(
+                    "[Consist] log_artifact received an Artifact with run_id=%s but is logging it as output of run_id=%s (artifact key=%s id=%s).",
+                    producing_run_id,
+                    run_id,
+                    getattr(artifact_obj, "key", None),
+                    getattr(artifact_obj, "id", None),
+                )
 
         # Inherit selected run metadata onto the artifact unless already present
         run_ctx = self.current_consist.run
@@ -907,7 +978,7 @@ class Tracker:
 
     def log_input(
         self,
-        path: Union[str, Artifact],
+        path: ArtifactRef,
         key: Optional[str] = None,
         **meta: Any,
     ) -> Artifact:
@@ -916,8 +987,8 @@ class Tracker:
 
         Parameters
         ----------
-        path : Union[str, Artifact]
-            The file path (str) or an existing `Artifact` object to be logged.
+        path : ArtifactRef
+            A file path (str/Path) or an existing `Artifact` reference to be logged.
         key : Optional[str], optional
             A semantic, human-readable name for the artifact.
         **meta : Any
@@ -932,7 +1003,7 @@ class Tracker:
 
     def log_output(
         self,
-        path: Union[str, Artifact],
+        path: ArtifactRef,
         key: Optional[str] = None,
         **meta: Any,
     ) -> Artifact:
@@ -941,8 +1012,8 @@ class Tracker:
 
         Parameters
         ----------
-        path : Union[str, Artifact]
-            The file path (str) or an existing `Artifact` object to be logged.
+        path : ArtifactRef
+            A file path (str/Path) or an existing `Artifact` reference to be logged.
         key : Optional[str], optional
             A semantic, human-readable name for the artifact.
         **meta : Any
@@ -1101,6 +1172,7 @@ class Tracker:
         data: Optional[Union[Iterable[Dict[str, Any]], Any]] = None,
         schema: Optional[Type[SQLModel]] = None,
         run: Optional[Run] = None,
+        profile_schema: bool = True,
     ) -> Any:
         """
         Ingests data associated with an `Artifact` into the Consist DuckDB database.
@@ -1126,6 +1198,10 @@ class Tracker:
         run : Optional[Run], optional
             If provided, tags data with this run's ID (Offline Mode).
             If None, uses the currently active run (Online Mode).
+        profile_schema : bool, default True
+            If True, profile and persist a deduped schema record for the ingested table,
+            writing `schema_id`/`schema_summary` (and optionally `schema_profile`) into
+            `Artifact.meta`.
 
         Returns
         -------
@@ -1188,6 +1264,14 @@ class Tracker:
                 self.db.update_artifact_meta(
                     artifact, {"is_ingested": True, "dlt_table_name": resource_name}
                 )
+
+                if profile_schema:
+                    self.artifact_schemas.profile_ingested_table(
+                        artifact=artifact,
+                        run=target_run,
+                        table_schema="global_tables",
+                        table_name=resource_name,
+                    )
             return info
 
         except Exception as e:
@@ -1197,15 +1281,24 @@ class Tracker:
 
     def view(self, model: Type[SQLModel], key: Optional[str] = None) -> Type[SQLModel]:
         """
-        Creates a Hybrid View (SQL + Python) for a given SQLModel schema
-        and registers it to tracker.views.
+        Create/register a hybrid view for a given SQLModel schema.
 
-        Args:
-            model: The SQLModel schema defining the data structure.
-            key: Optional override for the concept key (defaults to __tablename__).
+        Parameters
+        ----------
+        model : Type[SQLModel]
+            SQLModel schema defining the logical columns for the concept.
+        key : Optional[str], optional
+            Override the concept key (defaults to `model.__tablename__`).
 
-        Returns:
-            The dynamic SQLModel view class.
+        Returns
+        -------
+        Type[SQLModel]
+            The dynamic SQLModel view class exposed via `tracker.views`.
+
+        Raises
+        ------
+        RuntimeError
+            If the tracker has no database configured.
         """
         if not self.db:
             raise RuntimeError("Database required to create views.")
@@ -1678,7 +1771,25 @@ class Tracker:
                 if not Path(resolved_path).exists() and not art.meta.get(
                     "is_ingested", False
                 ):
-                    logging.warning(f"⚠️ Cache Validation Failed. Missing: {art.uri}")
+                    from consist.tools.mount_diagnostics import (
+                        build_mount_resolution_hint,
+                        format_missing_artifact_mount_help,
+                    )
+
+                    hint = build_mount_resolution_hint(
+                        art.uri, artifact_meta=art.meta, mounts=self.mounts
+                    )
+                    help_text = (
+                        "\n"
+                        + format_missing_artifact_mount_help(
+                            hint, resolved_path=resolved_path
+                        )
+                        if hint
+                        else f"\nResolved path: {resolved_path}"
+                    )
+                    logging.warning(
+                        "⚠️ Cache Validation Failed. Missing: %s%s", art.uri, help_text
+                    )
                     return False
         return True
 

@@ -618,9 +618,22 @@ def preview(
 
         data = consist.load(artifact, tracker=tracker, **load_kwargs)
     except FileNotFoundError:
+        abs_path = tracker.resolve_uri(artifact.uri)
+        from consist.tools.mount_diagnostics import (
+            build_mount_resolution_hint,
+            format_missing_artifact_mount_help,
+        )
+
+        hint = build_mount_resolution_hint(
+            artifact.uri, artifact_meta=artifact.meta, mounts=tracker.mounts
+        )
+        help_text = (
+            format_missing_artifact_mount_help(hint, resolved_path=abs_path)
+            if hint
+            else f"Resolved path: {abs_path}\nThe artifact may have been deleted, moved, or your mounts are misconfigured."
+        )
         console.print(
-            f"[red]Artifact file not found at: {artifact.uri}[/red]\n"
-            "The artifact may have been deleted or moved."
+            f"[red]Artifact file not found at: {artifact.uri}[/red]\n{help_text}"
         )
         raise typer.Exit(1)
     except ImportError as e:
@@ -761,9 +774,22 @@ def schema(
 
         data = consist.load(artifact, tracker=tracker)
     except FileNotFoundError:
+        abs_path = tracker.resolve_uri(artifact.uri)
+        from consist.tools.mount_diagnostics import (
+            build_mount_resolution_hint,
+            format_missing_artifact_mount_help,
+        )
+
+        hint = build_mount_resolution_hint(
+            artifact.uri, artifact_meta=artifact.meta, mounts=tracker.mounts
+        )
+        help_text = (
+            format_missing_artifact_mount_help(hint, resolved_path=abs_path)
+            if hint
+            else f"Resolved path: {abs_path}\nThe artifact may have been deleted, moved, or your mounts are misconfigured."
+        )
         console.print(
-            f"[red]Artifact file not found at: {artifact.uri}[/red]\n"
-            "The artifact may have been deleted or moved."
+            f"[red]Artifact file not found at: {artifact.uri}[/red]\n{help_text}"
         )
         raise typer.Exit(1)
     except ImportError as e:
@@ -990,9 +1016,24 @@ class ConsistShell(cmd.Cmd):
                     load_kwargs["nrows"] = n_rows
                 data = consist.load(artifact, tracker=self.tracker, **load_kwargs)
             except FileNotFoundError:
+                abs_path = self.tracker.resolve_uri(artifact.uri)
+                from consist.tools.mount_diagnostics import (
+                    build_mount_resolution_hint,
+                    format_missing_artifact_mount_help,
+                )
+
+                hint = build_mount_resolution_hint(
+                    artifact.uri,
+                    artifact_meta=artifact.meta,
+                    mounts=self.tracker.mounts,
+                )
+                help_text = (
+                    format_missing_artifact_mount_help(hint, resolved_path=abs_path)
+                    if hint
+                    else f"Resolved path: {abs_path}\nThe artifact may have been deleted, moved, or your mounts are misconfigured."
+                )
                 console.print(
-                    f"[red]Artifact file not found at: {artifact.uri}[/red]\n"
-                    "The artifact may have been deleted or moved."
+                    f"[red]Artifact file not found at: {artifact.uri}[/red]\n{help_text}"
                 )
                 return
             except ImportError as e:
@@ -1071,9 +1112,24 @@ class ConsistShell(cmd.Cmd):
 
                 data = consist.load(artifact, tracker=self.tracker)
             except FileNotFoundError:
+                abs_path = self.tracker.resolve_uri(artifact.uri)
+                from consist.tools.mount_diagnostics import (
+                    build_mount_resolution_hint,
+                    format_missing_artifact_mount_help,
+                )
+
+                hint = build_mount_resolution_hint(
+                    artifact.uri,
+                    artifact_meta=artifact.meta,
+                    mounts=self.tracker.mounts,
+                )
+                help_text = (
+                    format_missing_artifact_mount_help(hint, resolved_path=abs_path)
+                    if hint
+                    else f"Resolved path: {abs_path}\nThe artifact may have been deleted, moved, or your mounts are misconfigured."
+                )
                 console.print(
-                    f"[red]Artifact file not found at: {artifact.uri}[/red]\n"
-                    "The artifact may have been deleted or moved."
+                    f"[red]Artifact file not found at: {artifact.uri}[/red]\n{help_text}"
                 )
                 return
             except ImportError as e:

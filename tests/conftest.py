@@ -14,6 +14,11 @@ from consist.core.identity import IdentityManager
 # Import specific models
 from consist.models.run import Run, RunArtifactLink
 from consist.models.artifact import Artifact
+from consist.models.artifact_schema import (
+    ArtifactSchema,
+    ArtifactSchemaField,
+    ArtifactSchemaObservation,
+)
 from consist.models.config_facet import ConfigFacet
 from consist.models.run_config_kv import RunConfigKV
 
@@ -106,6 +111,9 @@ def tracker(request, run_dir: Path, tmp_path: Path) -> Tracker:
         RunArtifactLink.__table__,
         ConfigFacet.__table__,
         RunConfigKV.__table__,
+        ArtifactSchema.__table__,
+        ArtifactSchemaField.__table__,
+        ArtifactSchemaObservation.__table__,
     ]
 
     # Clean Slate Policy:
