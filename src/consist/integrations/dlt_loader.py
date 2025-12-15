@@ -21,13 +21,18 @@ Key functionalities include:
     and consistency.
 """
 
-import dlt
 import uuid
 import pandas as pd
 from typing import Optional, Any, Iterable, Union, Type, Set, Dict, Tuple
 from sqlmodel import SQLModel
 from consist.models.artifact import Artifact
 from consist.models.run import Run
+
+# Optional dependency: `dlt` is only required when using ingestion helpers.
+try:
+    import dlt  # type: ignore[import-not-found]
+except ImportError:
+    dlt = None
 
 # Robust imports
 try:
@@ -256,6 +261,11 @@ def ingest_artifact(
         If a required library for a specific driver (e.g., `pyarrow` for Parquet,
         `tables` for HDF5, `xarray`/`zarr` for Zarr) is not installed.
     """
+    if dlt is None:
+        raise ImportError(
+            "Optional dependency 'dlt' is required for ingestion. "
+            'Install with `pip install "consist[ingest]"`.'
+        )
 
     # 1. Resolve Data Source (Streaming Batches)
     if isinstance(data_iterable, str):

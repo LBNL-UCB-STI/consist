@@ -82,6 +82,17 @@ Tasks return `Artifact` objects that wrap the output path with provenance metada
 - **[CLI Reference](docs/cli-reference.md)**: Command-line tools for inspecting provenance
 - **[Architecture](docs/architecture.md)**: How caching and lineage tracking work
 
+### Build and View Docs Locally
+
+If you have access to the private repo, you can build and browse the documentation locally:
+
+```bash
+pip install -e ".[docs]"
+mkdocs serve
+```
+
+Then open `http://127.0.0.1:8000/`.
+
 ---
 
 ## Current Status

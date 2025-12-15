@@ -1,7 +1,7 @@
 site_name: Consist
-site_url: https://yourusername.github.io/consist/
-repo_url: https://github.com/yourusername/consist
-repo_name: yourusername/consist
+site_url: https://LBNL-UCB-STI.github.io/consist/
+repo_url: https://github.com/LBNL-UCB-STI/consist
+repo_name: LBNL-UCB-STI/consist
 theme:
   name: material
   features:
@@ -19,16 +19,27 @@ plugins:
       handlers:
         python:
           paths: [src]
+          options:
+            docstring_style: numpy
+            docstring_section_style: table
+            separate_signature: true
+            show_signature_annotations: true
+            signature_crossrefs: true
 
 nav:
-  - Home: ../README.md
-#  - User Guide:
-#      - Getting Started: docs/getting_started.md  # You can create this later
+  - Home: index.md
+  - User Guide: usage-guide.md
+  - CLI Reference: cli-reference.md
+  - Architecture: architecture.md
   - API Reference:
+      - Public API: api/public_api.md
+      - Helpers: api/api_helpers.md
       - Tracker: api/tracker.md
       - Artifact: api/artifact.md
       - Run: api/run.md
+      - Indexing: api/indexing.md
       - Identity Manager: api/identity.md
       - View Factory: api/views.md
+  - Integrations (Experimental):
+      - Containers: api/containers.md
       - DLT Loader: api/dlt_loader.md
-      - Docker Integration: api/docker.md

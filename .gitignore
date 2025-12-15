@@ -6,6 +6,16 @@ dist/
 wheels/
 *.egg-info
 
+docs/internal
+
+*.duckdb
+tmp/
+
+
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+
 # Virtual environments
 .venv
 

@@ -448,25 +448,16 @@ class Tracker:
             A unique identifier for the current run.
         model : str
             A descriptive name for the model or process being executed.
-        config : Union[Dict[str, Any], BaseModel, None], optional
-            Configuration parameters for this run, hashed to form part of run identity.
-        inputs : Optional[list[ArtifactRef]], optional
-            Input paths (str/Path) or Artifact references that this run depends on.
-        tags : Optional[List[str]], optional
-            String labels for categorization and filtering.
-        description : Optional[str], optional
-            Human-readable description of the run's purpose.
-        cache_mode : str, default "reuse"
-            Strategy for caching:
-            - "reuse": Attempts to find a matching run in the cache. If found and valid,
-                       the current run becomes a cache hit and its outputs are hydrated.
-                       Otherwise, the run executes.
-            - "overwrite": The run will always execute, and its results will overwrite
-                           any existing cache entry for its signature.
-            - "readonly": The run will perform a cache lookup. If a hit, outputs are hydrated.
-                          If a miss, the run executes but its results are NOT saved to the cache.
         **kwargs : Any
-            Additional metadata. Special keywords `year` and `iteration` can be used.
+            Additional arguments forwarded to `begin_run()`, including commonly used keys:
+
+            - `config`: Union[Dict[str, Any], BaseModel, None]
+            - `inputs`: Optional[list[ArtifactRef]]
+            - `tags`: Optional[List[str]]
+            - `description`: Optional[str]
+            - `cache_mode`: str ("reuse", "overwrite", "readonly")
+            - `facet`, `hash_inputs`, `facet_schema_version`, `facet_index`
+            - `year`, `iteration`
 
         Yields
         ------
@@ -1311,6 +1302,25 @@ class Tracker:
         return getattr(self.views, model.__name__)
 
     def create_view(self, view_name: str, concept_key: str) -> Any:
+        """
+        Create a named hybrid view over a registered concept.
+
+        This is a lower-level helper than `Tracker.view(...)`. It is useful when you
+        want to create multiple named views over the same concept key, or when you
+        want explicit control over the view name.
+
+        Parameters
+        ----------
+        view_name : str
+            The SQL view name to create in the database (e.g., `"v_persons"`).
+        concept_key : str
+            The registered concept key to materialize (typically a table/artifact key).
+
+        Returns
+        -------
+        Any
+            Backend-specific result from `ViewFactory.create_hybrid_view`.
+        """
         factory = ViewFactory(self)
         return factory.create_hybrid_view(view_name, concept_key)
 
@@ -1372,6 +1382,19 @@ class Tracker:
     # --- Config Facet Query Helpers ---
 
     def get_config_facet(self, facet_id: str):
+        """
+        Retrieve a single persisted config facet by ID.
+
+        Parameters
+        ----------
+        facet_id : str
+            The facet identifier.
+
+        Returns
+        -------
+        Any
+            The facet record if present, otherwise `None`.
+        """
         if not self.db:
             return None
         return self.db.get_config_facet(facet_id)
@@ -1383,6 +1406,23 @@ class Tracker:
         schema_name: Optional[str] = None,
         limit: int = 100,
     ):
+        """
+        List persisted config facets, optionally filtered.
+
+        Parameters
+        ----------
+        namespace : Optional[str], optional
+            Filter facets by namespace.
+        schema_name : Optional[str], optional
+            Filter facets by schema name.
+        limit : int, default 100
+            Maximum number of facet records to return.
+
+        Returns
+        -------
+        list
+            A list of facet records (empty if DB is not configured).
+        """
         if not self.db:
             return []
         return self.db.get_config_facets(
@@ -1397,6 +1437,27 @@ class Tracker:
         prefix: Optional[str] = None,
         limit: int = 10_000,
     ):
+        """
+        Retrieve flattened key/value config entries for a run.
+
+        This is primarily used for querying and debugging indexed config facets.
+
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+        namespace : Optional[str], optional
+            Filter by namespace.
+        prefix : Optional[str], optional
+            Filter keys by prefix (e.g. `"inputs."`).
+        limit : int, default 10_000
+            Maximum number of entries to return.
+
+        Returns
+        -------
+        list
+            A list of key/value rows (empty if DB is not configured).
+        """
         if not self.db:
             return []
         return self.db.get_run_config_kv(
@@ -1414,6 +1475,31 @@ class Tracker:
         value_bool: Optional[bool] = None,
         limit: int = 100,
     ):
+        """
+        Find runs by a flattened config facet key/value.
+
+        Parameters
+        ----------
+        namespace : str
+            Facet namespace.
+        key : str
+            Flattened facet key.
+        value_type : Optional[str], optional
+            Optional discriminator for the value column (implementation dependent).
+        value_str : Optional[str], optional
+            String value to match.
+        value_num : Optional[float], optional
+            Numeric value to match.
+        value_bool : Optional[bool], optional
+            Boolean value to match.
+        limit : int, default 100
+            Maximum number of runs to return.
+
+        Returns
+        -------
+        list
+            Matching run records (empty if DB is not configured).
+        """
         if not self.db:
             return []
         return self.db.find_runs_by_facet_kv(
@@ -1657,9 +1743,35 @@ class Tracker:
         return self.events.on_run_start(callback)
 
     def on_run_complete(self, callback: Callable[[Run, List[Artifact]], None]):
+        """
+        Register a callback to be invoked when a run completes successfully.
+
+        Parameters
+        ----------
+        callback : Callable[[Run, List[Artifact]], None]
+            Called with the completed `Run` and its output artifacts.
+
+        Returns
+        -------
+        Callable[[Run, List[Artifact]], None]
+            The same callback, allowing use as a decorator.
+        """
         return self.events.on_run_complete(callback)
 
     def on_run_failed(self, callback: Callable[[Run, Exception], None]):
+        """
+        Register a callback to be invoked when a run fails.
+
+        Parameters
+        ----------
+        callback : Callable[[Run, Exception], None]
+            Called with the failed `Run` and the raised exception.
+
+        Returns
+        -------
+        Callable[[Run, Exception], None]
+            The same callback, allowing use as a decorator.
+        """
         return self.events.on_run_failed(callback)
 
     def _emit_run_start(self, run: Run):
@@ -1796,6 +1908,21 @@ class Tracker:
     def history(
         self, limit: int = 10, tags: Optional[List[str]] = None
     ) -> pd.DataFrame:
+        """
+        Return recent runs as a Pandas DataFrame.
+
+        Parameters
+        ----------
+        limit : int, default 10
+            Maximum number of runs to include.
+        tags : Optional[List[str]], optional
+            If provided, filter runs to those containing any of the given tags.
+
+        Returns
+        -------
+        pd.DataFrame
+            A DataFrame of recent runs (empty if DB is not configured).
+        """
         if self.db:
             return self.db.get_history(limit, tags)
         return pd.DataFrame()
@@ -1896,14 +2023,47 @@ class Tracker:
         self._sync_run_to_db(self.current_consist.run)
 
     def task(self, **kwargs) -> Callable:
+        """
+        Create a task decorator bound to this tracker.
+
+        Tasks wrap functions with Consist's caching + provenance behavior.
+        The decorator accepts options like `cache_mode`, `depends_on`,
+        and output-capture settings; see the user guide for details.
+
+        Parameters
+        ----------
+        **kwargs : Any
+            Options forwarded to `create_task_decorator(...)`.
+
+        Returns
+        -------
+        Callable
+            A decorator that can be applied to a function to create a cached task.
+        """
         return create_task_decorator(self, **kwargs)
 
     @property
     def last_run(self) -> Optional[ConsistRecord]:
+        """
+        Return the most recent run record observed by this tracker.
+
+        Returns
+        -------
+        Optional[ConsistRecord]
+            The last completed/failed run record, or `None` if no run has executed yet.
+        """
         return self._last_consist
 
     @property
     def is_cached(self) -> bool:
+        """
+        Whether the currently active run is a cache hit.
+
+        Returns
+        -------
+        bool
+            True if the current `start_run`/task execution is reusing a cached run.
+        """
         return self.current_consist and self.current_consist.cached_run is not None
 
     def cached_artifacts(self, direction: str = "output"):

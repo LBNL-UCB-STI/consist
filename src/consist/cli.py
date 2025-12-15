@@ -180,7 +180,7 @@ def _render_run_details(run: Any) -> None:
     if parent_id:
         info.add_row("Parent", parent_id)
 
-    scenario_value = getattr(run, "scenario_id", None)
+    scenario_value = getattr(run, "parent_run_id", None)
     if scenario_value:
         info.add_row("Scenario", scenario_value)
 
@@ -312,7 +312,7 @@ def search(
                 or_(
                     Run.id.contains(query),
                     Run.model_name.contains(query),
-                    Run.scenario_id.contains(query) if query else False,
+                    Run.parent_run_id.contains(query) if query else False,
                 )
             )
             .order_by(Run.created_at.desc())
@@ -337,7 +337,7 @@ def search(
             table.add_row(
                 run.id,
                 run.model_name,
-                getattr(run, "scenario_id", "-"),
+                run.parent_run_id or "-",
                 f"[{status_style}]{run.status}[/]",
                 run.created_at.strftime("%Y-%m-%d %H:%M"),
             )
@@ -481,7 +481,7 @@ def runs(
                         "id": getattr(r, "id", None),
                         "model": getattr(r, "model_name", None),
                         "status": getattr(r, "status", None),
-                        "scenario_id": getattr(r, "scenario_id", None),
+                        "scenario_id": getattr(r, "parent_run_id", None),
                         "year": getattr(r, "year", None),
                         "created_at": created_at.isoformat() if created_at else None,
                         "duration_seconds": getattr(r, "duration_seconds", None),
