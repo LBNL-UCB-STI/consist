@@ -624,7 +624,9 @@ def preview(
         )
         raise typer.Exit(1)
     except ImportError as e:
-        console.print(f"[red]Missing optional dependency while loading artifact: {e}[/red]")
+        console.print(
+            f"[red]Missing optional dependency while loading artifact: {e}[/red]"
+        )
         if artifact.driver == "zarr":
             console.print(
                 "[yellow]Hint:[/] install Zarr support: `pip install -e '.[zarr]'`"
@@ -635,7 +637,9 @@ def preview(
             )
         raise typer.Exit(1)
     except ValueError as e:
-        console.print(f"[red]Unsupported artifact driver '{artifact.driver}': {e}[/red]")
+        console.print(
+            f"[red]Unsupported artifact driver '{artifact.driver}': {e}[/red]"
+        )
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Error loading artifact: {e}[/red]")
@@ -763,7 +767,9 @@ def schema(
         )
         raise typer.Exit(1)
     except ImportError as e:
-        console.print(f"[red]Missing optional dependency while loading artifact: {e}[/red]")
+        console.print(
+            f"[red]Missing optional dependency while loading artifact: {e}[/red]"
+        )
         if artifact.driver == "zarr":
             console.print(
                 "[yellow]Hint:[/] install Zarr support: `pip install -e '.[zarr]'`"
@@ -774,7 +780,9 @@ def schema(
             )
         raise typer.Exit(1)
     except ValueError as e:
-        console.print(f"[red]Unsupported artifact driver '{artifact.driver}': {e}[/red]")
+        console.print(
+            f"[red]Unsupported artifact driver '{artifact.driver}': {e}[/red]"
+        )
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Error loading artifact: {e}[/red]")

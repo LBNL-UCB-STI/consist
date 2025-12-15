@@ -144,6 +144,7 @@ def test_pydantic_config_to_consist_facet_and_schema_version(tracker):
     - If `facet_schema_version` is present on the config model (or passed explicitly),
       it is recorded in run meta and persisted in `ConfigFacet.schema_version`.
     """
+
     class MyConfig(BaseModel):
         a: int
         b: str
@@ -183,6 +184,7 @@ def test_explicit_facet_overrides_pydantic_extractor(tracker):
     Verifies facet source precedence:
     - An explicit `facet=...` argument always wins over `config.to_consist_facet()`.
     """
+
     class MyConfig(BaseModel):
         a: int
 

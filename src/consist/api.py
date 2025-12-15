@@ -38,8 +38,19 @@ T = TypeVar("T", bound=SQLModel)
 
 def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
     """
-    Creates a dynamic SQLModel class that maps to a Consist Hybrid View.
-    Ensures table=True is passed to the metaclass.
+    Create a SQLModel class backed by a Consist hybrid view.
+
+    Parameters
+    ----------
+    model : Type[T]
+        Base SQLModel describing the schema.
+    name : Optional[str], optional
+        Optional override for the generated view name.
+
+    Returns
+    -------
+    Type[T]
+        SQLModel subclass with ``table=True`` pointing at the hybrid view.
     """
     return create_view_model(model, name)
 
@@ -50,11 +61,21 @@ def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
 @contextmanager
 def scenario(name: str, tracker: Optional["Tracker"] = None, **kwargs: Any):
     """
-    Proxy for Tracker.scenario for ergonomic top-level usage.
+    Proxy for ``Tracker.scenario`` to avoid importing the tracker directly.
 
-    Example:
-        with consist.scenario("baseline", model="pilates_orchestrator"):
-            ...
+    Parameters
+    ----------
+    name : str
+        Name of the scenario (used for the header run ID).
+    tracker : Optional[Tracker], optional
+        Tracker instance to use; defaults to the active global tracker.
+    **kwargs : Any
+        Additional arguments forwarded to ``Tracker.scenario``.
+
+    Yields
+    ------
+    ScenarioContext
+        Scenario context manager.
     """
     tr = tracker or current_tracker()
     with tr.scenario(name, **kwargs) as sc:
@@ -69,11 +90,23 @@ def single_step_scenario(
     **kwargs: Any,
 ):
     """
-    Convenience wrapper: create a scenario with a single step.
+    Convenience wrapper that exposes a single step scenario.
 
-    Example:
-        with consist.single_step_scenario("baseline_2025", model="travel_demand") as step:
-            ...  # do work inside the sole step
+    Parameters
+    ----------
+    name : str
+        Name of the scenario header.
+    step_name : Optional[str], optional
+        Name for the single step; defaults to ``name``.
+    tracker : Optional[Tracker], optional
+        Tracker to execute the scenario; defaults to the active tracker.
+    **kwargs : Any
+        Arguments forwarded to ``Tracker.scenario``.
+
+    Yields
+    ------
+    ScenarioContext
+        Scenario context manager for the single step.
     """
     tr = tracker or current_tracker()
     with tr.scenario(name, **kwargs) as sc:
@@ -126,13 +159,17 @@ def cached_artifacts(direction: str = "output") -> Dict[str, Artifact]:
 
 def cached_output(key: Optional[str] = None) -> Optional[Artifact]:
     """
-    Convenience to fetch a hydrated cached output artifact for the active run.
+    Fetch a hydrated cached output artifact for the active run.
 
     Parameters
     ----------
     key : Optional[str]
-        If provided, returns the artifact with this key; otherwise returns the
-        first available cached output.
+        Specific artifact key to look up; defaults to the first available artifact.
+
+    Returns
+    -------
+    Optional[Artifact]
+        Cached artifact instance or ``None`` if no cache hit exists.
     """
     return current_tracker().cached_output(key=key)
 
@@ -144,7 +181,23 @@ def get_artifact(
     direction: str = "output",
 ) -> Optional[Artifact]:
     """
-    Fetch a single artifact for a run by exact key or substring.
+    Retrieve a single artifact from a historical run.
+
+    Parameters
+    ----------
+    run_id : str
+        Identifier of the run that produced the artifact.
+    key : Optional[str], optional
+        Exact artifact key to match.
+    key_contains : Optional[str], optional
+        Substring filter for artifact keys.
+    direction : str, default "output"
+        Either "input" or "output".
+
+    Returns
+    -------
+    Optional[Artifact]
+        Matching artifact or ``None`` if not found.
     """
     return current_tracker().get_artifact(
         run_id, key=key, key_contains=key_contains, direction=direction
@@ -264,10 +317,38 @@ def log_dataframe(
     **to_file_kwargs: Any,
 ) -> Artifact:
     """
-    Convenience helper: write a DataFrame to disk, log it, and optionally ingest.
+    Serialize a DataFrame, log it as an artifact, and trigger optional ingestion.
 
-    Example:
-        art = consist.log_dataframe(df, key="persons", schema=Person)
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Data to persist.
+    key : str
+        Logical artifact key.
+    schema : Optional[Type[SQLModel]], optional
+        Schema used for ingestion, if provided.
+    direction : str, default "output"
+        Artifact direction relative to the run.
+    tracker : Optional[Tracker], optional
+        Tracker instance to use; defaults to the active tracker.
+    path : Optional[Union[str, Path]], optional
+        Output path; defaults to a temporary file in the tracker run directory.
+    driver : Optional[str], optional
+        File format driver (e.g., "parquet" or "csv").
+    meta : Optional[Dict[str, Any]], optional
+        Additional metadata for the artifact.
+    **to_file_kwargs : Any
+        Keyword arguments forwarded to ``pd.DataFrame.to_parquet`` or ``to_csv``.
+
+    Returns
+    -------
+    Artifact
+        The artifact logged for the written dataset.
+
+    Raises
+    ------
+    ValueError
+        If the requested driver is unsupported.
     """
     tr = tracker or current_tracker()
     # Resolve path and driver
@@ -301,19 +382,36 @@ def log_dataframe(
 
 def register_views(*models: Type[SQLModel]) -> Dict[str, Type[SQLModel]]:
     """
-    Create view models for the provided SQLModel schemas on the active tracker.
+    Register hybrid view models for the active tracker.
 
-    Returns a dict keyed by model name for quick access.
+    Parameters
+    ----------
+    *models : Type[SQLModel]
+        SQLModel classes describing the schema of hybrid views.
+
+    Returns
+    -------
+    Dict[str, Type[SQLModel]]
+        Mapping from model class name to the generated view model.
     """
     return {m.__name__: create_view_model(m) for m in models}
 
 
 def find_run(tracker: Optional["Tracker"] = None, **filters: Any) -> Optional[Run]:
     """
-    Proxy to Tracker.find_run for quick querying.
+    Convenience proxy for ``Tracker.find_run``.
 
-    Example:
-        run = consist.find_run(parent_id="baseline", year=2030)
+    Parameters
+    ----------
+    tracker : Optional[Tracker], optional
+        Tracker instance to query; defaults to the active tracker.
+    **filters : Any
+        Filter values forwarded to ``Tracker.find_run``.
+
+    Returns
+    -------
+    Optional[Run]
+        Matching run or ``None`` when no match exists.
     """
     tr = tracker or current_tracker()
     return tr.find_run(**filters)
@@ -321,10 +419,19 @@ def find_run(tracker: Optional["Tracker"] = None, **filters: Any) -> Optional[Ru
 
 def find_runs(tracker: Optional["Tracker"] = None, **filters: Any):
     """
-    Proxy to Tracker.find_runs for quick querying.
+    Convenience proxy for ``Tracker.find_runs``.
 
-    Example:
-        runs_by_year = consist.find_runs(parent_id="baseline", index_by="year")
+    Parameters
+    ----------
+    tracker : Optional[Tracker], optional
+        Tracker instance to query; defaults to the active tracker.
+    **filters : Any
+        Filter values forwarded to ``Tracker.find_runs``.
+
+    Returns
+    -------
+    list
+        Results returned by ``Tracker.find_runs``.
     """
     tr = tracker or current_tracker()
     return tr.find_runs(**filters)
@@ -333,11 +440,17 @@ def find_runs(tracker: Optional["Tracker"] = None, **filters: Any):
 @contextmanager
 def db_session(tracker: Optional["Tracker"] = None) -> Session:
     """
-    Context manager for a SQLModel Session on the active tracker engine.
+    Provide a SQLModel ``Session`` connected to the tracker's database.
 
-    Example:
-        with consist.db_session() as session:
-            results = session.exec(query).all()
+    Parameters
+    ----------
+    tracker : Optional[Tracker], optional
+        Tracker instance supplying the engine; defaults to active tracker.
+
+    Yields
+    ------
+    Session
+        SQLModel session bound to the tracker engine.
     """
     tr = tracker or current_tracker()
     with Session(tr.engine) as session:
@@ -346,10 +459,19 @@ def db_session(tracker: Optional["Tracker"] = None) -> Session:
 
 def run_query(query: Any, tracker: Optional["Tracker"] = None) -> list:
     """
-    Execute a SQLModel/SQLAlchemy query against the active tracker engine.
+    Execute a SQLModel/SQLAlchemy query via the tracker engine.
 
-    Example:
-        results = consist.run_query(select(Model), tracker=my_tracker)
+    Parameters
+    ----------
+    query : Any
+        Query object (``select``, etc.).
+    tracker : Optional[Tracker], optional
+        Tracker instance supplying the engine; defaults to the active tracker.
+
+    Returns
+    -------
+    list
+        Results of the executed query.
     """
     tr = tracker or current_tracker()
     with Session(tr.engine) as session:

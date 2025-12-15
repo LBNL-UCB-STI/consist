@@ -12,7 +12,12 @@ from sqlmodel import SQLModel
 
 # Core
 from consist.core.tracker import Tracker
-from consist.core.indexing import FacetIndex, RunFieldIndex, index_by_facet, index_by_field
+from consist.core.indexing import (
+    FacetIndex,
+    RunFieldIndex,
+    index_by_facet,
+    index_by_field,
+)
 
 # API
 from consist.api import (

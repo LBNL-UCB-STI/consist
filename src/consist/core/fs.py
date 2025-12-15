@@ -5,21 +5,24 @@ from typing import Optional, Union, Dict
 
 class FileSystemManager:
     """
-    Service responsible for File System abstractions.
+    Virtualizes file system paths for run portability and capture helpers.
 
-    It handles:
-    1. Managing the root run directory.
-    2. Managing "Mounts" (virtualizing paths).
-    3. bidirectional conversion between Absolute Paths and Portable URIs.
+    Responsibilities include run directory management, mount-aware URIs, and
+    helpers for resolving historical artifact locations during hydration.
     """
 
     def __init__(
         self, run_dir: Union[str, Path], mounts: Optional[Dict[str, str]] = None
     ):
         """
-        Args:
-            run_dir: The root directory for run logs and outputs.
-            mounts: Dictionary mapping schemes (e.g., 'inputs') to absolute paths.
+        Initialize run directory and optional mounts.
+
+        Parameters
+        ----------
+        run_dir : Union[str, Path]
+            Directory where run logs and artifacts are stored.
+        mounts : Optional[Dict[str, str]], optional
+            Mapping from scheme name (e.g., ``"inputs"``) to absolute path.
         """
         # Force absolute resolve to prevent /var vs /private/var mismatches
         self.run_dir = Path(run_dir).resolve()
@@ -28,8 +31,17 @@ class FileSystemManager:
 
     def resolve_uri(self, uri: str) -> str:
         """
-        Converts a portable Consist URI back into an absolute file system path.
-        Inverse of virtualize_path.
+        Convert a Consist URI into an absolute file-system path.
+
+        Parameters
+        ----------
+        uri : str
+            Portable URI created via ``virtualize_path``.
+
+        Returns
+        -------
+        str
+            Absolute resolved path on the local filesystem.
         """
         path_str = uri
 
@@ -50,11 +62,17 @@ class FileSystemManager:
 
     def virtualize_path(self, path: str) -> str:
         """
-        Converts an absolute file system path into a portable Consist URI.
-        Attempts to match configured mounts or make relative to run_dir.
+        Create a portable URI for the supplied path, honoring mounts and workspace.
 
-        Updated to handle symlinks: Checks the logical path (symlink) FIRST,
-        then falls back to the resolved physical path.
+        Parameters
+        ----------
+        path : str
+            Absolute path to transform into a Consist URI.
+
+        Returns
+        -------
+        str
+            URI referencing the path via a mount scheme or relative workspace path.
         """
         path_obj = Path(path)
 
@@ -111,8 +129,21 @@ class FileSystemManager:
         self, directory: Union[str, Path], pattern: str = "*", recursive: bool = False
     ) -> Dict[Path, int]:
         """
-        Scans a directory and returns a map of {Path: mtime_ns}.
-        Used for change detection (capture_outputs).
+        Collect modification timestamps for files in a directory.
+
+        Parameters
+        ----------
+        directory : Union[str, Path]
+            Directory to traverse.
+        pattern : str, default "*"
+            Glob pattern to match files.
+        recursive : bool, default False
+            Whether to scan subdirectories recursively.
+
+        Returns
+        -------
+        Dict[Path, int]
+            Mapping from file paths to their last modification time (ns).
         """
         dir_path = Path(directory).resolve()
         if not dir_path.exists():
@@ -128,14 +159,19 @@ class FileSystemManager:
 
     def resolve_historical_path(self, uri: str, original_run_dir: Optional[str]) -> str:
         """
-        Resolves a URI as if it were in the context of a previous run.
+        Resolve an artifact URI relative to a historical run directory.
 
-        This is crucial for hydration: we need to find where the file *was*
-        to copy it to where it *is*.
+        Parameters
+        ----------
+        uri : str
+            Portable URI recorded by a previous run.
+        original_run_dir : Optional[str]
+            Absolute workspace path of the original run.
 
-        Args:
-            uri: The portable URI of the artifact (e.g. "workspace://outputs/data.h5")
-            original_run_dir: The absolute path where the previous run executed.
+        Returns
+        -------
+        str
+            Absolute path where the artifact lived during the historical run.
         """
         # Case 1: Workspace scheme (Ephemeral)
         # If the URI is virtualized to the workspace, its physical location

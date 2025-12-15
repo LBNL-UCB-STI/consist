@@ -47,9 +47,13 @@ class RunConfigKV(SQLModel, table=True):
         description="One of: str|int|float|bool|json|null",
     )
 
-    value_str: Optional[str] = Field(default=None, sa_column=Column(String, nullable=True))
+    value_str: Optional[str] = Field(
+        default=None, sa_column=Column(String, nullable=True)
+    )
     value_num: Optional[float] = Field(default=None, nullable=True)
     value_bool: Optional[bool] = Field(default=None, nullable=True)
-    value_json: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON, nullable=True))
+    value_json: Optional[Dict[str, Any]] = Field(
+        default=None, sa_column=Column(JSON, nullable=True)
+    )
 
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

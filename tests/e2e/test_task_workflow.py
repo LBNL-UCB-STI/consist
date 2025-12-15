@@ -47,7 +47,8 @@ class ManualConfigDemo(BaseModel):
     def to_consist_facet(self) -> dict:
         return {"mode": self.mode, "purpose": self.purpose}
 
-@pytest.mark.flaky(reruns=3) # flaky due to db sync
+
+@pytest.mark.flaky(reruns=3)  # flaky due to db sync
 def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     """
     End-to-end validation of @task decorator workflow:
@@ -230,13 +231,14 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
 
     # `find_runs(..., index_by=...)` can return a "runs by knob" map.
     # Prefer the typed helper for IDE/type-checker friendliness.
-    by_mode = tracker.find_runs(model="manual_config_demo", index_by=consist.index_by_facet("mode"))
+    by_mode = tracker.find_runs(
+        model="manual_config_demo", index_by=consist.index_by_facet("mode")
+    )
     assert by_mode["strict"].id == "manual_config_demo"
 
-    import time
 
     if tracker.db:
-        tracker.db.session.commit() if hasattr(tracker.db, 'session') else None
+        tracker.db.session.commit() if hasattr(tracker.db, "session") else None
 
     # === Second execution: same inputs should hit cache ===
     cleaned_artifact_2 = clean_data(raw_data_path, config)

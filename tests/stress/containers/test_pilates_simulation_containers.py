@@ -47,7 +47,9 @@ def run_simulation_scenario(
     advance_delta_by_year = advance_delta_by_year or {}
     container_out_root = (tracker.run_dir / "container_out").resolve()
     # Example "external config bundle" that should affect identity but not be stored in DB.
-    external_cfg_dir = (tracker.run_dir / "external_configs" / "generate_trips").resolve()
+    external_cfg_dir = (
+        tracker.run_dir / "external_configs" / "generate_trips"
+    ).resolve()
     external_cfg_dir.mkdir(parents=True, exist_ok=True)
     (external_cfg_dir / "model.conf").write_text("version=1\n")
     (external_cfg_dir / ".ignored").write_text("ignore_me=1\n")

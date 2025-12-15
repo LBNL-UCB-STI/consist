@@ -19,7 +19,6 @@ Key features include:
 import abc
 import os
 import logging
-import os
 import shlex
 import subprocess
 from pathlib import Path
@@ -455,7 +454,15 @@ class SingularityBackend(ContainerBackend):
                 "🔮 Passing %d env var(s) via SINGULARITYENV_/APPTAINERENV_ "
                 "(values contain whitespace): %s",
                 len(passthrough_env) // 2,
-                ", ".join(sorted({k.replace("SINGULARITYENV_", "") for k in passthrough_env if k.startswith("SINGULARITYENV_")})),
+                ", ".join(
+                    sorted(
+                        {
+                            k.replace("SINGULARITYENV_", "")
+                            for k in passthrough_env
+                            if k.startswith("SINGULARITYENV_")
+                        }
+                    )
+                ),
             )
 
         try:

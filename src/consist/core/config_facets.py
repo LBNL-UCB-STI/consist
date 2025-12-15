@@ -13,13 +13,37 @@ from consist.types import FacetLike, HasConsistFacet
 
 
 class ConfigFacetManager:
-    def __init__(self, *, db: Optional[DatabaseManager], identity: IdentityManager) -> None:
+    """
+    Persist and index configuration facets for runs.
+
+    Facets capture structured run inputs/configuration via Pydantic models or dicts,
+    and allow indexed querying via KV tables.
+    """
+
+    def __init__(
+        self, *, db: Optional[DatabaseManager], identity: IdentityManager
+    ) -> None:
         self._db = db
         self._identity = identity
 
     def infer_schema_name(
         self, raw_config_model: Optional[BaseModel], facet: Optional[FacetLike]
     ) -> str:
+        """
+        Determine the schema name that should be recorded for a facet.
+
+        Parameters
+        ----------
+        raw_config_model : Optional[BaseModel]
+            Explicit config model provided to the run.
+        facet : Optional[FacetLike]
+            Explicit facet value (potentially a BaseModel).
+
+        Returns
+        -------
+        str
+            Name of the schema to persist (derived from Pydantic class or dict fallback).
+        """
         if isinstance(facet, BaseModel):
             return facet.__class__.__name__
         if raw_config_model is not None:
@@ -34,6 +58,25 @@ class ConfigFacetManager:
         facet: Optional[FacetLike],
         run_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
+        """
+        Normalize the provided facet or config model into a dict.
+
+        Parameters
+        ----------
+        model : str
+            Name of the model/namespace producing the facet.
+        raw_config_model : Optional[BaseModel]
+            The input model instance passed to the run.
+        facet : Optional[FacetLike]
+            Explicit facet override supplied by the user/decorator.
+        run_id : Optional[str], optional
+            Run identifier used for logging warnings.
+
+        Returns
+        -------
+        Optional[Dict[str, Any]]
+            JSON-serializable dictionary representing the facet, or ``None`` if unavailable.
+        """
         if facet is not None:
             if isinstance(facet, BaseModel):
                 return (
@@ -43,7 +86,9 @@ class ConfigFacetManager:
                 )
             return facet
 
-        if raw_config_model is not None and isinstance(raw_config_model, HasConsistFacet):
+        if raw_config_model is not None and isinstance(
+            raw_config_model, HasConsistFacet
+        ):
             try:
                 extracted = raw_config_model.to_consist_facet()
             except Exception as exc:
@@ -77,6 +122,28 @@ class ConfigFacetManager:
         max_facet_bytes: int = 16_384,
         max_kv_rows: int = 500,
     ) -> None:
+        """
+        Persist facet JSON and optional KV representation to the database.
+
+        Parameters
+        ----------
+        run : Run
+            The run that produces the facet.
+        model : str
+            Namespace/model name of the facet.
+        facet_dict : Dict[str, Any]
+            Serialized facet content.
+        schema_name : str
+            Schema identifier to store with the facet.
+        schema_version : Optional[Union[str, int]]
+            Optional version for the schema.
+        index_kv : bool
+            Whether to flatten the facet for KV indexing.
+        max_facet_bytes : int, default 16384
+            Byte limit before skipping facet persistence.
+        max_kv_rows : int, default 500
+            Row limit before skipping KV indexing.
+        """
         if not self._db:
             return
 
@@ -96,7 +163,9 @@ class ConfigFacetManager:
                 id=facet_id,
                 namespace=model,
                 schema_name=schema_name,
-                schema_version=str(schema_version) if schema_version is not None else None,
+                schema_version=(
+                    str(schema_version) if schema_version is not None else None
+                ),
                 facet_json=facet_dict,
             )
         )
@@ -133,6 +202,25 @@ class ConfigFacetManager:
         namespace: str,
         facet_dict: Dict[str, Any],
     ) -> List[RunConfigKV]:
+        """
+        Walk a facet dict and generate KV rows for indexed querying.
+
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+        facet_id : str
+            Unique facet hash.
+        namespace : str
+            Facet namespace/model.
+        facet_dict : Dict[str, Any]
+            Facet content to flatten.
+
+        Returns
+        -------
+        List[RunConfigKV]
+            Flattened key/value metadata rows.
+        """
         rows: List[RunConfigKV] = []
 
         def walk(prefix: str, value: Any) -> None:
@@ -204,4 +292,3 @@ class ConfigFacetManager:
 
         walk("", facet_dict)
         return [r for r in rows if r.key]
-

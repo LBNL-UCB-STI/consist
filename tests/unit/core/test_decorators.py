@@ -321,6 +321,7 @@ def test_task_with_mixed_inputs(tracker: Tracker, run_dir: Path):
 # Cache Behavior Tests
 # ============================================================================
 
+
 @pytest.mark.flaky(reruns=3)
 def test_task_cache_hit(tracker: Tracker, run_dir: Path):
     """

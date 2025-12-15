@@ -26,6 +26,7 @@ FacetLike: TypeAlias = Union[FacetDict, BaseModel]
 class HasConsistFacet(Protocol):
     def to_consist_facet(self) -> FacetLike: ...
 
+
 @runtime_checkable
 class HasFacetSchemaVersion(Protocol):
     facet_schema_version: Optional[Union[str, int]]

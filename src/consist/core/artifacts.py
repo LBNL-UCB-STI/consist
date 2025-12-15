@@ -10,6 +10,13 @@ if TYPE_CHECKING:
 
 
 class ArtifactManager:
+    """
+    Handles creation and discovery of Consist ``Artifact`` objects within a run.
+
+    The manager virtualizes paths, computes hashes, ties artifacts to existing
+    provenance records, and provides helpers for discovering nested HDF5 tables.
+    """
+
     def __init__(self, tracker: "Tracker"):
         self.tracker = tracker
 
@@ -23,6 +30,36 @@ class ArtifactManager:
         driver: Optional[str] = None,
         **meta: Any,
     ) -> Artifact:
+        """
+        Construct or reuse an ``Artifact`` instance for the given path.
+
+        Parameters
+        ----------
+        path : Union[str, Artifact]
+            File system path or existing ``Artifact`` to log.
+        run_id : Optional[str], optional
+            Identifier of the run that produced the artifact.
+        key : Optional[str], optional
+            Logical name for the artifact; required when ``path`` is a string.
+        direction : str, default "output"
+            Whether the artifact is treated as an "input" or "output" of the run.
+        schema : Optional[Type[SQLModel]], optional
+            Schema class to record in ``meta["schema_name"]`` and ``meta["has_strict_schema"]``.
+        driver : Optional[str], optional
+            Explicit driver identifier (e.g., ``"h5_table"``); inferred from suffix if omitted.
+        **meta : Any
+            Additional metadata key/value pairs to attach to the artifact.
+
+        Returns
+        -------
+        Artifact
+            The persisted or reused artifact object carrying virtualized URI information.
+
+        Raises
+        ------
+        ValueError
+            If ``path`` is a string and ``key`` is not provided.
+        """
         artifact_obj = None
         resolved_abs_path = None
 
@@ -91,6 +128,27 @@ class ArtifactManager:
         direction: str,
         filter_fn: Callable[[str], bool],
     ) -> List[Artifact]:
+        """
+        Discover and log HDF5 tables contained within an artifact.
+
+        Parameters
+        ----------
+        container : Artifact
+            Parent artifact that holds the HDF5 container.
+        path_obj : Path
+            Path to the HDF5 file.
+        key : str
+            Base key used to name derived HDF5 table artifacts.
+        direction : str
+            Either ``"input"`` or ``"output"`` to tag derived artifacts.
+        filter_fn : Callable[[str], bool]
+            Predicate that selects which datasets should be turned into artifacts.
+
+        Returns
+        -------
+        List[Artifact]
+            One artifact per selected dataset.
+        """
         try:
             import h5py
         except ImportError:

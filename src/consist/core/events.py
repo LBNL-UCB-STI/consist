@@ -5,7 +5,7 @@ from consist.models.artifact import Artifact
 
 
 class EventManager:
-    """Service responsible for managing Run Lifecycle Hooks."""
+    """Manage run lifecycle hooks and emit lifecycle events."""
 
     def __init__(self):
         self._on_start: List[Callable[[Run], None]] = []
@@ -16,51 +16,51 @@ class EventManager:
 
     def on_run_start(self, callback: Callable[[Run], None]):
         """
-        Register a callback to be invoked when a run starts.
+        Register a callback executed when a run starts.
 
         Parameters
         ----------
         callback : Callable[[Run], None]
-            Function to be called with the ``Run`` instance when a run starts.
+            Handler invoked with the ``Run`` instance.
 
         Returns
         -------
         Callable[[Run], None]
-            The same callback, allowing decorator usage.
+            The registered callback, supporting decorator syntax.
         """
         self._on_start.append(callback)
         return callback
 
     def on_run_complete(self, callback: Callable[[Run, List[Artifact]], None]):
         """
-        Register a callback to be invoked when a run completes.
+        Register a callback executed when a run finishes successfully.
 
         Parameters
         ----------
         callback : Callable[[Run, List[Artifact]], None]
-            Function called with the ``Run`` instance and a list of output ``Artifact`` objects.
+            Handler invoked with the completed ``Run`` and its output ``Artifact`` list.
 
         Returns
         -------
         Callable[[Run, List[Artifact]], None]
-            The same callback, allowing decorator usage.
+            The registered callback for decorator usage.
         """
         self._on_complete.append(callback)
         return callback
 
     def on_run_failed(self, callback: Callable[[Run, Exception], None]):
         """
-        Register a callback to be invoked when a run fails.
+        Register a callback executed when a run fails.
 
         Parameters
         ----------
         callback : Callable[[Run, Exception], None]
-            Function called with the ``Run`` instance and the exception that caused the failure.
+            Handler invoked with the failed ``Run`` and the raised exception.
 
         Returns
         -------
         Callable[[Run, Exception], None]
-            The same callback, allowing decorator usage.
+            The registered callback for decorator usage.
         """
         self._on_failed.append(callback)
         return callback
@@ -69,12 +69,12 @@ class EventManager:
 
     def emit_start(self, run: Run):
         """
-        Emit the start event to all registered ``on_run_start`` callbacks.
+        Invoke start hooks for a run.
 
         Parameters
         ----------
         run : Run
-            The ``Run`` instance that has started.
+            Run that just began.
         """
         for hook in self._on_start:
             try:
@@ -84,14 +84,14 @@ class EventManager:
 
     def emit_complete(self, run: Run, outputs: List[Artifact]):
         """
-        Emit the completion event to all registered ``on_run_complete`` callbacks.
+        Invoke completion hooks for a run.
 
         Parameters
         ----------
         run : Run
-            The ``Run`` instance that has completed.
+            Completed run instance.
         outputs : List[Artifact]
-            List of output ``Artifact`` objects produced by the run.
+            Artifacts produced by the run.
         """
         for hook in self._on_complete:
             try:
@@ -101,14 +101,14 @@ class EventManager:
 
     def emit_failed(self, run: Run, error: Exception):
         """
-        Emit the failure event to all registered ``on_run_failed`` callbacks.
+        Invoke failure hooks for a run.
 
         Parameters
         ----------
         run : Run
-            The ``Run`` instance that failed.
+            Run that threw an exception.
         error : Exception
-            The exception that caused the failure.
+            Exception raised during execution.
         """
         for hook in self._on_failed:
             try:

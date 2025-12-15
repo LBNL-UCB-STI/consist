@@ -1,5 +1,4 @@
 import logging
-import json
 import uuid
 import weakref
 from pathlib import Path
@@ -184,7 +183,9 @@ class Tracker:
         cache_mode: str = "reuse",
         *,
         facet: Optional[FacetLike] = None,
-        hash_inputs: Optional[List[Union[Path, str, Tuple[str, Union[Path, str]]]]] = None,
+        hash_inputs: Optional[
+            List[Union[Path, str, Tuple[str, Union[Path, str]]]]
+        ] = None,
         facet_schema_version: Optional[Union[str, int]] = None,
         facet_index: bool = True,
         **kwargs: Any,
@@ -250,7 +251,9 @@ class Tracker:
                 "Call end_run() first."
             )
 
-        raw_config_model: Optional[BaseModel] = config if isinstance(config, BaseModel) else None
+        raw_config_model: Optional[BaseModel] = (
+            config if isinstance(config, BaseModel) else None
+        )
 
         if config is None:
             config_dict: Dict[str, Any] = {}
@@ -310,15 +313,19 @@ class Tracker:
         if facet_dict is not None:
             self.current_consist.facet = facet_dict
             schema_version = facet_schema_version
-            if schema_version is None and raw_config_model is not None and isinstance(
-                raw_config_model, HasFacetSchemaVersion
+            if (
+                schema_version is None
+                and raw_config_model is not None
+                and isinstance(raw_config_model, HasFacetSchemaVersion)
             ):
                 schema_version = raw_config_model.facet_schema_version
             self.config_facets.persist_facet(
                 run=run,
                 model=model,
                 facet_dict=facet_dict,
-                schema_name=self.config_facets.infer_schema_name(raw_config_model, facet),
+                schema_name=self.config_facets.infer_schema_name(
+                    raw_config_model, facet
+                ),
                 schema_version=schema_version,
                 index_kv=facet_index,
             )
@@ -599,7 +606,11 @@ class Tracker:
         # Update in-process cache index (best-effort) so immediate re-runs can cache-hit
         # even if the DB is briefly locked or slow to reflect status updates.
         if cache_mode != "readonly" and run.status == "completed":
-            cache_key = (run.config_hash or "", run.input_hash or "", run.git_hash or "")
+            cache_key = (
+                run.config_hash or "",
+                run.input_hash or "",
+                run.git_hash or "",
+            )
             self._local_cache_index[cache_key] = run
             if len(self._local_cache_index) > self._local_cache_max_entries:
                 # FIFO eviction (dict preserves insertion order).

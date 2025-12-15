@@ -14,34 +14,26 @@ if TYPE_CHECKING:
 
 class OutputCapture:
     """
-    A helper object to temporarily hold artifacts captured during a `capture_outputs` block.
+    Holder for artifacts collected inside a ``capture_outputs`` context.
 
-    This class provides a convenient way for users to access the artifacts that were
-    automatically logged by the system immediately after a `capture_outputs` context manager
-    finishes execution.
-
-    Attributes:
-        artifacts (List[Artifact]): A list of `Artifact` objects that were
-                                    captured and logged during the `capture_outputs` block.
+    The tracker yields this object so callers can inspect which artifacts were
+    automatically logged once the context exits.
     """
 
     def __init__(self) -> None:
         """
-        Initializes the OutputCapture object.
-
-        This constructor sets up an empty list to store `Artifact` objects that
-        will be captured during a `capture_outputs` context.
+        Initialize an empty artifact buffer.
         """
         self.artifacts: List[Artifact] = []
 
 
 class ScenarioContext:
     """
-    Context manager for managing a Scenario Header Run and its constituent steps.
+    Manage a scenario header run and its child steps.
 
-    This class is returned by `tracker.scenario()` and manages the lifecycle of a parent
-    "header" run. It temporarily suspends the header run to allow child "step" runs
-    to execute sequentially without violating the tracker's single-active-run constraint.
+    The context exposes ``step()`` helpers that suspend the parent header run,
+    execute child runs sequentially, and aggregate artifacts/metadata back into the
+    header record.
     """
 
     def __init__(
@@ -89,21 +81,26 @@ class ScenarioContext:
         self, path: Union[str, Path, Artifact], key: str, **kwargs
     ) -> Artifact:
         """
-        Register an exogenous input to the scenario header.
+        Log an external input artifact to the scenario header run.
 
-        Must be called before any steps are started. These inputs are logged to the
-        header run to represent data entering the workflow.
+        Parameters
+        ----------
+        path : Union[str, Path, Artifact]
+            Path (or prebuilt ``Artifact``) representing the input.
+        key : str
+            Semantic key for the artifact.
+        **kwargs : Any
+            Additional metadata forwarded to ``Tracker.log_artifact``.
 
-        Args:
-            path: File path to the input.
-            key: Semantic key for the input (e.g., "population").
-            **kwargs: Additional metadata for the artifact.
+        Returns
+        -------
+        Artifact
+            Logged artifact associated with the scenario.
 
-        Returns:
-            Artifact: The logged input artifact.
-
-        Raises:
-            RuntimeError: If called after `step()` has been used.
+        Raises
+        ------
+        RuntimeError
+            If a step has already started or the scenario context is inactive.
         """
         if self._first_step_started:
             raise RuntimeError(
@@ -131,19 +128,19 @@ class ScenarioContext:
     @contextmanager
     def step(self, name: str, **kwargs):
         """
-        Execute a step run within the scenario.
+        Execute a child run as part of this scenario.
 
-        Wraps `tracker.start_run` with logic to:
-        1. Auto-generate Run ID: `{scenario_id}_{step_name}`
-        2. Link parent_run_id to the scenario.
-        3. Automatically log any provided `inputs` as run inputs (via Tracker.begin_run).
+        Parameters
+        ----------
+        name : str
+            Name of the step, used to derive the run ID and default model.
+        **kwargs : Any
+            Arguments forwarded to ``Tracker.start_run`` such as ``config`` or ``tags``.
 
-        Args:
-            name (str): Name of the step.
-            **kwargs: Arguments passed to `tracker.start_run` (model, config, etc).
-
-        Yields:
-            Tracker: The tracker instance.
+        Yields
+        ------
+        Tracker
+            Active tracker for the step run.
         """
         if not self._header_record:
             raise RuntimeError("Scenario not active.")

@@ -55,4 +55,3 @@ def index_by_facet(key: str) -> FacetIndex:
     """Typed helper for `index_by=...` keyed by a facet key."""
 
     return FacetIndex(key=key)
-

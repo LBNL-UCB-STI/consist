@@ -65,7 +65,9 @@ class IdentityManager:
         key ordering and compact separators.
         """
         cleaned = self._clean_structure(obj, set())
-        return json.dumps(cleaned, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+        return json.dumps(
+            cleaned, sort_keys=True, ensure_ascii=True, separators=(",", ":")
+        )
 
     def canonical_json_sha256(self, obj: Any) -> str:
         """SHA256 hex digest of `canonical_json_str(obj)`."""
@@ -513,9 +515,13 @@ class IdentityManager:
                 continue
 
             rel = file_path.relative_to(resolved).as_posix()
-            if ignore_dotfiles and any(part.startswith(".") for part in Path(rel).parts):
+            if ignore_dotfiles and any(
+                part.startswith(".") for part in Path(rel).parts
+            ):
                 continue
-            if allowlist is not None and not any(fnmatch.fnmatch(rel, pat) for pat in allowlist):
+            if allowlist is not None and not any(
+                fnmatch.fnmatch(rel, pat) for pat in allowlist
+            ):
                 continue
 
             if self.hashing_strategy == "fast":

@@ -534,7 +534,9 @@ class DatabaseManager:
                 if value_str is not None:
                     statement = statement.where(RunConfigKV.value_str == value_str)
                 elif value_num is not None:
-                    statement = statement.where(RunConfigKV.value_num == float(value_num))
+                    statement = statement.where(
+                        RunConfigKV.value_num == float(value_num)
+                    )
                 elif value_bool is not None:
                     statement = statement.where(RunConfigKV.value_bool == value_bool)
 
@@ -546,7 +548,9 @@ class DatabaseManager:
                 return results
 
         try:
-            return self.execute_with_retry(_query, operation_name="find_runs_by_facet_kv")
+            return self.execute_with_retry(
+                _query, operation_name="find_runs_by_facet_kv"
+            )
         except Exception as e:
             logging.warning("Failed to find runs by facet kv: %s", e)
             return []
@@ -578,7 +582,9 @@ class DatabaseManager:
                 return rows
 
         try:
-            rows = self.execute_with_retry(_query, operation_name="get_facet_values_for_runs")
+            rows = self.execute_with_retry(
+                _query, operation_name="get_facet_values_for_runs"
+            )
         except Exception as e:
             logging.warning("Failed to get facet values for runs: %s", e)
             return {}
