@@ -9,7 +9,7 @@ def mock_tracker():
     tracker = MagicMock()
     tracker.resolve_uri = lambda uri: f"/abs/{uri}"
     tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
-    tracker.identity._compute_file_checksum.return_value = "mock_hash"
+    tracker.identity.compute_file_checksum.return_value = "mock_hash"
     return tracker
 
 
