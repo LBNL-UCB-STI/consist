@@ -51,12 +51,17 @@ class Tracker:
     The central orchestrator for Consist, managing the lifecycle of a Run and its associated Artifacts.
 
     The Tracker is responsible for:
+
     1.  Initiating and managing the state of individual "Runs" (e.g., model executions, data processing steps).
+
     2.  Logging "Artifacts" (input files, output data, etc.) and their relationships to runs.
+
     3.  Implementing a **dual-write mechanism**, logging provenance to both human-readable JSON files (`consist.json`)
         and an analytical DuckDB database (`provenance.duckdb`).
+
     4.  Providing **path virtualization** to make runs portable across different environments,
         as described in the "Path Resolution & Mounts" architectural section.
+
     5.  Facilitating **smart caching** based on a Merkle DAG strategy, enabling "run forking" and "hydration"
         of previously computed results.
     """
@@ -799,12 +804,15 @@ class Tracker:
         Logs an artifact (file or data reference) within the current run context.
 
         This method supports:
+
         -   **Automatic Input Discovery**: If an input `path` matches a previously
             logged output artifact, Consist automatically links them, building the
             provenance graph. This is a key part of **"Auto-Forking"**.
+
         -   **Path Virtualization**: Converts absolute file system paths to portable URIs
             (e.g., `inputs://data.csv`) using configured mounts, adhering to
             **"Path Resolution & Mounts"**.
+
         -   **Schema Metadata Injection**: Embeds schema information (if provided) into the
             artifact's metadata, useful for later "Strict Mode" validation or introspection.
 

@@ -27,8 +27,11 @@ class DatabaseManager:
 
     It handles:
     1. Connection pooling (Engine creation).
+
     2. Schema initialization.
+
     3. Concurrency control (Retries/Locking).
+
     4. CRUD operations for Runs and Artifacts.
     """
 
