@@ -23,6 +23,7 @@ import hashlib
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Union
@@ -529,7 +530,10 @@ def run_container(
                 tracker.log_artifact(str(p), key=p.stem, direction="input")
 
         # 2. Log Config to Meta (so we don't lose the container context)
-        step_key = f"container_step_{int(time.time())}"
+        # Use a collision-resistant key: container calls can happen multiple times per second
+        # (e.g., retries or tight orchestration loops), and Consist meta keys must be unique
+        # to avoid overwriting prior container context.
+        step_key = f"container_step_{uuid.uuid4().hex[:10]}"
         # Record human-readable image tag alongside hashable config
         meta_cfg = config.to_hashable_config()
         meta_cfg["image"] = image

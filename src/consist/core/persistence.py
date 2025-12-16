@@ -262,16 +262,41 @@ class DatabaseManager:
     def link_artifact_to_run(
         self, artifact_id: uuid.UUID, run_id: str, direction: str
     ) -> None:
-        """Creates a link between an artifact and a run without syncing the artifact itself."""
+        """
+        Create a link between an artifact and a run without syncing the artifact itself.
+
+        Notes
+        -----
+        `run_artifact_link` is keyed by (run_id, artifact_id). This means the same Artifact
+        cannot be linked to the same Run as both an input and an output. If callers attempt
+        to do so (commonly via "pass-through" steps that re-log an input Artifact as output),
+        we keep the first direction and emit a targeted warning instead of silently overwriting.
+        """
 
         def _do_link():
             with Session(self.engine) as session:
-                link = RunArtifactLink(
-                    run_id=run_id,
-                    artifact_id=artifact_id,
-                    direction=direction,
-                )
-                session.merge(link)
+                existing = session.exec(
+                    select(RunArtifactLink)
+                    .where(RunArtifactLink.run_id == run_id)
+                    .where(RunArtifactLink.artifact_id == artifact_id)
+                ).first()
+
+                if existing is not None:
+                    if existing.direction != direction:
+                        logging.warning(
+                            "[Consist] Ignoring attempt to link artifact_id=%s to run_id=%s as '%s' "
+                            "because it is already linked as '%s'. "
+                            "If this step truly produces a new output, write to a new path (preferred), "
+                            "or log a distinct Artifact instance rather than reusing the same Artifact reference.",
+                            artifact_id,
+                            run_id,
+                            direction,
+                            existing.direction,
+                        )
+                    return
+
+                link = RunArtifactLink(run_id=run_id, artifact_id=artifact_id, direction=direction)
+                session.add(link)
                 session.commit()
 
         try:
