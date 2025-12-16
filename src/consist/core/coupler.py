@@ -1,4 +1,7 @@
-from typing import Optional, Dict, TYPE_CHECKING
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Dict, Iterable, Optional, TYPE_CHECKING
 
 from consist.models.artifact import Artifact
 
@@ -8,10 +11,14 @@ if TYPE_CHECKING:
 
 class Coupler:
     """
-    Lightweight helper to thread named artifacts between steps.
+    Scenario-local helper to thread named artifacts between steps.
 
-    Keeps the latest artifact per key and can optionally hydrate absolute paths
-    using the provided tracker.
+    Coupler is intentionally small:
+    - It stores the "latest Artifact for a semantic key" in-memory.
+    - It can "adopt" a cached output from the current step (when a cache hit occurred).
+
+    It does not log artifacts, infer inputs/outputs, or mutate Artifacts as a side effect
+    of reads. Keep provenance operations on the Tracker.
     """
 
     def __init__(self, tracker: Optional["Tracker"] = None) -> None:
@@ -22,29 +29,90 @@ class Coupler:
         self._artifacts[key] = artifact
         return artifact
 
-    def get(self, key: str) -> Optional[Artifact]:
-        art = self._artifacts.get(key)
-        if art and self.tracker and not art.abs_path:
-            try:
-                art.abs_path = self.tracker.resolve_uri(art.uri)
-            except Exception:
-                pass
-        return art
-
-    def get_cached(self, key: Optional[str] = None) -> Optional[Artifact]:
-        """Deprecated alias for get_cached_output."""
-        return self.get_cached_output(key=key)
-
-    def get_cached_output(self, key: Optional[str] = None) -> Optional[Artifact]:
+    def update(self, artifacts: Optional[Dict[str, Artifact]] = None, /, **kwargs: Artifact) -> None:
         """
-        Return a hydrated cached output for the *current step run* if this step is a cache hit.
+        Bulk-update the coupler mapping.
 
-        This checks tracker.cached_output(), which is populated only when the active run
-        matched a prior run and its outputs were hydrated at start_run/begin_run time.
+        Examples
+        --------
+        `coupler.update({"persons": art})` or `coupler.update(persons=art)`
+        """
+        if artifacts:
+            self._artifacts.update(artifacts)
+        if kwargs:
+            self._artifacts.update(kwargs)
+
+    def get(self, key: str) -> Optional[Artifact]:
+        """Return the current artifact for `key`, or None if unset."""
+        return self._artifacts.get(key)
+
+    def require(self, key: str) -> Artifact:
+        """Return the artifact for `key`, raising a clear error if unset."""
+        artifact = self.get(key)
+        if artifact is None:
+            available = ", ".join(sorted(self._artifacts.keys())) or "<none>"
+            raise KeyError(
+                f"Coupler missing key={key!r}. Available keys: {available}. "
+                f"Did you forget to call coupler.set({key!r}, ...)?"
+            )
+        return artifact
+
+    def pop(self, key: str, default: Optional[Artifact] = None) -> Optional[Artifact]:
+        return self._artifacts.pop(key, default)
+
+    def keys(self) -> Iterable[str]:
+        return self._artifacts.keys()
+
+    def items(self) -> Iterable[tuple[str, Artifact]]:
+        return self._artifacts.items()
+
+    def values(self) -> Iterable[Artifact]:
+        return self._artifacts.values()
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._artifacts
+
+    def __getitem__(self, key: str) -> Artifact:
+        return self.require(key)
+
+    def __setitem__(self, key: str, artifact: Artifact) -> None:
+        self.set(key, artifact)
+
+    def path(self, key: str, *, required: bool = True) -> Optional[Path]:
+        """
+        Resolve an artifact's URI to an absolute host path.
+
+        This does not mutate the Artifact; it only returns a resolved Path.
+        """
+        artifact = self.require(key) if required else self.get(key)
+        if not artifact:
+            return None
+        if not self.tracker:
+            raise RuntimeError(
+                f"Cannot resolve path for {key!r}: no tracker attached to Coupler."
+            )
+        return Path(self.tracker.resolve_uri(artifact.uri))
+
+    def adopt_cached_output(self, key: Optional[str] = None) -> Optional[Artifact]:
+        """
+        If the *current step run* is a cache hit, adopt a hydrated cached output.
+
+        This is a thin wrapper around `tracker.cached_output()`. When an artifact is found,
+        it is stored into the Coupler under:
+        - `key` if provided
+        - otherwise `artifact.key`
         """
         if not self.tracker:
             return None
-        art = self.tracker.cached_output(key=key)
-        if art:
-            self.set(key or art.key, art)
-        return art
+        artifact = self.tracker.cached_output(key=key)
+        if artifact:
+            self.set(key or artifact.key, artifact)
+        return artifact
+
+    def get_cached(self, key: Optional[str] = None) -> Optional[Artifact]:
+        """Alias for `adopt_cached_output()` (kept for backwards compatibility)."""
+        return self.adopt_cached_output(key=key)
+
+    def get_cached_output(self, key: Optional[str] = None) -> Optional[Artifact]:
+        """Alias for `adopt_cached_output()` (kept for backwards compatibility)."""
+        return self.adopt_cached_output(key=key)

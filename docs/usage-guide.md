@@ -142,7 +142,7 @@ with consist.scenario("baseline", tracker=tracker) as sc:
         coupler.set("data", art)
     
     with sc.step(name="simulate"):
-        input_art = coupler.get("data")
+        input_art = coupler.require("data")
         df = consist.load(input_art)
         # ... simulation logic ...
 ```

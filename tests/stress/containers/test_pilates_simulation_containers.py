@@ -142,7 +142,7 @@ def run_simulation_scenario(
                 facet={"delta": advance_delta_by_year.get(year, 1)},
                 inputs=step_inputs,
             ):
-                cached_persons = coupler.get_cached("persons")
+                cached_persons = coupler.adopt_cached_output("persons")
                 if cached_persons:
                     coupler.set("persons", cached_persons)
                 else:
@@ -177,7 +177,7 @@ def run_simulation_scenario(
                 inputs=[coupler.get("persons")],
             ):
                 # Resolve from cache if present; otherwise execute container and log output.
-                persons_art = coupler.get_cached_output("persons")
+                persons_art = coupler.adopt_cached_output("persons")
                 if not persons_art:
                     df_adv = consist.load(coupler.get("persons"))
                     # Use a stable host path for container outputs so identical scenarios can reuse cache
