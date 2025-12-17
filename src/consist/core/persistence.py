@@ -295,7 +295,9 @@ class DatabaseManager:
                         )
                     return
 
-                link = RunArtifactLink(run_id=run_id, artifact_id=artifact_id, direction=direction)
+                link = RunArtifactLink(
+                    run_id=run_id, artifact_id=artifact_id, direction=direction
+                )
                 session.add(link)
                 session.commit()
 
@@ -304,6 +306,67 @@ class DatabaseManager:
         except Exception as e:
             logging.warning(
                 f"Failed to link artifact {artifact_id} to run {run_id}: {e}"
+            )
+
+    def link_artifacts_to_run_bulk(
+        self, *, artifact_ids: List[uuid.UUID], run_id: str, direction: str
+    ) -> None:
+        """
+        Bulk variant of `link_artifact_to_run`.
+
+        This executes in a single transaction to avoid per-artifact session overhead.
+        The same direction conflict behavior applies: if a link already exists with a
+        different direction, we keep the first direction and emit a warning.
+        """
+        if not artifact_ids:
+            return
+
+        def _do_link():
+            with Session(self.engine) as session:
+                existing = session.exec(
+                    select(RunArtifactLink)
+                    .where(RunArtifactLink.run_id == run_id)
+                    .where(col(RunArtifactLink.artifact_id).in_(artifact_ids))
+                ).all()
+
+                existing_by_id = {row.artifact_id: row for row in existing}
+
+                new_links: List[RunArtifactLink] = []
+                for artifact_id in artifact_ids:
+                    row = existing_by_id.get(artifact_id)
+                    if row is not None:
+                        if row.direction != direction:
+                            logging.warning(
+                                "[Consist] Ignoring attempt to link artifact_id=%s to run_id=%s as '%s' "
+                                "because it is already linked as '%s'. "
+                                "If this step truly produces a new output, write to a new path (preferred), "
+                                "or log a distinct Artifact instance rather than reusing the same Artifact reference.",
+                                artifact_id,
+                                run_id,
+                                direction,
+                                row.direction,
+                            )
+                        continue
+                    new_links.append(
+                        RunArtifactLink(
+                            run_id=run_id, artifact_id=artifact_id, direction=direction
+                        )
+                    )
+
+                if not new_links:
+                    return
+
+                session.add_all(new_links)
+                session.commit()
+
+        try:
+            self.execute_with_retry(_do_link, operation_name="link_artifacts_bulk")
+        except Exception as e:
+            logging.warning(
+                "Failed to link artifacts to run run_id=%s count=%s: %s",
+                run_id,
+                len(artifact_ids),
+                e,
             )
 
     def sync_artifact(self, artifact: Artifact, run_id: str, direction: str) -> None:

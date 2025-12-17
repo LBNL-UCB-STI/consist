@@ -1,12 +1,13 @@
 from contextlib import contextmanager
 from types import MappingProxyType
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Callable, Mapping
 
 from consist import Artifact
 from consist.models.run import ConsistRecord
 from typing import TYPE_CHECKING
 from consist.core.coupler import Coupler
 from consist.types import ArtifactRef
+from pathlib import Path
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
@@ -122,6 +123,171 @@ class ScenarioContext:
 
         self._inputs[key] = artifact
         return artifact
+
+    def run_step(
+        self,
+        name: str,
+        fn: Callable[..., Any],
+        *fn_args: Any,
+        run_id: Optional[str] = None,
+        model: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+        tags: Optional[List[str]] = None,
+        description: Optional[str] = None,
+        cache_mode: str = "reuse",
+        input_keys: Optional[object] = None,
+        inputs: Optional[List[ArtifactRef]] = None,
+        outputs: Optional[List[str]] = None,
+        output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        materialize_cached_outputs: str = "never",
+        materialize_cached_output_paths: Optional[Mapping[str, Path]] = None,
+        materialize_cached_outputs_dir: Optional[Path] = None,
+        **fn_kwargs: Any,
+    ) -> Dict[str, Artifact]:
+        """
+        Run a function-shaped scenario step that can be skipped on cache hits.
+
+        This complements the imperative `scenario.step(...)` context manager.
+        When Consist finds a cache hit for this step, the callable is NOT executed;
+        instead, cached outputs are hydrated and placed into the scenario Coupler.
+
+        Parameters
+        ----------
+        name : str
+            Step name. Used to derive the default child run id (scenario_id + "_" + name).
+        fn : Callable[..., Any]
+            Callable to execute on cache misses. Can be an imported function or a bound
+            method like `beamPreprocessor.run`.
+        *fn_args, **fn_kwargs
+            Arguments forwarded to `fn(...)` on cache misses.
+        input_keys : Optional[object]
+            A string or list of strings naming Coupler keys to declare as step inputs.
+            Inputs are resolved before the run starts (so caching and `db_fallback="inputs-only"`
+            behave correctly).
+        inputs : Optional[List[ArtifactRef]]
+            Additional explicit inputs to declare for caching/provenance.
+        outputs / output_paths
+            Output contract for this step. Exactly one of these must be provided:
+            - `outputs=[...]`: assert that `fn(...)` logs these output keys during execution.
+            - `output_paths={key: ref, ...}`: after `fn(...)` returns, log these paths as outputs.
+        output_paths resolution rules
+            For `output_paths`, each value is interpreted as:
+            - relative path → relative to the step run directory (`t.run_dir`)
+            - URI-like string (contains `"://"`) → resolved via mounts (`tracker.resolve_uri`)
+            - absolute path → used as-is
+
+        Returns
+        -------
+        Dict[str, Artifact]
+            Mapping of declared output key to hydrated `Artifact` for that key.
+        """
+        if not self._header_record:
+            raise RuntimeError("Scenario not active. Use within 'with' block.")
+
+        if (outputs is None) == (output_paths is None):
+            raise ValueError(
+                "ScenarioContext.run_step requires exactly one of `outputs=[...]` or `output_paths={...}`."
+            )
+
+        declared_output_keys: List[str]
+        if output_paths is not None:
+            declared_output_keys = list(output_paths.keys())
+        else:
+            declared_output_keys = list(outputs or [])
+
+        if not declared_output_keys:
+            raise ValueError(
+                "ScenarioContext.run_step requires at least one output key."
+            )
+
+        resolved_inputs: List[ArtifactRef] = []
+        if input_keys:
+            keys_list: List[str]
+            if isinstance(input_keys, str):
+                keys_list = [input_keys]
+            else:
+                keys_list = list(input_keys)  # type: ignore[arg-type]
+            resolved_inputs.extend([self.coupler.require(k) for k in keys_list])
+        if inputs:
+            resolved_inputs.extend(list(inputs))
+
+        def _resolve_output_ref(t: "Tracker", ref: ArtifactRef) -> ArtifactRef:
+            if isinstance(ref, Artifact):
+                return ref
+            ref_str = str(ref)
+            if "://" in ref_str:
+                scheme = ref_str.split("://", 1)[0]
+                if scheme != "file" and scheme not in t.mounts:
+                    raise ValueError(
+                        f"output_paths for key must use a mounted scheme or file:// (got {ref_str!r}). "
+                        f"Known schemes: {sorted(t.mounts.keys())}"
+                    )
+                return Path(t.resolve_uri(ref_str))
+            ref_path = Path(ref_str)
+            if not ref_path.is_absolute():
+                return t.run_dir / ref_path
+            return ref_path
+
+        step_kwargs: Dict[str, Any] = {
+            "cache_mode": cache_mode,
+            "materialize_cached_outputs": materialize_cached_outputs,
+            "materialize_cached_output_paths": (
+                dict(materialize_cached_output_paths)
+                if materialize_cached_output_paths
+                else None
+            ),
+            "materialize_cached_outputs_dir": materialize_cached_outputs_dir,
+        }
+        if resolved_inputs:
+            step_kwargs["inputs"] = resolved_inputs
+        if run_id:
+            step_kwargs["run_id"] = run_id
+        if model:
+            step_kwargs["model"] = model
+        if config is not None:
+            step_kwargs["config"] = config
+        if tags is not None:
+            step_kwargs["tags"] = tags
+        if description is not None:
+            step_kwargs["description"] = description
+
+        with self.step(name, **step_kwargs) as t:
+            if t.is_cached:
+                hydrated: Dict[str, Artifact] = {}
+                for k in declared_output_keys:
+                    art = t.cached_output(key=k)
+                    if art is None:
+                        raise RuntimeError(
+                            f"Cache hit for step {name!r} but missing cached output key={k!r}. "
+                            "This cache entry does not satisfy the step output contract."
+                        )
+                    self.coupler.set(k, art)
+                    hydrated[k] = art
+                return hydrated
+
+            fn(*fn_args, **fn_kwargs)
+
+            if output_paths is not None:
+                produced: Dict[str, Artifact] = {}
+                for k, ref in output_paths.items():
+                    resolved_ref = _resolve_output_ref(t, ref)
+                    produced[k] = t.log_artifact(
+                        resolved_ref, key=k, direction="output"
+                    )
+                    self.coupler.set(k, produced[k])
+                return produced
+
+            # outputs-based contract: ensure the callable logged the declared keys.
+            by_key: Dict[str, Artifact] = {a.key: a for a in t.current_consist.outputs}
+            missing = [k for k in declared_output_keys if k not in by_key]
+            if missing:
+                raise RuntimeError(
+                    f"Step {name!r} did not produce declared outputs: {missing}. "
+                    "Either log them via tracker.log_artifact(..., key=...), or use output_paths={...}."
+                )
+            for k in declared_output_keys:
+                self.coupler.set(k, by_key[k])
+            return {k: by_key[k] for k in declared_output_keys}
 
     @contextmanager
     def step(self, name: str, **kwargs):
@@ -315,9 +481,11 @@ class ScenarioContext:
         # 2. Capture & Suspend
         # Save the record and clear the tracker's active state
         self._header_record = self.tracker.current_consist
-        self._suspended_cache_mode = self.tracker._active_run_cache_mode
+        self._suspended_cache_options = self.tracker._active_run_cache_options
         self.tracker.current_consist = None
-        self.tracker._active_run_cache_mode = None
+        from consist.core.cache import ActiveRunCacheOptions
+
+        self.tracker._active_run_cache_options = ActiveRunCacheOptions()
 
         # Note: We leave the tracker pushed to the global context stack.
         # This ensures calls to `consist.log_artifact()` fail with our custom error
@@ -328,7 +496,7 @@ class ScenarioContext:
     def __exit__(self, exc_type, exc_val, exc_tb):
         # 1. Restore Header Context
         self.tracker.current_consist = self._header_record
-        self.tracker._active_run_cache_mode = self._suspended_cache_mode
+        self.tracker._active_run_cache_options = self._suspended_cache_options
 
         # 2. Handle Status
         status = "failed" if exc_type else "completed"

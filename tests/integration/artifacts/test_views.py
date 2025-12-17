@@ -72,12 +72,12 @@ def test_hybrid_view_generation(tracker, tmp_path):
     cold_path = tmp_path / "cold.parquet"
     cold_df.to_parquet(cold_path)
 
-    with tracker.start_run("run_cold", "model_x", year=2010):
+    with tracker.start_run("run_cold", "model_x", year=2010, cache_mode="overwrite"):
         tracker.log_artifact(str(cold_path), key="households", driver="parquet")
 
     # 2. Hot Data (Has 'persons')
     hot_data = [{"id": 2, "income": 75000.0, "persons": 3}]
-    with tracker.start_run("run_hot", "model_x", year=2011):
+    with tracker.start_run("run_hot", "model_x", year=2011, cache_mode="overwrite"):
         tracker.ingest(
             artifact=tracker.log_artifact("dummy", "households"),
             data=hot_data,
@@ -132,10 +132,10 @@ def test_pure_cold_view(tracker, tmp_path):
     df1.to_parquet(p1)
     df2.to_parquet(p2)
 
-    with tracker.start_run("r1", "m", year=2020):
+    with tracker.start_run("r1", "m", year=2020, cache_mode="overwrite"):
         tracker.log_artifact(str(p1), key="zones", driver="parquet")
 
-    with tracker.start_run("r2", "m", year=2021):
+    with tracker.start_run("r2", "m", year=2021, cache_mode="overwrite"):
         tracker.log_artifact(str(p2), key="zones", driver="parquet")
 
     # Create view (No 'global_tables.zones' exists)
@@ -181,7 +181,7 @@ def test_bidirectional_schema_drift(tracker, tmp_path):
     cold_path = tmp_path / "drift.parquet"
     cold_df.to_parquet(cold_path)
 
-    with tracker.start_run("r_old", "m"):
+    with tracker.start_run("r_old", "m", cache_mode="overwrite"):
         tracker.log_artifact(str(cold_path), key="drift_test", driver="parquet")
 
     # Hot: Has 'new_col', missing 'legacy_col'
@@ -192,7 +192,7 @@ def test_bidirectional_schema_drift(tracker, tmp_path):
         new_col: str
 
     hot_data = [{"id": 2, "new_col": "fresh"}]
-    with tracker.start_run("r_new", "m"):
+    with tracker.start_run("r_new", "m", cache_mode="overwrite"):
         tracker.ingest(
             artifact=tracker.log_artifact("dummy", "drift_test"),
             data=hot_data,
@@ -300,7 +300,7 @@ def test_view_with_mounts(mounted_tracker):
     df.to_parquet(p_path)
 
     # Log using absolute path (Tracker should virtualize it to inputs://)
-    with tracker.start_run("r_mount", "m"):
+    with tracker.start_run("r_mount", "m", cache_mode="overwrite"):
         # We simulate the user providing the absolute path,
         # which Tracker converts to inputs:// internally.
         tracker.log_artifact(str(p_path), key="mounted_data", driver="parquet")
@@ -356,7 +356,7 @@ def test_hybrid_view_with_multiple_cold_schema_drift(tracker, tmp_path):
     df1.to_parquet(path1)
 
     run_id1 = "run_cold_schema_1"
-    with tracker.start_run(run_id1, "model_drift", year=2023):
+    with tracker.start_run(run_id1, "model_drift", year=2023, cache_mode="overwrite"):
         tracker.log_artifact(str(path1), key="drift_concept", driver="parquet")
 
     # 2. Second Cold Data (Has 'value_b')
@@ -365,7 +365,7 @@ def test_hybrid_view_with_multiple_cold_schema_drift(tracker, tmp_path):
     df2.to_parquet(path2)
 
     run_id2 = "run_cold_schema_2"
-    with tracker.start_run(run_id2, "model_drift", year=2024):
+    with tracker.start_run(run_id2, "model_drift", year=2024, cache_mode="overwrite"):
         tracker.log_artifact(str(path2), key="drift_concept", driver="parquet")
 
     # 3. Create the hybrid view

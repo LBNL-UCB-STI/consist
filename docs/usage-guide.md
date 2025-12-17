@@ -25,7 +25,9 @@ tracker = Tracker(
 @tracker.task()
 def clean_data(raw_file: Path, config: CleaningConfig) -> Path:
     """Clean raw data according to config rules."""
-    output_path = Path("cleaned.parquet")
+    # Prefer writing outputs under `tracker.run_dir` (or a mounted outputs:// root)
+    # so artifacts remain portable and easy to locate.
+    output_path = tracker.run_dir / "cleaned.parquet"
     df = pd.read_csv(raw_file)
     # ... cleaning logic ...
     df.to_parquet(output_path)
@@ -54,7 +56,7 @@ Pass artifacts directly between tasks to build lineage chains:
 ```python
 @tracker.task()
 def analyze_data(cleaned_file: Path, multiplier: float) -> Path:
-    output_path = Path("analysis.parquet")
+    output_path = tracker.run_dir / "analysis.parquet"
     df = pd.read_parquet(cleaned_file)
     df["scaled"] = df["value"] * multiplier
     df.to_parquet(output_path)
@@ -141,9 +143,10 @@ with consist.scenario("baseline", tracker=tracker) as sc:
         art = consist.log_dataframe(df, key="processed")
         coupler.set("data", art)
     
-    with sc.step(name="simulate"):
-        input_art = coupler.require("data")
-        df = consist.load(input_art)
+    # Declare upstream artifacts as step inputs so caching and provenance are correct.
+    # `input_keys=[...]` avoids repeating `coupler.require(...)` in `inputs=[...]`.
+    with sc.step(name="simulate", input_keys=["data"]):
+        df = consist.load(coupler.require("data"))
         # ... simulation logic ...
 ```
 
@@ -162,8 +165,26 @@ with consist.scenario("baseline", tracker=tracker) as sc:
         # Task cache is checked; won't re-run if inputs unchanged
         processed = expensive_preprocessing(Path("network.geojson"))
     
-    with sc.step(name="simulate"):
+    # If you want this step itself to be cacheable, declare the task output as an input.
+    with sc.step(name="simulate", inputs=[processed]):
         run_simulation(processed)
+```
+
+### Function-Shaped Scenario Steps (Skip on Cache Hit)
+
+`sc.step(...)` is a context manager, so its Python block always executes even on cache hits.
+If you want Consist to *skip* calling an expensive function/bound method on cache hits (while
+still hydrating cached outputs into the Coupler), use `sc.run_step(...)`:
+
+```python
+with consist.scenario("baseline", tracker=tracker) as sc:
+    sc.run_step(
+        name="beam_preprocess",
+        fn=beamPreprocessor.run,  # imported function or bound method
+        input_keys=["data"],
+        output_paths={"beam_inputs": "beam_inputs.parquet"},
+    )
+    beam_inputs = sc.coupler.require("beam_inputs")
 ```
 
 ---

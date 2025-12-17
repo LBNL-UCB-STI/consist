@@ -98,6 +98,10 @@ def run_simulation_scenario(
             run_id=f"{scenario_id}_init",
             name="pop_synth",
             tags=["init"],
+            # Important: scenario header config is not inherited by steps.
+            # Include identity-relevant knobs here so different scenarios don't
+            # accidentally cache-hit on the init step.
+            config={"mode": storage_mode, "base_trips": base_trips},
         ):
             df_hh = pd.DataFrame(
                 {
@@ -138,7 +142,8 @@ def run_simulation_scenario(
                 name="advance_people",
                 year=year,
                 tags=["simulation", "advance"],
-                config={"year": year},
+                # Include delta in config so cache signatures reflect the actual work.
+                config={"year": year, "delta": advance_delta_by_year.get(year, 1)},
                 facet={"delta": advance_delta_by_year.get(year, 1)},
                 inputs=step_inputs,
             ):

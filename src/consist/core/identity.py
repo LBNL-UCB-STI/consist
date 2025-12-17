@@ -229,6 +229,28 @@ class IdentityManager:
         # 3. Hash
         return hashlib.sha256(json_str.encode("utf-8")).hexdigest()
 
+    def compute_run_config_hash(
+        self,
+        *,
+        config: Dict[str, Any],
+        model: str,
+        year: Any = None,
+        iteration: Any = None,
+    ) -> str:
+        """
+        Compute a config hash for a run, mixing in identity-relevant run fields.
+
+        Tracker persists `config` for human inspection, but caching identity needs to
+        include some run context fields that are frequently semantically relevant.
+        """
+        payload = dict(config)
+        payload["__consist_run_fields__"] = {
+            "model": model,
+            "year": year,
+            "iteration": iteration,
+        }
+        return self.compute_config_hash(payload)
+
     # --- Component 3: Input Identity ---
 
     def compute_input_hash(

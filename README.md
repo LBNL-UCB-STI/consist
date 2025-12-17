@@ -46,7 +46,9 @@ tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
 @tracker.task()
 def clean_data(raw_file: Path, config: CleaningConfig) -> Path:
-    output_path = Path("cleaned.parquet")
+    # Prefer writing outputs under `tracker.run_dir` (or a mounted outputs:// root)
+    # so artifacts remain portable and easy to locate.
+    output_path = tracker.run_dir / "cleaned.parquet"
     # ... processing logic ...
     return output_path
 
@@ -70,7 +72,7 @@ Tasks return `Artifact` objects that wrap the output path with provenance metada
 
 - **Container support**: Track Docker/Singularity containers as functions—image digest and mounts become part of the signature.
 
-- **Ghost Mode**: Provenance remains valid even after intermediate files are deleted.
+- **Ghost Mode**: If an artifact was ingested into DuckDB, `consist.load(...)` can recover it even if the file is deleted (by default only when it’s a declared input to an uncached run).
 
 - **CLI tools**: Inspect runs, trace lineage, and validate artifacts from the command line.
 

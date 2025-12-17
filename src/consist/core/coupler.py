@@ -29,7 +29,9 @@ class Coupler:
         self._artifacts[key] = artifact
         return artifact
 
-    def update(self, artifacts: Optional[Dict[str, Artifact]] = None, /, **kwargs: Artifact) -> None:
+    def update(
+        self, artifacts: Optional[Dict[str, Artifact]] = None, /, **kwargs: Artifact
+    ) -> None:
         """
         Bulk-update the coupler mapping.
 

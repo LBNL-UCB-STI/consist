@@ -28,7 +28,8 @@ def test_run_artifact_link_direction_conflict_warns_and_preserves_first_link(
 
     warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
     assert any(
-        "Ignoring attempt to link artifact_id" in msg and "already linked as 'input'" in msg
+        "Ignoring attempt to link artifact_id" in msg
+        and "already linked as 'input'" in msg
         for msg in warnings
     ), f"Expected conflict warning; got: {warnings}"
 
@@ -61,7 +62,9 @@ def test_run_artifact_link_distinct_input_and_output_no_warning(
 
     with tracker.start_run(run_id="happy_run", model="unit_test"):
         tracker.log_artifact(str(input_path), key="data.csv", direction="input")
-        tracker.log_artifact(str(output_path), key="data_processed.csv", direction="output")
+        tracker.log_artifact(
+            str(output_path), key="data_processed.csv", direction="output"
+        )
 
     warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
     assert not any(

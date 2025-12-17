@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 
 import consist
 from consist.cli import app as cli_app
+from consist.core.context import get_active_tracker
 from consist.core.identity import IdentityManager
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
@@ -140,6 +141,11 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
         {
             "seed": 7,
             "__consist_hash_inputs__": data["run"]["meta"]["consist_hash_inputs"],
+            "__consist_run_fields__": {
+                "model": "scenario",
+                "year": None,
+                "iteration": None,
+            },
         }
     )
     assert data["run"]["git_hash"] is not None
@@ -232,7 +238,9 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
         assert "value_doubled" in schema_payload["dtypes"]
 
 
-def test_resume_after_failure_uses_cache_and_ghost_mode(tracker: Tracker, run_dir: Path):
+def test_resume_after_failure_uses_cache_and_ghost_mode(
+    tracker: Tracker, run_dir: Path
+):
     """
     Regression test: resume a multi-step workflow after a failure, using cache.
 
@@ -357,7 +365,9 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(tracker: Tracker, run_di
     report_artifact = evaluate_model(model_artifact, prepared_artifact_2)
 
     assert report_artifact.path.exists()
-    assert execution_counts["prepare_data"] == 1, "Predecessor should be reused via cache"
+    assert (
+        execution_counts["prepare_data"] == 1
+    ), "Predecessor should be reused via cache"
     assert execution_counts["train_model"] == 2
     assert execution_counts["evaluate_model"] == 1
 
@@ -379,3 +389,50 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(tracker: Tracker, run_di
     )
     assert len(eval_runs) == 1
     assert eval_runs[0].status == "completed"
+
+
+def test_scenario_run_step_skips_callable_on_cache_hit(tracker: Tracker):
+    """
+    End-to-end demonstration of `ScenarioContext.run_step(...)`.
+
+    Unlike `scenario.step(...)` (a context manager whose body always runs),
+    `scenario.run_step(...)` can *skip executing the callable* on cache hits,
+    while still hydrating cached outputs and populating the scenario Coupler.
+    """
+    tracker.identity.hashing_strategy = "fast"
+
+    calls: list[str] = []
+    rel_out = Path("run_step_out.txt")
+
+    def expensive_step() -> None:
+        calls.append("called")
+        t = get_active_tracker()
+        (t.run_dir / rel_out).write_text(f"calls={len(calls)}\n")
+
+    with tracker.scenario("run_step_demo_A") as sc:
+        outs = sc.run_step(
+            "produce",
+            expensive_step,
+            config={"v": 1},
+            output_paths={"out": rel_out},
+        )
+        assert outs["out"].key == "out"
+        assert sc.coupler.require("out").id == outs["out"].id
+
+    assert calls == ["called"]
+    assert (tracker.run_dir / rel_out).read_text() == "calls=1\n"
+
+    # Repeat with the same signature (code/config/inputs). This should be a cache hit
+    # and should NOT execute `expensive_step()` again.
+    with tracker.scenario("run_step_demo_B") as sc:
+        outs = sc.run_step(
+            "produce",
+            expensive_step,
+            config={"v": 1},
+            output_paths={"out": rel_out},
+        )
+        assert outs["out"].key == "out"
+        assert sc.coupler.require("out").id == outs["out"].id
+
+    assert calls == ["called"]
+    assert (tracker.run_dir / rel_out).read_text() == "calls=1\n"

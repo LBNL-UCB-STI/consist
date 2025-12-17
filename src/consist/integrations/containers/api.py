@@ -22,12 +22,10 @@ Key functionalities include:
 import hashlib
 import json
 import logging
-import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Union
-import shutil
 
 from sqlmodel import Session, select
 
@@ -175,17 +173,16 @@ def _reuse_or_execute_container(
             if tracker.db and tracker.engine:
                 with Session(tracker.engine) as session:
                     links = session.exec(
-                        select(RunArtifactLink).where(RunArtifactLink.run_id == cached.id)
-                    ).all()
-                    for link in links:
-                        session.add(
-                            RunArtifactLink(
-                                run_id=run_id,
-                                artifact_id=link.artifact_id,
-                                direction=link.direction,
-                            )
+                        select(RunArtifactLink).where(
+                            RunArtifactLink.run_id == cached.id
                         )
-                    session.commit()
+                    ).all()
+                for link in links:
+                    tracker.db.link_artifact_to_run(
+                        artifact_id=link.artifact_id,
+                        run_id=run_id,
+                        direction=link.direction,
+                    )
 
             # Materialize requested outputs onto the host so callers see expected files.
             # This is copy-only physical materialization (bytes-on-disk), not DB reconstruction.
@@ -213,7 +210,9 @@ def _reuse_or_execute_container(
                     continue
                 items.append((match, target))
 
-            materialized = materialize_artifacts(tracker=tracker, items=items, on_missing="warn")
+            materialized = materialize_artifacts(
+                tracker=tracker, items=items, on_missing="warn"
+            )
             tracker.db.update_run_meta(
                 run_id,
                 {
@@ -564,6 +563,9 @@ def run_container(
         model="container_step",
         config=config.to_hashable_config(),
         inputs=resolved_inputs,
+        # Container runs implement their own caching (based on container signature),
+        # so we disable core Tracker caching to avoid double-cache interactions.
+        cache_mode="overwrite",
     ) as t:
 
         _reuse_or_execute_container(

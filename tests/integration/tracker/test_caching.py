@@ -169,9 +169,14 @@ def test_log_artifact_on_cache_hit_returns_cached_output(tracker, dummy_input):
         assert t.is_cached
         assert len(t.current_consist.outputs) == 1
 
-        returned = t.log_artifact("does-not-matter.parquet", key="out", direction="output")
+        returned = t.log_artifact(
+            "does-not-matter.parquet", key="out", direction="output"
+        )
         assert returned.id == produced.id
         assert len(t.current_consist.outputs) == 1
 
-        with pytest.raises(RuntimeError, match="Cannot log a new output artifact"):
-            t.log_artifact("new.parquet", key="new", direction="output")
+        # If code attempts to produce a new output on a cache hit, Consist demotes the
+        # cache hit to an executing run so provenance remains truthful.
+        new_out = t.log_artifact("new.parquet", key="new", direction="output")
+        assert new_out.key == "new"
+        assert not t.is_cached

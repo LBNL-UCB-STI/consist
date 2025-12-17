@@ -101,7 +101,16 @@ Notes:
 - Always pass upstream artifacts through `inputs=[...]` so caching and provenance are correct.
 - Step bodies still execute on cache hits; Consist does not “skip the Python block”.
   - To make cache-agnostic step code easier to write, `tracker.log_artifact(..., direction="output")` will return the hydrated cached output when the current run is a cache hit and the output `key` matches a cached output.
-  - If you attempt to log a *new* output key on a cache hit, Consist raises a `RuntimeError` (use `cache_mode="overwrite"` if you need to produce new outputs).
+  - If code attempts to produce a *new or different* output on a cache hit, Consist demotes the cache hit to an executing run (so provenance remains truthful).
+
+### Function-shaped steps (skip on cache hit)
+
+If you have an expensive callable (including imported functions or bound methods) and you want Consist to skip executing it on cache hits, use `ScenarioContext.run_step(...)`.
+
+`output_paths={...}` values are interpreted as:
+- relative paths → relative to the step run directory (`t.run_dir`)
+- URI-like strings (`"scheme://..."`) → resolved via mounts (`tracker.resolve_uri`)
+- absolute paths → used as-is
 
 ---
 
