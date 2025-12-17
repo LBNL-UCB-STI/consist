@@ -73,6 +73,7 @@ def test_container_cache_reuse_and_miss_for_new_outputs(
     run2 = tracker.get_run("container_run_2")
     assert run2.meta.get("cache_hit") is True
     assert run2.meta.get("cache_source") == "container_run_1"
+    assert run2.meta.get("materialized_outputs") is not None
 
     # Third run asks for additional output -> should execute again
     result3 = run_container(

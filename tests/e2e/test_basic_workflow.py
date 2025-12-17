@@ -1,12 +1,15 @@
+import errno
 import json
 from pathlib import Path
 from typing import Optional
 from unittest.mock import patch
 
 import pandas as pd
-from sqlmodel import Session, select
+import pytest
+from sqlmodel import select
 from typer.testing import CliRunner
 
+import consist
 from consist.cli import app as cli_app
 from consist.core.identity import IdentityManager
 from consist.core.tracker import Tracker
@@ -103,7 +106,9 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
             run_id=transform_run_id,
             tags=["transform"],
             year=2025,
-            inputs=[scenario.coupler.get("raw")],
+            # Prefer `require()` in tests: it produces a clear error if a predecessor
+            # forgot to `coupler.set(...)`, and avoids Optional typing.
+            inputs=[scenario.coupler.require("raw")],
             facet={"step": "transform", "multiplier": 2},
         ):
             df_raw = pd.read_csv(raw_path)
@@ -140,20 +145,20 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     assert data["run"]["git_hash"] is not None
 
     # Database snapshot
-    with Session(tracker.engine) as session:
-        runs = session.exec(select(Run)).all()
-        run_ids = {r.id for r in runs}
-        assert {scenario_id, ingest_run_id, transform_run_id} <= run_ids
-        assert all(r.status == "completed" for r in runs)
+    # For tests, `consist.run_query(...)` is a convenient wrapper around a Session.
+    runs = consist.run_query(select(Run), tracker=tracker)
+    run_ids = {r.id for r in runs}
+    assert {scenario_id, ingest_run_id, transform_run_id} <= run_ids
+    assert all(r.status == "completed" for r in runs)
 
-        artifacts = session.exec(select(Artifact)).all()
-        keys = {a.key for a in artifacts}
-        assert {"raw_table", "features"} <= keys
+    artifacts = consist.run_query(select(Artifact), tracker=tracker)
+    keys = {a.key for a in artifacts}
+    assert {"raw_table", "features"} <= keys
 
-        # Ensure parent linkage captured by scenario header
-        child_parents = {r.id: r.parent_run_id for r in runs if r.id != scenario_id}
-        assert child_parents[ingest_run_id] == scenario_id
-        assert child_parents[transform_run_id] == scenario_id
+    # Ensure parent linkage captured by scenario header
+    child_parents = {r.id: r.parent_run_id for r in runs if r.id != scenario_id}
+    assert child_parents[ingest_run_id] == scenario_id
+    assert child_parents[transform_run_id] == scenario_id
 
     # Schema persistence: ingest an artifact and verify schema discovery is persisted.
     assert features_artifact is not None
@@ -161,7 +166,8 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     assert "schema_id" in features_artifact.meta
     assert "schema_summary" in features_artifact.meta
 
-    with Session(tracker.engine) as session:
+    # `consist.db_session(...)` is the ergonomic way to open a Session for ad-hoc queries.
+    with consist.db_session(tracker=tracker) as session:
         schema_id = features_artifact.meta["schema_id"]
         assert session.get(ArtifactSchema, schema_id) is not None
         fields = session.exec(
@@ -224,3 +230,152 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
         assert schema_payload["columns"] >= 2
         assert "value" in schema_payload["dtypes"]
         assert "value_doubled" in schema_payload["dtypes"]
+
+
+def test_resume_after_failure_uses_cache_and_ghost_mode(tracker: Tracker, run_dir: Path):
+    """
+    Regression test: resume a multi-step workflow after a failure, using cache.
+
+    This test is intentionally narrative and "readable first" because it documents a
+    common pain point in real pipelines: a long workflow fails late (e.g., out-of-disk),
+    and you want to re-run without repeating expensive earlier steps.
+
+    What we validate
+    ----------------
+    1) A predecessor step (`prepare_data`) completes successfully and its output is
+       cached by Consist (keyed by signature = code hash + config hash + input hash).
+
+    2) A downstream step (`train_model`) fails on the first attempt with an ENOSPC-like
+       exception. Consist should persist the run with `status="failed"` and an error
+       message in `run.meta["error"]`. Failed runs should never be reused as cache hits.
+
+    3) On a second execution of the workflow with the same inputs/config/code:
+       - `prepare_data` should be a cache hit (not re-executed).
+       - `train_model` should re-execute (since the previous attempt failed).
+       - the pipeline should be able to continue to `evaluate_model`.
+
+    Bonus: Ghost Mode
+    -----------------
+    After we ingest `prepare_data` into DuckDB, we delete the original CSV file.
+    Downstream steps then call `consist.load(...)` on the input artifact; since the file
+    is missing but `is_ingested=True`, Consist transparently loads the data from DuckDB.
+    """
+    tracker.identity.hashing_strategy = "fast"
+
+    execution_counts = {"prepare_data": 0, "train_model": 0, "evaluate_model": 0}
+    train_attempts = {"count": 0}
+
+    prepared_path = run_dir / "prepared_data.csv"
+    model_path = run_dir / "model.json"
+    report_path = run_dir / "report.json"
+
+    @tracker.task()
+    def prepare_data(rows: int = 8) -> Path:
+        execution_counts["prepare_data"] += 1
+        _write_csv(prepared_path, rows=rows)
+        return prepared_path
+
+    @tracker.task()
+    def train_model(prepared_file: Path) -> Path:
+        execution_counts["train_model"] += 1
+
+        # Tasks receive resolved filesystem Paths, but Consist still tracks the original
+        # input artifacts on the active run record.
+        input_artifact = next(
+            a for a in tracker.current_consist.inputs if a.key == "prepared_data"
+        )
+        df = consist.load(input_artifact, tracker=tracker)
+
+        train_attempts["count"] += 1
+        if train_attempts["count"] == 1:
+            # Simulate an OS-level failure (e.g., writing model artifacts runs out of space).
+            # The tracker should mark this run "failed" and record the exception string.
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        model_payload = {"rows": int(len(df)), "mean_value": float(df["value"].mean())}
+        model_path.write_text(json.dumps(model_payload))
+        return model_path
+
+    @tracker.task()
+    def evaluate_model(model_file: Path, prepared_file: Path) -> Path:
+        execution_counts["evaluate_model"] += 1
+
+        model_payload = json.loads(Path(model_file).read_text())
+        input_artifact = next(
+            a for a in tracker.current_consist.inputs if a.key == "prepared_data"
+        )
+        df = consist.load(input_artifact, tracker=tracker)
+
+        report_path.write_text(
+            json.dumps(
+                {
+                    "ok": True,
+                    "rows": int(len(df)),
+                    "model_rows": int(model_payload["rows"]),
+                }
+            )
+        )
+        return report_path
+
+    # --- First execution: predecessor completes, training fails ---
+    prepared_artifact = prepare_data(rows=8)
+    # Materialize the predecessor output into DuckDB so downstream steps can still
+    # read it even if the underlying file disappears (ghost mode).
+    tracker.ingest(prepared_artifact)
+
+    # Delete the on-disk file to force `consist.load(...)` to go through DuckDB.
+    prepared_artifact.path.unlink()
+    assert not prepared_artifact.path.exists()
+
+    with pytest.raises(OSError) as exc_info:
+        train_model(prepared_artifact)
+    assert "No space left on device" in str(exc_info.value)
+
+    prepare_runs = consist.run_query(
+        select(Run).where(Run.model_name == "prepare_data"), tracker=tracker
+    )
+    assert len(prepare_runs) == 1
+    assert prepare_runs[0].status == "completed"
+
+    train_runs = consist.run_query(
+        select(Run).where(Run.model_name == "train_model"), tracker=tracker
+    )
+    assert len(train_runs) == 1
+    assert train_runs[0].status == "failed"
+    assert "No space left on device" in train_runs[0].meta.get("error", "")
+
+    eval_runs = consist.run_query(
+        select(Run).where(Run.model_name == "evaluate_model"), tracker=tracker
+    )
+    assert len(eval_runs) == 0
+
+    # --- Second execution: should reuse cached predecessor and succeed downstream ---
+    prepared_artifact_2 = prepare_data(rows=8)
+    assert prepared_artifact_2.uri == prepared_artifact.uri
+
+    model_artifact = train_model(prepared_artifact_2)
+    report_artifact = evaluate_model(model_artifact, prepared_artifact_2)
+
+    assert report_artifact.path.exists()
+    assert execution_counts["prepare_data"] == 1, "Predecessor should be reused via cache"
+    assert execution_counts["train_model"] == 2
+    assert execution_counts["evaluate_model"] == 1
+
+    prepare_runs = consist.run_query(
+        select(Run).where(Run.model_name == "prepare_data"), tracker=tracker
+    )
+    assert len(prepare_runs) == 2
+    assert any(r.meta.get("cache_hit") is True for r in prepare_runs)
+
+    train_runs = consist.run_query(
+        select(Run).where(Run.model_name == "train_model"), tracker=tracker
+    )
+    assert len(train_runs) == 2
+    assert [r.status for r in train_runs].count("failed") == 1
+    assert [r.status for r in train_runs].count("completed") == 1
+
+    eval_runs = consist.run_query(
+        select(Run).where(Run.model_name == "evaluate_model"), tracker=tracker
+    )
+    assert len(eval_runs) == 1
+    assert eval_runs[0].status == "completed"

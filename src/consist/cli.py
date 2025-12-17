@@ -616,7 +616,9 @@ def preview(
             # Avoid loading the full file when we only need a head() preview.
             load_kwargs["nrows"] = n_rows
 
-        data = consist.load(artifact, tracker=tracker, **load_kwargs)
+        data = consist.load(
+            artifact, tracker=tracker, db_fallback="always", **load_kwargs
+        )
     except FileNotFoundError:
         abs_path = tracker.resolve_uri(artifact.uri)
         from consist.tools.mount_diagnostics import (
@@ -772,7 +774,7 @@ def schema(
     try:
         import consist
 
-        data = consist.load(artifact, tracker=tracker)
+        data = consist.load(artifact, tracker=tracker, db_fallback="always")
     except FileNotFoundError:
         abs_path = tracker.resolve_uri(artifact.uri)
         from consist.tools.mount_diagnostics import (
@@ -1014,7 +1016,9 @@ class ConsistShell(cmd.Cmd):
                 load_kwargs: Dict[str, Any] = {}
                 if artifact.driver == "csv":
                     load_kwargs["nrows"] = n_rows
-                data = consist.load(artifact, tracker=self.tracker, **load_kwargs)
+                data = consist.load(
+                    artifact, tracker=self.tracker, db_fallback="always", **load_kwargs
+                )
             except FileNotFoundError:
                 abs_path = self.tracker.resolve_uri(artifact.uri)
                 from consist.tools.mount_diagnostics import (
@@ -1110,7 +1114,9 @@ class ConsistShell(cmd.Cmd):
             try:
                 import consist
 
-                data = consist.load(artifact, tracker=self.tracker)
+                data = consist.load(
+                    artifact, tracker=self.tracker, db_fallback="always"
+                )
             except FileNotFoundError:
                 abs_path = self.tracker.resolve_uri(artifact.uri)
                 from consist.tools.mount_diagnostics import (

@@ -57,3 +57,18 @@ def test_scenario_context(tracker: Tracker):
     run = tracker.get_run("header")
     assert run is not None
     # assert run.status == "completed" # TODO: Figure out why this is still "running"
+
+
+def test_scenario_step_input_keys_declares_inputs(tracker: Tracker):
+    """
+    `ScenarioContext.step(..., input_keys=[...])` should declare inputs before begin_run()
+    computes the cache signature (so caching and `db_fallback='inputs-only'` stay correct).
+    """
+    with tracker.scenario("scen_input_keys") as sc:
+        with sc.step("produce") as t:
+            produced = t.log_artifact("raw.csv", key="raw", direction="output")
+            sc.coupler.set("raw", produced)
+
+        with sc.step("consume", input_keys=["raw"], cache_mode="overwrite") as t:
+            assert t.current_consist is not None
+            assert any(a.id == produced.id for a in t.current_consist.inputs)

@@ -136,3 +136,42 @@ def test_cache_overwrite_mode(tracker, dummy_input):
         assert t.is_cached, "Run C should have a cache hit."
         cached_run = t.current_consist.cached_run
         assert cached_run.id == "run_B_overwrite"
+
+
+def test_log_artifact_on_cache_hit_returns_cached_output(tracker, dummy_input):
+    """
+    On cache hits, step bodies still execute. `log_artifact(...)` should therefore be
+    safe to call in cache-agnostic code:
+
+    - If the requested output key exists in the hydrated cached outputs, return it.
+    - If the key does not exist, raise (to avoid creating confusing "new" outputs on a
+      run that did not execute).
+    """
+    config = {"param": 7}
+    input_path = str(dummy_input)
+
+    with tracker.start_run(
+        "run_A_log_artifact_cache",
+        model="test_model",
+        config=config,
+        inputs=[input_path],
+    ) as t:
+        out_path = t.run_dir / "out.parquet"
+        pd.DataFrame({"a": [1]}).to_parquet(out_path)
+        produced = t.log_artifact(out_path, key="out", direction="output")
+
+    with tracker.start_run(
+        "run_B_log_artifact_cache",
+        model="test_model",
+        config=config,
+        inputs=[input_path],
+    ) as t:
+        assert t.is_cached
+        assert len(t.current_consist.outputs) == 1
+
+        returned = t.log_artifact("does-not-matter.parquet", key="out", direction="output")
+        assert returned.id == produced.id
+        assert len(t.current_consist.outputs) == 1
+
+        with pytest.raises(RuntimeError, match="Cannot log a new output artifact"):
+            t.log_artifact("new.parquet", key="new", direction="output")

@@ -32,6 +32,7 @@ import shutil
 from sqlmodel import Session, select
 
 from consist.core.tracker import Tracker
+from consist.core.materialize import materialize_artifacts
 from consist.models.artifact import Artifact
 from consist.integrations.containers.models import ContainerDefinition
 from consist.integrations.containers.backends import DockerBackend, SingularityBackend
@@ -170,74 +171,56 @@ def _reuse_or_execute_container(
         )
         if set(requested_outputs).issubset(set(cached_outputs)):
             logger.info(f"✅ [Consist] Container cache hit: {run_id} -> {cached.id}")
-            # re-link cached artifacts to current run
-            if tracker.db:
+            # Re-link cached artifacts to current run for provenance (inputs + outputs).
+            if tracker.db and tracker.engine:
                 with Session(tracker.engine) as session:
                     links = session.exec(
-                        select(RunArtifactLink).where(
-                            RunArtifactLink.run_id == cached.id
-                        )
+                        select(RunArtifactLink).where(RunArtifactLink.run_id == cached.id)
                     ).all()
-            for link in links:
-                session.merge(
-                    RunArtifactLink(
-                        run_id=run_id,
-                        artifact_id=link.artifact_id,
-                        direction=link.direction,
-                    )
-                )
-                session.commit()
-
-                # Hydrate outputs onto the host so callers see expected files
-                with Session(tracker.engine) as session:
-                    linked_outputs = session.exec(
-                        select(Artifact, RunArtifactLink.direction)
-                        .join(
-                            RunArtifactLink, Artifact.id == RunArtifactLink.artifact_id
-                        )
-                        .where(RunArtifactLink.run_id == cached.id)
-                    ).all()
-                output_arts = [
-                    a for a, direction in linked_outputs if direction == "output"
-                ]
-
-                for host_out in requested_outputs:
-                    target = Path(host_out).resolve()
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    match = next(
-                        (
-                            a
-                            for a in output_arts
-                            if a.key == target.name
-                            or Path(a.uri).name == target.name
-                            or (
-                                output_key_map
-                                and output_key_map.get(str(target)) == a.key
+                    for link in links:
+                        session.add(
+                            RunArtifactLink(
+                                run_id=run_id,
+                                artifact_id=link.artifact_id,
+                                direction=link.direction,
                             )
-                        ),
-                        None,
+                        )
+                    session.commit()
+
+            # Materialize requested outputs onto the host so callers see expected files.
+            # This is copy-only physical materialization (bytes-on-disk), not DB reconstruction.
+            cached_items = tracker.get_artifacts_for_run(cached.id)
+            output_arts = list(cached_items.outputs.values())
+            items: list[tuple[Artifact, Path]] = []
+
+            for host_out in requested_outputs:
+                target = Path(host_out).resolve()
+                match = next(
+                    (
+                        a
+                        for a in output_arts
+                        if a.key == target.name
+                        or Path(a.uri).name == target.name
+                        or (output_key_map and output_key_map.get(str(target)) == a.key)
+                    ),
+                    None,
+                )
+                if not match:
+                    logger.warning(
+                        "⚠️ [Consist] Cache hit but no matching artifact for requested output: %s",
+                        host_out,
                     )
-                    if not match:
-                        logger.warning(
-                            f"⚠️ [Consist] Cache hit but no matching artifact for requested output: {host_out}"
-                        )
-                        continue
-                    try:
-                        src_path = Path(tracker.resolve_uri(match.uri)).resolve()
-                        if src_path.is_dir():
-                            shutil.copytree(src_path, target, dirs_exist_ok=True)
-                        else:
-                            shutil.copy2(src_path, target)
-                    except Exception as e:
-                        logger.warning(
-                            f"⚠️ [Consist] Failed to hydrate cached output {host_out} from {match.uri}: {e}"
-                        )
+                    continue
+                items.append((match, target))
+
+            materialized = materialize_artifacts(tracker=tracker, items=items, on_missing="warn")
             tracker.db.update_run_meta(
                 run_id,
                 {
                     "cache_hit": True,
                     "cache_source": cached.id,
                     "declared_outputs": requested_outputs,
+                    "materialized_outputs": materialized,
                 },
             )
             tracker.db.update_run_signature(run_id, signature)
@@ -251,6 +234,7 @@ def _reuse_or_execute_container(
                         "cache_hit": True,
                         "cache_source": cached.id,
                         "declared_outputs": requested_outputs,
+                        "materialized_outputs": materialized,
                     }
                 )
                 run_obj.meta = meta

@@ -4,6 +4,8 @@ repo_url: https://github.com/LBNL-UCB-STI/consist
 repo_name: LBNL-UCB-STI/consist
 theme:
   name: material
+  font:
+    text: Libre Franklin
   features:
     - navigation.sections
     - navigation.expand
@@ -12,6 +14,12 @@ theme:
     scheme: default
     primary: teal
     accent: purple
+  icon:
+    logo: material/train-car-box-full
+
+
+extra_css:
+  - stylesheets/extra.css
 
 plugins:
   - search
@@ -29,6 +37,7 @@ plugins:
 nav:
   - Home: index.md
   - User Guide: usage-guide.md
+  - Caching & Hydration: caching-and-hydration.md
   - CLI Reference: cli-reference.md
   - Architecture: architecture.md
   - API Reference:

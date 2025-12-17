@@ -83,7 +83,7 @@ def get_artifact_preview(
         # Use the public API instead of assuming tracker.load exists
         import consist
 
-        data = consist.load(artifact, tracker=tracker)
+        data = consist.load(artifact, tracker=tracker, db_fallback="always")
         if isinstance(data, pd.DataFrame):
             return data.head(limit)
     except FileNotFoundError:

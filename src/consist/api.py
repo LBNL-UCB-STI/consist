@@ -522,15 +522,20 @@ def capture_outputs(
 
 
 def load(
-    artifact: Artifact, tracker: Optional["Tracker"] = None, **kwargs: Any
+    artifact: Artifact,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
 ) -> Union[pd.DataFrame, "xr.Dataset", Any]:
     """
     Smart loader that retrieves data for an artifact from the best available source.
 
     This function attempts to load the data associated with an `Artifact` object.
     It prioritizes loading from disk (raw format) if the file exists. If the file
-    is missing but the artifact is marked as ingested, it attempts to recover the data
-    from the Consist DuckDB database ("Ghost Mode").
+    is missing but the artifact is marked as ingested, it can optionally recover the
+    data from the Consist DuckDB database ("Ghost Mode"). By default, DB recovery is
+    only allowed when the artifact is an input to an active, non-cached run.
 
     Parameters
     ----------
@@ -544,6 +549,15 @@ def load(
     **kwargs : Any
         Additional keyword arguments to pass to the underlying data loader function
         (e.g., `pd.read_parquet`, `pd.read_csv`, `xr.open_zarr`, `pd.read_sql`).
+    db_fallback : str, default "inputs-only"
+        Controls when the loader is allowed to fall back to DuckDB ("Ghost Mode") when
+        the file is missing but the artifact is marked as ingested.
+
+        - "inputs-only": allow DB fallback only if the artifact is declared as an input
+          to the current active run AND the current run is not a cache hit.
+        - "always": allow DB fallback whenever `artifact.meta["is_ingested"]` is true and
+          a tracker with a DB connection is available.
+        - "never": disable DB fallback entirely.
 
     Returns
     -------
@@ -611,6 +625,47 @@ def load(
 
     # 4. Try Database Load (Priority 2 - Ghost Mode)
     if artifact.meta.get("is_ingested", False):
+        if db_fallback not in {"inputs-only", "always", "never"}:
+            raise ValueError(
+                f"Invalid db_fallback={db_fallback!r}. Expected 'inputs-only', 'always', or 'never'."
+            )
+
+        if db_fallback == "never":
+            raise FileNotFoundError(
+                f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
+                f" - Disk Path: {path} (Missing)\n"
+                f" - Database: Ingested, but db_fallback='never'\n"
+                f"Hint: pass db_fallback='always' (or load within an active run where the artifact is a declared input)."
+            )
+
+        if db_fallback == "inputs-only":
+            if not tracker or not tracker.current_consist:
+                raise FileNotFoundError(
+                    f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
+                    f" - Disk Path: {path} (Missing)\n"
+                    f" - Database: Ingested, but no active run context\n"
+                    f"Hint: call consist.load(...) within a tracker.start_run(..., inputs=[...]) context, "
+                    f"or pass db_fallback='always'."
+                )
+            if getattr(tracker, "is_cached", False):
+                raise FileNotFoundError(
+                    f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
+                    f" - Disk Path: {path} (Missing)\n"
+                    f" - Database: Ingested, but current run is a cache hit\n"
+                    f"Hint: pass db_fallback='always' if you explicitly want DB recovery here."
+                )
+            is_declared_input = any(
+                (a.id == artifact.id) or (a.uri == artifact.uri)
+                for a in tracker.current_consist.inputs
+            )
+            if not is_declared_input:
+                raise FileNotFoundError(
+                    f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
+                    f" - Disk Path: {path} (Missing)\n"
+                    f" - Database: Ingested, but artifact is not a declared input to the active run\n"
+                    f"Hint: add it to inputs=[...] when starting the run, or pass db_fallback='always'."
+                )
+
         if not tracker or not tracker.engine:
             raise RuntimeError(
                 f"Artifact {artifact.key} is missing from disk, but marked as ingested. Provide a tracker with a DB connection to load it."

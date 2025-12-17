@@ -146,6 +146,24 @@ class ScenarioContext:
         self._first_step_started = True
         self._last_step_name = name
 
+        # Ergonomic helper: allow declaring step inputs by Coupler key, while still
+        # ensuring inputs are registered before begin_run() computes the cache signature.
+        #
+        # Example:
+        #   with sc.step("transform", input_keys=["raw"]):
+        #       raw = sc.coupler.require("raw")
+        #       ...
+        input_keys = kwargs.pop("input_keys", None)
+        if input_keys:
+            if isinstance(input_keys, str):
+                input_keys = [input_keys]
+            coupler_inputs = [self.coupler.require(k) for k in input_keys]
+            existing_inputs = kwargs.get("inputs")
+            if existing_inputs:
+                kwargs["inputs"] = list(existing_inputs) + coupler_inputs
+            else:
+                kwargs["inputs"] = coupler_inputs
+
         # 1. Construct Hierarchical ID & Enforce Linkage
         # Default ID: scenario_name + "_" + step_name
         run_id = kwargs.pop("run_id", f"{self.run_id}_{name}")

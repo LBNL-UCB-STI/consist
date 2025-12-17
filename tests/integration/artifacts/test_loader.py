@@ -84,7 +84,7 @@ def test_loader_priority_and_ghost_mode(tracker: Tracker):
 
     # TEST 2: Load from DB (Ghost Mode)
     # The loader should detect file is missing, check metadata, find it's ingested, and query DB.
-    ghost_df = load(fresh_artifact, tracker=tracker)
+    ghost_df = load(fresh_artifact, tracker=tracker, db_fallback="always")
 
     # Note: DB roundtrip might change column types (e.g. object -> string),
     # so we may need loose comparison or type casting.
@@ -104,6 +104,85 @@ def test_loader_priority_and_ghost_mode(tracker: Tracker):
 
     with pytest.raises(FileNotFoundError):
         load(fake_artifact, tracker=tracker)
+
+
+def test_loader_db_fallback_policy_paths(tracker: Tracker):
+    """
+    Covers `db_fallback` policy behavior for DB recovery ("Ghost Mode").
+
+    We explicitly validate four distinct paths:
+
+    1) "always": DB recovery works even outside an active run.
+    2) "inputs-only": DB recovery works when the artifact is a declared input to an
+       active, non-cached run.
+    3) "inputs-only": DB recovery is blocked when the artifact is NOT a declared input.
+    4) "inputs-only": if the artifact IS a declared input but cannot be loaded from disk
+       AND is not ingested, `load()` raises `FileNotFoundError`.
+    """
+    df = pd.DataFrame({"id": [1, 2, 3], "val": ["a", "b", "c"]})
+    file_path = tracker.run_dir / "data.csv"
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(file_path, index=False)
+
+    # Produce an artifact (so it has provenance/run_id) and ingest it so DB recovery is possible.
+    with tracker.start_run("produce_csv", model="producer"):
+        artifact = tracker.log_artifact(file_path, key="my_csv", driver="csv")
+
+    with tracker.start_run("ingest_csv", model="ingester", inputs=[artifact]):
+        tracker.ingest(artifact, df)
+
+    # Refresh the artifact so `is_ingested` is present in metadata.
+    from sqlmodel import Session, select
+
+    with Session(tracker.engine) as session:
+        ingested_artifact = session.exec(
+            select(Artifact).where(Artifact.id == artifact.id)
+        ).one()
+
+    # Delete the file to force any recovery to come from DuckDB.
+    file_path.unlink()
+    assert not file_path.exists()
+
+    # 1) "always": recovery succeeds even without an active run.
+    df_always = load(ingested_artifact, tracker=tracker, db_fallback="always")
+    assert len(df_always) == 3
+    assert df_always.iloc[0]["val"] == "a"
+
+    # 2) "inputs-only": recovery succeeds when declared as an input to an uncached run.
+    # Use overwrite to ensure this is NOT a cache hit; policy is meant to allow DB
+    # fallback only for inputs to an actually-executing run.
+    with tracker.start_run(
+        "consumer_with_input",
+        model="consumer",
+        inputs=[ingested_artifact],
+        cache_mode="overwrite",
+    ):
+        df_inputs_only_ok = load(ingested_artifact, tracker=tracker)
+        assert len(df_inputs_only_ok) == 3
+
+    # 3) "inputs-only": recovery is blocked when artifact is not declared as an input.
+    with tracker.start_run(
+        "consumer_without_input", model="consumer", cache_mode="overwrite"
+    ):
+        with pytest.raises(FileNotFoundError):
+            load(ingested_artifact, tracker=tracker)
+
+    # 4) "inputs-only": declared input but not ingested and missing on disk => FileNotFoundError.
+    other_path = tracker.run_dir / "other.csv"
+    df.to_csv(other_path, index=False)
+    with tracker.start_run("produce_other_csv", model="producer"):
+        cold_artifact = tracker.log_artifact(other_path, key="other_csv", driver="csv")
+    other_path.unlink()
+    assert not other_path.exists()
+
+    with tracker.start_run(
+        "consumer_missing_input",
+        model="consumer",
+        inputs=[cold_artifact],
+        cache_mode="overwrite",
+    ):
+        with pytest.raises(FileNotFoundError):
+            load(cold_artifact, tracker=tracker)
 
 
 def test_loader_drivers(run_dir: Path):

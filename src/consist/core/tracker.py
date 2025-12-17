@@ -146,6 +146,11 @@ class Tracker:
 
         # Active run tracking (for imperative begin_run/end_run pattern)
         self._active_run_cache_mode: Optional[str] = None
+        self._active_run_materialize_cached_outputs: str = "never"
+        self._active_run_materialize_cached_output_paths: Optional[
+            Dict[str, Path]
+        ] = None
+        self._active_run_materialize_cached_outputs_dir: Optional[Path] = None
 
         # In-process cache index to avoid DB timing/lock flakiness for immediate re-runs.
         # Keyed by (config_hash, input_hash, git_hash) to match cache lookup semantics.
@@ -262,6 +267,29 @@ class Tracker:
                 "Call end_run() first."
             )
 
+        materialize_cached_outputs = str(
+            kwargs.pop("materialize_cached_outputs", "never")
+        ).lower()
+        materialize_cached_output_paths_raw = kwargs.pop(
+            "materialize_cached_output_paths", None
+        )
+        materialize_cached_outputs_dir_raw = kwargs.pop(
+            "materialize_cached_outputs_dir", None
+        )
+
+        if materialize_cached_outputs not in {"never", "requested", "all"}:
+            raise ValueError(
+                "materialize_cached_outputs must be one of: 'never', 'requested', 'all'"
+            )
+        if materialize_cached_outputs == "requested" and materialize_cached_output_paths_raw is None:
+            raise ValueError(
+                "materialize_cached_outputs='requested' requires materialize_cached_output_paths"
+            )
+        if materialize_cached_outputs == "all" and materialize_cached_outputs_dir_raw is None:
+            raise ValueError(
+                "materialize_cached_outputs='all' requires materialize_cached_outputs_dir"
+            )
+
         raw_config_model: Optional[BaseModel] = (
             config if isinstance(config, BaseModel) else None
         )
@@ -320,6 +348,20 @@ class Tracker:
         push_tracker(self)
         self.current_consist = ConsistRecord(run=run, config=config_dict)
         self._active_run_cache_mode = cache_mode
+        self._active_run_materialize_cached_outputs = materialize_cached_outputs
+        self._active_run_materialize_cached_output_paths = (
+            {
+                str(k): Path(v)
+                for k, v in dict(materialize_cached_output_paths_raw).items()
+            }
+            if materialize_cached_output_paths_raw is not None
+            else None
+        )
+        self._active_run_materialize_cached_outputs_dir = (
+            Path(materialize_cached_outputs_dir_raw)
+            if materialize_cached_outputs_dir_raw is not None
+            else None
+        )
 
         # Persist a queryable facet (optional)
         facet_dict = self.config_facets.resolve_facet_dict(
@@ -414,6 +456,63 @@ class Tracker:
                 for art in cached_items.outputs.values():
                     art.abs_path = self.resolve_uri(art.uri)
                     self.current_consist.outputs.append(art)
+
+                # Optional physical materialization of cached outputs (copy-bytes-on-disk).
+                # Core Consist defaults to "never" (artifact hydration only). Integrations and
+                # advanced workflows can opt in via begin_run/start_run kwargs.
+                try:
+                    policy = self._active_run_materialize_cached_outputs
+                    if policy in {"requested", "all"}:
+                        from consist.core.materialize import (
+                            build_materialize_items_for_keys,
+                            materialize_artifacts,
+                        )
+
+                        items: list[tuple[Artifact, Path]] = []
+                        on_missing = "warn"
+
+                        if policy == "requested":
+                            destinations = (
+                                self._active_run_materialize_cached_output_paths or {}
+                            )
+                            items = build_materialize_items_for_keys(
+                                self.current_consist.outputs,
+                                destinations_by_key=destinations,
+                            )
+                            requested_keys = set(destinations.keys())
+                            hydrated_keys = {a.key for a in self.current_consist.outputs}
+                            missing_keys = requested_keys - hydrated_keys
+                            if missing_keys:
+                                logging.warning(
+                                    "[Consist] Requested cached output materialization for missing keys: %s",
+                                    sorted(missing_keys),
+                                )
+                        else:  # policy == "all"
+                            on_missing = "raise"
+                            out_dir = self._active_run_materialize_cached_outputs_dir
+                            if not out_dir:
+                                raise ValueError(
+                                    "materialize_cached_outputs='all' requires materialize_cached_outputs_dir"
+                                )
+                            out_dir = Path(out_dir).resolve()
+                            items = [
+                                (a, out_dir / Path(self.resolve_uri(a.uri)).name)
+                                for a in self.current_consist.outputs
+                            ]
+
+                        materialized = materialize_artifacts(
+                            tracker=self, items=items, on_missing=on_missing
+                        )
+                        if materialized:
+                            run.meta["materialized_outputs"] = materialized
+                except Exception as e:
+                    if self._active_run_materialize_cached_outputs == "all":
+                        raise
+                    logging.warning(
+                        "[Consist] Failed to materialize cached outputs (policy=%s): %s",
+                        self._active_run_materialize_cached_outputs,
+                        e,
+                    )
 
                 # Mirror cache metadata on the active run for downstream checks (e.g., tests)
                 run.meta["cache_hit"] = True
@@ -632,6 +731,9 @@ class Tracker:
         # Clear current run context
         self.current_consist = None
         self._active_run_cache_mode = None
+        self._active_run_materialize_cached_outputs = "never"
+        self._active_run_materialize_cached_output_paths = None
+        self._active_run_materialize_cached_outputs_dir = None
 
         return run
 
@@ -853,6 +955,39 @@ class Tracker:
 
         if not self.current_consist:
             raise RuntimeError("Cannot log artifact: no active run.")
+
+        # Cache-hit ergonomics:
+        # - Scenario/task bodies still execute on cache hits (we hydrate cached outputs,
+        #   but we do not skip user code).
+        # - Many workflows write cache-agnostic code that calls `log_artifact(...)` in
+        #   both cache-hit and cache-miss cases.
+        # - On cache hits, re-logging outputs should typically *return the hydrated cached
+        #   output* (by key) rather than creating a new artifact node.
+        #
+        # We intentionally *reject* attempts to log a brand-new output on a cache hit,
+        # because it would create confusing provenance (a run claiming outputs it did not
+        # actually produce). If you want to produce new outputs, run with
+        # `cache_mode="overwrite"`.
+        if direction == "output" and self.is_cached:
+            lookup_key = key
+            if lookup_key is None and isinstance(path, Artifact):
+                lookup_key = path.key
+
+            if not lookup_key:
+                raise ValueError(
+                    "Cannot log output artifact on a cache hit without a key. "
+                    "Provide `key=...` (or pass an Artifact with `.key` set)."
+                )
+
+            cached = self.cached_output(key=lookup_key)
+            if cached is not None:
+                return cached
+
+            raise RuntimeError(
+                f"Cannot log a new output artifact (key={lookup_key!r}) on a cache-hit run "
+                f"(run_id={self.current_consist.run.id!r}, cache_source={self.current_consist.cached_run.id!r}). "
+                "This run is reusing prior outputs; to generate new outputs, run with cache_mode='overwrite'."
+            )
 
         run_id = self.current_consist.run.id if direction == "output" else None
 
