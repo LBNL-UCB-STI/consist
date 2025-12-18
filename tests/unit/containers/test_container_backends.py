@@ -168,8 +168,16 @@ def test_singularity_cache_selection(
         == "/fast_local/.singularity/cache"
     )
 
-    # Verify we tried to create them
-    mock_makedirs.assert_any_call("/fast_local/.apptainer/cache", exist_ok=True)
+    # Verify we tried to create them (path separator agnostic)
+    created_dirs = {
+        Path(call.args[0]).as_posix()
+        for call in mock_makedirs.call_args_list
+        if call.kwargs.get("exist_ok") is True and call.args
+    }
+    assert "/fast_local/.apptainer/cache" in created_dirs
+    assert "/fast_local/.apptainer/tmp" in created_dirs
+    assert "/fast_local/.singularity/cache" in created_dirs
+    assert "/fast_local/.singularity/tmp" in created_dirs
 
 
 # --- Docker Tests ---
