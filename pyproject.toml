@@ -34,13 +34,14 @@ classifiers = [
 consist = "consist.cli:app"
 
 [project.optional-dependencies]
+# Optional runtime integrations (install as needed).
 docker = ["docker>=7.1.0"]
 hdf5 = ["h5py>=3.15.1", "tables>=3.10.2"]
 ingest = ["dlt>=1.18.2"]
 netcdf = ["cftime>=1.6.0", "netCDF4>=1.6.0", "xarray>=2025.11.0"]
 zarr = ["xarray>=2025.11.0", "zarr>=2.18,<3"]
 
-# Convenience extras
+# Convenience extras.
 all = [
     "cftime>=1.6.0",
     "docker>=7.1.0",
@@ -53,7 +54,13 @@ all = [
 ]
 bench = ["polars>=1.35.2", "psutil>6.0.0"]
 docs = ["mkdocs-material>=9.7.0", "mkdocstrings[python]>=1.0.0"]
-test = ["pytest>=9.0.1", "pytest-cov>=7.0.0", "pytest-mock>=3.15.1"]
+# Test + lint tools used by CI and local development.
+test = [
+    "pytest>=9.0.1",
+    "pytest-cov>=7.0.0",
+    "pytest-mock>=3.15.1",
+    "ruff>=0.14.6",
+]
 dev = [
     "black>=25.11.0",
     "docker>=7.1.0",
@@ -103,6 +110,7 @@ docs = [
 [tool.pytest.ini_options]
 markers = [
     "heavy: marks tests as heavyweight/long-running",
+    "flaky: marks tests as flaky/retryable",
     "timeout: marks tests with explicit timeout expectations",
 ]
 

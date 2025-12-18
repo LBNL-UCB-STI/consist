@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Keep the matrix small to reduce CI time/credits.
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.11"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Use uv for fast, lockfile-based installs + caching.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: >
+          uv sync --frozen
+          --extra test
+          --extra all
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: >
+          uv sync --frozen
+          --extra test
+          --extra all
+
+      - name: Ruff
+        run: uv run -m ruff check src tests
+
+      - name: Pytest (skip heavy)
+        run: >
+          uv run -m pytest -q
+          -m "not heavy"
+          tests/unit tests/integration tests/e2e
