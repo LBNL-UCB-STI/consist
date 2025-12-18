@@ -38,8 +38,8 @@ def test_tags_and_run_timing(tracker: Tracker, tmp_path: Path):
     # Check history includes new fields
     df = tracker.history(limit=5)
     print(f"\\nHistory columns: {list(df.columns)}")
-    print(f'Tags from history: {df.iloc[0]["tags"]}')
-    print(f'Duration from history: {df.iloc[0]["duration_seconds"]:.3f} seconds')
+    print(f"Tags from history: {df.iloc[0]['tags']}")
+    print(f"Duration from history: {df.iloc[0]['duration_seconds']:.3f} seconds")
 
     # Test tag filtering
     df_filtered = tracker.history(tags=["production"])

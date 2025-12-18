@@ -36,7 +36,6 @@ def test_singularity_command_construction():
         patch("os.makedirs"),
         patch("pathlib.Path.mkdir"),
     ):  # Patch mkdir for the run() method
-
         backend = SingularityBackend(cache_base_options=["/tmp"])
 
         with patch("subprocess.run") as mock_run:
@@ -162,7 +161,10 @@ def test_singularity_cache_selection(
     SingularityBackend(cache_base_options=["/fast_local"])
 
     # Check that environment vars were set correctly pointing to /fast_local
-    assert Path(os.environ["APPTAINER_CACHEDIR"]).as_posix() == "/fast_local/.apptainer/cache"
+    assert (
+        Path(os.environ["APPTAINER_CACHEDIR"]).as_posix()
+        == "/fast_local/.apptainer/cache"
+    )
     assert (
         Path(os.environ["SINGULARITY_CACHEDIR"]).as_posix()
         == "/fast_local/.singularity/cache"

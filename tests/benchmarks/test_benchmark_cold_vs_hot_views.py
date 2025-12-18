@@ -13,6 +13,7 @@ It serves to demonstrate how Consist, by leveraging DuckDB, can provide competit
 or superior performance and resource usage compared to traditional Python data
 analysis libraries for certain workloads.
 """
+
 import logging
 from pathlib import Path
 

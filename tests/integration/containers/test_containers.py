@@ -424,7 +424,6 @@ def test_granular_cache_invalidation(
             return_value=mock_backend,
         ),
     ):
-
         base_args = dict(
             tracker=clean_tracker,
             run_id="base_run",
@@ -466,9 +465,9 @@ def test_granular_cache_invalidation(
         run_container(**new_args)
 
         # Assert Cache Miss
-        assert (
-            mock_backend.run_count == 2
-        ), f"Failed to invalidate cache on change: {change_type}"
+        assert mock_backend.run_count == 2, (
+            f"Failed to invalidate cache on change: {change_type}"
+        )
 
 
 # --- Real Docker Integration Test ---

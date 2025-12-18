@@ -567,7 +567,6 @@ def run_container(
         # so we disable core Tracker caching to avoid double-cache interactions.
         cache_mode="overwrite",
     ) as t:
-
         _reuse_or_execute_container(
             tracker=t,
             defn=config,

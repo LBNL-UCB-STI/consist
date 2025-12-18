@@ -372,9 +372,9 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
     report_artifact = evaluate_model(model_artifact, prepared_artifact_2)
 
     assert report_artifact.path.exists()
-    assert (
-        execution_counts["prepare_data"] == 1
-    ), "Predecessor should be reused via cache"
+    assert execution_counts["prepare_data"] == 1, (
+        "Predecessor should be reused via cache"
+    )
     assert execution_counts["train_model"] == 2
     assert execution_counts["evaluate_model"] == 1
 

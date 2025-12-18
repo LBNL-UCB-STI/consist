@@ -168,9 +168,9 @@ def mock_model_step(
         cache_mode=cache_mode,
     ) as t:
         if t.is_cached:
-            assert (
-                len(t.current_consist.outputs) > 0
-            ), f"Step {step_name}: Cached run missing outputs!"
+            assert len(t.current_consist.outputs) > 0, (
+                f"Step {step_name}: Cached run missing outputs!"
+            )
             output_artifact = t.current_consist.outputs[0]
             return t.resolve_uri(output_artifact.uri)
         else:
@@ -278,9 +278,9 @@ def test_cache_overwrite_mode(tracker_setup, ctx):
     out_a_2 = mock_model_step(tracker, ctx, "A", [], {"p": 1}, cache_mode="overwrite")
 
     # ASSERTIONS
-    assert (
-        "A" in ctx.execution_log
-    ), "Step A should have executed despite matching previous run"
+    assert "A" in ctx.execution_log, (
+        "Step A should have executed despite matching previous run"
+    )
     assert out_a_2 != out_a_1, "Overwrite run should produce a physically new artifact"
 
     # 3. Verify Database State

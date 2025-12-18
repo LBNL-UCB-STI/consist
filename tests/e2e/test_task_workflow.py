@@ -256,9 +256,9 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     print([r.meta for r in runs])
     print(runs)
     assert len(cache_hits) == 1, "Should have exactly one cache hit run"
-    assert (
-        cache_hits[0].meta.get("cache_source") is not None
-    ), "Cache hit should reference source"
+    assert cache_hits[0].meta.get("cache_source") is not None, (
+        "Cache hit should reference source"
+    )
 
     # The other run should be the original (no cache_hit metadata)
     originals = [r for r in runs if not r.meta.get("cache_hit")]
@@ -282,9 +282,9 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
 
     # Verify the new config run is NOT a cache hit
     latest_run = runs[-1]
-    assert not latest_run.meta.get(
-        "cache_hit"
-    ), "New config should execute, not hit cache"
+    assert not latest_run.meta.get("cache_hit"), (
+        "New config should execute, not hit cache"
+    )
 
     # === Fourth execution: test cache_mode="overwrite" ===
     @tracker.task(cache_mode="overwrite")
@@ -387,9 +387,9 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
         select(Run).where(Run.model_name == "clean_data"), tracker=tracker
     )
     # Should have original, new config, and modified input = 3 runs
-    assert (
-        len(clean_runs) == 4
-    ), "Should have original, cache hit, new config, and modified input runs"
+    assert len(clean_runs) == 4, (
+        "Should have original, cache hit, new config, and modified input runs"
+    )
 
     # Verify the cleaned data is different
     df_cleaned_modified = consist.load(cleaned_modified)

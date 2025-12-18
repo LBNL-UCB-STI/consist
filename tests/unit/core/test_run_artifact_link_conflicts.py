@@ -67,9 +67,9 @@ def test_run_artifact_link_distinct_input_and_output_no_warning(
         )
 
     warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
-    assert not any(
-        "Ignoring attempt to link artifact_id" in msg for msg in warnings
-    ), f"Did not expect conflict warning; got: {warnings}"
+    assert not any("Ignoring attempt to link artifact_id" in msg for msg in warnings), (
+        f"Did not expect conflict warning; got: {warnings}"
+    )
 
     with Session(tracker.engine) as session:
         links = session.exec(

@@ -59,6 +59,9 @@ jobs:
       - name: Ruff
         run: uv run -m ruff check src tests
 
+      - name: Ruff format
+        run: uv run -m ruff format --check src tests
+
       - name: Pytest (skip heavy)
         run: >
           uv run -m pytest -q

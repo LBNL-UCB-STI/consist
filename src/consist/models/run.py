@@ -149,7 +149,9 @@ class Run(SQLModel, table=True):
         status_icon = (
             "🟢"
             if self.status == "completed"
-            else "🔴" if self.status == "failed" else "🟡"
+            else "🔴"
+            if self.status == "failed"
+            else "🟡"
         )
         return f"<{status_icon} Run id='{self.id}' model='{self.model_name}' status='{self.status}'>"
 
