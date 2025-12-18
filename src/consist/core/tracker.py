@@ -361,6 +361,8 @@ class Tracker:
             config_dict["__consist_hash_inputs__"] = digest_map
             kwargs["consist_hash_inputs"] = digest_map
 
+        config_dict = self.identity.normalize_json(config_dict)
+
         # Compute core identity hashes early
         # Important: keep the stored config snapshot as user-provided config, but include
         # selected Run fields in the identity hash to avoid accidental cache hits.
@@ -2105,7 +2107,8 @@ class Tracker:
         if self.current_consist.run.meta is None:
             self.current_consist.run.meta = {}
 
-        self.current_consist.run.meta.update(kwargs)
+        normalized = self.identity.normalize_json(kwargs)
+        self.current_consist.run.meta.update(normalized)
 
         # 2. Persist
         self._flush_json()

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Tuple
+from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -24,16 +24,16 @@ class PredatorPreyConfig:
     dt: float = 1.0
     seed: int = 7
 
-    prey_init: int = 80
-    predator_init: int = 25
+    prey_init: int = 800
+    predator_init: int = 250
 
     prey_birth_rate: float = 0.55
     predation_rate: float = 0.015
     predator_birth_efficiency: float = 0.20
     predator_death_rate: float = 0.35
 
-    prey_carrying_capacity: int = 2_000
-    max_population: int = 5_000_000
+    prey_carrying_capacity: int = 2_0000
+    max_population: int = 50_000_000
 
     sample_every: int = 1
 
@@ -79,14 +79,12 @@ def make_parameter_sweep(
 
 def run_predator_prey(
     config: PredatorPreyConfig,
-) -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
+) -> pd.DataFrame:
     """
     Run one Monte Carlo predator–prey simulation.
 
     Returns:
-        raw: dict containing full-resolution arrays for optional storage
         time_series: sampled time series (tabular, for DuckDB ingestion)
-        metrics: single-row per-sim summary metrics (tabular, for DuckDB ingestion)
     """
     rng = np.random.default_rng(config.seed)
     steps = int(config.steps)
@@ -148,43 +146,4 @@ def run_predator_prey(
             )
 
     time_series = pd.DataFrame(samples)
-
-    prey_final = int(prey[-1])
-    predator_final = int(predator[-1])
-    prey_extinct = int((prey == 0).any())
-    predator_extinct = int((predator == 0).any())
-
-    prey_mean = float(prey.mean())
-    predator_mean = float(predator.mean())
-    prey_std = float(prey.std())
-    predator_std = float(predator.std())
-
-    metrics = pd.DataFrame(
-        [
-            {
-                "steps": int(config.steps),
-                "dt": float(config.dt),
-                "seed": int(config.seed),
-                "prey_init": int(config.prey_init),
-                "predator_init": int(config.predator_init),
-                "prey_birth_rate": prey_birth_rate,
-                "predation_rate": predation_rate,
-                "predator_birth_efficiency": predator_birth_efficiency,
-                "predator_death_rate": predator_death_rate,
-                "prey_mean": prey_mean,
-                "predator_mean": predator_mean,
-                "prey_std": prey_std,
-                "predator_std": predator_std,
-                "prey_final": prey_final,
-                "predator_final": predator_final,
-                "prey_extinct": prey_extinct,
-                "predator_extinct": predator_extinct,
-            }
-        ]
-    )
-
-    raw: Dict[str, Any] = {
-        "prey": prey,
-        "predator": predator,
-    }
-    return raw, time_series, metrics
+    return time_series

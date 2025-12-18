@@ -74,6 +74,15 @@ class IdentityManager:
         """SHA256 hex digest of `canonical_json_str(obj)`."""
         return hashlib.sha256(self.canonical_json_str(obj).encode("utf-8")).hexdigest()
 
+    def normalize_json(self, obj: Any) -> Any:
+        """
+        Normalize Python structures into JSON-friendly types.
+
+        This mirrors the canonical hashing cleanup but preserves the full structure
+        without excluding any keys.
+        """
+        return self._clean_structure(obj, set())
+
     # --- Run Signature Calculation ---
 
     def calculate_run_signature(
