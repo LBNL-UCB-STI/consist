@@ -1208,8 +1208,10 @@ class Tracker:
 
             # Build filter function
             if table_filter is None:
+
                 def filter_fn(name: str) -> bool:
                     return True
+
             elif isinstance(table_filter, list):
                 # Convert list to set for O(1) lookup
                 filter_set = set(table_filter)
@@ -1217,6 +1219,7 @@ class Tracker:
                 def filter_fn(name: str) -> bool:
                     stripped = name.lstrip("/")
                     return name in filter_set or stripped in filter_set
+
             else:
                 filter_fn = table_filter
 
@@ -1901,15 +1904,17 @@ class Tracker:
         per_run_dir.mkdir(parents=True, exist_ok=True)
         per_run_target = per_run_dir / f"{safe_run_id}.json"
         per_run_tmp = per_run_target.with_suffix(".tmp")
-        with open(per_run_tmp, "w") as f:
+        with open(per_run_tmp, "w", encoding="utf-8") as f:
             f.write(json_str)
-        per_run_tmp.rename(per_run_target)
+        # `Path.rename()` overwrites on POSIX but fails on Windows if the destination exists.
+        # `Path.replace()` uses `os.replace()` and is atomic + cross-platform.
+        per_run_tmp.replace(per_run_target)
 
         latest_target = self.fs.run_dir / "consist.json"
         latest_tmp = latest_target.with_suffix(".tmp")
-        with open(latest_tmp, "w") as f:
+        with open(latest_tmp, "w", encoding="utf-8") as f:
             f.write(json_str)
-        latest_tmp.rename(latest_target)
+        latest_tmp.replace(latest_target)
 
     def _sync_run_to_db(self, run: Run) -> None:
         """

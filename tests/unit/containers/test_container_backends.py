@@ -116,7 +116,7 @@ def test_singularity_env_with_spaces_uses_passthrough_env():
             assert run_env["APPTAINERENV_JAVA_OPTS"] == "-Xms1g -Xmx1g"
 
 
-@patch("os.statvfs")
+@patch("consist.integrations.containers.backends.shutil.disk_usage")
 @patch("os.path.exists")
 @patch("os.access")
 @patch("os.makedirs")
@@ -124,7 +124,7 @@ def test_singularity_cache_selection(
     mock_makedirs: MagicMock,
     mock_access: MagicMock,
     mock_exists: MagicMock,
-    mock_statvfs: MagicMock,
+    mock_disk_usage: MagicMock,
 ):
     """
     Tests the `SingularityBackend`'s logic for selecting an appropriate cache directory.
@@ -134,7 +134,7 @@ def test_singularity_cache_selection(
     write permissions, as described in Consist's HPC optimization strategy.
 
     What happens:
-    1. Mock `os.statvfs`, `os.path.exists`, and `os.access` to simulate a specific
+    1. Mock `shutil.disk_usage`, `os.path.exists`, and `os.access` to simulate a specific
        filesystem state: a `/fast_local` directory exists, is writable, and has
        more than 20GB of free space.
     2. A `SingularityBackend` instance is initialized with `cache_base_options`
@@ -155,13 +155,8 @@ def test_singularity_cache_selection(
     mock_exists.side_effect = exists_side_effect
     mock_access.return_value = True
 
-    # Mock statvfs to return > 20GB free
-    # f_bavail * f_frsize = bytes
-    # 20GB = 20 * 1024**3 bytes
-    mock_stat = MagicMock()
-    mock_stat.f_bavail = 30 * (1024**3)
-    mock_stat.f_frsize = 1
-    mock_statvfs.return_value = mock_stat
+    # Mock disk_usage to return > 20GB free
+    mock_disk_usage.return_value = MagicMock(free=30 * (1024**3))
 
     SingularityBackend(cache_base_options=["/fast_local"])
 
@@ -288,7 +283,7 @@ def test_docker_run_exception_handling():
 # --- Additional Singularity Tests ---
 
 
-@patch("os.statvfs")
+@patch("consist.integrations.containers.backends.shutil.disk_usage")
 @patch("os.path.exists")
 @patch("os.access")
 @patch("os.makedirs")
@@ -296,7 +291,7 @@ def test_singularity_cache_fallback(
     mock_makedirs: MagicMock,
     mock_access: MagicMock,
     mock_exists: MagicMock,
-    mock_statvfs: MagicMock,
+    mock_disk_usage: MagicMock,
 ):
     """
     Verifies that `SingularityBackend` correctly falls back to using the current
@@ -307,9 +302,9 @@ def test_singularity_cache_fallback(
     space might be full or unavailable.
 
     What happens:
-    1. `os.statvfs`, `os.path.exists`, and `os.access` are mocked to simulate
+    1. `shutil.disk_usage`, `os.path.exists`, and `os.access` are mocked to simulate
        a scenario where all provided `cache_base_options` exist and are writable,
-       but none have sufficient free disk space (mocking `f_bavail` to 0).
+       but none have sufficient free disk space (mocking `free` to 0).
     2. `os.getcwd` is patched to return a predictable current working directory.
     3. A `SingularityBackend` instance is initialized.
 
@@ -322,10 +317,7 @@ def test_singularity_cache_fallback(
     mock_access.return_value = True
 
     # ... BUT zero space available
-    mock_stat = MagicMock()
-    mock_stat.f_bavail = 0
-    mock_stat.f_frsize = 1
-    mock_statvfs.return_value = mock_stat
+    mock_disk_usage.return_value = MagicMock(free=0)
 
     # Should fallback to current working directory (getcwd) logic
     # The code sets cache_base = os.getcwd() if loop fails

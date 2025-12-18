@@ -21,6 +21,7 @@ import os
 import logging
 import shlex
 import subprocess
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Union, Any
 
@@ -306,8 +307,7 @@ class SingularityBackend(ContainerBackend):
             if option and os.path.exists(option) and os.access(option, os.W_OK):
                 try:
                     # Check for ~20GB free space
-                    stat = os.statvfs(option)
-                    free_gb = (stat.f_bavail * stat.f_frsize) / (1024**3)
+                    free_gb = shutil.disk_usage(option).free / (1024**3)
                     if free_gb >= 20:
                         cache_base = option
                         break

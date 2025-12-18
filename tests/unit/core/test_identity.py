@@ -128,6 +128,7 @@ class TestInputHashing:
             art = Artifact(
                 key="raw", uri="inputs://file.txt", driver="txt", run_id=None
             )
+
             def resolver(uri: str) -> str:
                 return fname
 
@@ -155,6 +156,7 @@ class TestInputHashing:
 
         try:
             art = Artifact(key="raw", uri="inputs://x", driver="x", run_id=None)
+
             def resolver(uri: str) -> str:
                 return fname
 
