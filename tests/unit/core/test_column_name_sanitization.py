@@ -9,6 +9,7 @@ def test_typed_empty_view_uses_original_column_names(tracker):
         __tablename__ = "weird_table"
         __table_args__ = {"extend_existing": True}
 
+        id: int | None = Field(default=None, primary_key=True)
         mass_kg: float | None = Field(
             default=None, sa_column=Column("Mass(kg)", String, nullable=True)
         )

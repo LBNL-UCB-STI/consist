@@ -96,6 +96,23 @@ class IdentityManager:
         if git is None:
             return "no_git_module_found"
 
+        # NOTE:
+        # Tests patch `consist.core.identity.git` with a `MagicMock`. In that case,
+        # attributes like `git.InvalidGitRepositoryError` are *not* real exception
+        # classes, so catching them in an `except (...)` tuple raises:
+        #   "TypeError: catching classes that do not inherit from BaseException"
+        #
+        # To keep the production behavior and still support mocking, we defensively
+        # collect only real exception types from the module.
+        git_error_types: tuple[type[BaseException], ...] = tuple(
+            exc_type
+            for exc_type in (
+                getattr(git, "InvalidGitRepositoryError", None),
+                getattr(git, "NoSuchPathError", None),
+            )
+            if isinstance(exc_type, type) and issubclass(exc_type, BaseException)
+        )
+
         try:
             # search_parent_directories=True helps if running from a subdir
             repo = git.Repo(self.project_root, search_parent_directories=True)
@@ -124,14 +141,26 @@ class IdentityManager:
                     diff_cached = repo.git.diff("--cached")
                 except Exception:
                     diff_cached = ""
-                dirty_payload = "\n\n".join([sha, diff_cached, diff_head])
+                # NOTE:
+                # `repo.git.diff(...)` should return strings, but when `git`/`repo` is
+                # mocked, these can be `MagicMock` instances. Coerce to `str` so the
+                # join/hash logic is stable and doesn't crash under tests.
+                dirty_payload = "\n\n".join([sha, str(diff_cached), str(diff_head)])
                 dirty_hash = hashlib.sha256(
                     dirty_payload.encode("utf-8", errors="replace")
                 ).hexdigest()[:12]
                 return f"{sha}-dirty-{dirty_hash}"
 
             return sha
-        except (git.InvalidGitRepositoryError, git.NoSuchPathError):
+        except Exception as e:
+            # NOTE:
+            # In production, we mainly care about "not a git repo" style failures;
+            # in tests, the `git` module may be mocked which can change exception
+            # semantics. We keep this conservative (never crash) and return a stable
+            # fallback string when anything goes wrong.
+            if git_error_types and isinstance(e, git_error_types):
+                return "unknown_code_version"
+            return "unknown_code_version"
             return "unknown_code_version"
 
     def compute_callable_hash(

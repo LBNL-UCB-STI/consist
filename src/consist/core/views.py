@@ -1,7 +1,9 @@
 import logging
 import os
 import types
+from copy import copy
 from typing import Any, List, Optional, TYPE_CHECKING, Type, TypeVar, Dict, Tuple
+from sqlalchemy import Column
 from sqlmodel import select, Session, text, SQLModel, Field
 
 from consist.models.artifact import Artifact
@@ -65,7 +67,39 @@ def create_view_model(model: Type[T], name: Optional[str] = None) -> Type[T]:
     # 4. Clone Fields
     for field_name, field_info in model.model_fields.items():
         if field_name not in namespace:
-            namespace[field_name] = field_info
+            sa_column = getattr(field_info, "sa_column", None)
+            if isinstance(sa_column, Column):
+                # NOTE:
+                # SQLAlchemy `Column` objects are bound to a specific `Table` instance.
+                # If we reuse the same Column object from the schema model, SQLAlchemy
+                # will raise:
+                #   "Column object 'X' already assigned to Table 'Y'"
+                #
+                # This comes up in practice when a schema model uses a custom column
+                # name (e.g., `Column("Mass(kg)", ...)`) and we create a dynamic view
+                # model pointing at a different table (`v_*`).
+                #
+                # We therefore create a *new* Column with the same name and type so
+                # the view model preserves the original column names for quoting and
+                # for typed empty views, without sharing SQLAlchemy state.
+                sa_column = Column(
+                    sa_column.name,
+                    copy(sa_column.type),
+                    nullable=sa_column.nullable,
+                    primary_key=sa_column.primary_key,
+                    index=sa_column.index,
+                    unique=sa_column.unique,
+                )
+
+            default_factory = getattr(field_info, "default_factory", None)
+            if default_factory is not None:
+                namespace[field_name] = Field(
+                    default_factory=default_factory, sa_column=sa_column
+                )
+            else:
+                namespace[field_name] = Field(
+                    default=getattr(field_info, "default", None), sa_column=sa_column
+                )
 
     # 5. Create Dynamic Class
     def exec_body(ns):
