@@ -21,6 +21,7 @@ class SchemaFieldProfile:
     name: str
     logical_type: str
     nullable: bool
+    ordinal_position: int
     stats: Optional[Dict[str, Any]] = None
     is_enum: bool = False
     enum_values: Optional[List[str]] = None
@@ -92,6 +93,7 @@ def profile_duckdb_table(
                 name=str(col_name),
                 logical_type=str(data_type).lower(),
                 nullable=str(is_nullable).upper() == "YES",
+                ordinal_position=int(_ordinal),
             )
         )
 
@@ -102,7 +104,7 @@ def profile_duckdb_table(
     }
 
     field_rows = [f.to_row() for f in fields]
-    profile_obj: Dict[str, Any] = {
+    hash_obj: Dict[str, Any] = {
         "profile_version": PROFILE_VERSION,
         "source": source,
         "table_schema": table_schema,
@@ -110,12 +112,7 @@ def profile_duckdb_table(
         "sample_rows": sample_rows,
         "fields": field_rows,
     }
-
-    if len(fields) > MAX_FIELDS:
-        truncated_flags["fields"] = True
-        profile_obj["fields"] = []
-
-    schema_id = identity.canonical_json_sha256(profile_obj)
+    schema_id = identity.canonical_json_sha256(hash_obj)
 
     summary = {
         "profile_version": PROFILE_VERSION,
@@ -127,6 +124,11 @@ def profile_duckdb_table(
         "n_columns": len(fields),
         "truncated": truncated_flags,
     }
+
+    profile_obj: Dict[str, Any] = dict(hash_obj)
+    if len(fields) > MAX_FIELDS:
+        truncated_flags["fields"] = True
+        profile_obj["fields"] = []
 
     schema_json: Optional[Dict[str, Any]] = profile_obj
     if _json_size_bytes(profile_obj) > MAX_SCHEMA_JSON_BYTES:
@@ -143,5 +145,5 @@ def profile_duckdb_table(
         summary=summary,
         schema_json=schema_json,
         inline_profile_json=inline_profile_json,
-        fields=fields if not truncated_flags["fields"] else [],
+        fields=fields,
     )

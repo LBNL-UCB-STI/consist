@@ -261,6 +261,12 @@ results = consist.run_query(query, tracker=tracker)
 
 Views automatically include `consist_scenario_id`, `consist_year`, and other metadata columns for filtering and grouping.
 
+### Generating Schemas from Captured Data
+
+If you ingest tabular data into DuckDB, Consist can capture the observed schema and export an **editable SQLModel stub** so you can curate PK/FK constraints and then register the model for views.
+
+See `docs/schema-export.md` for the full workflow (CLI + Python) and column-name/`__tablename__` guidelines.
+
 ---
 
 ## Container Integration

@@ -165,6 +165,64 @@ class Tracker:
         """Delegates to the DatabaseManager engine."""
         return self.db.engine if self.db else None
 
+    def export_schema_sqlmodel(
+        self,
+        *,
+        schema_id: Optional[str] = None,
+        artifact_id: Optional[Union[str, uuid.UUID]] = None,
+        out_path: Optional[Path] = None,
+        table_name: Optional[str] = None,
+        class_name: Optional[str] = None,
+        abstract: bool = True,
+        include_system_cols: bool = False,
+        include_stats_comments: bool = True,
+    ) -> str:
+        """
+        Export a captured artifact schema as a SQLModel stub string for manual editing.
+
+        Exactly one of `schema_id` or `artifact_id` must be provided.
+        """
+        if not self.db:
+            raise ValueError("Schema export requires a configured database (db_path).")
+        if (schema_id is None) == (artifact_id is None):
+            raise ValueError("Provide exactly one of schema_id or artifact_id.")
+
+        backfill_ordinals = self.access_mode != "read_only"
+
+        if artifact_id is not None:
+            artifact_uuid = (
+                uuid.UUID(artifact_id) if isinstance(artifact_id, str) else artifact_id
+            )
+            fetched = self.db.get_artifact_schema_for_artifact(
+                artifact_id=artifact_uuid, backfill_ordinals=backfill_ordinals
+            )
+        else:
+            fetched = self.db.get_artifact_schema(
+                schema_id=schema_id, backfill_ordinals=backfill_ordinals
+            )
+
+        if fetched is None:
+            raise KeyError("Schema not found for the provided selector.")
+        schema, fields = fetched
+
+        from consist.core.schema_export import render_sqlmodel_stub
+
+        code = render_sqlmodel_stub(
+            schema=schema,
+            fields=fields,
+            table_name=table_name,
+            class_name=class_name,
+            abstract=abstract,
+            include_system_cols=include_system_cols,
+            include_stats_comments=include_stats_comments,
+        )
+
+        if out_path is not None:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(code, encoding="utf-8")
+
+        return code
+
     def _resolve_run_signature(self, run_id: str) -> Optional[str]:
         """
         Internal helper to look up a run's signature (Merkle identity) via the database.

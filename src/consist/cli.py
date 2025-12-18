@@ -10,6 +10,7 @@ of the execution history and status of various models and workflows.
 import cmd
 import shlex
 import json
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -26,7 +27,10 @@ from consist import Tracker
 from consist.tools import queries
 
 app = typer.Typer(rich_markup_mode="markdown")
+schema_app = typer.Typer(rich_markup_mode="markdown")
 console = Console()
+
+app.add_typer(schema_app, name="schema")
 
 
 def output_json(data: Any) -> None:
@@ -72,6 +76,80 @@ def get_tracker(db_path: Optional[str] = None) -> Tracker:
         )
         raise typer.Exit(1)
     return Tracker(run_dir=Path("."), db_path=resolved_path)
+
+
+@schema_app.command("export")
+def schema_export(
+    schema_id: Optional[str] = typer.Option(
+        None, "--schema-id", help="Artifact schema id (hash) to export."
+    ),
+    artifact_id: Optional[str] = typer.Option(
+        None,
+        "--artifact-id",
+        help="Artifact UUID to export the associated captured schema.",
+    ),
+    out: Optional[Path] = typer.Option(
+        None, "--out", help="Write stub to this path (prints to stdout if omitted)."
+    ),
+    class_name: Optional[str] = typer.Option(
+        None, "--class-name", help="Override generated SQLModel class name."
+    ),
+    table_name: Optional[str] = typer.Option(
+        None, "--table-name", help="Override generated __tablename__."
+    ),
+    include_system_cols: bool = typer.Option(
+        False,
+        "--include-system-cols",
+        help="Include system/ingestion columns like consist_* and _dlt_*.",
+    ),
+    include_stats_comments: bool = typer.Option(
+        True,
+        "--stats-comments/--no-stats-comments",
+        help="Include stats/enum hints as comments when available.",
+    ),
+    abstract: bool = typer.Option(
+        True,
+        "--abstract/--concrete",
+        help="Export as an abstract SQLModel class (importable without defining a primary key).",
+    ),
+    db_path: str = typer.Option(
+        "provenance.duckdb", help="Path to the DuckDB database."
+    ),
+) -> None:
+    """Export a captured artifact schema as an editable SQLModel stub."""
+    if (schema_id is None) == (artifact_id is None):
+        console.print("[red]Provide exactly one of --schema-id or --artifact-id[/red]")
+        raise typer.Exit(2)
+    if artifact_id is not None:
+        try:
+            uuid.UUID(artifact_id)
+        except ValueError:
+            console.print("[red]--artifact-id must be a UUID[/red]")
+            raise typer.Exit(2)
+
+    tracker = get_tracker(db_path)
+    try:
+        code = tracker.export_schema_sqlmodel(
+            schema_id=schema_id,
+            artifact_id=artifact_id,
+            out_path=out,
+            table_name=table_name,
+            class_name=class_name,
+            abstract=abstract,
+            include_system_cols=include_system_cols,
+            include_stats_comments=include_stats_comments,
+        )
+    except KeyError:
+        console.print("[red]Captured schema not found for the provided selector.[/red]")
+        raise typer.Exit(1)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(2)
+
+    if out is None:
+        print(code)
+    else:
+        console.print(f"[green]Wrote SQLModel stub to {out}[/green]")
 
 
 def _render_runs_table(
@@ -749,170 +827,6 @@ def preview(
     console.print(
         "[dim]Hint: load programmatically via `consist.load(artifact, tracker=...)`[/dim]"
     )
-
-
-@app.command()
-def schema(
-    artifact_key: str = typer.Argument(
-        ..., help="The key or ID of the artifact to inspect."
-    ),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
-    ),
-    json_output: bool = typer.Option(
-        False, "--json", help="Output schema info as JSON for scripting/testing."
-    ),
-) -> None:
-    """Shows schema/structure information for an artifact (df.dtypes-style for tables)."""
-    tracker = get_tracker(db_path)
-
-    artifact = tracker.get_artifact(artifact_key)
-    if not artifact:
-        console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
-        raise typer.Exit(1)
-
-    try:
-        import consist
-
-        data = consist.load(artifact, tracker=tracker, db_fallback="always")
-    except FileNotFoundError:
-        abs_path = tracker.resolve_uri(artifact.uri)
-        from consist.tools.mount_diagnostics import (
-            build_mount_resolution_hint,
-            format_missing_artifact_mount_help,
-        )
-
-        hint = build_mount_resolution_hint(
-            artifact.uri, artifact_meta=artifact.meta, mounts=tracker.mounts
-        )
-        help_text = (
-            format_missing_artifact_mount_help(hint, resolved_path=abs_path)
-            if hint
-            else f"Resolved path: {abs_path}\nThe artifact may have been deleted, moved, or your mounts are misconfigured."
-        )
-        console.print(
-            f"[red]Artifact file not found at: {artifact.uri}[/red]\n{help_text}"
-        )
-        raise typer.Exit(1)
-    except ImportError as e:
-        console.print(
-            f"[red]Missing optional dependency while loading artifact: {e}[/red]"
-        )
-        if artifact.driver == "zarr":
-            console.print(
-                "[yellow]Hint:[/] install Zarr support: `pip install -e '.[zarr]'`"
-            )
-        elif artifact.driver in {"h5", "hdf5", "h5_table"}:
-            console.print(
-                "[yellow]Hint:[/] install HDF5 support: `pip install -e '.[hdf5]'`"
-            )
-        raise typer.Exit(1)
-    except ValueError as e:
-        console.print(
-            f"[red]Unsupported artifact driver '{artifact.driver}': {e}[/red]"
-        )
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Error loading artifact: {e}[/red]")
-        raise typer.Exit(1)
-
-    if isinstance(data, pd.DataFrame):
-        payload = {
-            "type": "dataframe",
-            "driver": artifact.driver,
-            "rows": int(data.shape[0]),
-            "columns": int(data.shape[1]),
-            "dtypes": {str(k): str(v) for k, v in data.dtypes.items()},
-        }
-        if json_output:
-            output_json(payload)
-            return
-
-        console.print(f"Schema: {artifact_key} [dim]({artifact.driver})[/dim]")
-        table = Table()
-        table.add_column("Column", style="cyan")
-        table.add_column("Dtype", style="magenta")
-        for col_name, dtype in data.dtypes.items():
-            table.add_row(str(col_name), str(dtype))
-        console.print(table)
-        console.print(
-            f"[dim]{int(data.shape[0])} rows × {int(data.shape[1])} columns[/dim]"
-        )
-        return
-
-    try:
-        import xarray as xr  # type: ignore[import-not-found]
-    except ImportError:
-        xr = None
-
-    if xr is not None and isinstance(data, (xr.Dataset, xr.DataArray)):
-        ds: xr.Dataset
-        if isinstance(data, xr.DataArray):
-            ds = data.to_dataset(name=getattr(data, "name", None) or "data")
-        else:
-            ds = data
-
-        payload = {
-            "type": "xarray_dataset",
-            "driver": artifact.driver,
-            "dims": {str(k): int(v) for k, v in ds.sizes.items()},
-            "data_vars": {
-                str(name): {
-                    "dtype": str(da.dtype),
-                    "dims": [str(d) for d in da.dims],
-                    "shape": [int(x) for x in da.shape],
-                }
-                for name, da in ds.data_vars.items()
-            },
-            "coords": list(map(str, ds.coords.keys())),
-        }
-        if json_output:
-            output_json(payload)
-            return
-
-        console.print(f"Schema: {artifact_key} [dim]({artifact.driver})[/dim]")
-        dims_table = Table(title="Dimensions")
-        dims_table.add_column("Dim", style="cyan")
-        dims_table.add_column("Size", style="magenta")
-        for dim_name, dim_size in ds.sizes.items():
-            dims_table.add_row(str(dim_name), str(dim_size))
-        console.print(dims_table)
-
-        vars_table = Table(title="Data Variables")
-        vars_table.add_column("Name", style="cyan")
-        vars_table.add_column("Dtype", style="magenta")
-        vars_table.add_column("Dims", style="green")
-        vars_table.add_column("Shape", style="yellow")
-        for var_name, da in ds.data_vars.items():
-            vars_table.add_row(
-                str(var_name),
-                str(da.dtype),
-                ", ".join(map(str, da.dims)),
-                str(tuple(int(x) for x in da.shape)),
-            )
-        console.print(vars_table)
-        if ds.coords:
-            console.print(
-                Panel(
-                    ", ".join(map(str, ds.coords.keys())),
-                    title="Coordinates",
-                    border_style="dim",
-                )
-            )
-        return
-
-    payload = {
-        "type": type(data).__name__,
-        "driver": artifact.driver,
-        "repr": repr(data),
-    }
-    if json_output:
-        output_json(payload)
-        return
-
-    console.print(f"Schema: {artifact_key} [dim]({artifact.driver})[/dim]")
-    console.print(f"[yellow]Unsupported loaded type: {type(data).__name__}[/yellow]")
-    console.print(Panel(repr(data), title="repr()", border_style="dim"))
 
 
 class ConsistShell(cmd.Cmd):

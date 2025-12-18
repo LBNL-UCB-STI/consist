@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import Column, JSON, String
+from sqlalchemy import Column, Integer, JSON, String
 from sqlmodel import Field, SQLModel
 
 from consist.models.artifact import UUIDType
@@ -54,6 +54,11 @@ class ArtifactSchemaField(SQLModel, table=True):
         primary_key=True,
         foreign_key="artifact_schema.id",
         description="FK to ArtifactSchema.id (schema hash).",
+    )
+    ordinal_position: Optional[int] = Field(
+        default=None,
+        sa_column=Column(Integer, nullable=True),
+        description="1-based ordinal position in source table when known.",
     )
     name: str = Field(primary_key=True, index=True, description="Column/field name.")
     logical_type: str = Field(index=True, description="Portable logical type string.")

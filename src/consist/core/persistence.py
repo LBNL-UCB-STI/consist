@@ -8,7 +8,7 @@ import pandas as pd
 from sqlalchemy.exc import OperationalError, DatabaseError
 from sqlalchemy.orm.exc import ConcurrentModificationError
 from sqlalchemy.pool import NullPool
-from sqlmodel import create_engine, Session, select, SQLModel, col
+from sqlmodel import create_engine, Session, select, SQLModel, col, delete
 
 from consist.models.artifact import Artifact
 from consist.models.artifact_schema import (
@@ -60,8 +60,113 @@ class DatabaseManager:
             )
             # DuckDB self-referential FK on run.parent_run_id blocks status updates.
             self._relax_run_parent_fk()
+            # Lightweight migrations for additive schema changes.
+            self._ensure_artifact_schema_field_ordinal_position()
 
         self.execute_with_retry(_create, operation_name="init_schema")
+
+    def _table_has_column(self, *, table_name: str, column_name: str) -> bool:
+        try:
+            with self.engine.begin() as conn:
+                rows = conn.exec_driver_sql(
+                    f"PRAGMA table_info('{table_name}')"
+                ).fetchall()
+            # DuckDB pragma_table_info returns: (cid, name, type, notnull, dflt_value, pk)
+            return any(str(row[1]) == column_name for row in rows)
+        except Exception:
+            return False
+
+    def _ensure_artifact_schema_field_ordinal_position(self) -> None:
+        """
+        Ensure `artifact_schema_field.ordinal_position` exists.
+
+        SQLModel metadata changes do not automatically migrate existing DuckDB DBs,
+        so we apply small additive migrations here.
+        """
+        if self._table_has_column(
+            table_name="artifact_schema_field", column_name="ordinal_position"
+        ):
+            return
+        try:
+            with self.engine.begin() as conn:
+                conn.exec_driver_sql(
+                    "ALTER TABLE artifact_schema_field ADD COLUMN ordinal_position INTEGER"
+                )
+        except Exception as e:
+            logging.warning(
+                "Failed to add artifact_schema_field.ordinal_position column: %s", e
+            )
+
+    def backfill_artifact_schema_field_ordinals(self, *, schema_id: str) -> None:
+        """
+        Best-effort backfill of missing `ordinal_position` for a schema.
+
+        Preference order:
+        1) `ArtifactSchema.profile_json["fields"]` order when present and non-empty.
+        2) Alphabetical by `ArtifactSchemaField.name`.
+        """
+
+        def _backfill():
+            with Session(self.engine) as session:
+                schema = session.get(ArtifactSchema, schema_id)
+                if schema is None:
+                    return
+
+                field_rows = session.exec(
+                    select(ArtifactSchemaField)
+                    .where(ArtifactSchemaField.schema_id == schema_id)
+                    .order_by(ArtifactSchemaField.name)
+                ).all()
+                if not field_rows:
+                    return
+                if all(row.ordinal_position is not None for row in field_rows):
+                    return
+
+                ordered_names: list[str] = []
+                profile = getattr(schema, "profile_json", None)
+                if isinstance(profile, dict):
+                    fields = profile.get("fields")
+                    if isinstance(fields, list) and fields:
+                        for entry in fields:
+                            if isinstance(entry, dict) and isinstance(
+                                entry.get("name"), str
+                            ):
+                                ordered_names.append(entry["name"])
+
+                ordinal_by_name: Dict[str, int] = {}
+                if ordered_names:
+                    ordinal_by_name = {
+                        name: i + 1 for i, name in enumerate(ordered_names)
+                    }
+
+                changed = False
+                if ordinal_by_name:
+                    for row in field_rows:
+                        if row.ordinal_position is None:
+                            ord_val = ordinal_by_name.get(row.name)
+                            if ord_val is not None:
+                                row.ordinal_position = ord_val
+                                changed = True
+                else:
+                    for i, row in enumerate(field_rows, start=1):
+                        if row.ordinal_position is None:
+                            row.ordinal_position = i
+                            changed = True
+
+                if changed:
+                    session.add_all(field_rows)
+                    session.commit()
+
+        try:
+            self.execute_with_retry(
+                _backfill, operation_name="backfill_artifact_schema_ordinals"
+            )
+        except Exception as e:
+            logging.warning(
+                "Failed to backfill artifact_schema_field.ordinal_position for schema_id=%s: %s",
+                schema_id,
+                e,
+            )
 
     def _relax_run_parent_fk(self):
         """Ensure run.parent_run_id FK is NOT ENFORCED (DuckDB self-FK workaround)."""
@@ -229,6 +334,13 @@ class DatabaseManager:
             with Session(self.engine) as session:
                 session.merge(schema)
                 if fields:
+                    # Idempotency: schema profiling may run multiple times for the same
+                    # schema_id (hash). Replace the normalized field rows in one shot.
+                    session.exec(
+                        delete(ArtifactSchemaField).where(
+                            ArtifactSchemaField.schema_id == schema.id
+                        )
+                    )
                     session.add_all(fields)
                 session.commit()
 
@@ -477,6 +589,61 @@ class DatabaseManager:
             return self.execute_with_retry(_query)
         except Exception:
             return None
+
+    def get_artifact_schema(
+        self, *, schema_id: str, backfill_ordinals: bool = True
+    ) -> Optional[Tuple[ArtifactSchema, List[ArtifactSchemaField]]]:
+        def _query():
+            with Session(self.engine) as session:
+                schema = session.get(ArtifactSchema, schema_id)
+                if schema is None:
+                    return None
+                fields = session.exec(
+                    select(ArtifactSchemaField).where(
+                        ArtifactSchemaField.schema_id == schema_id
+                    )
+                ).all()
+                return schema, fields
+
+        result = self.execute_with_retry(_query)
+        if result is None:
+            return None
+        schema, fields = result
+
+        if backfill_ordinals and any(row.ordinal_position is None for row in fields):
+            self.backfill_artifact_schema_field_ordinals(schema_id=schema_id)
+            result2 = self.execute_with_retry(_query)
+            if result2 is not None:
+                schema, fields = result2
+
+        fields_sorted = sorted(
+            fields,
+            key=lambda r: (
+                r.ordinal_position is None,
+                r.ordinal_position if r.ordinal_position is not None else 0,
+                r.name,
+            ),
+        )
+        return schema, fields_sorted
+
+    def get_artifact_schema_for_artifact(
+        self, *, artifact_id: uuid.UUID, backfill_ordinals: bool = True
+    ) -> Optional[Tuple[ArtifactSchema, List[ArtifactSchemaField]]]:
+        def _query_schema_id() -> Optional[str]:
+            with Session(self.engine) as session:
+                artifact = session.get(Artifact, artifact_id)
+                if artifact is None:
+                    return None
+                meta = getattr(artifact, "meta", None) or {}
+                schema_id = meta.get("schema_id")
+                return schema_id if isinstance(schema_id, str) and schema_id else None
+
+        schema_id = self.execute_with_retry(_query_schema_id)
+        if schema_id is None:
+            return None
+        return self.get_artifact_schema(
+            schema_id=schema_id, backfill_ordinals=backfill_ordinals
+        )
 
     def get_artifacts_for_run(self, run_id: str) -> List[Tuple[Artifact, str]]:
         def _query():

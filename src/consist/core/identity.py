@@ -101,12 +101,34 @@ class IdentityManager:
             repo = git.Repo(self.project_root, search_parent_directories=True)
             sha = repo.head.object.hexsha
 
-            if repo.is_dirty():
-                # If dirty, we append a nonce.
-                # improvement: We could hash the diff here for a "Dirty Content Hash",
-                # but a timestamp is safer to prevent false cache hits during dev.
-                nonce = int(time.time())
-                return f"{sha}-dirty-{nonce}"
+            # IMPORTANT:
+            # We intentionally ignore untracked files when computing code identity.
+            #
+            # In typical Consist usage, runs create many untracked files (artifacts, DBs,
+            # notebooks outputs) inside a repo. Including untracked filenames in the
+            # code hash would make `git_hash` change during the workflow itself and
+            # effectively disable caching.
+            #
+            # Tracked modifications (diff vs HEAD / staged diff) still invalidate caches.
+            if repo.is_dirty(untracked_files=False):
+                # If dirty, append a stable content hash of the working tree.
+                #
+                # Rationale: a time-based nonce prevents false cache hits during dev,
+                # but it also disables caching entirely for notebooks/local iteration.
+                # Hashing the diff keeps cache keys stable until the working tree changes.
+                try:
+                    diff_head = repo.git.diff("HEAD")
+                except Exception:
+                    diff_head = repo.git.diff()
+                try:
+                    diff_cached = repo.git.diff("--cached")
+                except Exception:
+                    diff_cached = ""
+                dirty_payload = "\n\n".join([sha, diff_cached, diff_head])
+                dirty_hash = hashlib.sha256(
+                    dirty_payload.encode("utf-8", errors="replace")
+                ).hexdigest()[:12]
+                return f"{sha}-dirty-{dirty_hash}"
 
             return sha
         except (git.InvalidGitRepositoryError, git.NoSuchPathError):

@@ -65,6 +65,9 @@ def test_profile_and_persist_ingested_schema(tracker, sample_csv):
                 )
             ).all()
             assert {f.name for f in fields} == {"a", "b"}
+            ordinal_by_name = {f.name: f.ordinal_position for f in fields}
+            assert ordinal_by_name["a"] == 1
+            assert ordinal_by_name["b"] == 2
 
             observations = session.exec(
                 select(ArtifactSchemaObservation).where(
@@ -97,11 +100,12 @@ def test_profile_and_persist_ingested_schema(tracker, sample_csv):
 
 def test_profile_duckdb_table_truncates_fields_for_wide_tables(tracker):
     """
-    Wide tables can create large schema payloads; we cap per-schema field persistence.
+    Wide tables can create large schema payloads; we truncate stored JSON blobs but
+    still retain per-field rows for schema export.
 
     Checks:
     - the summary reports that fields were truncated
-    - the returned `fields` list is empty (so we don't create thousands of rows)
+    - the returned `fields` list still contains all fields for persistence/export
     """
     from consist.tools import schema_profile
 
@@ -125,7 +129,9 @@ def test_profile_duckdb_table_truncates_fields_for_wide_tables(tracker):
             table_name=table_name,
         )
         assert result.summary["truncated"]["fields"] is True
-        assert list(result.fields) == []
+        assert len(list(result.fields)) == wide_n
+        assert result.schema_json is not None
+        assert result.schema_json["fields"] == []
 
 
 def test_profile_duckdb_table_respects_size_limits(tracker, monkeypatch):

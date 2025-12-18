@@ -350,30 +350,34 @@ def test_preview_command_unsupported_loaded_type(mock_db_session, tmp_path):
         assert "Preview not implemented" in result.stdout
 
 
-def test_schema_command_success_json(mock_db_session, tmp_path):
+def test_schema_export_command_success_stdout(mock_db_session, tmp_path):
     with (
         patch("pathlib.Path.exists", return_value=True),
         patch("consist.cli.get_tracker") as m,
-        patch("consist.load") as mock_load,
     ):
-        mock_df = pd.DataFrame({"col1": [1, 2], "col2": ["a", "b"]})
-        mock_load.return_value = mock_df
-
         tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
         tracker.db.engine = mock_db_session.get_bind()
         m.return_value = tracker
 
-        result = runner.invoke(app, ["schema", "raw_data", "--json"])
+        with patch.object(
+            tracker,
+            "export_schema_sqlmodel",
+            return_value="class MyTable(SQLModel, table=True):\n    pass\n",
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "schema",
+                    "export",
+                    "--artifact-id",
+                    "00000000-0000-0000-0000-000000000000",
+                ],
+            )
         assert result.exit_code == 0
-        payload = json.loads(result.stdout)
-        assert payload["type"] == "dataframe"
-        assert payload["driver"] == "csv"
-        assert payload["columns"] == 2
-        assert payload["dtypes"]["col1"] in {"int64", "int32"}
-        assert payload["dtypes"]["col2"] == "object"
+        assert "class MyTable" in result.stdout
 
 
-def test_schema_command_artifact_not_found(mock_db_session, tmp_path):
+def test_schema_export_command_requires_selector(mock_db_session, tmp_path):
     with (
         patch("pathlib.Path.exists", return_value=True),
         patch("consist.cli.get_tracker") as m,
@@ -382,9 +386,32 @@ def test_schema_command_artifact_not_found(mock_db_session, tmp_path):
         tracker.db.engine = mock_db_session.get_bind()
         m.return_value = tracker
 
-        result = runner.invoke(app, ["schema", "nonexistent_artifact"])
+        result = runner.invoke(app, ["schema", "export"])
+        assert result.exit_code == 2
+        assert "Provide exactly one of --schema-id or --artifact-id" in result.stdout
+
+
+def test_schema_export_command_schema_not_found_exits_1(mock_db_session, tmp_path):
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker") as m,
+    ):
+        tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
+        tracker.db.engine = mock_db_session.get_bind()
+        m.return_value = tracker
+
+        with patch.object(tracker, "export_schema_sqlmodel", side_effect=KeyError()):
+            result = runner.invoke(
+                app,
+                [
+                    "schema",
+                    "export",
+                    "--artifact-id",
+                    "00000000-0000-0000-0000-000000000000",
+                ],
+            )
         assert result.exit_code == 1
-        assert "Artifact 'nonexistent_artifact' not found" in result.stdout
+        assert "Captured schema not found" in result.stdout
 
 
 def test_summary_no_runs_exits_cleanly(tmp_path):

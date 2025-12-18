@@ -227,15 +227,21 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
         assert "value_doubled" in preview_result.stdout
 
         schema_result = runner.invoke(
-            cli_app, ["schema", "features", "--db-path", db_path, "--json"]
+            cli_app,
+            [
+                "schema",
+                "export",
+                "--artifact-id",
+                str(features_artifact.id),
+                "--db-path",
+                db_path,
+            ],
         )
         assert schema_result.exit_code == 0
-        schema_payload = json.loads(schema_result.stdout)
-        assert schema_payload["type"] == "dataframe"
-        assert schema_payload["driver"] == "csv"
-        assert schema_payload["columns"] >= 2
-        assert "value" in schema_payload["dtypes"]
-        assert "value_doubled" in schema_payload["dtypes"]
+        assert "class " in schema_result.stdout
+        assert "__tablename__" in schema_result.stdout
+        assert features_artifact.meta["schema_id"] in schema_result.stdout
+        assert "value_doubled" in schema_result.stdout
 
 
 def test_resume_after_failure_uses_cache_and_ghost_mode(

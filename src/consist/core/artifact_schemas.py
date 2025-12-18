@@ -55,6 +55,16 @@ class ArtifactSchemaManager:
                 table_name=table_name,
                 source=source,
             )
+            truncated = result.summary.get("truncated") or {}
+            if any(bool(v) for v in truncated.values()):
+                logging.warning(
+                    "[Consist] Schema profile for table=%s.%s was truncated (flags=%s). "
+                    "Per-field rows are still stored for schema export, but the full JSON profile may be unavailable. "
+                    "If this is a sparse wide table, consider reshaping to a long format before ingestion.",
+                    table_schema,
+                    table_name,
+                    truncated,
+                )
 
             schema_row = ArtifactSchema(
                 id=result.schema_id,
@@ -65,6 +75,7 @@ class ArtifactSchemaManager:
             field_rows = [
                 ArtifactSchemaField(
                     schema_id=result.schema_id,
+                    ordinal_position=f.ordinal_position,
                     name=f.name,
                     logical_type=f.logical_type,
                     nullable=f.nullable,

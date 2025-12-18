@@ -1,7 +1,7 @@
 import logging
 import os
 import types
-from typing import List, Optional, TYPE_CHECKING, Type, TypeVar, Dict, Tuple
+from typing import Any, List, Optional, TYPE_CHECKING, Type, TypeVar, Dict, Tuple
 from sqlmodel import select, Session, text, SQLModel, Field
 
 from consist.models.artifact import Artifact
@@ -11,6 +11,13 @@ if TYPE_CHECKING:
     from consist.core.tracker import Tracker
 
 T = TypeVar("T", bound=SQLModel)
+
+
+def _quote_ident(identifier: str) -> str:
+    """
+    Quote an identifier for DuckDB SQL (double-quote, escaping embedded quotes).
+    """
+    return '"' + identifier.replace('"', '""') + '"'
 
 
 def create_view_model(model: Type[T], name: Optional[str] = None) -> Type[T]:
@@ -27,7 +34,12 @@ def create_view_model(model: Type[T], name: Optional[str] = None) -> Type[T]:
         view_name = f"v_{model.__name__.lower()}"
 
     # 2. Clone Annotations
-    annotations = model.__annotations__.copy()
+    # Prefer resolved Pydantic field annotations (works even when the model was defined
+    # under `from __future__ import annotations`).
+    annotations: Dict[str, Any] = {}
+    for field_name, field_info in model.model_fields.items():
+        ann = getattr(field_info, "annotation", None)
+        annotations[field_name] = ann if ann is not None else Any
     annotations.update(
         {
             "consist_run_id": str,
@@ -236,11 +248,21 @@ class ViewFactory:
                 cols.append("CAST(NULL AS VARCHAR) as consist_scenario_id")
 
                 # User Schema Columns
-                for name in schema_model.model_fields.keys():
-                    if name.startswith("consist_"):
+                for attr_name, field_info in schema_model.model_fields.items():
+                    sa_col = getattr(field_info, "sa_column", None)
+                    col_name = (
+                        getattr(sa_col, "name", None) if sa_col is not None else None
+                    )
+                    sql_name = (
+                        str(col_name)
+                        if isinstance(col_name, str) and col_name
+                        else str(attr_name)
+                    )
+
+                    if sql_name.startswith("consist_"):
                         continue
                     # We cast to NULL, DuckDB handles the type inference loosely for empty views
-                    cols.append(f"NULL as {name}")
+                    cols.append(f"NULL as {_quote_ident(sql_name)}")
 
                 query = f"SELECT {', '.join(cols)} WHERE 1=0"
             else:
