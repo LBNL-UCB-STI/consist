@@ -491,6 +491,11 @@ def has_docker() -> bool:
 
         client = docker.from_env()
         client.ping()
+        # This test suite runs Linux images (e.g., alpine). On Windows runners, Docker may
+        # be in Windows-container mode; in that case, skip to avoid false failures.
+        info = client.info()
+        if info.get("OSType") != "linux":
+            return False
         return True
     except Exception:
         return False

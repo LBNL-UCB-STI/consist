@@ -227,6 +227,9 @@ class DockerBackend(ContainerBackend):
         }
 
         try:
+            if self.pull_latest and hasattr(self.client, "images"):
+                self.client.images.pull(image)
+
             logger.info(f"🐳 Running Docker: {image} {command}")
             container = self.client.containers.run(
                 image,

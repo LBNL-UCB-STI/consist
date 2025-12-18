@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 from consist.integrations.containers.backends import SingularityBackend, DockerBackend
 
@@ -161,8 +162,11 @@ def test_singularity_cache_selection(
     SingularityBackend(cache_base_options=["/fast_local"])
 
     # Check that environment vars were set correctly pointing to /fast_local
-    assert os.environ["APPTAINER_CACHEDIR"] == "/fast_local/.apptainer/cache"
-    assert os.environ["SINGULARITY_CACHEDIR"] == "/fast_local/.singularity/cache"
+    assert Path(os.environ["APPTAINER_CACHEDIR"]).as_posix() == "/fast_local/.apptainer/cache"
+    assert (
+        Path(os.environ["SINGULARITY_CACHEDIR"]).as_posix()
+        == "/fast_local/.singularity/cache"
+    )
 
     # Verify we tried to create them
     mock_makedirs.assert_any_call("/fast_local/.apptainer/cache", exist_ok=True)
@@ -327,7 +331,10 @@ def test_singularity_cache_fallback(
         SingularityBackend(cache_base_options=["/full_disk"])
 
         # Should rely on CWD
-        assert os.environ["APPTAINER_CACHEDIR"] == "/home/user/project/.apptainer/cache"
+        assert (
+            Path(os.environ["APPTAINER_CACHEDIR"]).as_posix()
+            == "/home/user/project/.apptainer/cache"
+        )
 
 
 def test_singularity_executable_missing():
