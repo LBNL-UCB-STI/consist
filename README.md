@@ -1,5 +1,7 @@
 # Consist
 
+[![CI](https://github.com/LBNL-UCB-STI/consist/actions/workflows/ci.yml/badge.svg)](https://github.com/LBNL-UCB-STI/consist/actions/workflows/ci.yml)
+
 **Provenance tracking, intelligent caching, and data virtualization for scientific simulation workflows.**
 
 Consist automatically records what code, configuration, and input data produced each output in your pipeline. It uses this information to skip redundant computation and to let you query results across many runs without manual bookkeeping.
