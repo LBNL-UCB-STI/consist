@@ -29,7 +29,7 @@ def test_cache_hit_demotion_emits_guidance_warning_and_happy_path_no_warning(
     ) as t:
         out_path = t.run_dir / "out.parquet"
         pd.DataFrame({"a": [1]}).to_parquet(out_path)
-        produced = t.log_artifact(out_path, key="out", direction="output")
+        t.log_artifact(out_path, key="out", direction="output")
 
     # --- Demotion path: attempt to log a different existing path for the same output key.
     caplog.set_level(logging.WARNING)

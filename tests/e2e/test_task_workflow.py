@@ -266,7 +266,7 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
 
     # === Third execution: different config should re-execute ===
     config_new = CleaningConfig(threshold=0.8, remove_outliers=True, min_value=0.0)
-    cleaned_artifact_3 = clean_data(raw_data_path, config_new)
+    clean_data(raw_data_path, config_new)
 
     # Should be a new execution (different config = different signature)
     runs = consist.run_query(
@@ -296,8 +296,8 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
         df_clean.to_csv(output_path, index=False)
         return output_path
 
-    result_1 = clean_data_overwrite(raw_data_path, config)
-    result_2 = clean_data_overwrite(raw_data_path, config)
+    clean_data_overwrite(raw_data_path, config)
+    clean_data_overwrite(raw_data_path, config)
 
     # Both should execute (overwrite mode)
     overwrite_runs = consist.run_query(

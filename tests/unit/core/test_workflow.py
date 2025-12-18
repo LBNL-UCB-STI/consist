@@ -32,7 +32,7 @@ def test_scenario_lifecycle(tracker: Tracker):
 
     # 5. Context Exit
     # Header should be completed
-    header_run = tracker.get_run("scen_A")
+    assert tracker.get_run("scen_A") is not None
     # assert header_run.status == "completed" # TODO: Figure out why this is still "running"
 
 

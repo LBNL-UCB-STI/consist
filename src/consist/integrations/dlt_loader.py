@@ -476,9 +476,9 @@ def _yield_h5_batches(path: str, key: str) -> Iterable[pd.DataFrame]:
     KeyError
         If the specified `key` (table path) is not found within the HDF5 file.
     """
-    try:
-        import tables
-    except ImportError:
+    from importlib.util import find_spec
+
+    if find_spec("tables") is None:
         raise ImportError("PyTables is required.")
     with pd.HDFStore(path, mode="r") as store:
         if key not in store:

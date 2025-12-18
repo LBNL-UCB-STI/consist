@@ -113,7 +113,6 @@ def run_simulation_scenario(
             consist.log_dataframe(df_hh, key="households", schema=Household)
 
             # Seed persons for the first year with zero trips
-            seed_year = years[0]
             df_seed = pd.DataFrame(
                 {
                     "person_id": np.arange(n_per),

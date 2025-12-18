@@ -163,7 +163,7 @@ def test_singularity_cache_selection(
     mock_stat.f_frsize = 1
     mock_statvfs.return_value = mock_stat
 
-    backend = SingularityBackend(cache_base_options=["/fast_local"])
+    SingularityBackend(cache_base_options=["/fast_local"])
 
     # Check that environment vars were set correctly pointing to /fast_local
     assert os.environ["APPTAINER_CACHEDIR"] == "/fast_local/.apptainer/cache"
@@ -332,7 +332,7 @@ def test_singularity_cache_fallback(
 
     # We need to capture the logger warning to be thorough, but checking the result path is enough
     with patch("os.getcwd", return_value="/home/user/project"):
-        backend = SingularityBackend(cache_base_options=["/full_disk"])
+        SingularityBackend(cache_base_options=["/full_disk"])
 
         # Should rely on CWD
         assert os.environ["APPTAINER_CACHEDIR"] == "/home/user/project/.apptainer/cache"

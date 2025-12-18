@@ -492,7 +492,7 @@ def has_docker() -> bool:
         client = docker.from_env()
         client.ping()
         return True
-    except:
+    except Exception:
         return False
 
 

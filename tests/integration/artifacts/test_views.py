@@ -1,5 +1,6 @@
-# tests/integration/test_views.py
+from pathlib import Path
 
+import pytest
 import pandas as pd
 from typing import Optional
 from sqlmodel import SQLModel, Field, text
@@ -243,10 +244,6 @@ def test_empty_state_safety(tracker):
         # Ensure it's select-able
         df = pd.read_sql("SELECT * FROM v_ghost", conn)
         assert len(df) == 0
-
-
-import pytest
-from pathlib import Path
 
 
 @pytest.fixture

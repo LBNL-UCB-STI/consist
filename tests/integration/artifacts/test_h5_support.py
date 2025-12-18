@@ -1,18 +1,10 @@
 import pytest
-import h5py
 from consist.core.tracker import Tracker
 
-# Check for tables/h5py
-try:
-    import tables
-    import h5py
-
-    HAS_H5 = True
-except ImportError:
-    HAS_H5 = False
+pytest.importorskip("tables")
+h5py = pytest.importorskip("h5py")
 
 
-@pytest.mark.skipif(not HAS_H5, reason="PyTables/h5py not installed")
 def test_h5_auto_discovery(tracker: Tracker):
     """
     Tests the automatic discovery of HDF5 tables using `log_h5_container`.

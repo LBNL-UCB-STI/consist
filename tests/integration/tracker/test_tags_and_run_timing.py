@@ -15,7 +15,7 @@ def test_tags_and_run_timing(tracker: Tracker, tmp_path: Path):
         tags=["production", "test", "v1"],
         year=2024,
     ):
-        art = tracker.log_artifact(str(test_file), key="test_data")
+        tracker.log_artifact(str(test_file), key="test_data")
         time.sleep(0.1)  # Small delay to ensure duration is measurable
 
     # Check the run has our new fields

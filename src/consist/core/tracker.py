@@ -1,55 +1,52 @@
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from importlib.util import find_spec
 import logging
 import uuid
 import weakref
 from pathlib import Path
 from typing import (
-    Dict,
-    Optional,
-    List,
     Any,
-    Type,
-    Iterable,
-    Union,
     Callable,
-    Tuple,
+    Dict,
+    Iterable,
+    List,
     Literal,
+    Optional,
+    Tuple,
+    Type,
+    Union,
 )
-from datetime import datetime, timezone
-
-from sqlmodel import SQLModel
-
-from consist.core.artifacts import ArtifactManager
-from consist.core.artifact_schemas import ArtifactSchemaManager
-from consist.core.workflow import ScenarioContext, OutputCapture
-
-UTC = timezone.utc
-from contextlib import contextmanager
 
 import pandas as pd
-
 from pydantic import BaseModel
+from sqlmodel import SQLModel
 
-from consist.types import ArtifactRef, FacetLike, HasFacetSchemaVersion, HashInputs
-
-from consist.core.views import ViewFactory, ViewRegistry
-from consist.core.fs import FileSystemManager
-from consist.core.persistence import DatabaseManager
-from consist.core.cache_output_logging import (
-    maybe_return_cached_output_or_demote_cache_hit,
-)
+from consist.core.artifact_schemas import ArtifactSchemaManager
+from consist.core.artifacts import ArtifactManager
 from consist.core.cache import (
     ActiveRunCacheOptions,
     hydrate_cache_hit_outputs,
     parse_materialize_cached_outputs_kwargs,
 )
+from consist.core.cache_output_logging import (
+    maybe_return_cached_output_or_demote_cache_hit,
+)
 from consist.core.config_facets import ConfigFacetManager
-from consist.core.indexing import FacetIndex, IndexBySpec, RunFieldIndex
+from consist.core.context import pop_tracker, push_tracker
 from consist.core.decorators import create_task_decorator
 from consist.core.events import EventManager
-from consist.models.artifact import Artifact
-from consist.models.run import Run, ConsistRecord, RunArtifacts
+from consist.core.fs import FileSystemManager
 from consist.core.identity import IdentityManager
-from consist.core.context import push_tracker, pop_tracker
+from consist.core.indexing import FacetIndex, IndexBySpec, RunFieldIndex
+from consist.core.persistence import DatabaseManager
+from consist.core.views import ViewFactory, ViewRegistry
+from consist.core.workflow import OutputCapture, ScenarioContext
+from consist.models.artifact import Artifact
+from consist.models.run import ConsistRecord, Run, RunArtifacts
+from consist.types import ArtifactRef, FacetLike, HasFacetSchemaVersion, HashInputs
+
+UTC = timezone.utc
 
 AccessMode = Literal["standard", "analysis", "read_only"]
 
@@ -1203,9 +1200,7 @@ class Tracker:
         table_artifacts: List[Artifact] = []
 
         if discover_tables:
-            try:
-                import h5py
-            except ImportError:
+            if find_spec("h5py") is None:
                 logging.warning(
                     "[Consist] h5py not installed. Cannot discover HDF5 tables."
                 )
@@ -1213,13 +1208,15 @@ class Tracker:
 
             # Build filter function
             if table_filter is None:
-                filter_fn = lambda name: True
+                def filter_fn(name: str) -> bool:
+                    return True
             elif isinstance(table_filter, list):
                 # Convert list to set for O(1) lookup
                 filter_set = set(table_filter)
-                filter_fn = (
-                    lambda name: name in filter_set or name.lstrip("/") in filter_set
-                )
+
+                def filter_fn(name: str) -> bool:
+                    stripped = name.lstrip("/")
+                    return name in filter_set or stripped in filter_set
             else:
                 filter_fn = table_filter
 

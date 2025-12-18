@@ -487,7 +487,7 @@ class DatabaseManager:
         def _do_sync():
             with Session(self.engine) as session:
                 # Merge artifact (create or update)
-                db_artifact = session.merge(artifact)
+                session.merge(artifact)
                 session.commit()
 
         try:
@@ -934,7 +934,7 @@ class DatabaseManager:
 
                         try:
                             run_tags = json.loads(run_tags)
-                        except:
+                        except json.JSONDecodeError:
                             pass
                     return all(t in (run_tags or []) for t in tags)
 

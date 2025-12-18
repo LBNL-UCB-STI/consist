@@ -221,7 +221,7 @@ def test_pipeline_forking_cold_storage(tracker_setup, ctx):
     out_a = mock_model_step(tracker, ctx, "A", [], {"p": 1})
     out_b = mock_model_step(tracker, ctx, "B", [out_a], {"p": 1})
     out_c = mock_model_step(tracker, ctx, "C", [out_b], {"p": 1})
-    out_d = mock_model_step(tracker, ctx, "D", [out_c], {"p": 1})
+    mock_model_step(tracker, ctx, "D", [out_c], {"p": 1})
 
     assert ctx.execution_log == ["A", "B", "C", "D"]
     ctx.clear_log()
@@ -230,7 +230,7 @@ def test_pipeline_forking_cold_storage(tracker_setup, ctx):
     out_a_2 = mock_model_step(tracker, ctx, "A", [], {"p": 1})
     out_b_2 = mock_model_step(tracker, ctx, "B", [out_a_2], {"p": 1})
     out_c_2 = mock_model_step(tracker, ctx, "C", [out_b_2], {"p": 999})
-    out_d_2 = mock_model_step(tracker, ctx, "D", [out_c_2], {"p": 1})
+    mock_model_step(tracker, ctx, "D", [out_c_2], {"p": 1})
 
     assert "A" not in ctx.execution_log
     assert "B" not in ctx.execution_log

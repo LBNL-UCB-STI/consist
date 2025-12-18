@@ -77,4 +77,4 @@ def test_run_artifact_link_distinct_input_and_output_no_warning(
         ).all()
 
     assert len(links) == 2
-    assert sorted([l.direction for l in links]) == ["input", "output"]
+    assert sorted([link.direction for link in links]) == ["input", "output"]

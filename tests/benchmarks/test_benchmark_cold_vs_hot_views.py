@@ -210,7 +210,7 @@ def test_comparative_analysis_benchmark(tmp_path: Path):
 
     with tracker.start_run("run_b", model="a"):
         df_b.to_parquet(path_b)
-        art_b = consist.log_artifact(str(path_b), key="results")
+        consist.log_artifact(str(path_b), key="results")
 
     # For Hot Benchmark: Ingest Run B only (simulate partial ingestion)
     # Actually let's ingest BOTH for the Hot test to be fair
@@ -228,7 +228,7 @@ def test_comparative_analysis_benchmark(tmp_path: Path):
     # BENCHMARK 1: PANDAS
     # =========================================================================
     # Workflow: Load A, Load B, Concat, Groupby
-    with Profiler("Pandas") as p:
+    with Profiler("Pandas"):
         # 1. Read
         # We must align schemas manually or rely on concat(sort=False)
         pdf_a = pd.read_parquet(path_a)
@@ -252,7 +252,7 @@ def test_comparative_analysis_benchmark(tmp_path: Path):
     # BENCHMARK 2: POLARS (If installed)
     # =========================================================================
     if pl:
-        with Profiler("Polars (Lazy)") as p:
+        with Profiler("Polars (Lazy)"):
             # 1. Scan (Lazy)
             lf_a = pl.scan_parquet(path_a).with_columns(pl.lit("run_a").alias("run_id"))
             lf_b = pl.scan_parquet(path_b).with_columns(pl.lit("run_b").alias("run_id"))
@@ -275,7 +275,7 @@ def test_comparative_analysis_benchmark(tmp_path: Path):
     # BENCHMARK 3: CONSIST (Cold View)
     # =========================================================================
     # Workflow: Create View (Metadata scan), SQL Query (Vectorized Read)
-    with Profiler("Consist (Cold)") as p:
+    with Profiler("Consist (Cold)"):
         # 1. Create View
         # This scans the artifacts DB and generates the 'read_parquet([file1, file2])' SQL
         tracker.create_view("v_bench_cold", "results")
