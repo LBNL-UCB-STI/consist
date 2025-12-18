@@ -247,7 +247,9 @@ def _render_run_details(run: Any) -> None:
     status_style = (
         "green"
         if status_value == "completed"
-        else "red" if status_value == "failed" else "yellow"
+        else "red"
+        if status_value == "failed"
+        else "yellow"
     )
 
     info.add_row("ID", run_id)

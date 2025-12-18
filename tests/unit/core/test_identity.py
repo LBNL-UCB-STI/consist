@@ -17,6 +17,7 @@ It verifies the correctness of:
 -   **Code Version Detection**: Accurately detecting the Git commit SHA and
     flagging "dirty" repository states.
 """
+
 import pytest
 import hashlib
 import tempfile

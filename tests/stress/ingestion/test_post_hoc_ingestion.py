@@ -13,6 +13,7 @@ can be ingested into the DuckDB database for analytical querying, correctly
 attributing provenance back to the original computation run. This decouples
 computation from data materialization.
 """
+
 import logging
 import pytest
 import pandas as pd
@@ -120,7 +121,9 @@ def test_offline_ingestion(tmp_path):
     # We pass the 'restored_run' explicitly.
     # This tags the data with 'run_hpc_01' even though that run is finished.
     tracker.ingest(
-        artifact=restored_artifact, data=df_to_load, run=restored_run  # <--- THE MAGIC
+        artifact=restored_artifact,
+        data=df_to_load,
+        run=restored_run,  # <--- THE MAGIC
     )
 
     # =========================================================================

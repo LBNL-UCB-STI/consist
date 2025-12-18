@@ -367,9 +367,9 @@ def test_task_cache_hit(tracker: Tracker, run_dir: Path):
 
     cache_hits = [r for r in runs if r.meta.get("cache_hit") is True]
     assert len(cache_hits) == 1, "Should have one cache hit"
-    assert (
-        cache_hits[0].meta.get("cache_source") is not None
-    ), "Should reference source run"
+    assert cache_hits[0].meta.get("cache_source") is not None, (
+        "Should reference source run"
+    )
 
 
 def test_task_cache_miss_on_config_change(tracker: Tracker, run_dir: Path):
@@ -401,9 +401,9 @@ def test_task_cache_miss_on_config_change(tracker: Tracker, run_dir: Path):
     result2 = configurable_task(input_path, TaskConfig(threshold=2.5, label="run2"))
 
     # Should be different artifacts
-    assert (
-        result1.uri != result2.uri
-    ), "Different configs should produce different artifacts"
+    assert result1.uri != result2.uri, (
+        "Different configs should produce different artifacts"
+    )
 
     # Validate both executed (no cache hit on second)
     runs = query_runs(tracker, select(Run).where(Run.model_name == "configurable_task"))
@@ -451,9 +451,9 @@ def test_task_cache_miss_on_input_change(tracker: Tracker, run_dir: Path):
         select(Run).where(Run.model_name == "process_task"),
     )
     assert len(runs) == 2, "Should have 2 runs"
-    assert (
-        runs[0].signature != runs[1].signature
-    ), "Different inputs should have different signatures"
+    assert runs[0].signature != runs[1].signature, (
+        "Different inputs should have different signatures"
+    )
 
     # Verify neither is a cache hit
     cache_hits = [r for r in runs if r.meta.get("cache_hit")]
@@ -629,9 +629,9 @@ def test_task_capture_dir_basic(tracker: Tracker, run_dir: Path):
     # Validate
     assert isinstance(captured, list), "capture_dir should return list"
     assert len(captured) == 2, "Should capture 2 CSV files"
-    assert all(
-        isinstance(a, Artifact) for a in captured
-    ), "All captured should be Artifacts"
+    assert all(isinstance(a, Artifact) for a in captured), (
+        "All captured should be Artifacts"
+    )
 
     # Validate files exist
     captured_keys = {a.key for a in captured}

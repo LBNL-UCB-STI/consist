@@ -54,9 +54,9 @@ def test_h5_auto_discovery(tracker: Tracker):
 
         # C. CRITICAL: Check Run ID Propagation
         for child in children:
-            assert (
-                child.run_id == container.run_id
-            ), "Child artifact must inherit Run ID"
+            assert child.run_id == container.run_id, (
+                "Child artifact must inherit Run ID"
+            )
             assert child.meta["parent_id"] == str(container.id)
             assert child.driver == "h5_table"
 
