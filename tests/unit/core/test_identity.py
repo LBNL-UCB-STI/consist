@@ -128,7 +128,9 @@ class TestInputHashing:
             art = Artifact(
                 key="raw", uri="inputs://file.txt", driver="txt", run_id=None
             )
-            resolver = lambda uri: fname
+
+            def resolver(uri: str) -> str:
+                return fname
 
             hash_val = im.compute_input_hash([art], path_resolver=resolver)
 
@@ -154,7 +156,9 @@ class TestInputHashing:
 
         try:
             art = Artifact(key="raw", uri="inputs://x", driver="x", run_id=None)
-            resolver = lambda uri: fname
+
+            def resolver(uri: str) -> str:
+                return fname
 
             im_full = IdentityManager(hashing_strategy="full")
             hash_full_1 = im_full.compute_input_hash([art], resolver)

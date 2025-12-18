@@ -1,4 +1,5 @@
 # tests/integration/test_loader.py
+from importlib.util import find_spec
 from pathlib import Path
 
 import numpy as np
@@ -8,14 +9,7 @@ from consist.core.tracker import Tracker
 from consist.api import load
 from consist.models.artifact import Artifact
 
-# Check for optional dependencies for Zarr testing
-try:
-    import xarray as xr
-    import zarr
-
-    has_zarr = True
-except ImportError:
-    has_zarr = False
+HAS_ZARR = find_spec("xarray") is not None and find_spec("zarr") is not None
 
 
 def test_loader_priority_and_ghost_mode(tracker: Tracker):
@@ -234,7 +228,9 @@ def test_loader_drivers(run_dir: Path):
     assert loaded_csv.iloc[0]["col1"] == 10
 
     # --- 2. Zarr Test ---
-    if has_zarr:
+    if HAS_ZARR:
+        import xarray as xr
+
         zarr_path = run_dir / "test.zarr"
 
         # Create a simple xarray Dataset

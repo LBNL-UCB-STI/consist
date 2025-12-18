@@ -204,7 +204,7 @@ def test_comparative_join_benchmark(tmp_path: Path):
     # =========================================================================
     # BENCHMARK 1: PANDAS (Merge)
     # =========================================================================
-    with Profiler("Pandas") as p:
+    with Profiler("Pandas"):
         pdf_a = pd.read_parquet(path_a)
         pdf_b = pd.read_parquet(path_b)
 
@@ -219,10 +219,10 @@ def test_comparative_join_benchmark(tmp_path: Path):
     # BENCHMARK 2: POLARS (Join)
     # =========================================================================
     if pl:
-        with Profiler("Polars (Lazy)") as p:
+        with Profiler("Polars (Lazy)"):
             lf_a = pl.scan_parquet(path_a)
             lf_b = pl.scan_parquet(path_b)
-            res_polars = (
+            (
                 lf_a.join(lf_b, on="id", suffix="_b")
                 .group_by("category")
                 .agg([(pl.col("val_b") - pl.col("val")).mean().alias("avg_delta")])
@@ -234,7 +234,7 @@ def test_comparative_join_benchmark(tmp_path: Path):
     # =========================================================================
     # BENCHMARK 3: CONSIST (Cold / Zero-Copy)
     # =========================================================================
-    with Profiler("Consist (Cold)") as p:
+    with Profiler("Consist (Cold)"):
         # Create View over raw Parquet files
         tracker.create_view("v_bench_cold", "results")
 
@@ -255,14 +255,14 @@ def test_comparative_join_benchmark(tmp_path: Path):
     # =========================================================================
     # 4a. Measure Ingestion Cost (Setup)
     logging.info("\n[Ingestion Phase] moving data to DuckDB...")
-    with Profiler("Ingestion Cost") as p:
+    with Profiler("Ingestion Cost"):
         # We pass the paths directly to avoid loading into Python RAM
         # Tracker sees the path string and streams it via Arrow
         tracker.ingest(artifact=art_a, data=str(path_a), run=Run(id="run_a", model="x"))
         tracker.ingest(artifact=art_b, data=str(path_b), run=Run(id="run_b", model="x"))
 
     # 4b. Measure Query Cost
-    with Profiler("Consist (Hot)") as p:
+    with Profiler("Consist (Hot)"):
         # Create View over Native Table
         # (Since artifacts are now marked 'is_ingested', this view points to global_tables.results)
         tracker.create_view("v_bench_hot", "results")

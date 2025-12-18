@@ -431,7 +431,7 @@ def test_task_cache_miss_on_input_change(tracker: Tracker, run_dir: Path):
     # First input
     input1 = run_dir / "input1.csv"
     pd.DataFrame({"value": [1, 2, 3]}).to_csv(input1, index=False)
-    result1 = process_task(input1)
+    process_task(input1)
 
     # Second input (different data)
     input2 = run_dir / "input2.csv"
@@ -440,7 +440,7 @@ def test_task_cache_miss_on_input_change(tracker: Tracker, run_dir: Path):
     import time
 
     time.sleep(0.1)
-    result2 = process_task(input2)
+    process_task(input2)
 
     # URIs will be the same (same output path), but this is OK
     # What matters is that different inputs caused re-execution
@@ -481,8 +481,8 @@ def test_task_cache_mode_overwrite(tracker: Tracker, run_dir: Path):
         return output
 
     # Execute twice
-    result1 = overwrite_task(input_path)
-    result2 = overwrite_task(input_path)
+    overwrite_task(input_path)
+    overwrite_task(input_path)
 
     # Should execute both times
     assert execution_count["count"] == 2, "Overwrite mode should execute both times"
@@ -521,7 +521,7 @@ def test_task_depends_on_files(tracker: Tracker, run_dir: Path):
         """Task that reads config files (tracked via depends_on)."""
         # Read the dependency files
         with open(config_file) as f:
-            config = json.load(f)
+            assert json.load(f) == {"version": "1.0"}
         with open(params_file) as f:
             params = json.load(f)
 
@@ -581,7 +581,7 @@ def test_task_depends_on_artifact(tracker: Tracker, run_dir: Path):
         pd.read_csv(data).to_csv(output, index=False)
         return output
 
-    result = task_with_artifact_deps(data_file)
+    task_with_artifact_deps(data_file)
 
     # Validate dependencies tracked
     runs = query_runs(
@@ -748,7 +748,7 @@ def test_task_artifact_path_resolution_error(tracker: Tracker, run_dir: Path):
     def task_with_missing_input(data: Path) -> Path:
         """Try to read missing file."""
         # This should fail when trying to read
-        df = pd.read_csv(data)
+        pd.read_csv(data)
         return run_dir / "output.csv"
 
     # Should raise FileNotFoundError
@@ -784,7 +784,7 @@ def test_task_metadata_propagation(tracker: Tracker, run_dir: Path):
 
         return output
 
-    result = task_with_metadata(input_path)
+    task_with_metadata(input_path)
 
     # Check metadata on run
     runs = query_runs(
@@ -944,7 +944,7 @@ def test_task_with_optional_parameters(tracker: Tracker, run_dir: Path):
     assert isinstance(result1, Artifact)
 
     # Call with explicit values
-    result2 = task_with_defaults(input_path, multiplier=5, label="custom")
+    task_with_defaults(input_path, multiplier=5, label="custom")
 
     # Should have different signatures
     runs = query_runs(
@@ -980,7 +980,6 @@ def test_task_weakref_cleanup(tracker: Tracker, run_dir: Path):
     assert result._tracker() is temp_tracker
 
     # Delete tracker
-    tracker_id = id(temp_tracker)
     del temp_tracker
 
     # Weak reference should now be dead

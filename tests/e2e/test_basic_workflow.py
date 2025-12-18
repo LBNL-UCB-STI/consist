@@ -193,12 +193,13 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     db_path = str(tracker.db_path)
     with patch("consist.cli.get_tracker", return_value=tracker):
         runs_result = runner.invoke(
-            cli_app, ["runs", "--db-path", db_path, "--limit", "5"]
+            cli_app, ["runs", "--db-path", db_path, "--limit", "5", "--json"]
         )
         assert runs_result.exit_code == 0
-        # Rich tables may truncate IDs; check the stable prefixes and model names.
-        assert scenario_id[:10] in runs_result.stdout
-        assert "transform" in runs_result.stdout
+        runs_payload = json.loads(runs_result.stdout)
+        run_ids = {r.get("id") for r in runs_payload}
+        assert scenario_id in run_ids
+        assert transform_run_id in run_ids
 
         show_result = runner.invoke(
             cli_app, ["show", transform_run_id, "--db-path", db_path]

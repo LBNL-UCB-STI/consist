@@ -1,18 +1,21 @@
+from __future__ import annotations
+
 import uuid
 import weakref
-from pathlib import Path
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Optional
 
-UTC = timezone.utc
-from typing import Dict, Any, Optional
-from sqlalchemy import Column, JSON
-from sqlalchemy.types import TypeDecorator, CHAR
+from pydantic import PrivateAttr
+from sqlalchemy import JSON, Column
 from sqlalchemy.dialects.postgresql import (
     UUID as PG_UUID,
 )  # Import for potential postgresql compatibility
+from sqlalchemy.types import CHAR, TypeDecorator
 
 from sqlmodel import Field, SQLModel
-from pydantic import PrivateAttr
+
+UTC = timezone.utc
 
 
 class UUIDType(TypeDecorator):

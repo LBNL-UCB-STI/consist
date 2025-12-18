@@ -161,7 +161,6 @@ def test_pipeline_chaining(tracker: Tracker):
     with Session(tracker.engine) as session:
         artifacts = session.exec(select(Artifact)).all()
         assert len(artifacts) == 1
-        db_art = artifacts[0]
 
         links = session.exec(select(RunArtifactLink)).all()
         assert len(links) == 2

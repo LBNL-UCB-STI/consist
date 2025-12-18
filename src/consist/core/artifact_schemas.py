@@ -1,8 +1,13 @@
+from __future__ import annotations
+
 import logging
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Dict
 
 from consist.models.artifact import Artifact
 from consist.models.run import Run
+
+if TYPE_CHECKING:
+    from consist.core.tracker import Tracker
 
 
 class ArtifactSchemaManager:
@@ -17,7 +22,7 @@ class ArtifactSchemaManager:
     - stores a small pointer/summary in `Artifact.meta`
     """
 
-    def __init__(self, tracker: "Tracker"):
+    def __init__(self, tracker: Tracker):
         self.tracker = tracker
 
     def profile_ingested_table(

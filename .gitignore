@@ -21,3 +21,5 @@ GEMINI.md
 
 # IDE
 .idea
+/examples/runs/
+/examples/generated/

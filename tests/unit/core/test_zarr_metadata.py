@@ -1,11 +1,9 @@
-import pytest
 import numpy as np
-
-# Skip if dependencies missing
-zarr = pytest.importorskip("zarr")
-xr = pytest.importorskip("xarray")
-
+import pytest
 from consist.integrations.dlt_loader import _handle_zarr_metadata
+
+pytest.importorskip("zarr")
+xr = pytest.importorskip("xarray")
 
 
 def test_extract_zarr_structure(tmp_path):

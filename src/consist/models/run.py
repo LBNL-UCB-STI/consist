@@ -1,14 +1,16 @@
+from __future__ import annotations
+
 import uuid
-from typing import Dict, Any, List, Optional
-from datetime import datetime
-from datetime import timezone
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
-UTC = timezone.utc
 from sqlalchemy import Column, JSON, String
 from sqlmodel import Field, SQLModel
 from consist.models.artifact import Artifact, UUIDType
+
+UTC = timezone.utc
 
 
 class RunArtifactLink(SQLModel, table=True):
