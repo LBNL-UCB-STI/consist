@@ -16,6 +16,7 @@
         - is_cached
         - last_run
         - log_artifact
+        - log_dataframe
         - log_artifacts
         - log_input
         - log_output

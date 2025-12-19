@@ -46,7 +46,7 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     2) **Step runs + artifact lineage**
        Each `scenario.step(...)` creates a child run. Within a step:
        - write some data
-       - `tracker.log_artifact(...)` to register outputs (and optionally inputs)
+       - `t.log_dataframe(...)` to register outputs (and optionally inputs)
        - use `scenario.coupler` to pass artifacts between steps
 
     3) **Dual-write provenance**
@@ -72,16 +72,16 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     scenario_id = "demo_scenario"
     ingest_run_id = f"{scenario_id}_ingest"
     transform_run_id = f"{scenario_id}_transform"
-    raw_path = run_dir / "raw.csv"
-    features_path = run_dir / "features.csv"
     scenario_cfg_path = run_dir / "scenario_config.json"
     scenario_cfg_path.write_text(json.dumps({"seed": 7, "note": "external config"}))
     features_artifact: Optional[Artifact] = None
+    raw_artifact: Optional[Artifact] = None
 
     with tracker.scenario(
         scenario_id,
         config={"seed": 7},  # identity config (hashed)
-        facet={"seed": 7, "region": "demo"},  # queryable config facet (optional)
+        facet_from=["seed"],
+        facet={"region": "demo"},  # queryable config facet (optional)
         hash_inputs=[("scenario_config", scenario_cfg_path)],  # hash-only attachment(s)
         tags=["e2e", "scenario_header"],
     ) as scenario:
@@ -90,16 +90,17 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
             run_id=ingest_run_id,
             tags=["ingest"],
             year=2024,
-            facet={"step": "ingest", "rows_written": 6},
-        ):
-            _write_csv(raw_path, rows=6)
-            raw_art = tracker.log_artifact(
-                path=raw_path,
+            config={"step": "ingest", "rows_written": 6},
+            facet_from=["step", "rows_written"],
+        ) as t:
+            df = pd.DataFrame({"value": range(6), "category": ["a"] * 6})
+            raw_art = t.log_dataframe(
+                df,
                 key="raw_table",
-                direction="output",
                 driver="csv",
                 meta={"rows": 6},
             )
+            raw_artifact = raw_art
             scenario.coupler.set("raw", raw_art)
 
         with scenario.step(
@@ -110,15 +111,15 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
             # Prefer `require()` in tests: it produces a clear error if a predecessor
             # forgot to `coupler.set(...)`, and avoids Optional typing.
             inputs=[scenario.coupler.require("raw")],
-            facet={"step": "transform", "multiplier": 2},
-        ):
-            df_raw = pd.read_csv(raw_path)
+            config={"step": "transform", "multiplier": 2},
+            facet_from=["step", "multiplier"],
+        ) as t:
+            raw_art = scenario.coupler.require("raw")
+            df_raw = pd.read_csv(raw_art.path)
             df_raw["value_doubled"] = df_raw["value"] * 2
-            df_raw.to_csv(features_path, index=False)
-            features_art = tracker.log_artifact(
-                path=features_path,
+            features_art = t.log_dataframe(
+                df_raw,
                 key="features",
-                direction="output",
                 driver="csv",
                 meta={"rows": len(df_raw)},
             )
@@ -160,6 +161,7 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     artifacts = consist.run_query(select(Artifact), tracker=tracker)
     keys = {a.key for a in artifacts}
     assert {"raw_table", "features"} <= keys
+    assert raw_artifact is not None
 
     # Ensure parent linkage captured by scenario header
     child_parents = {r.id: r.parent_run_id for r in runs if r.id != scenario_id}

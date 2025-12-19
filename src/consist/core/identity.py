@@ -463,15 +463,11 @@ class IdentityManager:
 
         # 5. Handle Numpy conversions (Existing logic)
         if np:
-            if isinstance(obj, np.integer):
-                return int(obj)
-            elif isinstance(obj, np.floating):
-                return float(obj)
-            elif isinstance(obj, np.ndarray):
+            if isinstance(obj, np.ndarray):
                 # Recursive call ensures arrays of Pydantic objects or sets are handled
                 return self._clean_structure(obj.tolist(), exclude_keys)
-            elif isinstance(obj, np.bool_):
-                return bool(obj)
+            if isinstance(obj, np.generic):
+                return self._clean_structure(obj.item(), exclude_keys)
 
         return obj
 

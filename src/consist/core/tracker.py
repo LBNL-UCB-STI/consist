@@ -12,6 +12,7 @@ from typing import (
     Iterable,
     List,
     Literal,
+    Mapping,
     Optional,
     Tuple,
     Type,
@@ -235,6 +236,17 @@ class Tracker:
                 return run.signature
         return None
 
+    def _coerce_facet_mapping(self, obj: Any, label: str) -> Dict[str, Any]:
+        if obj is None:
+            raise ValueError(f"facet_from requires a {label} to extract from.")
+        if hasattr(obj, "model_dump"):
+            return obj.model_dump(mode="json")
+        if hasattr(obj, "dict") and hasattr(obj, "json"):
+            return obj.dict()
+        if isinstance(obj, Mapping):
+            return dict(obj)
+        raise ValueError(f"Tracker {label} must be a mapping or Pydantic model.")
+
     # --- Run Management ---
 
     def begin_run(
@@ -248,6 +260,7 @@ class Tracker:
         cache_mode: str = "reuse",
         *,
         facet: Optional[FacetLike] = None,
+        facet_from: Optional[List[str]] = None,
         hash_inputs: HashInputs = None,
         facet_schema_version: Optional[Union[str, int]] = None,
         facet_index: bool = True,
@@ -283,6 +296,9 @@ class Tracker:
         facet : Optional[FacetLike], optional
             Optional small, queryable configuration facet to persist alongside the run.
             This is distinct from `config` (which is hashed and stored in the JSON snapshot).
+        facet_from : Optional[List[str]], optional
+            List of config keys to extract into the facet. Extracted values are merged
+            with any explicit `facet`, with explicit keys taking precedence.
         hash_inputs : HashInputs, optional
             Extra inputs to include in the run identity hash without logging them as run
             inputs/outputs. Useful for config bundles or auxiliary files. Each entry is
@@ -334,6 +350,21 @@ class Tracker:
         raw_config_model: Optional[BaseModel] = (
             config if isinstance(config, BaseModel) else None
         )
+        if facet_from:
+            if isinstance(facet_from, str):
+                raise ValueError("facet_from must be a list of config keys.")
+            config_dict_for_facet = self._coerce_facet_mapping(config, "config")
+            missing = [key for key in facet_from if key not in config_dict_for_facet]
+            if missing:
+                raise KeyError(f"facet_from keys not found in config: {missing}")
+            derived = {key: config_dict_for_facet[key] for key in facet_from}
+            if facet is not None:
+                facet_dict = self._coerce_facet_mapping(facet, "facet")
+                merged = dict(derived)
+                merged.update(facet_dict)
+                facet = self.identity.normalize_json(merged)
+            else:
+                facet = self.identity.normalize_json(derived)
 
         # Extract explicit Run fields early so they can contribute to identity hashing.
         # These are identity-relevant parameters for most workflows (e.g., a different year
@@ -521,7 +552,7 @@ class Tracker:
             - `tags`: Optional[List[str]]
             - `description`: Optional[str]
             - `cache_mode`: str ("reuse", "overwrite", "readonly")
-            - `facet`, `hash_inputs`, `facet_schema_version`, `facet_index`
+            - `facet`, `facet_from`, `hash_inputs`, `facet_schema_version`, `facet_index`
             - `year`, `iteration`
 
         Yields
@@ -578,7 +609,7 @@ class Tracker:
         model : str, default "scenario"
             The model name for the header run.
         **kwargs : Any
-            Additional metadata or arguments for the header run.
+            Additional metadata or arguments for the header run (including `facet_from`).
 
         Returns
         -------
@@ -983,6 +1014,75 @@ class Tracker:
         self._sync_artifact_to_db(artifact_obj, direction)
 
         return artifact_obj
+
+    def log_dataframe(
+        self,
+        df: pd.DataFrame,
+        key: str,
+        schema: Optional[Type[SQLModel]] = None,
+        direction: str = "output",
+        path: Optional[Union[str, Path]] = None,
+        driver: Optional[str] = None,
+        meta: Optional[Dict[str, Any]] = None,
+        **to_file_kwargs: Any,
+    ) -> Artifact:
+        """
+        Serialize a DataFrame, log it as an artifact, and trigger optional ingestion.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Data to persist.
+        key : str
+            Logical artifact key.
+        schema : Optional[Type[SQLModel]], optional
+            Schema used for ingestion, if provided.
+        direction : str, default "output"
+            Artifact direction relative to the run.
+        path : Optional[Union[str, Path]], optional
+            Output path; defaults to `<run_dir>/<key>.<driver>`.
+        driver : Optional[str], optional
+            File format driver (e.g., "parquet" or "csv").
+        meta : Optional[Dict[str, Any]], optional
+            Additional metadata for the artifact.
+        **to_file_kwargs : Any
+            Keyword arguments forwarded to ``pd.DataFrame.to_parquet`` or ``to_csv``.
+
+        Returns
+        -------
+        Artifact
+            The artifact logged for the written dataset.
+
+        Raises
+        ------
+        ValueError
+            If the requested driver is unsupported.
+        """
+        if path is None:
+            resolved_path = self.run_dir / f"{key}.{driver or 'parquet'}"
+        else:
+            resolved_path = Path(path)
+
+        inferred_driver = driver
+        if inferred_driver is None:
+            suffix = resolved_path.suffix.lower().lstrip(".")
+            inferred_driver = suffix or "parquet"
+
+        resolved_path.parent.mkdir(parents=True, exist_ok=True)
+        if inferred_driver == "parquet":
+            df.to_parquet(resolved_path, **to_file_kwargs)
+        elif inferred_driver == "csv":
+            df.to_csv(resolved_path, index=False, **to_file_kwargs)
+        else:
+            raise ValueError(f"Unsupported driver for log_dataframe: {inferred_driver}")
+
+        meta_payload = meta or {}
+        art = self.log_artifact(
+            resolved_path, key=key, direction=direction, schema=schema, **meta_payload
+        )
+        if schema is not None:
+            self.ingest(art, df, schema=schema)
+        return art
 
     def log_artifacts(
         self,

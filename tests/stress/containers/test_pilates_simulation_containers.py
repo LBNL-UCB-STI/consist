@@ -88,7 +88,7 @@ def run_simulation_scenario(
         scenario_name,
         config={"mode": storage_mode, "base_trips": base_trips},
         model="pilates_orchestrator",
-        facet={"mode": storage_mode, "base_trips": base_trips},
+        facet_from=["mode", "base_trips"],
         tags=["scenario_header"],
     ) as scenario:
         coupler = scenario.coupler
@@ -102,7 +102,7 @@ def run_simulation_scenario(
             # Include identity-relevant knobs here so different scenarios don't
             # accidentally cache-hit on the init step.
             config={"mode": storage_mode, "base_trips": base_trips},
-        ):
+        ) as t:
             df_hh = pd.DataFrame(
                 {
                     "household_id": np.arange(n_hh),
@@ -110,7 +110,7 @@ def run_simulation_scenario(
                     "income_segment": rng.choice(["Low", "Med", "High"], size=n_hh),
                 }
             )
-            consist.log_dataframe(df_hh, key="households", schema=Household)
+            t.log_dataframe(df_hh, key="households", schema=Household)
 
             # Seed persons for the first year with zero trips
             df_seed = pd.DataFrame(
@@ -121,7 +121,7 @@ def run_simulation_scenario(
                     "number_of_trips": np.zeros(n_per, dtype=int) + base_trips,
                 }
             )
-            seed_art = consist.log_dataframe(
+            seed_art = t.log_dataframe(
                 df_seed,
                 key="persons",
                 schema=Person,
@@ -143,9 +143,9 @@ def run_simulation_scenario(
                 tags=["simulation", "advance"],
                 # Include delta in config so cache signatures reflect the actual work.
                 config={"year": year, "delta": advance_delta_by_year.get(year, 1)},
-                facet={"delta": advance_delta_by_year.get(year, 1)},
+                facet_from=["delta"],
                 inputs=step_inputs,
-            ):
+            ) as t:
                 cached_persons = coupler.adopt_cached_output("persons")
                 if cached_persons:
                     coupler.set("persons", cached_persons)
@@ -156,7 +156,7 @@ def run_simulation_scenario(
                         delta = advance_delta_by_year.get(year, 1)
                         df_adv = advance_people(df_adv, delta=delta)
 
-                    prev_person_art = consist.log_dataframe(
+                    prev_person_art = t.log_dataframe(
                         df_adv,
                         key="persons",
                         schema=Person,
@@ -174,9 +174,7 @@ def run_simulation_scenario(
                     "year": year,
                     "base_trips": base_trips_by_year.get(year, base_trips),
                 },
-                facet={
-                    "base_trips": base_trips_by_year.get(year, base_trips),
-                },
+                facet_from=["base_trips"],
                 hash_inputs=[("generate_trips_config", external_cfg_dir)],
                 inputs=[coupler.get("persons")],
             ):
@@ -342,7 +340,7 @@ def test_pilates_header_pattern_api(tmp_path):
             model="pilates_orchestrator",
             tags=["scenario_header"],
         ) as sc:
-            with sc.step(name="pop_synth", run_id=f"{name}_init", tags=["init"]):
+            with sc.step(name="pop_synth", run_id=f"{name}_init", tags=["init"]) as t:
                 df_hh = pd.DataFrame(
                     {
                         "household_id": np.arange(n_hh),
@@ -350,7 +348,7 @@ def test_pilates_header_pattern_api(tmp_path):
                         "income_segment": rng.choice(["Low", "Med", "High"], size=n_hh),
                     }
                 )
-                consist.log_dataframe(df_hh, key="households", schema=Household)
+                t.log_dataframe(df_hh, key="households", schema=Household)
 
             for year in years:
                 with sc.step(
@@ -358,7 +356,7 @@ def test_pilates_header_pattern_api(tmp_path):
                     run_id=f"{name}_{year}",
                     year=year,
                     tags=["simulation"],
-                ):
+                ) as t:
                     trips = rng.poisson(lam=base_trips, size=n_per)
                     df_per = pd.DataFrame(
                         {
@@ -368,7 +366,7 @@ def test_pilates_header_pattern_api(tmp_path):
                             "number_of_trips": trips,
                         }
                     )
-                    consist.log_dataframe(
+                    t.log_dataframe(
                         df_per, key="persons", schema=Person, direction="output"
                     )
 
