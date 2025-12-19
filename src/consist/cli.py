@@ -12,7 +12,7 @@ import shlex
 import json
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Mapping
 
 import pandas as pd
 import typer
@@ -24,7 +24,13 @@ from sqlalchemy import select
 from sqlmodel import Session
 
 from consist import Tracker
+from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.tools import queries
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from consist.models.artifact import Artifact
 
 app = typer.Typer(rich_markup_mode="markdown")
 schema_app = typer.Typer(rich_markup_mode="markdown")
@@ -76,6 +82,142 @@ def get_tracker(db_path: Optional[str] = None) -> Tracker:
         )
         raise typer.Exit(1)
     return Tracker(run_dir=Path("."), db_path=resolved_path)
+
+
+def _coerce_mounts(value: Any) -> Dict[str, str]:
+    if not isinstance(value, Mapping):
+        return {}
+    mounts: Dict[str, str] = {}
+    for key, root in value.items():
+        if isinstance(key, str) and isinstance(root, str) and root:
+            mounts[key] = root
+    return mounts
+
+
+def _apply_inferred_mounts(tracker: Tracker, mounts: Mapping[str, str]) -> None:
+    if not mounts:
+        return
+    merged = dict(mounts)
+    merged.update(tracker.mounts)
+    tracker.fs.mounts = merged
+    tracker.mounts = tracker.fs.mounts
+
+
+def _ensure_tracker_mounts_for_artifact(tracker: Tracker, artifact: "Artifact") -> None:
+    from consist.tools.mount_diagnostics import parse_mount_uri
+
+    parsed = parse_mount_uri(artifact.uri)
+    if parsed is None:
+        return
+
+    scheme, _ = parsed
+    if scheme in tracker.mounts:
+        return
+
+    inferred: Dict[str, str] = {}
+    run = tracker.get_run(artifact.run_id) if artifact.run_id else None
+    if run and isinstance(run.meta, dict):
+        inferred.update(_coerce_mounts(run.meta.get("mounts")))
+        run_dir = run.meta.get("_physical_run_dir")
+        if (
+            scheme == "workspace"
+            and scheme not in inferred
+            and isinstance(run_dir, str)
+            and run_dir
+        ):
+            inferred[scheme] = run_dir
+
+    if scheme not in inferred:
+        meta = artifact.meta or {}
+        mount_root = meta.get("mount_root")
+        if isinstance(mount_root, str) and mount_root:
+            inferred[scheme] = mount_root
+
+    _apply_inferred_mounts(tracker, inferred)
+
+
+def _render_schema_profile(
+    schema: "ArtifactSchema", fields: List["ArtifactSchemaField"]
+) -> None:
+    summary = getattr(schema, "summary_json", None) or {}
+    table = Table()
+    table.add_column("Column", style="cyan")
+    table.add_column("Type", style="magenta")
+    table.add_column("Nullable", style="green")
+
+    for field in fields:
+        nullable = "yes" if getattr(field, "nullable", True) else "no"
+        table.add_row(str(field.name), str(field.logical_type), nullable)
+
+    console.print(table)
+
+    if summary:
+        summary_parts = []
+        for key in (
+            "row_count",
+            "num_rows",
+            "rows",
+            "column_count",
+            "num_columns",
+            "columns",
+        ):
+            value = summary.get(key)
+            if isinstance(value, (int, float)) and value:
+                summary_parts.append(f"{key}={value}")
+        if summary_parts:
+            console.print(f"[dim]Summary: {', '.join(summary_parts)}[/dim]")
+
+
+def _coerce_mounts(value: Any) -> Dict[str, str]:
+    if not isinstance(value, Mapping):
+        return {}
+    mounts: Dict[str, str] = {}
+    for key, root in value.items():
+        if isinstance(key, str) and isinstance(root, str) and root:
+            mounts[key] = root
+    return mounts
+
+
+def _apply_inferred_mounts(tracker: Tracker, mounts: Mapping[str, str]) -> None:
+    if not mounts:
+        return
+    merged = dict(mounts)
+    merged.update(tracker.mounts)
+    tracker.fs.mounts = merged
+    tracker.mounts = tracker.fs.mounts
+
+
+def _ensure_tracker_mounts_for_artifact(tracker: Tracker, artifact: "Artifact") -> None:
+    from consist.tools.mount_diagnostics import parse_mount_uri
+
+    parsed = parse_mount_uri(artifact.uri)
+    if parsed is None:
+        return
+
+    scheme, _ = parsed
+    if scheme in tracker.mounts:
+        return
+
+    inferred: Dict[str, str] = {}
+    run = tracker.get_run(artifact.run_id) if artifact.run_id else None
+    if run and isinstance(run.meta, dict):
+        inferred.update(_coerce_mounts(run.meta.get("mounts")))
+        run_dir = run.meta.get("_physical_run_dir")
+        if (
+            scheme == "workspace"
+            and scheme not in inferred
+            and isinstance(run_dir, str)
+            and run_dir
+        ):
+            inferred[scheme] = run_dir
+
+    if scheme not in inferred:
+        meta = artifact.meta or {}
+        mount_root = meta.get("mount_root")
+        if isinstance(mount_root, str) and mount_root:
+            inferred[scheme] = mount_root
+
+    _apply_inferred_mounts(tracker, inferred)
 
 
 @schema_app.command("export")
@@ -688,6 +830,8 @@ def preview(
         console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
         raise typer.Exit(1)
 
+    _ensure_tracker_mounts_for_artifact(tracker, artifact)
+
     try:
         import consist
 
@@ -926,6 +1070,8 @@ class ConsistShell(cmd.Cmd):
                 console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
                 return
 
+            _ensure_tracker_mounts_for_artifact(self.tracker, artifact)
+
             try:
                 import consist
 
@@ -1026,6 +1172,20 @@ class ConsistShell(cmd.Cmd):
             if not artifact:
                 console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
                 return
+
+            _ensure_tracker_mounts_for_artifact(self.tracker, artifact)
+
+            if self.tracker.db and artifact.id:
+                fetched = self.tracker.db.get_artifact_schema_for_artifact(
+                    artifact_id=artifact.id
+                )
+                if fetched is not None:
+                    schema, fields = fetched
+                    console.print(
+                        f"Schema: {artifact_key} [dim]({artifact.driver}, db profile)[/dim]"
+                    )
+                    _render_schema_profile(schema, fields)
+                    return
 
             try:
                 import consist
