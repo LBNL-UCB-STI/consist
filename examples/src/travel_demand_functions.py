@@ -265,7 +265,6 @@ def compute_od_logsums(
     mode_params = mode_params or ModeChoiceParams()
 
     zone_ids = list(skims.coords["origin"].values)
-    n_zones = len(zone_ids)
 
     # Build zone lookup arrays
     parking = np.array(
