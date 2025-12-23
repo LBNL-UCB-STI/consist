@@ -181,6 +181,50 @@ class TestInputHashing:
             os.remove(fname)
 
 
+class TestZarrHashing:
+    """Tests Zarr-aware hashing behavior for directory inputs."""
+
+    def test_fast_hash_ignores_chunk_content_when_metadata_stable(self, tmp_path):
+        store = tmp_path / "skims.zarr"
+        store.mkdir()
+        metadata = store / ".zmetadata"
+        metadata.write_text('{"zarr_consolidated_format":1}', encoding="utf-8")
+        chunk = store / "0.0.0"
+        chunk.write_bytes(b"aaaa")
+
+        im_fast = IdentityManager(hashing_strategy="fast")
+        im_full = IdentityManager(hashing_strategy="full")
+
+        hash_fast_1 = im_fast.compute_file_checksum(store)
+        hash_full_1 = im_full.compute_file_checksum(store)
+
+        original_stat = chunk.stat()
+        chunk.write_bytes(b"bbbb")
+        os.utime(chunk, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+        hash_fast_2 = im_fast.compute_file_checksum(store)
+        hash_full_2 = im_full.compute_file_checksum(store)
+
+        assert hash_fast_1 == hash_fast_2
+        assert hash_full_1 != hash_full_2
+
+    def test_fast_hash_changes_on_metadata_update(self, tmp_path):
+        store = tmp_path / "skims.zarr"
+        store.mkdir()
+        metadata = store / ".zmetadata"
+        metadata.write_text('{"metadata":"v1"}', encoding="utf-8")
+        chunk = store / "0.0.0"
+        chunk.write_bytes(b"aaaa")
+
+        im_fast = IdentityManager(hashing_strategy="fast")
+        hash_fast_1 = im_fast.compute_file_checksum(store)
+
+        metadata.write_text('{"metadata":"v2"}', encoding="utf-8")
+        hash_fast_2 = im_fast.compute_file_checksum(store)
+
+        assert hash_fast_1 != hash_fast_2
+
+
 class TestCallableHashing:
     """
     Tests the new `compute_callable_hash` method in `IdentityManager`.

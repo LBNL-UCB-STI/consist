@@ -5,7 +5,7 @@ from typing import Any, Iterable, Mapping
 
 import pandas as pd
 
-from .synth_simulation import (
+from synth_simulation import (
     PredatorPreyConfig,
     make_parameter_sweep,
     run_predator_prey,

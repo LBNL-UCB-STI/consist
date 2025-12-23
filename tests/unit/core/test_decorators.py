@@ -886,6 +886,39 @@ def test_task_lineage_tracking(tracker: Tracker, run_dir: Path):
     assert inputs[0]["artifact"].id == a2.id, "Should trace back to step2 output"
 
 
+def test_task_lineage_max_depth(tracker: Tracker, run_dir: Path):
+    input_path = run_dir / "start_depth.csv"
+    pd.DataFrame({"x": [1, 2, 3]}).to_csv(input_path, index=False)
+
+    @tracker.task()
+    def step1(data: Path) -> Path:
+        df = pd.read_csv(data)
+        out = run_dir / "depth_step1.csv"
+        df.to_csv(out, index=False)
+        return out
+
+    @tracker.task()
+    def step2(data: Path) -> Path:
+        df = pd.read_csv(data)
+        out = run_dir / "depth_step2.csv"
+        df.to_csv(out, index=False)
+        return out
+
+    a1 = step1(input_path)
+    a2 = step2(a1)
+
+    depth0 = tracker.get_artifact_lineage(a2.id, max_depth=0)
+    assert depth0 is not None
+    assert depth0["producing_run"] is None
+
+    depth1 = tracker.get_artifact_lineage(a2.id, max_depth=1)
+    assert depth1 is not None
+    assert depth1["producing_run"] is not None
+    inputs = depth1["producing_run"]["inputs"]
+    assert len(inputs) > 0
+    assert all(node["producing_run"] is None for node in inputs)
+
+
 # ============================================================================
 # Edge Cases and Special Scenarios
 # ============================================================================

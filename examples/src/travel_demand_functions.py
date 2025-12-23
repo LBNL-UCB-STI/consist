@@ -15,7 +15,7 @@ Skims are stored as xarray Datasets in zarr format to demonstrate array handling
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
 import numpy as np
@@ -32,8 +32,8 @@ import xarray as xr
 class ZoneParams:
     """Parameters defining the 5-zone linear city."""
 
-    populations: tuple[int, ...] = (200, 250, 100, 250, 200)
-    jobs: tuple[int, ...] = (100, 150, 500, 150, 100)
+    populations: tuple[int, ...] = (2000, 2000, 2000, 2000, 2000)
+    jobs: tuple[int, ...] = (1000, 1500, 5000, 1500, 1000)
     parking_costs: tuple[float, ...] = (0.0, 5.0, 15.0, 5.0, 0.0)
     has_transit: tuple[bool, ...] = (True, True, True, True, False)
 
@@ -51,14 +51,14 @@ class ModeChoiceParams:
     beta_time: float = -0.10
     beta_cost: float = -0.50
 
-    asc_transit: float = -0.5
-    asc_walk: float = 0.5
+    asc_transit: float = -1.5
+    asc_walk: float = -0.5
 
     fuel_cost_per_mile: float = 0.20
     transit_fare: float = 2.50
 
     walk_speed_mph: float = 3.0
-    transit_speed_mph: float = 25.0
+    transit_speed_mph: float = 20.0
     free_flow_car_speed_mph: float = 35.0
 
     max_walk_distance: float = 2.0
@@ -84,7 +84,24 @@ class AssignmentParams:
 
     bpr_alpha: float = 0.15
     bpr_beta: float = 4.0
-    base_capacity: float = 200.0
+    base_capacity: float = 1500.0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class TravelDemandScenarioConfig:
+    """High-level scenario configuration."""
+
+    n_iterations: int = 10
+    seed: int = 0
+    zone_params: ZoneParams = field(default_factory=ZoneParams)
+    mode_params: ModeChoiceParams = field(default_factory=ModeChoiceParams)
+    dest_params: DestinationChoiceParams = field(
+        default_factory=DestinationChoiceParams
+    )
+    assignment_params: AssignmentParams = field(default_factory=AssignmentParams)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -313,6 +330,8 @@ def distribute_trips(
     logsums: xr.DataArray,
     dest_params: DestinationChoiceParams | None = None,
     seed: int = 42,
+    prev_trips: pd.DataFrame | None = None,
+    update_share: float = 1.0,
 ) -> pd.DataFrame:
     """Assign work locations using logsum-based gravity model.
 
@@ -322,6 +341,8 @@ def distribute_trips(
     """
     dest_params = dest_params or DestinationChoiceParams()
     rng = np.random.default_rng(seed)
+    if not 0.0 <= update_share <= 1.0:
+        raise ValueError("update_share must be between 0.0 and 1.0.")
 
     zone_ids = list(logsums.coords["origin"].values)
     jobs_by_zone = zones.set_index("zone_id")["jobs"].to_dict()
@@ -357,7 +378,25 @@ def distribute_trips(
             }
         )
 
-    return pd.DataFrame(trips)
+    trips_df = pd.DataFrame(trips)
+
+    if prev_trips is not None and update_share < 1.0:
+        prev_dest = prev_trips[["person_id", "work_zone"]].drop_duplicates("person_id")
+        blended = trips_df.merge(
+            prev_dest,
+            on="person_id",
+            how="left",
+            suffixes=("", "_prev"),
+            sort=False,
+        )
+        update_mask = rng.random(len(blended)) < update_share
+        keep_prev_mask = blended["work_zone_prev"].notna() & ~update_mask
+        blended.loc[keep_prev_mask, "work_zone"] = blended.loc[
+            keep_prev_mask, "work_zone_prev"
+        ]
+        trips_df = blended.drop(columns=["work_zone_prev"])
+
+    return trips_df
 
 
 # =============================================================================
@@ -450,12 +489,20 @@ def compute_mode_utilities(
 def apply_mode_choice(
     utilities_df: pd.DataFrame,
     seed: int = 42,
+    prev_trips: pd.DataFrame | None = None,
+    update_share: float = 1.0,
 ) -> pd.DataFrame:
     """Apply multinomial logit to select mode for each trip.
+
+    If prev_trips is provided, update_share controls the fraction of trips
+    that are resampled; the remainder keep their previous mode.
 
     Returns DataFrame with: person_id, home_zone, work_zone, distance_miles,
                            mode, time_mins, cost
     """
+    if not 0.0 <= update_share <= 1.0:
+        raise ValueError("update_share must be between 0.0 and 1.0.")
+
     rng = np.random.default_rng(seed)
 
     # Build utility matrix, masking unavailable modes
@@ -484,7 +531,18 @@ def apply_mode_choice(
     ].copy()
     result["mode"] = modes
 
-    mode_arr = np.array(modes)
+    if prev_trips is not None and update_share < 1.0:
+        key_cols = ["person_id", "home_zone", "work_zone"]
+        prev_modes = prev_trips[key_cols + ["mode"]].drop_duplicates(key_cols)
+        blended = result.merge(
+            prev_modes, on=key_cols, how="left", suffixes=("", "_prev"), sort=False
+        )
+        update_mask = rng.random(len(blended)) < update_share
+        keep_prev_mask = blended["mode_prev"].notna() & ~update_mask
+        blended.loc[keep_prev_mask, "mode"] = blended.loc[keep_prev_mask, "mode_prev"]
+        result = blended.drop(columns=["mode_prev"])
+
+    mode_arr = result["mode"].to_numpy()
     result["time_mins"] = np.select(
         [mode_arr == "car", mode_arr == "transit", mode_arr == "walk"],
         [

@@ -77,6 +77,21 @@ def test_scenario_step_input_keys_declares_inputs(tracker: Tracker):
             assert any(a.id == produced.id for a in t.current_consist.inputs)
 
 
+def test_scenario_step_optional_input_keys_skips_missing(tracker: Tracker):
+    with tracker.scenario("scen_optional_inputs") as sc:
+        with sc.step("produce") as t:
+            produced = t.log_artifact("raw.csv", key="raw", direction="output")
+            sc.coupler.set("raw", produced)
+
+        with sc.step(
+            "consume",
+            optional_input_keys=["raw", "missing"],
+            cache_mode="overwrite",
+        ) as t:
+            assert t.current_consist is not None
+            assert any(a.id == produced.id for a in t.current_consist.inputs)
+
+
 def test_scenario_step_facet_from_config(tracker: Tracker):
     np = pytest.importorskip("numpy")
     with tracker.scenario("scen_facet_from") as sc:

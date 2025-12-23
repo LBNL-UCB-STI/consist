@@ -186,6 +186,34 @@ class TestGetArtifactByUri:
             assert found.key == f"artifact_{i}"
 
 
+class TestFindArtifacts:
+    """Tests for find_artifacts() method."""
+
+    def test_find_artifacts_by_creator_consumer_and_key(self, tracker, run_dir: Path):
+        output_path = run_dir / "artifact_output.csv"
+        output_path.write_text("data\n")
+
+        with tracker.start_run("producer_run", "test_model"):
+            produced = tracker.log_output(output_path, key="shared_artifact")
+
+        with tracker.start_run("consumer_run", "test_model", inputs=[produced]):
+            pass
+
+        by_creator = tracker.find_artifacts(creator="producer_run")
+        assert any(art.id == produced.id for art in by_creator)
+
+        by_consumer = tracker.find_artifacts(consumer="consumer_run")
+        assert any(art.id == produced.id for art in by_consumer)
+
+        by_key = tracker.find_artifacts(key="shared_artifact")
+        assert any(art.id == produced.id for art in by_key)
+
+        by_both = tracker.find_artifacts(
+            creator="producer_run", consumer="consumer_run", key="shared_artifact"
+        )
+        assert [art.id for art in by_both] == [produced.id]
+
+
 class TestLogH5Container:
     """Tests for log_h5_container() method."""
 

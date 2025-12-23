@@ -7,6 +7,7 @@ from typing import Optional, List, Callable, Any, Dict, Tuple
 import pandas as pd
 from sqlalchemy.exc import OperationalError, DatabaseError
 from sqlalchemy.orm.exc import ConcurrentModificationError
+from sqlalchemy.orm import aliased
 from sqlalchemy.pool import NullPool
 from sqlmodel import create_engine, Session, select, SQLModel, col, delete
 
@@ -656,6 +657,52 @@ class DatabaseManager:
 
         try:
             return self.execute_with_retry(_query)
+        except Exception:
+            return []
+
+    def find_artifacts(
+        self,
+        *,
+        creator: Optional[str] = None,
+        consumer: Optional[str] = None,
+        key: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Artifact]:
+        def _query():
+            with Session(self.engine) as session:
+                statement = select(Artifact).distinct()
+
+                if creator:
+                    output_link = aliased(RunArtifactLink)
+                    statement = statement.join(
+                        output_link, Artifact.id == output_link.artifact_id
+                    )
+                    statement = statement.where(output_link.run_id == creator)
+                    statement = statement.where(output_link.direction == "output")
+
+                if consumer:
+                    input_link = aliased(RunArtifactLink)
+                    statement = statement.join(
+                        input_link, Artifact.id == input_link.artifact_id
+                    )
+                    statement = statement.where(input_link.run_id == consumer)
+                    statement = statement.where(input_link.direction == "input")
+
+                if key:
+                    statement = statement.where(Artifact.key == key)
+
+                results = session.exec(
+                    statement.order_by(Artifact.created_at.desc()).limit(limit)
+                ).all()
+
+                for artifact in results:
+                    _ = artifact.meta
+                    session.expunge(artifact)
+
+                return results
+
+        try:
+            return self.execute_with_retry(_query, operation_name="find_artifacts")
         except Exception:
             return []
 

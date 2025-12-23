@@ -28,6 +28,7 @@
         - get_artifact
         - get_artifacts_for_run
         - get_artifact_lineage
+        - find_artifacts
         - find_run
         - find_runs
         - history

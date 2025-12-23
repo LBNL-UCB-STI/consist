@@ -138,12 +138,15 @@ class ScenarioContext:
         description: Optional[str] = None,
         cache_mode: str = "reuse",
         input_keys: Optional[object] = None,
+        optional_input_keys: Optional[object] = None,
         inputs: Optional[List[ArtifactRef]] = None,
         outputs: Optional[List[str]] = None,
         output_paths: Optional[Mapping[str, ArtifactRef]] = None,
         materialize_cached_outputs: str = "never",
         materialize_cached_output_paths: Optional[Mapping[str, Path]] = None,
         materialize_cached_outputs_dir: Optional[Path] = None,
+        iteration: Optional[int] = None,
+        year: Optional[int] = None,
         **fn_kwargs: Any,
     ) -> Dict[str, Artifact]:
         """
@@ -170,6 +173,9 @@ class ScenarioContext:
             A string or list of strings naming Coupler keys to declare as step inputs.
             Inputs are resolved before the run starts (so caching and `db_fallback="inputs-only"`
             behave correctly).
+        optional_input_keys : Optional[object]
+            A string or list of strings naming Coupler keys to declare as inputs only
+            when present (useful for warm-starting iterative runs).
         inputs : Optional[List[ArtifactRef]]
             Additional explicit inputs to declare for caching/provenance.
         outputs / output_paths
@@ -214,6 +220,16 @@ class ScenarioContext:
             else:
                 keys_list = list(input_keys)  # type: ignore[arg-type]
             resolved_inputs.extend([self.coupler.require(k) for k in keys_list])
+        if optional_input_keys:
+            keys_list: List[str]
+            if isinstance(optional_input_keys, str):
+                keys_list = [optional_input_keys]
+            else:
+                keys_list = list(optional_input_keys)  # type: ignore[arg-type]
+            for key in keys_list:
+                artifact = self.coupler.get(key)
+                if artifact is not None:
+                    resolved_inputs.append(artifact)
         if inputs:
             resolved_inputs.extend(list(inputs))
 
@@ -260,6 +276,10 @@ class ScenarioContext:
             step_kwargs["tags"] = tags
         if description is not None:
             step_kwargs["description"] = description
+        if iteration is not None:
+            step_kwargs["iteration"] = iteration
+        if year is not None:
+            step_kwargs["year"] = year
 
         with self.step(name, **step_kwargs) as t:
             if t.is_cached:
@@ -331,15 +351,22 @@ class ScenarioContext:
         #       raw = sc.coupler.require("raw")
         #       ...
         input_keys = kwargs.pop("input_keys", None)
-        if input_keys:
-            if isinstance(input_keys, str):
-                input_keys = [input_keys]
-            coupler_inputs = [self.coupler.require(k) for k in input_keys]
-            existing_inputs = kwargs.get("inputs")
-            if existing_inputs:
-                kwargs["inputs"] = list(existing_inputs) + coupler_inputs
-            else:
-                kwargs["inputs"] = coupler_inputs
+        optional_input_keys = kwargs.pop("optional_input_keys", None)
+        if input_keys or optional_input_keys:
+            inputs = list(kwargs.get("inputs") or [])
+            if input_keys:
+                if isinstance(input_keys, str):
+                    input_keys = [input_keys]
+                inputs.extend(self.coupler.require(k) for k in input_keys)
+            if optional_input_keys:
+                if isinstance(optional_input_keys, str):
+                    optional_input_keys = [optional_input_keys]
+                for key in optional_input_keys:
+                    artifact = self.coupler.get(key)
+                    if artifact is not None:
+                        inputs.append(artifact)
+            if inputs:
+                kwargs["inputs"] = inputs
 
         facet_from = kwargs.pop("facet_from", None)
         if facet_from:
