@@ -217,8 +217,10 @@ This is the most common source of confusion, so here is the explicit behavior.
 
 On a cache hit, Consist:
 - Finds a matching **completed** prior run with the same signature.
-- Validates cached outputs are “usable” (output files exist OR are marked ingested).
+- By default, **skips** filesystem checks for cached outputs for speed.
+  - Pass `validate_cached_outputs="eager"` if you want to require that output files exist (or are ingested).
 - **Hydrates artifact objects** for the cached outputs into the current run context.
+  - Paths are resolved on demand (e.g., `cached_output()`).
 
 On a cache hit, Consist does **not**:
 - Copy files into a new run directory.
@@ -228,6 +230,37 @@ On a cache hit, Consist does **not**:
 If you need bytes, you typically:
 - call `consist.load(...)` for tabular artifacts (disk first, then DB fallback per `db_fallback`), or
 - implement explicit file copy/materialization for non-tabular artifacts.
+
+### Cache misses that depend on cached inputs
+
+If a run is **not** a cache hit but its inputs include artifacts produced by cached runs,
+those input artifacts are still referenced by **portable URIs** (e.g., `./outputs/foo.parquet`).
+By default, Consist resolves those URIs into the **current** run directory, which may not
+contain the bytes from the original run.
+
+To make “extend a scenario in a new run_dir” workflows work without rerunning cached steps,
+use the cache hydration policy:
+
+```python
+with tracker.start_run(
+    "next_step",
+    model="step",
+    inputs=[cached_artifact],
+    cache_hydration="inputs-missing",
+):
+    ...
+```
+
+With `cache_hydration="inputs-missing"`, Consist will:
+- detect missing input paths in the current run_dir,
+- locate the original run directory recorded in provenance metadata, and
+- copy those input bytes into the current run_dir before execution.
+
+This keeps cache misses fast while still ensuring the executing step can read its inputs.
+
+If the original on-disk input is missing but the artifact was ingested, Consist will
+attempt to reconstruct the input from DuckDB **for CSV and Parquet artifacts only**.
+Other drivers raise a `ValueError` to avoid silent or lossy conversions.
 
 ### Optional cache-hit materialization (copy bytes on disk)
 
@@ -244,7 +277,7 @@ Enable it at run start:
 with tracker.start_run(
     "r2",
     model="step",
-    materialize_cached_outputs="all",
+    cache_hydration="outputs-all",
     materialize_cached_outputs_dir=Path("some/output/dir"),
 ):
     ...
@@ -256,13 +289,22 @@ Or materialize only specific cached outputs (by artifact key):
 with tracker.start_run(
     "r2",
     model="step",
-    materialize_cached_outputs="requested",
+    cache_hydration="outputs-requested",
     materialize_cached_output_paths={"features": Path("outputs/features.csv")},
 ):
     ...
 ```
 
-Defaults remain unchanged: `materialize_cached_outputs="never"` (artifact hydration only).
+Defaults remain unchanged: `cache_hydration="metadata"` (artifact hydration only).
+
+Validation rules (error cases):
+- `outputs-requested` requires `materialize_cached_output_paths` and rejects `materialize_cached_outputs_dir`.
+- `outputs-all` requires `materialize_cached_outputs_dir` and rejects `materialize_cached_output_paths`.
+- `metadata`/`inputs-missing` reject both materialization args.
+
+Operational notes:
+- `outputs-requested` will log a warning if you ask for keys that are not present in the cached outputs.
+- `outputs-all` raises `FileNotFoundError` if any cached output source file is missing.
 
 ### Containers integration cache hits (requested outputs)
 
@@ -273,6 +315,17 @@ default to “requested outputs” because the caller explicitly provided host o
 
 This is an integration-level choice for ergonomics; it should not be assumed for core `Tracker`
 cache hits.
+
+---
+
+## Hydration policy table
+
+| Workflow need | `cache_hydration` | When bytes are copied | Notes |
+| --- | --- | --- | --- |
+| Fast cache hits, metadata only | `metadata` | Never | Default; paths may not exist in new run dirs. |
+| Extend a scenario in a new `run_dir` | `inputs-missing` | On cache misses, for missing inputs only | Ensures executing steps can read cached inputs. |
+| Materialize a few outputs on cache hits | `outputs-requested` | On cache hits, for requested outputs | Requires `materialize_cached_output_paths`. |
+| Make all cached outputs exist locally | `outputs-all` | On cache hits, for all outputs | Requires `materialize_cached_outputs_dir`. |
 
 ---
 
@@ -299,3 +352,76 @@ Deleting old artifacts can be safe when:
 - they were ingested and you intentionally allow DB recovery (usually by declaring them as inputs in a non-cached run, or by using `db_fallback="always"` in explicit analysis tooling).
 
 If you want to aggressively GC the workspace while keeping provenance usable, ingestion + intentional DB fallback is the strategy to reach for.
+
+---
+
+## Pattern 5: Shared input bundles via a DuckDB file
+
+If you want collaborators to start with **all required inputs already packaged in a
+standalone DuckDB file**, use a dedicated "bundle" run that logs inputs as outputs
+and ingests them. Sharing the DB file is enough to reproduce inputs without shipping
+the original raw files.
+
+### Bundle creation (producer)
+
+```python
+tracker = Tracker(run_dir="bundle_build", db_path="inputs.duckdb")
+
+with tracker.start_run("inputs_bundle_v1", model="input_bundle", cache_mode="overwrite"):
+    households = tracker.log_artifact("households.csv", key="households", direction="output")
+    persons = tracker.log_artifact("persons.csv", key="persons", direction="output")
+    tracker.ingest(households)
+    tracker.ingest(persons)
+```
+
+Packaging steps:
+1. Run the bundle creation code once.
+2. Share the resulting DuckDB file (`inputs.duckdb`) with collaborators.
+3. Collaborators only need the DB file; they do **not** need the original CSV files.
+
+### Bundle consumption (consumer)
+
+```python
+tracker = Tracker(run_dir="runs", db_path="inputs.duckdb")
+
+bundle_outputs = tracker.load_input_bundle("inputs_bundle_v1")
+inputs = list(bundle_outputs.values())
+
+with tracker.start_run(
+    "simulate",
+    model="simulate",
+    inputs=inputs,
+    cache_hydration="inputs-missing",
+):
+    ...
+```
+
+Notes:
+- The bundle is identified **only by run_id**; no hard-coded hashes are needed.
+- `cache_hydration="inputs-missing"` will reconstruct CSV/Parquet inputs from the
+  shared DuckDB file if the original bytes are missing.
+
+### Multi-model workflows from one bundle
+
+Bundles can contain inputs for multiple downstream steps. Each run selects only the
+inputs it needs:
+
+```python
+bundle_outputs = tracker.load_input_bundle("inputs_bundle_v1")
+
+with tracker.start_run(
+    "model_a",
+    model="model_a",
+    inputs=[bundle_outputs["input_a"]],
+    cache_hydration="inputs-missing",
+):
+    ...
+
+with tracker.start_run(
+    "model_b",
+    model="model_b",
+    inputs=[bundle_outputs["input_b"]],
+    cache_hydration="inputs-missing",
+):
+    ...
+```

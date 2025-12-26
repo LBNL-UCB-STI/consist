@@ -114,6 +114,7 @@ def mock_model_step(
     inputs: List[str],
     config: Optional[dict] = None,
     cache_mode: str = "reuse",
+    validate_cached_outputs: str = "lazy",
 ) -> str:
     """
     Simulates a single step in a data processing pipeline within the Consist framework.
@@ -166,6 +167,7 @@ def mock_model_step(
         config=config,
         inputs=resolved_inputs,
         cache_mode=cache_mode,
+        validate_cached_outputs=validate_cached_outputs,
     ) as t:
         if t.is_cached:
             assert len(t.current_consist.outputs) > 0, (
@@ -218,7 +220,9 @@ def test_pipeline_forking_cold_storage(tracker_setup, ctx):
     tracker, _ = tracker_setup
 
     logging.info("\n--- Phase 1: Full Run ---")
-    out_a = mock_model_step(tracker, ctx, "A", [], {"p": 1})
+    out_a = mock_model_step(
+        tracker, ctx, "A", [], {"p": 1}, validate_cached_outputs="eager"
+    )
     out_b = mock_model_step(tracker, ctx, "B", [out_a], {"p": 1})
     out_c = mock_model_step(tracker, ctx, "C", [out_b], {"p": 1})
     mock_model_step(tracker, ctx, "D", [out_c], {"p": 1})
@@ -374,6 +378,8 @@ def test_broken_cache_recovery(tracker_setup, ctx):
     out_a = mock_model_step(tracker, ctx, "A", [], {"p": 1})
     ctx.clear_log()
     Path(out_a).unlink()
-    out_a_retry = mock_model_step(tracker, ctx, "A", [], {"p": 1})
+    out_a_retry = mock_model_step(
+        tracker, ctx, "A", [], {"p": 1}, validate_cached_outputs="eager"
+    )
     assert "A" in ctx.execution_log
     assert Path(out_a_retry).exists()

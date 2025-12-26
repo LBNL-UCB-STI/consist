@@ -2,6 +2,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from importlib.util import find_spec
 import logging
+import os
+import time
 import uuid
 import weakref
 from pathlib import Path
@@ -40,6 +42,7 @@ from consist.core.events import EventManager
 from consist.core.fs import FileSystemManager
 from consist.core.identity import IdentityManager
 from consist.core.indexing import FacetIndex, IndexBySpec, RunFieldIndex
+from consist.core.materialize import materialize_artifacts_from_sources
 from consist.core.persistence import DatabaseManager
 from consist.core.views import ViewFactory, ViewRegistry
 from consist.core.workflow import OutputCapture, ScenarioContext
@@ -257,6 +260,27 @@ class Tracker:
                 return signature
         return None
 
+    def _prefetch_run_signatures(self, inputs: Iterable[Artifact]) -> None:
+        """
+        Warm the run-signature cache for input artifacts in bulk to reduce DB chatter.
+        """
+        if not self.db:
+            return
+        run_ids = {
+            str(a.run_id)
+            for a in inputs
+            if a.run_id and a.run_id not in self._run_signature_cache
+        }
+        if not run_ids:
+            return
+        signatures = self.db.get_run_signatures(list(run_ids))
+        if not signatures:
+            return
+        for run_id, signature in signatures.items():
+            self._run_signature_cache[run_id] = signature
+            if len(self._run_signature_cache) > self._run_signature_cache_max_entries:
+                self._run_signature_cache.pop(next(iter(self._run_signature_cache)))
+
     def _coerce_facet_mapping(self, obj: Any, label: str) -> Dict[str, Any]:
         if obj is None:
             raise ValueError(f"facet_from requires a {label} to extract from.")
@@ -356,6 +380,24 @@ class Tracker:
         ```
         """
         self._ensure_write_provenance()
+        timing_enabled = os.getenv("CONSIST_CACHE_TIMING", "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        debug_cache = os.getenv("CONSIST_CACHE_DEBUG", "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+
+        def _log_timing(label: str, start: float) -> None:
+            elapsed = time.perf_counter() - start
+            if timing_enabled:
+                logging.info("[Consist][timing] %s %.3fs", label, elapsed)
+            if debug_cache:
+                logging.info("[Consist][cache] %s %.3fs", label, elapsed)
+
         if self.current_consist is not None:
             raise RuntimeError(
                 f"Cannot begin_run: A run is already active (id={self.current_consist.run.id}). "
@@ -363,9 +405,10 @@ class Tracker:
             )
 
         (
-            materialize_cached_outputs,
+            cache_hydration,
             materialize_cached_output_paths,
             materialize_cached_outputs_dir,
+            validate_cached_outputs,
         ) = parse_materialize_cached_outputs_kwargs(kwargs)
 
         raw_config_model: Optional[BaseModel] = (
@@ -450,9 +493,10 @@ class Tracker:
         self.current_consist = ConsistRecord(run=run, config=config_dict)
         self._active_run_cache_options = ActiveRunCacheOptions(
             cache_mode=cache_mode,
-            materialize_cached_outputs=materialize_cached_outputs,
+            cache_hydration=cache_hydration,
             materialize_cached_output_paths=materialize_cached_output_paths,
             materialize_cached_outputs_dir=materialize_cached_outputs_dir,
+            validate_cached_outputs=validate_cached_outputs,
         )
 
         # Persist a queryable facet (optional)
@@ -497,6 +541,10 @@ class Tracker:
                 run.parent_run_id = parent_candidates[-1]
 
         try:
+            t0 = time.perf_counter()
+            self._prefetch_run_signatures(self.current_consist.inputs)
+            _log_timing("prefetch_run_signatures", t0)
+            t0 = time.perf_counter()
             input_hash = self.identity.compute_input_hash(
                 self.current_consist.inputs,
                 path_resolver=self.resolve_uri,
@@ -506,6 +554,7 @@ class Tracker:
             run.signature = self.identity.calculate_run_signature(
                 code_hash=git_hash, config_hash=config_hash, input_hash=input_hash
             )
+            _log_timing("compute_input_hash", t0)
         except Exception as e:
             logging.warning(
                 f"[Consist Warning] Failed to compute inputs hash for run {run_id}: {e}"
@@ -516,28 +565,61 @@ class Tracker:
         # --- Cache Logic (Refactored) ---
         if cache_mode == "reuse":
             cache_key = (run.config_hash, run.input_hash, run.git_hash)
+            if debug_cache:
+                logging.info(
+                    "[Consist][cache] lookup key config=%s input=%s code=%s",
+                    run.config_hash,
+                    run.input_hash,
+                    run.git_hash,
+                )
 
             cached_run = self._local_cache_index.get(cache_key)
             if cached_run is None:
+                t0 = time.perf_counter()
                 cached_run = self.find_matching_run(
                     config_hash=run.config_hash,
                     input_hash=run.input_hash,
                     git_hash=run.git_hash,
                 )
-            if cached_run and self._validate_run_outputs(cached_run):
-                hydrate_cache_hit_outputs(
+                _log_timing("find_matching_run", t0)
+            cache_valid = False
+            if cached_run:
+                t0 = time.perf_counter()
+                cache_valid = self._validate_run_outputs(cached_run)
+                _log_timing("validate_cached_outputs", t0)
+            elif debug_cache:
+                logging.info("[Consist][cache] miss: no matching completed run.")
+
+            if cached_run and cache_valid:
+                t0 = time.perf_counter()
+                cached_items = hydrate_cache_hit_outputs(
                     tracker=self,
                     run=run,
                     cached_run=cached_run,
                     options=self._active_run_cache_options,
                 )
-
+                _log_timing("hydrate_cache_hit_outputs", t0)
+                if debug_cache:
+                    logging.info(
+                        "[Consist][cache] hit: cached_run=%s outputs=%d hydration=%s",
+                        cached_run.id,
+                        len(cached_items.outputs),
+                        self._active_run_cache_options.cache_hydration,
+                    )
             else:
+                if cached_run and not cache_valid and debug_cache:
+                    logging.info(
+                        "[Consist][cache] miss: cached run %s failed validation.",
+                        cached_run.id,
+                    )
                 logging.info("🔄 [Consist] Cache Miss. Running...")
         elif cache_mode == "overwrite":
             logging.warning("⚠️ [Consist] Cache lookup skipped (Mode: Overwrite).")
         elif cache_mode == "readonly":
             logging.info("👁️ [Consist] Read-only mode.")
+
+        if not self.current_consist.cached_run:
+            self._materialize_missing_inputs()
 
         self._flush_json()
         self._sync_run_to_db(run)
@@ -2170,36 +2252,117 @@ class Tracker:
         if not self.db:
             return True
 
-            # Use service instead of raw SQL
-        artifacts_links = self.db.get_artifacts_for_run(run.id)
+        policy = "eager"
+        if self._active_run_cache_options:
+            policy = str(
+                self._active_run_cache_options.validate_cached_outputs or "eager"
+            ).lower()
 
-        for art, direction in artifacts_links:
-            if direction == "output":
-                resolved_path = self.resolve_uri(art.uri)
-                if not Path(resolved_path).exists() and not art.meta.get(
-                    "is_ingested", False
-                ):
-                    from consist.tools.mount_diagnostics import (
-                        build_mount_resolution_hint,
-                        format_missing_artifact_mount_help,
-                    )
+        if policy != "eager":
+            return True
 
-                    hint = build_mount_resolution_hint(
-                        art.uri, artifact_meta=art.meta, mounts=self.mounts
+        run_artifacts = self.get_artifacts_for_run(run.id)
+
+        for art in run_artifacts.outputs.values():
+            resolved_path = self.resolve_uri(art.uri)
+            if not Path(resolved_path).exists() and not art.meta.get(
+                "is_ingested", False
+            ):
+                from consist.tools.mount_diagnostics import (
+                    build_mount_resolution_hint,
+                    format_missing_artifact_mount_help,
+                )
+
+                hint = build_mount_resolution_hint(
+                    art.uri, artifact_meta=art.meta, mounts=self.mounts
+                )
+                help_text = (
+                    "\n"
+                    + format_missing_artifact_mount_help(
+                        hint, resolved_path=resolved_path
                     )
-                    help_text = (
-                        "\n"
-                        + format_missing_artifact_mount_help(
-                            hint, resolved_path=resolved_path
-                        )
-                        if hint
-                        else f"\nResolved path: {resolved_path}"
-                    )
-                    logging.warning(
-                        "⚠️ Cache Validation Failed. Missing: %s%s", art.uri, help_text
-                    )
-                    return False
+                    if hint
+                    else f"\nResolved path: {resolved_path}"
+                )
+                logging.warning(
+                    "⚠️ Cache Validation Failed. Missing: %s%s", art.uri, help_text
+                )
+                return False
         return True
+
+    def _materialize_missing_inputs(self) -> None:
+        """
+        Copy cached-input artifacts into the current run_dir when missing.
+
+        This is intended for cache-miss runs that rely on cached outputs from
+        previous runs in a different run_dir.
+        """
+        options = self._active_run_cache_options or ActiveRunCacheOptions()
+        if options.cache_hydration != "inputs-missing":
+            return
+        if not self.current_consist:
+            return
+        if not self.db:
+            return
+
+        items: list[tuple[Artifact, Path, Path]] = []
+        db_items: list[tuple[Artifact, Path]] = []
+        run_dir_cache: dict[str, Optional[str]] = {}
+
+        for artifact in self.current_consist.inputs:
+            if not artifact.run_id:
+                continue
+
+            destination = Path(self.resolve_uri(artifact.uri))
+            if destination.exists():
+                continue
+
+            run_id = str(artifact.run_id)
+            if run_id not in run_dir_cache:
+                run = self.db.get_run(run_id)
+                run_dir_cache[run_id] = (
+                    run.meta.get("_physical_run_dir") if run and run.meta else None
+                )
+
+            original_run_dir = run_dir_cache.get(run_id)
+            if not original_run_dir:
+                continue
+
+            source = Path(
+                self.fs.resolve_historical_path(artifact.uri, original_run_dir)
+            )
+            if source.exists():
+                items.append((artifact, source, destination))
+                continue
+
+            if artifact.meta.get("is_ingested", False):
+                db_items.append((artifact, destination))
+
+        materialized: dict[str, str] = {}
+
+        if items:
+            materialized.update(
+                materialize_artifacts_from_sources(items, on_missing="warn")
+            )
+            for artifact, _, destination in items:
+                artifact.abs_path = str(destination)
+
+        if db_items:
+            from consist.core.materialize import (
+                materialize_ingested_artifact_from_db,
+            )
+
+            for artifact, destination in db_items:
+                materialized_path = materialize_ingested_artifact_from_db(
+                    artifact=artifact,
+                    tracker=self,
+                    destination=destination,
+                )
+                materialized[artifact.key] = materialized_path
+                artifact.abs_path = materialized_path
+
+        if materialized:
+            self.current_consist.run.meta["materialized_inputs"] = materialized
 
     def history(
         self, limit: int = 10, tags: Optional[List[str]] = None
@@ -2222,6 +2385,38 @@ class Tracker:
         if self.db:
             return self.db.get_history(limit, tags)
         return pd.DataFrame()
+
+    def load_input_bundle(self, run_id: str) -> dict[str, Artifact]:
+        """
+        Load a set of input artifacts from a prior "bundle" run by run_id.
+
+        This is a convenience helper for shared DuckDB bundles where a dedicated
+        run logs all required inputs as outputs. The returned dict can be passed
+        directly to `inputs=[...]` on a new run.
+
+        Parameters
+        ----------
+        run_id : str
+            The run id that logged the bundle outputs.
+
+        Returns
+        -------
+        dict[str, Artifact]
+            Mapping of artifact key -> Artifact from the bundle run.
+
+        Raises
+        ------
+        ValueError
+            If the run does not exist or has no output artifacts.
+        """
+        run = self.get_run(run_id)
+        if not run:
+            raise ValueError(f"Input bundle run_id={run_id!r} not found.")
+
+        outputs = self.get_artifacts_for_run(run_id).outputs
+        if not outputs:
+            raise ValueError(f"Input bundle run_id={run_id!r} has no output artifacts.")
+        return outputs
 
     @contextmanager
     def capture_outputs(

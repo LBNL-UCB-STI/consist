@@ -5,6 +5,9 @@ import shutil
 from pathlib import Path
 from typing import Iterable, Literal, Sequence, TYPE_CHECKING
 
+import pandas as pd
+from sqlalchemy import text
+
 from consist.models.artifact import Artifact
 
 if TYPE_CHECKING:
@@ -88,6 +91,55 @@ def materialize_artifacts(
     return materialized
 
 
+def materialize_artifacts_from_sources(
+    items: Sequence[tuple[Artifact, Path, Path]],
+    *,
+    on_missing: Literal["warn", "raise"] = "warn",
+) -> dict[str, str]:
+    """
+    Copy artifact bytes from explicit source paths to caller-specified destinations.
+
+    This is useful for rehydrating cached inputs from historical run directories
+    when the current run directory is different from the original producer.
+    """
+    materialized: dict[str, str] = {}
+
+    for artifact, source, destination in items:
+        source_path = Path(source).resolve()
+        destination_path = Path(destination).resolve()
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if not source_path.exists():
+            msg = (
+                f"[Consist] Cannot materialize cached input {artifact.key!r}: "
+                f"source path missing ({source_path})."
+            )
+            if on_missing == "raise":
+                raise FileNotFoundError(msg)
+            logging.warning(msg)
+            continue
+
+        try:
+            if source_path == destination_path:
+                materialized[artifact.key] = str(destination_path)
+                continue
+            if source_path.is_dir():
+                shutil.copytree(source_path, destination_path, dirs_exist_ok=True)
+            else:
+                shutil.copy2(source_path, destination_path)
+            materialized[artifact.key] = str(destination_path)
+        except Exception as e:
+            msg = (
+                f"[Consist] Failed to materialize cached input {artifact.key!r} "
+                f"from {source_path} -> {destination_path}: {e}"
+            )
+            if on_missing == "raise":
+                raise RuntimeError(msg) from e
+            logging.warning(msg)
+
+    return materialized
+
+
 def build_materialize_items_for_keys(
     outputs: Iterable[Artifact],
     *,
@@ -106,3 +158,52 @@ def build_materialize_items_for_keys(
         if artifact is not None:
             items.append((artifact, Path(dest)))
     return items
+
+
+def materialize_ingested_artifact_from_db(
+    *,
+    artifact: Artifact,
+    tracker: "Tracker",
+    destination: Path,
+) -> str:
+    """
+    Reconstruct a CSV/Parquet artifact from DuckDB and write it to disk.
+
+    This is intended for `cache_hydration="inputs-missing"` when the original
+    on-disk source is missing but the artifact is ingested (`is_ingested=True`).
+
+    Supported drivers: csv, parquet. All other drivers raise ValueError.
+    """
+    if not tracker or not tracker.engine:
+        raise RuntimeError(
+            "Cannot materialize ingested artifact: tracker has no DB engine."
+        )
+    if not artifact.meta.get("is_ingested", False):
+        raise ValueError(
+            f"Artifact {artifact.key!r} is not marked as ingested; "
+            "cannot reconstruct from DB."
+        )
+
+    driver = str(artifact.driver or "").lower()
+    if driver not in {"csv", "parquet"}:
+        raise ValueError(
+            "Only csv/parquet artifacts can be reconstructed from DuckDB "
+            f"(got driver={artifact.driver!r})."
+        )
+
+    table_name = artifact.meta.get("dlt_table_name") or artifact.key
+    query = (
+        f"SELECT * FROM global_tables.{table_name} "
+        f"WHERE consist_artifact_id = '{artifact.id}'"
+    )
+    df = pd.read_sql(text(query), tracker.engine)
+
+    destination_path = Path(destination).resolve()
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if driver == "csv":
+        df.to_csv(destination_path, index=False)
+    else:
+        df.to_parquet(destination_path, index=False)
+
+    return str(destination_path)

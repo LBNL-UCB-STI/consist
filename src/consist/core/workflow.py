@@ -142,9 +142,10 @@ class ScenarioContext:
         inputs: Optional[List[ArtifactRef]] = None,
         outputs: Optional[List[str]] = None,
         output_paths: Optional[Mapping[str, ArtifactRef]] = None,
-        materialize_cached_outputs: str = "never",
+        cache_hydration: str = "metadata",
         materialize_cached_output_paths: Optional[Mapping[str, Path]] = None,
         materialize_cached_outputs_dir: Optional[Path] = None,
+        validate_cached_outputs: str = "lazy",
         iteration: Optional[int] = None,
         year: Optional[int] = None,
         **fn_kwargs: Any,
@@ -187,6 +188,9 @@ class ScenarioContext:
             - relative path → relative to the step run directory (`t.run_dir`)
             - URI-like string (contains `"://"`) → resolved via mounts (`tracker.resolve_uri`)
             - absolute path → used as-is
+        cache_hydration
+            Controls whether cached bytes are materialized for inputs/outputs.
+            See `docs/caching-and-hydration.md` for the supported policies.
 
         Returns
         -------
@@ -252,14 +256,15 @@ class ScenarioContext:
 
         step_kwargs: Dict[str, Any] = {
             "cache_mode": cache_mode,
-            "materialize_cached_outputs": materialize_cached_outputs,
-            "materialize_cached_output_paths": (
-                dict(materialize_cached_output_paths)
-                if materialize_cached_output_paths
-                else None
-            ),
-            "materialize_cached_outputs_dir": materialize_cached_outputs_dir,
+            "cache_hydration": cache_hydration,
         }
+        step_kwargs["materialize_cached_output_paths"] = (
+            dict(materialize_cached_output_paths)
+            if materialize_cached_output_paths
+            else None
+        )
+        step_kwargs["materialize_cached_outputs_dir"] = materialize_cached_outputs_dir
+        step_kwargs["validate_cached_outputs"] = validate_cached_outputs
         if resolved_inputs:
             step_kwargs["inputs"] = resolved_inputs
         if run_id:

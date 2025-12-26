@@ -526,6 +526,27 @@ class DatabaseManager:
 
         return self.execute_with_retry(_query)
 
+    def get_run_signatures(self, run_ids: List[str]) -> Dict[str, str]:
+        """
+        Bulk lookup of run signatures by run id.
+
+        Returns a mapping of run_id -> signature for runs that exist and have a signature.
+        """
+        if not run_ids:
+            return {}
+
+        def _query():
+            with Session(self.engine) as session:
+                rows = session.exec(
+                    select(Run.id, Run.signature).where(col(Run.id).in_(run_ids))
+                ).all()
+                return {row[0]: row[1] for row in rows if row[1]}
+
+        try:
+            return self.execute_with_retry(_query)
+        except Exception:
+            return {}
+
     def find_matching_run(
         self, config_hash: str, input_hash: str, git_hash: str
     ) -> Optional[Run]:

@@ -135,7 +135,10 @@ class Artifact(SQLModel, table=True):
         private_state = getattr(self, "__pydantic_private__", None)
         if private_state is None:
             return None
-        return self._abs_path
+        try:
+            return self._abs_path
+        except Exception:
+            return None
 
     @abs_path.setter
     def abs_path(self, value: str) -> None:

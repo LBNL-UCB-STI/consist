@@ -38,6 +38,7 @@ def run_simulation_scenario(
     storage_mode,
     base_trips_by_year=None,
     advance_delta_by_year=None,
+    validate_cached_outputs: str = "lazy",
 ):
     rng = np.random.default_rng(42)
     n_hh = 100
@@ -145,6 +146,7 @@ def run_simulation_scenario(
                 config={"year": year, "delta": advance_delta_by_year.get(year, 1)},
                 facet_from=["delta"],
                 inputs=step_inputs,
+                validate_cached_outputs=validate_cached_outputs,
             ) as t:
                 cached_persons = coupler.adopt_cached_output("persons")
                 if cached_persons:
@@ -177,6 +179,7 @@ def run_simulation_scenario(
                 facet_from=["base_trips"],
                 hash_inputs=[("generate_trips_config", external_cfg_dir)],
                 inputs=[coupler.get("persons")],
+                validate_cached_outputs=validate_cached_outputs,
             ):
                 # Resolve from cache if present; otherwise execute container and log output.
                 persons_art = coupler.adopt_cached_output("persons")
@@ -477,7 +480,14 @@ def test_pilates_cache_hydrates_across_run_dirs(tmp_path):
     with patch.object(
         tracker1.identity, "get_code_version", return_value="stable_git_hash"
     ):
-        run_simulation_scenario(tracker1, "baseline_a", 10, years, "cold")
+        run_simulation_scenario(
+            tracker1,
+            "baseline_a",
+            10,
+            years,
+            "cold",
+            validate_cached_outputs="eager",
+        )
 
     # Second tracker in a new run_dir replays the same work and should hydrate
     tracker2 = Tracker(
@@ -489,7 +499,14 @@ def test_pilates_cache_hydrates_across_run_dirs(tmp_path):
     with patch.object(
         tracker2.identity, "get_code_version", return_value="stable_git_hash"
     ):
-        run_simulation_scenario(tracker2, "baseline_replay", 10, years, "cold")
+        run_simulation_scenario(
+            tracker2,
+            "baseline_replay",
+            10,
+            years,
+            "cold",
+            validate_cached_outputs="eager",
+        )
 
     out_path = tracker2.run_dir / "container_out" / "2020" / "persons.parquet"
     assert out_path.exists(), "Cache reuse should materialize output in the new run_dir"
@@ -543,7 +560,14 @@ def test_pilates_cache_replay_with_ingested_outputs(tmp_path):
     with patch.object(
         tracker1.identity, "get_code_version", return_value="stable_git_hash"
     ):
-        run_simulation_scenario(tracker1, "ingest_a", 10, years, "cold")
+        run_simulation_scenario(
+            tracker1,
+            "ingest_a",
+            10,
+            years,
+            "cold",
+            validate_cached_outputs="eager",
+        )
 
     tracker2 = Tracker(
         run_dir=tmp_path / "runs_ingest_b",
@@ -554,7 +578,14 @@ def test_pilates_cache_replay_with_ingested_outputs(tmp_path):
     with patch.object(
         tracker2.identity, "get_code_version", return_value="stable_git_hash"
     ):
-        run_simulation_scenario(tracker2, "ingest_replay", 10, years, "cold")
+        run_simulation_scenario(
+            tracker2,
+            "ingest_replay",
+            10,
+            years,
+            "cold",
+            validate_cached_outputs="eager",
+        )
 
     # Cache hit preferred on trips; validation may downgrade to execute if outputs missing
     replay_run = tracker2.find_run(
