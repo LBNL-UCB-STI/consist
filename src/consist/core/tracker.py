@@ -1,3 +1,4 @@
+import itertools
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from importlib.util import find_spec
@@ -12,6 +13,7 @@ from typing import (
     Callable,
     Dict,
     Iterable,
+    Iterator,
     List,
     Literal,
     Mapping,
@@ -78,8 +80,8 @@ class Tracker:
     def __init__(
         self,
         run_dir: Path,
-        db_path: Optional[str] = None,
-        mounts: Dict[str, str] = None,
+        db_path: Optional[str | os.PathLike[str]] = None,
+        mounts: Optional[Dict[str, str]] = None,
         project_root: str = ".",
         hashing_strategy: str = "full",
         schemas: Optional[List[Type[SQLModel]]] = None,
@@ -95,7 +97,7 @@ class Tracker:
         ----------
         run_dir : Path
             Root directory where run logs (e.g., `consist.json`) and run outputs are written.
-        db_path : Optional[str], default None
+        db_path : Optional[str | os.PathLike[str]], default None
             Path to the DuckDB database. If provided, Consist dual-writes provenance to DB
             in addition to JSON. If None, DB-backed features are disabled.
         mounts : Optional[Dict[str, str]], default None
@@ -124,14 +126,14 @@ class Tracker:
 
         self.access_mode = access_mode
 
-        self.db_path = db_path
+        self.db_path = os.fspath(db_path) if db_path is not None else None
         self.identity = IdentityManager(
             project_root=project_root, hashing_strategy=hashing_strategy
         )
 
         self.db = None
-        if db_path:
-            self.db = DatabaseManager(db_path)
+        if self.db_path:
+            self.db = DatabaseManager(self.db_path)
 
         self.artifacts = ArtifactManager(self)
         self.config_facets = ConfigFacetManager(db=self.db, identity=self.identity)
@@ -202,6 +204,7 @@ class Tracker:
                 artifact_id=artifact_uuid, backfill_ordinals=backfill_ordinals
             )
         else:
+            assert schema_id is not None
             fetched = self.db.get_artifact_schema(
                 schema_id=schema_id, backfill_ordinals=backfill_ordinals
             )
@@ -523,6 +526,10 @@ class Tracker:
                 index_kv=facet_index,
             )
 
+        current_consist = self.current_consist
+        if current_consist is None:
+            raise RuntimeError("Cannot start run: no active consist record.")
+
         # Process Inputs & Auto-Forking
         if inputs:
             for item in inputs:
@@ -535,18 +542,18 @@ class Tracker:
         # Auto-Lineage
         if not run.parent_run_id:
             parent_candidates = [
-                a.run_id for a in self.current_consist.inputs if a.run_id is not None
+                a.run_id for a in current_consist.inputs if a.run_id is not None
             ]
             if parent_candidates:
                 run.parent_run_id = parent_candidates[-1]
 
         try:
             t0 = time.perf_counter()
-            self._prefetch_run_signatures(self.current_consist.inputs)
+            self._prefetch_run_signatures(current_consist.inputs)
             _log_timing("prefetch_run_signatures", t0)
             t0 = time.perf_counter()
             input_hash = self.identity.compute_input_hash(
-                self.current_consist.inputs,
+                current_consist.inputs,
                 path_resolver=self.resolve_uri,
                 signature_lookup=self._resolve_run_signature,
             )
@@ -564,7 +571,11 @@ class Tracker:
 
         # --- Cache Logic (Refactored) ---
         if cache_mode == "reuse":
-            cache_key = (run.config_hash, run.input_hash, run.git_hash)
+            cache_key = (
+                (run.config_hash, run.input_hash, run.git_hash)
+                if run.config_hash and run.input_hash and run.git_hash
+                else None
+            )
             if debug_cache:
                 logging.info(
                     "[Consist][cache] lookup key config=%s input=%s code=%s",
@@ -573,14 +584,16 @@ class Tracker:
                     run.git_hash,
                 )
 
-            cached_run = self._local_cache_index.get(cache_key)
+            cached_run = self._local_cache_index.get(cache_key) if cache_key else None
             if cached_run is None:
                 t0 = time.perf_counter()
-                cached_run = self.find_matching_run(
-                    config_hash=run.config_hash,
-                    input_hash=run.input_hash,
-                    git_hash=run.git_hash,
-                )
+                if cache_key:
+                    config_hash, input_hash, git_hash = cache_key
+                    cached_run = self.find_matching_run(
+                        config_hash=config_hash,
+                        input_hash=input_hash,
+                        git_hash=git_hash,
+                    )
                 _log_timing("find_matching_run", t0)
             cache_valid = False
             if cached_run:
@@ -633,7 +646,7 @@ class Tracker:
         run_id: str,
         model: str,
         **kwargs: Any,
-    ) -> "Tracker":
+    ) -> Iterator["Tracker"]:
         """
         Context manager to initiate and manage the lifecycle of a Consist run.
 
@@ -688,6 +701,7 @@ class Tracker:
         config: Optional[Dict[str, Any]] = None,
         tags: Optional[List[str]] = None,
         model: str = "scenario",
+        step_cache_hydration: Optional[str] = None,
         **kwargs: Any,
     ) -> ScenarioContext:
         """
@@ -711,6 +725,9 @@ class Tracker:
             Tags for the scenario. "scenario_header" is automatically appended.
         model : str, default "scenario"
             The model name for the header run.
+        step_cache_hydration : Optional[str], optional
+            Default cache hydration policy for all scenario steps unless overridden
+            in a specific `scenario.step(...)` or `scenario.run_step(...)`.
         **kwargs : Any
             Additional metadata or arguments for the header run (including `facet_from`).
 
@@ -728,7 +745,15 @@ class Tracker:
                 ...
         ```
         """
-        return ScenarioContext(self, name, config, tags, model, **kwargs)
+        return ScenarioContext(
+            self,
+            name,
+            config,
+            tags,
+            model,
+            step_cache_hydration=step_cache_hydration,
+            **kwargs,
+        )
 
     def end_run(
         self,
@@ -1527,6 +1552,9 @@ class Tracker:
             self.engine.dispose()
         from consist.integrations.dlt_loader import ingest_artifact
 
+        if self.db_path is None:
+            raise RuntimeError("Cannot ingest: db_path is not configured.")
+
         # Auto-Resolve Data if None
         data_to_pass = data
         if data_to_pass is None:
@@ -1640,7 +1668,10 @@ class Tracker:
             The found `Artifact` object, or `None` if no matching artifact is found.
         """
         if self.db:
-            return self.db.get_artifact(key_or_id)
+            artifact = self.db.get_artifact(key_or_id)
+            if artifact is not None:
+                artifact._tracker = weakref.ref(self)
+            return artifact
         return None
 
     def get_artifact_by_uri(self, uri: str) -> Optional[Artifact]:
@@ -1668,7 +1699,10 @@ class Tracker:
 
         # 2. Check Database
         if self.db:
-            return self.db.get_artifact_by_uri(uri)
+            artifact = self.db.get_artifact_by_uri(uri)
+            if artifact is not None:
+                artifact._tracker = weakref.ref(self)
+            return artifact
 
         return None
 
@@ -1705,9 +1739,12 @@ class Tracker:
         creator_id = creator.id if isinstance(creator, Run) else creator
         consumer_id = consumer.id if isinstance(consumer, Run) else consumer
 
-        return self.db.find_artifacts(
+        artifacts = self.db.find_artifacts(
             creator=creator_id, consumer=consumer_id, key=key, limit=limit
         )
+        for artifact in artifacts:
+            artifact._tracker = weakref.ref(self)
+        return artifacts
 
     # --- Config Facet Query Helpers ---
 
@@ -1895,6 +1932,8 @@ class Tracker:
                 outputs[artifact.key] = artifact
 
         artifacts = RunArtifacts(inputs=inputs, outputs=outputs)
+        for artifact in itertools.chain(inputs.values(), outputs.values()):
+            artifact._tracker = weakref.ref(self)
         if run_id != current_run_id:
             self._run_artifacts_cache[run_id] = artifacts
             if len(self._run_artifacts_cache) > self._run_artifacts_cache_max_entries:
@@ -2421,7 +2460,7 @@ class Tracker:
     @contextmanager
     def capture_outputs(
         self, directory: Union[str, Path], pattern: str = "*", recursive: bool = False
-    ) -> OutputCapture:
+    ) -> Iterator[OutputCapture]:
         """
         A context manager to automatically capture and log new or modified files in a directory.
 
@@ -2556,7 +2595,9 @@ class Tracker:
         bool
             True if the current `start_run`/task execution is reusing a cached run.
         """
-        return self.current_consist and self.current_consist.cached_run is not None
+        return bool(
+            self.current_consist and self.current_consist.cached_run is not None
+        )
 
     def cached_artifacts(self, direction: str = "output"):
         """

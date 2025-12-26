@@ -221,6 +221,7 @@ On a cache hit, Consist:
   - Pass `validate_cached_outputs="eager"` if you want to require that output files exist (or are ingested).
 - **Hydrates artifact objects** for the cached outputs into the current run context.
   - Paths are resolved on demand (e.g., `cached_output()`).
+  - `Artifact.path` lazily resolves via the active tracker; no filesystem checks happen until you access it.
 
 On a cache hit, Consist does **not**:
 - Copy files into a new run directory.
@@ -352,6 +353,49 @@ Deleting old artifacts can be safe when:
 - they were ingested and you intentionally allow DB recovery (usually by declaring them as inputs in a non-cached run, or by using `db_fallback="always"` in explicit analysis tooling).
 
 If you want to aggressively GC the workspace while keeping provenance usable, ingestion + intentional DB fallback is the strategy to reach for.
+
+---
+
+## Cache-Hit Performance and Diagnostics
+
+Consist’s cache-hit path is optimized to minimize filesystem work by default.
+The main knobs are:
+
+- `validate_cached_outputs="lazy"` (default) skips per-output existence checks.
+- `cache_hydration="metadata"` (default) avoids copying bytes for cached outputs.
+
+### Cache and hydration knobs (summary)
+
+- `cache_mode`:
+  - `reuse` (default): reuse cached runs when signatures match.
+  - `overwrite`: always execute and replace cached outputs.
+  - `readonly`: read cache but avoid persisting new outputs.
+- `validate_cached_outputs`:
+  - `lazy` (default): skip filesystem checks for cached outputs.
+  - `eager`: require output files to exist (or be ingested) for a cache hit.
+- `cache_hydration`:
+  - `metadata` (default): hydrate artifact objects only; no bytes copied.
+  - `inputs-missing`: on cache misses, copy missing input bytes into the current `run_dir`.
+  - `outputs-requested`: on cache hits, copy only specified cached outputs to requested paths.
+  - `outputs-all`: on cache hits, copy all cached outputs into a target directory.
+- Scenario default: pass `step_cache_hydration="inputs-missing"` to `tracker.scenario(...)`
+  to apply a default policy to all steps unless overridden.
+- `materialize_cached_output_paths`: required for `outputs-requested`.
+- `materialize_cached_outputs_dir`: required for `outputs-all`.
+
+For large iterative workflows, most cache-hit time is spent on:
+
+- fetching cached outputs from the database
+- hashing raw-file inputs (when inputs are not Consist-produced artifacts)
+
+You can enable lightweight diagnostics to understand where time is going:
+
+- `CONSIST_CACHE_TIMING=1` logs timing for cache-hit phases during `begin_run`
+  (signature prefetch, input hashing, cache lookup, validation, hydration).
+- `CONSIST_CACHE_DEBUG=1` logs cache hit/miss details and signatures.
+
+If you need strict safety for missing outputs, use `validate_cached_outputs="eager"`,
+accepting the additional filesystem checks.
 
 ---
 

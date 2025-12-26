@@ -1,4 +1,7 @@
 import time
+
+# ty: ignore[invalid-argument-type] is used on SQLAlchemy joins/where clauses that
+# ty currently mis-types as bool; these are valid SQLAlchemy expressions.
 import random
 import logging
 import uuid
@@ -49,14 +52,14 @@ class DatabaseManager:
             SQLModel.metadata.create_all(
                 self.engine,
                 tables=[
-                    Run.__table__,
-                    Artifact.__table__,
-                    RunArtifactLink.__table__,
-                    ConfigFacet.__table__,
-                    RunConfigKV.__table__,
-                    ArtifactSchema.__table__,
-                    ArtifactSchemaField.__table__,
-                    ArtifactSchemaObservation.__table__,
+                    getattr(Run, "__table__"),
+                    getattr(Artifact, "__table__"),
+                    getattr(RunArtifactLink, "__table__"),
+                    getattr(ConfigFacet, "__table__"),
+                    getattr(RunConfigKV, "__table__"),
+                    getattr(ArtifactSchema, "__table__"),
+                    getattr(ArtifactSchemaField, "__table__"),
+                    getattr(ArtifactSchemaObservation, "__table__"),
                 ],
             )
             # DuckDB self-referential FK on run.parent_run_id blocks status updates.
@@ -339,7 +342,7 @@ class DatabaseManager:
                     # schema_id (hash). Replace the normalized field rows in one shot.
                     session.exec(
                         delete(ArtifactSchemaField).where(
-                            ArtifactSchemaField.schema_id == schema.id
+                            ArtifactSchemaField.schema_id == schema.id  # ty: ignore[invalid-argument-type]
                         )
                     )
                     session.add_all(fields)
@@ -591,7 +594,7 @@ class DatabaseManager:
             logging.warning(f"Signature lookup failed: {e}")
             return None
 
-    def get_artifact(self, key_or_id: str) -> Optional[Artifact]:
+    def get_artifact(self, key_or_id: str | uuid.UUID) -> Optional[Artifact]:
         def _query():
             with Session(self.engine) as session:
                 try:
@@ -672,7 +675,10 @@ class DatabaseManager:
             with Session(self.engine) as session:
                 return session.exec(
                     select(Artifact, RunArtifactLink.direction)
-                    .join(RunArtifactLink, Artifact.id == RunArtifactLink.artifact_id)
+                    .join(
+                        RunArtifactLink,
+                        Artifact.id == RunArtifactLink.artifact_id,  # ty: ignore[invalid-argument-type]
+                    )
                     .where(RunArtifactLink.run_id == run_id)
                 ).all()
 
@@ -696,7 +702,8 @@ class DatabaseManager:
                 if creator:
                     output_link = aliased(RunArtifactLink)
                     statement = statement.join(
-                        output_link, Artifact.id == output_link.artifact_id
+                        output_link,
+                        Artifact.id == output_link.artifact_id,  # ty: ignore[invalid-argument-type]
                     )
                     statement = statement.where(output_link.run_id == creator)
                     statement = statement.where(output_link.direction == "output")
@@ -704,7 +711,8 @@ class DatabaseManager:
                 if consumer:
                     input_link = aliased(RunArtifactLink)
                     statement = statement.join(
-                        input_link, Artifact.id == input_link.artifact_id
+                        input_link,
+                        Artifact.id == input_link.artifact_id,  # ty: ignore[invalid-argument-type]
                     )
                     statement = statement.where(input_link.run_id == consumer)
                     statement = statement.where(input_link.direction == "input")
@@ -902,7 +910,7 @@ class DatabaseManager:
             with Session(self.engine) as session:
                 statement = (
                     select(Run)
-                    .join(RunConfigKV, RunConfigKV.run_id == Run.id)
+                    .join(RunConfigKV, RunConfigKV.run_id == Run.id)  # ty: ignore[invalid-argument-type]
                     .where(Run.status == "completed")
                     .where(RunConfigKV.namespace == namespace)
                     .where(RunConfigKV.key == key)
@@ -987,8 +995,10 @@ class DatabaseManager:
 
         return values
 
-    def get_history(self, limit: int = 10, tags: List[str] = None) -> pd.DataFrame:
-        query = f"SELECT * FROM run ORDER BY created_at DESC LIMIT {limit}"
+    def get_history(
+        self, limit: int = 10, tags: Optional[List[str]] = None
+    ) -> pd.DataFrame:
+        query = select(Run).order_by(Run.created_at.desc()).limit(limit)
         try:
             df = pd.read_sql(query, self.engine)
             if not df.empty and tags:

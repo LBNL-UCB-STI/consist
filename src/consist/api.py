@@ -1,10 +1,25 @@
 from contextlib import contextmanager
+import importlib
 from pathlib import Path
-from typing import Optional, Union, Any, Type, Iterable, Dict, Mapping, TYPE_CHECKING
+from types import ModuleType
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    Iterator,
+    Mapping,
+    Optional,
+    TYPE_CHECKING,
+    Type,
+    TypeVar,
+    Union,
+)
 
 import pandas as pd
 import tempfile
-from sqlalchemy import case, func, text
+from sqlalchemy import MetaData, Table, case, func, select as sa_select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlmodel import SQLModel, Session, select
 
 # Internal imports
 from consist.core.context import get_active_tracker
@@ -16,24 +31,20 @@ from consist.core.tracker import Tracker
 from consist.types import ArtifactRef
 
 if TYPE_CHECKING:
-    # Type-only imports already handled above; kept for static checkers
-    pass
+    import xarray
 
 # Import loaders for specific formats
+xr: Optional[ModuleType]
 try:
-    import xarray as xr
+    xr = importlib.import_module("xarray")
 except ImportError:
     xr = None
 
+tables: Optional[ModuleType]
 try:
-    import tables
+    tables = importlib.import_module("tables")
 except ImportError:
     tables = None
-
-# In consist/api.py
-
-from typing import TypeVar
-from sqlmodel import SQLModel, Session, select
 
 T = TypeVar("T", bound=SQLModel)
 
@@ -54,7 +65,7 @@ def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
     Type[T]
         SQLModel subclass with ``table=True`` pointing at the hybrid view.
     """
-    return create_view_model(model, name)
+    return create_view_model(model, name)  # ty: ignore[invalid-return-type]
 
 
 # --- Core Access ---
@@ -201,7 +212,7 @@ def get_artifact(
     Optional[Artifact]
         Matching artifact or ``None`` if not found.
     """
-    return current_tracker().get_artifact(
+    return current_tracker().get_run_artifact(
         run_id, key=key, key_contains=key_contains, direction=direction
     )
 
@@ -396,7 +407,7 @@ def register_views(*models: Type[SQLModel]) -> Dict[str, Type[SQLModel]]:
     Dict[str, Type[SQLModel]]
         Mapping from model class name to the generated view model.
     """
-    return {m.__name__: create_view_model(m) for m in models}
+    return {m.__name__: create_view_model(m) for m in models}  # ty: ignore[invalid-return-type]
 
 
 def find_run(tracker: Optional["Tracker"] = None, **filters: Any) -> Optional[Run]:
@@ -440,7 +451,7 @@ def find_runs(tracker: Optional["Tracker"] = None, **filters: Any):
 
 
 @contextmanager
-def db_session(tracker: Optional["Tracker"] = None) -> Session:
+def db_session(tracker: Optional["Tracker"] = None) -> Iterator[Session]:
     """
     Provide a SQLModel ``Session`` connected to the tracker's database.
 
@@ -606,7 +617,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     **kwargs: Any,
-) -> Union[pd.DataFrame, "xr.Dataset", Any]:
+) -> Union[pd.DataFrame, "xarray.Dataset", Any]:
     """
     Smart loader that retrieves data for an artifact from the best available source.
 
@@ -700,7 +711,7 @@ def load(
 
     # 3. Try Disk Load (Priority 1)
     if Path(path).exists():
-        return _load_from_disk(path, artifact.driver, **load_kwargs)
+        return _load_from_disk(str(path), artifact.driver, **load_kwargs)
 
     # 4. Try Database Load (Priority 2 - Ghost Mode)
     if artifact.meta.get("is_ingested", False):
@@ -861,12 +872,29 @@ def _load_from_db(
         does not exist or a database error occurs.
     """
     table_name = artifact.key
-    query = f"SELECT * FROM global_tables.{table_name} WHERE consist_artifact_id = '{artifact.id}'"
+    metadata = MetaData()
     try:
-        return pd.read_sql(text(query), tracker.engine, **kwargs)
+        table = Table(
+            table_name,
+            metadata,
+            schema="global_tables",
+            autoload_with=tracker.engine,
+        )
+    except SQLAlchemyError as e:
+        raise RuntimeError(
+            f"Failed to reflect DB table 'global_tables.{table_name}': {e}"
+        ) from e
+
+    if "consist_artifact_id" not in table.c:
+        raise RuntimeError(
+            f"Table 'global_tables.{table_name}' is missing consist_artifact_id."
+        )
+
+    stmt = sa_select(table).where(table.c.consist_artifact_id == str(artifact.id))
+    try:
+        return pd.read_sql(stmt, tracker.engine, **kwargs)
     except Exception as e:
-        # If table not found, provide helpful error
-        raise RuntimeError(f"Failed to load from DB table '{table_name}': {e}")
+        raise RuntimeError(f"Failed to load from DB table '{table_name}': {e}") from e
 
 
 def log_meta(**kwargs: Any) -> None:

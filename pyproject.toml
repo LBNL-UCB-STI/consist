@@ -47,6 +47,9 @@ examples = [
     "matplotlib>=3.8.0",
     "seaborn>=0.13.0",
 ]
+typecheck = [
+    "ty>=0.0.7",
+]
 
 # Convenience extras.
 all = [
@@ -131,3 +134,22 @@ markers = [
 [tool.ruff]
 target-version = "py311"
 line-length = 88
+
+[tool.ty.src]
+include = ["src", "tests"]
+
+[[tool.ty.overrides]]
+include = ["src/consist/cli.py", "src/consist/api.py"]
+rules = { "conflicting-declarations" = "ignore", "invalid-assignment" = "ignore", "invalid-argument-type" = "ignore", "invalid-method-override" = "ignore", "no-matching-overload" = "ignore", "unresolved-attribute" = "ignore" }
+
+[[tool.ty.overrides]]
+include = ["src/consist/core/**", "src/consist/tools/**"]
+rules = { "invalid-assignment" = "ignore", "possibly-missing-attribute" = "ignore", "unresolved-attribute" = "ignore" }
+
+[[tool.ty.overrides]]
+include = ["src/consist/integrations/**"]
+rules = { "invalid-argument-type" = "ignore", "invalid-assignment" = "ignore", "possibly-missing-attribute" = "ignore" }
+
+[[tool.ty.overrides]]
+include = ["tests/**"]
+rules = { "invalid-argument-type" = "ignore", "invalid-assignment" = "ignore", "non-subscriptable" = "ignore", "possibly-missing-attribute" = "ignore", "unresolved-attribute" = "ignore" }

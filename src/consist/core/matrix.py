@@ -20,6 +20,7 @@ import logging
 from typing import TYPE_CHECKING, List, Optional
 
 import pandas as pd
+from sqlmodel import select
 
 try:
     import xarray as xr
@@ -28,6 +29,8 @@ except ImportError:
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
+from consist.models.artifact import Artifact
+from consist.models.run import Run
 
 
 class MatrixViewFactory:
@@ -100,13 +103,17 @@ class MatrixViewFactory:
             raise RuntimeError("Database connection required.")
 
         # 1. Query Metadata
-        query = f"""
-            SELECT a.uri, r.id as run_id, r.year, r.iteration 
-            FROM artifact a
-            JOIN run r ON a.run_id = r.id
-            WHERE a.key = '{concept_key}'
-            ORDER BY r.year, r.iteration
-        """
+        query = (
+            select(
+                Artifact.uri,
+                Run.id.label("run_id"),
+                Run.year,
+                Run.iteration,
+            )
+            .join(Run, Artifact.run_id == Run.id)
+            .where(Artifact.key == concept_key)
+            .order_by(Run.year, Run.iteration)
+        )
         df = pd.read_sql(query, self.tracker.engine)
         if df.empty:
             return xr.Dataset()

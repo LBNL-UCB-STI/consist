@@ -135,7 +135,11 @@ All steps share the same `scenario_id`, making cross-scenario queries straightfo
 Use the coupler to track artifacts flowing between steps:
 
 ```python
-with consist.scenario("baseline", tracker=tracker) as sc:
+with consist.scenario(
+    "baseline",
+    tracker=tracker,
+    step_cache_hydration="inputs-missing",
+) as sc:
     coupler = sc.coupler
     
     with sc.step(name="preprocess"):
@@ -149,6 +153,27 @@ with consist.scenario("baseline", tracker=tracker) as sc:
     with sc.step(name="simulate", input_keys=["data"]):
         df = consist.load(coupler.require("data"))
         # ... simulation logic ...
+
+## Query facets with `pivot_facets`
+
+If you log small, queryable config facets on runs, you can pivot them into a wide table
+and join them to other run metadata for analysis.
+
+```python
+from sqlmodel import select
+import consist
+
+params = consist.pivot_facets(
+    namespace="simulate",
+    keys=["alpha", "beta", "mode"],
+    value_columns={"mode": "value_str"},
+)
+
+rows = consist.run_query(
+    select(params.c.run_id, params.c.alpha, params.c.beta, params.c.mode),
+    tracker=tracker,
+)
+```
 ```
 
 ### Mixing Tasks and Scenarios

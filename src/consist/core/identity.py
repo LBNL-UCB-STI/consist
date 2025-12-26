@@ -327,7 +327,7 @@ class IdentityManager:
         self,
         inputs: List["Artifact"],
         path_resolver: Optional[Callable[[str], str]] = None,
-        signature_lookup: Optional[Callable[[str], str]] = None,
+        signature_lookup: Optional[Callable[[str], Optional[str]]] = None,
     ) -> str:
         """
         Generates a deterministic hash representing the state of all input artifacts.

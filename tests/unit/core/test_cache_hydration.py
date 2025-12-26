@@ -20,14 +20,14 @@ from consist.models.run_config_kv import RunConfigKV
 
 def _init_core_tables(tracker: Tracker) -> None:
     core_tables = [
-        Run.__table__,
-        Artifact.__table__,
-        RunArtifactLink.__table__,
-        ConfigFacet.__table__,
-        RunConfigKV.__table__,
-        ArtifactSchema.__table__,
-        ArtifactSchemaField.__table__,
-        ArtifactSchemaObservation.__table__,
+        getattr(Run, "__table__"),
+        getattr(Artifact, "__table__"),
+        getattr(RunArtifactLink, "__table__"),
+        getattr(ConfigFacet, "__table__"),
+        getattr(RunConfigKV, "__table__"),
+        getattr(ArtifactSchema, "__table__"),
+        getattr(ArtifactSchemaField, "__table__"),
+        getattr(ArtifactSchemaObservation, "__table__"),
     ]
     if tracker.engine:
         with tracker.engine.connect() as connection:

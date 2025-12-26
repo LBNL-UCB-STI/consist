@@ -21,6 +21,7 @@
         - find_runs
         - db_session
         - run_query
+        - pivot_facets
         - capture_outputs
         - load
       filters:

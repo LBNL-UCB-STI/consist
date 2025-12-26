@@ -108,7 +108,7 @@ def create_view_model(model: Type[T], name: Optional[str] = None) -> Type[T]:
     # Pass {"table": True} to the keyword args of class creation
     return types.new_class(
         f"Virtual{model.__name__}", (SQLModel,), {"table": True}, exec_body
-    )
+    )  # ty: ignore[invalid-return-type]
 
 
 class ViewRegistry:
@@ -145,7 +145,7 @@ class ViewRegistry:
 
             # 3. Update Cache & Return
             self._class_cache[name] = view_cls
-            return view_cls
+            return view_cls  # ty: ignore[invalid-return-type]
 
         raise AttributeError(f"'ViewRegistry' object has no attribute '{name}'")
 
@@ -196,7 +196,7 @@ class ViewFactory:
         # Pass schema_model to handle empty states
         self.create_hybrid_view(view_name, concept_key, schema_model=model)
 
-        return create_view_model(model, name=view_name)
+        return create_view_model(model, name=view_name)  # ty: ignore[invalid-return-type]
 
     def create_hybrid_view(
         self,
@@ -362,7 +362,7 @@ class ViewFactory:
             # Query Artifacts + Join Run to get Year/Iteration info
             statement = (
                 select(Artifact, Run)
-                .join(Run, Artifact.run_id == Run.id)
+                .join(Run, Artifact.run_id == Run.id)  # ty: ignore[invalid-argument-type]
                 .where(Artifact.key == concept_key)
                 .where(Artifact.driver.in_(drivers))
             )

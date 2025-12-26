@@ -280,6 +280,8 @@ class TestCallableHashing:
 
         # 2. Load the module dynamically
         spec = importlib.util.spec_from_file_location("my_module", module_path)
+        assert spec is not None
+        assert spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         func = module.my_func

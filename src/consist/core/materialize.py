@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Iterable, Literal, Sequence, TYPE_CHECKING
 
 import pandas as pd
-from sqlalchemy import text
+from sqlalchemy import MetaData, Table, select
+from sqlalchemy.exc import SQLAlchemyError
 
 from consist.models.artifact import Artifact
 
@@ -192,11 +193,29 @@ def materialize_ingested_artifact_from_db(
         )
 
     table_name = artifact.meta.get("dlt_table_name") or artifact.key
-    query = (
-        f"SELECT * FROM global_tables.{table_name} "
-        f"WHERE consist_artifact_id = '{artifact.id}'"
-    )
-    df = pd.read_sql(text(query), tracker.engine)
+    if not isinstance(table_name, str) or not table_name:
+        raise ValueError("Artifact table name is missing; cannot reconstruct from DB.")
+
+    metadata = MetaData()
+    try:
+        table = Table(
+            table_name,
+            metadata,
+            schema="global_tables",
+            autoload_with=tracker.engine,
+        )
+    except SQLAlchemyError as e:
+        raise RuntimeError(
+            f"Failed to reflect table 'global_tables.{table_name}': {e}"
+        ) from e
+
+    if "consist_artifact_id" not in table.c:
+        raise RuntimeError(
+            f"Table 'global_tables.{table_name}' is missing consist_artifact_id."
+        )
+
+    stmt = select(table).where(table.c.consist_artifact_id == str(artifact.id))
+    df = pd.read_sql(stmt, tracker.engine)
 
     destination_path = Path(destination).resolve()
     destination_path.parent.mkdir(parents=True, exist_ok=True)

@@ -1,4 +1,5 @@
 import logging
+import weakref
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Protocol, runtime_checkable
@@ -172,6 +173,8 @@ def hydrate_cache_hit_outputs(
     active_options = options or ActiveRunCacheOptions()
 
     for art in cached_items.outputs.values():
+        # Attach tracker ref so Artifact.path can lazily resolve URIs on demand.
+        art._tracker = weakref.ref(tracker)
         record.outputs.append(art)
 
     # Ensure the new (cached) run has DB links to its hydrated outputs.

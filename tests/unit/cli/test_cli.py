@@ -3,10 +3,12 @@
 import json
 import uuid
 from datetime import datetime
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
+from sqlalchemy.engine import Engine
 from sqlmodel import SQLModel, Session, create_engine
 from typer.testing import CliRunner
 
@@ -123,7 +125,11 @@ def mock_db_session(mock_data, tmp_path):
     engine = create_engine(f"duckdb:///{db_path}")
 
     # CRITICAL: Only create the core tables, ignoring MockTable from other tests
-    core_tables = [Run.__table__, Artifact.__table__, RunArtifactLink.__table__]
+    core_tables = [
+        getattr(Run, "__table__"),
+        getattr(Artifact, "__table__"),
+        getattr(RunArtifactLink, "__table__"),
+    ]
 
     with engine.connect() as connection:
         with connection.begin():
@@ -255,8 +261,9 @@ def test_artifacts_with_db(mock_db_session, tmp_path):
     ):
         # We need a real Tracker to exercise the get_artifacts_for_run delegation logic
         tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
+        assert tracker.db is not None
         # Fix: Inject the mock engine into the DatabaseManager, not the Tracker property
-        tracker.db.engine = mock_db_session.get_bind()
+        tracker.db.engine = cast(Engine, mock_db_session.get_bind())
         m.return_value = tracker
 
         result = runner.invoke(app, ["artifacts", "run2"])
@@ -272,8 +279,9 @@ def test_lineage_with_db(mock_db_session, tmp_path):
         patch("consist.cli.get_tracker") as m,
     ):
         tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
+        assert tracker.db is not None
         # Fix: Inject the mock engine into the DatabaseManager
-        tracker.db.engine = mock_db_session.get_bind()
+        tracker.db.engine = cast(Engine, mock_db_session.get_bind())
         m.return_value = tracker
 
         result = runner.invoke(app, ["lineage", "processed_data"])
@@ -306,7 +314,8 @@ def test_preview_command_success(mock_db_session, tmp_path):
         mock_load.return_value = mock_df
 
         tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        tracker.db.engine = mock_db_session.get_bind()
+        assert tracker.db is not None
+        tracker.db.engine = cast(Engine, mock_db_session.get_bind())
         m.return_value = tracker
 
         result = runner.invoke(app, ["preview", "raw_data"])
@@ -323,8 +332,8 @@ def test_preview_command_artifact_not_found(mock_db_session, tmp_path):
         patch("consist.cli.get_tracker") as m,
     ):
         tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        # Fix: Inject the mock engine into the DatabaseManager
-        tracker.db.engine = mock_db_session.get_bind()
+        assert tracker.db is not None
+        tracker.db.engine = cast(Engine, mock_db_session.get_bind())
         m.return_value = tracker
 
         result = runner.invoke(app, ["preview", "nonexistent_artifact"])
@@ -341,8 +350,8 @@ def test_preview_command_unsupported_loaded_type(mock_db_session, tmp_path):
         mock_load.return_value = {"not": "a dataframe"}
 
         tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        # Fix: Inject the mock engine into the DatabaseManager
-        tracker.db.engine = mock_db_session.get_bind()
+        assert tracker.db is not None
+        tracker.db.engine = cast(Engine, mock_db_session.get_bind())
         m.return_value = tracker
 
         result = runner.invoke(app, ["preview", "params"])
@@ -356,7 +365,8 @@ def test_schema_export_command_success_stdout(mock_db_session, tmp_path):
         patch("consist.cli.get_tracker") as m,
     ):
         tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        tracker.db.engine = mock_db_session.get_bind()
+        assert tracker.db is not None
+        tracker.db.engine = cast(Engine, mock_db_session.get_bind())
         m.return_value = tracker
 
         with patch.object(
@@ -383,7 +393,8 @@ def test_schema_export_command_requires_selector(mock_db_session, tmp_path):
         patch("consist.cli.get_tracker") as m,
     ):
         tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        tracker.db.engine = mock_db_session.get_bind()
+        assert tracker.db is not None
+        tracker.db.engine = cast(Engine, mock_db_session.get_bind())
         m.return_value = tracker
 
         result = runner.invoke(app, ["schema", "export"])
@@ -397,7 +408,8 @@ def test_schema_export_command_schema_not_found_exits_1(mock_db_session, tmp_pat
         patch("consist.cli.get_tracker") as m,
     ):
         tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        tracker.db.engine = mock_db_session.get_bind()
+        assert tracker.db is not None
+        tracker.db.engine = cast(Engine, mock_db_session.get_bind())
         m.return_value = tracker
 
         with patch.object(tracker, "export_schema_sqlmodel", side_effect=KeyError()):
@@ -421,6 +433,7 @@ def test_summary_no_runs_exits_cleanly(tmp_path):
         patch("consist.cli.queries.get_summary") as m_summary,
     ):
         tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
+        assert tracker.db is not None
         tracker.db.engine = create_engine("duckdb:///:memory:")
         m_tracker.return_value = tracker
         m_summary.return_value = {

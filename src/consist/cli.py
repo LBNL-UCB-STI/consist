@@ -84,58 +84,6 @@ def get_tracker(db_path: Optional[str] = None) -> Tracker:
     return Tracker(run_dir=Path("."), db_path=resolved_path)
 
 
-def _coerce_mounts(value: Any) -> Dict[str, str]:
-    if not isinstance(value, Mapping):
-        return {}
-    mounts: Dict[str, str] = {}
-    for key, root in value.items():
-        if isinstance(key, str) and isinstance(root, str) and root:
-            mounts[key] = root
-    return mounts
-
-
-def _apply_inferred_mounts(tracker: Tracker, mounts: Mapping[str, str]) -> None:
-    if not mounts:
-        return
-    merged = dict(mounts)
-    merged.update(tracker.mounts)
-    tracker.fs.mounts = merged
-    tracker.mounts = tracker.fs.mounts
-
-
-def _ensure_tracker_mounts_for_artifact(tracker: Tracker, artifact: "Artifact") -> None:
-    from consist.tools.mount_diagnostics import parse_mount_uri
-
-    parsed = parse_mount_uri(artifact.uri)
-    if parsed is None:
-        return
-
-    scheme, _ = parsed
-    if scheme in tracker.mounts:
-        return
-
-    inferred: Dict[str, str] = {}
-    run = tracker.get_run(artifact.run_id) if artifact.run_id else None
-    if run and isinstance(run.meta, dict):
-        inferred.update(_coerce_mounts(run.meta.get("mounts")))
-        run_dir = run.meta.get("_physical_run_dir")
-        if (
-            scheme == "workspace"
-            and scheme not in inferred
-            and isinstance(run_dir, str)
-            and run_dir
-        ):
-            inferred[scheme] = run_dir
-
-    if scheme not in inferred:
-        meta = artifact.meta or {}
-        mount_root = meta.get("mount_root")
-        if isinstance(mount_root, str) and mount_root:
-            inferred[scheme] = mount_root
-
-    _apply_inferred_mounts(tracker, inferred)
-
-
 def _render_schema_profile(
     schema: "ArtifactSchema", fields: List["ArtifactSchemaField"]
 ) -> None:
@@ -581,6 +529,7 @@ def validate(
 
     with Session(tracker.engine) as session:
         from consist.models.artifact import Artifact
+        from sqlmodel import select
 
         artifacts = session.exec(select(Artifact)).all()
 

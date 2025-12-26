@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from collections.abc import Iterable
 from types import MappingProxyType
 from typing import List, Optional, Dict, Any, Callable, Mapping
 
@@ -44,6 +45,7 @@ class ScenarioContext:
         config: Optional[Dict[str, Any]] = None,
         tags: Optional[List[str]] = None,
         model: str = "scenario",
+        step_cache_hydration: Optional[str] = None,
         **kwargs: Any,
     ):
         self.tracker = tracker
@@ -52,6 +54,7 @@ class ScenarioContext:
         self.config_arg = config or {}
         self.tags = tags or []
         self.kwargs = kwargs
+        self.step_cache_hydration = step_cache_hydration
 
         # Internal State
         self._header_record: Optional[ConsistRecord] = None
@@ -142,7 +145,7 @@ class ScenarioContext:
         inputs: Optional[List[ArtifactRef]] = None,
         outputs: Optional[List[str]] = None,
         output_paths: Optional[Mapping[str, ArtifactRef]] = None,
-        cache_hydration: str = "metadata",
+        cache_hydration: Optional[str] = None,
         materialize_cached_output_paths: Optional[Mapping[str, Path]] = None,
         materialize_cached_outputs_dir: Optional[Path] = None,
         validate_cached_outputs: str = "lazy",
@@ -188,8 +191,9 @@ class ScenarioContext:
             - relative path → relative to the step run directory (`t.run_dir`)
             - URI-like string (contains `"://"`) → resolved via mounts (`tracker.resolve_uri`)
             - absolute path → used as-is
-        cache_hydration
-            Controls whether cached bytes are materialized for inputs/outputs.
+        cache_hydration : Optional[str]
+            Controls whether cached bytes are materialized for inputs/outputs. If
+            omitted, the scenario default (if any) is used.
             See `docs/caching-and-hydration.md` for the supported policies.
 
         Returns
@@ -256,8 +260,10 @@ class ScenarioContext:
 
         step_kwargs: Dict[str, Any] = {
             "cache_mode": cache_mode,
-            "cache_hydration": cache_hydration,
         }
+        effective_cache_hydration = cache_hydration or self.step_cache_hydration
+        if effective_cache_hydration is not None:
+            step_kwargs["cache_hydration"] = effective_cache_hydration
         step_kwargs["materialize_cached_output_paths"] = (
             dict(materialize_cached_output_paths)
             if materialize_cached_output_paths
@@ -348,6 +354,10 @@ class ScenarioContext:
         self._first_step_started = True
         self._last_step_name = name
 
+        # Apply scenario default cache hydration for steps unless overridden.
+        if "cache_hydration" not in kwargs and self.step_cache_hydration is not None:
+            kwargs["cache_hydration"] = self.step_cache_hydration
+
         # Ergonomic helper: allow declaring step inputs by Coupler key, while still
         # ensuring inputs are registered before begin_run() computes the cache signature.
         #
@@ -423,14 +433,18 @@ class ScenarioContext:
                         # Capture Artifacts (Copy to list so they survive context exit)
                         # Check 'current_inputs' (tracker attr) or 'inputs' (context attr)
                         if hasattr(t, "current_inputs"):
-                            child_inputs = list(t.current_inputs)
+                            child_inputs = self._as_artifact_list(
+                                getattr(t, "current_inputs")
+                            )
                         elif hasattr(ctx, "inputs"):
-                            child_inputs = list(ctx.inputs)
+                            child_inputs = self._as_artifact_list(ctx.inputs)
 
                         if hasattr(t, "current_outputs"):
-                            child_outputs = list(t.current_outputs)
+                            child_outputs = self._as_artifact_list(
+                                getattr(t, "current_outputs")
+                            )
                         elif hasattr(ctx, "outputs"):
-                            child_outputs = list(ctx.outputs)
+                            child_outputs = self._as_artifact_list(ctx.outputs)
 
         finally:
             # 3. Bubble Up (Tracker is now closed, but we have our copies)
@@ -447,6 +461,19 @@ class ScenarioContext:
         raise ValueError(
             f"ScenarioContext {label} must be a mapping or Pydantic model."
         )
+
+    def _as_artifact_list(self, value: Any) -> List[Artifact]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return list(value)
+        if isinstance(value, tuple):
+            return list(value)
+        if isinstance(value, Mapping):
+            return list(value.values())
+        if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+            return list(value)
+        return []
 
     def _extract_facet_from_config(
         self, config: Optional[Any], facet_from: List[str]
@@ -471,6 +498,8 @@ class ScenarioContext:
             parent_run = self._header_record
             parent_inputs_list = []
             parent_outputs_list = []
+        if parent_run is None:
+            return
 
         # --- Smart Merge Logic ---
         parent_output_ids = {a.id for a in parent_outputs_list}

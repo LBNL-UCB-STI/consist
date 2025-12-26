@@ -128,3 +128,17 @@ def test_step_log_dataframe_defaults_to_run_dir(tracker: Tracker):
     assert abs_path.exists()
     assert abs_path.parent == tracker.run_dir
     assert abs_path.name == "series.parquet"
+
+
+def test_scenario_step_cache_hydration_default(tracker: Tracker):
+    with tracker.scenario(
+        "scen_cache_default",
+        step_cache_hydration="inputs-missing",
+    ) as sc:
+        with sc.step("step_a") as t:
+            assert t._active_run_cache_options is not None
+            assert t._active_run_cache_options.cache_hydration == "inputs-missing"
+
+        with sc.step("step_b", cache_hydration="metadata") as t:
+            assert t._active_run_cache_options is not None
+            assert t._active_run_cache_options.cache_hydration == "metadata"

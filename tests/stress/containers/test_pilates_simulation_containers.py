@@ -315,6 +315,7 @@ def test_pilates_header_pattern(tmp_path):
     person_art = tracker.get_run_artifact(
         target_run.id, key_contains="persons", direction="output"
     )
+    assert person_art is not None
 
     df = consist.load(person_art, tracker=tracker)
     assert len(df) == 300
@@ -386,6 +387,7 @@ def test_pilates_header_pattern_api(tmp_path):
     person_art = tracker.get_run_artifact(
         target_run.id, key_contains="persons", direction="output"
     )
+    assert person_art is not None
     df = consist.load(person_art, tracker=tracker)
     assert len(df) == n_per
 

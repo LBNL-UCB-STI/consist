@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from consist.core.coupler import Coupler
+from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
 
 
@@ -82,7 +84,7 @@ def test_coupler_path_requires_tracker() -> None:
 def test_coupler_path_resolves_without_mutating_artifact() -> None:
     art = _artifact(key="data", uri="inputs://data.csv")
     tracker = FakeTracker(resolved_by_uri={"inputs://data.csv": "/abs/data.csv"})
-    coupler = Coupler(tracker)
+    coupler = Coupler(cast(Tracker, tracker))
     coupler.set("data", art)
 
     assert art.abs_path is None
@@ -94,7 +96,7 @@ def test_coupler_path_resolves_without_mutating_artifact() -> None:
 def test_coupler_adopt_cached_output_sets_state() -> None:
     cached_persons = _artifact(key="persons", uri="workspace://persons.parquet")
     tracker = FakeTracker(cached_outputs={"persons": cached_persons})
-    coupler = Coupler(tracker)
+    coupler = Coupler(cast(Tracker, tracker))
 
     assert coupler.get("persons") is None
     adopted = coupler.adopt_cached_output("persons")
@@ -105,7 +107,7 @@ def test_coupler_adopt_cached_output_sets_state() -> None:
 def test_coupler_cached_aliases_delegate_to_adopt_cached_output() -> None:
     cached = _artifact(key="persons", uri="workspace://persons.parquet")
     tracker = FakeTracker(cached_outputs={"persons": cached})
-    coupler = Coupler(tracker)
+    coupler = Coupler(cast(Tracker, tracker))
 
     adopted = coupler.get_cached("persons")
     assert adopted == cached
