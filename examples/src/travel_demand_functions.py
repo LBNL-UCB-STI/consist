@@ -84,7 +84,7 @@ class AssignmentParams:
 
     bpr_alpha: float = 0.15
     bpr_beta: float = 4.0
-    base_capacity: float = 1500.0
+    base_capacity: float = 1000.0
 
     def to_dict(self) -> dict:
         return asdict(self)

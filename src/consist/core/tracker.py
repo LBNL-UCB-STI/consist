@@ -11,6 +11,7 @@ from typing import (
     Any,
     Callable,
     Dict,
+    Hashable,
     Iterable,
     Iterator,
     List,
@@ -88,7 +89,6 @@ class Tracker:
         hashing_strategy: str = "full",
         schemas: Optional[List[Type[SQLModel]]] = None,
         access_mode: AccessMode = "standard",
-        run_subdir_template: Optional[str] = None,
         run_subdir_fn: Optional[Callable[[Run], str]] = None,
     ):
         """
@@ -119,13 +119,9 @@ class Tracker:
             - `"analysis"`: Read-oriented; blocks creating new provenance nodes but allows
               ingest/backfill and view/query helpers.
             - `"read_only"`: No permanent DB writes.
-        run_subdir_template : Optional[str], default None
-            Optional format string used to derive per-run artifact subdirectories.
-            Available fields: ``run_id``, ``parent_run_id``, ``model``, ``year``,
-            ``iteration``. When omitted, a default pattern is used.
         run_subdir_fn : Optional[Callable[[Run], str]], default None
             Optional callable that returns a relative subdirectory name for a run.
-            When provided, this takes precedence over ``run_subdir_template``.
+            When provided, this takes precedence over the default pattern.
         """
         # 1. Initialize FileSystem Service
         # (This handles the mkdir and path resolution internally now)
@@ -136,8 +132,7 @@ class Tracker:
         self.run_dir = self.fs.run_dir
 
         self.access_mode = access_mode
-        self._run_subdir_template = run_subdir_template
-        self._run_subdir_fn = run_subdir_fn or self._default_run_subdir
+        self._run_subdir_fn = run_subdir_fn
 
         self.db_path = os.fspath(db_path) if db_path is not None else None
         self.identity = IdentityManager(
@@ -191,24 +186,12 @@ class Tracker:
         """
         Default run subdirectory pattern.
 
-        Uses `<parent_run_id>/iteration_<iteration>` when available, otherwise the run id.
+        Uses `<parent_run_id>/<model>/iteration_<iteration>` when available, otherwise
+        `<model>/<run_id>`.
         """
         if run.parent_run_id and run.iteration is not None:
-            return f"{run.parent_run_id}/iteration_{run.iteration}"
-        return run.id
-
-    def set_run_subdir_template(self, template: Optional[str]) -> None:
-        """
-        Set the format string used to derive per-run artifact subdirectories.
-
-        Parameters
-        ----------
-        template : Optional[str]
-            Format string with fields like ``{run_id}``, ``{parent_run_id}``,
-            ``{model}``, ``{year}``, and ``{iteration}``. Set to ``None`` to
-            disable templating and fall back to the run id.
-        """
-        self._run_subdir_template = template
+            return f"{run.parent_run_id}/{run.model_name}/iteration_{run.iteration}"
+        return f"{run.model_name}/{run.id}"
 
     def set_run_subdir_fn(self, fn: Optional[Callable[[Run], str]]) -> None:
         """
@@ -240,22 +223,27 @@ class Tracker:
         if target_run is None and self.current_consist:
             target_run = self.current_consist.run
         if target_run is None:
-            return self.run_dir
+            return self.run_dir / "outputs"
 
-        subdir = None
-        if self._run_subdir_fn is not None:
-            subdir = self._run_subdir_fn(target_run)
-        elif self._run_subdir_template is not None:
-            mapping = {
-                "run_id": target_run.id,
-                "parent_run_id": target_run.parent_run_id or "",
-                "model": target_run.model_name,
-                "year": "" if target_run.year is None else str(target_run.year),
-                "iteration": ""
-                if target_run.iteration is None
-                else str(target_run.iteration),
-            }
-            subdir = self._run_subdir_template.format_map(mapping)
+        base_dir = self.run_dir / "outputs"
+        artifact_dir = (
+            target_run.meta.get("artifact_dir")
+            if isinstance(target_run.meta, dict)
+            else None
+        )
+        if isinstance(artifact_dir, Path):
+            artifact_dir = str(artifact_dir)
+        if isinstance(artifact_dir, str) and artifact_dir:
+            artifact_path = Path(artifact_dir)
+            if artifact_path.is_absolute():
+                return artifact_path
+            return base_dir / artifact_path
+
+        subdir = (
+            self._run_subdir_fn(target_run)
+            if self._run_subdir_fn is not None
+            else self._default_run_subdir(target_run)
+        )
 
         if subdir:
             subdir = subdir.strip().lstrip("/\\")
@@ -268,7 +256,7 @@ class Tracker:
                 "run_subdir must be a relative path; got an absolute path."
             )
 
-        return self.run_dir / subdir_path
+        return base_dir / subdir_path
 
     def export_schema_sqlmodel(
         self,
@@ -405,6 +393,7 @@ class Tracker:
         description: Optional[str] = None,
         cache_mode: str = "reuse",
         *,
+        artifact_dir: Optional[Union[str, Path]] = None,
         facet: Optional[FacetLike] = None,
         facet_from: Optional[List[str]] = None,
         hash_inputs: HashInputs = None,
@@ -439,6 +428,9 @@ class Tracker:
             A human-readable description of the run's purpose.
         cache_mode : str, default "reuse"
             Strategy for caching: "reuse", "overwrite", or "readonly".
+        artifact_dir : Optional[Union[str, Path]], optional
+            Override the per-run artifact directory. Relative paths are resolved
+            under ``<run_dir>/outputs``. Absolute paths are used as-is.
         facet : Optional[FacetLike], optional
             Optional small, queryable configuration facet to persist alongside the run.
             This is distinct from `config` (which is hashed and stored in the JSON snapshot).
@@ -537,6 +529,9 @@ class Tracker:
         year = kwargs.pop("year", None)
         iteration = kwargs.pop("iteration", None)
         parent_run_id = kwargs.pop("parent_run_id", None)
+
+        if artifact_dir is not None:
+            kwargs["artifact_dir"] = str(artifact_dir)
 
         if config is None:
             config_dict: Dict[str, Any] = {}
@@ -980,7 +975,7 @@ class Tracker:
         limit: int = 100,
         index_by: Optional[Union[str, IndexBySpec]] = None,
         name: Optional[str] = None,
-    ) -> Union[List[Run], Dict[Any, Run]]:
+    ) -> Union[List[Run], Dict[Hashable, Run]]:
         """
         Retrieve runs matching the specified criteria.
 
@@ -1013,7 +1008,7 @@ class Tracker:
 
         Returns
         -------
-        Union[List[Run], Dict[Any, Run]]
+        Union[List[Run], Dict[Hashable, Run]]
             List of runs, or a dict keyed by `index_by` when requested.
 
         Raises
@@ -1281,8 +1276,8 @@ class Tracker:
         direction : str, default "output"
             Artifact direction relative to the run.
         path : Optional[Union[str, Path]], optional
-            Output path; defaults to `<run_dir>/<run_subdir>/<key>.<driver>` where
-            ``run_subdir`` is derived from ``run_subdir_fn``/``run_subdir_template``.
+            Output path; defaults to `<run_dir>/outputs/<run_subdir>/<key>.<driver>` where
+            ``run_subdir`` is derived from ``run_subdir_fn`` (or the default pattern).
         driver : Optional[str], optional
             File format driver (e.g., "parquet" or "csv").
         meta : Optional[Dict[str, Any]], optional

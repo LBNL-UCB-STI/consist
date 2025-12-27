@@ -59,7 +59,7 @@ def create_task_decorator(
                 bound = None
 
             config: dict[str, Any] = {}
-            inputs: List[Any] = []
+            inputs: List[ArtifactRef] = []
             resolved_args: Optional[inspect.BoundArguments] = None
             if bound:
                 bound.apply_defaults()

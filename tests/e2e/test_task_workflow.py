@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 import pandas as pd
@@ -392,5 +393,5 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     )
 
     # Verify the cleaned data is different
-    df_cleaned_modified = consist.load(cleaned_modified)
+    df_cleaned_modified = cast(pd.DataFrame, consist.load(cleaned_modified))
     assert not df_cleaned_modified.equals(df_cleaned)

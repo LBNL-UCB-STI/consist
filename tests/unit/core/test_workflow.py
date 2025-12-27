@@ -126,7 +126,10 @@ def test_step_log_dataframe_defaults_to_run_dir(tracker: Tracker):
     assert artifact.abs_path is not None
     abs_path = Path(artifact.abs_path)
     assert abs_path.exists()
-    assert abs_path.parent == tracker.run_dir / "scen_df" / "iteration_0"
+    assert (
+        abs_path.parent
+        == tracker.run_dir / "outputs" / "scen_df" / "write_df" / "iteration_0"
+    )
     assert abs_path.name == "series.parquet"
 
 
@@ -142,3 +145,50 @@ def test_scenario_step_cache_hydration_default(tracker: Tracker):
         with sc.step("step_b", cache_hydration="metadata") as t:
             assert t._active_run_cache_options is not None
             assert t._active_run_cache_options.cache_hydration == "metadata"
+
+
+def test_run_artifact_dir_overrides(tracker: Tracker, tmp_path: Path):
+    df = pd.DataFrame({"value": [1, 2, 3]})
+
+    with tracker.start_run(
+        "override_rel",
+        model="override_model",
+        artifact_dir="custom/dir",
+        cache_mode="overwrite",
+    ) as t:
+        artifact = t.log_dataframe(df, key="series")
+
+    assert artifact is not None
+    assert artifact.abs_path is not None
+    abs_path = Path(artifact.abs_path)
+    assert abs_path.parent == tracker.run_dir / "outputs" / "custom" / "dir"
+
+    absolute_dir = tmp_path / "absolute_outputs"
+    with tracker.start_run(
+        "override_abs",
+        model="override_model",
+        artifact_dir=absolute_dir,
+        cache_mode="overwrite",
+    ) as t:
+        artifact = t.log_dataframe(df, key="series_abs")
+
+    assert artifact is not None
+    assert artifact.abs_path is not None
+    abs_path = Path(artifact.abs_path)
+    assert abs_path.parent == absolute_dir
+
+
+def test_step_default_path_includes_model_name(tracker: Tracker):
+    df = pd.DataFrame({"value": [1, 2, 3]})
+    artifact = None
+    with tracker.scenario("scen_model_dir") as sc:
+        with sc.step("write_df", model="model_x", iteration=2) as t:
+            artifact = t.log_dataframe(df, key="series")
+
+    assert artifact is not None
+    assert artifact.abs_path is not None
+    abs_path = Path(artifact.abs_path)
+    assert (
+        abs_path.parent
+        == tracker.run_dir / "outputs" / "scen_model_dir" / "model_x" / "iteration_2"
+    )

@@ -4,6 +4,7 @@ from typing import Dict, Any, TYPE_CHECKING, Set, Optional, Union
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
     from consist.models.artifact import Artifact
+    from consist.models.run import Run, RunArtifacts
 
 
 def build_lineage_tree(
@@ -38,8 +39,8 @@ def build_lineage_tree(
     if not start_artifact:
         return None
 
-    run_cache: Dict[str, Optional[Any]] = {}
-    run_artifacts_cache: Dict[str, Any] = {}
+    run_cache: Dict[str, Optional["Run"]] = {}
+    run_artifacts_cache: Dict[str, "RunArtifacts"] = {}
     lineage_cache: Dict[tuple[str, Optional[int]], Dict[str, Any]] = {}
 
     def _trace(

@@ -10,7 +10,6 @@ import json
 import time
 import inspect
 import fnmatch
-import os
 from importlib import import_module
 from types import ModuleType
 from typing import TYPE_CHECKING, Dict, List, Any, Optional, Callable, Set, Union
@@ -149,14 +148,7 @@ class IdentityManager:
             # effectively disable caching.
             #
             # Tracked modifications (diff vs HEAD / staged diff) still invalidate caches.
-            ignore_dirty = os.getenv("CONSIST_IGNORE_GIT_DIRTY", "").lower() in {
-                "1",
-                "true",
-                "yes",
-            }
             if repo.is_dirty(untracked_files=False):
-                if ignore_dirty:
-                    return sha
                 # If dirty, append a stable content hash of the working tree.
                 #
                 # Rationale: a time-based nonce prevents false cache hits during dev,

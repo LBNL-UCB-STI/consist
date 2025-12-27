@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from consist.models.artifact import Artifact
+    from consist.models.run import Run
 
 app = typer.Typer(rich_markup_mode="markdown")
 schema_app = typer.Typer(rich_markup_mode="markdown")
@@ -325,7 +326,7 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> None:
     console.print(table)
 
 
-def _render_run_details(run: Any) -> None:
+def _render_run_details(run: "Run") -> None:
     """Shared logic for displaying run details, config, and metadata."""
     info = Table.grid(padding=(0, 2))
     info.add_column(style="bold cyan")

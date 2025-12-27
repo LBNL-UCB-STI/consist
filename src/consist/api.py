@@ -5,6 +5,7 @@ from types import ModuleType
 from typing import (
     Any,
     Dict,
+    Hashable,
     Iterable,
     Iterator,
     Mapping,
@@ -16,13 +17,15 @@ from typing import (
 )
 
 import pandas as pd
-from sqlalchemy import MetaData, Table, case, func, select as sa_select
+from sqlalchemy import MetaData, Table, case, func, select as sa_select, Subquery
+from sqlalchemy.sql import Executable
 from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import SQLModel, Session, select
 
 # Internal imports
 from consist.core.context import get_active_tracker
 from consist.core.views import create_view_model
+from consist.core.workflow import OutputCapture
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 from consist.models.run_config_kv import RunConfigKV
@@ -46,6 +49,7 @@ except ImportError:
     tables = None
 
 T = TypeVar("T", bound=SQLModel)
+LoadResult = Union[pd.DataFrame, pd.Series, "xarray.Dataset", pd.HDFStore]
 
 
 def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
@@ -344,7 +348,7 @@ def log_dataframe(
     tracker : Optional[Tracker], optional
         Tracker instance to use; defaults to the active tracker.
     path : Optional[Union[str, Path]], optional
-        Output path; defaults to `<run_dir>/<run_subdir>/<key>.<driver>` for the
+        Output path; defaults to `<run_dir>/outputs/<run_subdir>/<key>.<driver>` for the
         active run as determined by the tracker's run subdir configuration.
     driver : Optional[str], optional
         File format driver (e.g., "parquet" or "csv").
@@ -430,7 +434,9 @@ def find_run(tracker: Optional["Tracker"] = None, **filters: Any) -> Optional[Ru
     return tr.find_run(**filters)
 
 
-def find_runs(tracker: Optional["Tracker"] = None, **filters: Any):
+def find_runs(
+    tracker: Optional["Tracker"] = None, **filters: Any
+) -> Union[list[Run], Dict[Hashable, Run]]:
     """
     Convenience proxy for ``Tracker.find_runs``.
 
@@ -443,7 +449,7 @@ def find_runs(tracker: Optional["Tracker"] = None, **filters: Any):
 
     Returns
     -------
-    list
+    Union[list[Run], Dict[Hashable, Run]]
         Results returned by ``Tracker.find_runs``.
     """
     tr = tracker or current_tracker()
@@ -470,13 +476,13 @@ def db_session(tracker: Optional["Tracker"] = None) -> Iterator[Session]:
         yield session
 
 
-def run_query(query: Any, tracker: Optional["Tracker"] = None) -> list:
+def run_query(query: Executable, tracker: Optional["Tracker"] = None) -> list:
     """
     Execute a SQLModel/SQLAlchemy query via the tracker engine.
 
     Parameters
     ----------
-    query : Any
+    query : Executable
         Query object (``select``, etc.).
     tracker : Optional[Tracker], optional
         Tracker instance supplying the engine; defaults to the active tracker.
@@ -501,7 +507,7 @@ def pivot_facets(
     label_map: Optional[Mapping[str, str]] = None,
     run_id_label: str = "run_id",
     table: Type[RunConfigKV] = RunConfigKV,
-) -> Any:
+) -> Subquery:
     """
     Build a pivoted facet subquery keyed by run_id.
 
@@ -572,7 +578,7 @@ def pivot_facets(
 @contextmanager
 def capture_outputs(
     directory: Union[str, Path], pattern: str = "*", recursive: bool = False
-) -> Any:
+) -> Iterator[OutputCapture]:
     """
     Context manager to automatically capture and log new or modified files in a directory
     within the current active run context.
@@ -617,7 +623,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     **kwargs: Any,
-) -> Union[pd.DataFrame, "xarray.Dataset", Any]:
+) -> LoadResult:
     """
     Smart loader that retrieves data for an artifact from the best available source.
 
@@ -651,7 +657,7 @@ def load(
 
     Returns
     -------
-    Union[pd.DataFrame, xarray.Dataset, Any]
+    LoadResult
         The loaded data, typically a Pandas DataFrame, an xarray Dataset (for Zarr),
         or another data object depending on the artifact's `driver` and the data format.
 
@@ -771,7 +777,7 @@ def load(
     )
 
 
-def _load_from_disk(path: str, driver: str, **kwargs: Any) -> Any:
+def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
     """
     Dispatches to the correct file reader based on the artifact's driver.
 
@@ -789,7 +795,7 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> Any:
 
     Returns
     -------
-    Any
+    LoadResult
         The loaded data, typically a Pandas DataFrame, an xarray Dataset, or
         another format-specific data object.
 
