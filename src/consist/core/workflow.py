@@ -607,6 +607,8 @@ class ScenarioContext:
         # 1. Restore Header Context
         self.tracker.current_consist = self._header_record
         self.tracker._active_run_cache_options = self._suspended_cache_options
+        if self._header_record is None:
+            raise RuntimeError("Scenario header record was not captured.")
 
         # 2. Handle Status
         status = "failed" if exc_type else "completed"

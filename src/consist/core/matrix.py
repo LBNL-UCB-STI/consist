@@ -17,20 +17,25 @@ Key functionalities include:
 from __future__ import annotations
 
 import logging
+from importlib import import_module
+from types import ModuleType
 from typing import TYPE_CHECKING, List, Optional
 
 import pandas as pd
 from sqlmodel import select
 
+from consist.models.artifact import Artifact
+from consist.models.run import Run
+
+xr: Optional[ModuleType]
 try:
-    import xarray as xr
+    xr = import_module("xarray")
 except ImportError:
     xr = None
 
 if TYPE_CHECKING:
+    from xarray import Dataset as XrDataset
     from consist.core.tracker import Tracker
-from consist.models.artifact import Artifact
-from consist.models.run import Run
 
 
 class MatrixViewFactory:
@@ -63,7 +68,7 @@ class MatrixViewFactory:
 
     def load_matrix_view(
         self, concept_key: str, variables: Optional[List[str]] = None
-    ) -> "xr.Dataset":
+    ) -> "XrDataset":
         """
         Returns a lazy xarray Dataset containing all runs that match the `concept_key`.
 

@@ -144,11 +144,11 @@ rules = { "conflicting-declarations" = "ignore", "invalid-assignment" = "ignore"
 
 [[tool.ty.overrides]]
 include = ["src/consist/core/**", "src/consist/tools/**"]
-rules = { "invalid-assignment" = "ignore", "possibly-missing-attribute" = "ignore", "unresolved-attribute" = "ignore" }
+rules = { "unresolved-attribute" = "ignore" }
 
 [[tool.ty.overrides]]
 include = ["src/consist/integrations/**"]
-rules = { "invalid-argument-type" = "ignore", "invalid-assignment" = "ignore", "possibly-missing-attribute" = "ignore" }
+rules = { "invalid-argument-type" = "ignore", "invalid-assignment" = "ignore" }
 
 [[tool.ty.overrides]]
 include = ["tests/**"]

@@ -1535,9 +1535,11 @@ class Tracker:
             # AUTO-DISCOVERY: Use the run that created the artifact
             if artifact.run_id:
                 target_run = self.get_run(artifact.run_id)
-                logging.info(
-                    f"[Consist] Ingesting in Analysis Mode. Attributing to Run: {target_run.id}"
-                )
+                if target_run:
+                    logging.info(
+                        "[Consist] Ingesting in Analysis Mode. Attributing to Run: %s",
+                        target_run.id,
+                    )
 
         # Fallback to active run if available
         if not target_run and self.current_consist:

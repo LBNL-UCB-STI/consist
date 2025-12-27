@@ -349,9 +349,14 @@ def ingest_artifact(
                     current_cols = set(batch.columns)
                     extra_cols = current_cols - allowed_keys
                     if extra_cols:
+                        schema_name = (
+                            schema_model.__name__
+                            if schema_model is not None
+                            else "unknown"
+                        )
                         raise ValueError(
                             f"Schema Contract Violation: Found undefined columns {extra_cols} "
-                            f"in artifact '{artifact.key}'. Strict Schema '{schema_model.__name__}' "
+                            f"in artifact '{artifact.key}'. Strict Schema '{schema_name}' "
                             "does not allow new columns."
                         )
                 yield batch

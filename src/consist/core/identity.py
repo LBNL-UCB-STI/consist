@@ -10,22 +10,24 @@ import json
 import time
 import inspect
 import fnmatch
-from typing import Dict, List, Any, Optional, Callable, Set, Union
+from importlib import import_module
+from types import ModuleType
+from typing import TYPE_CHECKING, Dict, List, Any, Optional, Callable, Set, Union
 from pathlib import Path
 
 # Try importing git, handle error if missing (optional dependency)
+git: Optional[ModuleType]
 try:
-    import git
+    git = import_module("git")
 except ImportError:
     git = None
 
 # Try importing numpy for type checking
+np: Optional[ModuleType]
 try:
-    import numpy as np
+    np = import_module("numpy")
 except ImportError:
     np = None
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from consist.models.artifact import Artifact

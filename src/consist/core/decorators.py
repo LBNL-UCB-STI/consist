@@ -112,15 +112,18 @@ def create_task_decorator(
                 cache_mode=cache_mode,
                 **run_kwargs,
             ):
+                current_consist = tracker.current_consist
+                if current_consist is None:
+                    raise RuntimeError("No active run context is available.")
                 # Cache Hit Handling
                 if tracker.is_cached:
                     cache_source_id = None
-                    if tracker.current_consist and tracker.current_consist.cached_run:
-                        cache_source_id = tracker.current_consist.cached_run.id
+                    if current_consist.cached_run:
+                        cache_source_id = current_consist.cached_run.id
                     tracker.log_meta(cache_hit=True)
                     if cache_source_id:
                         tracker.log_meta(cache_source=cache_source_id)
-                    outputs = tracker.current_consist.outputs
+                    outputs = current_consist.outputs
                     for art in outputs or []:
                         art._tracker = weakref.ref(tracker)
                     if capture_dir:
@@ -151,7 +154,7 @@ def create_task_decorator(
 
                     # Return Value Handling
                     if isinstance(result, Artifact):
-                        if result not in tracker.current_consist.outputs:
+                        if result not in current_consist.outputs:
                             result = tracker.log_artifact(
                                 result, key=result.key, direction="output"
                             )
@@ -162,7 +165,7 @@ def create_task_decorator(
                     ):
                         logged_results = {}
                         for k, v in result.items():
-                            if v not in tracker.current_consist.outputs:
+                            if v not in current_consist.outputs:
                                 logged = tracker.log_artifact(
                                     v, key=v.key or k, direction="output"
                                 )

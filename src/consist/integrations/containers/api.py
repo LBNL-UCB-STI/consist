@@ -213,7 +213,10 @@ def _reuse_or_execute_container(
             materialized = materialize_artifacts(
                 tracker=tracker, items=items, on_missing="warn"
             )
-            tracker.db.update_run_meta(
+            db = tracker.db
+            if db is None:
+                raise RuntimeError("Cannot update run metadata without a database.")
+            db.update_run_meta(
                 run_id,
                 {
                     "cache_hit": True,
@@ -222,10 +225,11 @@ def _reuse_or_execute_container(
                     "materialized_outputs": materialized,
                 },
             )
-            tracker.db.update_run_signature(run_id, signature)
+            db.update_run_signature(run_id, signature)
             # Keep in-memory run in sync to avoid later overwrite during end_run
-            if getattr(tracker, "current_consist", None):
-                run_obj = tracker.current_consist.run
+            current_consist = tracker.current_consist
+            if current_consist is not None:
+                run_obj = current_consist.run
                 run_obj.signature = signature
                 meta = run_obj.meta or {}
                 meta.update(
@@ -242,8 +246,9 @@ def _reuse_or_execute_container(
     logger.debug("[container.cache] miss_or_reexec for run=%s", run_id)
     # Cache miss (or missing outputs) -> execute
     execute_fn()
-    if tracker.db:
-        tracker.db.update_run_meta(
+    db = tracker.db
+    if db is not None:
+        db.update_run_meta(
             run_id,
             {
                 "cache_hit": False,
@@ -251,10 +256,11 @@ def _reuse_or_execute_container(
                 "signature": signature,
             },
         )
-        tracker.db.update_run_signature(run_id, signature)
+        db.update_run_signature(run_id, signature)
     # Sync in-memory run to avoid overwrite on end_run
-    if getattr(tracker, "current_consist", None):
-        run_obj = tracker.current_consist.run
+    current_consist = tracker.current_consist
+    if current_consist is not None:
+        run_obj = current_consist.run
         run_obj.signature = signature
         meta = run_obj.meta or {}
         meta.update(
