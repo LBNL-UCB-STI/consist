@@ -171,6 +171,7 @@ def hydrate_cache_hit_outputs(
     run: Run,
     cached_run: Run,
     options: Optional[ActiveRunCacheOptions] = None,
+    link_outputs: bool = True,
 ) -> RunArtifacts:
     """
     Hydrate cached outputs into the active run and optionally materialize bytes to disk.
@@ -213,20 +214,21 @@ def hydrate_cache_hit_outputs(
         record.outputs.append(art)
 
     # Ensure the new (cached) run has DB links to its hydrated outputs.
-    db = getattr(tracker, "db", None)
-    if db and getattr(db, "engine", None) is not None:
-        try:
-            db.link_artifacts_to_run_bulk(
-                artifact_ids=[a.id for a in record.outputs],
-                run_id=run.id,
-                direction="output",
-            )
-        except Exception as e:
-            logging.warning(
-                "[Consist] Failed to link cached outputs to run id=%s: %s",
-                run.id,
-                e,
-            )
+    if link_outputs:
+        db = getattr(tracker, "db", None)
+        if db and getattr(db, "engine", None) is not None:
+            try:
+                db.link_artifacts_to_run_bulk(
+                    artifact_ids=[a.id for a in record.outputs],
+                    run_id=run.id,
+                    direction="output",
+                )
+            except Exception as e:
+                logging.warning(
+                    "[Consist] Failed to link cached outputs to run id=%s: %s",
+                    run.id,
+                    e,
+                )
 
     # Optional physical materialization of cached outputs (copy-bytes-on-disk).
     # Core Consist defaults to "never" (artifact hydration only). Integrations and

@@ -667,6 +667,8 @@ class Tracker:
             run.input_hash = "error"
             run.signature = "error"
 
+        cached_output_ids: Optional[List[uuid.UUID]] = None
+
         # --- Cache Logic (Refactored) ---
         if cache_mode == "reuse":
             cache_key = (
@@ -712,7 +714,9 @@ class Tracker:
                     run=run,
                     cached_run=cached_run,
                     options=self._active_run_cache_options,
+                    link_outputs=False,
                 )
+                cached_output_ids = [art.id for art in cached_items.outputs.values()]
                 _log_timing("hydrate_cache_hit_outputs", t0)
                 if debug_cache:
                     logging.info(
@@ -739,7 +743,12 @@ class Tracker:
             )
 
         self._flush_json()
-        self._sync_run_to_db(run)
+        if cached_output_ids and self.db:
+            self.persistence.sync_run_with_links(
+                run, artifact_ids=cached_output_ids, direction="output"
+            )
+        else:
+            self._sync_run_to_db(run)
         self._emit_run_start(run)
 
         return run

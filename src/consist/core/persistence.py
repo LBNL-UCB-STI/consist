@@ -490,6 +490,68 @@ class DatabaseManager:
                 e,
             )
 
+    def sync_run_with_links(
+        self, *, run: Run, artifact_ids: List[uuid.UUID], direction: str = "output"
+    ) -> None:
+        """
+        Upsert a Run and link artifacts in a single transaction.
+
+        Parameters
+        ----------
+        run : Run
+            Run to upsert.
+        artifact_ids : List[uuid.UUID]
+            Artifact ids to link to the run.
+        direction : str, default "output"
+            Link direction for all artifacts.
+        """
+        if not artifact_ids:
+            self.sync_run(run)
+            return
+
+        def _do_sync():
+            with Session(self.engine) as session:
+                session.merge(run)
+
+                existing = session.exec(
+                    select(RunArtifactLink)
+                    .where(RunArtifactLink.run_id == run.id)
+                    .where(col(RunArtifactLink.artifact_id).in_(artifact_ids))
+                ).all()
+
+                existing_by_id = {row.artifact_id: row for row in existing}
+                new_links: List[RunArtifactLink] = []
+                for artifact_id in artifact_ids:
+                    row = existing_by_id.get(artifact_id)
+                    if row is not None:
+                        if row.direction != direction:
+                            logging.warning(
+                                "[Consist] Ignoring attempt to link artifact_id=%s to run_id=%s as '%s' "
+                                "because it is already linked as '%s'. "
+                                "If this step truly produces a new output, write to a new path (preferred), "
+                                "or log a distinct Artifact instance rather than reusing the same Artifact reference.",
+                                artifact_id,
+                                run.id,
+                                direction,
+                                row.direction,
+                            )
+                        continue
+                    new_links.append(
+                        RunArtifactLink(
+                            run_id=run.id, artifact_id=artifact_id, direction=direction
+                        )
+                    )
+
+                if new_links:
+                    session.add_all(new_links)
+
+                session.commit()
+
+        try:
+            self.execute_with_retry(_do_sync, operation_name="sync_run_with_links")
+        except Exception as e:
+            logging.warning("Database sync failed: %s", e)
+
     def sync_artifact(self, artifact: Artifact, run_id: str, direction: str) -> None:
         """Upserts an Artifact and links it to the Run."""
 
@@ -1089,6 +1151,34 @@ class ProvenanceWriter:
         if tracker.db:
             try:
                 tracker.db.sync_run(run)
+            except Exception as e:
+                logging.warning("Database sync failed: %s", e)
+
+    def sync_run_with_links(
+        self,
+        run: "RunModel",
+        *,
+        artifact_ids: list[uuid.UUID],
+        direction: str = "output",
+    ) -> None:
+        """
+        Sync a Run and link artifacts in one database transaction.
+
+        Parameters
+        ----------
+        run : Run
+            Run instance to upsert into the database.
+        artifact_ids : list[uuid.UUID]
+            Artifact ids to link to the run.
+        direction : str, default "output"
+            Direction for all linked artifacts.
+        """
+        tracker = self._tracker
+        if tracker.db:
+            try:
+                tracker.db.sync_run_with_links(
+                    run=run, artifact_ids=artifact_ids, direction=direction
+                )
             except Exception as e:
                 logging.warning("Database sync failed: %s", e)
 
