@@ -544,8 +544,8 @@ class ScenarioContext:
         current_state = self.tracker.current_consist
         self.tracker.current_consist = self._header_record
 
-        self.tracker._flush_json()
-        self.tracker._sync_run_to_db(parent_run)
+        self.tracker.persistence.flush_json()
+        self.tracker.persistence.sync_run(parent_run)
 
         # --- NEW: Create database links for parent scenario ---
         if self.tracker.db:
@@ -591,11 +591,8 @@ class ScenarioContext:
         # 2. Capture & Suspend
         # Save the record and clear the tracker's active state
         self._header_record = self.tracker.current_consist
-        self._suspended_cache_options = self.tracker._active_run_cache_options
+        self._suspended_cache_options = self.tracker.suspend_cache_options()
         self.tracker.current_consist = None
-        from consist.core.cache import ActiveRunCacheOptions
-
-        self.tracker._active_run_cache_options = ActiveRunCacheOptions()
 
         # Note: We leave the tracker pushed to the global context stack.
         # This ensures calls to `consist.log_artifact()` fail with our custom error
@@ -606,7 +603,8 @@ class ScenarioContext:
     def __exit__(self, exc_type, exc_val, exc_tb):
         # 1. Restore Header Context
         self.tracker.current_consist = self._header_record
-        self.tracker._active_run_cache_options = self._suspended_cache_options
+        if self._suspended_cache_options is not None:
+            self.tracker.restore_cache_options(self._suspended_cache_options)
         if self._header_record is None:
             raise RuntimeError("Scenario header record was not captured.")
 
@@ -637,7 +635,7 @@ class ScenarioContext:
                 "[ScenarioContext] Syncing header after end_run: "
                 f"id={self._header_record.run.id}, status={self._header_record.run.status}"
             )
-            self.tracker._flush_json()
+            self.tracker.persistence.flush_json()
             # Use a fresh Run clone to avoid any ORM identity/cache oddities
             try:
                 from consist.models.run import Run
@@ -646,13 +644,13 @@ class ScenarioContext:
                 logging.debug(
                     f"[ScenarioContext] Syncing cloned header run id={cloned.id} status={cloned.status}"
                 )
-                self.tracker._sync_run_to_db(cloned)
+                self.tracker.persistence.sync_run(cloned)
             except Exception:
                 # Fallback to direct sync on the original object
                 logging.debug(
                     f"[ScenarioContext] Syncing original header run id={self._header_record.run.id} status={self._header_record.run.status}"
                 )
-                self.tracker._sync_run_to_db(self._header_record.run)
+                self.tracker.persistence.sync_run(self._header_record.run)
 
         # 4. Final Cleanup
         # end_run sets current_consist to None, but we ensure it matches expected state

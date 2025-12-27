@@ -1,7 +1,6 @@
 import itertools
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from importlib.util import find_spec
 import logging
 import os
 import time
@@ -32,7 +31,9 @@ from consist.core.artifacts import ArtifactManager
 from consist.core.cache import (
     ActiveRunCacheOptions,
     hydrate_cache_hit_outputs,
+    materialize_missing_inputs,
     parse_materialize_cached_outputs_kwargs,
+    validate_cached_run_outputs,
 )
 from consist.core.cache_output_logging import (
     maybe_return_cached_output_or_demote_cache_hit,
@@ -44,9 +45,10 @@ from consist.core.events import EventManager
 from consist.core.fs import FileSystemManager
 from consist.core.identity import IdentityManager
 from consist.core.indexing import FacetIndex, IndexBySpec, RunFieldIndex
-from consist.core.materialize import materialize_artifacts_from_sources
-from consist.core.persistence import DatabaseManager
+from consist.core.persistence import DatabaseManager, ProvenanceWriter
 from consist.core.views import ViewFactory, ViewRegistry
+from consist.core.ingestion import ingest_artifact
+from consist.core.lineage import build_lineage_tree
 from consist.core.workflow import OutputCapture, ScenarioContext
 from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord, Run, RunArtifacts
@@ -86,6 +88,8 @@ class Tracker:
         hashing_strategy: str = "full",
         schemas: Optional[List[Type[SQLModel]]] = None,
         access_mode: AccessMode = "standard",
+        run_subdir_template: Optional[str] = None,
+        run_subdir_fn: Optional[Callable[[Run], str]] = None,
     ):
         """
         Initialize a Consist Tracker.
@@ -115,6 +119,13 @@ class Tracker:
             - `"analysis"`: Read-oriented; blocks creating new provenance nodes but allows
               ingest/backfill and view/query helpers.
             - `"read_only"`: No permanent DB writes.
+        run_subdir_template : Optional[str], default None
+            Optional format string used to derive per-run artifact subdirectories.
+            Available fields: ``run_id``, ``parent_run_id``, ``model``, ``year``,
+            ``iteration``. When omitted, a default pattern is used.
+        run_subdir_fn : Optional[Callable[[Run], str]], default None
+            Optional callable that returns a relative subdirectory name for a run.
+            When provided, this takes precedence over ``run_subdir_template``.
         """
         # 1. Initialize FileSystem Service
         # (This handles the mkdir and path resolution internally now)
@@ -125,6 +136,8 @@ class Tracker:
         self.run_dir = self.fs.run_dir
 
         self.access_mode = access_mode
+        self._run_subdir_template = run_subdir_template
+        self._run_subdir_fn = run_subdir_fn or self._default_run_subdir
 
         self.db_path = os.fspath(db_path) if db_path is not None else None
         self.identity = IdentityManager(
@@ -134,6 +147,7 @@ class Tracker:
         self.db = None
         if self.db_path:
             self.db = DatabaseManager(self.db_path)
+        self.persistence = ProvenanceWriter(self)
 
         self.artifacts = ArtifactManager(self)
         self.config_facets = ConfigFacetManager(db=self.db, identity=self.identity)
@@ -171,6 +185,90 @@ class Tracker:
     def engine(self):
         """Delegates to the DatabaseManager engine."""
         return self.db.engine if self.db else None
+
+    @staticmethod
+    def _default_run_subdir(run: Run) -> str:
+        """
+        Default run subdirectory pattern.
+
+        Uses `<parent_run_id>/iteration_<iteration>` when available, otherwise the run id.
+        """
+        if run.parent_run_id and run.iteration is not None:
+            return f"{run.parent_run_id}/iteration_{run.iteration}"
+        return run.id
+
+    def set_run_subdir_template(self, template: Optional[str]) -> None:
+        """
+        Set the format string used to derive per-run artifact subdirectories.
+
+        Parameters
+        ----------
+        template : Optional[str]
+            Format string with fields like ``{run_id}``, ``{parent_run_id}``,
+            ``{model}``, ``{year}``, and ``{iteration}``. Set to ``None`` to
+            disable templating and fall back to the run id.
+        """
+        self._run_subdir_template = template
+
+    def set_run_subdir_fn(self, fn: Optional[Callable[[Run], str]]) -> None:
+        """
+        Set a callable that returns the per-run artifact subdirectory name.
+
+        Parameters
+        ----------
+        fn : Optional[Callable[[Run], str]]
+            Callable that accepts a ``Run`` and returns a relative directory name.
+            Set to ``None`` to disable the custom resolver.
+        """
+        self._run_subdir_fn = fn
+
+    def run_artifact_dir(self, run: Optional[Run] = None) -> Path:
+        """
+        Resolve the run-specific artifact directory for the active run.
+
+        Parameters
+        ----------
+        run : Optional[Run], optional
+            Run to resolve the directory for. Defaults to the current run if active.
+
+        Returns
+        -------
+        Path
+            Directory under ``run_dir`` where run artifacts should be written.
+        """
+        target_run = run
+        if target_run is None and self.current_consist:
+            target_run = self.current_consist.run
+        if target_run is None:
+            return self.run_dir
+
+        subdir = None
+        if self._run_subdir_fn is not None:
+            subdir = self._run_subdir_fn(target_run)
+        elif self._run_subdir_template is not None:
+            mapping = {
+                "run_id": target_run.id,
+                "parent_run_id": target_run.parent_run_id or "",
+                "model": target_run.model_name,
+                "year": "" if target_run.year is None else str(target_run.year),
+                "iteration": ""
+                if target_run.iteration is None
+                else str(target_run.iteration),
+            }
+            subdir = self._run_subdir_template.format_map(mapping)
+
+        if subdir:
+            subdir = subdir.strip().lstrip("/\\")
+        if not subdir:
+            subdir = target_run.id
+
+        subdir_path = Path(subdir)
+        if subdir_path.is_absolute():
+            raise ValueError(
+                "run_subdir must be a relative path; got an absolute path."
+            )
+
+        return self.run_dir / subdir_path
 
     def export_schema_sqlmodel(
         self,
@@ -598,7 +696,11 @@ class Tracker:
             cache_valid = False
             if cached_run:
                 t0 = time.perf_counter()
-                cache_valid = self._validate_run_outputs(cached_run)
+                cache_valid = validate_cached_run_outputs(
+                    tracker=self,
+                    run=cached_run,
+                    options=self._active_run_cache_options,
+                )
                 _log_timing("validate_cached_outputs", t0)
             elif debug_cache:
                 logging.info("[Consist][cache] miss: no matching completed run.")
@@ -632,7 +734,9 @@ class Tracker:
             logging.info("👁️ [Consist] Read-only mode.")
 
         if not self.current_consist.cached_run:
-            self._materialize_missing_inputs()
+            materialize_missing_inputs(
+                tracker=self, options=self._active_run_cache_options
+            )
 
         self._flush_json()
         self._sync_run_to_db(run)
@@ -1168,7 +1272,8 @@ class Tracker:
         direction : str, default "output"
             Artifact direction relative to the run.
         path : Optional[Union[str, Path]], optional
-            Output path; defaults to `<run_dir>/<key>.<driver>`.
+            Output path; defaults to `<run_dir>/<run_subdir>/<key>.<driver>` where
+            ``run_subdir`` is derived from ``run_subdir_fn``/``run_subdir_template``.
         driver : Optional[str], optional
             File format driver (e.g., "parquet" or "csv").
         meta : Optional[Dict[str, Any]], optional
@@ -1187,7 +1292,8 @@ class Tracker:
             If the requested driver is unsupported.
         """
         if path is None:
-            resolved_path = self.run_dir / f"{key}.{driver or 'parquet'}"
+            base_dir = self.run_artifact_dir()
+            resolved_path = base_dir / f"{key}.{driver or 'parquet'}"
         else:
             resolved_path = Path(path)
 
@@ -1410,70 +1516,14 @@ class Tracker:
         )
         ```
         """
-        if not self.current_consist:
-            raise RuntimeError("Cannot log artifact outside of a run context.")
-
-        path_obj = Path(path)
-        if key is None:
-            key = path_obj.stem
-
-        # Log the container artifact
-        container = self.log_artifact(
-            str(path_obj),
+        return self.artifacts.log_h5_container(
+            path,
             key=key,
             direction=direction,
-            driver="h5",
-            is_container=True,
+            discover_tables=discover_tables,
+            table_filter=table_filter,
             **meta,
         )
-
-        table_artifacts: List[Artifact] = []
-
-        if discover_tables:
-            if find_spec("h5py") is None:
-                logging.warning(
-                    "[Consist] h5py not installed. Cannot discover HDF5 tables."
-                )
-                return container, table_artifacts
-
-            # Build filter function
-            if table_filter is None:
-
-                def filter_fn(name: str) -> bool:
-                    return True
-
-            elif isinstance(table_filter, list):
-                # Convert list to set for O(1) lookup
-                filter_set = set(table_filter)
-
-                def filter_fn(name: str) -> bool:
-                    stripped = name.lstrip("/")
-                    return name in filter_set or stripped in filter_set
-
-            else:
-                filter_fn = table_filter
-
-            path_obj = Path(path)  # Ensure this matches what you passed to log_artifact
-            table_artifacts = self.artifacts.scan_h5_container(
-                container, path_obj, key, direction, filter_fn
-            )
-
-            # Persist the children found by the manager
-            for t in table_artifacts:
-                # Note: create_artifact returns them un-persisted, so we must add them here
-                # Or better yet, have scan_h5_container return objects that just need syncing
-                self.current_consist.outputs.append(t)
-                self._sync_artifact_to_db(t, direction)
-
-        # Update container metadata with table info
-        container.meta["table_count"] = len(table_artifacts)
-        container.meta["table_ids"] = [str(t.id) for t in table_artifacts]
-
-        # Re-sync the container with updated metadata
-        self._flush_json()
-        self._sync_artifact_to_db(container, direction)
-
-        return container, table_artifacts
 
     def ingest(
         self,
@@ -1528,68 +1578,14 @@ class Tracker:
         """
         self._ensure_write_data()
 
-        # 1. Determine Context
-        target_run = run
-
-        if not target_run and not self.current_consist:
-            # AUTO-DISCOVERY: Use the run that created the artifact
-            if artifact.run_id:
-                target_run = self.get_run(artifact.run_id)
-                if target_run:
-                    logging.info(
-                        "[Consist] Ingesting in Analysis Mode. Attributing to Run: %s",
-                        target_run.id,
-                    )
-
-        # Fallback to active run if available
-        if not target_run and self.current_consist:
-            target_run = self.current_consist.run
-
-        if not target_run:
-            raise RuntimeError(
-                "Cannot ingest: Could not determine associated Run context."
-            )
-
-        if self.engine:
-            self.engine.dispose()
-        from consist.integrations.dlt_loader import ingest_artifact
-
-        if self.db_path is None:
-            raise RuntimeError("Cannot ingest: db_path is not configured.")
-
-        # Auto-Resolve Data if None
-        data_to_pass = data
-        if data_to_pass is None:
-            # If no data provided, we assume we should read from the artifact's file
-            # We resolve the URI to an absolute path string
-            data_to_pass = self.resolve_uri(artifact.uri)
-
-        try:
-            info, resource_name = ingest_artifact(
-                artifact=artifact,
-                run_context=target_run,
-                db_path=self.db_path,
-                data_iterable=data_to_pass,
-                schema_model=schema,
-            )
-
-            # FORCE Metadata update via Service
-            if self.db:
-                self.db.update_artifact_meta(
-                    artifact, {"is_ingested": True, "dlt_table_name": resource_name}
-                )
-
-                if profile_schema:
-                    self.artifact_schemas.profile_ingested_table(
-                        artifact=artifact,
-                        run=target_run,
-                        table_schema="global_tables",
-                        table_name=resource_name,
-                    )
-            return info
-
-        except Exception as e:
-            raise e
+        return ingest_artifact(
+            tracker=self,
+            artifact=artifact,
+            data=data,
+            schema=schema,
+            run=run,
+            profile_schema=profile_schema,
+        )
 
     # --- View Factory ---
 
@@ -1996,63 +1992,11 @@ class Tracker:
             Maximum depth to traverse (0 returns only the artifact). Useful for
             large graphs or iterative workflows.
         """
-        if not self.engine:
-            return None
-
-        start_artifact = self.get_artifact(key_or_id=artifact_key_or_id)
-        if not start_artifact:
-            return None
-
-        run_cache: Dict[str, Optional[Run]] = {}
-        run_artifacts_cache: Dict[str, RunArtifacts] = {}
-        lineage_cache: Dict[tuple[str, Optional[int]], Dict[str, Any]] = {}
-
-        def _trace(artifact: Artifact, visited_runs: set, depth: int) -> Dict[str, Any]:
-            lineage_node: Dict[str, Any] = {"artifact": artifact, "producing_run": None}
-
-            if max_depth is not None and depth >= max_depth:
-                return lineage_node
-
-            cache_key = (
-                str(artifact.id),
-                None if max_depth is None else max_depth - depth,
-            )
-            cached = lineage_cache.get(cache_key)
-            if cached is not None:
-                return cached
-
-            producing_run_id = artifact.run_id
-            if not producing_run_id or producing_run_id in visited_runs:
-                return lineage_node
-
-            visited_runs.add(producing_run_id)
-            producing_run = run_cache.get(producing_run_id)
-            if producing_run is None and producing_run_id not in run_cache:
-                producing_run = self.get_run(producing_run_id)
-                run_cache[producing_run_id] = producing_run
-            if not producing_run:
-                return lineage_node
-
-            # Recursively find inputs
-            # NEW: Returns RunArtifacts object
-            run_artifacts = run_artifacts_cache.get(producing_run.id)
-            if run_artifacts is None:
-                run_artifacts = self.get_artifacts_for_run(producing_run.id)
-                run_artifacts_cache[producing_run.id] = run_artifacts
-
-            run_node: Dict[str, Any] = {"run": producing_run, "inputs": []}
-
-            # NEW: Iterate over inputs dict
-            for input_artifact in run_artifacts.inputs.values():
-                run_node["inputs"].append(
-                    _trace(input_artifact, visited_runs.copy(), depth + 1)
-                )
-
-            lineage_node["producing_run"] = run_node
-            lineage_cache[cache_key] = lineage_node
-            return lineage_node
-
-        return _trace(start_artifact, set(), 0)
+        return build_lineage_tree(
+            tracker=self,
+            artifact_key_or_id=artifact_key_or_id,
+            max_depth=max_depth,
+        )
 
         # --- Permission Helpers ---
 
@@ -2214,36 +2158,7 @@ class Tracker:
         is always flushed first, ensuring that a human-readable record of the run exists
         even if the subsequent database synchronization fails.
         """
-        if not self.current_consist:
-            return
-        json_str = self.current_consist.model_dump_json(indent=2)
-
-        # NOTE:
-        # `Tracker.run_dir` is often a *scenario* directory that contains many runs (steps).
-        # Writing a single `run_dir/consist.json` would overwrite previous steps and can look
-        # "broken" to users expecting multiple steps. To preserve backward compatibility,
-        # we still write `run_dir/consist.json` as the "latest snapshot", but we also write
-        # a stable per-run snapshot in `run_dir/consist_runs/<run_id>.json`.
-        run_id = self.current_consist.run.id
-        safe_run_id = "".join(
-            c if (c.isalnum() or c in ("-", "_", ".")) else "_" for c in run_id
-        )
-
-        per_run_dir = self.fs.run_dir / "consist_runs"
-        per_run_dir.mkdir(parents=True, exist_ok=True)
-        per_run_target = per_run_dir / f"{safe_run_id}.json"
-        per_run_tmp = per_run_target.with_suffix(".tmp")
-        with open(per_run_tmp, "w", encoding="utf-8") as f:
-            f.write(json_str)
-        # `Path.rename()` overwrites on POSIX but fails on Windows if the destination exists.
-        # `Path.replace()` uses `os.replace()` and is atomic + cross-platform.
-        per_run_tmp.replace(per_run_target)
-
-        latest_target = self.fs.run_dir / "consist.json"
-        latest_tmp = latest_target.with_suffix(".tmp")
-        with open(latest_tmp, "w", encoding="utf-8") as f:
-            f.write(json_str)
-        latest_tmp.replace(latest_target)
+        self.persistence.flush_json()
 
     def _sync_run_to_db(self, run: Run) -> None:
         """
@@ -2263,8 +2178,7 @@ class Tracker:
         run : Run
             The `Run` object whose state needs to be synchronized with the database.
         """
-        if self.db:
-            self.db.sync_run(run)
+        self.persistence.sync_run(run)
 
     def _sync_artifact_to_db(self, artifact: Artifact, direction: str) -> None:
         """
@@ -2286,124 +2200,7 @@ class Tracker:
             The direction of the artifact relative to the current run
             ("input" or "output").
         """
-        if self.db and self.current_consist:
-            self.db.sync_artifact(artifact, self.current_consist.run.id, direction)
-
-    def _validate_run_outputs(self, run: Run) -> bool:
-        if not self.db:
-            return True
-
-        policy = "eager"
-        if self._active_run_cache_options:
-            policy = str(
-                self._active_run_cache_options.validate_cached_outputs or "eager"
-            ).lower()
-
-        if policy != "eager":
-            return True
-
-        run_artifacts = self.get_artifacts_for_run(run.id)
-
-        for art in run_artifacts.outputs.values():
-            resolved_path = self.resolve_uri(art.uri)
-            if not Path(resolved_path).exists() and not art.meta.get(
-                "is_ingested", False
-            ):
-                from consist.tools.mount_diagnostics import (
-                    build_mount_resolution_hint,
-                    format_missing_artifact_mount_help,
-                )
-
-                hint = build_mount_resolution_hint(
-                    art.uri, artifact_meta=art.meta, mounts=self.mounts
-                )
-                help_text = (
-                    "\n"
-                    + format_missing_artifact_mount_help(
-                        hint, resolved_path=resolved_path
-                    )
-                    if hint
-                    else f"\nResolved path: {resolved_path}"
-                )
-                logging.warning(
-                    "⚠️ Cache Validation Failed. Missing: %s%s", art.uri, help_text
-                )
-                return False
-        return True
-
-    def _materialize_missing_inputs(self) -> None:
-        """
-        Copy cached-input artifacts into the current run_dir when missing.
-
-        This is intended for cache-miss runs that rely on cached outputs from
-        previous runs in a different run_dir.
-        """
-        options = self._active_run_cache_options or ActiveRunCacheOptions()
-        if options.cache_hydration != "inputs-missing":
-            return
-        if not self.current_consist:
-            return
-        if not self.db:
-            return
-
-        items: list[tuple[Artifact, Path, Path]] = []
-        db_items: list[tuple[Artifact, Path]] = []
-        run_dir_cache: dict[str, Optional[str]] = {}
-
-        for artifact in self.current_consist.inputs:
-            if not artifact.run_id:
-                continue
-
-            destination = Path(self.resolve_uri(artifact.uri))
-            if destination.exists():
-                continue
-
-            run_id = str(artifact.run_id)
-            if run_id not in run_dir_cache:
-                run = self.db.get_run(run_id)
-                run_dir_cache[run_id] = (
-                    run.meta.get("_physical_run_dir") if run and run.meta else None
-                )
-
-            original_run_dir = run_dir_cache.get(run_id)
-            if not original_run_dir:
-                continue
-
-            source = Path(
-                self.fs.resolve_historical_path(artifact.uri, original_run_dir)
-            )
-            if source.exists():
-                items.append((artifact, source, destination))
-                continue
-
-            if artifact.meta.get("is_ingested", False):
-                db_items.append((artifact, destination))
-
-        materialized: dict[str, str] = {}
-
-        if items:
-            materialized.update(
-                materialize_artifacts_from_sources(items, on_missing="warn")
-            )
-            for artifact, _, destination in items:
-                artifact.abs_path = str(destination)
-
-        if db_items:
-            from consist.core.materialize import (
-                materialize_ingested_artifact_from_db,
-            )
-
-            for artifact, destination in db_items:
-                materialized_path = materialize_ingested_artifact_from_db(
-                    artifact=artifact,
-                    tracker=self,
-                    destination=destination,
-                )
-                materialized[artifact.key] = materialized_path
-                artifact.abs_path = materialized_path
-
-        if materialized:
-            self.current_consist.run.meta["materialized_inputs"] = materialized
+        self.persistence.sync_artifact(artifact, direction)
 
     def history(
         self, limit: int = 10, tags: Optional[List[str]] = None
@@ -2600,6 +2397,30 @@ class Tracker:
         return bool(
             self.current_consist and self.current_consist.cached_run is not None
         )
+
+    def suspend_cache_options(self) -> ActiveRunCacheOptions:
+        """
+        Suspend active-run cache options and reset them to defaults.
+
+        Returns
+        -------
+        ActiveRunCacheOptions
+            The previously active cache options, for later restoration.
+        """
+        suspended = self._active_run_cache_options
+        self._active_run_cache_options = ActiveRunCacheOptions()
+        return suspended
+
+    def restore_cache_options(self, options: ActiveRunCacheOptions) -> None:
+        """
+        Restore previously suspended active-run cache options.
+
+        Parameters
+        ----------
+        options : ActiveRunCacheOptions
+            Cache options to restore.
+        """
+        self._active_run_cache_options = options
 
     def cached_artifacts(self, direction: str = "output"):
         """

@@ -118,7 +118,7 @@ def test_step_log_dataframe_defaults_to_run_dir(tracker: Tracker):
     df = pd.DataFrame({"value": [1, 2, 3]})
     artifact = None
     with tracker.scenario("scen_df") as sc:
-        with sc.step("write_df") as t:
+        with sc.step("write_df", iteration=0) as t:
             artifact = t.log_dataframe(df, key="series")
 
     assert artifact is not None
@@ -126,7 +126,7 @@ def test_step_log_dataframe_defaults_to_run_dir(tracker: Tracker):
     assert artifact.abs_path is not None
     abs_path = Path(artifact.abs_path)
     assert abs_path.exists()
-    assert abs_path.parent == tracker.run_dir
+    assert abs_path.parent == tracker.run_dir / "scen_df" / "iteration_0"
     assert abs_path.name == "series.parquet"
 
 

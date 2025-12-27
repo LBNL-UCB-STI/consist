@@ -2,10 +2,13 @@ import logging
 import weakref
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, Optional, Protocol, runtime_checkable, TYPE_CHECKING, cast
 
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifacts, ConsistRecord
+
+if TYPE_CHECKING:
+    from consist.core.tracker import Tracker
 
 
 @runtime_checkable
@@ -18,6 +21,38 @@ class CacheHydrationContext(Protocol):
     def resolve_uri(self, uri: str) -> str: ...
 
     def get_artifacts_for_run(self, run_id: str) -> RunArtifacts: ...
+
+
+@runtime_checkable
+class CacheValidationContext(Protocol):
+    """
+    Protocol describing the tracker surface required for cache validation.
+
+    This keeps cache validation logic reusable across tracker-like objects.
+    """
+
+    current_consist: Optional[ConsistRecord]
+    db: object
+    mounts: Dict[str, str]
+
+    def resolve_uri(self, uri: str) -> str: ...
+
+    def get_artifacts_for_run(self, run_id: str) -> RunArtifacts: ...
+
+
+@runtime_checkable
+class CacheMaterializationContext(Protocol):
+    """
+    Protocol describing the tracker surface required for input materialization.
+
+    This keeps input materialization logic reusable across tracker-like objects.
+    """
+
+    current_consist: Optional[ConsistRecord]
+    db: object
+    fs: object
+
+    def resolve_uri(self, uri: str) -> str: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,3 +319,147 @@ def hydrate_cache_hit_outputs(
     run.meta["declared_outputs"] = list(cached_items.outputs.keys())
 
     return cached_items
+
+
+def validate_cached_run_outputs(
+    *,
+    tracker: CacheValidationContext,
+    run: Run,
+    options: Optional[ActiveRunCacheOptions],
+) -> bool:
+    """
+    Validate that cached outputs for a run still exist on disk (or are ingested).
+
+    Parameters
+    ----------
+    tracker : CacheValidationContext
+        Tracker-like context that provides DB access, mounts, and URI resolution.
+    run : Run
+        Cached run whose outputs should be validated.
+    options : Optional[ActiveRunCacheOptions]
+        Active cache options controlling validation policy.
+
+    Returns
+    -------
+    bool
+        True if all required outputs are present or validation is disabled.
+    """
+    if not getattr(tracker, "db", None):
+        return True
+
+    policy = "eager"
+    if options:
+        policy = str(options.validate_cached_outputs or "eager").lower()
+
+    if policy != "eager":
+        return True
+
+    run_artifacts = tracker.get_artifacts_for_run(run.id)
+
+    for art in run_artifacts.outputs.values():
+        resolved_path = tracker.resolve_uri(art.uri)
+        if not Path(resolved_path).exists() and not art.meta.get("is_ingested", False):
+            from consist.tools.mount_diagnostics import (
+                build_mount_resolution_hint,
+                format_missing_artifact_mount_help,
+            )
+
+            hint = build_mount_resolution_hint(
+                art.uri, artifact_meta=art.meta, mounts=tracker.mounts
+            )
+            help_text = (
+                "\n"
+                + format_missing_artifact_mount_help(hint, resolved_path=resolved_path)
+                if hint
+                else f"\nResolved path: {resolved_path}"
+            )
+            logging.warning(
+                "⚠️ Cache Validation Failed. Missing: %s%s", art.uri, help_text
+            )
+            return False
+    return True
+
+
+def materialize_missing_inputs(
+    *, tracker: CacheMaterializationContext, options: Optional[ActiveRunCacheOptions]
+) -> None:
+    """
+    Copy cached-input artifacts into the current run_dir when missing.
+
+    This is intended for cache-miss runs that rely on cached outputs from
+    previous runs in a different run_dir.
+
+    Parameters
+    ----------
+    tracker : CacheMaterializationContext
+        Tracker-like context that provides DB access, filesystem helpers,
+        and URI resolution.
+    options : Optional[ActiveRunCacheOptions]
+        Active cache options that determine whether to materialize inputs.
+    """
+    active_options = options or ActiveRunCacheOptions()
+    if active_options.cache_hydration != "inputs-missing":
+        return
+    if not tracker.current_consist:
+        return
+    if not getattr(tracker, "db", None):
+        return
+
+    items: list[tuple[Artifact, Path, Path]] = []
+    db_items: list[tuple[Artifact, Path]] = []
+    run_dir_cache: dict[str, Optional[str]] = {}
+
+    for artifact in tracker.current_consist.inputs:
+        if not artifact.run_id:
+            continue
+
+        destination = Path(tracker.resolve_uri(artifact.uri))
+        if destination.exists():
+            continue
+
+        run_id = str(artifact.run_id)
+        if run_id not in run_dir_cache:
+            run = tracker.db.get_run(run_id)
+            run_dir_cache[run_id] = (
+                run.meta.get("_physical_run_dir") if run and run.meta else None
+            )
+
+        original_run_dir = run_dir_cache.get(run_id)
+        if not original_run_dir:
+            continue
+
+        source = Path(
+            tracker.fs.resolve_historical_path(artifact.uri, original_run_dir)
+        )
+        if source.exists():
+            items.append((artifact, source, destination))
+            continue
+
+        if artifact.meta.get("is_ingested", False):
+            db_items.append((artifact, destination))
+
+    materialized: dict[str, str] = {}
+
+    if items:
+        from consist.core.materialize import materialize_artifacts_from_sources
+
+        materialized.update(
+            materialize_artifacts_from_sources(items, on_missing="warn")
+        )
+        for artifact, _, destination in items:
+            artifact.abs_path = str(destination)
+
+    if db_items:
+        from consist.core.materialize import materialize_ingested_artifact_from_db
+
+        for artifact, destination in db_items:
+            materialized_path = materialize_ingested_artifact_from_db(
+                artifact=artifact,
+                tracker=cast("Tracker", tracker),
+                destination=destination,
+            )
+            materialized[artifact.key] = materialized_path
+            artifact.abs_path = materialized_path
+
+    if materialized:
+        tracker.current_consist.run.meta["materialized_inputs"] = materialized

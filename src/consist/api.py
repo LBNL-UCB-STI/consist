@@ -16,7 +16,6 @@ from typing import (
 )
 
 import pandas as pd
-import tempfile
 from sqlalchemy import MetaData, Table, case, func, select as sa_select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import SQLModel, Session, select
@@ -345,7 +344,8 @@ def log_dataframe(
     tracker : Optional[Tracker], optional
         Tracker instance to use; defaults to the active tracker.
     path : Optional[Union[str, Path]], optional
-        Output path; defaults to a temporary file in the tracker run directory.
+        Output path; defaults to `<run_dir>/<run_subdir>/<key>.<driver>` for the
+        active run as determined by the tracker's run subdir configuration.
     driver : Optional[str], optional
         File format driver (e.g., "parquet" or "csv").
     meta : Optional[Dict[str, Any]], optional
@@ -366,7 +366,7 @@ def log_dataframe(
     tr = tracker or current_tracker()
     # Resolve path and driver
     if path is None:
-        base_dir = getattr(tr, "run_dir", None) or Path(tempfile.mkdtemp())
+        base_dir = tr.run_artifact_dir()
         resolved_path = Path(base_dir) / f"{key}.{driver or 'parquet'}"
     else:
         resolved_path = Path(path)

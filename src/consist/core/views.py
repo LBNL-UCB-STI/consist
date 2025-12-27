@@ -126,7 +126,12 @@ class ViewRegistry:
         self._class_cache: Dict[str, Type[SQLModel]] = {}
 
     def register(self, model: Type[SQLModel], key: Optional[str] = None):
-        self._registry[model.__name__] = (model, key)
+        name = model.__name__
+        previous = self._registry.get(name)
+        self._registry[name] = (model, key)
+        # Invalidate the cached class only when the registration changes.
+        if previous != (model, key):
+            self._class_cache.pop(name, None)
 
     def __getattr__(self, name: str) -> Type[SQLModel]:
         # 1. Check if registered
@@ -137,6 +142,15 @@ class ViewRegistry:
             # We assume accessing the property means the user wants to query it now.
             # Recreating the view ensures all files on disk are picked up.
             factory = ViewFactory(self._tracker)
+
+            cached = self._class_cache.get(name)
+            if cached is not None:
+                concept_key = key or getattr(
+                    model, "__tablename__", model.__name__.lower()
+                )
+                view_name = f"v_{concept_key}"
+                factory.create_hybrid_view(view_name, concept_key, schema_model=model)
+                return cached  # ty: ignore[invalid-return-type]
 
             # This calls create_hybrid_view inside
             # We don't need the return value (the python class) necessarily

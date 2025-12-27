@@ -5,7 +5,7 @@ import time
 import random
 import logging
 import uuid
-from typing import Optional, List, Callable, Any, Dict, Tuple
+from typing import Optional, List, Callable, Any, Dict, Tuple, TYPE_CHECKING
 
 import pandas as pd
 from sqlalchemy.exc import OperationalError, DatabaseError
@@ -23,6 +23,11 @@ from consist.models.artifact_schema import (
 from consist.models.config_facet import ConfigFacet
 from consist.models.run import Run, RunArtifactLink
 from consist.models.run_config_kv import RunConfigKV
+
+if TYPE_CHECKING:
+    from consist.core.tracker import Tracker
+    from consist.models.artifact import Artifact
+    from consist.models.run import Run as RunModel
 
 
 class DatabaseManager:
@@ -253,7 +258,7 @@ class DatabaseManager:
         try:
             self.execute_with_retry(_do_sync, operation_name="sync_run")
         except Exception as e:
-            logging.warning(f"Database sync failed: {e}")
+            logging.warning("Database sync failed: %s", e)
 
     def update_run_meta(self, run_id: str, meta_updates: Dict[str, Any]) -> None:
         """Updates a run's meta field with a partial dict."""
@@ -499,7 +504,8 @@ class DatabaseManager:
             # Now create the link
             self.link_artifact_to_run(artifact.id, run_id, direction)
         except Exception as e:
-            logging.warning(f"Artifact sync failed for {artifact.key}: {e}")
+            logging.warning("Artifact sync failed: %s", e)
+            logging.warning("Database sync failed: %s", e)
 
     # --- Read Operations ---
 
@@ -1026,3 +1032,83 @@ class DatabaseManager:
         except Exception as e:
             logging.warning(f"Failed to fetch history: {e}")
             return pd.DataFrame()
+
+
+class ProvenanceWriter:
+    """
+    Lightweight persistence helper for JSON snapshots and DB synchronization.
+
+    This keeps non-public persistence mechanics out of managers while allowing
+    the tracker to remain the primary orchestrator.
+    """
+
+    def __init__(self, tracker: "Tracker"):
+        self._tracker = tracker
+
+    def flush_json(self) -> None:
+        """
+        Flush the current in-memory run state to JSON snapshots on disk.
+
+        Uses an atomic write strategy for both the per-run snapshot and the
+        rolling latest snapshot.
+        """
+        tracker = self._tracker
+        if not tracker.current_consist:
+            return
+        json_str = tracker.current_consist.model_dump_json(indent=2)
+
+        run_id = tracker.current_consist.run.id
+        safe_run_id = "".join(
+            c if (c.isalnum() or c in ("-", "_", ".")) else "_" for c in run_id
+        )
+
+        per_run_dir = tracker.fs.run_dir / "consist_runs"
+        per_run_dir.mkdir(parents=True, exist_ok=True)
+        per_run_target = per_run_dir / f"{safe_run_id}.json"
+        per_run_tmp = per_run_target.with_suffix(".tmp")
+        with open(per_run_tmp, "w", encoding="utf-8") as f:
+            f.write(json_str)
+        per_run_tmp.replace(per_run_target)
+
+        latest_target = tracker.fs.run_dir / "consist.json"
+        latest_tmp = latest_target.with_suffix(".tmp")
+        with open(latest_tmp, "w", encoding="utf-8") as f:
+            f.write(json_str)
+        latest_tmp.replace(latest_target)
+
+    def sync_run(self, run: "RunModel") -> None:
+        """
+        Sync a Run object to the database, if configured.
+
+        Parameters
+        ----------
+        run : Run
+            Run instance to upsert into the database.
+        """
+        tracker = self._tracker
+        if tracker.db:
+            try:
+                tracker.db.sync_run(run)
+            except Exception as e:
+                logging.warning("Database sync failed: %s", e)
+
+    def sync_artifact(self, artifact: "Artifact", direction: str) -> None:
+        """
+        Sync an Artifact and its run link to the database, if configured.
+
+        Parameters
+        ----------
+        artifact : Artifact
+            Artifact instance to upsert into the database.
+        direction : str
+            Direction of the artifact relative to the current run
+            ("input" or "output").
+        """
+        tracker = self._tracker
+        if tracker.db and tracker.current_consist:
+            try:
+                tracker.db.sync_artifact(
+                    artifact, tracker.current_consist.run.id, direction
+                )
+            except Exception as e:
+                logging.warning("Database sync failed: %s", e)
