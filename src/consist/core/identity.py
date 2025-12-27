@@ -162,12 +162,14 @@ class IdentityManager:
                 # Rationale: a time-based nonce prevents false cache hits during dev,
                 # but it also disables caching entirely for notebooks/local iteration.
                 # Hashing the diff keeps cache keys stable until the working tree changes.
+                # Only include Python file diffs in the dirty hash to keep cache keys
+                # stable when non-code files (e.g., notebooks) change.
                 try:
-                    diff_head = repo.git.diff("HEAD")
+                    diff_head = repo.git.diff("HEAD", "--", "*.py")
                 except Exception:
-                    diff_head = repo.git.diff()
+                    diff_head = repo.git.diff("--", "*.py")
                 try:
-                    diff_cached = repo.git.diff("--cached")
+                    diff_cached = repo.git.diff("--cached", "--", "*.py")
                 except Exception:
                     diff_cached = ""
                 # NOTE:
