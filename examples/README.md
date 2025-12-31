@@ -4,7 +4,7 @@ This directory contains helper modules for the example notebooks in `examples/`.
 
 ## Scientific Simulation Example (Monte Carlo Predator–Prey Sweep)
 
-The primary example (to be added as a Jupyter notebook) uses a simple **Monte Carlo predator–prey** simulation as a stand-in for a realistic scientific workflow. It’s designed to be understandable without domain background (it’s basically “rabbits vs foxes” dynamics with randomness).
+The primary example uses a simple **Monte Carlo predator–prey** simulation as a stand-in for a realistic scientific workflow. It’s designed to be understandable without domain background (it’s basically “rabbits vs foxes” dynamics with randomness).
 
 - **Cold run**: generate a parameter sweep, then run one simulation per Consist step (so each sweep member has its own run metadata and artifacts).
 - **Aggregate**: run a final step that combines per-simulation outputs into canonical analysis tables.
@@ -27,7 +27,8 @@ This example demonstrates an iterative travel demand model with feedback between
 
 ## Files
 
-- `../01_predator_prey_end_to_end.ipynb`: end-to-end narrative walkthrough.
+- `../00_quickstart.ipynb`: shortest “happy path” walkthrough (basic run + artifacts + queries).
+- `../01_parameter_sweep_monte_carlo.ipynb`: Monte Carlo parameter sweep and analysis (tutorial 1).
 - `../02_iterative_workflows.ipynb`: iterative workflows and provenance chains (tutorial 2).
 - `../03_transportation_demand_modeling.ipynb`: transportation demand modeling with Consist (tutorial 3).
 - `synth_simulation.py`: deterministic Monte Carlo simulation + summarization helpers.
@@ -42,7 +43,7 @@ This example demonstrates an iterative travel demand model with feedback between
    - `pip install -e ".[dev]"`
 2. Launch Jupyter from the repo root:
    - `jupyter lab`
-3. Open `examples/01_predator_prey_end_to_end.ipynb`, `examples/02_iterative_workflows.ipynb`, or `examples/03_transportation_demand_modeling.ipynb` and run all cells.
+3. Open `examples/00_quickstart.ipynb`, `examples/01_parameter_sweep_monte_carlo.ipynb`, `examples/02_iterative_workflows.ipynb`, or `examples/03_transportation_demand_modeling.ipynb` and run all cells.
 
 ## Outputs
 
