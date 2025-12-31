@@ -126,7 +126,7 @@ def single_step_scenario(
     """
     tr = tracker or current_tracker()
     with tr.scenario(name, **kwargs) as sc:
-        with sc.step(step_name or name):
+        with sc.trace(step_name or name):
             yield sc
 
 
@@ -148,7 +148,7 @@ def current_tracker() -> "Tracker":
     ------
     RuntimeError
         If no `Tracker` is active in the current context. This typically happens
-        if called outside of a `consist.start_run` block or a `@consist.task` decorated function.
+        if called outside of a `consist.start_run` block or a `tracker.run`/`tracker.trace` call.
     """
     return get_active_tracker()
 

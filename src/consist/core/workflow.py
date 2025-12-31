@@ -1,13 +1,26 @@
+from __future__ import annotations
+
 from contextlib import contextmanager
-from collections.abc import Iterable
-from types import MappingProxyType
-from typing import List, Optional, Dict, Any, Callable, Mapping
+import uuid
+from collections.abc import Iterable, Mapping as MappingABC
+from types import MappingProxyType, TracebackType
+from typing import (
+    List,
+    Optional,
+    Dict,
+    Any,
+    Callable,
+    Mapping,
+    Iterator,
+    Union,
+)
 
 from consist import Artifact
-from consist.models.run import ConsistRecord
+from consist.models.run import ConsistRecord, RunResult
 from typing import TYPE_CHECKING
 from consist.core.coupler import Coupler
-from consist.types import ArtifactRef, FacetLike
+from consist.core.input_utils import coerce_input_map
+from consist.types import ArtifactRef, FacetLike, HashInputs
 from pathlib import Path
 
 if TYPE_CHECKING:
@@ -27,6 +40,50 @@ class OutputCapture:
         Initialize an empty artifact buffer.
         """
         self.artifacts: List[Artifact] = []
+
+
+class RunContext:
+    """
+    Lightweight wrapper for injecting tracker helpers into user functions.
+    """
+
+    def __init__(self, tracker: "Tracker") -> None:
+        self._tracker = tracker
+
+    @property
+    def run_dir(self) -> Path:
+        return self._tracker.run_artifact_dir()
+
+    def log_artifact(self, *args: Any, **kwargs: Any) -> Artifact:
+        return self._tracker.log_artifact(*args, **kwargs)
+
+    def log_input(self, *args: Any, **kwargs: Any) -> Artifact:
+        return self._tracker.log_input(*args, **kwargs)
+
+    def log_output(self, *args: Any, **kwargs: Any) -> Artifact:
+        return self._tracker.log_output(*args, **kwargs)
+
+    def log_meta(self, **kwargs: Any) -> None:
+        self._tracker.log_meta(**kwargs)
+
+    @property
+    def inputs(self) -> Dict[str, Artifact]:
+        current_consist = self._tracker.current_consist
+        if current_consist is None:
+            raise RuntimeError("No active run context is available.")
+        return {a.key: a for a in current_consist.inputs}
+
+    def load(self, key_or_artifact: Union[str, Artifact]) -> Any:
+        if isinstance(key_or_artifact, str):
+            key_or_artifact = self.inputs[key_or_artifact]
+        return self._tracker.load(key_or_artifact)
+
+    @contextmanager
+    def capture_outputs(
+        self, directory: Path, pattern: str = "*"
+    ) -> Iterator[OutputCapture]:
+        with self._tracker.capture_outputs(directory, pattern=pattern) as cap:
+            yield cap
 
 
 class ScenarioContext:
@@ -107,7 +164,7 @@ class ScenarioContext:
         if self._first_step_started:
             raise RuntimeError(
                 "Cannot add scenario inputs after first step has started. "
-                "Register all inputs before calling scenario.step()."
+                "Register all inputs before calling scenario.trace()."
             )
 
         if not self._header_record:
@@ -127,329 +184,298 @@ class ScenarioContext:
         self._inputs[key] = artifact
         return artifact
 
-    def run_step(
+    def _coerce_keys(self, value: Optional[Iterable[str] | str]) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return list(value)
+
+    def _resolve_input_value(self, value: ArtifactRef) -> ArtifactRef:
+        if isinstance(value, Artifact):
+            return value
+        if isinstance(value, Path):
+            if not value.exists():
+                raise ValueError(f"Scenario input path does not exist: {value!s}")
+            return value
+        if isinstance(value, str):
+            if value in self.coupler:
+                return self.coupler.require(value)
+            ref_str = value
+            resolved = (
+                Path(self.tracker.resolve_uri(ref_str))
+                if "://" in ref_str
+                else Path(ref_str)
+            )
+            if not resolved.exists():
+                raise ValueError(
+                    "Scenario input string must resolve to a Coupler key or existing "
+                    f"path (got {value!r})."
+                )
+            return resolved
+        raise TypeError(
+            f"Scenario inputs must be Artifact, Path, or str (got {type(value)})."
+        )
+
+    def _resolve_inputs(
         self,
-        name: str,
-        fn: Callable[..., Any],
-        *fn_args: Any,
+        inputs: Optional[Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]],
+        input_keys: Optional[Iterable[str] | str],
+        optional_input_keys: Optional[Iterable[str] | str],
+    ) -> Optional[Union[Dict[str, ArtifactRef], List[ArtifactRef]]]:
+        resolved_inputs: Optional[Union[Dict[str, ArtifactRef], List[ArtifactRef]]] = (
+            None
+        )
+        if inputs is not None:
+            if isinstance(inputs, MappingABC):
+                resolved_inputs = {
+                    str(k): self._resolve_input_value(v)
+                    for k, v in coerce_input_map(inputs).items()
+                }
+            else:
+                resolved_inputs = [self._resolve_input_value(v) for v in list(inputs)]
+
+        for key in self._coerce_keys(input_keys):
+            artifact = self.coupler.require(key)
+            if resolved_inputs is None:
+                resolved_inputs = {key: artifact}
+            elif isinstance(resolved_inputs, dict):
+                resolved_inputs.setdefault(key, artifact)
+            else:
+                resolved_inputs.append(artifact)
+
+        for key in self._coerce_keys(optional_input_keys):
+            artifact = self.coupler.get(key)
+            if artifact is None:
+                continue
+            if resolved_inputs is None:
+                resolved_inputs = {key: artifact}
+            elif isinstance(resolved_inputs, dict):
+                resolved_inputs.setdefault(key, artifact)
+            else:
+                resolved_inputs.append(artifact)
+
+        return resolved_inputs
+
+    def _resolve_output_paths(
+        self, output_paths: Optional[Mapping[str, ArtifactRef]]
+    ) -> Optional[Dict[str, ArtifactRef]]:
+        if output_paths is None:
+            return None
+        resolved_output_paths: Dict[str, ArtifactRef] = {}
+        for key, ref in coerce_input_map(output_paths).items():
+            if isinstance(ref, str) and ref in self.coupler:
+                path = self.coupler.path(ref)
+                if path is None:
+                    raise RuntimeError(
+                        f"Coupler key {ref!r} has no path to use for output_paths[{key!r}]."
+                    )
+                resolved_output_paths[str(key)] = path
+            else:
+                resolved_output_paths[str(key)] = ref
+        return resolved_output_paths
+
+    def run(
+        self,
+        fn: Optional[Callable[..., Any]] = None,
+        name: Optional[str] = None,
+        *,
         run_id: Optional[str] = None,
         model: Optional[str] = None,
+        description: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
+        inputs: Optional[
+            Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]
+        ] = None,
+        input_keys: Optional[Iterable[str] | str] = None,
+        optional_input_keys: Optional[Iterable[str] | str] = None,
+        depends_on: Optional[List[ArtifactRef]] = None,
+        tags: Optional[List[str]] = None,
         facet: Optional[FacetLike] = None,
         facet_from: Optional[List[str]] = None,
-        tags: Optional[List[str]] = None,
-        description: Optional[str] = None,
-        cache_mode: str = "reuse",
-        input_keys: Optional[object] = None,
-        optional_input_keys: Optional[object] = None,
-        inputs: Optional[List[ArtifactRef]] = None,
+        facet_schema_version: Optional[Union[str, int]] = None,
+        facet_index: Optional[bool] = None,
+        hash_inputs: HashInputs = None,
+        year: Optional[int] = None,
+        iteration: Optional[int] = None,
+        parent_run_id: Optional[str] = None,
         outputs: Optional[List[str]] = None,
         output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        capture_dir: Optional[Path] = None,
+        capture_pattern: str = "*",
+        cache_mode: str = "reuse",
         cache_hydration: Optional[str] = None,
-        materialize_cached_output_paths: Optional[Mapping[str, Path]] = None,
-        materialize_cached_outputs_dir: Optional[Path] = None,
         validate_cached_outputs: str = "lazy",
-        iteration: Optional[int] = None,
-        year: Optional[int] = None,
-        **fn_kwargs: Any,
-    ) -> Dict[str, Artifact]:
+        load_inputs: Optional[bool] = None,
+        executor: str = "python",
+        container: Optional[Mapping[str, Any]] = None,
+        fn_args: Optional[Dict[str, Any]] = None,
+        inject_context: bool | str = False,
+        output_mismatch: str = "warn",
+        output_missing: str = "warn",
+    ) -> RunResult:
         """
-        Run a function-shaped scenario step that can be skipped on cache hits.
-
-        This complements the imperative `scenario.step(...)` context manager.
-        When Consist finds a cache hit for this step, the callable is NOT executed;
-        instead, cached outputs are hydrated and placed into the scenario Coupler.
-
-        Parameters
-        ----------
-        name : str
-            Step name. Used to derive the default child run id (scenario_id + "_" + name).
-        fn : Callable[..., Any]
-            Callable to execute on cache misses. Can be an imported function or a bound
-            method like `beamPreprocessor.run`.
-        *fn_args, **fn_kwargs
-            Arguments forwarded to `fn(...)` on cache misses.
-        facet : Optional[FacetLike]
-            Explicit facet payload to persist with the run.
-        facet_from : Optional[List[str]]
-            List of config keys to extract into facets (merged with explicit `facet`).
-        input_keys : Optional[object]
-            A string or list of strings naming Coupler keys to declare as step inputs.
-            Inputs are resolved before the run starts (so caching and `db_fallback="inputs-only"`
-            behave correctly).
-        optional_input_keys : Optional[object]
-            A string or list of strings naming Coupler keys to declare as inputs only
-            when present (useful for warm-starting iterative runs).
-        inputs : Optional[List[ArtifactRef]]
-            Additional explicit inputs to declare for caching/provenance.
-        outputs / output_paths
-            Output contract for this step. Exactly one of these must be provided:
-            - `outputs=[...]`: assert that `fn(...)` logs these output keys during execution.
-            - `output_paths={key: ref, ...}`: after `fn(...)` returns, log these paths as outputs.
-        output_paths resolution rules
-            For `output_paths`, each value is interpreted as:
-            - relative path → relative to the step run directory (`t.run_dir`)
-            - URI-like string (contains `"://"`) → resolved via mounts (`tracker.resolve_uri`)
-            - absolute path → used as-is
-        cache_hydration : Optional[str]
-            Controls whether cached bytes are materialized for inputs/outputs. If
-            omitted, the scenario default (if any) is used.
-            See `docs/caching-and-hydration.md` for the supported policies.
-
-        Returns
-        -------
-        Dict[str, Artifact]
-            Mapping of declared output key to hydrated `Artifact` for that key.
+        Execute a cached scenario step and update the Coupler with outputs.
         """
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
 
-        if (outputs is None) == (output_paths is None):
-            raise ValueError(
-                "ScenarioContext.run_step requires exactly one of `outputs=[...]` or `output_paths={...}`."
-            )
-
-        declared_output_keys: List[str]
-        if output_paths is not None:
-            declared_output_keys = list(output_paths.keys())
+        if fn is None:
+            if name is None:
+                raise ValueError("ScenarioContext.run requires name when fn is None.")
+            resolved_name = name
         else:
-            declared_output_keys = list(outputs or [])
+            resolved_name = name or fn.__name__
+        resolved_model = model or resolved_name
+        if run_id is None:
+            run_id = f"{self.run_id}_{resolved_name}_{uuid.uuid4().hex[:8]}"
+        if parent_run_id is None:
+            parent_run_id = self.run_id
 
-        if not declared_output_keys:
-            raise ValueError(
-                "ScenarioContext.run_step requires at least one output key."
-            )
+        self._first_step_started = True
+        self._last_step_name = resolved_name
 
-        resolved_inputs: List[ArtifactRef] = []
-        if input_keys:
-            keys_list: List[str]
-            if isinstance(input_keys, str):
-                keys_list = [input_keys]
-            else:
-                keys_list = list(input_keys)  # type: ignore[arg-type]
-            resolved_inputs.extend([self.coupler.require(k) for k in keys_list])
-        if optional_input_keys:
-            keys_list: List[str]
-            if isinstance(optional_input_keys, str):
-                keys_list = [optional_input_keys]
-            else:
-                keys_list = list(optional_input_keys)  # type: ignore[arg-type]
-            for key in keys_list:
-                artifact = self.coupler.get(key)
-                if artifact is not None:
-                    resolved_inputs.append(artifact)
-        if inputs:
-            resolved_inputs.extend(list(inputs))
-
-        def _resolve_output_ref(t: "Tracker", ref: ArtifactRef) -> ArtifactRef:
-            if isinstance(ref, Artifact):
-                return ref
-            ref_str = str(ref)
-            if "://" in ref_str:
-                scheme = ref_str.split("://", 1)[0]
-                if scheme != "file" and scheme not in t.mounts:
-                    raise ValueError(
-                        f"output_paths for key must use a mounted scheme or file:// (got {ref_str!r}). "
-                        f"Known schemes: {sorted(t.mounts.keys())}"
-                    )
-                return Path(t.resolve_uri(ref_str))
-            ref_path = Path(ref_str)
-            if not ref_path.is_absolute():
-                return t.run_dir / ref_path
-            return ref_path
-
-        step_kwargs: Dict[str, Any] = {
-            "cache_mode": cache_mode,
-        }
         effective_cache_hydration = cache_hydration or self.step_cache_hydration
-        if effective_cache_hydration is not None:
-            step_kwargs["cache_hydration"] = effective_cache_hydration
-        step_kwargs["materialize_cached_output_paths"] = (
-            dict(materialize_cached_output_paths)
-            if materialize_cached_output_paths
-            else None
+
+        resolved_inputs = self._resolve_inputs(inputs, input_keys, optional_input_keys)
+        resolved_output_paths = self._resolve_output_paths(output_paths)
+
+        result = self.tracker.run(
+            fn=fn,
+            name=resolved_name,
+            run_id=run_id,
+            model=resolved_model,
+            description=description,
+            config=config,
+            inputs=resolved_inputs,
+            input_keys=None,
+            optional_input_keys=None,
+            depends_on=depends_on,
+            tags=tags,
+            facet=facet,
+            facet_from=facet_from,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
+            hash_inputs=hash_inputs,
+            year=year,
+            iteration=iteration,
+            parent_run_id=parent_run_id,
+            outputs=outputs,
+            output_paths=resolved_output_paths,
+            capture_dir=capture_dir,
+            capture_pattern=capture_pattern,
+            cache_mode=cache_mode,
+            cache_hydration=effective_cache_hydration,
+            validate_cached_outputs=validate_cached_outputs,
+            load_inputs=load_inputs,
+            executor=executor,
+            container=container,
+            fn_args=fn_args,
+            inject_context=inject_context,
+            output_mismatch=output_mismatch,
+            output_missing=output_missing,
         )
-        step_kwargs["materialize_cached_outputs_dir"] = materialize_cached_outputs_dir
-        step_kwargs["validate_cached_outputs"] = validate_cached_outputs
-        if resolved_inputs:
-            step_kwargs["inputs"] = resolved_inputs
-        if run_id:
-            step_kwargs["run_id"] = run_id
-        if model:
-            step_kwargs["model"] = model
-        if config is not None:
-            step_kwargs["config"] = config
-        if facet is not None:
-            step_kwargs["facet"] = facet
-        if facet_from is not None:
-            step_kwargs["facet_from"] = facet_from
-        if tags is not None:
-            step_kwargs["tags"] = tags
-        if description is not None:
-            step_kwargs["description"] = description
-        if iteration is not None:
-            step_kwargs["iteration"] = iteration
-        if year is not None:
-            step_kwargs["year"] = year
 
-        with self.step(name, **step_kwargs) as t:
-            if t.is_cached:
-                hydrated: Dict[str, Artifact] = {}
-                for k in declared_output_keys:
-                    art = t.cached_output(key=k)
-                    if art is None:
-                        raise RuntimeError(
-                            f"Cache hit for step {name!r} but missing cached output key={k!r}. "
-                            "This cache entry does not satisfy the step output contract."
-                        )
-                    self.coupler.set(k, art)
-                    hydrated[k] = art
-                return hydrated
+        if result.outputs:
+            self.coupler.update(result.outputs)
 
-            fn(*fn_args, **fn_kwargs)
+        record = self.tracker.last_run
+        if record and self._header_record:
+            self._record_step_in_parent(record.run, record.inputs, record.outputs)
 
-            if output_paths is not None:
-                produced: Dict[str, Artifact] = {}
-                for k, ref in output_paths.items():
-                    resolved_ref = _resolve_output_ref(t, ref)
-                    produced[k] = t.log_artifact(
-                        resolved_ref, key=k, direction="output"
-                    )
-                    self.coupler.set(k, produced[k])
-                return produced
-
-            # outputs-based contract: ensure the callable logged the declared keys.
-            by_key: Dict[str, Artifact] = {a.key: a for a in t.current_consist.outputs}
-            missing = [k for k in declared_output_keys if k not in by_key]
-            if missing:
-                raise RuntimeError(
-                    f"Step {name!r} did not produce declared outputs: {missing}. "
-                    "Either log them via tracker.log_artifact(..., key=...), or use output_paths={...}."
-                )
-            for k in declared_output_keys:
-                self.coupler.set(k, by_key[k])
-            return {k: by_key[k] for k in declared_output_keys}
+        return result
 
     @contextmanager
-    def step(self, name: str, **kwargs):
+    def trace(
+        self,
+        name: str,
+        *,
+        run_id: Optional[str] = None,
+        model: Optional[str] = None,
+        description: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+        inputs: Optional[
+            Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]
+        ] = None,
+        input_keys: Optional[Iterable[str] | str] = None,
+        optional_input_keys: Optional[Iterable[str] | str] = None,
+        depends_on: Optional[List[ArtifactRef]] = None,
+        tags: Optional[List[str]] = None,
+        facet: Optional[FacetLike] = None,
+        facet_from: Optional[List[str]] = None,
+        facet_schema_version: Optional[Union[str, int]] = None,
+        facet_index: Optional[bool] = None,
+        hash_inputs: HashInputs = None,
+        year: Optional[int] = None,
+        iteration: Optional[int] = None,
+        parent_run_id: Optional[str] = None,
+        outputs: Optional[List[str]] = None,
+        output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        capture_dir: Optional[Path] = None,
+        capture_pattern: str = "*",
+        cache_mode: str = "reuse",
+        cache_hydration: Optional[str] = None,
+        validate_cached_outputs: str = "lazy",
+        output_mismatch: str = "warn",
+        output_missing: str = "warn",
+    ):
         """
-        Execute a child run as part of this scenario.
-
-        Parameters
-        ----------
-        name : str
-            Name of the step, used to derive the run ID and default model.
-        **kwargs : Any
-            Arguments forwarded to ``Tracker.start_run`` such as ``config``, ``facet_from``,
-            or ``tags``.
-
-        Yields
-        ------
-        Tracker
-            Active tracker for the step run.
+        Manual tracing context manager for scenario steps.
         """
         if not self._header_record:
-            raise RuntimeError("Scenario not active.")
+            raise RuntimeError("Scenario not active. Use within 'with' block.")
+
+        resolved_model = model or name
+        if run_id is None:
+            run_id = f"{self.run_id}_{name}"
+        if parent_run_id is None:
+            parent_run_id = self.run_id
 
         self._first_step_started = True
         self._last_step_name = name
 
-        # Apply scenario default cache hydration for steps unless overridden.
-        if "cache_hydration" not in kwargs and self.step_cache_hydration is not None:
-            kwargs["cache_hydration"] = self.step_cache_hydration
+        effective_cache_hydration = cache_hydration or self.step_cache_hydration
 
-        # Ergonomic helper: allow declaring step inputs by Coupler key, while still
-        # ensuring inputs are registered before begin_run() computes the cache signature.
-        #
-        # Example:
-        #   with sc.step("transform", input_keys=["raw"]):
-        #       raw = sc.coupler.require("raw")
-        #       ...
-        input_keys = kwargs.pop("input_keys", None)
-        optional_input_keys = kwargs.pop("optional_input_keys", None)
-        if input_keys or optional_input_keys:
-            inputs = list(kwargs.get("inputs") or [])
-            if input_keys:
-                if isinstance(input_keys, str):
-                    input_keys = [input_keys]
-                inputs.extend(self.coupler.require(k) for k in input_keys)
-            if optional_input_keys:
-                if isinstance(optional_input_keys, str):
-                    optional_input_keys = [optional_input_keys]
-                for key in optional_input_keys:
-                    artifact = self.coupler.get(key)
-                    if artifact is not None:
-                        inputs.append(artifact)
-            if inputs:
-                kwargs["inputs"] = inputs
-
-        facet_from = kwargs.pop("facet_from", None)
-        if facet_from:
-            if isinstance(facet_from, str):
-                raise ValueError("facet_from must be a list of config keys.")
-            facet_keys = list(facet_from)
-            config = kwargs.get("config")
-            derived = self._extract_facet_from_config(config, facet_keys)
-            facet = kwargs.get("facet")
-            if facet is not None:
-                facet_dict = self._coerce_mapping(facet, "facet")
-                merged = dict(derived)
-                merged.update(facet_dict)
-                kwargs["facet"] = self.tracker.identity.normalize_json(merged)
-            else:
-                kwargs["facet"] = self.tracker.identity.normalize_json(derived)
-
-        # 1. Construct Hierarchical ID & Enforce Linkage
-        # Default ID: scenario_name + "_" + step_name
-        run_id = kwargs.pop("run_id", f"{self.run_id}_{name}")
-        kwargs["parent_run_id"] = self.run_id
-
-        # Default model name to step name if not provided
-        if "model" not in kwargs:
-            kwargs["model"] = name
-
-        # Containers for the captured state
-        child_run = None
-        child_inputs = []
-        child_outputs = []
+        resolved_inputs = self._resolve_inputs(inputs, input_keys, optional_input_keys)
+        resolved_output_paths = self._resolve_output_paths(output_paths)
 
         try:
-            # We open the tracker context...
-            with self.tracker.start_run(run_id=run_id, **kwargs) as t:
-                try:
-                    # 1. Yield to let the user code run (This populates the artifacts)
-                    yield t
-                finally:
-                    # 2. Capture State NOW (After code ran, but before tracker closes)
-                    # We wrap in finally to ensure we capture partial state even if the step fails
-
-                    # Resolve the context object (Run wrapper)
-                    ctx = t.current_consist
-
-                    if ctx:
-                        # Capture Run Object
-                        child_run = getattr(ctx, "run", ctx)
-
-                        # Capture Artifacts (Copy to list so they survive context exit)
-                        # Check 'current_inputs' (tracker attr) or 'inputs' (context attr)
-                        if hasattr(t, "current_inputs"):
-                            child_inputs = self._as_artifact_list(
-                                getattr(t, "current_inputs")
-                            )
-                        elif hasattr(ctx, "inputs"):
-                            child_inputs = self._as_artifact_list(ctx.inputs)
-
-                        if hasattr(t, "current_outputs"):
-                            child_outputs = self._as_artifact_list(
-                                getattr(t, "current_outputs")
-                            )
-                        elif hasattr(ctx, "outputs"):
-                            child_outputs = self._as_artifact_list(ctx.outputs)
-
+            with self.tracker.trace(
+                name=name,
+                run_id=run_id,
+                model=resolved_model,
+                description=description,
+                config=config,
+                inputs=resolved_inputs,
+                input_keys=None,
+                optional_input_keys=None,
+                depends_on=depends_on,
+                tags=tags,
+                facet=facet,
+                facet_from=facet_from,
+                facet_schema_version=facet_schema_version,
+                facet_index=facet_index,
+                hash_inputs=hash_inputs,
+                year=year,
+                iteration=iteration,
+                parent_run_id=parent_run_id,
+                outputs=outputs,
+                output_paths=resolved_output_paths,
+                capture_dir=capture_dir,
+                capture_pattern=capture_pattern,
+                cache_mode=cache_mode,
+                cache_hydration=effective_cache_hydration,
+                validate_cached_outputs=validate_cached_outputs,
+                output_mismatch=output_mismatch,
+                output_missing=output_missing,
+            ) as t:
+                yield t
         finally:
-            # 3. Bubble Up (Tracker is now closed, but we have our copies)
-            if child_run and self._header_record:
-                self._record_step_in_parent(child_run, child_inputs, child_outputs)
+            record = self.tracker.last_run
+            if record and self._header_record:
+                if record.outputs:
+                    self.coupler.update({a.key: a for a in record.outputs})
+                self._record_step_in_parent(record.run, record.inputs, record.outputs)
 
     def _coerce_mapping(self, obj: Any, label: str) -> Dict[str, Any]:
         if hasattr(obj, "model_dump"):
@@ -565,7 +591,7 @@ class ScenarioContext:
 
         self.tracker.current_consist = current_state
 
-    def __enter__(self):
+    def __enter__(self) -> "ScenarioContext":
         # Enforce No Nesting
         if self.tracker.current_consist is not None:
             raise RuntimeError(
@@ -600,7 +626,12 @@ class ScenarioContext:
 
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> bool:
         # 1. Restore Header Context
         self.tracker.current_consist = self._header_record
         if self._suspended_cache_options is not None:

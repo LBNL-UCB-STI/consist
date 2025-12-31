@@ -8,7 +8,6 @@ from sqlmodel import SQLModel, Field, select, func
 from consist.core.tracker import Tracker
 from consist.models.run import Run
 import consist
-from consist.integrations.containers import run_container
 
 
 # --- 1. Domain Models ---
@@ -64,8 +63,15 @@ def run_simulation_scenario(
     class MockTripsBackend:
         """Mock container backend that writes a Parquet with regenerated trips."""
 
-        def __init__(self, df_source: pd.DataFrame, base_trips: int, output_path: Path):
-            self.df_source = df_source
+        def __init__(
+            self,
+            tracker: Tracker,
+            source_artifact: "consist.Artifact",
+            base_trips: int,
+            output_path: Path,
+        ):
+            self.tracker = tracker
+            self.source_artifact = source_artifact
             self.base_trips = base_trips
             self.output_path = output_path
             self.run_count = 0
@@ -75,7 +81,14 @@ def run_simulation_scenario(
 
         def run(self, image, command, volumes, env, working_dir):
             self.run_count += 1
-            df_out = self.df_source.copy()
+            df_in = consist.load(
+                self.source_artifact,
+                tracker=self.tracker,
+                db_fallback="always",
+            )
+            if not isinstance(df_in, pd.DataFrame):
+                raise TypeError("Expected DataFrame from consist.load()")
+            df_out = df_in.copy()
             df_out["number_of_trips"] = rng.poisson(
                 lam=self.base_trips, size=len(df_out)
             )
@@ -95,7 +108,7 @@ def run_simulation_scenario(
         coupler = scenario.coupler
 
         # Init
-        with scenario.step(
+        with scenario.trace(
             run_id=f"{scenario_id}_init",
             name="pop_synth",
             tags=["init"],
@@ -137,7 +150,7 @@ def run_simulation_scenario(
             step_inputs = [current_person_art] if current_person_art else None
 
             # Step 1: advance people (age only)
-            with scenario.step(
+            with scenario.trace(
                 run_id=f"{scenario_id}_year_{year}_advance",
                 name="advance_people",
                 year=year,
@@ -167,62 +180,55 @@ def run_simulation_scenario(
                     coupler.set("persons", prev_person_art)
 
             # Step 2: generate trips via mocked container (updates number_of_trips)
-            with scenario.step(
-                run_id=f"{scenario_id}_year_{year}_trips",
-                name="generate_trips",
-                year=year,
-                tags=["simulation", "generate_trips"],
-                config={
-                    "year": year,
-                    "base_trips": base_trips_by_year.get(year, base_trips),
-                },
-                facet_from=["base_trips"],
-                hash_inputs=[("generate_trips_config", external_cfg_dir)],
-                inputs=[coupler.get("persons")],
-                validate_cached_outputs=validate_cached_outputs,
+            advanced_person_art = coupler.require("persons")
+            # Use a stable host path for container outputs so identical scenarios can reuse cache
+            container_out_dir = (container_out_root / str(year)).resolve()
+            container_out_dir.mkdir(parents=True, exist_ok=True)
+            output_path = (container_out_dir / "persons.parquet").resolve()
+
+            trips_lambda = base_trips_by_year.get(year, base_trips)
+
+            mock_backend = MockTripsBackend(
+                tracker=tracker,
+                source_artifact=advanced_person_art,
+                base_trips=trips_lambda,
+                output_path=output_path,
+            )
+
+            container_spec = {
+                "image": "mock/generate_trips:latest",
+                "command": ["generate_trips"],
+                "backend": "docker",
+                "environment": {"BASE_TRIPS": str(trips_lambda)},
+                "volumes": {str(container_out_dir): "/out"},
+            }
+
+            with patch(
+                "consist.integrations.containers.api.DockerBackend",
+                return_value=mock_backend,
             ):
-                # Resolve from cache if present; otherwise execute container and log output.
-                persons_art = coupler.adopt_cached_output("persons")
-                if not persons_art:
-                    df_adv = consist.load(coupler.get("persons"))
-                    # Use a stable host path for container outputs so identical scenarios can reuse cache
-                    container_out_dir = (container_out_root / str(year)).resolve()
-                    container_out_dir.mkdir(parents=True, exist_ok=True)
-                    output_path = (container_out_dir / "persons.parquet").resolve()
+                result = scenario.run(
+                    name="generate_trips",
+                    executor="container",
+                    container=container_spec,
+                    year=year,
+                    tags=["simulation", "generate_trips"],
+                    config={
+                        "year": year,
+                        "base_trips": base_trips_by_year.get(year, base_trips),
+                    },
+                    facet_from=["base_trips"],
+                    hash_inputs=[("generate_trips_config", external_cfg_dir)],
+                    inputs=[advanced_person_art],
+                    output_paths={"persons": output_path},
+                    validate_cached_outputs=validate_cached_outputs,
+                )
 
-                    trips_lambda = base_trips_by_year.get(year, base_trips)
-
-                    mock_backend = MockTripsBackend(
-                        df_source=df_adv,
-                        base_trips=trips_lambda,
-                        output_path=output_path,
-                    )
-
-                    with patch(
-                        "consist.integrations.containers.api.DockerBackend",
-                        return_value=mock_backend,
-                    ):
-                        # Nested mode: run_container detects the active step and does NOT create
-                        # a new Run row; signature/meta/artifacts are attached to the step run.
-                        result = run_container(
-                            tracker=tracker,
-                            run_id=f"{scenario_id}_year_{year}_trips_container",
-                            image="mock/generate_trips:latest",
-                            command=["generate_trips"],
-                            volumes={str(container_out_dir): "/out"},
-                            inputs=[coupler.get("persons")],
-                            outputs={"persons": output_path},
-                            environment={"BASE_TRIPS": str(trips_lambda)},
-                            backend_type="docker",
-                        )
-
-                        persons_art = result.artifacts["persons"]
-                        assert persons_art is not None, "No persons output logged"
-
-                coupler.set("persons", persons_art)
+            persons_art = result.outputs["persons"]
+            coupler.set("persons", persons_art)
 
 
-def test_pilates_header_pattern(tmp_path):
+def test_pilates_header_pattern(tmp_path: Path):
     run_dir = tmp_path / "runs"
     db_path = str(tmp_path / "provenance.duckdb")
     tracker = Tracker(run_dir=run_dir, db_path=db_path, schemas=[Household, Person])
@@ -321,7 +327,7 @@ def test_pilates_header_pattern(tmp_path):
     assert len(df) == 300
 
 
-def test_pilates_header_pattern_api(tmp_path):
+def test_pilates_header_pattern_api(tmp_path: Path):
     """
     Same workflow as above, but exercising the top-level API shortcuts.
     """
@@ -344,7 +350,7 @@ def test_pilates_header_pattern_api(tmp_path):
             model="pilates_orchestrator",
             tags=["scenario_header"],
         ) as sc:
-            with sc.step(name="pop_synth", run_id=f"{name}_init", tags=["init"]) as t:
+            with sc.trace(name="pop_synth", run_id=f"{name}_init", tags=["init"]) as t:
                 df_hh = pd.DataFrame(
                     {
                         "household_id": np.arange(n_hh),
@@ -355,7 +361,7 @@ def test_pilates_header_pattern_api(tmp_path):
                 t.log_dataframe(df_hh, key="households", schema=Household)
 
             for year in years:
-                with sc.step(
+                with sc.trace(
                     name="travel_demand",
                     run_id=f"{name}_{year}",
                     year=year,

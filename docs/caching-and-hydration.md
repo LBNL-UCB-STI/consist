@@ -85,13 +85,13 @@ Using `tracker.scenario(...)`:
 
 ```python
 with tracker.scenario("my_scenario") as scenario:
-    with scenario.step("ingest"):
+    with scenario.trace("ingest"):
         raw = tracker.log_artifact("raw.csv", key="raw", direction="output")
         scenario.coupler.set("raw", raw)
 
     # `input_keys=[...]` declares step inputs by Coupler key without repeating
     # `scenario.coupler.require(...)` in the `inputs=[...]` list.
-    with scenario.step("transform", input_keys=["raw"]):
+    with scenario.trace("transform", input_keys=["raw"]):
         raw_art = scenario.coupler.require("raw")
         df = consist.load(raw_art, tracker=tracker)
 ```
@@ -105,7 +105,7 @@ Notes:
 
 ### Function-shaped steps (skip on cache hit)
 
-If you have an expensive callable (including imported functions or bound methods) and you want Consist to skip executing it on cache hits, use `ScenarioContext.run_step(...)`.
+If you have an expensive callable (including imported functions or bound methods) and you want Consist to skip executing it on cache hits, use `ScenarioContext.run(...)`.
 
 `output_paths={...}` values are interpreted as:
 - relative paths → relative to the step run directory (`t.run_dir`)
@@ -114,28 +114,22 @@ If you have an expensive callable (including imported functions or bound methods
 
 ---
 
-## Pattern 2: Task caching (`@tracker.task`) and chained artifacts
+## Pattern 2: Cached runs with `tracker.run`
 
-The `@tracker.task()` decorator is designed for “function-shaped steps”:
-- it automatically starts/ends a run
-- it turns `Path` arguments into input artifacts
-- it turns returned `Path`s into output artifacts
-- it supports caching via `cache_mode`
+Use `tracker.run(...)` with declared outputs to get cache-aware execution for function-shaped steps.
 
 ```python
-@tracker.task()
-def clean(raw_file: Path) -> Path:
+def clean(raw_file: Path):
     ...
-    return cleaned_path
+    return {"cleaned": cleaned_df}
 
-@tracker.task()
-def analyze(cleaned: Artifact) -> Path:
-    # You can pass artifacts directly; the decorator resolves `.path` for execution
-    ...
-    return analysis_path
+result = tracker.run(
+    fn=clean,
+    inputs={"raw_file": Path("raw.csv")},
+    outputs=["cleaned"],
+    load_inputs=True,
+)
 ```
-
-If the `clean(...)` signature matches a prior completed run, calling it again returns cached outputs without re-executing the function body.
 
 ---
 

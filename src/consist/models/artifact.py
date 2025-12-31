@@ -104,7 +104,7 @@ class Artifact(SQLModel, table=True):
     # Metadata (Flexible JSON bag)
     # Stores: schema signatures, matrix shapes, etc.
     # Uses SQLAlchemy's JSON type for efficient persistence of arbitrary JSON structures.
-    meta: Dict[str, Any] = Field(default={}, sa_column=Column(JSON))
+    meta: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
 
     # Audit
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

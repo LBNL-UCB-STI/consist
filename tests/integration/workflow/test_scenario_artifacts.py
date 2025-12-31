@@ -13,7 +13,7 @@ def test_scenario_records_child_artifacts_and_steps(tracker: Tracker, run_dir: P
     with tracker.scenario("scenario_merge", config={"global": 1}) as sc:
         sc.add_input(base_in, key="exog")
 
-        with sc.step("stage_one", config={"local": 2}) as t:
+        with sc.trace("stage_one", config={"local": 2}) as t:
             step_in = run_dir / "stage_in.txt"
             step_in.write_text("in")
             t.log_artifact(step_in, key="stage_input", direction="input")
@@ -41,7 +41,7 @@ def test_scenario_links_child_artifacts_in_db(tracker: Tracker, run_dir: Path):
         pytest.skip("Database manager not configured")
 
     with tracker.scenario("scenario_db") as sc:
-        with sc.step("stage_db") as t:
+        with sc.trace("stage_db") as t:
             child_out = run_dir / "db_out.csv"
             child_out.write_text("data")
             t.log_artifact(child_out, key="db_out", direction="output")

@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field as PydanticField
 
 from sqlalchemy import Column, JSON, String
 from sqlmodel import Field, SQLModel
@@ -91,7 +91,7 @@ class Run(SQLModel, table=True):
     # Tags (for filtering and categorization)
     # Note: DuckDB supports arrays natively. For SQLite compatibility, this would need JSON storage.
     tags: List[str] = Field(
-        default=[],
+        default_factory=list,
         sa_column=Column(JSON),  # Using JSON for broader DB compatibility
         description="List of string labels for categorization and filtering",
     )
@@ -118,7 +118,7 @@ class Run(SQLModel, table=True):
 
     # Metadata
     # Uses SQLAlchemy's JSON type for efficient persistence of arbitrary JSON structures.
-    meta: Dict[str, Any] = Field(default={}, sa_column=Column(JSON))
+    meta: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
 
     # Timing
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -166,11 +166,33 @@ class RunArtifacts(BaseModel):
         artifacts.inputs['config'] -> Artifact(...)
     """
 
-    inputs: Dict[str, Artifact] = {}
-    outputs: Dict[str, Artifact] = {}
+    inputs: Dict[str, Artifact] = PydanticField(default_factory=dict)
+    outputs: Dict[str, Artifact] = PydanticField(default_factory=dict)
 
     class Config:
         arbitrary_types_allowed = True
+
+
+class RunResult(BaseModel):
+    """
+    Structured return value for Tracker.run/ScenarioContext.run.
+    """
+
+    run: Run
+    outputs: Dict[str, Artifact] = PydanticField(default_factory=dict)
+    cache_hit: bool = False
+
+    class Config:
+        arbitrary_types_allowed = True
+
+    @property
+    def output(self) -> Optional[Artifact]:
+        if not self.outputs:
+            return None
+        return next(iter(self.outputs.values()))
+
+    def as_dict(self) -> Dict[str, Artifact]:
+        return dict(self.outputs)
 
 
 class ConsistRecord(SQLModel):
@@ -190,14 +212,14 @@ class ConsistRecord(SQLModel):
     """
 
     run: Run
-    inputs: List[Artifact] = []
-    outputs: List[Artifact] = []
+    inputs: List[Artifact] = PydanticField(default_factory=list)
+    outputs: List[Artifact] = PydanticField(default_factory=list)
 
     # Cache Detection State
     cached_run: Optional[Run] = None  # NEW: Stores the potential cache hit
 
-    config: Dict[str, Any] = {}
+    config: Dict[str, Any] = PydanticField(default_factory=dict)
 
     # Optional, minimal, queryable config facet (not persisted to Run table).
     # This is included in the per-run `consist.json` snapshot for inspection/debugging.
-    facet: Dict[str, Any] = {}
+    facet: Dict[str, Any] = PydanticField(default_factory=dict)

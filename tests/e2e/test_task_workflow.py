@@ -4,7 +4,6 @@ from typing import cast
 from unittest.mock import patch
 
 import pandas as pd
-import pytest
 from pydantic import BaseModel
 from sqlmodel import select
 from typer.testing import CliRunner
@@ -12,6 +11,7 @@ from typer.testing import CliRunner
 import consist
 from consist.cli import app as cli_app
 from consist.core.tracker import Tracker
+from consist.core.workflow import RunContext
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 
@@ -49,13 +49,12 @@ class ManualConfigDemo(BaseModel):
         return {"mode": self.mode, "purpose": self.purpose}
 
 
-@pytest.mark.flaky(reruns=3)  # flaky due to db sync
 def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     """
     End-to-end validation of @task decorator workflow:
     - Task with simple caching
-    - Task with depends_on (config file dependency)
-    - Task with capture_dir (legacy code wrapper)
+    - Task with hash_inputs (config file dependency)
+    - Task with capture_outputs (legacy code wrapper)
     - Cache hit behavior on re-execution
     - CLI introspection
     - Artifact chaining between tasks
@@ -84,7 +83,7 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
         json.dump({"version": "1.0", "mode": "strict"}, f)
 
     # Task 1: Simple data cleaning with caching
-    @tracker.task()
+    @tracker.define_step(outputs=["cleaned"], tags=["clean"])
     def clean_data(raw_file: Path, config: CleaningConfig) -> Path:
         """Clean data by removing outliers and applying threshold."""
         output_path = run_dir / "cleaned.csv"
@@ -104,7 +103,7 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
         return output_path
 
     # Task 2: Analysis that takes cleaned data as input
-    @tracker.task()
+    @tracker.define_step(outputs=["analysis"], tags=["analysis"])
     def analyze_data(cleaned_file: Path, multiplier: float = 1.0) -> Path:
         """Analyze cleaned data with a multiplier."""
         output_path = run_dir / "analysis.csv"
@@ -113,47 +112,49 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
         df.to_csv(output_path, index=False)
         return output_path
 
-    # Task 3: Legacy code wrapper with depends_on
-    @tracker.task(
-        depends_on=[config_path, params_path],
-        capture_dir=run_dir / "outputs",
-        capture_pattern="*.csv",
-    )
-    def run_legacy_analysis(cleaned_file: Path) -> None:
+    # Task 3: Legacy code wrapper with hash_inputs + capture_outputs
+    def run_legacy_analysis(cleaned_file: Path, _consist_ctx: RunContext) -> None:
         """Wrapper around legacy analysis code that reads config files."""
         # Simulate legacy code that reads config files and writes to ./outputs
         output_dir = run_dir / "outputs"
         output_dir.mkdir(exist_ok=True)
 
-        # Legacy code reads the config files (captured by depends_on)
-        with open(config_path) as f:
-            config_data = json.load(f)
+        with _consist_ctx.capture_outputs(output_dir, pattern="*.csv"):
+            # Legacy code reads the config files (captured by hash_inputs)
+            with open(config_path) as f:
+                config_data = json.load(f)
 
-        # Legacy code processes data
-        df = pd.read_csv(cleaned_file)
-        df["processed_value"] = df["value"] * config_data["threshold"]
+            # Legacy code processes data
+            df = pd.read_csv(cleaned_file)
+            df["processed_value"] = df["value"] * config_data["threshold"]
 
-        # Legacy code writes to outputs directory (captured by capture_dir)
-        df.to_csv(output_dir / "analysis_results.csv", index=False)
+            # Legacy code writes to outputs directory (captured by capture_outputs)
+            df.to_csv(output_dir / "analysis_results.csv", index=False)
 
-        # Summary report
-        summary = pd.DataFrame(
-            {
-                "metric": ["count", "mean", "max"],
-                "value": [len(df), df["value"].mean(), df["value"].max()],
-            }
-        )
-        summary.to_csv(output_dir / "summary.csv", index=False)
+            # Summary report
+            summary = pd.DataFrame(
+                {
+                    "metric": ["count", "mean", "max"],
+                    "value": [len(df), df["value"].mean(), df["value"].max()],
+                }
+            )
+            summary.to_csv(output_dir / "summary.csv", index=False)
 
-        # Task returns None when using capture_dir
+        # Task returns None when using capture_outputs
         return None
 
     # === First execution: everything runs ===
     config = CleaningConfig(threshold=0.5, remove_outliers=True, min_value=0.0)
 
-    # Task returns an Artifact, not a Path
-    cleaned_artifact = clean_data(raw_data_path, config)
-    assert isinstance(cleaned_artifact, Artifact), "Task should return Artifact"
+    cleaned_result = tracker.run(
+        fn=clean_data,
+        inputs={"raw_file": raw_data_path},
+        config=config,
+        fn_args={"raw_file": raw_data_path},
+        load_inputs=False,
+    )
+    cleaned_artifact = cleaned_result.outputs["cleaned"]
+    assert isinstance(cleaned_artifact, Artifact), "Run should return output artifacts"
 
     # Access the resolved path via .path property
     assert cleaned_artifact.path.exists(), "Cleaned data should exist"
@@ -165,7 +166,13 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     assert len(df_cleaned_loaded) == len(df_cleaned)
 
     # Chain tasks: pass artifact directly to next task
-    analysis_artifact = analyze_data(cleaned_artifact, multiplier=2.0)
+    analysis_result = tracker.run(
+        fn=analyze_data,
+        inputs={"cleaned_file": cleaned_artifact},
+        fn_args={"cleaned_file": cleaned_artifact.path, "multiplier": 2.0},
+        load_inputs=False,
+    )
+    analysis_artifact = analysis_result.outputs["analysis"]
     assert isinstance(analysis_artifact, Artifact)
     assert analysis_artifact.path.exists()
 
@@ -173,10 +180,15 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     assert "analyzed_value" in df_analysis.columns
     assert df_analysis["analyzed_value"][0] == df_cleaned["value"][0] * 2.0
 
-    # Run legacy analysis (returns list of captured artifacts)
-    legacy_artifacts = run_legacy_analysis(cleaned_artifact)
-    assert isinstance(legacy_artifacts, list)
-    assert len(legacy_artifacts) > 0
+    legacy_result = tracker.run(
+        fn=run_legacy_analysis,
+        inputs={"cleaned_file": cleaned_artifact},
+        fn_args={"cleaned_file": cleaned_artifact.path},
+        hash_inputs=[("cleaning_config", config_path), ("params", params_path)],
+        inject_context=True,
+        load_inputs=False,
+    )
+    assert legacy_result.outputs, "Legacy analysis should capture outputs"
 
     # Verify captured outputs exist
     analysis_output = run_dir / "outputs" / "analysis_results.csv"
@@ -241,10 +253,16 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
         tracker.db.session.commit() if hasattr(tracker.db, "session") else None
 
     # === Second execution: same inputs should hit cache ===
-    cleaned_artifact_2 = clean_data(raw_data_path, config)
+    cleaned_result_2 = tracker.run(
+        fn=clean_data,
+        inputs={"raw_file": raw_data_path},
+        config=config,
+        fn_args={"raw_file": raw_data_path},
+        load_inputs=False,
+    )
 
     # Should get the same artifact back (cache hit)
-    assert cleaned_artifact_2.uri == cleaned_artifact.uri
+    assert cleaned_result_2.outputs["cleaned"].uri == cleaned_artifact.uri
 
     # Check cache hit metadata
     runs = consist.run_query(
@@ -267,7 +285,13 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
 
     # === Third execution: different config should re-execute ===
     config_new = CleaningConfig(threshold=0.8, remove_outliers=True, min_value=0.0)
-    clean_data(raw_data_path, config_new)
+    tracker.run(
+        fn=clean_data,
+        inputs={"raw_file": raw_data_path},
+        config=config_new,
+        fn_args={"raw_file": raw_data_path},
+        load_inputs=False,
+    )
 
     # Should be a new execution (different config = different signature)
     runs = consist.run_query(
@@ -288,7 +312,7 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     )
 
     # === Fourth execution: test cache_mode="overwrite" ===
-    @tracker.task(cache_mode="overwrite")
+    @tracker.define_step(outputs=["cleaned_overwrite"])
     def clean_data_overwrite(raw_file: Path, config: CleaningConfig) -> Path:
         """Same logic but always re-executes."""
         output_path = run_dir / "cleaned_overwrite.csv"
@@ -297,8 +321,22 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
         df_clean.to_csv(output_path, index=False)
         return output_path
 
-    clean_data_overwrite(raw_data_path, config)
-    clean_data_overwrite(raw_data_path, config)
+    tracker.run(
+        fn=clean_data_overwrite,
+        inputs={"raw_file": raw_data_path},
+        config=config,
+        fn_args={"raw_file": raw_data_path},
+        load_inputs=False,
+        cache_mode="overwrite",
+    )
+    tracker.run(
+        fn=clean_data_overwrite,
+        inputs={"raw_file": raw_data_path},
+        config=config,
+        fn_args={"raw_file": raw_data_path},
+        load_inputs=False,
+        cache_mode="overwrite",
+    )
 
     # Both should execute (overwrite mode)
     overwrite_runs = consist.run_query(
@@ -381,7 +419,13 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     df_modified.to_csv(modified_path, index=False)
 
     # Clean the modified data
-    cleaned_modified = clean_data(modified_path, config)
+    cleaned_modified_result = tracker.run(
+        fn=clean_data,
+        inputs={"raw_file": modified_path},
+        config=config,
+        fn_args={"raw_file": modified_path},
+        load_inputs=False,
+    )
 
     # Should be a new run (different input)
     clean_runs = consist.run_query(
@@ -393,5 +437,7 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     )
 
     # Verify the cleaned data is different
-    df_cleaned_modified = cast(pd.DataFrame, consist.load(cleaned_modified))
+    df_cleaned_modified = cast(
+        pd.DataFrame, consist.load(cleaned_modified_result.outputs["cleaned"])
+    )
     assert not df_cleaned_modified.equals(df_cleaned)

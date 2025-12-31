@@ -36,7 +36,7 @@ def get_active_tracker() -> "Tracker":
     RuntimeError
         If no `Tracker` instance is currently active (i.e., the stack is empty).
         This typically means Consist API functions are being called outside
-        a `with tracker.start_run():` block or a `@consist.task` decorated function.
+        a `with tracker.start_run():` block or a `tracker.run`/`tracker.trace` call.
     """
     if not _TRACKER_STACK:
         raise RuntimeError(

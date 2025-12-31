@@ -69,7 +69,22 @@ def _hash_inputs(tracker: Tracker, items: List[ArtifactRef]) -> List[str]:
     hashes: List[str] = []
     for item in items:
         if isinstance(item, Artifact):
-            hashes.append(item.hash)
+            sig_parts: List[str] = []
+            if item.run_id:
+                run = tracker.get_run(item.run_id)
+                if run:
+                    if run.config_hash:
+                        sig_parts.append(f"conf:{run.config_hash}")
+            if item.hash:
+                sig_parts.append(f"hash:{item.hash}")
+            if not sig_parts:
+                try:
+                    abs_path = Path(tracker.resolve_uri(item.uri))
+                    file_hash = tracker.identity.compute_file_checksum(abs_path)
+                    sig_parts.append(f"file:{file_hash}")
+                except Exception:
+                    sig_parts.append(f"uri:{item.uri}")
+            hashes.append("|".join(sig_parts))
         else:
             p = Path(item).resolve()
             if not p.exists():
