@@ -16,6 +16,7 @@
         - is_cached
         - last_run
         - log_artifact
+        - log_dataframe
         - log_artifacts
         - log_input
         - log_output
@@ -27,6 +28,7 @@
         - get_artifact
         - get_artifacts_for_run
         - get_artifact_lineage
+        - find_artifacts
         - find_run
         - find_runs
         - history

@@ -58,6 +58,16 @@ class IdentityManager:
 
     # --- Canonical JSON utilities ---
 
+    _ZARR_METADATA_FILES = frozenset(
+        {
+            ".zarray",
+            ".zattrs",
+            ".zgroup",
+            ".zmetadata",
+            "zarr.json",
+        }
+    )
+
     def canonical_json_str(self, obj: Any) -> str:
         """
         Return a stable JSON string for hashing/IDs.
@@ -73,6 +83,15 @@ class IdentityManager:
     def canonical_json_sha256(self, obj: Any) -> str:
         """SHA256 hex digest of `canonical_json_str(obj)`."""
         return hashlib.sha256(self.canonical_json_str(obj).encode("utf-8")).hexdigest()
+
+    def normalize_json(self, obj: Any) -> Any:
+        """
+        Normalize Python structures into JSON-friendly types.
+
+        This mirrors the canonical hashing cleanup but preserves the full structure
+        without excluding any keys.
+        """
+        return self._clean_structure(obj, set())
 
     # --- Run Signature Calculation ---
 
@@ -497,6 +516,14 @@ class IdentityManager:
 
         # --- Directory Handling (e.g. Zarr) ---
         if path.is_dir():
+            if self._is_zarr_store(path):
+                if self.hashing_strategy != "fast":
+                    logging.warning(
+                        "[Consist Warning] Performing full content hashing on Zarr store '%s'. "
+                        "This can be slow. Consider using 'fast' hashing_strategy for metadata-based hashing.",
+                        path.name,
+                    )
+                return self._hash_zarr_store(path)
             # For directories, we compute a hash based on the aggregate metadata
             # of all files inside.
             if self.hashing_strategy == "fast":
@@ -581,6 +608,15 @@ class IdentityManager:
         if resolved.is_file():
             return self.compute_file_checksum(resolved)
 
+        if allowlist is None and self._is_zarr_store(resolved):
+            if self.hashing_strategy != "fast":
+                logging.warning(
+                    "[Consist Warning] Performing full content hashing on Zarr store '%s'. "
+                    "This can be slow. Consider using 'fast' hashing_strategy for metadata-based hashing.",
+                    resolved.name,
+                )
+            return self._hash_zarr_store(resolved)
+
         sha = hashlib.sha256()
         for file_path in sorted(resolved.rglob("*")):
             if not file_path.is_file():
@@ -609,6 +645,74 @@ class IdentityManager:
                             break
                         sha.update(chunk)
         return sha.hexdigest()
+
+    def _is_zarr_store(self, path: Path) -> bool:
+        if path.suffix == ".zarr":
+            return True
+        for marker in self._ZARR_METADATA_FILES:
+            if (path / marker).exists():
+                return True
+        return False
+
+    def _hash_zarr_store(self, path: Path) -> str:
+        if self.hashing_strategy == "fast":
+            return self._hash_zarr_store_fast(path)
+        return self._hash_zarr_store_full(path)
+
+    def _hash_zarr_store_full(self, path: Path) -> str:
+        sha = hashlib.sha256()
+        for file_path in sorted(path.rglob("*")):
+            if not file_path.is_file():
+                continue
+            rel = file_path.relative_to(path).as_posix()
+            sha.update(f"{rel}:".encode("utf-8"))
+            with open(file_path, "rb") as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    sha.update(chunk)
+        return sha.hexdigest()
+
+    def _hash_zarr_store_fast(self, path: Path) -> str:
+        sha = hashlib.sha256()
+        files = [p for p in sorted(path.rglob("*")) if p.is_file()]
+        consolidated = path / ".zmetadata"
+        zarr_json = path / "zarr.json"
+
+        if consolidated.exists():
+            sha.update(b".zmetadata:")
+            self._update_hash_from_file(sha, consolidated)
+        elif zarr_json.exists():
+            sha.update(b"zarr.json:")
+            self._update_hash_from_file(sha, zarr_json)
+        else:
+            for file_path in files:
+                if file_path.name in self._ZARR_METADATA_FILES:
+                    rel = file_path.relative_to(path).as_posix()
+                    sha.update(f"{rel}:".encode("utf-8"))
+                    self._update_hash_from_file(sha, file_path)
+
+        for file_path in files:
+            name = file_path.name
+            if name in self._ZARR_METADATA_FILES:
+                continue
+            if name.startswith("."):
+                continue
+            rel = file_path.relative_to(path).as_posix()
+            stat = file_path.stat()
+            leaf = f"{rel}:{stat.st_size}:{stat.st_mtime_ns}|"
+            sha.update(leaf.encode("utf-8"))
+
+        return sha.hexdigest()
+
+    def _update_hash_from_file(self, sha: "hashlib._Hash", path: Path) -> None:
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                sha.update(chunk)
 
     def compute_hash_inputs_digests(
         self,

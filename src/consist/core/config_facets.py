@@ -79,12 +79,13 @@ class ConfigFacetManager:
         """
         if facet is not None:
             if isinstance(facet, BaseModel):
-                return (
+                normalized = (
                     facet.model_dump(mode="json")
                     if hasattr(facet, "model_dump")
                     else facet.model_dump()
                 )
-            return facet
+                return self._identity.normalize_json(normalized)
+            return self._identity.normalize_json(facet)
 
         if raw_config_model is not None and isinstance(
             raw_config_model, HasConsistFacet
@@ -101,12 +102,13 @@ class ConfigFacetManager:
                 extracted = None
             if extracted is not None:
                 if isinstance(extracted, BaseModel):
-                    return (
+                    normalized = (
                         extracted.model_dump(mode="json")
                         if hasattr(extracted, "model_dump")
                         else extracted.model_dump()
                     )
-                return extracted
+                    return self._identity.normalize_json(normalized)
+                return self._identity.normalize_json(extracted)
 
         return None
 

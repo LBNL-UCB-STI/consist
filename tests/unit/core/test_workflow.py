@@ -1,3 +1,6 @@
+from pathlib import Path
+
+import pandas as pd
 import pytest
 from consist.core.tracker import Tracker
 
@@ -72,3 +75,56 @@ def test_scenario_step_input_keys_declares_inputs(tracker: Tracker):
         with sc.step("consume", input_keys=["raw"], cache_mode="overwrite") as t:
             assert t.current_consist is not None
             assert any(a.id == produced.id for a in t.current_consist.inputs)
+
+
+def test_scenario_step_optional_input_keys_skips_missing(tracker: Tracker):
+    with tracker.scenario("scen_optional_inputs") as sc:
+        with sc.step("produce") as t:
+            produced = t.log_artifact("raw.csv", key="raw", direction="output")
+            sc.coupler.set("raw", produced)
+
+        with sc.step(
+            "consume",
+            optional_input_keys=["raw", "missing"],
+            cache_mode="overwrite",
+        ) as t:
+            assert t.current_consist is not None
+            assert any(a.id == produced.id for a in t.current_consist.inputs)
+
+
+def test_scenario_step_facet_from_config(tracker: Tracker):
+    np = pytest.importorskip("numpy")
+    with tracker.scenario("scen_facet_from") as sc:
+        with sc.step(
+            "step_1",
+            config={"alpha": np.float64(0.5), "beta": np.int64(2), "extra": 9},
+            facet_from=["alpha", "beta"],
+            facet={"note": "ok"},
+        ):
+            pass
+
+    run = tracker.get_run("scen_facet_from_step_1")
+    assert run is not None
+    facet_id = run.meta["config_facet_id"]
+    facet = tracker.get_config_facet(facet_id)
+    assert facet is not None
+    assert facet.facet_json["alpha"] == pytest.approx(0.5)
+    assert facet.facet_json["beta"] == pytest.approx(2)
+    assert facet.facet_json["note"] == "ok"
+    assert "extra" not in facet.facet_json
+
+
+def test_step_log_dataframe_defaults_to_run_dir(tracker: Tracker):
+    df = pd.DataFrame({"value": [1, 2, 3]})
+    artifact = None
+    with tracker.scenario("scen_df") as sc:
+        with sc.step("write_df") as t:
+            artifact = t.log_dataframe(df, key="series")
+
+    assert artifact is not None
+    assert artifact.key == "series"
+    assert artifact.abs_path is not None
+    abs_path = Path(artifact.abs_path)
+    assert abs_path.exists()
+    assert abs_path.parent == tracker.run_dir
+    assert abs_path.name == "series.parquet"

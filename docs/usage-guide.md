@@ -145,6 +145,7 @@ with consist.scenario("baseline", tracker=tracker) as sc:
     
     # Declare upstream artifacts as step inputs so caching and provenance are correct.
     # `input_keys=[...]` avoids repeating `coupler.require(...)` in `inputs=[...]`.
+    # Use `optional_input_keys=[...]` to include artifacts only if they already exist.
     with sc.step(name="simulate", input_keys=["data"]):
         df = consist.load(coupler.require("data"))
         # ... simulation logic ...

@@ -26,6 +26,12 @@ def create_task_decorator(
     """
     Factory that creates the decorator for tracker.task().
     Separated from Tracker to keep the core class clean.
+
+    Parameters
+    ----------
+    run_kwargs : Any
+        Extra options forwarded to ``Tracker.start_run(...)`` such as `facet` or
+        `facet_from`.
     """
 
     def decorator(func: Callable) -> Callable:

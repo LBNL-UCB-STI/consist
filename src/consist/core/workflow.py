@@ -6,7 +6,7 @@ from consist import Artifact
 from consist.models.run import ConsistRecord
 from typing import TYPE_CHECKING
 from consist.core.coupler import Coupler
-from consist.types import ArtifactRef
+from consist.types import ArtifactRef, FacetLike
 from pathlib import Path
 
 if TYPE_CHECKING:
@@ -132,16 +132,21 @@ class ScenarioContext:
         run_id: Optional[str] = None,
         model: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
+        facet: Optional[FacetLike] = None,
+        facet_from: Optional[List[str]] = None,
         tags: Optional[List[str]] = None,
         description: Optional[str] = None,
         cache_mode: str = "reuse",
         input_keys: Optional[object] = None,
+        optional_input_keys: Optional[object] = None,
         inputs: Optional[List[ArtifactRef]] = None,
         outputs: Optional[List[str]] = None,
         output_paths: Optional[Mapping[str, ArtifactRef]] = None,
         materialize_cached_outputs: str = "never",
         materialize_cached_output_paths: Optional[Mapping[str, Path]] = None,
         materialize_cached_outputs_dir: Optional[Path] = None,
+        iteration: Optional[int] = None,
+        year: Optional[int] = None,
         **fn_kwargs: Any,
     ) -> Dict[str, Artifact]:
         """
@@ -160,10 +165,17 @@ class ScenarioContext:
             method like `beamPreprocessor.run`.
         *fn_args, **fn_kwargs
             Arguments forwarded to `fn(...)` on cache misses.
+        facet : Optional[FacetLike]
+            Explicit facet payload to persist with the run.
+        facet_from : Optional[List[str]]
+            List of config keys to extract into facets (merged with explicit `facet`).
         input_keys : Optional[object]
             A string or list of strings naming Coupler keys to declare as step inputs.
             Inputs are resolved before the run starts (so caching and `db_fallback="inputs-only"`
             behave correctly).
+        optional_input_keys : Optional[object]
+            A string or list of strings naming Coupler keys to declare as inputs only
+            when present (useful for warm-starting iterative runs).
         inputs : Optional[List[ArtifactRef]]
             Additional explicit inputs to declare for caching/provenance.
         outputs / output_paths
@@ -208,6 +220,16 @@ class ScenarioContext:
             else:
                 keys_list = list(input_keys)  # type: ignore[arg-type]
             resolved_inputs.extend([self.coupler.require(k) for k in keys_list])
+        if optional_input_keys:
+            keys_list: List[str]
+            if isinstance(optional_input_keys, str):
+                keys_list = [optional_input_keys]
+            else:
+                keys_list = list(optional_input_keys)  # type: ignore[arg-type]
+            for key in keys_list:
+                artifact = self.coupler.get(key)
+                if artifact is not None:
+                    resolved_inputs.append(artifact)
         if inputs:
             resolved_inputs.extend(list(inputs))
 
@@ -246,10 +268,18 @@ class ScenarioContext:
             step_kwargs["model"] = model
         if config is not None:
             step_kwargs["config"] = config
+        if facet is not None:
+            step_kwargs["facet"] = facet
+        if facet_from is not None:
+            step_kwargs["facet_from"] = facet_from
         if tags is not None:
             step_kwargs["tags"] = tags
         if description is not None:
             step_kwargs["description"] = description
+        if iteration is not None:
+            step_kwargs["iteration"] = iteration
+        if year is not None:
+            step_kwargs["year"] = year
 
         with self.step(name, **step_kwargs) as t:
             if t.is_cached:
@@ -299,7 +329,8 @@ class ScenarioContext:
         name : str
             Name of the step, used to derive the run ID and default model.
         **kwargs : Any
-            Arguments forwarded to ``Tracker.start_run`` such as ``config`` or ``tags``.
+            Arguments forwarded to ``Tracker.start_run`` such as ``config``, ``facet_from``,
+            or ``tags``.
 
         Yields
         ------
@@ -320,15 +351,38 @@ class ScenarioContext:
         #       raw = sc.coupler.require("raw")
         #       ...
         input_keys = kwargs.pop("input_keys", None)
-        if input_keys:
-            if isinstance(input_keys, str):
-                input_keys = [input_keys]
-            coupler_inputs = [self.coupler.require(k) for k in input_keys]
-            existing_inputs = kwargs.get("inputs")
-            if existing_inputs:
-                kwargs["inputs"] = list(existing_inputs) + coupler_inputs
+        optional_input_keys = kwargs.pop("optional_input_keys", None)
+        if input_keys or optional_input_keys:
+            inputs = list(kwargs.get("inputs") or [])
+            if input_keys:
+                if isinstance(input_keys, str):
+                    input_keys = [input_keys]
+                inputs.extend(self.coupler.require(k) for k in input_keys)
+            if optional_input_keys:
+                if isinstance(optional_input_keys, str):
+                    optional_input_keys = [optional_input_keys]
+                for key in optional_input_keys:
+                    artifact = self.coupler.get(key)
+                    if artifact is not None:
+                        inputs.append(artifact)
+            if inputs:
+                kwargs["inputs"] = inputs
+
+        facet_from = kwargs.pop("facet_from", None)
+        if facet_from:
+            if isinstance(facet_from, str):
+                raise ValueError("facet_from must be a list of config keys.")
+            facet_keys = list(facet_from)
+            config = kwargs.get("config")
+            derived = self._extract_facet_from_config(config, facet_keys)
+            facet = kwargs.get("facet")
+            if facet is not None:
+                facet_dict = self._coerce_mapping(facet, "facet")
+                merged = dict(derived)
+                merged.update(facet_dict)
+                kwargs["facet"] = self.tracker.identity.normalize_json(merged)
             else:
-                kwargs["inputs"] = coupler_inputs
+                kwargs["facet"] = self.tracker.identity.normalize_json(derived)
 
         # 1. Construct Hierarchical ID & Enforce Linkage
         # Default ID: scenario_name + "_" + step_name
@@ -377,6 +431,28 @@ class ScenarioContext:
             # 3. Bubble Up (Tracker is now closed, but we have our copies)
             if child_run and self._header_record:
                 self._record_step_in_parent(child_run, child_inputs, child_outputs)
+
+    def _coerce_mapping(self, obj: Any, label: str) -> Dict[str, Any]:
+        if hasattr(obj, "model_dump"):
+            return obj.model_dump(mode="json")
+        if hasattr(obj, "dict") and hasattr(obj, "json"):
+            return obj.dict()
+        if isinstance(obj, Mapping):
+            return dict(obj)
+        raise ValueError(
+            f"ScenarioContext {label} must be a mapping or Pydantic model."
+        )
+
+    def _extract_facet_from_config(
+        self, config: Optional[Any], facet_from: List[str]
+    ) -> Dict[str, Any]:
+        if config is None:
+            raise ValueError("facet_from requires a config to extract from.")
+        config_dict = self._coerce_mapping(config, "config")
+        missing = [key for key in facet_from if key not in config_dict]
+        if missing:
+            raise KeyError(f"facet_from keys not found in config: {missing}")
+        return {key: config_dict[key] for key in facet_from}
 
     def _record_step_in_parent(self, child_run, child_inputs, child_outputs):
         # Resolve Parent Lists (assuming header_record is the wrapper)

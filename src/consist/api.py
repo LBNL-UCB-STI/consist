@@ -1,16 +1,17 @@
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Union, Any, Type, Iterable, Dict, TYPE_CHECKING
+from typing import Optional, Union, Any, Type, Iterable, Dict, Mapping, TYPE_CHECKING
 
 import pandas as pd
 import tempfile
-from sqlalchemy import text
+from sqlalchemy import case, func, text
 
 # Internal imports
 from consist.core.context import get_active_tracker
 from consist.core.views import create_view_model
 from consist.models.artifact import Artifact
 from consist.models.run import Run
+from consist.models.run_config_kv import RunConfigKV
 from consist.core.tracker import Tracker
 from consist.types import ArtifactRef
 
@@ -32,7 +33,7 @@ except ImportError:
 # In consist/api.py
 
 from typing import TypeVar
-from sqlmodel import SQLModel, Session
+from sqlmodel import SQLModel, Session, select
 
 T = TypeVar("T", bound=SQLModel)
 
@@ -477,6 +478,84 @@ def run_query(query: Any, tracker: Optional["Tracker"] = None) -> list:
     tr = tracker or current_tracker()
     with Session(tr.engine) as session:
         return session.exec(query).all()
+
+
+def pivot_facets(
+    *,
+    namespace: Optional[str],
+    keys: Iterable[str],
+    value_column: str = "value_num",
+    value_columns: Optional[Mapping[str, str]] = None,
+    label_prefix: str = "",
+    label_map: Optional[Mapping[str, str]] = None,
+    run_id_label: str = "run_id",
+    table: Type[RunConfigKV] = RunConfigKV,
+) -> Any:
+    """
+    Build a pivoted facet subquery keyed by run_id.
+
+    This is a convenience helper for turning flattened config facets
+    (``run_config_kv``) into a wide table suitable for joins.
+
+    Parameters
+    ----------
+    namespace : Optional[str]
+        Facet namespace to filter by (typically the model name). If ``None``,
+        the namespace filter is skipped.
+    keys : Iterable[str]
+        Facet keys to pivot into columns.
+    value_column : str, default "value_num"
+        Default value column to read from. Must be one of:
+        ``value_num``, ``value_str``, ``value_bool``, ``value_json``.
+    value_columns : Optional[Mapping[str, str]], optional
+        Optional per-key override of ``value_column``.
+    label_prefix : str, default ""
+        Optional prefix for pivoted column labels.
+    label_map : Optional[Mapping[str, str]], optional
+        Optional per-key label overrides.
+    run_id_label : str, default "run_id"
+        Label to use for the run id column in the returned subquery.
+    table : Type[RunConfigKV], default RunConfigKV
+        Table/model providing the facet KV rows.
+
+    Returns
+    -------
+    Any
+        A SQLAlchemy subquery with columns: ``run_id`` and one column per key.
+    """
+    keys_list = list(dict.fromkeys(keys))
+    if not keys_list:
+        raise ValueError("pivot_facets requires at least one key")
+
+    valid_columns = {"value_num", "value_str", "value_bool", "value_json"}
+    if value_column not in valid_columns:
+        raise ValueError(
+            f"pivot_facets value_column must be one of {sorted(valid_columns)}"
+        )
+
+    value_columns = value_columns or {}
+    label_map = label_map or {}
+
+    select_columns = [table.run_id.label(run_id_label)]
+    for key in keys_list:
+        column_name = value_columns.get(key, value_column)
+        if column_name not in valid_columns:
+            raise ValueError(
+                f"pivot_facets value_columns[{key!r}] must be one of {sorted(valid_columns)}"
+            )
+        value_col = getattr(table, column_name)
+        label = label_map.get(key, f"{label_prefix}{key}")
+        select_columns.append(
+            func.max(case((table.key == key, value_col), else_=None)).label(label)
+        )
+
+    stmt = (
+        select(*select_columns).where(table.key.in_(keys_list)).group_by(table.run_id)
+    )
+    if namespace is not None:
+        stmt = stmt.where(table.namespace == namespace)
+
+    return stmt.subquery()
 
 
 @contextmanager

@@ -66,7 +66,7 @@ Key fields for workflow tracking:
 Consist separates configuration into:
 
 - **Identity config**: `Tracker.begin_run(..., config=...)` drives `Run.config_hash` and caching identity, but is not stored as a queryable blob in DuckDB.
-- **Facet (queryable config)**: `Tracker.begin_run(..., facet=...)` stores a minimal JSON snapshot (deduped) and optionally indexes flattened keys for filtering.
+- **Facet (queryable config)**: `Tracker.begin_run(..., facet=...)` stores a minimal JSON snapshot (deduped) and optionally indexes flattened keys for filtering. If the facet is derived from config values, use `facet_from=[...]` to extract keys directly from `config` and avoid duplication.
 - **Hash-only attachments**: `Tracker.begin_run(..., hash_inputs=[...])` folds file/directory digests into the run identity (via `__consist_hash_inputs__`) without storing the raw configs in DuckDB (useful for BEAM HOCON trees, ActivitySim config folders, etc.). Dotfiles are ignored by default for directory hashing.
 
 DuckDB tables used:

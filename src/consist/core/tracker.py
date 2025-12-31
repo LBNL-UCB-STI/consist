@@ -12,6 +12,7 @@ from typing import (
     Iterable,
     List,
     Literal,
+    Mapping,
     Optional,
     Tuple,
     Type,
@@ -156,6 +157,10 @@ class Tracker:
         # Keyed by (config_hash, input_hash, git_hash) to match cache lookup semantics.
         self._local_cache_index: Dict[Tuple[str, str, str], Run] = {}
         self._local_cache_max_entries: int = 1024
+        self._run_signature_cache: Dict[str, str] = {}
+        self._run_signature_cache_max_entries: int = 4096
+        self._run_artifacts_cache: Dict[str, RunArtifacts] = {}
+        self._run_artifacts_cache_max_entries: int = 1024
 
     @property
     def engine(self):
@@ -225,15 +230,43 @@ class Tracker:
         Internal helper to look up a run's signature (Merkle identity) via the database.
         Used by IdentityManager to stabilize input hashes against ephemeral Run IDs.
         """
+        cached = self._run_signature_cache.get(run_id)
+        if cached is not None:
+            return cached
+
         # 1. Check active run (unlikely for inputs, but good for completeness)
         if self.current_consist and self.current_consist.run.id == run_id:
-            return self.current_consist.run.signature
+            signature = self.current_consist.run.signature
+            if signature:
+                self._run_signature_cache[run_id] = signature
+            return signature
         # 2. Check Database
         if self.db:
             run = self.db.get_run(run_id)
             if run:
-                return run.signature
+                signature = run.signature
+                if signature:
+                    self._run_signature_cache[run_id] = signature
+                    if (
+                        len(self._run_signature_cache)
+                        > self._run_signature_cache_max_entries
+                    ):
+                        self._run_signature_cache.pop(
+                            next(iter(self._run_signature_cache))
+                        )
+                return signature
         return None
+
+    def _coerce_facet_mapping(self, obj: Any, label: str) -> Dict[str, Any]:
+        if obj is None:
+            raise ValueError(f"facet_from requires a {label} to extract from.")
+        if hasattr(obj, "model_dump"):
+            return obj.model_dump(mode="json")
+        if hasattr(obj, "dict") and hasattr(obj, "json"):
+            return obj.dict()
+        if isinstance(obj, Mapping):
+            return dict(obj)
+        raise ValueError(f"Tracker {label} must be a mapping or Pydantic model.")
 
     # --- Run Management ---
 
@@ -248,6 +281,7 @@ class Tracker:
         cache_mode: str = "reuse",
         *,
         facet: Optional[FacetLike] = None,
+        facet_from: Optional[List[str]] = None,
         hash_inputs: HashInputs = None,
         facet_schema_version: Optional[Union[str, int]] = None,
         facet_index: bool = True,
@@ -283,6 +317,9 @@ class Tracker:
         facet : Optional[FacetLike], optional
             Optional small, queryable configuration facet to persist alongside the run.
             This is distinct from `config` (which is hashed and stored in the JSON snapshot).
+        facet_from : Optional[List[str]], optional
+            List of config keys to extract into the facet. Extracted values are merged
+            with any explicit `facet`, with explicit keys taking precedence.
         hash_inputs : HashInputs, optional
             Extra inputs to include in the run identity hash without logging them as run
             inputs/outputs. Useful for config bundles or auxiliary files. Each entry is
@@ -334,6 +371,21 @@ class Tracker:
         raw_config_model: Optional[BaseModel] = (
             config if isinstance(config, BaseModel) else None
         )
+        if facet_from:
+            if isinstance(facet_from, str):
+                raise ValueError("facet_from must be a list of config keys.")
+            config_dict_for_facet = self._coerce_facet_mapping(config, "config")
+            missing = [key for key in facet_from if key not in config_dict_for_facet]
+            if missing:
+                raise KeyError(f"facet_from keys not found in config: {missing}")
+            derived = {key: config_dict_for_facet[key] for key in facet_from}
+            if facet is not None:
+                facet_dict = self._coerce_facet_mapping(facet, "facet")
+                merged = dict(derived)
+                merged.update(facet_dict)
+                facet = self.identity.normalize_json(merged)
+            else:
+                facet = self.identity.normalize_json(derived)
 
         # Extract explicit Run fields early so they can contribute to identity hashing.
         # These are identity-relevant parameters for most workflows (e.g., a different year
@@ -360,6 +412,8 @@ class Tracker:
                 )
             config_dict["__consist_hash_inputs__"] = digest_map
             kwargs["consist_hash_inputs"] = digest_map
+
+        config_dict = self.identity.normalize_json(config_dict)
 
         # Compute core identity hashes early
         # Important: keep the stored config snapshot as user-provided config, but include
@@ -519,7 +573,7 @@ class Tracker:
             - `tags`: Optional[List[str]]
             - `description`: Optional[str]
             - `cache_mode`: str ("reuse", "overwrite", "readonly")
-            - `facet`, `hash_inputs`, `facet_schema_version`, `facet_index`
+            - `facet`, `facet_from`, `hash_inputs`, `facet_schema_version`, `facet_index`
             - `year`, `iteration`
 
         Yields
@@ -576,7 +630,7 @@ class Tracker:
         model : str, default "scenario"
             The model name for the header run.
         **kwargs : Any
-            Additional metadata or arguments for the header run.
+            Additional metadata or arguments for the header run (including `facet_from`).
 
         Returns
         -------
@@ -981,6 +1035,75 @@ class Tracker:
         self._sync_artifact_to_db(artifact_obj, direction)
 
         return artifact_obj
+
+    def log_dataframe(
+        self,
+        df: pd.DataFrame,
+        key: str,
+        schema: Optional[Type[SQLModel]] = None,
+        direction: str = "output",
+        path: Optional[Union[str, Path]] = None,
+        driver: Optional[str] = None,
+        meta: Optional[Dict[str, Any]] = None,
+        **to_file_kwargs: Any,
+    ) -> Artifact:
+        """
+        Serialize a DataFrame, log it as an artifact, and trigger optional ingestion.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Data to persist.
+        key : str
+            Logical artifact key.
+        schema : Optional[Type[SQLModel]], optional
+            Schema used for ingestion, if provided.
+        direction : str, default "output"
+            Artifact direction relative to the run.
+        path : Optional[Union[str, Path]], optional
+            Output path; defaults to `<run_dir>/<key>.<driver>`.
+        driver : Optional[str], optional
+            File format driver (e.g., "parquet" or "csv").
+        meta : Optional[Dict[str, Any]], optional
+            Additional metadata for the artifact.
+        **to_file_kwargs : Any
+            Keyword arguments forwarded to ``pd.DataFrame.to_parquet`` or ``to_csv``.
+
+        Returns
+        -------
+        Artifact
+            The artifact logged for the written dataset.
+
+        Raises
+        ------
+        ValueError
+            If the requested driver is unsupported.
+        """
+        if path is None:
+            resolved_path = self.run_dir / f"{key}.{driver or 'parquet'}"
+        else:
+            resolved_path = Path(path)
+
+        inferred_driver = driver
+        if inferred_driver is None:
+            suffix = resolved_path.suffix.lower().lstrip(".")
+            inferred_driver = suffix or "parquet"
+
+        resolved_path.parent.mkdir(parents=True, exist_ok=True)
+        if inferred_driver == "parquet":
+            df.to_parquet(resolved_path, **to_file_kwargs)
+        elif inferred_driver == "csv":
+            df.to_csv(resolved_path, index=False, **to_file_kwargs)
+        else:
+            raise ValueError(f"Unsupported driver for log_dataframe: {inferred_driver}")
+
+        meta_payload = meta or {}
+        art = self.log_artifact(
+            resolved_path, key=key, direction=direction, schema=schema, **meta_payload
+        )
+        if schema is not None:
+            self.ingest(art, df, schema=schema)
+        return art
 
     def log_artifacts(
         self,
@@ -1467,6 +1590,43 @@ class Tracker:
 
         return None
 
+    def find_artifacts(
+        self,
+        *,
+        creator: Optional[Union[str, Run]] = None,
+        consumer: Optional[Union[str, Run]] = None,
+        key: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Artifact]:
+        """
+        Find artifacts by producing/consuming runs and key.
+
+        Parameters
+        ----------
+        creator : Optional[Union[str, Run]]
+            Run ID (or Run) that logged the artifact as an output.
+        consumer : Optional[Union[str, Run]]
+            Run ID (or Run) that logged the artifact as an input.
+        key : Optional[str]
+            Exact artifact key to match.
+        limit : int, default 100
+            Maximum number of artifacts to return.
+
+        Returns
+        -------
+        list
+            Matching artifact records (empty if DB is not configured).
+        """
+        if not self.db:
+            return []
+
+        creator_id = creator.id if isinstance(creator, Run) else creator
+        consumer_id = consumer.id if isinstance(consumer, Run) else consumer
+
+        return self.db.find_artifacts(
+            creator=creator_id, consumer=consumer_id, key=key, limit=limit
+        )
+
     # --- Config Facet Query Helpers ---
 
     def get_config_facet(self, facet_id: str):
@@ -1634,6 +1794,12 @@ class Tracker:
         if not self.db:
             return RunArtifacts()
 
+        current_run_id = self.current_consist.run.id if self.current_consist else None
+        if run_id != current_run_id:
+            cached = self._run_artifacts_cache.get(run_id)
+            if cached is not None:
+                return cached
+
         # Get raw list [(Artifact, "input"), (Artifact, "output")]
         raw_list = self.db.get_artifacts_for_run(run_id)
 
@@ -1646,7 +1812,12 @@ class Tracker:
             elif direction == "output":
                 outputs[artifact.key] = artifact
 
-        return RunArtifacts(inputs=inputs, outputs=outputs)
+        artifacts = RunArtifacts(inputs=inputs, outputs=outputs)
+        if run_id != current_run_id:
+            self._run_artifacts_cache[run_id] = artifacts
+            if len(self._run_artifacts_cache) > self._run_artifacts_cache_max_entries:
+                self._run_artifacts_cache.pop(next(iter(self._run_artifacts_cache)))
+        return artifacts
 
     def get_run_artifact(
         self,
@@ -1686,10 +1857,21 @@ class Tracker:
         return None
 
     def get_artifact_lineage(
-        self, artifact_key_or_id: Union[str, uuid.UUID]
+        self,
+        artifact_key_or_id: Union[str, uuid.UUID],
+        *,
+        max_depth: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Recursively builds a lineage tree for a given artifact.
+
+        Parameters
+        ----------
+        artifact_key_or_id : Union[str, uuid.UUID]
+            Artifact key or UUID.
+        max_depth : Optional[int], optional
+            Maximum depth to traverse (0 returns only the artifact). Useful for
+            large graphs or iterative workflows.
         """
         if not self.engine:
             return None
@@ -1698,32 +1880,56 @@ class Tracker:
         if not start_artifact:
             return None
 
-        def _trace(artifact: Artifact, visited_runs: set) -> Dict[str, Any]:
+        run_cache: Dict[str, Optional[Run]] = {}
+        run_artifacts_cache: Dict[str, RunArtifacts] = {}
+        lineage_cache: Dict[tuple[str, Optional[int]], Dict[str, Any]] = {}
+
+        def _trace(artifact: Artifact, visited_runs: set, depth: int) -> Dict[str, Any]:
             lineage_node: Dict[str, Any] = {"artifact": artifact, "producing_run": None}
+
+            if max_depth is not None and depth >= max_depth:
+                return lineage_node
+
+            cache_key = (
+                str(artifact.id),
+                None if max_depth is None else max_depth - depth,
+            )
+            cached = lineage_cache.get(cache_key)
+            if cached is not None:
+                return cached
 
             producing_run_id = artifact.run_id
             if not producing_run_id or producing_run_id in visited_runs:
                 return lineage_node
 
             visited_runs.add(producing_run_id)
-            producing_run = self.get_run(producing_run_id)
+            producing_run = run_cache.get(producing_run_id)
+            if producing_run is None and producing_run_id not in run_cache:
+                producing_run = self.get_run(producing_run_id)
+                run_cache[producing_run_id] = producing_run
             if not producing_run:
                 return lineage_node
 
             # Recursively find inputs
             # NEW: Returns RunArtifacts object
-            run_artifacts = self.get_artifacts_for_run(producing_run.id)
+            run_artifacts = run_artifacts_cache.get(producing_run.id)
+            if run_artifacts is None:
+                run_artifacts = self.get_artifacts_for_run(producing_run.id)
+                run_artifacts_cache[producing_run.id] = run_artifacts
 
             run_node: Dict[str, Any] = {"run": producing_run, "inputs": []}
 
             # NEW: Iterate over inputs dict
             for input_artifact in run_artifacts.inputs.values():
-                run_node["inputs"].append(_trace(input_artifact, visited_runs.copy()))
+                run_node["inputs"].append(
+                    _trace(input_artifact, visited_runs.copy(), depth + 1)
+                )
 
             lineage_node["producing_run"] = run_node
+            lineage_cache[cache_key] = lineage_node
             return lineage_node
 
-        return _trace(start_artifact, set())
+        return _trace(start_artifact, set(), 0)
 
         # --- Permission Helpers ---
 
@@ -2105,7 +2311,8 @@ class Tracker:
         if self.current_consist.run.meta is None:
             self.current_consist.run.meta = {}
 
-        self.current_consist.run.meta.update(kwargs)
+        normalized = self.identity.normalize_json(kwargs)
+        self.current_consist.run.meta.update(normalized)
 
         # 2. Persist
         self._flush_json()
