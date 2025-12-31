@@ -807,6 +807,7 @@ class DatabaseManager:
         self,
         tags: Optional[List[str]] = None,
         year: Optional[int] = None,
+        iteration: Optional[int] = None,
         model: Optional[str] = None,
         status: Optional[str] = None,
         parent_id: Optional[str] = None,
@@ -824,6 +825,8 @@ class DatabaseManager:
                     statement = statement.where(Run.model_name == model)
                 if year is not None:
                     statement = statement.where(Run.year == year)
+                if iteration is not None:
+                    statement = statement.where(Run.iteration == iteration)
                 if parent_id:
                     statement = statement.where(Run.parent_run_id == parent_id)
                 if name:

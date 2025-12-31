@@ -48,16 +48,18 @@ from consist.core.decorators import define_step as define_step_decorator
 from consist.core.events import EventManager
 from consist.core.fs import FileSystemManager
 from consist.core.identity import IdentityManager
-from consist.core.indexing import FacetIndex, IndexBySpec, RunFieldIndex
+from consist.core.indexing import IndexBySpec
 from consist.core.persistence import DatabaseManager, ProvenanceWriter
 from consist.core.views import ViewFactory, ViewRegistry
 from consist.core.ingestion import ingest_artifact
-from consist.core.lineage import build_lineage_tree
+from consist.core.lineage import LineageService
+from consist.core.materialize import materialize_artifacts
+from consist.core.matrix import MatrixViewFactory
+from consist.core.queries import RunQueryService
 from consist.core.workflow import OutputCapture, RunContext, ScenarioContext
 from consist.core.input_utils import coerce_input_map
 from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord, Run, RunArtifacts, RunResult
-from consist.models.run_config_kv import RunConfigKV
 from consist.types import ArtifactRef, FacetLike, HasFacetSchemaVersion, HashInputs
 
 UTC = timezone.utc
@@ -263,6 +265,8 @@ class Tracker:
         self.artifacts = ArtifactManager(self)
         self.config_facets = ConfigFacetManager(db=self.db, identity=self.identity)
         self.artifact_schemas = ArtifactSchemaManager(self)
+        self.queries = RunQueryService(self)
+        self.lineage = LineageService(self)
 
         self.views = ViewRegistry(self)
         if schemas:
@@ -1750,6 +1754,7 @@ class Tracker:
         self,
         tags: Optional[List[str]] = None,
         year: Optional[int] = None,
+        iteration: Optional[int] = None,
         model: Optional[str] = None,
         status: Optional[str] = None,
         parent_id: Optional[str] = None,
@@ -1767,6 +1772,8 @@ class Tracker:
             Filter runs that contain all provided tags.
         year : Optional[int], optional
             Filter by run year.
+        iteration : Optional[int], optional
+            Filter by run iteration.
         model : Optional[str], optional
             Filter by run model name.
         status : Optional[str], optional
@@ -1798,51 +1805,18 @@ class Tracker:
         TypeError
             If `index_by` is an unsupported type.
         """
-        runs = []
-        if self.db:
-            runs = self.db.find_runs(
-                tags, year, model, status, parent_id, metadata, limit, name
-            )
-
-        if index_by:
-            if isinstance(index_by, FacetIndex):
-                facet_key = index_by.key
-                if not self.db:
-                    return {}
-                values_by_run = self.db.get_facet_values_for_runs(
-                    [r.id for r in runs],
-                    key=facet_key,
-                    namespace=model,
-                )
-                return {values_by_run[r.id]: r for r in runs if r.id in values_by_run}
-
-            if isinstance(index_by, RunFieldIndex):
-                return {getattr(r, index_by.field): r for r in runs}
-
-            if isinstance(index_by, str) and (
-                index_by.startswith("facet.") or index_by.startswith("facet:")
-            ):
-                if not self.db:
-                    return {}
-                facet_key = (
-                    index_by.split(".", 1)[1]
-                    if index_by.startswith("facet.")
-                    else index_by.split(":", 1)[1]
-                )
-                values_by_run = self.db.get_facet_values_for_runs(
-                    [r.id for r in runs],
-                    key=facet_key,
-                    namespace=model,
-                )
-                # Only include runs that have this facet key present.
-                return {values_by_run[r.id]: r for r in runs if r.id in values_by_run}
-
-            # Create dictionary keyed by the requested attribute
-            if not isinstance(index_by, str):
-                raise TypeError(f"Unsupported index_by type: {type(index_by)}")
-            return {getattr(r, index_by): r for r in runs}
-
-        return runs
+        return self.queries.find_runs(
+            tags=tags,
+            year=year,
+            iteration=iteration,
+            model=model,
+            status=status,
+            parent_id=parent_id,
+            metadata=metadata,
+            limit=limit,
+            index_by=index_by,
+            name=name,
+        )
 
     def find_run(self, **kwargs) -> Run:
         """
@@ -1867,36 +1841,7 @@ class Tracker:
         ValueError
             If no runs match, or more than one run matches.
         """
-        # 1. Primary Key Lookup Optimization
-        # If the user asks for a specific ID, we skip the search query and use get_run.
-        # We accept 'id' or 'run_id' for ergonomics.
-        run_id = kwargs.pop("id", None) or kwargs.pop("run_id", None)
-
-        if run_id:
-            run = self.get_run(run_id)
-            if not run:
-                raise ValueError(f"No run found with ID: {run_id}")
-            # If other filters were passed (e.g. year=2020), strictly we should check them,
-            # but ID lookup usually implies absolute intent.
-            return run
-
-        # 2. Standard Search
-        # Enforce limit=2 to optimize checking for multiple results
-        kwargs["limit"] = 2
-
-        # Note: We popped 'id'/'run_id' above, so kwargs now only contains
-        # arguments valid for find_runs (assuming user didn't pass bad args).
-        results = self.find_runs(**kwargs)
-
-        if not results:
-            raise ValueError(f"No run found matching criteria: {kwargs}")
-
-        if len(results) > 1:
-            raise ValueError(
-                f"Multiple runs ({len(results)}+) found matching criteria: {kwargs}. Narrow your search."
-            )
-
-        return results[0]
+        return self.queries.find_run(**kwargs)
 
     def find_latest_run(
         self,
@@ -1916,7 +1861,7 @@ class Tracker:
         1) Highest `iteration` (when present)
         2) Newest `created_at` (fallback when no iteration is set)
         """
-        runs = self.find_runs(
+        return self.queries.find_latest_run(
             parent_id=parent_id,
             model=model,
             status=status,
@@ -1925,21 +1870,12 @@ class Tracker:
             metadata=metadata,
             limit=limit,
         )
-        if not runs:
-            raise ValueError("No runs found matching criteria for find_latest_run().")
-
-        def _latest_key(run: Run) -> tuple[int, Any, Any]:
-            if run.iteration is not None:
-                return (1, run.iteration, run.created_at)
-            return (0, run.created_at, run.id)
-
-        return max(runs, key=_latest_key)
 
     def get_latest_run_id(self, **kwargs) -> str:
         """
         Convenience wrapper to return the latest run ID for the given filters.
         """
-        return self.find_latest_run(**kwargs).id
+        return self.queries.get_latest_run_id(**kwargs)
 
     # --- Artifact Logging & Ingestion ---
 
@@ -2472,6 +2408,46 @@ class Tracker:
         factory = ViewFactory(self)
         return factory.create_hybrid_view(view_name, concept_key)
 
+    def load_matrix(
+        self,
+        concept_key: str,
+        variables: Optional[List[str]] = None,
+        *,
+        run_ids: Optional[List[str]] = None,
+        parent_id: Optional[str] = None,
+        model: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> Any:
+        """
+        Convenience wrapper for loading a matrix view from tracked artifacts.
+        """
+        factory = MatrixViewFactory(self)
+        return factory.load_matrix_view(
+            concept_key,
+            variables,
+            run_ids=run_ids,
+            parent_id=parent_id,
+            model=model,
+            status=status,
+        )
+
+    def materialize(
+        self,
+        artifact: Artifact,
+        destination_path: Union[str, Path],
+        *,
+        on_missing: Literal["warn", "raise"] = "warn",
+    ) -> Optional[str]:
+        """
+        Materialize a cached artifact onto the filesystem.
+        """
+        result = materialize_artifacts(
+            tracker=self,
+            items=[(artifact, Path(destination_path))],
+            on_missing=on_missing,
+        )
+        return result.get(artifact.key)
+
     # --- Retrieval Helpers ---
 
     def get_artifact(self, key_or_id: Union[str, uuid.UUID]) -> Optional[Artifact]:
@@ -2589,9 +2565,7 @@ class Tracker:
         Any
             The facet record if present, otherwise `None`.
         """
-        if not self.db:
-            return None
-        return self.db.get_config_facet(facet_id)
+        return self.queries.get_config_facet(facet_id)
 
     def get_config_facets(
         self,
@@ -2617,9 +2591,7 @@ class Tracker:
         list
             A list of facet records (empty if DB is not configured).
         """
-        if not self.db:
-            return []
-        return self.db.get_config_facets(
+        return self.queries.get_config_facets(
             namespace=namespace, schema_name=schema_name, limit=limit
         )
 
@@ -2652,33 +2624,9 @@ class Tracker:
         list
             A list of key/value rows (empty if DB is not configured).
         """
-        if not self.db:
-            return []
-        return self.db.get_run_config_kv(
+        return self.queries.get_run_config_kv(
             run_id, namespace=namespace, prefix=prefix, limit=limit
         )
-
-    def _resolve_config_namespace(
-        self, run_id: str, namespace: Optional[str]
-    ) -> Optional[str]:
-        if namespace is not None:
-            return namespace
-        run = self.get_run(run_id)
-        return run.model_name if run else None
-
-    @staticmethod
-    def _coerce_config_kv_value(row: RunConfigKV) -> Any:
-        if row.value_type == "json":
-            return row.value_json
-        if row.value_type == "str":
-            return row.value_str
-        if row.value_type == "int":
-            return int(row.value_num) if row.value_num is not None else None
-        if row.value_type == "float":
-            return float(row.value_num) if row.value_num is not None else None
-        if row.value_type == "bool":
-            return row.value_bool
-        return None
 
     def get_config_values(
         self,
@@ -2715,18 +2663,59 @@ class Tracker:
         Keys are stored as flattened dotted paths. If an original key contains a
         literal dot, it is escaped as ``"\\."`` in the stored key.
         """
-        resolved_namespace = self._resolve_config_namespace(run_id, namespace)
-        rows = self.get_run_config_kv(
-            run_id, namespace=resolved_namespace, prefix=prefix, limit=limit
+        return self.queries.get_config_values(
+            run_id,
+            namespace=namespace,
+            prefix=prefix,
+            keys=keys,
+            limit=limit,
         )
-        if not rows:
-            return {}
 
-        if keys is not None:
-            key_set = set(keys)
-            rows = [row for row in rows if row.key in key_set]
+    def diff_runs(
+        self,
+        run_id_a: str,
+        run_id_b: str,
+        *,
+        namespace: Optional[str] = None,
+        prefix: Optional[str] = None,
+        keys: Optional[Iterable[str]] = None,
+        limit: int = 10_000,
+        include_equal: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Compare flattened config facets between two runs.
 
-        return {row.key: self._coerce_config_kv_value(row) for row in rows}
+        Parameters
+        ----------
+        run_id_a : str
+            Baseline run identifier.
+        run_id_b : str
+            Comparison run identifier.
+        namespace : Optional[str], optional
+            Namespace for facets. Defaults to each run's model name.
+        prefix : Optional[str], optional
+            Filter keys by prefix (e.g. ``"inputs."``).
+        keys : Optional[Iterable[str]], optional
+            Only include specific keys when provided.
+        limit : int, default 10_000
+            Maximum number of entries to inspect per run.
+        include_equal : bool, default False
+            If True, include keys whose values are unchanged.
+
+        Returns
+        -------
+        dict
+            A dict with `namespace` metadata and `changes` mapping keys to values.
+        """
+        return self.queries.diff_runs(
+            run_id_a,
+            run_id_b,
+            namespace=namespace,
+            prefix=prefix,
+            keys=keys,
+            limit=limit,
+            include_equal=include_equal,
+        )
 
     def get_config_value(
         self,
@@ -2755,14 +2744,9 @@ class Tracker:
         Any
             The typed value for the key, or ``default`` if missing.
         """
-        resolved_namespace = self._resolve_config_namespace(run_id, namespace)
-        rows = self.get_run_config_kv(
-            run_id, namespace=resolved_namespace, prefix=key, limit=10_000
+        return self.queries.get_config_value(
+            run_id, key, namespace=namespace, default=default
         )
-        for row in rows:
-            if row.key == key:
-                return self._coerce_config_kv_value(row)
-        return default
 
     def find_runs_by_facet_kv(
         self,
@@ -2800,9 +2784,7 @@ class Tracker:
         list
             Matching run records (empty if DB is not configured).
         """
-        if not self.db:
-            return []
-        return self.db.find_runs_by_facet_kv(
+        return self.queries.find_runs_by_facet_kv(
             namespace=namespace,
             key=key,
             value_type=value_type,
@@ -2873,6 +2855,18 @@ class Tracker:
                 self._run_artifacts_cache.pop(next(iter(self._run_artifacts_cache)))
         return artifacts
 
+    def get_run_outputs(self, run_id: str) -> Dict[str, Artifact]:
+        """
+        Return output artifacts for a run, keyed by artifact key.
+        """
+        return self.get_artifacts_for_run(run_id).outputs
+
+    def get_run_inputs(self, run_id: str) -> Dict[str, Artifact]:
+        """
+        Return input artifacts for a run, keyed by artifact key.
+        """
+        return self.get_artifacts_for_run(run_id).inputs
+
     def get_run_artifact(
         self,
         run_id: str,
@@ -2898,6 +2892,26 @@ class Tracker:
                 if key_contains in k:
                     return art
         return next(iter(collection.values()), None)
+
+    def load_run_output(self, run_id: str, key: str, **kwargs: Any) -> Any:
+        """
+        Load a specific output artifact from a run by key.
+
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+        key : str
+            Output artifact key to load.
+        **kwargs : Any
+            Forwarded to `Tracker.load(...)`.
+        """
+        artifact = self.get_run_artifact(run_id, key=key, direction="output")
+        if artifact is None:
+            raise ValueError(
+                f"No output artifact found for run_id={run_id!r} key={key!r}."
+            )
+        return self.load(artifact, **kwargs)
 
     def find_matching_run(
         self, config_hash: str, input_hash: str, git_hash: str
@@ -2927,8 +2941,21 @@ class Tracker:
             Maximum depth to traverse (0 returns only the artifact). Useful for
             large graphs or iterative workflows.
         """
-        return build_lineage_tree(
-            tracker=self,
+        return self.lineage.get_lineage(
+            artifact_key_or_id=artifact_key_or_id,
+            max_depth=max_depth,
+        )
+
+    def print_lineage(
+        self,
+        artifact_key_or_id: Union[str, uuid.UUID],
+        *,
+        max_depth: Optional[int] = None,
+    ) -> str:
+        """
+        Return and print a formatted lineage tree for an artifact.
+        """
+        return self.lineage.print_lineage(
             artifact_key_or_id=artifact_key_or_id,
             max_depth=max_depth,
         )

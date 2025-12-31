@@ -267,11 +267,8 @@ def test_pilates_header_pattern(tmp_path: Path):
     assert res_map[("high_gas", 2030)] < res_map[("baseline", 2030)]
 
     # Verify artifact metadata inherited step year/tags
-    art_2020 = tracker.get_run_artifact(
-        tracker.find_run(parent_id="baseline", year=2020, model="generate_trips").id,
-        key_contains="persons",
-        direction="output",
-    )
+    run_2020 = tracker.find_run(parent_id="baseline", year=2020, model="generate_trips")
+    art_2020 = tracker.get_run_outputs(run_2020.id).get("persons")
     assert art_2020 is not None
     assert art_2020.meta.get("year") == 2020
     assert "simulation" in (art_2020.meta.get("tags") or [])
@@ -318,12 +315,7 @@ def test_pilates_header_pattern(tmp_path: Path):
     assert runs_by_year[2030].id == target_run.id
 
     # Q4: Snapshot Retrieval
-    person_art = tracker.get_run_artifact(
-        target_run.id, key_contains="persons", direction="output"
-    )
-    assert person_art is not None
-
-    df = consist.load(person_art, tracker=tracker)
+    df = tracker.load_run_output(target_run.id, "persons")
     assert len(df) == 300
 
 
@@ -390,11 +382,7 @@ def test_pilates_header_pattern_api(tmp_path: Path):
     )
     assert runs_by_year[2035].id == target_run.id
 
-    person_art = tracker.get_run_artifact(
-        target_run.id, key_contains="persons", direction="output"
-    )
-    assert person_art is not None
-    df = consist.load(person_art, tracker=tracker)
+    df = tracker.load_run_output(target_run.id, "persons")
     assert len(df) == n_per
 
 

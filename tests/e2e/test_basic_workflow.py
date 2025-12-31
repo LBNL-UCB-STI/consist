@@ -167,6 +167,10 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     keys = {a.key for a in artifacts}
     assert {"raw_table", "features"} <= keys
     assert raw_artifact is not None
+    outputs = tracker.get_run_outputs(transform_run_id)
+    assert "features" in outputs
+    loaded_features = tracker.load_run_output(transform_run_id, "features")
+    assert "value_doubled" in loaded_features.columns
 
     # Ensure parent linkage captured by scenario header
     child_parents = {r.id: r.parent_run_id for r in runs if r.id != scenario_id}

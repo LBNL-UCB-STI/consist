@@ -1,5 +1,5 @@
 import uuid
-from typing import Dict, Any, TYPE_CHECKING, Set, Optional, Union
+from typing import Dict, Any, Iterable, TYPE_CHECKING, Set, Optional, Union
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
@@ -88,3 +88,104 @@ def build_lineage_tree(
         return lineage_node
 
     return _trace(start_artifact, set(), 0)
+
+
+def format_lineage_tree(
+    lineage: Optional[Dict[str, Any]],
+    *,
+    indent: int = 2,
+) -> str:
+    """
+    Format a lineage tree into a human-readable string.
+
+    Parameters
+    ----------
+    lineage : Optional[Dict[str, Any]]
+        Lineage tree from `build_lineage_tree`.
+    indent : int, default 2
+        Spaces per nesting level.
+
+    Returns
+    -------
+    str
+        A formatted lineage string (empty if lineage is None).
+    """
+    if lineage is None:
+        return ""
+
+    def _artifact_label(artifact: "Artifact") -> str:
+        key = getattr(artifact, "key", None)
+        driver = getattr(artifact, "driver", None)
+        if key and driver:
+            return f"{key} ({driver})"
+        if key:
+            return key
+        return str(getattr(artifact, "id", "artifact"))
+
+    def _run_label(run: "Run") -> str:
+        model = getattr(run, "model_name", None)
+        run_id = getattr(run, "id", None)
+        if model and run_id:
+            return f"{model} [{run_id}]"
+        return str(run_id or model or "run")
+
+    lines: list[str] = []
+
+    def _walk(node: Dict[str, Any], depth: int) -> None:
+        artifact = node.get("artifact")
+        prefix = " " * (indent * depth)
+        if artifact is not None:
+            lines.append(f"{prefix}- artifact: {_artifact_label(artifact)}")
+        producing_run = node.get("producing_run")
+        if not producing_run:
+            return
+        run = producing_run.get("run")
+        if run is not None:
+            lines.append(f"{prefix}{' ' * indent}- run: {_run_label(run)}")
+        inputs = producing_run.get("inputs") or []
+        for input_node in _coerce_inputs(inputs):
+            _walk(input_node, depth + 2)
+
+    def _coerce_inputs(items: Iterable[Any]) -> Iterable[Dict[str, Any]]:
+        for item in items:
+            if isinstance(item, dict):
+                yield item
+
+    _walk(lineage, 0)
+    return "\n".join(lines)
+
+
+class LineageService:
+    """
+    Helper for lineage tree retrieval and formatting.
+    """
+
+    def __init__(self, tracker: "Tracker") -> None:
+        self._tracker = tracker
+
+    def get_lineage(
+        self,
+        artifact_key_or_id: Union[str, uuid.UUID],
+        *,
+        max_depth: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        return build_lineage_tree(
+            tracker=self._tracker,
+            artifact_key_or_id=artifact_key_or_id,
+            max_depth=max_depth,
+        )
+
+    def format_lineage(self, lineage: Optional[Dict[str, Any]]) -> str:
+        return format_lineage_tree(lineage)
+
+    def print_lineage(
+        self,
+        artifact_key_or_id: Union[str, uuid.UUID],
+        *,
+        max_depth: Optional[int] = None,
+    ) -> str:
+        lineage = self.get_lineage(artifact_key_or_id, max_depth=max_depth)
+        formatted = format_lineage_tree(lineage)
+        if formatted:
+            print(formatted)
+        return formatted
