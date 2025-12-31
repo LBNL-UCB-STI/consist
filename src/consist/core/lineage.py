@@ -175,9 +175,7 @@ def print_lineage(
     """
     Print a lineage tree with Rich formatting.
     """
-    lineage = build_lineage_tree(
-        tracker, artifact_key_or_id, max_depth=max_depth
-    )
+    lineage = build_lineage_tree(tracker, artifact_key_or_id, max_depth=max_depth)
     if not lineage:
         if _RICH_AVAILABLE:
             rprint("[dim]No lineage available[/dim]")

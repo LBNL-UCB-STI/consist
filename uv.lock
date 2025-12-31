@@ -555,6 +555,7 @@ docs = [
 ]
 examples = [
     { name = "ipykernel" },
+    { name = "ipywidgets" },
     { name = "jupyterlab" },
     { name = "matplotlib" },
     { name = "seaborn" },
@@ -637,6 +638,7 @@ requires-dist = [
     { name = "ipykernel", specifier = ">=7.1.0" },
     { name = "ipykernel", marker = "extra == 'examples'", specifier = ">=6.29.0" },
     { name = "ipywidgets", specifier = ">=8.1.8" },
+    { name = "ipywidgets", marker = "extra == 'examples'", specifier = ">=8.1.8" },
     { name = "jupyterlab", marker = "extra == 'examples'", specifier = ">=4.0.0" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "matplotlib", marker = "extra == 'examples'", specifier = ">=3.8.0" },

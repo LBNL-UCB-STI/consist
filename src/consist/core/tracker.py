@@ -3002,13 +3002,15 @@ class Tracker:
         artifact_key_or_id: Union[str, uuid.UUID],
         *,
         max_depth: Optional[int] = None,
-    ) -> str:
+        show_run_ids: bool = False,
+    ) -> None:
         """
-        Return and print a formatted lineage tree for an artifact.
+        Print a formatted lineage tree for an artifact.
         """
-        return self.lineage.print_lineage(
+        self.lineage.print_lineage(
             artifact_key_or_id=artifact_key_or_id,
             max_depth=max_depth,
+            show_run_ids=show_run_ids,
         )
 
         # --- Permission Helpers ---

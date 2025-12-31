@@ -335,9 +335,9 @@ class DatabaseManager:
                 for run_id, facet_id, namespace in combos:
                     session.exec(
                         delete(RunConfigKV).where(
-                            RunConfigKV.run_id == run_id,
-                            RunConfigKV.facet_id == facet_id,
-                            RunConfigKV.namespace == namespace,
+                            col(RunConfigKV.run_id) == run_id,
+                            col(RunConfigKV.facet_id) == facet_id,
+                            col(RunConfigKV.namespace) == namespace,
                         )
                     )
                 session.add_all(rows)
