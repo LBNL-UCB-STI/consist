@@ -96,6 +96,32 @@ def test_run_output_helpers(tracker: Tracker, run_dir):
     assert loaded.shape[0] == 1
 
 
+def test_run_config_snapshot_access(tracker: Tracker):
+    """
+    Verifies run config snapshot access via Tracker helpers.
+    """
+    tracker.begin_run(
+        "config_run",
+        "model_config",
+        config={"alpha": 1, "beta": {"nested": True}},
+    )
+    tracker.end_run()
+
+    record = tracker.get_run_record("config_run")
+    assert record is not None
+    assert record.run.id == "config_run"
+    assert record.config["alpha"] == 1
+    assert record.config["beta"]["nested"] is True
+
+    config = tracker.get_run_config("config_run")
+    assert config is not None
+    assert config["alpha"] == 1
+
+    assert tracker.get_run_config("missing_run", allow_missing=True) is None
+    with pytest.raises(FileNotFoundError):
+        tracker.get_run_record("missing_run")
+
+
 def test_find_runs_iteration(tracker: Tracker):
     """
     Verifies iteration filtering in find_runs/find_run.

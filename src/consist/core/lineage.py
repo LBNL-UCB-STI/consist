@@ -1,6 +1,16 @@
 import uuid
 from typing import Dict, Any, Iterable, TYPE_CHECKING, Set, Optional, Union
 
+try:
+    from rich.tree import Tree
+    from rich import print as rprint
+
+    _RICH_AVAILABLE = True
+except ImportError:  # pragma: no cover - rich is optional at runtime
+    Tree = None  # type: ignore[assignment]
+    rprint = None  # type: ignore[assignment]
+    _RICH_AVAILABLE = False
+
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
     from consist.models.artifact import Artifact
@@ -155,6 +165,75 @@ def format_lineage_tree(
     return "\n".join(lines)
 
 
+def print_lineage(
+    tracker: "Tracker",
+    artifact_key_or_id: Union[str, uuid.UUID],
+    *,
+    max_depth: Optional[int] = None,
+    show_run_ids: bool = False,
+) -> None:
+    """
+    Print a lineage tree with Rich formatting.
+    """
+    lineage = build_lineage_tree(
+        tracker, artifact_key_or_id, max_depth=max_depth
+    )
+    if not lineage:
+        if _RICH_AVAILABLE:
+            rprint("[dim]No lineage available[/dim]")
+        else:
+            print("No lineage available")
+        return
+
+    if not _RICH_AVAILABLE:
+        formatted = format_lineage_tree(lineage)
+        if formatted:
+            print(formatted)
+        return
+
+    def _add_node(parent: "Tree", node: Dict[str, Any]) -> None:
+        artifact = node.get("artifact")
+        if artifact is None:
+            return
+
+        key = getattr(artifact, "key", "?")
+        driver = getattr(artifact, "driver", None)
+        art_label = f"[bold cyan]{key}[/bold cyan]"
+        if driver:
+            art_label += f" [dim]({driver})[/dim]"
+
+        art_branch = parent.add(art_label)
+
+        producing_run = node.get("producing_run")
+        if not producing_run:
+            return
+
+        run = producing_run.get("run")
+        if run is None:
+            return
+
+        model = getattr(run, "model_name", "?")
+        iteration = getattr(run, "iteration", None)
+        run_label = f"[dim]\u2190[/dim] [yellow]{model}[/yellow]"
+        if iteration is not None:
+            run_label += f" [dim](iter {iteration})[/dim]"
+        if show_run_ids:
+            run_id = getattr(run, "id", None)
+            if run_id:
+                short_id = run_id[:40] + "..." if len(run_id) > 40 else run_id
+                run_label += f" [dim]{short_id}[/dim]"
+
+        run_branch = art_branch.add(run_label)
+
+        for input_node in producing_run.get("inputs", []):
+            if isinstance(input_node, dict):
+                _add_node(run_branch, input_node)
+
+    tree = Tree("[bold]Lineage[/bold]")
+    _add_node(tree, lineage)
+    rprint(tree)
+
+
 class LineageService:
     """
     Helper for lineage tree retrieval and formatting.
@@ -175,17 +254,16 @@ class LineageService:
             max_depth=max_depth,
         )
 
-    def format_lineage(self, lineage: Optional[Dict[str, Any]]) -> str:
-        return format_lineage_tree(lineage)
-
     def print_lineage(
         self,
         artifact_key_or_id: Union[str, uuid.UUID],
         *,
         max_depth: Optional[int] = None,
-    ) -> str:
-        lineage = self.get_lineage(artifact_key_or_id, max_depth=max_depth)
-        formatted = format_lineage_tree(lineage)
-        if formatted:
-            print(formatted)
-        return formatted
+        show_run_ids: bool = False,
+    ) -> None:
+        print_lineage(
+            self._tracker,
+            artifact_key_or_id,
+            max_depth=max_depth,
+            show_run_ids=show_run_ids,
+        )

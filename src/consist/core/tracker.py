@@ -378,6 +378,21 @@ class Tracker:
 
         return base_dir / subdir_path
 
+    @staticmethod
+    def _safe_run_id(run_id: str) -> str:
+        return "".join(
+            c if (c.isalnum() or c in ("-", "_", ".")) else "_" for c in run_id
+        )
+
+    def _resolve_run_snapshot_path(self, run_id: str, run: Optional[Run]) -> Path:
+        run_dir = self.fs.run_dir
+        if run and run.meta:
+            physical_run_dir = run.meta.get("_physical_run_dir")
+            if physical_run_dir:
+                run_dir = Path(physical_run_dir)
+        safe_run_id = self._safe_run_id(run_id)
+        return run_dir / "consist_runs" / f"{safe_run_id}.json"
+
     def export_schema_sqlmodel(
         self,
         *,
@@ -2820,6 +2835,42 @@ class Tracker:
         if self.db:
             return self.db.get_run(run_id)
         return None
+
+    def get_run_record(
+        self, run_id: str, *, allow_missing: bool = False
+    ) -> Optional[ConsistRecord]:
+        """
+        Load the full run record snapshot from disk.
+        """
+        run = self.get_run(run_id) if self.db else None
+        snapshot_path = self._resolve_run_snapshot_path(run_id, run)
+        if not snapshot_path.exists():
+            if allow_missing:
+                return None
+            raise FileNotFoundError(
+                f"Run snapshot not found at {snapshot_path!s} for run_id={run_id}."
+            )
+        try:
+            return ConsistRecord.model_validate_json(
+                snapshot_path.read_text(encoding="utf-8")
+            )
+        except Exception as exc:
+            if allow_missing:
+                return None
+            raise ValueError(
+                f"Failed to parse run snapshot at {snapshot_path!s} for run_id={run_id}."
+            ) from exc
+
+    def get_run_config(
+        self, run_id: str, *, allow_missing: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Load the full config snapshot for a historical run.
+        """
+        record = self.get_run_record(run_id, allow_missing=allow_missing)
+        if record is None:
+            return None
+        return record.config
 
     def get_artifacts_for_run(self, run_id: str) -> RunArtifacts:
         """

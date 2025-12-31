@@ -189,6 +189,13 @@ class DatabaseManager:
                     "FOREIGN KEY (parent_run_id) REFERENCES run(id) NOT ENFORCED"
                 )
         except Exception as e:
+            msg = str(e)
+            if "Not implemented" in msg and "ALTER TABLE" in msg:
+                logging.debug(
+                    "DuckDB does not yet support ALTER TABLE for FK relaxation: %s",
+                    msg,
+                )
+                return
             logging.warning(f"Failed to relax run.parent_run_id FK: {e}")
 
     def execute_with_retry(
@@ -319,6 +326,20 @@ class DatabaseManager:
 
         def _insert():
             with Session(self.engine) as session:
+                # Ensure idempotency for repeated runs with identical run_id/facet_id/namespace.
+                combos = {
+                    (row.run_id, row.facet_id, row.namespace)
+                    for row in rows
+                    if row.run_id and row.facet_id and row.namespace
+                }
+                for run_id, facet_id, namespace in combos:
+                    session.exec(
+                        delete(RunConfigKV).where(
+                            RunConfigKV.run_id == run_id,
+                            RunConfigKV.facet_id == facet_id,
+                            RunConfigKV.namespace == namespace,
+                        )
+                    )
                 session.add_all(rows)
                 session.commit()
 

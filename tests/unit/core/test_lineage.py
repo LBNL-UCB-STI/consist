@@ -83,7 +83,7 @@ def test_format_lineage_tree():
     assert "data_v1" in formatted
 
 
-def test_lineage_service_prints(monkeypatch, capsys):
+def test_lineage_service_prints(monkeypatch):
     """
     Verify LineageService.print_lineage formats and prints output.
     """
@@ -98,12 +98,17 @@ def test_lineage_service_prints(monkeypatch, capsys):
         "consist.core.lineage.build_lineage_tree", fake_build_lineage_tree
     )
 
+    printed = []
+
+    def fake_rprint(obj):
+        printed.append(obj)
+
+    monkeypatch.setattr("consist.core.lineage.rprint", fake_rprint)
+
     class DummyTracker:
         pass
 
     service = LineageService(DummyTracker())
-    formatted = service.print_lineage("data_v1")
+    service.print_lineage("data_v1")
 
-    captured = capsys.readouterr()
-    assert formatted
-    assert formatted == captured.out.strip()
+    assert printed

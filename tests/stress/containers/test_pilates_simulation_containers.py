@@ -591,8 +591,8 @@ def test_pilates_cache_replay_with_ingested_outputs(tmp_path):
     assert cache_flag in (True, False)
 
     # Outputs should be linked and readable
-    arts = tracker2.get_artifacts_for_run(replay_run.id).outputs
-    persons_art = arts.get("persons") or next(iter(arts.values()))
+    outputs = tracker2.get_run_outputs(replay_run.id)
+    persons_art = outputs.get("persons") or next(iter(outputs.values()))
     df = consist.load(persons_art, tracker=tracker2)
     assert len(df) == 300
 
