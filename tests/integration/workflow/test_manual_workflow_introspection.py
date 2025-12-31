@@ -44,18 +44,30 @@ def test_complex_manual_workflow(tracker: Tracker, run_dir: Path):
 
 
 def test_tracker_introspection_and_history(tracker: Tracker, run_dir: Path):
-    @tracker.task()
-    def task_a():
-        return Path(run_dir / "a").write_text("a") and Path(run_dir / "a")
+    def task_a(ctx) -> None:
+        path = ctx.run_dir / "a"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("a")
 
-    @tracker.task()
-    def task_b():
-        return Path(run_dir / "b").write_text("b") and Path(run_dir / "b")
+    def task_b(ctx) -> None:
+        path = ctx.run_dir / "b"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("b")
 
-    task_a()
+    tracker.run(
+        fn=task_a,
+        name="task_a",
+        output_paths={"a": "a"},
+        inject_context="ctx",
+    )
     assert tracker.last_run.run.model_name == "task_a"
 
-    task_b()
+    tracker.run(
+        fn=task_b,
+        name="task_b",
+        output_paths={"b": "b"},
+        inject_context="ctx",
+    )
     assert tracker.last_run.run.model_name == "task_b"
 
     df = tracker.history()

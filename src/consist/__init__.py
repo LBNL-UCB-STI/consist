@@ -6,7 +6,7 @@ the Tracker for managing runs, logging artifacts, and ingesting data.
 """
 
 # Models
-from consist.models.run import Run
+from consist.models.run import Run, RunResult
 from consist.models.artifact import Artifact
 
 # Core
@@ -45,6 +45,7 @@ __all__ = [
     # Core objects
     "Tracker",
     "Run",
+    "RunResult",
     "Artifact",
     # Indexing helpers
     "FacetIndex",

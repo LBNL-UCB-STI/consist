@@ -24,7 +24,7 @@ def test_config_hashing_sensitivity():
     - `config1` is not equal to `config3` (change in environment invalidates hash).
     - `config1` is not equal to `config4` (change in image digest invalidates hash).
     """
-    base = dict(
+    base_def = ContainerDefinition(
         image="img:v1",
         image_digest="sha:123",
         command=["run"],
@@ -32,23 +32,19 @@ def test_config_hashing_sensitivity():
         backend="docker",
         extra_args={},
     )
-
-    config1 = ContainerDefinition(**base).to_hashable_config()
+    config1 = base_def.to_hashable_config()
 
     # Case 1: Change Command
-    base_cmd = base.copy()
-    base_cmd["command"] = ["run", "--fast"]
-    config2 = ContainerDefinition(**base_cmd).to_hashable_config()
+    base_cmd = base_def.model_copy(update={"command": ["run", "--fast"]})
+    config2 = base_cmd.to_hashable_config()
     assert config1 != config2
 
     # Case 2: Change Env
-    base_env = base.copy()
-    base_env["environment"] = {"A": "2"}
-    config3 = ContainerDefinition(**base_env).to_hashable_config()
+    base_env = base_def.model_copy(update={"environment": {"A": "2"}})
+    config3 = base_env.to_hashable_config()
     assert config1 != config3
 
     # Case 3: Change Image Digest (Simulate image update)
-    base_img = base.copy()
-    base_img["image_digest"] = "sha:456"
-    config4 = ContainerDefinition(**base_img).to_hashable_config()
+    base_img = base_def.model_copy(update={"image_digest": "sha:456"})
+    config4 = base_img.to_hashable_config()
     assert config1 != config4

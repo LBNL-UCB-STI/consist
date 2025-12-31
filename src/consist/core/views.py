@@ -108,7 +108,7 @@ def create_view_model(model: Type[T], name: Optional[str] = None) -> Type[T]:
     # Pass {"table": True} to the keyword args of class creation
     return types.new_class(
         f"Virtual{model.__name__}", (SQLModel,), {"table": True}, exec_body
-    )
+    )  # ty: ignore[invalid-return-type]
 
 
 class ViewRegistry:
@@ -126,7 +126,12 @@ class ViewRegistry:
         self._class_cache: Dict[str, Type[SQLModel]] = {}
 
     def register(self, model: Type[SQLModel], key: Optional[str] = None):
-        self._registry[model.__name__] = (model, key)
+        name = model.__name__
+        previous = self._registry.get(name)
+        self._registry[name] = (model, key)
+        # Invalidate the cached class only when the registration changes.
+        if previous != (model, key):
+            self._class_cache.pop(name, None)
 
     def __getattr__(self, name: str) -> Type[SQLModel]:
         # 1. Check if registered
@@ -138,6 +143,15 @@ class ViewRegistry:
             # Recreating the view ensures all files on disk are picked up.
             factory = ViewFactory(self._tracker)
 
+            cached = self._class_cache.get(name)
+            if cached is not None:
+                concept_key = key or getattr(
+                    model, "__tablename__", model.__name__.lower()
+                )
+                view_name = f"v_{concept_key}"
+                factory.create_hybrid_view(view_name, concept_key, schema_model=model)
+                return cached  # ty: ignore[invalid-return-type]
+
             # This calls create_hybrid_view inside
             # We don't need the return value (the python class) necessarily
             # if we have it cached, but the factory method does both.
@@ -145,7 +159,7 @@ class ViewRegistry:
 
             # 3. Update Cache & Return
             self._class_cache[name] = view_cls
-            return view_cls
+            return view_cls  # ty: ignore[invalid-return-type]
 
         raise AttributeError(f"'ViewRegistry' object has no attribute '{name}'")
 
@@ -196,7 +210,7 @@ class ViewFactory:
         # Pass schema_model to handle empty states
         self.create_hybrid_view(view_name, concept_key, schema_model=model)
 
-        return create_view_model(model, name=view_name)
+        return create_view_model(model, name=view_name)  # ty: ignore[invalid-return-type]
 
     def create_hybrid_view(
         self,
@@ -362,7 +376,7 @@ class ViewFactory:
             # Query Artifacts + Join Run to get Year/Iteration info
             statement = (
                 select(Artifact, Run)
-                .join(Run, Artifact.run_id == Run.id)
+                .join(Run, Artifact.run_id == Run.id)  # ty: ignore[invalid-argument-type]
                 .where(Artifact.key == concept_key)
                 .where(Artifact.driver.in_(drivers))
             )

@@ -31,7 +31,7 @@ class ArtifactSchema(SQLModel, table=True):
         default=1, description="Internal schema profile format."
     )
     summary_json: Dict[str, Any] = Field(
-        default={},
+        default_factory=dict,
         sa_column=Column(JSON, nullable=False),
         description="Small, always-present schema summary (safe to query/display).",
     )

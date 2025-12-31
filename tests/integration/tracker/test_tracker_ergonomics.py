@@ -78,6 +78,97 @@ def test_structured_artifact_access(tracker: Tracker, run_dir):
     assert "missing" not in artifacts.outputs
 
 
+def test_run_output_helpers(tracker: Tracker, run_dir):
+    """
+    Verifies run output helpers for ergonomic access and loading.
+    """
+    output_path = run_dir / "results.csv"
+    output_path.write_text("a,b\n1,2\n", encoding="utf-8")
+
+    with tracker.start_run("run_outputs", "model_outputs"):
+        tracker.log_artifact(output_path, key="results", direction="output")
+
+    outputs = tracker.get_run_outputs("run_outputs")
+    assert "results" in outputs
+
+    loaded = tracker.load_run_output("run_outputs", "results")
+    assert hasattr(loaded, "shape")
+    assert loaded.shape[0] == 1
+
+
+def test_run_config_snapshot_access(tracker: Tracker):
+    """
+    Verifies run config snapshot access via Tracker helpers.
+    """
+    tracker.begin_run(
+        "config_run",
+        "model_config",
+        config={"alpha": 1, "beta": {"nested": True}},
+    )
+    tracker.end_run()
+
+    record = tracker.get_run_record("config_run")
+    assert record is not None
+    assert record.run.id == "config_run"
+    assert record.config["alpha"] == 1
+    assert record.config["beta"]["nested"] is True
+
+    config = tracker.get_run_config("config_run")
+    assert config is not None
+    assert config["alpha"] == 1
+
+    assert tracker.get_run_config("missing_run", allow_missing=True) is None
+    with pytest.raises(FileNotFoundError):
+        tracker.get_run_record("missing_run")
+
+
+def test_find_runs_iteration(tracker: Tracker):
+    """
+    Verifies iteration filtering in find_runs/find_run.
+    """
+    tracker.begin_run("iter_1", "model_iter", iteration=1)
+    tracker.end_run()
+    tracker.begin_run("iter_2", "model_iter", iteration=2)
+    tracker.end_run()
+
+    runs = tracker.find_runs(model="model_iter", iteration=2)
+    assert len(runs) == 1
+    assert runs[0].id == "iter_2"
+
+    run = tracker.find_run(model="model_iter", iteration=1)
+    assert run.id == "iter_1"
+
+
+def test_diff_runs_facet(tracker: Tracker):
+    """
+    Verifies diff_runs output for facet diffs.
+    """
+    tracker.begin_run(
+        "diff_a",
+        "model_diff",
+        config={"alpha": 1, "beta": 2},
+        facet={"alpha": 1, "beta": 2},
+    )
+    tracker.end_run()
+
+    tracker.begin_run(
+        "diff_b",
+        "model_diff",
+        config={"alpha": 1, "beta": 3, "gamma": 4},
+        facet={"alpha": 1, "beta": 3, "gamma": 4},
+    )
+    tracker.end_run()
+
+    diff = tracker.diff_runs("diff_a", "diff_b")
+    changes = diff["changes"]
+    assert "alpha" not in changes
+    assert changes["beta"]["status"] == "changed"
+    assert changes["gamma"]["status"] == "added"
+
+    diff_with_equals = tracker.diff_runs("diff_a", "diff_b", include_equal=True)
+    assert diff_with_equals["changes"]["alpha"]["status"] == "same"
+
+
 def test_access_modes(tracker: Tracker, run_dir):
     """
     Verifies permissions for 'analysis' and 'read_only' modes.

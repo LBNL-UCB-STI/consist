@@ -1,5 +1,5 @@
 from unittest.mock import MagicMock
-from consist.core.lineage import build_lineage_tree
+from consist.core.lineage import build_lineage_tree, format_lineage_tree, LineageService
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifacts
 
@@ -67,3 +67,48 @@ def test_build_lineage_tree():
     # Art 1 Producer -> Run A
     producer_a = input_node["producing_run"]
     assert producer_a["run"] == run_a
+
+
+def test_format_lineage_tree():
+    """
+    Verify lineage formatting produces a readable string.
+    """
+    run = Run(id="run_x", model_name="model_x")
+    art = Artifact(id="a1", key="data_v1", run_id="run_x", driver="csv")
+    tree = {"artifact": art, "producing_run": {"run": run, "inputs": []}}
+
+    formatted = format_lineage_tree(tree)
+    assert "artifact" in formatted
+    assert "run" in formatted
+    assert "data_v1" in formatted
+
+
+def test_lineage_service_prints(monkeypatch):
+    """
+    Verify LineageService.print_lineage formats and prints output.
+    """
+    run = Run(id="run_x", model_name="model_x")
+    art = Artifact(id="a1", key="data_v1", run_id="run_x", driver="csv")
+    tree = {"artifact": art, "producing_run": {"run": run, "inputs": []}}
+
+    def fake_build_lineage_tree(*args, **kwargs):
+        return tree
+
+    monkeypatch.setattr(
+        "consist.core.lineage.build_lineage_tree", fake_build_lineage_tree
+    )
+
+    printed = []
+
+    def fake_rprint(obj):
+        printed.append(obj)
+
+    monkeypatch.setattr("consist.core.lineage.rprint", fake_rprint)
+
+    class DummyTracker:
+        pass
+
+    service = LineageService(DummyTracker())
+    service.print_lineage("data_v1")
+
+    assert printed

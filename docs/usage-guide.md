@@ -1,17 +1,28 @@
 # Usage Guide
 
-Consist provides two complementary patterns for tracking provenance: **tasks** for cacheable functions and **scenarios** for multi-step workflows. You can use either independently or combine them.
+Consist provides two complementary patterns for tracking provenance: `run()` for single steps and **scenarios** for multi-step workflows. You can use either independently or combine them.
 
 ---
 
-## Tasks
+## Common Patterns
 
-Tasks are decorated functions with automatic signature-based caching. Consist inspects the function's inputs to compute a cache key.
+- **Parameter sweeps**: See [Predator-Prey §3](../examples/01_parameter_sweep_monte_carlo.ipynb#3-running-the-sweep-with-provenance-tracking).
+- **Iterative/feedback loops**: See [Iterative Workflows §Baseline Run](../examples/02_iterative_workflows.ipynb#baseline-run-10-iterations).
+- **Schema export**: See [Predator-Prey §4](../examples/01_parameter_sweep_monte_carlo.ipynb#4-schema-export-from-data-to-typed-queries).
+- **Lineage queries**: See [Iterative Workflows §Querying Provenance](../examples/02_iterative_workflows.ipynb#querying-provenance).
+
+---
+
+## Runs
+
+Runs execute a callable with explicit inputs, config, and outputs, and return a `RunResult`.
+See: [Predator-Prey §1](../examples/01_parameter_sweep_monte_carlo.ipynb#1-single-simulation-preview).
 
 ```python
 from consist import Tracker
 from pydantic import BaseModel
 from pathlib import Path
+import pandas as pd
 
 class CleaningConfig(BaseModel):
     threshold: float = 0.5
@@ -22,93 +33,46 @@ tracker = Tracker(
     db_path="./provenance.duckdb",
 )
 
-@tracker.task()
-def clean_data(raw_file: Path, config: CleaningConfig) -> Path:
-    """Clean raw data according to config rules."""
-    # Prefer writing outputs under `tracker.run_dir` (or a mounted outputs:// root)
-    # so artifacts remain portable and easy to locate.
-    output_path = tracker.run_dir / "cleaned.parquet"
+@tracker.define_step(outputs=["cleaned"])
+def clean_data(raw_file: Path, config: CleaningConfig):
     df = pd.read_csv(raw_file)
-    # ... cleaning logic ...
-    df.to_parquet(output_path)
-    return output_path
-```
+    df = df[df["value"] >= config.threshold]
+    return {"cleaned": df}
 
-### Task Return Values
-
-Tasks return `Artifact` objects, not raw paths:
-
-```python
-result = clean_data(Path("raw.csv"), config)
-
-# Access the file path
-print(result.path)  # Path to the output file
-
-# Load the data directly
-import consist
-df = consist.load(result)
-```
-
-### Chaining Tasks
-
-Pass artifacts directly between tasks to build lineage chains:
-
-```python
-@tracker.task()
-def analyze_data(cleaned_file: Path, multiplier: float) -> Path:
-    output_path = tracker.run_dir / "analysis.parquet"
-    df = pd.read_parquet(cleaned_file)
-    df["scaled"] = df["value"] * multiplier
-    df.to_parquet(output_path)
-    return output_path
-
-# Chain: clean_data -> analyze_data
-cleaned = clean_data(Path("raw.csv"), config)
-analyzed = analyze_data(cleaned, multiplier=2.0)  # Pass artifact directly
-```
-
-### Cache Modes
-
-Control caching behavior per-task:
-
-```python
-# Default: reuse cached results when signature matches
-@tracker.task()
-def process(input_file: Path) -> Path: ...
-
-# Always re-execute, update the cache
-@tracker.task(cache_mode="overwrite")
-def process_fresh(input_file: Path) -> Path: ...
-
-# Use cache but don't persist new results (sandbox mode)
-@tracker.task(cache_mode="readonly")
-def process_whatif(input_file: Path) -> Path: ...
-```
-
-### Wrapping Legacy Code
-
-For code that reads configuration files and writes to directories:
-
-```python
-@tracker.task(
-    depends_on=["config.yaml", "parameters.json"],  # Include in signature
-    capture_dir="./outputs",                         # Watch for new files
-    capture_pattern="*.csv"
+result = tracker.run(
+    fn=clean_data,
+    inputs={"raw_file": Path("raw.csv")},
+    config=CleaningConfig(threshold=0.5),
+    load_inputs=True,
 )
-def run_legacy_model(upstream_artifact):
-    """Wrapper around legacy simulation."""
-    import legacy_model
-    legacy_model.run()  # Reads config files, writes to ./outputs
-    # Return None; Consist captures outputs automatically
+
+cleaned_artifact = result.outputs["cleaned"]
 ```
 
-The `depends_on` files are hashed into the signature. Any files matching `capture_pattern` created in `capture_dir` are registered as output artifacts.
+### Wrapping legacy code
+
+For legacy tools that write to directories, use the injected context helper:
+
+```python
+def run_legacy_model(upstream_artifact, ctx):
+    import legacy_model
+    legacy_model.run()
+    ctx.capture_outputs(Path("outputs"), pattern="*.csv")
+
+tracker.run(
+    fn=run_legacy_model,
+    inputs={"upstream_artifact": Path("input.csv")},
+    depends_on=["config.yaml", "parameters.json"],
+    inject_context="ctx",
+)
+```
 
 ---
 
 ## Scenarios
 
 Scenarios group related steps under a parent run, useful for multi-year simulations or variant comparisons.
+See: [Iterative Workflows §Baseline Run](../examples/02_iterative_workflows.ipynb#baseline-run-10-iterations).
 
 ```python
 import consist
@@ -117,13 +81,13 @@ from consist import Tracker
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
 with consist.scenario("baseline", tracker=tracker, model="travel_demand") as sc:
-    
-    with sc.step(name="initialize", run_id="baseline_init"):
+
+    with sc.trace(name="initialize", run_id="baseline_init"):
         df_pop = load_population()
         consist.log_dataframe(df_pop, key="population", schema=Population)
     
     for year in [2020, 2030, 2040]:
-        with sc.step(name="simulate", run_id=f"baseline_{year}", year=year):
+        with sc.trace(name="simulate", run_id=f"baseline_{year}", year=year):
             df_result = run_model(year)
             consist.log_dataframe(df_result, key="persons", schema=Person)
 ```
@@ -133,12 +97,17 @@ All steps share the same `scenario_id`, making cross-scenario queries straightfo
 ### Passing Data Between Steps
 
 Use the coupler to track artifacts flowing between steps:
+See: [Iterative Workflows §Baseline Run](../examples/02_iterative_workflows.ipynb#baseline-run-10-iterations).
 
 ```python
-with consist.scenario("baseline", tracker=tracker) as sc:
+with consist.scenario(
+    "baseline",
+    tracker=tracker,
+    step_cache_hydration="inputs-missing",
+) as sc:
     coupler = sc.coupler
     
-    with sc.step(name="preprocess"):
+    with sc.trace(name="preprocess"):
         df = preprocess_data()
         art = consist.log_dataframe(df, key="processed")
         coupler.set("data", art)
@@ -146,44 +115,67 @@ with consist.scenario("baseline", tracker=tracker) as sc:
     # Declare upstream artifacts as step inputs so caching and provenance are correct.
     # `input_keys=[...]` avoids repeating `coupler.require(...)` in `inputs=[...]`.
     # Use `optional_input_keys=[...]` to include artifacts only if they already exist.
-    with sc.step(name="simulate", input_keys=["data"]):
+    with sc.trace(name="simulate", input_keys=["data"]):
         df = consist.load(coupler.require("data"))
         # ... simulation logic ...
-```
 
-### Mixing Tasks and Scenarios
+## Query facets with `pivot_facets`
 
-Call cached tasks inside scenario steps:
+If you log small, queryable config facets on runs, you can pivot them into a wide table
+and join them to other run metadata for analysis.
+See: [Predator-Prey §5](../examples/01_predator_prey_end_to_end.ipynb#5-querying-across-runs-with-hybrid-views).
+For when to use `config` vs `facet`, see [Concepts](concepts.md#the-config-vs-facet-distinction).
 
 ```python
-@tracker.task()
-def expensive_preprocessing(network_file: Path) -> Path:
-    # Cached independently of scenarios
+from sqlmodel import select
+import consist
+
+params = consist.pivot_facets(
+    namespace="simulate",
+    keys=["alpha", "beta", "mode"],
+    value_columns={"mode": "value_str"},
+)
+
+rows = consist.run_query(
+    select(params.c.run_id, params.c.alpha, params.c.beta, params.c.mode),
+    tracker=tracker,
+)
+```
+```
+
+### Mixing Runs and Scenarios
+
+Call `tracker.run(...)` inside a scenario when a step should be cached independently:
+
+```python
+def expensive_preprocessing(network_file: Path):
     ...
+    return {"processed": processed_df}
 
 with consist.scenario("baseline", tracker=tracker) as sc:
-    with sc.step(name="preprocess"):
-        # Task cache is checked; won't re-run if inputs unchanged
-        processed = expensive_preprocessing(Path("network.geojson"))
-    
-    # If you want this step itself to be cacheable, declare the task output as an input.
-    with sc.step(name="simulate", inputs=[processed]):
-        run_simulation(processed)
+    preprocess = tracker.run(
+        fn=expensive_preprocessing,
+        inputs={"network_file": Path("network.geojson")},
+        outputs=["processed"],
+        load_inputs=True,
+    )
+    sc.coupler.update(preprocess.outputs)
 ```
 
 ### Function-Shaped Scenario Steps (Skip on Cache Hit)
 
-`sc.step(...)` is a context manager, so its Python block always executes even on cache hits.
+`sc.trace(...)` is a context manager, so its Python block always executes even on cache hits.
 If you want Consist to *skip* calling an expensive function/bound method on cache hits (while
-still hydrating cached outputs into the Coupler), use `sc.run_step(...)`:
+still hydrating cached outputs into the Coupler), use `sc.run(...)`:
 
 ```python
 with consist.scenario("baseline", tracker=tracker) as sc:
-    sc.run_step(
+    sc.run(
         name="beam_preprocess",
         fn=beamPreprocessor.run,  # imported function or bound method
-        input_keys=["data"],
+        inputs={"data": "data"},
         output_paths={"beam_inputs": "beam_inputs.parquet"},
+        load_inputs=False,
     )
     beam_inputs = sc.coupler.require("beam_inputs")
 ```
@@ -193,6 +185,7 @@ with consist.scenario("baseline", tracker=tracker) as sc:
 ## Querying Results
 
 ### Finding Runs
+See: [Iterative Workflows §Querying Provenance](../examples/02_iterative_workflows.ipynb#querying-provenance).
 
 ```python
 import consist
@@ -216,6 +209,7 @@ result_2030 = runs_by_year[2030]
 ```
 
 ### Loading Artifacts
+See: [Iterative Workflows §Querying Provenance](../examples/02_iterative_workflows.ipynb#querying-provenance).
 
 ```python
 # Get artifacts for a run
@@ -227,6 +221,7 @@ df = consist.load(persons_artifact)
 ```
 
 ### Cross-Run Queries with Views
+See: [Predator-Prey §5](../examples/01_parameter_sweep_monte_carlo.ipynb#5-querying-across-runs-with-hybrid-views).
 
 Register schemas to enable SQL queries across all runs:
 

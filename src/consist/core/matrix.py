@@ -17,16 +17,24 @@ Key functionalities include:
 from __future__ import annotations
 
 import logging
+from importlib import import_module
+from types import ModuleType
 from typing import TYPE_CHECKING, List, Optional
 
 import pandas as pd
+from sqlmodel import select
 
+from consist.models.artifact import Artifact
+from consist.models.run import Run
+
+xr: Optional[ModuleType]
 try:
-    import xarray as xr
+    xr = import_module("xarray")
 except ImportError:
     xr = None
 
 if TYPE_CHECKING:
+    from xarray import Dataset as XrDataset
     from consist.core.tracker import Tracker
 
 
@@ -59,8 +67,15 @@ class MatrixViewFactory:
         self.tracker = tracker
 
     def load_matrix_view(
-        self, concept_key: str, variables: Optional[List[str]] = None
-    ) -> "xr.Dataset":
+        self,
+        concept_key: str,
+        variables: Optional[List[str]] = None,
+        *,
+        run_ids: Optional[List[str]] = None,
+        parent_id: Optional[str] = None,
+        model: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> "XrDataset":
         """
         Returns a lazy xarray Dataset containing all runs that match the `concept_key`.
 
@@ -78,6 +93,14 @@ class MatrixViewFactory:
         variables : Optional[List[str]], optional
             A list of variable names to load from each Zarr store. If `None`,
             all variables from each store will be loaded.
+        run_ids : Optional[List[str]], optional
+            Optional list of run IDs to include in the view.
+        parent_id : Optional[str], optional
+            Optional scenario/parent run ID to filter by.
+        model : Optional[str], optional
+            Optional model name to filter by.
+        status : Optional[str], optional
+            Optional run status to filter by (e.g., "completed").
 
         Returns
         -------
@@ -100,13 +123,25 @@ class MatrixViewFactory:
             raise RuntimeError("Database connection required.")
 
         # 1. Query Metadata
-        query = f"""
-            SELECT a.uri, r.id as run_id, r.year, r.iteration 
-            FROM artifact a
-            JOIN run r ON a.run_id = r.id
-            WHERE a.key = '{concept_key}'
-            ORDER BY r.year, r.iteration
-        """
+        query = (
+            select(
+                Artifact.uri,
+                Run.id.label("run_id"),
+                Run.year,
+                Run.iteration,
+            )
+            .join(Run, Artifact.run_id == Run.id)
+            .where(Artifact.key == concept_key)
+            .order_by(Run.year, Run.iteration)
+        )
+        if run_ids:
+            query = query.where(Run.id.in_(run_ids))
+        if parent_id:
+            query = query.where(Run.parent_run_id == parent_id)
+        if model:
+            query = query.where(Run.model_name == model)
+        if status:
+            query = query.where(Run.status == status)
         df = pd.read_sql(query, self.tracker.engine)
         if df.empty:
             return xr.Dataset()

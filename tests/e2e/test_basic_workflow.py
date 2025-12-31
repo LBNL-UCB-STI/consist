@@ -11,16 +11,16 @@ from typer.testing import CliRunner
 
 import consist
 from consist.cli import app as cli_app
-from consist.core.context import get_active_tracker
 from consist.core.identity import IdentityManager
 from consist.core.tracker import Tracker
+from consist.core.workflow import RunContext
 from consist.models.artifact import Artifact
 from consist.models.artifact_schema import (
     ArtifactSchema,
     ArtifactSchemaField,
     ArtifactSchemaObservation,
 )
-from consist.models.run import Run
+from consist.models.run import Run, RunResult
 
 
 def _write_csv(path: Path, rows: int = 5) -> None:
@@ -44,10 +44,10 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
        under a single scenario identifier (useful for multi-step pipelines/simulations).
 
     2) **Step runs + artifact lineage**
-       Each `scenario.step(...)` creates a child run. Within a step:
+       Each `scenario.run(...)` creates a child run. Within a step:
        - write some data
-       - `t.log_dataframe(...)` to register outputs (and optionally inputs)
-       - use `scenario.coupler` to pass artifacts between steps
+       - `ctx.log_dataframe(...)` to register outputs (and optionally inputs)
+       - use `scenario.coupler` to pass artifacts between steps (auto-updated)
 
     3) **Dual-write provenance**
        Consist writes a human-inspectable JSON snapshot (`consist.json`) and (when
@@ -85,46 +85,51 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
         hash_inputs=[("scenario_config", scenario_cfg_path)],  # hash-only attachment(s)
         tags=["e2e", "scenario_header"],
     ) as scenario:
-        with scenario.step(
-            name="ingest",
-            run_id=ingest_run_id,
-            tags=["ingest"],
-            year=2024,
-            config={"step": "ingest", "rows_written": 6},
-            facet_from=["step", "rows_written"],
-        ) as t:
+
+        def ingest_step():
             df = pd.DataFrame({"value": range(6), "category": ["a"] * 6})
-            raw_art = t.log_dataframe(
+            consist.log_dataframe(
                 df,
                 key="raw_table",
                 driver="csv",
                 meta={"rows": 6},
             )
-            raw_artifact = raw_art
-            scenario.coupler.set("raw", raw_art)
 
-        with scenario.step(
-            name="transform",
-            run_id=transform_run_id,
-            tags=["transform"],
-            year=2025,
-            # Prefer `require()` in tests: it produces a clear error if a predecessor
-            # forgot to `coupler.set(...)`, and avoids Optional typing.
-            inputs=[scenario.coupler.require("raw")],
-            config={"step": "transform", "multiplier": 2},
-            facet_from=["step", "multiplier"],
-        ) as t:
-            raw_art = scenario.coupler.require("raw")
-            df_raw = pd.read_csv(raw_art.path)
+        ingest_result: RunResult = scenario.run(
+            name="ingest",
+            run_id=ingest_run_id,
+            fn=ingest_step,
+            tags=["ingest"],
+            year=2024,
+            config={"step": "ingest", "rows_written": 6},
+            facet_from=["step", "rows_written"],
+            outputs=["raw_table"],
+        )
+        raw_artifact = ingest_result.outputs["raw_table"]
+
+        def transform_step(raw_table: pd.DataFrame):
+            df_raw = raw_table
             df_raw["value_doubled"] = df_raw["value"] * 2
-            features_art = t.log_dataframe(
+            consist.log_dataframe(
                 df_raw,
                 key="features",
                 driver="csv",
                 meta={"rows": len(df_raw)},
             )
-            features_artifact = features_art
-            scenario.coupler.set("features", features_art)
+
+        transform_result: RunResult = scenario.run(
+            name="transform",
+            run_id=transform_run_id,
+            fn=transform_step,
+            tags=["transform"],
+            year=2025,
+            inputs={"raw_table": "raw_table"},
+            config={"step": "transform", "multiplier": 2},
+            facet_from=["step", "multiplier"],
+            outputs=["features"],
+            load_inputs=True,
+        )
+        features_artifact = transform_result.outputs["features"]
 
     # JSON snapshot
     json_file = tracker.run_dir / "consist.json"
@@ -162,6 +167,10 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     keys = {a.key for a in artifacts}
     assert {"raw_table", "features"} <= keys
     assert raw_artifact is not None
+    outputs = tracker.get_run_outputs(transform_run_id)
+    assert "features" in outputs
+    loaded_features = tracker.load_run_output(transform_run_id, "features")
+    assert "value_doubled" in loaded_features.columns
 
     # Ensure parent linkage captured by scenario header
     child_parents = {r.id: r.parent_run_id for r in runs if r.id != scenario_id}
@@ -286,22 +295,15 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
     model_path = run_dir / "model.json"
     report_path = run_dir / "report.json"
 
-    @tracker.task()
     def prepare_data(rows: int = 8) -> Path:
         execution_counts["prepare_data"] += 1
         _write_csv(prepared_path, rows=rows)
         return prepared_path
 
-    @tracker.task()
-    def train_model(prepared_file: Path) -> Path:
+    def train_model(_consist_ctx: RunContext) -> Path:
         execution_counts["train_model"] += 1
 
-        # Tasks receive resolved filesystem Paths, but Consist still tracks the original
-        # input artifacts on the active run record.
-        input_artifact = next(
-            a for a in tracker.current_consist.inputs if a.key == "prepared_data"
-        )
-        df = consist.load(input_artifact, tracker=tracker)
+        df = _consist_ctx.load("prepared_data")
 
         train_attempts["count"] += 1
         if train_attempts["count"] == 1:
@@ -313,15 +315,12 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
         model_path.write_text(json.dumps(model_payload))
         return model_path
 
-    @tracker.task()
-    def evaluate_model(model_file: Path, prepared_file: Path) -> Path:
+    def evaluate_model(_consist_ctx: RunContext) -> Path:
         execution_counts["evaluate_model"] += 1
 
-        model_payload = json.loads(Path(model_file).read_text())
-        input_artifact = next(
-            a for a in tracker.current_consist.inputs if a.key == "prepared_data"
-        )
-        df = consist.load(input_artifact, tracker=tracker)
+        model_artifact = _consist_ctx.inputs["model"]
+        model_payload = json.loads(Path(model_artifact.path).read_text())
+        df = _consist_ctx.load("prepared_data")
 
         report_path.write_text(
             json.dumps(
@@ -335,7 +334,13 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
         return report_path
 
     # --- First execution: predecessor completes, training fails ---
-    prepared_artifact = prepare_data(rows=8)
+    prepared_result: RunResult = tracker.run(
+        fn=prepare_data,
+        name="prepare_data",
+        outputs=["prepared_data"],
+        fn_args={"rows": 8},
+    )
+    prepared_artifact = prepared_result.outputs["prepared_data"]
     # Materialize the predecessor output into DuckDB so downstream steps can still
     # read it even if the underlying file disappears (ghost mode).
     tracker.ingest(prepared_artifact)
@@ -345,7 +350,14 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
     assert not prepared_artifact.path.exists()
 
     with pytest.raises(OSError) as exc_info:
-        train_model(prepared_artifact)
+        tracker.run(
+            fn=train_model,
+            name="train_model",
+            inputs={"prepared_data": prepared_artifact},
+            outputs=["model"],
+            load_inputs=False,
+            inject_context=True,
+        )
     assert "No space left on device" in str(exc_info.value)
 
     prepare_runs = consist.run_query(
@@ -367,11 +379,35 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
     assert len(eval_runs) == 0
 
     # --- Second execution: should reuse cached predecessor and succeed downstream ---
-    prepared_artifact_2 = prepare_data(rows=8)
+    prepared_result_2: RunResult = tracker.run(
+        fn=prepare_data,
+        name="prepare_data",
+        outputs=["prepared_data"],
+        fn_args={"rows": 8},
+    )
+    prepared_artifact_2 = prepared_result_2.outputs["prepared_data"]
     assert prepared_artifact_2.uri == prepared_artifact.uri
 
-    model_artifact = train_model(prepared_artifact_2)
-    report_artifact = evaluate_model(model_artifact, prepared_artifact_2)
+    model_result: RunResult = tracker.run(
+        fn=train_model,
+        name="train_model",
+        inputs={"prepared_data": prepared_artifact_2},
+        outputs=["model"],
+        load_inputs=False,
+        inject_context=True,
+    )
+    report_result: RunResult = tracker.run(
+        fn=evaluate_model,
+        name="evaluate_model",
+        inputs={
+            "model": model_result.outputs["model"],
+            "prepared_data": prepared_artifact_2,
+        },
+        outputs=["report"],
+        load_inputs=False,
+        inject_context=True,
+    )
+    report_artifact = report_result.outputs["report"]
 
     assert report_artifact.path.exists()
     assert execution_counts["prepare_data"] == 1, (
@@ -400,48 +436,50 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
     assert eval_runs[0].status == "completed"
 
 
-def test_scenario_run_step_skips_callable_on_cache_hit(tracker: Tracker):
+def test_scenario_run_skips_callable_on_cache_hit(tracker: Tracker):
     """
-    End-to-end demonstration of `ScenarioContext.run_step(...)`.
+    End-to-end demonstration of `ScenarioContext.run(...)` cache skipping.
 
-    Unlike `scenario.step(...)` (a context manager whose body always runs),
-    `scenario.run_step(...)` can *skip executing the callable* on cache hits,
-    while still hydrating cached outputs and populating the scenario Coupler.
+    `scenario.run(...)` can skip executing the callable on cache hits while still
+    hydrating cached outputs and populating the scenario Coupler.
     """
     tracker.identity.hashing_strategy = "fast"
 
     calls: list[str] = []
-    rel_out = Path("run_step_out.txt")
+    rel_out = Path("run_out.txt")
 
-    def expensive_step() -> None:
+    def expensive_step(_consist_ctx: RunContext) -> None:
         calls.append("called")
-        t = get_active_tracker()
-        (t.run_dir / rel_out).write_text(f"calls={len(calls)}\n")
+        out_path = _consist_ctx.run_dir / rel_out
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(f"calls={len(calls)}\n")
 
-    with tracker.scenario("run_step_demo_A") as sc:
-        outs = sc.run_step(
-            "produce",
-            expensive_step,
+    with tracker.scenario("run_demo_A") as sc:
+        result: RunResult = sc.run(
+            name="produce",
+            fn=expensive_step,
             config={"v": 1},
             output_paths={"out": rel_out},
+            inject_context=True,
         )
-        assert outs["out"].key == "out"
-        assert sc.coupler.require("out").id == outs["out"].id
+        assert result.outputs["out"].key == "out"
+        assert sc.coupler.require("out").id == result.outputs["out"].id
 
     assert calls == ["called"]
-    assert (tracker.run_dir / rel_out).read_text() == "calls=1\n"
+    assert result.outputs["out"].path.read_text() == "calls=1\n"
 
     # Repeat with the same signature (code/config/inputs). This should be a cache hit
     # and should NOT execute `expensive_step()` again.
-    with tracker.scenario("run_step_demo_B") as sc:
-        outs = sc.run_step(
-            "produce",
-            expensive_step,
+    with tracker.scenario("run_demo_B") as sc:
+        result: RunResult = sc.run(
+            name="produce",
+            fn=expensive_step,
             config={"v": 1},
             output_paths={"out": rel_out},
+            inject_context=True,
         )
-        assert outs["out"].key == "out"
-        assert sc.coupler.require("out").id == outs["out"].id
+        assert result.outputs["out"].key == "out"
+        assert sc.coupler.require("out").id == result.outputs["out"].id
 
     assert calls == ["called"]
-    assert (tracker.run_dir / rel_out).read_text() == "calls=1\n"
+    assert result.outputs["out"].path.read_text() == "calls=1\n"

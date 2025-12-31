@@ -1,15 +1,22 @@
+import inspect
+import itertools
+from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from importlib.util import find_spec
 import logging
+import os
+import time
 import uuid
 import weakref
+import warnings
 from pathlib import Path
 from typing import (
     Any,
     Callable,
     Dict,
+    Hashable,
     Iterable,
+    Iterator,
     List,
     Literal,
     Mapping,
@@ -28,28 +35,147 @@ from consist.core.artifacts import ArtifactManager
 from consist.core.cache import (
     ActiveRunCacheOptions,
     hydrate_cache_hit_outputs,
+    materialize_missing_inputs,
     parse_materialize_cached_outputs_kwargs,
+    validate_cached_run_outputs,
 )
 from consist.core.cache_output_logging import (
     maybe_return_cached_output_or_demote_cache_hit,
 )
 from consist.core.config_facets import ConfigFacetManager
 from consist.core.context import pop_tracker, push_tracker
-from consist.core.decorators import create_task_decorator
+from consist.core.decorators import define_step as define_step_decorator
 from consist.core.events import EventManager
 from consist.core.fs import FileSystemManager
 from consist.core.identity import IdentityManager
-from consist.core.indexing import FacetIndex, IndexBySpec, RunFieldIndex
-from consist.core.persistence import DatabaseManager
+from consist.core.indexing import IndexBySpec
+from consist.core.persistence import DatabaseManager, ProvenanceWriter
 from consist.core.views import ViewFactory, ViewRegistry
-from consist.core.workflow import OutputCapture, ScenarioContext
+from consist.core.ingestion import ingest_artifact
+from consist.core.lineage import LineageService
+from consist.core.materialize import materialize_artifacts
+from consist.core.matrix import MatrixViewFactory
+from consist.core.queries import RunQueryService
+from consist.core.workflow import OutputCapture, RunContext, ScenarioContext
+from consist.core.input_utils import coerce_input_map
 from consist.models.artifact import Artifact
-from consist.models.run import ConsistRecord, Run, RunArtifacts
+from consist.models.run import ConsistRecord, Run, RunArtifacts, RunResult
 from consist.types import ArtifactRef, FacetLike, HasFacetSchemaVersion, HashInputs
 
 UTC = timezone.utc
 
 AccessMode = Literal["standard", "analysis", "read_only"]
+
+
+def _resolve_input_ref(
+    tracker: "Tracker", ref: ArtifactRef, key: Optional[str]
+) -> ArtifactRef:
+    if isinstance(ref, Artifact):
+        return ref
+    if not isinstance(ref, (str, Path)):
+        raise TypeError(f"inputs must be Artifact, Path, or str (got {type(ref)}).")
+    ref_str = str(ref)
+    resolved = (
+        Path(tracker.resolve_uri(ref_str))
+        if isinstance(ref, str) and "://" in ref_str
+        else Path(ref_str)
+    )
+    if not resolved.exists():
+        raise ValueError(f"Input path does not exist: {resolved!s}")
+    if key is None:
+        return resolved
+    return tracker.artifacts.create_artifact(
+        resolved, run_id=None, key=key, direction="input"
+    )
+
+
+def _is_xarray_dataset(value: Any) -> bool:
+    try:
+        import xarray as xr  # type: ignore[import-not-found]
+    except ImportError:
+        return False
+    return isinstance(value, xr.Dataset)
+
+
+def _write_xarray_dataset(dataset: Any, path: Path) -> None:
+    try:
+        import xarray as xr  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise ImportError("xarray is required to log xarray.Dataset outputs.") from exc
+    if not isinstance(dataset, xr.Dataset):
+        raise TypeError(f"Expected xarray.Dataset, got {type(dataset)}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dataset.to_zarr(path, mode="w")
+
+
+def _resolve_input_refs(
+    tracker: "Tracker",
+    inputs: Optional[Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]],
+    depends_on: Optional[List[ArtifactRef]],
+    *,
+    include_keyed_artifacts: bool,
+) -> tuple[List[ArtifactRef], Dict[str, Artifact]]:
+    resolved_inputs: List[ArtifactRef] = []
+    input_artifacts_by_key: Dict[str, Artifact] = {}
+    if inputs is not None:
+        if isinstance(inputs, MappingABC):
+            inputs_map = coerce_input_map(inputs)
+            for key, ref in inputs_map.items():
+                resolved = _resolve_input_ref(tracker, ref, str(key))
+                resolved_inputs.append(resolved)
+                if include_keyed_artifacts and isinstance(resolved, Artifact):
+                    input_artifacts_by_key[str(key)] = resolved
+        else:
+            for ref in list(inputs):
+                resolved_inputs.append(_resolve_input_ref(tracker, ref, None))
+
+    if depends_on:
+        for dep in depends_on:
+            resolved_inputs.append(_resolve_input_ref(tracker, dep, None))
+
+    return resolved_inputs, input_artifacts_by_key
+
+
+def _preview_run_artifact_dir(
+    tracker: "Tracker",
+    *,
+    run_id: str,
+    model: str,
+    description: Optional[str],
+    year: Optional[int],
+    iteration: Optional[int],
+    parent_run_id: Optional[str],
+    tags: Optional[List[str]],
+) -> Path:
+    preview = Run(
+        id=run_id,
+        model_name=model,
+        description=description,
+        year=year,
+        iteration=iteration,
+        parent_run_id=parent_run_id,
+        tags=tags or [],
+        status="running",
+        config_hash=None,
+        git_hash=None,
+        meta={},
+        started_at=datetime.now(UTC),
+        created_at=datetime.now(UTC),
+    )
+    return tracker.run_artifact_dir(preview)
+
+
+def _resolve_output_path(tracker: "Tracker", ref: ArtifactRef, base_dir: Path) -> Path:
+    if isinstance(ref, Artifact):
+        raw = ref.path or tracker.resolve_uri(ref.uri)
+        return Path(raw)
+    ref_str = str(ref)
+    if isinstance(ref, str) and "://" in ref_str:
+        return Path(tracker.resolve_uri(ref_str))
+    ref_path = Path(ref_str)
+    if not ref_path.is_absolute():
+        return base_dir / ref_path
+    return ref_path
 
 
 class Tracker:
@@ -75,12 +201,13 @@ class Tracker:
     def __init__(
         self,
         run_dir: Path,
-        db_path: Optional[str] = None,
-        mounts: Dict[str, str] = None,
+        db_path: Optional[str | os.PathLike[str]] = None,
+        mounts: Optional[Dict[str, str]] = None,
         project_root: str = ".",
         hashing_strategy: str = "full",
         schemas: Optional[List[Type[SQLModel]]] = None,
         access_mode: AccessMode = "standard",
+        run_subdir_fn: Optional[Callable[[Run], str]] = None,
     ):
         """
         Initialize a Consist Tracker.
@@ -92,7 +219,7 @@ class Tracker:
         ----------
         run_dir : Path
             Root directory where run logs (e.g., `consist.json`) and run outputs are written.
-        db_path : Optional[str], default None
+        db_path : Optional[str | os.PathLike[str]], default None
             Path to the DuckDB database. If provided, Consist dual-writes provenance to DB
             in addition to JSON. If None, DB-backed features are disabled.
         mounts : Optional[Dict[str, str]], default None
@@ -110,6 +237,9 @@ class Tracker:
             - `"analysis"`: Read-oriented; blocks creating new provenance nodes but allows
               ingest/backfill and view/query helpers.
             - `"read_only"`: No permanent DB writes.
+        run_subdir_fn : Optional[Callable[[Run], str]], default None
+            Optional callable that returns a relative subdirectory name for a run.
+            When provided, this takes precedence over the default pattern.
         """
         # 1. Initialize FileSystem Service
         # (This handles the mkdir and path resolution internally now)
@@ -120,19 +250,23 @@ class Tracker:
         self.run_dir = self.fs.run_dir
 
         self.access_mode = access_mode
+        self._run_subdir_fn = run_subdir_fn
 
-        self.db_path = db_path
+        self.db_path = os.fspath(db_path) if db_path is not None else None
         self.identity = IdentityManager(
             project_root=project_root, hashing_strategy=hashing_strategy
         )
 
         self.db = None
-        if db_path:
-            self.db = DatabaseManager(db_path)
+        if self.db_path:
+            self.db = DatabaseManager(self.db_path)
+        self.persistence = ProvenanceWriter(self)
 
         self.artifacts = ArtifactManager(self)
         self.config_facets = ConfigFacetManager(db=self.db, identity=self.identity)
         self.artifact_schemas = ArtifactSchemaManager(self)
+        self.queries = RunQueryService(self)
+        self.lineage = LineageService(self)
 
         self.views = ViewRegistry(self)
         if schemas:
@@ -167,6 +301,98 @@ class Tracker:
         """Delegates to the DatabaseManager engine."""
         return self.db.engine if self.db else None
 
+    @staticmethod
+    def _default_run_subdir(run: Run) -> str:
+        """
+        Default run subdirectory pattern.
+
+        Uses `<parent_run_id>/<model>/iteration_<iteration>` when available, otherwise
+        `<model>/<run_id>`.
+        """
+        if run.parent_run_id and run.iteration is not None:
+            return f"{run.parent_run_id}/{run.model_name}/iteration_{run.iteration}"
+        return f"{run.model_name}/{run.id}"
+
+    def set_run_subdir_fn(self, fn: Optional[Callable[[Run], str]]) -> None:
+        """
+        Set a callable that returns the per-run artifact subdirectory name.
+
+        Parameters
+        ----------
+        fn : Optional[Callable[[Run], str]]
+            Callable that accepts a ``Run`` and returns a relative directory name.
+            Set to ``None`` to disable the custom resolver.
+        """
+        self._run_subdir_fn = fn
+
+    def run_artifact_dir(self, run: Optional[Run] = None) -> Path:
+        """
+        Resolve the run-specific artifact directory for the active run.
+
+        Parameters
+        ----------
+        run : Optional[Run], optional
+            Run to resolve the directory for. Defaults to the current run if active.
+
+        Returns
+        -------
+        Path
+            Directory under ``run_dir`` where run artifacts should be written.
+        """
+        target_run = run
+        if target_run is None and self.current_consist:
+            target_run = self.current_consist.run
+        if target_run is None:
+            return self.run_dir / "outputs"
+
+        base_dir = self.run_dir / "outputs"
+        artifact_dir = (
+            target_run.meta.get("artifact_dir")
+            if isinstance(target_run.meta, dict)
+            else None
+        )
+        if isinstance(artifact_dir, Path):
+            artifact_dir = str(artifact_dir)
+        if isinstance(artifact_dir, str) and artifact_dir:
+            artifact_path = Path(artifact_dir)
+            if artifact_path.is_absolute():
+                return artifact_path
+            return base_dir / artifact_path
+
+        subdir = (
+            self._run_subdir_fn(target_run)
+            if self._run_subdir_fn is not None
+            else self._default_run_subdir(target_run)
+        )
+
+        if subdir:
+            subdir = subdir.strip().lstrip("/\\")
+        if not subdir:
+            subdir = target_run.id
+
+        subdir_path = Path(subdir)
+        if subdir_path.is_absolute():
+            raise ValueError(
+                "run_subdir must be a relative path; got an absolute path."
+            )
+
+        return base_dir / subdir_path
+
+    @staticmethod
+    def _safe_run_id(run_id: str) -> str:
+        return "".join(
+            c if (c.isalnum() or c in ("-", "_", ".")) else "_" for c in run_id
+        )
+
+    def _resolve_run_snapshot_path(self, run_id: str, run: Optional[Run]) -> Path:
+        run_dir = self.fs.run_dir
+        if run and run.meta:
+            physical_run_dir = run.meta.get("_physical_run_dir")
+            if physical_run_dir:
+                run_dir = Path(physical_run_dir)
+        safe_run_id = self._safe_run_id(run_id)
+        return run_dir / "consist_runs" / f"{safe_run_id}.json"
+
     def export_schema_sqlmodel(
         self,
         *,
@@ -199,6 +425,7 @@ class Tracker:
                 artifact_id=artifact_uuid, backfill_ordinals=backfill_ordinals
             )
         else:
+            assert schema_id is not None
             fetched = self.db.get_artifact_schema(
                 schema_id=schema_id, backfill_ordinals=backfill_ordinals
             )
@@ -257,6 +484,27 @@ class Tracker:
                 return signature
         return None
 
+    def _prefetch_run_signatures(self, inputs: Iterable[Artifact]) -> None:
+        """
+        Warm the run-signature cache for input artifacts in bulk to reduce DB chatter.
+        """
+        if not self.db:
+            return
+        run_ids = {
+            str(a.run_id)
+            for a in inputs
+            if a.run_id and a.run_id not in self._run_signature_cache
+        }
+        if not run_ids:
+            return
+        signatures = self.db.get_run_signatures(list(run_ids))
+        if not signatures:
+            return
+        for run_id, signature in signatures.items():
+            self._run_signature_cache[run_id] = signature
+            if len(self._run_signature_cache) > self._run_signature_cache_max_entries:
+                self._run_signature_cache.pop(next(iter(self._run_signature_cache)))
+
     def _coerce_facet_mapping(self, obj: Any, label: str) -> Dict[str, Any]:
         if obj is None:
             raise ValueError(f"facet_from requires a {label} to extract from.")
@@ -280,6 +528,7 @@ class Tracker:
         description: Optional[str] = None,
         cache_mode: str = "reuse",
         *,
+        artifact_dir: Optional[Union[str, Path]] = None,
         facet: Optional[FacetLike] = None,
         facet_from: Optional[List[str]] = None,
         hash_inputs: HashInputs = None,
@@ -314,6 +563,9 @@ class Tracker:
             A human-readable description of the run's purpose.
         cache_mode : str, default "reuse"
             Strategy for caching: "reuse", "overwrite", or "readonly".
+        artifact_dir : Optional[Union[str, Path]], optional
+            Override the per-run artifact directory. Relative paths are resolved
+            under ``<run_dir>/outputs``. Absolute paths are used as-is.
         facet : Optional[FacetLike], optional
             Optional small, queryable configuration facet to persist alongside the run.
             This is distinct from `config` (which is hashed and stored in the JSON snapshot).
@@ -356,6 +608,24 @@ class Tracker:
         ```
         """
         self._ensure_write_provenance()
+        timing_enabled = os.getenv("CONSIST_CACHE_TIMING", "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        debug_cache = os.getenv("CONSIST_CACHE_DEBUG", "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+
+        def _log_timing(label: str, start: float) -> None:
+            elapsed = time.perf_counter() - start
+            if timing_enabled:
+                logging.info("[Consist][timing] %s %.3fs", label, elapsed)
+            if debug_cache:
+                logging.info("[Consist][cache] %s %.3fs", label, elapsed)
+
         if self.current_consist is not None:
             raise RuntimeError(
                 f"Cannot begin_run: A run is already active (id={self.current_consist.run.id}). "
@@ -363,9 +633,10 @@ class Tracker:
             )
 
         (
-            materialize_cached_outputs,
+            cache_hydration,
             materialize_cached_output_paths,
             materialize_cached_outputs_dir,
+            validate_cached_outputs,
         ) = parse_materialize_cached_outputs_kwargs(kwargs)
 
         raw_config_model: Optional[BaseModel] = (
@@ -393,6 +664,9 @@ class Tracker:
         year = kwargs.pop("year", None)
         iteration = kwargs.pop("iteration", None)
         parent_run_id = kwargs.pop("parent_run_id", None)
+
+        if artifact_dir is not None:
+            kwargs["artifact_dir"] = str(artifact_dir)
 
         if config is None:
             config_dict: Dict[str, Any] = {}
@@ -450,9 +724,10 @@ class Tracker:
         self.current_consist = ConsistRecord(run=run, config=config_dict)
         self._active_run_cache_options = ActiveRunCacheOptions(
             cache_mode=cache_mode,
-            materialize_cached_outputs=materialize_cached_outputs,
+            cache_hydration=cache_hydration,
             materialize_cached_output_paths=materialize_cached_output_paths,
             materialize_cached_outputs_dir=materialize_cached_outputs_dir,
+            validate_cached_outputs=validate_cached_outputs,
         )
 
         # Persist a queryable facet (optional)
@@ -479,6 +754,10 @@ class Tracker:
                 index_kv=facet_index,
             )
 
+        current_consist = self.current_consist
+        if current_consist is None:
+            raise RuntimeError("Cannot start run: no active consist record.")
+
         # Process Inputs & Auto-Forking
         if inputs:
             for item in inputs:
@@ -491,14 +770,18 @@ class Tracker:
         # Auto-Lineage
         if not run.parent_run_id:
             parent_candidates = [
-                a.run_id for a in self.current_consist.inputs if a.run_id is not None
+                a.run_id for a in current_consist.inputs if a.run_id is not None
             ]
             if parent_candidates:
                 run.parent_run_id = parent_candidates[-1]
 
         try:
+            t0 = time.perf_counter()
+            self._prefetch_run_signatures(current_consist.inputs)
+            _log_timing("prefetch_run_signatures", t0)
+            t0 = time.perf_counter()
             input_hash = self.identity.compute_input_hash(
-                self.current_consist.inputs,
+                current_consist.inputs,
                 path_resolver=self.resolve_uri,
                 signature_lookup=self._resolve_run_signature,
             )
@@ -506,6 +789,7 @@ class Tracker:
             run.signature = self.identity.calculate_run_signature(
                 code_hash=git_hash, config_hash=config_hash, input_hash=input_hash
             )
+            _log_timing("compute_input_hash", t0)
         except Exception as e:
             logging.warning(
                 f"[Consist Warning] Failed to compute inputs hash for run {run_id}: {e}"
@@ -513,34 +797,88 @@ class Tracker:
             run.input_hash = "error"
             run.signature = "error"
 
+        cached_output_ids: Optional[List[uuid.UUID]] = None
+
         # --- Cache Logic (Refactored) ---
         if cache_mode == "reuse":
-            cache_key = (run.config_hash, run.input_hash, run.git_hash)
-
-            cached_run = self._local_cache_index.get(cache_key)
-            if cached_run is None:
-                cached_run = self.find_matching_run(
-                    config_hash=run.config_hash,
-                    input_hash=run.input_hash,
-                    git_hash=run.git_hash,
+            cache_key = (
+                (run.config_hash, run.input_hash, run.git_hash)
+                if run.config_hash and run.input_hash and run.git_hash
+                else None
+            )
+            if debug_cache:
+                logging.info(
+                    "[Consist][cache] lookup key config=%s input=%s code=%s",
+                    run.config_hash,
+                    run.input_hash,
+                    run.git_hash,
                 )
-            if cached_run and self._validate_run_outputs(cached_run):
-                hydrate_cache_hit_outputs(
+
+            cached_run = self._local_cache_index.get(cache_key) if cache_key else None
+            if cached_run is None:
+                t0 = time.perf_counter()
+                if cache_key:
+                    config_hash, input_hash, git_hash = cache_key
+                    cached_run = self.find_matching_run(
+                        config_hash=config_hash,
+                        input_hash=input_hash,
+                        git_hash=git_hash,
+                    )
+                _log_timing("find_matching_run", t0)
+            cache_valid = False
+            if cached_run:
+                t0 = time.perf_counter()
+                cache_valid = validate_cached_run_outputs(
+                    tracker=self,
+                    run=cached_run,
+                    options=self._active_run_cache_options,
+                )
+                _log_timing("validate_cached_outputs", t0)
+            elif debug_cache:
+                logging.info("[Consist][cache] miss: no matching completed run.")
+
+            if cached_run and cache_valid:
+                t0 = time.perf_counter()
+                cached_items = hydrate_cache_hit_outputs(
                     tracker=self,
                     run=run,
                     cached_run=cached_run,
                     options=self._active_run_cache_options,
+                    link_outputs=False,
                 )
-
+                cached_output_ids = [art.id for art in cached_items.outputs.values()]
+                _log_timing("hydrate_cache_hit_outputs", t0)
+                if debug_cache:
+                    logging.info(
+                        "[Consist][cache] hit: cached_run=%s outputs=%d hydration=%s",
+                        cached_run.id,
+                        len(cached_items.outputs),
+                        self._active_run_cache_options.cache_hydration,
+                    )
             else:
+                if cached_run and not cache_valid and debug_cache:
+                    logging.info(
+                        "[Consist][cache] miss: cached run %s failed validation.",
+                        cached_run.id,
+                    )
                 logging.info("🔄 [Consist] Cache Miss. Running...")
         elif cache_mode == "overwrite":
             logging.warning("⚠️ [Consist] Cache lookup skipped (Mode: Overwrite).")
         elif cache_mode == "readonly":
             logging.info("👁️ [Consist] Read-only mode.")
 
+        if not self.current_consist.cached_run:
+            materialize_missing_inputs(
+                tracker=self, options=self._active_run_cache_options
+            )
+
         self._flush_json()
-        self._sync_run_to_db(run)
+        if cached_output_ids and self.db:
+            self.persistence.sync_run_with_links(
+                run, artifact_ids=cached_output_ids, direction="output"
+            )
+        else:
+            self._sync_run_to_db(run)
         self._emit_run_start(run)
 
         return run
@@ -551,7 +889,7 @@ class Tracker:
         run_id: str,
         model: str,
         **kwargs: Any,
-    ) -> "Tracker":
+    ) -> Iterator["Tracker"]:
         """
         Context manager to initiate and manage the lifecycle of a Consist run.
 
@@ -600,12 +938,679 @@ class Tracker:
             self.end_run(status="failed", error=e)
             raise
 
+    def run(
+        self,
+        fn: Optional[Callable[..., Any]] = None,
+        name: Optional[str] = None,
+        *,
+        run_id: Optional[str] = None,
+        model: Optional[str] = None,
+        description: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+        inputs: Optional[
+            Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]
+        ] = None,
+        input_keys: Optional[Iterable[str] | str] = None,
+        optional_input_keys: Optional[Iterable[str] | str] = None,
+        depends_on: Optional[List[ArtifactRef]] = None,
+        tags: Optional[List[str]] = None,
+        facet: Optional[FacetLike] = None,
+        facet_from: Optional[List[str]] = None,
+        facet_schema_version: Optional[Union[str, int]] = None,
+        facet_index: Optional[bool] = None,
+        hash_inputs: HashInputs = None,
+        year: Optional[int] = None,
+        iteration: Optional[int] = None,
+        parent_run_id: Optional[str] = None,
+        outputs: Optional[List[str]] = None,
+        output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        capture_dir: Optional[Path] = None,
+        capture_pattern: str = "*",
+        cache_mode: str = "reuse",
+        cache_hydration: Optional[str] = None,
+        validate_cached_outputs: str = "lazy",
+        load_inputs: Optional[bool] = None,
+        executor: str = "python",
+        container: Optional[Mapping[str, Any]] = None,
+        fn_args: Optional[Dict[str, Any]] = None,
+        inject_context: bool | str = False,
+        output_mismatch: str = "warn",
+        output_missing: str = "warn",
+    ) -> RunResult:
+        """
+        Execute a function-shaped run with caching and output handling.
+        """
+        if executor not in {"python", "container"}:
+            raise ValueError("Tracker.run supports executor='python' or 'container'.")
+
+        if executor == "container":
+            if container is None:
+                raise ValueError("executor='container' requires a container spec.")
+            if output_paths is None:
+                raise ValueError("executor='container' requires output_paths.")
+            if outputs is not None:
+                raise ValueError(
+                    "executor='container' does not accept outputs; use output_paths."
+                )
+            if fn is None and name is None:
+                raise ValueError("executor='container' requires name when fn is None.")
+        else:
+            if fn is None:
+                raise ValueError("Tracker.run requires a callable fn.")
+
+        if executor == "container":
+            resolved_name = name or (fn.__name__ if fn else None)
+            if resolved_name is None:
+                raise ValueError("executor='container' requires a run name.")
+        else:
+            resolved_name = name or fn.__name__
+        resolved_model = model or resolved_name
+
+        if executor == "python":
+            step_def = getattr(fn, "__consist_step__", None)
+            if step_def is not None:
+                if outputs is None and step_def.outputs is not None:
+                    outputs = list(step_def.outputs)
+                if tags is None and step_def.tags is not None:
+                    tags = list(step_def.tags)
+                if description is None and step_def.description is not None:
+                    description = step_def.description
+
+            if load_inputs is None:
+                load_inputs = isinstance(inputs, Mapping)
+            if load_inputs and inputs is not None and not isinstance(inputs, Mapping):
+                raise ValueError("load_inputs=True requires inputs to be a dict.")
+
+            if cache_hydration is None and load_inputs:
+                cache_hydration = "inputs-missing"
+
+        if input_keys is not None or optional_input_keys is not None:
+            warnings.warn(
+                "Tracker.run ignores input_keys/optional_input_keys; use inputs mapping instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+        if output_mismatch not in {"warn", "error", "ignore"}:
+            raise ValueError(
+                "output_mismatch must be one of: 'warn', 'error', 'ignore'"
+            )
+        if output_missing not in {"warn", "error", "ignore"}:
+            raise ValueError("output_missing must be one of: 'warn', 'error', 'ignore'")
+
+        resolved_inputs, input_artifacts_by_key = _resolve_input_refs(
+            self,
+            inputs,
+            depends_on,
+            include_keyed_artifacts=executor == "python",
+        )
+
+        if run_id is None:
+            run_id = f"{resolved_name}_{uuid.uuid4().hex[:8]}"
+
+        materialize_cached_output_paths: Optional[Dict[str, Path]] = None
+        materialize_cached_outputs_dir: Optional[Path] = None
+        if cache_hydration == "outputs-requested":
+            if output_paths is None:
+                raise ValueError(
+                    "cache_hydration='outputs-requested' requires output_paths."
+                )
+            output_base_dir = _preview_run_artifact_dir(
+                self,
+                run_id=run_id,
+                model=resolved_model,
+                description=description,
+                year=year,
+                iteration=iteration,
+                parent_run_id=parent_run_id,
+                tags=tags,
+            )
+            materialize_cached_output_paths = {
+                str(key): _resolve_output_path(self, ref, output_base_dir)
+                for key, ref in output_paths.items()
+            }
+        elif cache_hydration == "outputs-all":
+            materialize_cached_outputs_dir = _preview_run_artifact_dir(
+                self,
+                run_id=run_id,
+                model=resolved_model,
+                description=description,
+                year=year,
+                iteration=iteration,
+                parent_run_id=parent_run_id,
+                tags=tags,
+            )
+
+        if executor == "container" and cache_mode != "overwrite":
+            logging.warning(
+                "[Consist] executor='container' uses container-level caching; forcing cache_mode='overwrite'."
+            )
+            cache_mode = "overwrite"
+
+        start_kwargs: Dict[str, Any] = {
+            "run_id": run_id,
+            "model": resolved_model,
+            "config": config,
+            "inputs": resolved_inputs or None,
+            "tags": tags,
+            "description": description,
+            "cache_mode": cache_mode,
+            "facet": facet,
+            "facet_from": facet_from,
+            "hash_inputs": hash_inputs,
+            "year": year,
+            "iteration": iteration,
+            "parent_run_id": parent_run_id,
+            "validate_cached_outputs": validate_cached_outputs,
+        }
+        if facet_schema_version is not None:
+            start_kwargs["facet_schema_version"] = facet_schema_version
+        if facet_index is not None:
+            start_kwargs["facet_index"] = facet_index
+        if cache_hydration is not None:
+            start_kwargs["cache_hydration"] = cache_hydration
+        if materialize_cached_output_paths is not None:
+            start_kwargs["materialize_cached_output_paths"] = (
+                materialize_cached_output_paths
+            )
+        if materialize_cached_outputs_dir is not None:
+            start_kwargs["materialize_cached_outputs_dir"] = (
+                materialize_cached_outputs_dir
+            )
+
+        def _handle_missing_outputs(label: str, missing: List[str]) -> None:
+            if not missing:
+                return
+            msg = f"{label} missing outputs: {missing}"
+            if output_missing == "error":
+                raise RuntimeError(msg)
+            if output_missing == "warn":
+                logging.warning("[Consist] %s", msg)
+
+        def _handle_output_mismatch(msg: str) -> bool:
+            if output_mismatch == "error":
+                raise RuntimeError(msg)
+            if output_mismatch == "warn":
+                logging.warning("[Consist] %s", msg)
+            return False
+
+        with self.start_run(**start_kwargs) as t:
+            current_consist = t.current_consist
+            if current_consist is None:
+                raise RuntimeError("No active run context is available.")
+
+            if t.is_cached:
+                cached_outputs = {a.key: a for a in current_consist.outputs}
+                expected_keys = set(outputs or [])
+                if output_paths:
+                    expected_keys.update(output_paths.keys())
+                missing = [k for k in expected_keys if k not in cached_outputs]
+                _handle_missing_outputs(f"Cache hit for run {resolved_name!r}", missing)
+                if expected_keys:
+                    outputs_map = {
+                        k: cached_outputs[k]
+                        for k in expected_keys
+                        if k in cached_outputs
+                    }
+                else:
+                    outputs_map = cached_outputs
+                return RunResult(
+                    run=current_consist.run,
+                    outputs=outputs_map,
+                    cache_hit=True,
+                )
+
+            if executor == "container":
+                if container is None or output_paths is None:
+                    raise RuntimeError(
+                        "Container execution requires container and output_paths."
+                    )
+                if load_inputs:
+                    raise ValueError(
+                        "executor='container' does not support load_inputs."
+                    )
+                if not isinstance(container, MappingABC):
+                    raise TypeError(
+                        "container must be a mapping of run_container arguments."
+                    )
+
+                from consist.integrations.containers import run_container
+
+                container_args = dict(container)
+                image = container_args.pop("image", None)
+                command = container_args.pop("command", None)
+                backend_type = container_args.pop(
+                    "backend", None
+                ) or container_args.pop("backend_type", None)
+                backend_type = backend_type or "docker"
+                environment = container_args.pop("environment", None) or {}
+                working_dir = container_args.pop("working_dir", None)
+                volumes = container_args.pop("volumes", None) or {}
+                pull_latest = bool(container_args.pop("pull_latest", False))
+                lineage_mode = container_args.pop("lineage_mode", "full")
+
+                if container_args:
+                    raise ValueError(
+                        f"Unknown container options: {sorted(container_args.keys())}"
+                    )
+                if image is None or command is None:
+                    raise ValueError("container spec must include image and command.")
+
+                output_base_dir = self.run_artifact_dir()
+                resolved_output_paths = {
+                    str(key): _resolve_output_path(self, ref, output_base_dir)
+                    for key, ref in output_paths.items()
+                }
+
+                result = run_container(
+                    tracker=self,
+                    run_id=run_id,
+                    image=image,
+                    command=command,
+                    volumes=volumes,
+                    inputs=resolved_inputs,
+                    outputs=resolved_output_paths,
+                    environment=environment,
+                    working_dir=working_dir,
+                    backend_type=backend_type,
+                    pull_latest=pull_latest,
+                    lineage_mode=lineage_mode,
+                )
+
+                outputs_map = dict(result.artifacts)
+                missing = [key for key in output_paths.keys() if key not in outputs_map]
+                _handle_missing_outputs(f"Run {resolved_name!r}", missing)
+
+                return RunResult(
+                    run=current_consist.run,
+                    outputs=outputs_map,
+                    cache_hit=result.cache_hit,
+                )
+
+            fn_args = dict(fn_args or {})
+            config_dict: Dict[str, Any] = {}
+            if config is None:
+                config_dict = {}
+            elif isinstance(config, BaseModel):
+                config_dict = config.model_dump()
+            else:
+                config_dict = dict(config)
+
+            if fn is None:
+                raise ValueError("run() requires a callable `fn` to execute.")
+            fn_callable = fn
+            sig = inspect.signature(fn_callable)
+            params = sig.parameters
+            has_var_kw = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+            )
+            call_kwargs: Dict[str, Any] = {}
+
+            if "config" in params and "config" not in fn_args and config is not None:
+                call_kwargs["config"] = (
+                    config if isinstance(config, BaseModel) else config_dict
+                )
+
+            for param_name, param in params.items():
+                if param.kind in (
+                    inspect.Parameter.VAR_POSITIONAL,
+                    inspect.Parameter.VAR_KEYWORD,
+                ):
+                    continue
+                if param_name in call_kwargs:
+                    continue
+                if param_name in fn_args:
+                    call_kwargs[param_name] = fn_args[param_name]
+                    continue
+                if load_inputs and isinstance(inputs, Mapping):
+                    if param_name in input_artifacts_by_key:
+                        if param_name in config_dict:
+                            logging.warning(
+                                "[Consist] Ambiguous param %r present in inputs and config; preferring inputs.",
+                                param_name,
+                            )
+                        artifact = input_artifacts_by_key[param_name]
+                        if getattr(artifact, "_tracker", None) is None:
+                            artifact._tracker = weakref.ref(self)
+                        call_kwargs[param_name] = self.load(artifact)
+                        continue
+                if param_name in config_dict:
+                    call_kwargs[param_name] = config_dict[param_name]
+
+            for key, value in fn_args.items():
+                if key not in call_kwargs:
+                    call_kwargs[key] = value
+
+            if inject_context:
+                ctx_name = (
+                    inject_context
+                    if isinstance(inject_context, str)
+                    else "_consist_ctx"
+                )
+                if ctx_name not in call_kwargs:
+                    if ctx_name in params or has_var_kw:
+                        call_kwargs[ctx_name] = RunContext(self)
+                    else:
+                        raise ValueError(
+                            f"inject_context requested '{ctx_name}', but fn does not accept it."
+                        )
+
+            try:
+                sig.bind_partial(**call_kwargs)
+            except TypeError as exc:
+                raise TypeError(
+                    f"Tracker.run could not bind arguments for {resolved_name!r}: {exc}"
+                ) from exc
+
+            captured_outputs: Dict[str, Artifact] = {}
+            if capture_dir is not None:
+                with t.capture_outputs(capture_dir, pattern=capture_pattern) as cap:
+                    result = fn_callable(**call_kwargs)
+                if result is not None:
+                    raise ValueError(
+                        "capture_dir requires the run function to return None. "
+                        "Use inject_context to log outputs manually if you need a return value."
+                    )
+                captured_outputs = {a.key: a for a in cap.artifacts}
+            else:
+                result = fn_callable(**call_kwargs)
+
+            outputs_map: Dict[str, Artifact] = {}
+            output_base_dir = self.run_artifact_dir()
+
+            def _log_output_value(key: str, value: ArtifactRef) -> Optional[Artifact]:
+                if value is None:
+                    return None
+                return self.log_artifact(value, key=key, direction="output")
+
+            if output_paths is not None:
+                for key, ref in output_paths.items():
+                    if isinstance(ref, Artifact):
+                        ref_path = _resolve_output_path(self, ref, output_base_dir)
+                        if not ref_path.exists():
+                            _handle_missing_outputs(
+                                f"Run {resolved_name!r}", [str(key)]
+                            )
+                            continue
+                        outputs_map[key] = self.log_artifact(
+                            ref, key=key, direction="output"
+                        )
+                    else:
+                        ref_path = _resolve_output_path(self, ref, output_base_dir)
+                        if not ref_path.exists():
+                            _handle_missing_outputs(
+                                f"Run {resolved_name!r}", [str(key)]
+                            )
+                            continue
+                        outputs_map[key] = self.log_artifact(
+                            ref_path, key=key, direction="output"
+                        )
+
+            if outputs:
+                if result is None:
+                    pass
+                elif isinstance(result, dict):
+                    for key, value in result.items():
+                        logged = _log_output_value(str(key), value)
+                        if logged is not None:
+                            outputs_map[str(key)] = logged
+                elif isinstance(result, (list, tuple)):
+                    if len(result) != len(outputs):
+                        _handle_output_mismatch(
+                            "Output list length does not match declared outputs."
+                        )
+                    else:
+                        for key, value in zip(outputs, result):
+                            logged = _log_output_value(key, value)
+                            if logged is not None:
+                                outputs_map[key] = logged
+                elif isinstance(result, pd.DataFrame):
+                    if len(outputs) != 1:
+                        _handle_output_mismatch(
+                            "Single return value does not match declared outputs."
+                        )
+                    else:
+                        outputs_map[outputs[0]] = self.log_dataframe(
+                            result, key=outputs[0]
+                        )
+                elif isinstance(result, pd.Series):
+                    if len(outputs) != 1:
+                        _handle_output_mismatch(
+                            "Single return value does not match declared outputs."
+                        )
+                    else:
+                        outputs_map[outputs[0]] = self.log_dataframe(
+                            result.to_frame(name=outputs[0]), key=outputs[0]
+                        )
+                elif _is_xarray_dataset(result):
+                    if len(outputs) != 1:
+                        _handle_output_mismatch(
+                            "Single return value does not match declared outputs."
+                        )
+                    else:
+                        key = outputs[0]
+                        output_path = output_base_dir / f"{key}.zarr"
+                        _write_xarray_dataset(result, output_path)
+                        outputs_map[key] = self.log_artifact(
+                            output_path, key=key, direction="output", driver="zarr"
+                        )
+                elif isinstance(result, (Artifact, str, Path)):
+                    if len(outputs) != 1:
+                        _handle_output_mismatch(
+                            "Single return value does not match declared outputs."
+                        )
+                    else:
+                        logged = _log_output_value(outputs[0], result)
+                        if logged is not None:
+                            outputs_map[outputs[0]] = logged
+                else:
+                    raise TypeError(f"Run returned unsupported type {type(result)}")
+            elif result is not None:
+                logging.warning(
+                    "[Consist] Run %r returned a value but no outputs were declared; ignoring return value.",
+                    resolved_name,
+                )
+
+            if captured_outputs:
+                for key, artifact in captured_outputs.items():
+                    outputs_map.setdefault(key, artifact)
+
+            logged_outputs = {a.key: a for a in current_consist.outputs}
+            if outputs:
+                missing_keys = [
+                    key
+                    for key in outputs
+                    if key not in outputs_map and key not in logged_outputs
+                ]
+                _handle_missing_outputs(f"Run {resolved_name!r}", missing_keys)
+                for key in outputs:
+                    if key not in outputs_map and key in logged_outputs:
+                        outputs_map[key] = logged_outputs[key]
+            elif not outputs_map and logged_outputs:
+                outputs_map = logged_outputs
+
+            return RunResult(
+                run=current_consist.run,
+                outputs=outputs_map,
+                cache_hit=False,
+            )
+
+    @contextmanager
+    def trace(
+        self,
+        name: str,
+        *,
+        run_id: Optional[str] = None,
+        model: Optional[str] = None,
+        description: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+        inputs: Optional[
+            Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]
+        ] = None,
+        input_keys: Optional[Iterable[str] | str] = None,
+        optional_input_keys: Optional[Iterable[str] | str] = None,
+        depends_on: Optional[List[ArtifactRef]] = None,
+        tags: Optional[List[str]] = None,
+        facet: Optional[FacetLike] = None,
+        facet_from: Optional[List[str]] = None,
+        facet_schema_version: Optional[Union[str, int]] = None,
+        facet_index: Optional[bool] = None,
+        hash_inputs: HashInputs = None,
+        year: Optional[int] = None,
+        iteration: Optional[int] = None,
+        parent_run_id: Optional[str] = None,
+        outputs: Optional[List[str]] = None,
+        output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        capture_dir: Optional[Path] = None,
+        capture_pattern: str = "*",
+        cache_mode: str = "reuse",
+        cache_hydration: Optional[str] = None,
+        validate_cached_outputs: str = "lazy",
+        output_mismatch: str = "warn",
+        output_missing: str = "warn",
+    ) -> Iterator["Tracker"]:
+        """
+        Manual tracing context manager for a run.
+        """
+        resolved_model = model or name
+
+        if input_keys is not None or optional_input_keys is not None:
+            warnings.warn(
+                "Tracker.trace ignores input_keys/optional_input_keys; use inputs mapping instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+        if output_mismatch not in {"warn", "error", "ignore"}:
+            raise ValueError(
+                "output_mismatch must be one of: 'warn', 'error', 'ignore'"
+            )
+        if output_missing not in {"warn", "error", "ignore"}:
+            raise ValueError("output_missing must be one of: 'warn', 'error', 'ignore'")
+
+        resolved_inputs, _ = _resolve_input_refs(
+            self,
+            inputs,
+            depends_on,
+            include_keyed_artifacts=False,
+        )
+
+        if run_id is None:
+            run_id = f"{name}_{uuid.uuid4().hex[:8]}"
+
+        materialize_cached_output_paths: Optional[Dict[str, Path]] = None
+        materialize_cached_outputs_dir: Optional[Path] = None
+        if cache_hydration == "outputs-requested":
+            if output_paths is None:
+                raise ValueError(
+                    "cache_hydration='outputs-requested' requires output_paths."
+                )
+            output_base_dir = _preview_run_artifact_dir(
+                self,
+                run_id=run_id,
+                model=resolved_model,
+                description=description,
+                year=year,
+                iteration=iteration,
+                parent_run_id=parent_run_id,
+                tags=tags,
+            )
+            materialize_cached_output_paths = {
+                str(key): _resolve_output_path(self, ref, output_base_dir)
+                for key, ref in output_paths.items()
+            }
+        elif cache_hydration == "outputs-all":
+            materialize_cached_outputs_dir = _preview_run_artifact_dir(
+                self,
+                run_id=run_id,
+                model=resolved_model,
+                description=description,
+                year=year,
+                iteration=iteration,
+                parent_run_id=parent_run_id,
+                tags=tags,
+            )
+
+        start_kwargs: Dict[str, Any] = {
+            "run_id": run_id,
+            "model": resolved_model,
+            "config": config,
+            "inputs": resolved_inputs or None,
+            "tags": tags,
+            "description": description,
+            "cache_mode": cache_mode,
+            "facet": facet,
+            "facet_from": facet_from,
+            "hash_inputs": hash_inputs,
+            "year": year,
+            "iteration": iteration,
+            "parent_run_id": parent_run_id,
+            "validate_cached_outputs": validate_cached_outputs,
+        }
+        if facet_schema_version is not None:
+            start_kwargs["facet_schema_version"] = facet_schema_version
+        if facet_index is not None:
+            start_kwargs["facet_index"] = facet_index
+        if cache_hydration is not None:
+            start_kwargs["cache_hydration"] = cache_hydration
+        if materialize_cached_output_paths is not None:
+            start_kwargs["materialize_cached_output_paths"] = (
+                materialize_cached_output_paths
+            )
+        if materialize_cached_outputs_dir is not None:
+            start_kwargs["materialize_cached_outputs_dir"] = (
+                materialize_cached_outputs_dir
+            )
+
+        def _handle_missing_outputs(label: str, missing: List[str]) -> None:
+            if not missing:
+                return
+            msg = f"{label} missing outputs: {missing}"
+            if output_missing == "error":
+                raise RuntimeError(msg)
+            if output_missing == "warn":
+                logging.warning("[Consist] %s", msg)
+
+        with self.start_run(**start_kwargs) as t:
+            current_consist = t.current_consist
+            if current_consist is None:
+                raise RuntimeError("No active run context is available.")
+
+            output_base_dir = self.run_artifact_dir()
+            try:
+                if capture_dir is not None:
+                    with t.capture_outputs(capture_dir, pattern=capture_pattern):
+                        yield t
+                else:
+                    yield t
+            finally:
+                if output_paths is not None:
+                    for key, ref in output_paths.items():
+                        if isinstance(ref, Artifact):
+                            ref_path = _resolve_output_path(self, ref, output_base_dir)
+                            if not ref_path.exists():
+                                _handle_missing_outputs(f"Run {name!r}", [str(key)])
+                                continue
+                            self.log_artifact(ref, key=key, direction="output")
+                        else:
+                            ref_path = _resolve_output_path(self, ref, output_base_dir)
+                            if not ref_path.exists():
+                                _handle_missing_outputs(f"Run {name!r}", [str(key)])
+                                continue
+                            self.log_artifact(ref_path, key=key, direction="output")
+
+                if outputs:
+                    logged_outputs = {a.key: a for a in current_consist.outputs}
+                    missing_keys = [key for key in outputs if key not in logged_outputs]
+                    _handle_missing_outputs(f"Run {name!r}", missing_keys)
+
     def scenario(
         self,
         name: str,
         config: Optional[Dict[str, Any]] = None,
         tags: Optional[List[str]] = None,
         model: str = "scenario",
+        step_cache_hydration: Optional[str] = None,
         **kwargs: Any,
     ) -> ScenarioContext:
         """
@@ -629,13 +1634,16 @@ class Tracker:
             Tags for the scenario. "scenario_header" is automatically appended.
         model : str, default "scenario"
             The model name for the header run.
+        step_cache_hydration : Optional[str], optional
+            Default cache hydration policy for all scenario steps unless overridden
+            in a specific `scenario.trace(...)` or `scenario.run(...)`.
         **kwargs : Any
             Additional metadata or arguments for the header run (including `facet_from`).
 
         Returns
         -------
         ScenarioContext
-            A context manager object that provides `.step()` and `.add_input()` methods.
+            A context manager object that provides `.trace()` and `.add_input()` methods.
 
         Example
         -------
@@ -646,7 +1654,15 @@ class Tracker:
                 ...
         ```
         """
-        return ScenarioContext(self, name, config, tags, model, **kwargs)
+        return ScenarioContext(
+            self,
+            name,
+            config,
+            tags,
+            model,
+            step_cache_hydration=step_cache_hydration,
+            **kwargs,
+        )
 
     def end_run(
         self,
@@ -753,6 +1769,7 @@ class Tracker:
         self,
         tags: Optional[List[str]] = None,
         year: Optional[int] = None,
+        iteration: Optional[int] = None,
         model: Optional[str] = None,
         status: Optional[str] = None,
         parent_id: Optional[str] = None,
@@ -760,7 +1777,7 @@ class Tracker:
         limit: int = 100,
         index_by: Optional[Union[str, IndexBySpec]] = None,
         name: Optional[str] = None,
-    ) -> Union[List[Run], Dict[Any, Run]]:
+    ) -> Union[List[Run], Dict[Hashable, Run]]:
         """
         Retrieve runs matching the specified criteria.
 
@@ -770,6 +1787,8 @@ class Tracker:
             Filter runs that contain all provided tags.
         year : Optional[int], optional
             Filter by run year.
+        iteration : Optional[int], optional
+            Filter by run iteration.
         model : Optional[str], optional
             Filter by run model name.
         status : Optional[str], optional
@@ -793,7 +1812,7 @@ class Tracker:
 
         Returns
         -------
-        Union[List[Run], Dict[Any, Run]]
+        Union[List[Run], Dict[Hashable, Run]]
             List of runs, or a dict keyed by `index_by` when requested.
 
         Raises
@@ -801,51 +1820,18 @@ class Tracker:
         TypeError
             If `index_by` is an unsupported type.
         """
-        runs = []
-        if self.db:
-            runs = self.db.find_runs(
-                tags, year, model, status, parent_id, metadata, limit, name
-            )
-
-        if index_by:
-            if isinstance(index_by, FacetIndex):
-                facet_key = index_by.key
-                if not self.db:
-                    return {}
-                values_by_run = self.db.get_facet_values_for_runs(
-                    [r.id for r in runs],
-                    key=facet_key,
-                    namespace=model,
-                )
-                return {values_by_run[r.id]: r for r in runs if r.id in values_by_run}
-
-            if isinstance(index_by, RunFieldIndex):
-                return {getattr(r, index_by.field): r for r in runs}
-
-            if isinstance(index_by, str) and (
-                index_by.startswith("facet.") or index_by.startswith("facet:")
-            ):
-                if not self.db:
-                    return {}
-                facet_key = (
-                    index_by.split(".", 1)[1]
-                    if index_by.startswith("facet.")
-                    else index_by.split(":", 1)[1]
-                )
-                values_by_run = self.db.get_facet_values_for_runs(
-                    [r.id for r in runs],
-                    key=facet_key,
-                    namespace=model,
-                )
-                # Only include runs that have this facet key present.
-                return {values_by_run[r.id]: r for r in runs if r.id in values_by_run}
-
-            # Create dictionary keyed by the requested attribute
-            if not isinstance(index_by, str):
-                raise TypeError(f"Unsupported index_by type: {type(index_by)}")
-            return {getattr(r, index_by): r for r in runs}
-
-        return runs
+        return self.queries.find_runs(
+            tags=tags,
+            year=year,
+            iteration=iteration,
+            model=model,
+            status=status,
+            parent_id=parent_id,
+            metadata=metadata,
+            limit=limit,
+            index_by=index_by,
+            name=name,
+        )
 
     def find_run(self, **kwargs) -> Run:
         """
@@ -870,36 +1856,41 @@ class Tracker:
         ValueError
             If no runs match, or more than one run matches.
         """
-        # 1. Primary Key Lookup Optimization
-        # If the user asks for a specific ID, we skip the search query and use get_run.
-        # We accept 'id' or 'run_id' for ergonomics.
-        run_id = kwargs.pop("id", None) or kwargs.pop("run_id", None)
+        return self.queries.find_run(**kwargs)
 
-        if run_id:
-            run = self.get_run(run_id)
-            if not run:
-                raise ValueError(f"No run found with ID: {run_id}")
-            # If other filters were passed (e.g. year=2020), strictly we should check them,
-            # but ID lookup usually implies absolute intent.
-            return run
+    def find_latest_run(
+        self,
+        *,
+        parent_id: Optional[str] = None,
+        model: Optional[str] = None,
+        status: Optional[str] = None,
+        year: Optional[int] = None,
+        tags: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        limit: int = 10_000,
+    ) -> Run:
+        """
+        Return the most recent run matching the filters.
 
-        # 2. Standard Search
-        # Enforce limit=2 to optimize checking for multiple results
-        kwargs["limit"] = 2
+        Selection priority:
+        1) Highest `iteration` (when present)
+        2) Newest `created_at` (fallback when no iteration is set)
+        """
+        return self.queries.find_latest_run(
+            parent_id=parent_id,
+            model=model,
+            status=status,
+            year=year,
+            tags=tags,
+            metadata=metadata,
+            limit=limit,
+        )
 
-        # Note: We popped 'id'/'run_id' above, so kwargs now only contains
-        # arguments valid for find_runs (assuming user didn't pass bad args).
-        results = self.find_runs(**kwargs)
-
-        if not results:
-            raise ValueError(f"No run found matching criteria: {kwargs}")
-
-        if len(results) > 1:
-            raise ValueError(
-                f"Multiple runs ({len(results)}+) found matching criteria: {kwargs}. Narrow your search."
-            )
-
-        return results[0]
+    def get_latest_run_id(self, **kwargs) -> str:
+        """
+        Convenience wrapper to return the latest run ID for the given filters.
+        """
+        return self.queries.get_latest_run_id(**kwargs)
 
     # --- Artifact Logging & Ingestion ---
 
@@ -967,7 +1958,7 @@ class Tracker:
             raise RuntimeError("Cannot log artifact: no active run.")
 
         # Cache-hit ergonomics:
-        # - Scenario/task bodies still execute on cache hits (we hydrate cached outputs,
+        # - Scenario/trace bodies still execute on cache hits (we hydrate cached outputs,
         #   but we do not skip user code).
         # - Many workflows write cache-agnostic code that calls `log_artifact(...)` in
         #   both cache-hit and cache-miss cases.
@@ -1061,7 +2052,8 @@ class Tracker:
         direction : str, default "output"
             Artifact direction relative to the run.
         path : Optional[Union[str, Path]], optional
-            Output path; defaults to `<run_dir>/<key>.<driver>`.
+            Output path; defaults to `<run_dir>/outputs/<run_subdir>/<key>.<driver>` where
+            ``run_subdir`` is derived from ``run_subdir_fn`` (or the default pattern).
         driver : Optional[str], optional
             File format driver (e.g., "parquet" or "csv").
         meta : Optional[Dict[str, Any]], optional
@@ -1080,7 +2072,8 @@ class Tracker:
             If the requested driver is unsupported.
         """
         if path is None:
-            resolved_path = self.run_dir / f"{key}.{driver or 'parquet'}"
+            base_dir = self.run_artifact_dir()
+            resolved_path = base_dir / f"{key}.{driver or 'parquet'}"
         else:
             resolved_path = Path(path)
 
@@ -1303,70 +2296,14 @@ class Tracker:
         )
         ```
         """
-        if not self.current_consist:
-            raise RuntimeError("Cannot log artifact outside of a run context.")
-
-        path_obj = Path(path)
-        if key is None:
-            key = path_obj.stem
-
-        # Log the container artifact
-        container = self.log_artifact(
-            str(path_obj),
+        return self.artifacts.log_h5_container(
+            path,
             key=key,
             direction=direction,
-            driver="h5",
-            is_container=True,
+            discover_tables=discover_tables,
+            table_filter=table_filter,
             **meta,
         )
-
-        table_artifacts: List[Artifact] = []
-
-        if discover_tables:
-            if find_spec("h5py") is None:
-                logging.warning(
-                    "[Consist] h5py not installed. Cannot discover HDF5 tables."
-                )
-                return container, table_artifacts
-
-            # Build filter function
-            if table_filter is None:
-
-                def filter_fn(name: str) -> bool:
-                    return True
-
-            elif isinstance(table_filter, list):
-                # Convert list to set for O(1) lookup
-                filter_set = set(table_filter)
-
-                def filter_fn(name: str) -> bool:
-                    stripped = name.lstrip("/")
-                    return name in filter_set or stripped in filter_set
-
-            else:
-                filter_fn = table_filter
-
-            path_obj = Path(path)  # Ensure this matches what you passed to log_artifact
-            table_artifacts = self.artifacts.scan_h5_container(
-                container, path_obj, key, direction, filter_fn
-            )
-
-            # Persist the children found by the manager
-            for t in table_artifacts:
-                # Note: create_artifact returns them un-persisted, so we must add them here
-                # Or better yet, have scan_h5_container return objects that just need syncing
-                self.current_consist.outputs.append(t)
-                self._sync_artifact_to_db(t, direction)
-
-        # Update container metadata with table info
-        container.meta["table_count"] = len(table_artifacts)
-        container.meta["table_ids"] = [str(t.id) for t in table_artifacts]
-
-        # Re-sync the container with updated metadata
-        self._flush_json()
-        self._sync_artifact_to_db(container, direction)
-
-        return container, table_artifacts
 
     def ingest(
         self,
@@ -1421,63 +2358,14 @@ class Tracker:
         """
         self._ensure_write_data()
 
-        # 1. Determine Context
-        target_run = run
-
-        if not target_run and not self.current_consist:
-            # AUTO-DISCOVERY: Use the run that created the artifact
-            if artifact.run_id:
-                target_run = self.get_run(artifact.run_id)
-                logging.info(
-                    f"[Consist] Ingesting in Analysis Mode. Attributing to Run: {target_run.id}"
-                )
-
-        # Fallback to active run if available
-        if not target_run and self.current_consist:
-            target_run = self.current_consist.run
-
-        if not target_run:
-            raise RuntimeError(
-                "Cannot ingest: Could not determine associated Run context."
-            )
-
-        if self.engine:
-            self.engine.dispose()
-        from consist.integrations.dlt_loader import ingest_artifact
-
-        # Auto-Resolve Data if None
-        data_to_pass = data
-        if data_to_pass is None:
-            # If no data provided, we assume we should read from the artifact's file
-            # We resolve the URI to an absolute path string
-            data_to_pass = self.resolve_uri(artifact.uri)
-
-        try:
-            info, resource_name = ingest_artifact(
-                artifact=artifact,
-                run_context=target_run,
-                db_path=self.db_path,
-                data_iterable=data_to_pass,
-                schema_model=schema,
-            )
-
-            # FORCE Metadata update via Service
-            if self.db:
-                self.db.update_artifact_meta(
-                    artifact, {"is_ingested": True, "dlt_table_name": resource_name}
-                )
-
-                if profile_schema:
-                    self.artifact_schemas.profile_ingested_table(
-                        artifact=artifact,
-                        run=target_run,
-                        table_schema="global_tables",
-                        table_name=resource_name,
-                    )
-            return info
-
-        except Exception as e:
-            raise e
+        return ingest_artifact(
+            tracker=self,
+            artifact=artifact,
+            data=data,
+            schema=schema,
+            run=run,
+            profile_schema=profile_schema,
+        )
 
     # --- View Factory ---
 
@@ -1535,6 +2423,46 @@ class Tracker:
         factory = ViewFactory(self)
         return factory.create_hybrid_view(view_name, concept_key)
 
+    def load_matrix(
+        self,
+        concept_key: str,
+        variables: Optional[List[str]] = None,
+        *,
+        run_ids: Optional[List[str]] = None,
+        parent_id: Optional[str] = None,
+        model: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> Any:
+        """
+        Convenience wrapper for loading a matrix view from tracked artifacts.
+        """
+        factory = MatrixViewFactory(self)
+        return factory.load_matrix_view(
+            concept_key,
+            variables,
+            run_ids=run_ids,
+            parent_id=parent_id,
+            model=model,
+            status=status,
+        )
+
+    def materialize(
+        self,
+        artifact: Artifact,
+        destination_path: Union[str, Path],
+        *,
+        on_missing: Literal["warn", "raise"] = "warn",
+    ) -> Optional[str]:
+        """
+        Materialize a cached artifact onto the filesystem.
+        """
+        result = materialize_artifacts(
+            tracker=self,
+            items=[(artifact, Path(destination_path))],
+            on_missing=on_missing,
+        )
+        return result.get(artifact.key)
+
     # --- Retrieval Helpers ---
 
     def get_artifact(self, key_or_id: Union[str, uuid.UUID]) -> Optional[Artifact]:
@@ -1558,7 +2486,10 @@ class Tracker:
             The found `Artifact` object, or `None` if no matching artifact is found.
         """
         if self.db:
-            return self.db.get_artifact(key_or_id)
+            artifact = self.db.get_artifact(key_or_id)
+            if artifact is not None:
+                artifact._tracker = weakref.ref(self)
+            return artifact
         return None
 
     def get_artifact_by_uri(self, uri: str) -> Optional[Artifact]:
@@ -1586,7 +2517,10 @@ class Tracker:
 
         # 2. Check Database
         if self.db:
-            return self.db.get_artifact_by_uri(uri)
+            artifact = self.db.get_artifact_by_uri(uri)
+            if artifact is not None:
+                artifact._tracker = weakref.ref(self)
+            return artifact
 
         return None
 
@@ -1623,9 +2557,12 @@ class Tracker:
         creator_id = creator.id if isinstance(creator, Run) else creator
         consumer_id = consumer.id if isinstance(consumer, Run) else consumer
 
-        return self.db.find_artifacts(
+        artifacts = self.db.find_artifacts(
             creator=creator_id, consumer=consumer_id, key=key, limit=limit
         )
+        for artifact in artifacts:
+            artifact._tracker = weakref.ref(self)
+        return artifacts
 
     # --- Config Facet Query Helpers ---
 
@@ -1643,9 +2580,7 @@ class Tracker:
         Any
             The facet record if present, otherwise `None`.
         """
-        if not self.db:
-            return None
-        return self.db.get_config_facet(facet_id)
+        return self.queries.get_config_facet(facet_id)
 
     def get_config_facets(
         self,
@@ -1671,9 +2606,7 @@ class Tracker:
         list
             A list of facet records (empty if DB is not configured).
         """
-        if not self.db:
-            return []
-        return self.db.get_config_facets(
+        return self.queries.get_config_facets(
             namespace=namespace, schema_name=schema_name, limit=limit
         )
 
@@ -1706,10 +2639,128 @@ class Tracker:
         list
             A list of key/value rows (empty if DB is not configured).
         """
-        if not self.db:
-            return []
-        return self.db.get_run_config_kv(
+        return self.queries.get_run_config_kv(
             run_id, namespace=namespace, prefix=prefix, limit=limit
+        )
+
+    def get_config_values(
+        self,
+        run_id: str,
+        *,
+        namespace: Optional[str] = None,
+        prefix: Optional[str] = None,
+        keys: Optional[Iterable[str]] = None,
+        limit: int = 10_000,
+    ) -> Dict[str, Any]:
+        """
+        Return a flattened config facet as a dict of key/value pairs.
+
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+        namespace : Optional[str], optional
+            Namespace for the facet. Defaults to the run's model name when available.
+        prefix : Optional[str], optional
+            Filter keys by prefix (e.g. ``"inputs."``).
+        keys : Optional[Iterable[str]], optional
+            Only include specific keys when provided.
+        limit : int, default 10_000
+            Maximum number of entries to return.
+
+        Returns
+        -------
+        dict
+            Mapping of flattened keys to typed values.
+
+        Notes
+        -----
+        Keys are stored as flattened dotted paths. If an original key contains a
+        literal dot, it is escaped as ``"\\."`` in the stored key.
+        """
+        return self.queries.get_config_values(
+            run_id,
+            namespace=namespace,
+            prefix=prefix,
+            keys=keys,
+            limit=limit,
+        )
+
+    def diff_runs(
+        self,
+        run_id_a: str,
+        run_id_b: str,
+        *,
+        namespace: Optional[str] = None,
+        prefix: Optional[str] = None,
+        keys: Optional[Iterable[str]] = None,
+        limit: int = 10_000,
+        include_equal: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Compare flattened config facets between two runs.
+
+        Parameters
+        ----------
+        run_id_a : str
+            Baseline run identifier.
+        run_id_b : str
+            Comparison run identifier.
+        namespace : Optional[str], optional
+            Namespace for facets. Defaults to each run's model name.
+        prefix : Optional[str], optional
+            Filter keys by prefix (e.g. ``"inputs."``).
+        keys : Optional[Iterable[str]], optional
+            Only include specific keys when provided.
+        limit : int, default 10_000
+            Maximum number of entries to inspect per run.
+        include_equal : bool, default False
+            If True, include keys whose values are unchanged.
+
+        Returns
+        -------
+        dict
+            A dict with `namespace` metadata and `changes` mapping keys to values.
+        """
+        return self.queries.diff_runs(
+            run_id_a,
+            run_id_b,
+            namespace=namespace,
+            prefix=prefix,
+            keys=keys,
+            limit=limit,
+            include_equal=include_equal,
+        )
+
+    def get_config_value(
+        self,
+        run_id: str,
+        key: str,
+        *,
+        namespace: Optional[str] = None,
+        default: Any = None,
+    ) -> Any:
+        """
+        Retrieve a single config value from a flattened config facet.
+
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+        key : str
+            Flattened key to fetch.
+        namespace : Optional[str], optional
+            Namespace for the facet. Defaults to the run's model name when available.
+        default : Any, optional
+            Value to return when the key is missing.
+
+        Returns
+        -------
+        Any
+            The typed value for the key, or ``default`` if missing.
+        """
+        return self.queries.get_config_value(
+            run_id, key, namespace=namespace, default=default
         )
 
     def find_runs_by_facet_kv(
@@ -1748,9 +2799,7 @@ class Tracker:
         list
             Matching run records (empty if DB is not configured).
         """
-        if not self.db:
-            return []
-        return self.db.find_runs_by_facet_kv(
+        return self.queries.find_runs_by_facet_kv(
             namespace=namespace,
             key=key,
             value_type=value_type,
@@ -1787,6 +2836,42 @@ class Tracker:
             return self.db.get_run(run_id)
         return None
 
+    def get_run_record(
+        self, run_id: str, *, allow_missing: bool = False
+    ) -> Optional[ConsistRecord]:
+        """
+        Load the full run record snapshot from disk.
+        """
+        run = self.get_run(run_id) if self.db else None
+        snapshot_path = self._resolve_run_snapshot_path(run_id, run)
+        if not snapshot_path.exists():
+            if allow_missing:
+                return None
+            raise FileNotFoundError(
+                f"Run snapshot not found at {snapshot_path!s} for run_id={run_id}."
+            )
+        try:
+            return ConsistRecord.model_validate_json(
+                snapshot_path.read_text(encoding="utf-8")
+            )
+        except Exception as exc:
+            if allow_missing:
+                return None
+            raise ValueError(
+                f"Failed to parse run snapshot at {snapshot_path!s} for run_id={run_id}."
+            ) from exc
+
+    def get_run_config(
+        self, run_id: str, *, allow_missing: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Load the full config snapshot for a historical run.
+        """
+        record = self.get_run_record(run_id, allow_missing=allow_missing)
+        if record is None:
+            return None
+        return record.config
+
     def get_artifacts_for_run(self, run_id: str) -> RunArtifacts:
         """
         Retrieves inputs and outputs for a specific run, organized by key.
@@ -1813,11 +2898,25 @@ class Tracker:
                 outputs[artifact.key] = artifact
 
         artifacts = RunArtifacts(inputs=inputs, outputs=outputs)
+        for artifact in itertools.chain(inputs.values(), outputs.values()):
+            artifact._tracker = weakref.ref(self)
         if run_id != current_run_id:
             self._run_artifacts_cache[run_id] = artifacts
             if len(self._run_artifacts_cache) > self._run_artifacts_cache_max_entries:
                 self._run_artifacts_cache.pop(next(iter(self._run_artifacts_cache)))
         return artifacts
+
+    def get_run_outputs(self, run_id: str) -> Dict[str, Artifact]:
+        """
+        Return output artifacts for a run, keyed by artifact key.
+        """
+        return self.get_artifacts_for_run(run_id).outputs
+
+    def get_run_inputs(self, run_id: str) -> Dict[str, Artifact]:
+        """
+        Return input artifacts for a run, keyed by artifact key.
+        """
+        return self.get_artifacts_for_run(run_id).inputs
 
     def get_run_artifact(
         self,
@@ -1844,6 +2943,26 @@ class Tracker:
                 if key_contains in k:
                     return art
         return next(iter(collection.values()), None)
+
+    def load_run_output(self, run_id: str, key: str, **kwargs: Any) -> Any:
+        """
+        Load a specific output artifact from a run by key.
+
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+        key : str
+            Output artifact key to load.
+        **kwargs : Any
+            Forwarded to `Tracker.load(...)`.
+        """
+        artifact = self.get_run_artifact(run_id, key=key, direction="output")
+        if artifact is None:
+            raise ValueError(
+                f"No output artifact found for run_id={run_id!r} key={key!r}."
+            )
+        return self.load(artifact, **kwargs)
 
     def find_matching_run(
         self, config_hash: str, input_hash: str, git_hash: str
@@ -1873,63 +2992,26 @@ class Tracker:
             Maximum depth to traverse (0 returns only the artifact). Useful for
             large graphs or iterative workflows.
         """
-        if not self.engine:
-            return None
+        return self.lineage.get_lineage(
+            artifact_key_or_id=artifact_key_or_id,
+            max_depth=max_depth,
+        )
 
-        start_artifact = self.get_artifact(key_or_id=artifact_key_or_id)
-        if not start_artifact:
-            return None
-
-        run_cache: Dict[str, Optional[Run]] = {}
-        run_artifacts_cache: Dict[str, RunArtifacts] = {}
-        lineage_cache: Dict[tuple[str, Optional[int]], Dict[str, Any]] = {}
-
-        def _trace(artifact: Artifact, visited_runs: set, depth: int) -> Dict[str, Any]:
-            lineage_node: Dict[str, Any] = {"artifact": artifact, "producing_run": None}
-
-            if max_depth is not None and depth >= max_depth:
-                return lineage_node
-
-            cache_key = (
-                str(artifact.id),
-                None if max_depth is None else max_depth - depth,
-            )
-            cached = lineage_cache.get(cache_key)
-            if cached is not None:
-                return cached
-
-            producing_run_id = artifact.run_id
-            if not producing_run_id or producing_run_id in visited_runs:
-                return lineage_node
-
-            visited_runs.add(producing_run_id)
-            producing_run = run_cache.get(producing_run_id)
-            if producing_run is None and producing_run_id not in run_cache:
-                producing_run = self.get_run(producing_run_id)
-                run_cache[producing_run_id] = producing_run
-            if not producing_run:
-                return lineage_node
-
-            # Recursively find inputs
-            # NEW: Returns RunArtifacts object
-            run_artifacts = run_artifacts_cache.get(producing_run.id)
-            if run_artifacts is None:
-                run_artifacts = self.get_artifacts_for_run(producing_run.id)
-                run_artifacts_cache[producing_run.id] = run_artifacts
-
-            run_node: Dict[str, Any] = {"run": producing_run, "inputs": []}
-
-            # NEW: Iterate over inputs dict
-            for input_artifact in run_artifacts.inputs.values():
-                run_node["inputs"].append(
-                    _trace(input_artifact, visited_runs.copy(), depth + 1)
-                )
-
-            lineage_node["producing_run"] = run_node
-            lineage_cache[cache_key] = lineage_node
-            return lineage_node
-
-        return _trace(start_artifact, set(), 0)
+    def print_lineage(
+        self,
+        artifact_key_or_id: Union[str, uuid.UUID],
+        *,
+        max_depth: Optional[int] = None,
+        show_run_ids: bool = False,
+    ) -> None:
+        """
+        Print a formatted lineage tree for an artifact.
+        """
+        self.lineage.print_lineage(
+            artifact_key_or_id=artifact_key_or_id,
+            max_depth=max_depth,
+            show_run_ids=show_run_ids,
+        )
 
         # --- Permission Helpers ---
 
@@ -2091,36 +3173,7 @@ class Tracker:
         is always flushed first, ensuring that a human-readable record of the run exists
         even if the subsequent database synchronization fails.
         """
-        if not self.current_consist:
-            return
-        json_str = self.current_consist.model_dump_json(indent=2)
-
-        # NOTE:
-        # `Tracker.run_dir` is often a *scenario* directory that contains many runs (steps).
-        # Writing a single `run_dir/consist.json` would overwrite previous steps and can look
-        # "broken" to users expecting multiple steps. To preserve backward compatibility,
-        # we still write `run_dir/consist.json` as the "latest snapshot", but we also write
-        # a stable per-run snapshot in `run_dir/consist_runs/<run_id>.json`.
-        run_id = self.current_consist.run.id
-        safe_run_id = "".join(
-            c if (c.isalnum() or c in ("-", "_", ".")) else "_" for c in run_id
-        )
-
-        per_run_dir = self.fs.run_dir / "consist_runs"
-        per_run_dir.mkdir(parents=True, exist_ok=True)
-        per_run_target = per_run_dir / f"{safe_run_id}.json"
-        per_run_tmp = per_run_target.with_suffix(".tmp")
-        with open(per_run_tmp, "w", encoding="utf-8") as f:
-            f.write(json_str)
-        # `Path.rename()` overwrites on POSIX but fails on Windows if the destination exists.
-        # `Path.replace()` uses `os.replace()` and is atomic + cross-platform.
-        per_run_tmp.replace(per_run_target)
-
-        latest_target = self.fs.run_dir / "consist.json"
-        latest_tmp = latest_target.with_suffix(".tmp")
-        with open(latest_tmp, "w", encoding="utf-8") as f:
-            f.write(json_str)
-        latest_tmp.replace(latest_target)
+        self.persistence.flush_json()
 
     def _sync_run_to_db(self, run: Run) -> None:
         """
@@ -2140,8 +3193,7 @@ class Tracker:
         run : Run
             The `Run` object whose state needs to be synchronized with the database.
         """
-        if self.db:
-            self.db.sync_run(run)
+        self.persistence.sync_run(run)
 
     def _sync_artifact_to_db(self, artifact: Artifact, direction: str) -> None:
         """
@@ -2163,43 +3215,7 @@ class Tracker:
             The direction of the artifact relative to the current run
             ("input" or "output").
         """
-        if self.db and self.current_consist:
-            self.db.sync_artifact(artifact, self.current_consist.run.id, direction)
-
-    def _validate_run_outputs(self, run: Run) -> bool:
-        if not self.db:
-            return True
-
-            # Use service instead of raw SQL
-        artifacts_links = self.db.get_artifacts_for_run(run.id)
-
-        for art, direction in artifacts_links:
-            if direction == "output":
-                resolved_path = self.resolve_uri(art.uri)
-                if not Path(resolved_path).exists() and not art.meta.get(
-                    "is_ingested", False
-                ):
-                    from consist.tools.mount_diagnostics import (
-                        build_mount_resolution_hint,
-                        format_missing_artifact_mount_help,
-                    )
-
-                    hint = build_mount_resolution_hint(
-                        art.uri, artifact_meta=art.meta, mounts=self.mounts
-                    )
-                    help_text = (
-                        "\n"
-                        + format_missing_artifact_mount_help(
-                            hint, resolved_path=resolved_path
-                        )
-                        if hint
-                        else f"\nResolved path: {resolved_path}"
-                    )
-                    logging.warning(
-                        "⚠️ Cache Validation Failed. Missing: %s%s", art.uri, help_text
-                    )
-                    return False
-        return True
+        self.persistence.sync_artifact(artifact, direction)
 
     def history(
         self, limit: int = 10, tags: Optional[List[str]] = None
@@ -2223,14 +3239,46 @@ class Tracker:
             return self.db.get_history(limit, tags)
         return pd.DataFrame()
 
+    def load_input_bundle(self, run_id: str) -> dict[str, Artifact]:
+        """
+        Load a set of input artifacts from a prior "bundle" run by run_id.
+
+        This is a convenience helper for shared DuckDB bundles where a dedicated
+        run logs all required inputs as outputs. The returned dict can be passed
+        directly to `inputs=[...]` on a new run.
+
+        Parameters
+        ----------
+        run_id : str
+            The run id that logged the bundle outputs.
+
+        Returns
+        -------
+        dict[str, Artifact]
+            Mapping of artifact key -> Artifact from the bundle run.
+
+        Raises
+        ------
+        ValueError
+            If the run does not exist or has no output artifacts.
+        """
+        run = self.get_run(run_id)
+        if not run:
+            raise ValueError(f"Input bundle run_id={run_id!r} not found.")
+
+        outputs = self.get_artifacts_for_run(run_id).outputs
+        if not outputs:
+            raise ValueError(f"Input bundle run_id={run_id!r} has no output artifacts.")
+        return outputs
+
     @contextmanager
     def capture_outputs(
         self, directory: Union[str, Path], pattern: str = "*", recursive: bool = False
-    ) -> OutputCapture:
+    ) -> Iterator[OutputCapture]:
         """
         A context manager to automatically capture and log new or modified files in a directory.
 
-        This context manager is used within a `@task` function or `start_run` block
+        This context manager is used within a `tracker.run`/`tracker.trace` call or `start_run` block
         to monitor a specified directory. Any files created or modified within this
         directory during the execution of the `with` block will be automatically
         logged as output artifacts of the current run.
@@ -2319,25 +3367,13 @@ class Tracker:
         # We also sync to DB immediately so external monitors can see progress/tags
         self._sync_run_to_db(self.current_consist.run)
 
-    def task(self, **kwargs) -> Callable:
+    def define_step(self, **kwargs) -> Callable:
         """
-        Create a task decorator bound to this tracker.
+        Attach metadata to a function without changing execution behavior.
 
-        Tasks wrap functions with Consist's caching + provenance behavior.
-        The decorator accepts options like `cache_mode`, `depends_on`,
-        and output-capture settings; see the user guide for details.
-
-        Parameters
-        ----------
-        **kwargs : Any
-            Options forwarded to `create_task_decorator(...)`.
-
-        Returns
-        -------
-        Callable
-            A decorator that can be applied to a function to create a cached task.
+        This is used by Tracker.run/ScenarioContext.run to infer defaults.
         """
-        return create_task_decorator(self, **kwargs)
+        return define_step_decorator(**kwargs)
 
     @property
     def last_run(self) -> Optional[ConsistRecord]:
@@ -2359,9 +3395,35 @@ class Tracker:
         Returns
         -------
         bool
-            True if the current `start_run`/task execution is reusing a cached run.
+            True if the current `start_run`/`run`/`trace` execution is reusing a cached run.
         """
-        return self.current_consist and self.current_consist.cached_run is not None
+        return bool(
+            self.current_consist and self.current_consist.cached_run is not None
+        )
+
+    def suspend_cache_options(self) -> ActiveRunCacheOptions:
+        """
+        Suspend active-run cache options and reset them to defaults.
+
+        Returns
+        -------
+        ActiveRunCacheOptions
+            The previously active cache options, for later restoration.
+        """
+        suspended = self._active_run_cache_options
+        self._active_run_cache_options = ActiveRunCacheOptions()
+        return suspended
+
+    def restore_cache_options(self, options: ActiveRunCacheOptions) -> None:
+        """
+        Restore previously suspended active-run cache options.
+
+        Parameters
+        ----------
+        options : ActiveRunCacheOptions
+            Cache options to restore.
+        """
+        self._active_run_cache_options = options
 
     def cached_artifacts(self, direction: str = "output"):
         """

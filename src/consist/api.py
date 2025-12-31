@@ -1,14 +1,31 @@
 from contextlib import contextmanager
+import importlib
 from pathlib import Path
-from typing import Optional, Union, Any, Type, Iterable, Dict, Mapping, TYPE_CHECKING
+from types import ModuleType
+from typing import (
+    Any,
+    Dict,
+    Hashable,
+    Iterable,
+    Iterator,
+    Mapping,
+    Optional,
+    TYPE_CHECKING,
+    Type,
+    TypeVar,
+    Union,
+)
 
 import pandas as pd
-import tempfile
-from sqlalchemy import case, func, text
+from sqlalchemy import MetaData, Table, case, func, select as sa_select, Subquery
+from sqlalchemy.sql import Executable
+from sqlalchemy.exc import SQLAlchemyError
+from sqlmodel import SQLModel, Session, select
 
 # Internal imports
 from consist.core.context import get_active_tracker
 from consist.core.views import create_view_model
+from consist.core.workflow import OutputCapture
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 from consist.models.run_config_kv import RunConfigKV
@@ -16,26 +33,23 @@ from consist.core.tracker import Tracker
 from consist.types import ArtifactRef
 
 if TYPE_CHECKING:
-    # Type-only imports already handled above; kept for static checkers
-    pass
+    import xarray
 
 # Import loaders for specific formats
+xr: Optional[ModuleType]
 try:
-    import xarray as xr
+    xr = importlib.import_module("xarray")
 except ImportError:
     xr = None
 
+tables: Optional[ModuleType]
 try:
-    import tables
+    tables = importlib.import_module("tables")
 except ImportError:
     tables = None
 
-# In consist/api.py
-
-from typing import TypeVar
-from sqlmodel import SQLModel, Session, select
-
 T = TypeVar("T", bound=SQLModel)
+LoadResult = Union[pd.DataFrame, pd.Series, "xarray.Dataset", pd.HDFStore]
 
 
 def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
@@ -54,7 +68,7 @@ def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
     Type[T]
         SQLModel subclass with ``table=True`` pointing at the hybrid view.
     """
-    return create_view_model(model, name)
+    return create_view_model(model, name)  # ty: ignore[invalid-return-type]
 
 
 # --- Core Access ---
@@ -112,7 +126,7 @@ def single_step_scenario(
     """
     tr = tracker or current_tracker()
     with tr.scenario(name, **kwargs) as sc:
-        with sc.step(step_name or name):
+        with sc.trace(step_name or name):
             yield sc
 
 
@@ -134,7 +148,7 @@ def current_tracker() -> "Tracker":
     ------
     RuntimeError
         If no `Tracker` is active in the current context. This typically happens
-        if called outside of a `consist.start_run` block or a `@consist.task` decorated function.
+        if called outside of a `consist.start_run` block or a `tracker.run`/`tracker.trace` call.
     """
     return get_active_tracker()
 
@@ -201,7 +215,7 @@ def get_artifact(
     Optional[Artifact]
         Matching artifact or ``None`` if not found.
     """
-    return current_tracker().get_artifact(
+    return current_tracker().get_run_artifact(
         run_id, key=key, key_contains=key_contains, direction=direction
     )
 
@@ -334,7 +348,8 @@ def log_dataframe(
     tracker : Optional[Tracker], optional
         Tracker instance to use; defaults to the active tracker.
     path : Optional[Union[str, Path]], optional
-        Output path; defaults to a temporary file in the tracker run directory.
+        Output path; defaults to `<run_dir>/outputs/<run_subdir>/<key>.<driver>` for the
+        active run as determined by the tracker's run subdir configuration.
     driver : Optional[str], optional
         File format driver (e.g., "parquet" or "csv").
     meta : Optional[Dict[str, Any]], optional
@@ -355,7 +370,7 @@ def log_dataframe(
     tr = tracker or current_tracker()
     # Resolve path and driver
     if path is None:
-        base_dir = getattr(tr, "run_dir", None) or Path(tempfile.mkdtemp())
+        base_dir = tr.run_artifact_dir()
         resolved_path = Path(base_dir) / f"{key}.{driver or 'parquet'}"
     else:
         resolved_path = Path(path)
@@ -396,7 +411,7 @@ def register_views(*models: Type[SQLModel]) -> Dict[str, Type[SQLModel]]:
     Dict[str, Type[SQLModel]]
         Mapping from model class name to the generated view model.
     """
-    return {m.__name__: create_view_model(m) for m in models}
+    return {m.__name__: create_view_model(m) for m in models}  # ty: ignore[invalid-return-type]
 
 
 def find_run(tracker: Optional["Tracker"] = None, **filters: Any) -> Optional[Run]:
@@ -419,7 +434,9 @@ def find_run(tracker: Optional["Tracker"] = None, **filters: Any) -> Optional[Ru
     return tr.find_run(**filters)
 
 
-def find_runs(tracker: Optional["Tracker"] = None, **filters: Any):
+def find_runs(
+    tracker: Optional["Tracker"] = None, **filters: Any
+) -> Union[list[Run], Dict[Hashable, Run]]:
     """
     Convenience proxy for ``Tracker.find_runs``.
 
@@ -432,7 +449,7 @@ def find_runs(tracker: Optional["Tracker"] = None, **filters: Any):
 
     Returns
     -------
-    list
+    Union[list[Run], Dict[Hashable, Run]]
         Results returned by ``Tracker.find_runs``.
     """
     tr = tracker or current_tracker()
@@ -440,7 +457,7 @@ def find_runs(tracker: Optional["Tracker"] = None, **filters: Any):
 
 
 @contextmanager
-def db_session(tracker: Optional["Tracker"] = None) -> Session:
+def db_session(tracker: Optional["Tracker"] = None) -> Iterator[Session]:
     """
     Provide a SQLModel ``Session`` connected to the tracker's database.
 
@@ -459,13 +476,13 @@ def db_session(tracker: Optional["Tracker"] = None) -> Session:
         yield session
 
 
-def run_query(query: Any, tracker: Optional["Tracker"] = None) -> list:
+def run_query(query: Executable, tracker: Optional["Tracker"] = None) -> list:
     """
     Execute a SQLModel/SQLAlchemy query via the tracker engine.
 
     Parameters
     ----------
-    query : Any
+    query : Executable
         Query object (``select``, etc.).
     tracker : Optional[Tracker], optional
         Tracker instance supplying the engine; defaults to the active tracker.
@@ -490,7 +507,7 @@ def pivot_facets(
     label_map: Optional[Mapping[str, str]] = None,
     run_id_label: str = "run_id",
     table: Type[RunConfigKV] = RunConfigKV,
-) -> Any:
+) -> Subquery:
     """
     Build a pivoted facet subquery keyed by run_id.
 
@@ -561,7 +578,7 @@ def pivot_facets(
 @contextmanager
 def capture_outputs(
     directory: Union[str, Path], pattern: str = "*", recursive: bool = False
-) -> Any:
+) -> Iterator[OutputCapture]:
     """
     Context manager to automatically capture and log new or modified files in a directory
     within the current active run context.
@@ -606,7 +623,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     **kwargs: Any,
-) -> Union[pd.DataFrame, "xr.Dataset", Any]:
+) -> LoadResult:
     """
     Smart loader that retrieves data for an artifact from the best available source.
 
@@ -640,7 +657,7 @@ def load(
 
     Returns
     -------
-    Union[pd.DataFrame, xarray.Dataset, Any]
+    LoadResult
         The loaded data, typically a Pandas DataFrame, an xarray Dataset (for Zarr),
         or another data object depending on the artifact's `driver` and the data format.
 
@@ -700,7 +717,7 @@ def load(
 
     # 3. Try Disk Load (Priority 1)
     if Path(path).exists():
-        return _load_from_disk(path, artifact.driver, **load_kwargs)
+        return _load_from_disk(str(path), artifact.driver, **load_kwargs)
 
     # 4. Try Database Load (Priority 2 - Ghost Mode)
     if artifact.meta.get("is_ingested", False):
@@ -760,7 +777,7 @@ def load(
     )
 
 
-def _load_from_disk(path: str, driver: str, **kwargs: Any) -> Any:
+def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
     """
     Dispatches to the correct file reader based on the artifact's driver.
 
@@ -778,7 +795,7 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> Any:
 
     Returns
     -------
-    Any
+    LoadResult
         The loaded data, typically a Pandas DataFrame, an xarray Dataset, or
         another format-specific data object.
 
@@ -861,12 +878,29 @@ def _load_from_db(
         does not exist or a database error occurs.
     """
     table_name = artifact.key
-    query = f"SELECT * FROM global_tables.{table_name} WHERE consist_artifact_id = '{artifact.id}'"
+    metadata = MetaData()
     try:
-        return pd.read_sql(text(query), tracker.engine, **kwargs)
+        table = Table(
+            table_name,
+            metadata,
+            schema="global_tables",
+            autoload_with=tracker.engine,
+        )
+    except SQLAlchemyError as e:
+        raise RuntimeError(
+            f"Failed to reflect DB table 'global_tables.{table_name}': {e}"
+        ) from e
+
+    if "consist_artifact_id" not in table.c:
+        raise RuntimeError(
+            f"Table 'global_tables.{table_name}' is missing consist_artifact_id."
+        )
+
+    stmt = sa_select(table).where(table.c.consist_artifact_id == str(artifact.id))
+    try:
+        return pd.read_sql(stmt, tracker.engine, **kwargs)
     except Exception as e:
-        # If table not found, provide helpful error
-        raise RuntimeError(f"Failed to load from DB table '{table_name}': {e}")
+        raise RuntimeError(f"Failed to load from DB table '{table_name}': {e}") from e
 
 
 def log_meta(**kwargs: Any) -> None:

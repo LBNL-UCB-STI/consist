@@ -33,6 +33,7 @@ This page defines what Consist considers its **public API** for the `0.1.x` seri
 - `consist.find_runs`
 - `consist.run_query`
 - `consist.db_session`
+- `consist.pivot_facets`
 - Indexing helpers: `consist.index_by_field`, `consist.index_by_facet`, plus `RunFieldIndex` / `FacetIndex`
 
 ## Stable, but optional extras
@@ -48,4 +49,3 @@ These modules are useful, but are not part of the stable `0.1.x` contract yet:
 - `consist.integrations.containers` (container execution + caching)
 - `consist.integrations.dlt_loader` (low-level ingestion integration)
 - `consist.web` (FastAPI service)
-

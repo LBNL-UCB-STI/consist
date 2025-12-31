@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Iterator
 from unittest.mock import patch
 
 import pandas as pd
@@ -81,7 +82,7 @@ def run_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def tracker(request, run_dir: Path, tmp_path: Path) -> Tracker:
+def tracker(request, run_dir: Path, tmp_path: Path) -> Iterator[Tracker]:
     """
     Provides a fresh, isolated Tracker instance for each test function.
 
@@ -106,14 +107,14 @@ def tracker(request, run_dir: Path, tmp_path: Path) -> Tracker:
     # We restrict operations to ONLY these tables to prevent 'create_all'
     # from trying to build 'MockTable' (from dlt tests) which uses 'SERIAL' types.
     core_tables = [
-        Run.__table__,
-        Artifact.__table__,
-        RunArtifactLink.__table__,
-        ConfigFacet.__table__,
-        RunConfigKV.__table__,
-        ArtifactSchema.__table__,
-        ArtifactSchemaField.__table__,
-        ArtifactSchemaObservation.__table__,
+        getattr(Run, "__table__"),
+        getattr(Artifact, "__table__"),
+        getattr(RunArtifactLink, "__table__"),
+        getattr(ConfigFacet, "__table__"),
+        getattr(RunConfigKV, "__table__"),
+        getattr(ArtifactSchema, "__table__"),
+        getattr(ArtifactSchemaField, "__table__"),
+        getattr(ArtifactSchemaObservation, "__table__"),
     ]
 
     # Clean Slate Policy:
@@ -141,7 +142,7 @@ def engine(tracker: Tracker):
 
 
 @pytest.fixture
-def cli_runner(tracker: Tracker) -> CliRunner:
+def cli_runner(tracker: Tracker) -> Iterator[CliRunner]:
     """
     Provides a Typer CliRunner with get_tracker patched to use the shared test tracker.
     Simplifies CLI command testing without repetitive patching.

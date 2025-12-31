@@ -163,6 +163,8 @@ class DockerBackend(ContainerBackend):
             The SHA digest of the image if available (RepoDigest), or the local image ID
             as a fallback. If resolution fails, the original image string is returned.
         """
+        if self.client is None:
+            return image
         try:
             if self.pull_latest:
                 self.client.images.pull(image)

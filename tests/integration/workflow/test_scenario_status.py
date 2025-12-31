@@ -8,7 +8,7 @@ from consist.models.run import Run
 def test_scenario_failure_marks_header_and_clears_state(tracker: Tracker):
     with pytest.raises(RuntimeError):
         with tracker.scenario("scenario_fail") as sc:
-            with sc.step("explode"):
+            with sc.trace("explode"):
                 raise RuntimeError("boom")
 
     header = tracker.get_run("scenario_fail")
@@ -30,7 +30,7 @@ def test_simple_run_status_persists(tracker: Tracker):
 def test_scenario_status_persistence_debug(tracker: Tracker):
     """Diagnostic coverage: scenario header status persists after steps."""
     with tracker.scenario("scenario_status_debug") as sc:
-        with sc.step("s1"):
+        with sc.trace("s1"):
             pass
 
     header_db = tracker.get_run("scenario_status_debug")

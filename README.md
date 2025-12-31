@@ -32,35 +32,44 @@ Consist addresses these by treating provenance as a first-class concern. Each ru
 pip install consist
 ```
 
+Requires Python 3.11+.
+
 ---
 
 ## Quick Example
 
 ```python
 from consist import Tracker
-from pydantic import BaseModel
 from pathlib import Path
-
-class CleaningConfig(BaseModel):
-    threshold: float = 0.5
+import pandas as pd
 
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
-@tracker.task()
-def clean_data(raw_file: Path, config: CleaningConfig) -> Path:
-    # Prefer writing outputs under `tracker.run_dir` (or a mounted outputs:// root)
-    # so artifacts remain portable and easy to locate.
-    output_path = tracker.run_dir / "cleaned.parquet"
-    # ... processing logic ...
-    return output_path
+def clean_data(raw_path):
+    df = pd.read_csv(raw_path)
+    df = df[df["value"] > 0.5]
+    # Keep outputs under the run directory for easy cleanup and portability.
+    out_path = tracker.run_dir / "cleaned.parquet"
+    df.to_parquet(out_path)
+    return out_path
 
-# First call executes; second call with same inputs returns cached result
-config = CleaningConfig(threshold=0.8)
-result = clean_data(Path("raw.csv"), config)  # Returns an Artifact
-result = clean_data(Path("raw.csv"), config)  # Cache hit!
+result = tracker.run(
+    fn=clean_data,
+    inputs={"raw_path": "raw.csv"},
+    outputs=["cleaned"],
+)
+result = tracker.run(
+    fn=clean_data,
+    inputs={"raw_path": "raw.csv"},
+    outputs=["cleaned"],
+)
+# Second call with same inputs -> cache hit
+
+cleaned = result["cleaned"]
+cleaned.path  # Local path to the artifact file
 ```
 
-Tasks return `Artifact` objects that wrap the output path with provenance metadata. Use `consist.load(artifact)` to read the data or `artifact.path` to access the file directly.
+Runs return `Artifact` objects that wrap output paths with provenance metadata. Use `consist.load(artifact)` to read the data or `artifact.path` to access the file directly.
 
 ---
 
@@ -82,13 +91,13 @@ Tasks return `Artifact` objects that wrap the output path with provenance metada
 
 ## Documentation
 
-- **[Usage Guide](docs/usage-guide.md)**: Detailed patterns for tasks, scenarios, and querying
+- **[Usage Guide](docs/usage-guide.md)**: Detailed patterns for runs, scenarios, and querying
 - **[CLI Reference](docs/cli-reference.md)**: Command-line tools for inspecting provenance
 - **[Architecture](docs/architecture.md)**: How caching and lineage tracking work
 
 ### Build and View Docs Locally
 
-If you have access to the private repo, you can build and browse the documentation locally:
+You can build and browse the documentation locally:
 
 ```bash
 pip install -e ".[docs]"

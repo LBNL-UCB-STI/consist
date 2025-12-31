@@ -134,3 +134,43 @@ def test_zarr_lifecycle(tracker_matrix):
 
     assert val_2020 == 10.0
     assert val_2030 == 20.0
+
+
+def test_matrix_view_filters(tracker_matrix):
+    """
+    Verify MatrixViewFactory filters by run_ids and parent_id.
+    """
+    # --- Run A (Scenario A) ---
+    with tracker_matrix.start_run(
+        "run_A", "traffic_simulation", year=2020, parent_run_id="scenario_A"
+    ) as t:
+        zarr_path = t.run_dir / "skims_A.zarr"
+        create_zarr(zarr_path, value_fill=1.0, year=2020)
+        art = t.log_artifact(zarr_path, key="skims", driver="zarr")
+        t.ingest(art)
+
+    # --- Run B (Scenario B) ---
+    with tracker_matrix.start_run(
+        "run_B", "traffic_simulation", year=2020, parent_run_id="scenario_B"
+    ) as t:
+        zarr_path = t.run_dir / "skims_B.zarr"
+        create_zarr(zarr_path, value_fill=2.0, year=2020)
+        art = t.log_artifact(zarr_path, key="skims", driver="zarr")
+        t.ingest(art)
+
+    factory = MatrixViewFactory(tracker_matrix)
+
+    # Filter by run_ids
+    ds_run_a = factory.load_matrix_view("skims", run_ids=["run_A"])
+    assert len(ds_run_a.run_id) == 1
+    assert ds_run_a.run_id.values[0] == "run_A"
+
+    # Filter by parent_id + model + status
+    ds_scenario_a = factory.load_matrix_view(
+        "skims",
+        parent_id="scenario_A",
+        model="traffic_simulation",
+        status="completed",
+    )
+    assert len(ds_scenario_a.run_id) == 1
+    assert ds_scenario_a.run_id.values[0] == "run_A"

@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from typing import List, Optional, Any, Type, TYPE_CHECKING, Callable
+from typing import List, Optional, Any, Type, TYPE_CHECKING, Callable, Union
 
 from sqlmodel import SQLModel
 from consist.models.artifact import Artifact
@@ -200,3 +200,94 @@ class ArtifactManager:
             logging.warning(f"[Consist] Failed to discover HDF5 tables: {e}")
 
         return table_artifacts
+
+    def log_h5_container(
+        self,
+        path: Union[str, Path],
+        *,
+        key: Optional[str] = None,
+        direction: str = "output",
+        discover_tables: bool = True,
+        table_filter: Optional[Union[Callable[[str], bool], List[str]]] = None,
+        **meta: Any,
+    ) -> tuple[Artifact, List[Artifact]]:
+        """
+        Log an HDF5 file and optionally discover its internal tables.
+
+        Parameters
+        ----------
+        path : Union[str, Path]
+            Path to the HDF5 file.
+        key : Optional[str], optional
+            Semantic name for the container. If not provided, uses the file stem.
+        direction : str, default "output"
+            Whether this is an "input" or "output" artifact.
+        discover_tables : bool, default True
+            If True, scan the file and create child artifacts for each table/dataset.
+        table_filter : Optional[Union[Callable[[str], bool], List[str]]], optional
+            Filter which tables to log. Can be:
+            - A callable that takes a table name and returns True to include
+            - A list of table names to include (exact match)
+            If None, all tables are included.
+        **meta : Any
+            Additional metadata for the container artifact.
+
+        Returns
+        -------
+        tuple[Artifact, List[Artifact]]
+            A tuple of (container_artifact, list_of_table_artifacts).
+
+        Raises
+        ------
+        RuntimeError
+            If called outside an active run context.
+        """
+        if not self.tracker.current_consist:
+            raise RuntimeError("Cannot log artifact outside of a run context.")
+
+        path_obj = Path(path)
+        if key is None:
+            key = path_obj.stem
+
+        container = self.tracker.log_artifact(
+            str(path_obj),
+            key=key,
+            direction=direction,
+            driver="h5",
+            is_container=True,
+            **meta,
+        )
+
+        table_artifacts: List[Artifact] = []
+
+        if discover_tables:
+            if table_filter is None:
+
+                def filter_fn(name: str) -> bool:
+                    return True
+
+            elif isinstance(table_filter, list):
+                filter_set = set(table_filter)
+
+                def filter_fn(name: str) -> bool:
+                    stripped = name.lstrip("/")
+                    return name in filter_set or stripped in filter_set
+
+            else:
+                filter_fn = table_filter
+
+            table_artifacts = self.scan_h5_container(
+                container, path_obj, key, direction, filter_fn
+            )
+
+            for table_artifact in table_artifacts:
+                self.tracker.current_consist.outputs.append(table_artifact)
+                self.tracker.persistence.sync_artifact(table_artifact, direction)
+
+        container.meta["table_count"] = len(table_artifacts)
+        container.meta["table_ids"] = [str(t.id) for t in table_artifacts]
+
+        self.tracker.persistence.flush_json()
+        self.tracker.persistence.sync_artifact(container, direction)
+
+        return container, table_artifacts

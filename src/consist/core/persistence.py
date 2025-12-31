@@ -1,8 +1,11 @@
 import time
+
+# ty: ignore[invalid-argument-type] is used on SQLAlchemy joins/where clauses that
+# ty currently mis-types as bool; these are valid SQLAlchemy expressions.
 import random
 import logging
 import uuid
-from typing import Optional, List, Callable, Any, Dict, Tuple
+from typing import Optional, List, Callable, Any, Dict, Tuple, TYPE_CHECKING
 
 import pandas as pd
 from sqlalchemy.exc import OperationalError, DatabaseError
@@ -20,6 +23,11 @@ from consist.models.artifact_schema import (
 from consist.models.config_facet import ConfigFacet
 from consist.models.run import Run, RunArtifactLink
 from consist.models.run_config_kv import RunConfigKV
+
+if TYPE_CHECKING:
+    from consist.core.tracker import Tracker
+    from consist.models.artifact import Artifact
+    from consist.models.run import Run as RunModel
 
 
 class DatabaseManager:
@@ -49,14 +57,14 @@ class DatabaseManager:
             SQLModel.metadata.create_all(
                 self.engine,
                 tables=[
-                    Run.__table__,
-                    Artifact.__table__,
-                    RunArtifactLink.__table__,
-                    ConfigFacet.__table__,
-                    RunConfigKV.__table__,
-                    ArtifactSchema.__table__,
-                    ArtifactSchemaField.__table__,
-                    ArtifactSchemaObservation.__table__,
+                    getattr(Run, "__table__"),
+                    getattr(Artifact, "__table__"),
+                    getattr(RunArtifactLink, "__table__"),
+                    getattr(ConfigFacet, "__table__"),
+                    getattr(RunConfigKV, "__table__"),
+                    getattr(ArtifactSchema, "__table__"),
+                    getattr(ArtifactSchemaField, "__table__"),
+                    getattr(ArtifactSchemaObservation, "__table__"),
                 ],
             )
             # DuckDB self-referential FK on run.parent_run_id blocks status updates.
@@ -181,6 +189,13 @@ class DatabaseManager:
                     "FOREIGN KEY (parent_run_id) REFERENCES run(id) NOT ENFORCED"
                 )
         except Exception as e:
+            msg = str(e)
+            if "Not implemented" in msg and "ALTER TABLE" in msg:
+                logging.debug(
+                    "DuckDB does not yet support ALTER TABLE for FK relaxation: %s",
+                    msg,
+                )
+                return
             logging.warning(f"Failed to relax run.parent_run_id FK: {e}")
 
     def execute_with_retry(
@@ -250,7 +265,7 @@ class DatabaseManager:
         try:
             self.execute_with_retry(_do_sync, operation_name="sync_run")
         except Exception as e:
-            logging.warning(f"Database sync failed: {e}")
+            logging.warning("Database sync failed: %s", e)
 
     def update_run_meta(self, run_id: str, meta_updates: Dict[str, Any]) -> None:
         """Updates a run's meta field with a partial dict."""
@@ -311,6 +326,20 @@ class DatabaseManager:
 
         def _insert():
             with Session(self.engine) as session:
+                # Ensure idempotency for repeated runs with identical run_id/facet_id/namespace.
+                combos = {
+                    (row.run_id, row.facet_id, row.namespace)
+                    for row in rows
+                    if row.run_id and row.facet_id and row.namespace
+                }
+                for run_id, facet_id, namespace in combos:
+                    session.exec(
+                        delete(RunConfigKV).where(
+                            col(RunConfigKV.run_id) == run_id,
+                            col(RunConfigKV.facet_id) == facet_id,
+                            col(RunConfigKV.namespace) == namespace,
+                        )
+                    )
                 session.add_all(rows)
                 session.commit()
 
@@ -339,7 +368,7 @@ class DatabaseManager:
                     # schema_id (hash). Replace the normalized field rows in one shot.
                     session.exec(
                         delete(ArtifactSchemaField).where(
-                            ArtifactSchemaField.schema_id == schema.id
+                            ArtifactSchemaField.schema_id == schema.id  # ty: ignore[invalid-argument-type]
                         )
                     )
                     session.add_all(fields)
@@ -482,6 +511,68 @@ class DatabaseManager:
                 e,
             )
 
+    def sync_run_with_links(
+        self, *, run: Run, artifact_ids: List[uuid.UUID], direction: str = "output"
+    ) -> None:
+        """
+        Upsert a Run and link artifacts in a single transaction.
+
+        Parameters
+        ----------
+        run : Run
+            Run to upsert.
+        artifact_ids : List[uuid.UUID]
+            Artifact ids to link to the run.
+        direction : str, default "output"
+            Link direction for all artifacts.
+        """
+        if not artifact_ids:
+            self.sync_run(run)
+            return
+
+        def _do_sync():
+            with Session(self.engine) as session:
+                session.merge(run)
+
+                existing = session.exec(
+                    select(RunArtifactLink)
+                    .where(RunArtifactLink.run_id == run.id)
+                    .where(col(RunArtifactLink.artifact_id).in_(artifact_ids))
+                ).all()
+
+                existing_by_id = {row.artifact_id: row for row in existing}
+                new_links: List[RunArtifactLink] = []
+                for artifact_id in artifact_ids:
+                    row = existing_by_id.get(artifact_id)
+                    if row is not None:
+                        if row.direction != direction:
+                            logging.warning(
+                                "[Consist] Ignoring attempt to link artifact_id=%s to run_id=%s as '%s' "
+                                "because it is already linked as '%s'. "
+                                "If this step truly produces a new output, write to a new path (preferred), "
+                                "or log a distinct Artifact instance rather than reusing the same Artifact reference.",
+                                artifact_id,
+                                run.id,
+                                direction,
+                                row.direction,
+                            )
+                        continue
+                    new_links.append(
+                        RunArtifactLink(
+                            run_id=run.id, artifact_id=artifact_id, direction=direction
+                        )
+                    )
+
+                if new_links:
+                    session.add_all(new_links)
+
+                session.commit()
+
+        try:
+            self.execute_with_retry(_do_sync, operation_name="sync_run_with_links")
+        except Exception as e:
+            logging.warning("Database sync failed: %s", e)
+
     def sync_artifact(self, artifact: Artifact, run_id: str, direction: str) -> None:
         """Upserts an Artifact and links it to the Run."""
 
@@ -496,7 +587,8 @@ class DatabaseManager:
             # Now create the link
             self.link_artifact_to_run(artifact.id, run_id, direction)
         except Exception as e:
-            logging.warning(f"Artifact sync failed for {artifact.key}: {e}")
+            logging.warning("Artifact sync failed: %s", e)
+            logging.warning("Database sync failed: %s", e)
 
     # --- Read Operations ---
 
@@ -525,6 +617,27 @@ class DatabaseManager:
                 return session.get(Run, run_id)
 
         return self.execute_with_retry(_query)
+
+    def get_run_signatures(self, run_ids: List[str]) -> Dict[str, str]:
+        """
+        Bulk lookup of run signatures by run id.
+
+        Returns a mapping of run_id -> signature for runs that exist and have a signature.
+        """
+        if not run_ids:
+            return {}
+
+        def _query():
+            with Session(self.engine) as session:
+                rows = session.exec(
+                    select(Run.id, Run.signature).where(col(Run.id).in_(run_ids))
+                ).all()
+                return {row[0]: row[1] for row in rows if row[1]}
+
+        try:
+            return self.execute_with_retry(_query)
+        except Exception:
+            return {}
 
     def find_matching_run(
         self, config_hash: str, input_hash: str, git_hash: str
@@ -570,7 +683,7 @@ class DatabaseManager:
             logging.warning(f"Signature lookup failed: {e}")
             return None
 
-    def get_artifact(self, key_or_id: str) -> Optional[Artifact]:
+    def get_artifact(self, key_or_id: str | uuid.UUID) -> Optional[Artifact]:
         def _query():
             with Session(self.engine) as session:
                 try:
@@ -651,7 +764,10 @@ class DatabaseManager:
             with Session(self.engine) as session:
                 return session.exec(
                     select(Artifact, RunArtifactLink.direction)
-                    .join(RunArtifactLink, Artifact.id == RunArtifactLink.artifact_id)
+                    .join(
+                        RunArtifactLink,
+                        Artifact.id == RunArtifactLink.artifact_id,  # ty: ignore[invalid-argument-type]
+                    )
                     .where(RunArtifactLink.run_id == run_id)
                 ).all()
 
@@ -675,7 +791,8 @@ class DatabaseManager:
                 if creator:
                     output_link = aliased(RunArtifactLink)
                     statement = statement.join(
-                        output_link, Artifact.id == output_link.artifact_id
+                        output_link,
+                        Artifact.id == output_link.artifact_id,  # ty: ignore[invalid-argument-type]
                     )
                     statement = statement.where(output_link.run_id == creator)
                     statement = statement.where(output_link.direction == "output")
@@ -683,7 +800,8 @@ class DatabaseManager:
                 if consumer:
                     input_link = aliased(RunArtifactLink)
                     statement = statement.join(
-                        input_link, Artifact.id == input_link.artifact_id
+                        input_link,
+                        Artifact.id == input_link.artifact_id,  # ty: ignore[invalid-argument-type]
                     )
                     statement = statement.where(input_link.run_id == consumer)
                     statement = statement.where(input_link.direction == "input")
@@ -710,6 +828,7 @@ class DatabaseManager:
         self,
         tags: Optional[List[str]] = None,
         year: Optional[int] = None,
+        iteration: Optional[int] = None,
         model: Optional[str] = None,
         status: Optional[str] = None,
         parent_id: Optional[str] = None,
@@ -727,6 +846,8 @@ class DatabaseManager:
                     statement = statement.where(Run.model_name == model)
                 if year is not None:
                     statement = statement.where(Run.year == year)
+                if iteration is not None:
+                    statement = statement.where(Run.iteration == iteration)
                 if parent_id:
                     statement = statement.where(Run.parent_run_id == parent_id)
                 if name:
@@ -881,7 +1002,7 @@ class DatabaseManager:
             with Session(self.engine) as session:
                 statement = (
                     select(Run)
-                    .join(RunConfigKV, RunConfigKV.run_id == Run.id)
+                    .join(RunConfigKV, RunConfigKV.run_id == Run.id)  # ty: ignore[invalid-argument-type]
                     .where(Run.status == "completed")
                     .where(RunConfigKV.namespace == namespace)
                     .where(RunConfigKV.key == key)
@@ -966,8 +1087,10 @@ class DatabaseManager:
 
         return values
 
-    def get_history(self, limit: int = 10, tags: List[str] = None) -> pd.DataFrame:
-        query = f"SELECT * FROM run ORDER BY created_at DESC LIMIT {limit}"
+    def get_history(
+        self, limit: int = 10, tags: Optional[List[str]] = None
+    ) -> pd.DataFrame:
+        query = select(Run).order_by(Run.created_at.desc()).limit(limit)
         try:
             df = pd.read_sql(query, self.engine)
             if not df.empty and tags:
@@ -995,3 +1118,111 @@ class DatabaseManager:
         except Exception as e:
             logging.warning(f"Failed to fetch history: {e}")
             return pd.DataFrame()
+
+
+class ProvenanceWriter:
+    """
+    Lightweight persistence helper for JSON snapshots and DB synchronization.
+
+    This keeps non-public persistence mechanics out of managers while allowing
+    the tracker to remain the primary orchestrator.
+    """
+
+    def __init__(self, tracker: "Tracker"):
+        self._tracker = tracker
+
+    def flush_json(self) -> None:
+        """
+        Flush the current in-memory run state to JSON snapshots on disk.
+
+        Uses an atomic write strategy for both the per-run snapshot and the
+        rolling latest snapshot.
+        """
+        tracker = self._tracker
+        if not tracker.current_consist:
+            return
+        json_str = tracker.current_consist.model_dump_json(indent=2)
+
+        run_id = tracker.current_consist.run.id
+        safe_run_id = "".join(
+            c if (c.isalnum() or c in ("-", "_", ".")) else "_" for c in run_id
+        )
+
+        per_run_dir = tracker.fs.run_dir / "consist_runs"
+        per_run_dir.mkdir(parents=True, exist_ok=True)
+        per_run_target = per_run_dir / f"{safe_run_id}.json"
+        per_run_tmp = per_run_target.with_suffix(".tmp")
+        with open(per_run_tmp, "w", encoding="utf-8") as f:
+            f.write(json_str)
+        per_run_tmp.replace(per_run_target)
+
+        latest_target = tracker.fs.run_dir / "consist.json"
+        latest_tmp = latest_target.with_suffix(".tmp")
+        with open(latest_tmp, "w", encoding="utf-8") as f:
+            f.write(json_str)
+        latest_tmp.replace(latest_target)
+
+    def sync_run(self, run: "RunModel") -> None:
+        """
+        Sync a Run object to the database, if configured.
+
+        Parameters
+        ----------
+        run : Run
+            Run instance to upsert into the database.
+        """
+        tracker = self._tracker
+        if tracker.db:
+            try:
+                tracker.db.sync_run(run)
+            except Exception as e:
+                logging.warning("Database sync failed: %s", e)
+
+    def sync_run_with_links(
+        self,
+        run: "RunModel",
+        *,
+        artifact_ids: list[uuid.UUID],
+        direction: str = "output",
+    ) -> None:
+        """
+        Sync a Run and link artifacts in one database transaction.
+
+        Parameters
+        ----------
+        run : Run
+            Run instance to upsert into the database.
+        artifact_ids : list[uuid.UUID]
+            Artifact ids to link to the run.
+        direction : str, default "output"
+            Direction for all linked artifacts.
+        """
+        tracker = self._tracker
+        if tracker.db:
+            try:
+                tracker.db.sync_run_with_links(
+                    run=run, artifact_ids=artifact_ids, direction=direction
+                )
+            except Exception as e:
+                logging.warning("Database sync failed: %s", e)
+
+    def sync_artifact(self, artifact: "Artifact", direction: str) -> None:
+        """
+        Sync an Artifact and its run link to the database, if configured.
+
+        Parameters
+        ----------
+        artifact : Artifact
+            Artifact instance to upsert into the database.
+        direction : str
+            Direction of the artifact relative to the current run
+            ("input" or "output").
+        """
+        tracker = self._tracker
+        if tracker.db and tracker.current_consist:
+            try:
+                tracker.db.sync_artifact(
+                    artifact, tracker.current_consist.run.id, direction
+                )
+            except Exception as e:
+                logging.warning("Database sync failed: %s", e)

@@ -10,22 +10,24 @@ import json
 import time
 import inspect
 import fnmatch
-from typing import Dict, List, Any, Optional, Callable, Set, Union
+from importlib import import_module
+from types import ModuleType
+from typing import TYPE_CHECKING, Dict, List, Any, Optional, Callable, Set, Union
 from pathlib import Path
 
 # Try importing git, handle error if missing (optional dependency)
+git: Optional[ModuleType]
 try:
-    import git
+    git = import_module("git")
 except ImportError:
     git = None
 
 # Try importing numpy for type checking
+np: Optional[ModuleType]
 try:
-    import numpy as np
+    np = import_module("numpy")
 except ImportError:
     np = None
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from consist.models.artifact import Artifact
@@ -152,12 +154,14 @@ class IdentityManager:
                 # Rationale: a time-based nonce prevents false cache hits during dev,
                 # but it also disables caching entirely for notebooks/local iteration.
                 # Hashing the diff keeps cache keys stable until the working tree changes.
+                # Only include Python file diffs in the dirty hash to keep cache keys
+                # stable when non-code files (e.g., notebooks) change.
                 try:
-                    diff_head = repo.git.diff("HEAD")
+                    diff_head = repo.git.diff("HEAD", "--", "*.py")
                 except Exception:
-                    diff_head = repo.git.diff()
+                    diff_head = repo.git.diff("--", "*.py")
                 try:
-                    diff_cached = repo.git.diff("--cached")
+                    diff_cached = repo.git.diff("--cached", "--", "*.py")
                 except Exception:
                     diff_cached = ""
                 # NOTE:
@@ -327,7 +331,7 @@ class IdentityManager:
         self,
         inputs: List["Artifact"],
         path_resolver: Optional[Callable[[str], str]] = None,
-        signature_lookup: Optional[Callable[[str], str]] = None,
+        signature_lookup: Optional[Callable[[str], Optional[str]]] = None,
     ) -> str:
         """
         Generates a deterministic hash representing the state of all input artifacts.

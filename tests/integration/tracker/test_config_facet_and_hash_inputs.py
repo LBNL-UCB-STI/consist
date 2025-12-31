@@ -60,6 +60,35 @@ def test_begin_run_persists_facet_and_kv_index(tracker, run_dir: Path):
     assert "file_format" in keys
 
 
+def test_get_config_helpers_return_typed_values(tracker):
+    tracker.begin_run(
+        "run_with_helpers",
+        "activitysim",
+        config={"ignored": "config_snapshot"},
+        facet={
+            "alpha": 1,
+            "beta": 2.5,
+            "flag": True,
+            "nested": {"inner": 3},
+        },
+    )
+    tracker.end_run()
+
+    values = tracker.get_config_values("run_with_helpers")
+    assert values["alpha"] == 1
+    assert isinstance(values["alpha"], int)
+    assert values["beta"] == 2.5
+    assert isinstance(values["beta"], float)
+    assert values["flag"] is True
+    assert values["nested.inner"] == 3
+
+    assert tracker.get_config_value("run_with_helpers", "nested.inner") == 3
+    assert (
+        tracker.get_config_value("run_with_helpers", "missing", default="fallback")
+        == "fallback"
+    )
+
+
 def test_hash_inputs_affects_config_hash_but_ignores_dotfiles(tracker, run_dir: Path):
     """
     Demonstrates `hash_inputs` identity behavior for directory hashing:

@@ -8,7 +8,6 @@ from sqlmodel import SQLModel, Field, select, func
 from consist.core.tracker import Tracker
 from consist.models.run import Run
 import consist
-from consist.integrations.containers import run_container
 
 
 # --- 1. Domain Models ---
@@ -38,6 +37,7 @@ def run_simulation_scenario(
     storage_mode,
     base_trips_by_year=None,
     advance_delta_by_year=None,
+    validate_cached_outputs: str = "lazy",
 ):
     rng = np.random.default_rng(42)
     n_hh = 100
@@ -63,8 +63,15 @@ def run_simulation_scenario(
     class MockTripsBackend:
         """Mock container backend that writes a Parquet with regenerated trips."""
 
-        def __init__(self, df_source: pd.DataFrame, base_trips: int, output_path: Path):
-            self.df_source = df_source
+        def __init__(
+            self,
+            tracker: Tracker,
+            source_artifact: "consist.Artifact",
+            base_trips: int,
+            output_path: Path,
+        ):
+            self.tracker = tracker
+            self.source_artifact = source_artifact
             self.base_trips = base_trips
             self.output_path = output_path
             self.run_count = 0
@@ -74,7 +81,14 @@ def run_simulation_scenario(
 
         def run(self, image, command, volumes, env, working_dir):
             self.run_count += 1
-            df_out = self.df_source.copy()
+            df_in = consist.load(
+                self.source_artifact,
+                tracker=self.tracker,
+                db_fallback="always",
+            )
+            if not isinstance(df_in, pd.DataFrame):
+                raise TypeError("Expected DataFrame from consist.load()")
+            df_out = df_in.copy()
             df_out["number_of_trips"] = rng.poisson(
                 lam=self.base_trips, size=len(df_out)
             )
@@ -94,7 +108,7 @@ def run_simulation_scenario(
         coupler = scenario.coupler
 
         # Init
-        with scenario.step(
+        with scenario.trace(
             run_id=f"{scenario_id}_init",
             name="pop_synth",
             tags=["init"],
@@ -136,7 +150,7 @@ def run_simulation_scenario(
             step_inputs = [current_person_art] if current_person_art else None
 
             # Step 1: advance people (age only)
-            with scenario.step(
+            with scenario.trace(
                 run_id=f"{scenario_id}_year_{year}_advance",
                 name="advance_people",
                 year=year,
@@ -145,6 +159,7 @@ def run_simulation_scenario(
                 config={"year": year, "delta": advance_delta_by_year.get(year, 1)},
                 facet_from=["delta"],
                 inputs=step_inputs,
+                validate_cached_outputs=validate_cached_outputs,
             ) as t:
                 cached_persons = coupler.adopt_cached_output("persons")
                 if cached_persons:
@@ -165,61 +180,55 @@ def run_simulation_scenario(
                     coupler.set("persons", prev_person_art)
 
             # Step 2: generate trips via mocked container (updates number_of_trips)
-            with scenario.step(
-                run_id=f"{scenario_id}_year_{year}_trips",
-                name="generate_trips",
-                year=year,
-                tags=["simulation", "generate_trips"],
-                config={
-                    "year": year,
-                    "base_trips": base_trips_by_year.get(year, base_trips),
-                },
-                facet_from=["base_trips"],
-                hash_inputs=[("generate_trips_config", external_cfg_dir)],
-                inputs=[coupler.get("persons")],
+            advanced_person_art = coupler.require("persons")
+            # Use a stable host path for container outputs so identical scenarios can reuse cache
+            container_out_dir = (container_out_root / str(year)).resolve()
+            container_out_dir.mkdir(parents=True, exist_ok=True)
+            output_path = (container_out_dir / "persons.parquet").resolve()
+
+            trips_lambda = base_trips_by_year.get(year, base_trips)
+
+            mock_backend = MockTripsBackend(
+                tracker=tracker,
+                source_artifact=advanced_person_art,
+                base_trips=trips_lambda,
+                output_path=output_path,
+            )
+
+            container_spec = {
+                "image": "mock/generate_trips:latest",
+                "command": ["generate_trips"],
+                "backend": "docker",
+                "environment": {"BASE_TRIPS": str(trips_lambda)},
+                "volumes": {str(container_out_dir): "/out"},
+            }
+
+            with patch(
+                "consist.integrations.containers.api.DockerBackend",
+                return_value=mock_backend,
             ):
-                # Resolve from cache if present; otherwise execute container and log output.
-                persons_art = coupler.adopt_cached_output("persons")
-                if not persons_art:
-                    df_adv = consist.load(coupler.get("persons"))
-                    # Use a stable host path for container outputs so identical scenarios can reuse cache
-                    container_out_dir = (container_out_root / str(year)).resolve()
-                    container_out_dir.mkdir(parents=True, exist_ok=True)
-                    output_path = (container_out_dir / "persons.parquet").resolve()
+                result = scenario.run(
+                    name="generate_trips",
+                    executor="container",
+                    container=container_spec,
+                    year=year,
+                    tags=["simulation", "generate_trips"],
+                    config={
+                        "year": year,
+                        "base_trips": base_trips_by_year.get(year, base_trips),
+                    },
+                    facet_from=["base_trips"],
+                    hash_inputs=[("generate_trips_config", external_cfg_dir)],
+                    inputs=[advanced_person_art],
+                    output_paths={"persons": output_path},
+                    validate_cached_outputs=validate_cached_outputs,
+                )
 
-                    trips_lambda = base_trips_by_year.get(year, base_trips)
-
-                    mock_backend = MockTripsBackend(
-                        df_source=df_adv,
-                        base_trips=trips_lambda,
-                        output_path=output_path,
-                    )
-
-                    with patch(
-                        "consist.integrations.containers.api.DockerBackend",
-                        return_value=mock_backend,
-                    ):
-                        # Nested mode: run_container detects the active step and does NOT create
-                        # a new Run row; signature/meta/artifacts are attached to the step run.
-                        result = run_container(
-                            tracker=tracker,
-                            run_id=f"{scenario_id}_year_{year}_trips_container",
-                            image="mock/generate_trips:latest",
-                            command=["generate_trips"],
-                            volumes={str(container_out_dir): "/out"},
-                            inputs=[coupler.get("persons")],
-                            outputs={"persons": output_path},
-                            environment={"BASE_TRIPS": str(trips_lambda)},
-                            backend_type="docker",
-                        )
-
-                        persons_art = result.artifacts["persons"]
-                        assert persons_art is not None, "No persons output logged"
-
-                coupler.set("persons", persons_art)
+            persons_art = result.outputs["persons"]
+            coupler.set("persons", persons_art)
 
 
-def test_pilates_header_pattern(tmp_path):
+def test_pilates_header_pattern(tmp_path: Path):
     run_dir = tmp_path / "runs"
     db_path = str(tmp_path / "provenance.duckdb")
     tracker = Tracker(run_dir=run_dir, db_path=db_path, schemas=[Household, Person])
@@ -258,11 +267,8 @@ def test_pilates_header_pattern(tmp_path):
     assert res_map[("high_gas", 2030)] < res_map[("baseline", 2030)]
 
     # Verify artifact metadata inherited step year/tags
-    art_2020 = tracker.get_run_artifact(
-        tracker.find_run(parent_id="baseline", year=2020, model="generate_trips").id,
-        key_contains="persons",
-        direction="output",
-    )
+    run_2020 = tracker.find_run(parent_id="baseline", year=2020, model="generate_trips")
+    art_2020 = tracker.get_run_outputs(run_2020.id).get("persons")
     assert art_2020 is not None
     assert art_2020.meta.get("year") == 2020
     assert "simulation" in (art_2020.meta.get("tags") or [])
@@ -309,15 +315,11 @@ def test_pilates_header_pattern(tmp_path):
     assert runs_by_year[2030].id == target_run.id
 
     # Q4: Snapshot Retrieval
-    person_art = tracker.get_run_artifact(
-        target_run.id, key_contains="persons", direction="output"
-    )
-
-    df = consist.load(person_art, tracker=tracker)
+    df = tracker.load_run_output(target_run.id, "persons")
     assert len(df) == 300
 
 
-def test_pilates_header_pattern_api(tmp_path):
+def test_pilates_header_pattern_api(tmp_path: Path):
     """
     Same workflow as above, but exercising the top-level API shortcuts.
     """
@@ -340,7 +342,7 @@ def test_pilates_header_pattern_api(tmp_path):
             model="pilates_orchestrator",
             tags=["scenario_header"],
         ) as sc:
-            with sc.step(name="pop_synth", run_id=f"{name}_init", tags=["init"]) as t:
+            with sc.trace(name="pop_synth", run_id=f"{name}_init", tags=["init"]) as t:
                 df_hh = pd.DataFrame(
                     {
                         "household_id": np.arange(n_hh),
@@ -351,7 +353,7 @@ def test_pilates_header_pattern_api(tmp_path):
                 t.log_dataframe(df_hh, key="households", schema=Household)
 
             for year in years:
-                with sc.step(
+                with sc.trace(
                     name="travel_demand",
                     run_id=f"{name}_{year}",
                     year=year,
@@ -380,10 +382,7 @@ def test_pilates_header_pattern_api(tmp_path):
     )
     assert runs_by_year[2035].id == target_run.id
 
-    person_art = tracker.get_run_artifact(
-        target_run.id, key_contains="persons", direction="output"
-    )
-    df = consist.load(person_art, tracker=tracker)
+    df = tracker.load_run_output(target_run.id, "persons")
     assert len(df) == n_per
 
 
@@ -477,7 +476,14 @@ def test_pilates_cache_hydrates_across_run_dirs(tmp_path):
     with patch.object(
         tracker1.identity, "get_code_version", return_value="stable_git_hash"
     ):
-        run_simulation_scenario(tracker1, "baseline_a", 10, years, "cold")
+        run_simulation_scenario(
+            tracker1,
+            "baseline_a",
+            10,
+            years,
+            "cold",
+            validate_cached_outputs="eager",
+        )
 
     # Second tracker in a new run_dir replays the same work and should hydrate
     tracker2 = Tracker(
@@ -489,7 +495,14 @@ def test_pilates_cache_hydrates_across_run_dirs(tmp_path):
     with patch.object(
         tracker2.identity, "get_code_version", return_value="stable_git_hash"
     ):
-        run_simulation_scenario(tracker2, "baseline_replay", 10, years, "cold")
+        run_simulation_scenario(
+            tracker2,
+            "baseline_replay",
+            10,
+            years,
+            "cold",
+            validate_cached_outputs="eager",
+        )
 
     out_path = tracker2.run_dir / "container_out" / "2020" / "persons.parquet"
     assert out_path.exists(), "Cache reuse should materialize output in the new run_dir"
@@ -543,7 +556,14 @@ def test_pilates_cache_replay_with_ingested_outputs(tmp_path):
     with patch.object(
         tracker1.identity, "get_code_version", return_value="stable_git_hash"
     ):
-        run_simulation_scenario(tracker1, "ingest_a", 10, years, "cold")
+        run_simulation_scenario(
+            tracker1,
+            "ingest_a",
+            10,
+            years,
+            "cold",
+            validate_cached_outputs="eager",
+        )
 
     tracker2 = Tracker(
         run_dir=tmp_path / "runs_ingest_b",
@@ -554,7 +574,14 @@ def test_pilates_cache_replay_with_ingested_outputs(tmp_path):
     with patch.object(
         tracker2.identity, "get_code_version", return_value="stable_git_hash"
     ):
-        run_simulation_scenario(tracker2, "ingest_replay", 10, years, "cold")
+        run_simulation_scenario(
+            tracker2,
+            "ingest_replay",
+            10,
+            years,
+            "cold",
+            validate_cached_outputs="eager",
+        )
 
     # Cache hit preferred on trips; validation may downgrade to execute if outputs missing
     replay_run = tracker2.find_run(
@@ -564,8 +591,8 @@ def test_pilates_cache_replay_with_ingested_outputs(tmp_path):
     assert cache_flag in (True, False)
 
     # Outputs should be linked and readable
-    arts = tracker2.get_artifacts_for_run(replay_run.id).outputs
-    persons_art = arts.get("persons") or next(iter(arts.values()))
+    outputs = tracker2.get_run_outputs(replay_run.id)
+    persons_art = outputs.get("persons") or next(iter(outputs.values()))
     df = consist.load(persons_art, tracker=tracker2)
     assert len(df) == 300
 

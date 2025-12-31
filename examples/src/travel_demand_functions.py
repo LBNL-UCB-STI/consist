@@ -620,12 +620,30 @@ def apply_congestion(
         d_idx = zone_to_idx[int(row["destination"])]
         vol_matrix[o_idx, d_idx] = row["volume"]
 
-    # BPR function
     free_flow = skims["time_car_ff_mins"].values
-    vc_ratio = vol_matrix / assignment_params.base_capacity
-    congestion_factor = 1 + assignment_params.bpr_alpha * (
+    if vol_matrix.sum() == 0:
+        new_skims = skims.copy()
+        new_skims["time_car_mins"] = (["origin", "destination"], free_flow)
+        return new_skims
+
+    # Build assignment matrix: (origin, destination, zone).
+    assignment = np.zeros((n_zones, n_zones, n_zones), dtype=float)
+    for o in range(n_zones):
+        for d in range(n_zones):
+            start = min(o, d)
+            end = max(o, d)
+            assignment[o, d, start : end + 1] = 1.0
+
+    # Aggregate OD volumes into zonal volumes.
+    zonal_volumes = np.einsum("od,odk->k", vol_matrix, assignment)
+
+    # BPR function on zonal volumes, then average factor along each OD path.
+    vc_ratio = zonal_volumes / assignment_params.base_capacity
+    zone_factor = 1 + assignment_params.bpr_alpha * (
         vc_ratio**assignment_params.bpr_beta
     )
+    path_counts = assignment.sum(axis=2)
+    congestion_factor = (assignment * zone_factor).sum(axis=2) / path_counts
     congested_time = free_flow * congestion_factor
 
     # Create new dataset with updated times

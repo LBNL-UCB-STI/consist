@@ -69,7 +69,22 @@ def _hash_inputs(tracker: Tracker, items: List[ArtifactRef]) -> List[str]:
     hashes: List[str] = []
     for item in items:
         if isinstance(item, Artifact):
-            hashes.append(item.hash)
+            sig_parts: List[str] = []
+            if item.run_id:
+                run = tracker.get_run(item.run_id)
+                if run:
+                    if run.config_hash:
+                        sig_parts.append(f"conf:{run.config_hash}")
+            if item.hash:
+                sig_parts.append(f"hash:{item.hash}")
+            if not sig_parts:
+                try:
+                    abs_path = Path(tracker.resolve_uri(item.uri))
+                    file_hash = tracker.identity.compute_file_checksum(abs_path)
+                    sig_parts.append(f"file:{file_hash}")
+                except Exception:
+                    sig_parts.append(f"uri:{item.uri}")
+            hashes.append("|".join(sig_parts))
         else:
             p = Path(item).resolve()
             if not p.exists():
@@ -213,7 +228,10 @@ def _reuse_or_execute_container(
             materialized = materialize_artifacts(
                 tracker=tracker, items=items, on_missing="warn"
             )
-            tracker.db.update_run_meta(
+            db = tracker.db
+            if db is None:
+                raise RuntimeError("Cannot update run metadata without a database.")
+            db.update_run_meta(
                 run_id,
                 {
                     "cache_hit": True,
@@ -222,10 +240,11 @@ def _reuse_or_execute_container(
                     "materialized_outputs": materialized,
                 },
             )
-            tracker.db.update_run_signature(run_id, signature)
+            db.update_run_signature(run_id, signature)
             # Keep in-memory run in sync to avoid later overwrite during end_run
-            if getattr(tracker, "current_consist", None):
-                run_obj = tracker.current_consist.run
+            current_consist = tracker.current_consist
+            if current_consist is not None:
+                run_obj = current_consist.run
                 run_obj.signature = signature
                 meta = run_obj.meta or {}
                 meta.update(
@@ -242,8 +261,9 @@ def _reuse_or_execute_container(
     logger.debug("[container.cache] miss_or_reexec for run=%s", run_id)
     # Cache miss (or missing outputs) -> execute
     execute_fn()
-    if tracker.db:
-        tracker.db.update_run_meta(
+    db = tracker.db
+    if db is not None:
+        db.update_run_meta(
             run_id,
             {
                 "cache_hit": False,
@@ -251,10 +271,11 @@ def _reuse_or_execute_container(
                 "signature": signature,
             },
         )
-        tracker.db.update_run_signature(run_id, signature)
+        db.update_run_signature(run_id, signature)
     # Sync in-memory run to avoid overwrite on end_run
-    if getattr(tracker, "current_consist", None):
-        run_obj = tracker.current_consist.run
+    current_consist = tracker.current_consist
+    if current_consist is not None:
+        run_obj = current_consist.run
         run_obj.signature = signature
         meta = run_obj.meta or {}
         meta.update(

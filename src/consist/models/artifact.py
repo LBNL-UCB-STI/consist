@@ -104,7 +104,7 @@ class Artifact(SQLModel, table=True):
     # Metadata (Flexible JSON bag)
     # Stores: schema signatures, matrix shapes, etc.
     # Uses SQLAlchemy's JSON type for efficient persistence of arbitrary JSON structures.
-    meta: Dict[str, Any] = Field(default={}, sa_column=Column(JSON))
+    meta: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
 
     # Audit
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -135,7 +135,10 @@ class Artifact(SQLModel, table=True):
         private_state = getattr(self, "__pydantic_private__", None)
         if private_state is None:
             return None
-        return self._abs_path
+        try:
+            return self._abs_path
+        except Exception:
+            return None
 
     @abs_path.setter
     def abs_path(self, value: str) -> None:

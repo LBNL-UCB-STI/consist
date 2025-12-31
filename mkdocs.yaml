@@ -37,6 +37,7 @@ plugins:
 nav:
   - Home: index.md
   - User Guide: usage-guide.md
+  - Configuration & Facets: configs.md
   - Schema Export: schema-export.md
   - Caching & Hydration: caching-and-hydration.md
   - CLI Reference: cli-reference.md

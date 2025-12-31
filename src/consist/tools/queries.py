@@ -33,7 +33,7 @@ def get_runs(
             statement = statement.where(col(Run.tags).like(f'%"{tag}"%'))
 
     statement = statement.limit(limit)
-    return session.exec(statement).all()
+    return list(session.exec(statement).all())
 
 
 def get_summary(session: Session) -> Dict[str, Any]:
