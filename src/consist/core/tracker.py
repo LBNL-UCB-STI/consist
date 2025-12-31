@@ -57,6 +57,7 @@ from consist.core.workflow import OutputCapture, RunContext, ScenarioContext
 from consist.core.input_utils import coerce_input_map
 from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord, Run, RunArtifacts, RunResult
+from consist.models.run_config_kv import RunConfigKV
 from consist.types import ArtifactRef, FacetLike, HasFacetSchemaVersion, HashInputs
 
 UTC = timezone.utc
@@ -1925,9 +1926,7 @@ class Tracker:
             limit=limit,
         )
         if not runs:
-            raise ValueError(
-                "No runs found matching criteria for find_latest_run()."
-            )
+            raise ValueError("No runs found matching criteria for find_latest_run().")
 
         def _latest_key(run: Run) -> tuple[int, Any, Any]:
             if run.iteration is not None:
@@ -2658,6 +2657,112 @@ class Tracker:
         return self.db.get_run_config_kv(
             run_id, namespace=namespace, prefix=prefix, limit=limit
         )
+
+    def _resolve_config_namespace(
+        self, run_id: str, namespace: Optional[str]
+    ) -> Optional[str]:
+        if namespace is not None:
+            return namespace
+        run = self.get_run(run_id)
+        return run.model_name if run else None
+
+    @staticmethod
+    def _coerce_config_kv_value(row: RunConfigKV) -> Any:
+        if row.value_type == "json":
+            return row.value_json
+        if row.value_type == "str":
+            return row.value_str
+        if row.value_type == "int":
+            return int(row.value_num) if row.value_num is not None else None
+        if row.value_type == "float":
+            return float(row.value_num) if row.value_num is not None else None
+        if row.value_type == "bool":
+            return row.value_bool
+        return None
+
+    def get_config_values(
+        self,
+        run_id: str,
+        *,
+        namespace: Optional[str] = None,
+        prefix: Optional[str] = None,
+        keys: Optional[Iterable[str]] = None,
+        limit: int = 10_000,
+    ) -> Dict[str, Any]:
+        """
+        Return a flattened config facet as a dict of key/value pairs.
+
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+        namespace : Optional[str], optional
+            Namespace for the facet. Defaults to the run's model name when available.
+        prefix : Optional[str], optional
+            Filter keys by prefix (e.g. ``"inputs."``).
+        keys : Optional[Iterable[str]], optional
+            Only include specific keys when provided.
+        limit : int, default 10_000
+            Maximum number of entries to return.
+
+        Returns
+        -------
+        dict
+            Mapping of flattened keys to typed values.
+
+        Notes
+        -----
+        Keys are stored as flattened dotted paths. If an original key contains a
+        literal dot, it is escaped as ``"\\."`` in the stored key.
+        """
+        resolved_namespace = self._resolve_config_namespace(run_id, namespace)
+        rows = self.get_run_config_kv(
+            run_id, namespace=resolved_namespace, prefix=prefix, limit=limit
+        )
+        if not rows:
+            return {}
+
+        if keys is not None:
+            key_set = set(keys)
+            rows = [row for row in rows if row.key in key_set]
+
+        return {row.key: self._coerce_config_kv_value(row) for row in rows}
+
+    def get_config_value(
+        self,
+        run_id: str,
+        key: str,
+        *,
+        namespace: Optional[str] = None,
+        default: Any = None,
+    ) -> Any:
+        """
+        Retrieve a single config value from a flattened config facet.
+
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+        key : str
+            Flattened key to fetch.
+        namespace : Optional[str], optional
+            Namespace for the facet. Defaults to the run's model name when available.
+        default : Any, optional
+            Value to return when the key is missing.
+
+        Returns
+        -------
+        Any
+            The typed value for the key, or ``default`` if missing.
+        """
+        resolved_namespace = self._resolve_config_namespace(run_id, namespace)
+        rows = self.get_run_config_kv(
+            run_id, namespace=resolved_namespace, prefix=key, limit=10_000
+        )
+        for row in rows:
+            if row.key == key:
+                return self._coerce_config_kv_value(row)
+        return default
 
     def find_runs_by_facet_kv(
         self,

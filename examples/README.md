@@ -28,7 +28,8 @@ This example demonstrates an iterative travel demand model with feedback between
 ## Files
 
 - `../01_predator_prey_end_to_end.ipynb`: end-to-end narrative walkthrough.
-- `../02_travel_demand_end_to_end.ipynb`: travel demand equilibrium walkthrough.
+- `../02_iterative_workflows.ipynb`: iterative workflows and provenance chains (tutorial 2).
+- `../03_transportation_demand_modeling.ipynb`: transportation demand modeling with Consist (tutorial 3).
 - `synth_simulation.py`: deterministic Monte Carlo simulation + summarization helpers.
 - `pipeline_steps.py`: “model steps” used by the notebook to keep it readable (registry creation, single-sim runner, aggregation helpers).
 - `checked_models.py`: checked-in SQLModel “contract” definitions (PK/FK/index) to compare against generated stubs.
@@ -41,7 +42,7 @@ This example demonstrates an iterative travel demand model with feedback between
    - `pip install -e ".[dev]"`
 2. Launch Jupyter from the repo root:
    - `jupyter lab`
-3. Open `examples/01_predator_prey_end_to_end.ipynb` or `examples/02_travel_demand_end_to_end.ipynb` and run all cells.
+3. Open `examples/01_predator_prey_end_to_end.ipynb`, `examples/02_iterative_workflows.ipynb`, or `examples/03_transportation_demand_modeling.ipynb` and run all cells.
 
 ## Outputs
 

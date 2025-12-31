@@ -7,9 +7,9 @@ Consist provides two complementary patterns for tracking provenance: `run()` for
 ## Common Patterns
 
 - **Parameter sweeps**: See [Predator-Prey §3](../examples/01_parameter_sweep_monte_carlo.ipynb#3-running-the-sweep-with-provenance-tracking).
-- **Iterative/feedback loops**: See [Transportation §Baseline Scenario](../examples/02_travel_demand_end_to_end.ipynb#baseline-scenario).
+- **Iterative/feedback loops**: See [Iterative Workflows §Baseline Run](../examples/02_iterative_workflows.ipynb#baseline-run-10-iterations).
 - **Schema export**: See [Predator-Prey §4](../examples/01_parameter_sweep_monte_carlo.ipynb#4-schema-export-from-data-to-typed-queries).
-- **Lineage queries**: See [Transportation §Querying Provenance](../examples/02_travel_demand_end_to_end.ipynb#querying-provenance).
+- **Lineage queries**: See [Iterative Workflows §Querying Provenance](../examples/02_iterative_workflows.ipynb#querying-provenance).
 
 ---
 
@@ -72,7 +72,7 @@ tracker.run(
 ## Scenarios
 
 Scenarios group related steps under a parent run, useful for multi-year simulations or variant comparisons.
-See: [Transportation §Baseline Scenario](../examples/02_travel_demand_end_to_end.ipynb#baseline-scenario).
+See: [Iterative Workflows §Baseline Run](../examples/02_iterative_workflows.ipynb#baseline-run-10-iterations).
 
 ```python
 import consist
@@ -97,7 +97,7 @@ All steps share the same `scenario_id`, making cross-scenario queries straightfo
 ### Passing Data Between Steps
 
 Use the coupler to track artifacts flowing between steps:
-See: [Transportation §Baseline Scenario](../examples/02_travel_demand_end_to_end.ipynb#baseline-scenario).
+See: [Iterative Workflows §Baseline Run](../examples/02_iterative_workflows.ipynb#baseline-run-10-iterations).
 
 ```python
 with consist.scenario(
@@ -185,7 +185,7 @@ with consist.scenario("baseline", tracker=tracker) as sc:
 ## Querying Results
 
 ### Finding Runs
-See: [Transportation §Querying Provenance](../examples/02_travel_demand_end_to_end.ipynb#querying-provenance).
+See: [Iterative Workflows §Querying Provenance](../examples/02_iterative_workflows.ipynb#querying-provenance).
 
 ```python
 import consist
@@ -209,7 +209,7 @@ result_2030 = runs_by_year[2030]
 ```
 
 ### Loading Artifacts
-See: [Transportation §Querying Provenance](../examples/02_travel_demand_end_to_end.ipynb#querying-provenance).
+See: [Iterative Workflows §Querying Provenance](../examples/02_iterative_workflows.ipynb#querying-provenance).
 
 ```python
 # Get artifacts for a run
