@@ -17,8 +17,8 @@ tracker = Tracker(
     run_dir="./runs",
     db_path="./provenance.duckdb",
     mounts={
-        "inputs": "/mnt/shared/inputs",
-        "scratch": "/scratch/users/zane",
+        "inputs": "/shared/inputs",
+        "scratch": "/scratch/users/MY_USERNAME",
     },
 )
 ```
