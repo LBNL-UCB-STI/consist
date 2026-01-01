@@ -150,7 +150,7 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
         fn=clean_data,
         inputs={"raw_file": raw_data_path},
         config=config,
-        fn_args={"raw_file": raw_data_path},
+        runtime_kwargs={"raw_file": raw_data_path},
         load_inputs=False,
     )
     cleaned_artifact = cleaned_result.outputs["cleaned"]
@@ -169,7 +169,7 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     analysis_result = tracker.run(
         fn=analyze_data,
         inputs={"cleaned_file": cleaned_artifact},
-        fn_args={"cleaned_file": cleaned_artifact.path, "multiplier": 2.0},
+        runtime_kwargs={"cleaned_file": cleaned_artifact.path, "multiplier": 2.0},
         load_inputs=False,
     )
     analysis_artifact = analysis_result.outputs["analysis"]
@@ -183,7 +183,7 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     legacy_result = tracker.run(
         fn=run_legacy_analysis,
         inputs={"cleaned_file": cleaned_artifact},
-        fn_args={"cleaned_file": cleaned_artifact.path},
+        runtime_kwargs={"cleaned_file": cleaned_artifact.path},
         hash_inputs=[("cleaning_config", config_path), ("params", params_path)],
         inject_context=True,
         load_inputs=False,
@@ -257,7 +257,7 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
         fn=clean_data,
         inputs={"raw_file": raw_data_path},
         config=config,
-        fn_args={"raw_file": raw_data_path},
+        runtime_kwargs={"raw_file": raw_data_path},
         load_inputs=False,
     )
 
@@ -289,7 +289,7 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
         fn=clean_data,
         inputs={"raw_file": raw_data_path},
         config=config_new,
-        fn_args={"raw_file": raw_data_path},
+        runtime_kwargs={"raw_file": raw_data_path},
         load_inputs=False,
     )
 
@@ -325,7 +325,7 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
         fn=clean_data_overwrite,
         inputs={"raw_file": raw_data_path},
         config=config,
-        fn_args={"raw_file": raw_data_path},
+        runtime_kwargs={"raw_file": raw_data_path},
         load_inputs=False,
         cache_mode="overwrite",
     )
@@ -333,7 +333,7 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
         fn=clean_data_overwrite,
         inputs={"raw_file": raw_data_path},
         config=config,
-        fn_args={"raw_file": raw_data_path},
+        runtime_kwargs={"raw_file": raw_data_path},
         load_inputs=False,
         cache_mode="overwrite",
     )
@@ -423,7 +423,7 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
         fn=clean_data,
         inputs={"raw_file": modified_path},
         config=config,
-        fn_args={"raw_file": modified_path},
+        runtime_kwargs={"raw_file": modified_path},
         load_inputs=False,
     )
 

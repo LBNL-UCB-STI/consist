@@ -330,9 +330,7 @@ def test_ingest_with_invalid_data_in_strict_mode(tracker, engine):
         assert result is None, "Table 'strict_person' should not have been created."
 
 
-def test_ingest_missing_dlt_dependency_raises(
-    tracker, monkeypatch, tmp_path
-) -> None:
+def test_ingest_missing_dlt_dependency_raises(tracker, monkeypatch, tmp_path) -> None:
     """
     Missing dlt dependency should raise ImportError during ingestion.
     """

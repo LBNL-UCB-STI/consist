@@ -2,27 +2,13 @@
 
 [![CI](https://github.com/LBNL-UCB-STI/consist/actions/workflows/ci.yml/badge.svg)](https://github.com/LBNL-UCB-STI/consist/actions/workflows/ci.yml)
 
-**Provenance tracking, intelligent caching, and data virtualization for scientific simulation workflows.**
+Consist automatically records what code, configuration, and input data produced each output in your pipeline. This makes it possible to skip redundant computation, answer "which configuration made Figure 3?", and query results across runs in SQL.
 
-Consist automatically records what code, configuration, and input data produced each output in your pipeline. It uses this information to skip redundant computation and to let you query results across many runs without manual bookkeeping.
+Multi-run simulation workflows typically accumulate friction:
 
----
-
-## Etymology
-
-In railroad terminology, a **consist** (noun, pronounced CON-sist) is the specific lineup of locomotives and cars that make up a train. In this library, a **consist** is the immutable record of exactly which components—code version, configuration, input artifacts—were coupled together to produce a particular run's outputs.
-
----
-
-## Why Consist?
-
-Multi-model simulation workflows accumulate friction over time:
-
-- **Provenance ambiguity.** Which configuration produced the results in Figure 3?
-- **Redundant computation.** Re-running an entire pipeline because one downstream parameter changed.
-- **Scattered outputs.** Writing one-off scripts to compare results across scenario variants.
-
-Consist addresses these by treating provenance as a first-class concern. Each run is identified by a cryptographic hash of its inputs (code version, configuration, input artifact signatures). Matching signatures return cached results; differing signatures trigger execution and record new lineage.
+- **Provenance ambiguity**: Which configuration produced those results?
+- **Redundant computation**: Re-running an entire pipeline because you changed one parameter takes hours.
+- **Scattered outputs**: Writing scripts to find and compare results across scenario variants.
 
 ---
 
@@ -42,6 +28,7 @@ Requires Python 3.11+.
 from consist import Tracker
 import pandas as pd
 
+# Initialize tracker: run_dir stores outputs, db_path stores metadata
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
 def clean_data(raw_path):
@@ -49,42 +36,46 @@ def clean_data(raw_path):
     df = df[df["value"] > 0.5]
     out_path = tracker.run_dir / "cleaned.parquet"
     df.to_parquet(out_path)
-    return {"cleaned": out_path}  # Keys match `outputs` list
+    return {"cleaned": out_path}
 
+# First run: executes function, records inputs/config/outputs
+result = tracker.run(
+    fn=clean_data,
+    inputs={"raw_path": "raw.csv"},  # Files to hash (part of cache key)
+    config={"threshold": 0.5},        # Config to hash (part of cache key)
+    outputs=["cleaned"],               # Output artifact names
+)
+
+# Second run with identical inputs+config: instant cache hit, no execution
 result = tracker.run(
     fn=clean_data,
     inputs={"raw_path": "raw.csv"},
+    config={"threshold": 0.5},
     outputs=["cleaned"],
 )
 
-# Re-run with identical inputs: cache hit, no execution
-result = tracker.run(
-    fn=clean_data,
-    inputs={"raw_path": "raw.csv"},
-    outputs=["cleaned"],
-)
-
+# Artifact: file with provenance metadata attached
 artifact = result["cleaned"]
 artifact.path   # -> PosixPath('./runs/<run_id>/cleaned.parquet')
 ```
 
-Runs return `Artifact` objects that wrap output paths with provenance metadata. Use `consist.load(artifact)` to read the data or `artifact.path` to access the file directly.
+**Key insight**: Consist computes a fingerprint from your code version, config, and input files. If you re-run with the same fingerprint, cached results return instantly. Different inputs/config? Full re-execution, with lineage recorded.
 
 ---
 
 ## Key Features
 
-- **Signature-based caching**: Runs are keyed by `SHA256(code_hash | config_hash | input_hash)`. Changing any component invalidates only affected downstream runs.
+- **Intelligent caching**: Runs are identified by fingerprints of code version, config, and inputs. Rerun with matching fingerprints? Instant cache hit. Changing one parameter? Only affected downstream steps re-execute.
 
-- **Scenario workflows**: Group multi-step simulations under a parent run for easy comparison across variants.
+- **Complete provenance**: Every result is tagged with the exact code, config, and input data that created it. Query by tags, compare variants, and trace lineage from any output back to its sources.
 
-- **Data virtualization**: Query artifacts across runs as SQL views without loading data into memory.
+- **SQL-native analysis**: All results indexed in DuckDB. Query across runs, join with your own tables, and export comparisons—all in standard SQL. No scripting or data movement required.
 
-- **Container support**: Track Docker/Singularity containers as functions—image digest and mounts become part of the signature.
+- **Multi-step orchestration**: Build complex workflows with caching, branching, and loops. Group related runs into scenarios for easy A/B comparison.
 
-- **Ghost Mode**: Artifacts ingested into DuckDB can be recovered via `consist.load(...)` even if the original file is deleted. This can be useful when re-running pipelines against archived inputs.
+- **Container support**: Track Docker/Singularity containers as functions—image digest and mounts become part of the cache signature. Run legacy black-box models deterministically.
 
-- **CLI tools**: Inspect runs, trace lineage, and validate artifacts from the command line.
+- **Command-line tools**: No code required. Use `consist lineage` to trace results, `consist runs` to inspect history, and `consist show` to compare variants.
 
 ---
 
@@ -126,6 +117,23 @@ Lineage for Artifact: traffic_volumes (a1b2c3d4)
 ```
 
 See [CLI Reference](docs/cli-reference.md) for `consist show`, `consist scenarios`, `consist preview`, and more.
+
+---
+
+## Where to Go Next
+
+**I maintain or develop simulation tools (ActivitySim, SUMO, etc.):**
+- Start with [Usage Guide](docs/usage-guide.md) for integration patterns. Container support lets you wrap existing tools without modification.
+
+**I'm an MPO official or practitioner who runs models:**
+- No coding required. See [CLI Reference](docs/cli-reference.md) to query and compare results from the command line.
+
+**I'm a researcher building simulation workflows:**
+- See [Concepts](docs/concepts.md) for mental models, then [Ingestion & Hybrid Views](docs/ingestion-and-hybrid-views.md) for SQL-native analytics and reproducibility.
+
+**I want to understand how it works:**
+- [Concepts](docs/concepts.md) explains the mental model. [Architecture](docs/architecture.md) goes deeper into caching and lineage tracking.
+
 ---
 
 ## Documentation
@@ -162,6 +170,12 @@ A `mkdocs.yml` is included for compatibility.
 Consist is under active development and used in production for the [PILATES](https://github.com/ual/PILATES) integrated land use and transportation modeling framework.
 
 We welcome feedback from researchers working with multi-model simulation workflows.
+
+---
+
+## Etymology
+
+In railroad terminology, a **consist** (noun, pronounced CON-sist) is the specific lineup of locomotives and cars that make up a train. In this library, a **consist** is the immutable record of exactly which components—code version, configuration, input artifacts—were coupled together to produce a particular run's outputs.
 
 ---
 

@@ -1005,7 +1005,7 @@ class Tracker:
         load_inputs: Optional[bool] = None,
         executor: str = "python",
         container: Optional[Mapping[str, Any]] = None,
-        fn_args: Optional[Dict[str, Any]] = None,
+        runtime_kwargs: Optional[Dict[str, Any]] = None,
         inject_context: bool | str = False,
         output_mismatch: str = "warn",
         output_missing: str = "warn",
@@ -1260,7 +1260,7 @@ class Tracker:
                     cache_hit=result.cache_hit,
                 )
 
-            fn_args = dict(fn_args or {})
+            runtime_kwargs = dict(runtime_kwargs or {})
             config_dict: Dict[str, Any] = {}
             if config is None:
                 config_dict = {}
@@ -1279,7 +1279,11 @@ class Tracker:
             )
             call_kwargs: Dict[str, Any] = {}
 
-            if "config" in params and "config" not in fn_args and config is not None:
+            if (
+                "config" in params
+                and "config" not in runtime_kwargs
+                and config is not None
+            ):
                 call_kwargs["config"] = (
                     config if isinstance(config, BaseModel) else config_dict
                 )
@@ -1292,8 +1296,8 @@ class Tracker:
                     continue
                 if param_name in call_kwargs:
                     continue
-                if param_name in fn_args:
-                    call_kwargs[param_name] = fn_args[param_name]
+                if param_name in runtime_kwargs:
+                    call_kwargs[param_name] = runtime_kwargs[param_name]
                     continue
                 if load_inputs and isinstance(inputs, Mapping):
                     if param_name in input_artifacts_by_key:
@@ -1310,7 +1314,7 @@ class Tracker:
                 if param_name in config_dict:
                     call_kwargs[param_name] = config_dict[param_name]
 
-            for key, value in fn_args.items():
+            for key, value in runtime_kwargs.items():
                 if key not in call_kwargs:
                     call_kwargs[key] = value
 

@@ -515,8 +515,7 @@ def test_outputs_requested_warns_on_stale_mount_source(
 
     assert not dest.exists()
     assert any(
-        "Cannot materialize cached input" in record.message
-        for record in caplog.records
+        "Cannot materialize cached input" in record.message for record in caplog.records
     )
 
 
@@ -558,8 +557,7 @@ def test_outputs_requested_warns_on_moved_run_dir(
 
     assert not dest.exists()
     assert any(
-        "Cannot materialize cached input" in record.message
-        for record in caplog.records
+        "Cannot materialize cached input" in record.message for record in caplog.records
     )
     run = tracker_b.get_run("requested_hit")
     assert run is not None
