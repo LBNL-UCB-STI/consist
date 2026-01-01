@@ -62,9 +62,7 @@ def test_large_db_smoke(tmp_path):
     )
     assert scenario_runs
 
-    meta_runs = tracker.find_runs(
-        metadata={"region": "west"}, limit=scale_100k
-    )
+    meta_runs = tracker.find_runs(metadata={"region": "west"}, limit=scale_100k)
     assert meta_runs
 
     cached = tracker.find_matching_run(*cache_tuple)
@@ -101,9 +99,7 @@ def test_large_db_smoke(tmp_path):
         paginated_count = _count_artifacts_keyset(session, batch_size=250)
         assert paginated_count == expected_artifacts
 
-        initial_run_count = session.exec(
-            select(func.count()).select_from(Run)
-        ).one()
+        initial_run_count = session.exec(select(func.count()).select_from(Run)).one()
 
     input_path = run_dir / "write_input.txt"
     input_path.write_text("seed", encoding="utf-8")
@@ -127,8 +123,6 @@ def test_large_db_smoke(tmp_path):
             )
 
     with Session(tracker.engine) as session:
-        final_run_count = session.exec(
-            select(func.count()).select_from(Run)
-        ).one()
+        final_run_count = session.exec(select(func.count()).select_from(Run)).one()
 
     assert final_run_count - initial_run_count == write_runs

@@ -48,6 +48,15 @@ Copyright &copy; 2025 The authors TODO TODO TODO
 #   { "Get started" = "index.md" },
 #   { "Markdown in 5min" = "markdown.md" },
 # ]
+nav = [
+  { "Home" = "index.md" },
+  { "Getting Started" = ["concepts.md", "usage-guide.md", "examples.md", "configs.md"] },
+  { "Core Topics" = ["caching-and-hydration.md", "mounts-and-portability.md", "ingestion-and-hybrid-views.md", "schema-export.md"] },
+  { "CLI" = ["cli-reference.md"] },
+  { "Architecture" = ["architecture.md"] },
+  { "API Reference" = ["api/index.md", "api/public_api.md", "api/api_helpers.md", "api/tracker.md", "api/workflow.md", "api/artifact.md", "api/run.md", "api/indexing.md", "api/identity.md", "api/views.md", "api/matrix.md", "api/materialize.md"] },
+  { "Integrations" = ["integrations/index.md", "integrations/containers.md", "integrations/dlt_loader.md"] },
+]
 
 # With the "extra_css" option you can add your own CSS styling to customize
 # your Zensical project according to your needs. You can add any number of
@@ -168,7 +177,7 @@ features = [
     # Turn on this feature to expand all collapsible sections in the
     # navigation sidebar by default.
     # https://zensical.org/docs/setup/navigation/#navigation-expansion
-#     "navigation.expand",
+    "navigation.expand",
 
     # This feature turns on navigation elements in the footer that allow the
     # user to navigate to a next or previous page.
@@ -179,17 +188,6 @@ features = [
     # to sections, which is particularly useful for providing overview pages.
     # https://zensical.org/docs/setup/navigation/#section-index-pages
     "navigation.indexes",
-
-    # When instant navigation is enabled, clicks on all internal links will be
-    # intercepted and dispatched via XHR without fully reloading the page.
-    # https://zensical.org/docs/setup/navigation/#instant-navigation
-    "navigation.instant",
-
-    # With instant prefetching, your site will start to fetch a page once the
-    # user hovers over a link. This will reduce the perceived loading time
-    # for the user.
-    # https://zensical.org/docs/setup/navigation/#instant-prefetching
-    "navigation.instant.prefetch",
 
     # In order to provide a better user experience on slow connections when
     # using instant navigation, a progress indicator can be enabled.

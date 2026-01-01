@@ -94,9 +94,7 @@ def _seed_base_dataset(
         )
         artifacts.append(artifact)
         links.append(
-            RunArtifactLink(
-                run_id=run_id, artifact_id=artifact.id, direction="output"
-            )
+            RunArtifactLink(run_id=run_id, artifact_id=artifact.id, direction="output")
         )
 
         if i == 0:
@@ -309,9 +307,7 @@ def _lineage_run_depth(node: Dict[str, object]) -> int:
     inputs = producing.get("inputs") or []
     depth = 1
     child_depths = [
-        _lineage_run_depth(child)
-        for child in inputs
-        if isinstance(child, dict)
+        _lineage_run_depth(child) for child in inputs if isinstance(child, dict)
     ]
     if child_depths:
         depth += max(child_depths)

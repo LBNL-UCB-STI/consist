@@ -136,18 +136,10 @@ def test_large_db_scale_queries(tmp_path):
     Builds a large provenance DB and runs representative queries to surface scale issues.
     """
     total_runs = max(1, _env_int("CONSIST_STRESS_TOTAL_RUNS", 100_000))
-    runs_per_scenario = max(
-        1, _env_int("CONSIST_STRESS_RUNS_PER_SCENARIO", 100)
-    )
-    lineage_depth = max(
-        1, _env_int("CONSIST_STRESS_LINEAGE_DEPTH", 25)
-    )
-    wide_inputs = max(
-        1, _env_int("CONSIST_STRESS_WIDE_INPUTS", 50)
-    )
-    config_keys = max(
-        1, _env_int("CONSIST_STRESS_CONFIG_KEYS", 2_000)
-    )
+    runs_per_scenario = max(1, _env_int("CONSIST_STRESS_RUNS_PER_SCENARIO", 100))
+    lineage_depth = max(1, _env_int("CONSIST_STRESS_LINEAGE_DEPTH", 25))
+    wide_inputs = max(1, _env_int("CONSIST_STRESS_WIDE_INPUTS", 50))
+    config_keys = max(1, _env_int("CONSIST_STRESS_CONFIG_KEYS", 2_000))
     chunk_size = max(100, _env_int("CONSIST_STRESS_CHUNK_SIZE", 5_000))
     write_runs = max(0, _env_int("CONSIST_STRESS_WRITE_RUNS", 200))
 
@@ -186,15 +178,11 @@ def test_large_db_scale_queries(tmp_path):
     scale_sizes = sample["scale_sizes"]
 
     with _timed("find_runs.scale_10k", metrics):
-        runs_10k = tracker.find_runs(
-            tags=["scale_10k"], limit=scale_sizes["scale_10k"]
-        )
+        runs_10k = tracker.find_runs(tags=["scale_10k"], limit=scale_sizes["scale_10k"])
     assert len(runs_10k) == scale_sizes["scale_10k"]
 
     with _timed("find_runs.scale_50k", metrics):
-        runs_50k = tracker.find_runs(
-            tags=["scale_50k"], limit=scale_sizes["scale_50k"]
-        )
+        runs_50k = tracker.find_runs(tags=["scale_50k"], limit=scale_sizes["scale_50k"])
     assert len(runs_50k) == scale_sizes["scale_50k"]
 
     with _timed("find_runs.scale_100k", metrics):
@@ -279,15 +267,11 @@ def test_large_db_scale_queries(tmp_path):
 
         with _timed("validate.select_all_artifacts", metrics):
             all_artifacts = session.exec(select(Artifact)).all()
-        expected_artifacts = (
-            total_runs + lineage_depth + wide_inputs + 1
-        )
+        expected_artifacts = total_runs + lineage_depth + wide_inputs + 1
         assert len(all_artifacts) == expected_artifacts
 
         with _timed("validate.paginated", metrics):
-            paginated_count = _count_artifacts_keyset(
-                session, batch_size=1000
-            )
+            paginated_count = _count_artifacts_keyset(session, batch_size=1000)
         assert paginated_count == expected_artifacts
 
         if write_runs:
@@ -358,9 +342,7 @@ def test_large_db_scale_queries(tmp_path):
                 metrics[f"{label}.{stat}"] = value
 
         with Session(tracker.engine) as session:
-            final_run_count = session.exec(
-                select(func.count()).select_from(Run)
-            ).one()
+            final_run_count = session.exec(select(func.count()).select_from(Run)).one()
         assert final_run_count - initial_run_count == write_runs
 
     db_size_mb = db_path.stat().st_size / (1024 * 1024)
@@ -399,10 +381,6 @@ def test_large_db_scale_queries(tmp_path):
         f"  db_size_mb={metrics.get('db.size_mb', 0.0):,.3f}",
     ]
     for label, duration in sorted(metrics.items()):
-        summary_lines.append(
-            f"  {label}: {duration:,.3f}s"
-        )
+        summary_lines.append(f"  {label}: {duration:,.3f}s")
     _emit_stdout("\n".join(summary_lines))
-    _emit_stdout(
-        f"[stress.large_db] profile written to {profile_path}"
-    )
+    _emit_stdout(f"[stress.large_db] profile written to {profile_path}")

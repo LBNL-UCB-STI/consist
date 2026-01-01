@@ -45,6 +45,9 @@ class OutputCapture:
 class RunContext:
     """
     Lightweight wrapper for injecting tracker helpers into user functions.
+
+    Consist passes this object when `inject_context=True` so step functions can
+    access run-aware helpers without referencing the tracker directly.
     """
 
     def __init__(self, tracker: "Tracker") -> None:
@@ -52,6 +55,7 @@ class RunContext:
 
     @property
     def run_dir(self) -> Path:
+        """Run-specific output directory for the active step."""
         return self._tracker.run_artifact_dir()
 
     def log_artifact(self, *args: Any, **kwargs: Any) -> Artifact:
@@ -68,12 +72,16 @@ class RunContext:
 
     @property
     def inputs(self) -> Dict[str, Artifact]:
+        """Mapping of input artifact keys to artifacts for the active step."""
         current_consist = self._tracker.current_consist
         if current_consist is None:
             raise RuntimeError("No active run context is available.")
         return {a.key: a for a in current_consist.inputs}
 
     def load(self, key_or_artifact: Union[str, Artifact]) -> Any:
+        """
+        Load data from an input artifact by key or from an Artifact instance.
+        """
         if isinstance(key_or_artifact, str):
             key_or_artifact = self.inputs[key_or_artifact]
         return self._tracker.load(key_or_artifact)
@@ -82,6 +90,9 @@ class RunContext:
     def capture_outputs(
         self, directory: Path, pattern: str = "*"
     ) -> Iterator[OutputCapture]:
+        """
+        Capture files written under ``directory`` and log them as outputs on exit.
+        """
         with self._tracker.capture_outputs(directory, pattern=pattern) as cap:
             yield cap
 
@@ -93,6 +104,11 @@ class ScenarioContext:
     The context exposes ``step()`` helpers that suspend the parent header run,
     execute child runs sequentially, and aggregate artifacts/metadata back into the
     header record.
+
+    Attributes
+    ----------
+    coupler : Coupler
+        Scenario-local artifact registry for passing outputs between steps.
     """
 
     def __init__(
@@ -316,6 +332,9 @@ class ScenarioContext:
     ) -> RunResult:
         """
         Execute a cached scenario step and update the Coupler with outputs.
+
+        This method wraps ``Tracker.run`` while ensuring the scenario header
+        is updated with step metadata and artifacts.
         """
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
@@ -421,6 +440,10 @@ class ScenarioContext:
     ):
         """
         Manual tracing context manager for scenario steps.
+
+        This wraps ``Tracker.trace`` to log a step while allowing inline code
+        blocks. Use ``ScenarioContext.run`` when you want function execution
+        to be skipped on cache hits.
         """
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")

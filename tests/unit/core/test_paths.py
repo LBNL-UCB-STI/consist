@@ -9,6 +9,9 @@ enabling Consist's reproducibility features across different environments.
 """
 
 # tests/unit/test_paths.py
+import os
+from pathlib import Path
+
 from consist.core.tracker import Tracker
 
 
@@ -47,3 +50,40 @@ def test_virtualize_path_with_mounts(tmp_path):
     # Test 2: Match Relative
     result = tracker._virtualize_path(str(tmp_path / "consist.json"))
     assert result == "./consist.json"
+
+
+def test_resolve_uri_file_and_workspace_paths(tmp_path: Path) -> None:
+    """
+    Resolve file:// and run-relative URIs to absolute paths.
+    """
+    tracker = Tracker(run_dir=tmp_path)
+    file_path = tmp_path / "file.txt"
+    file_path.write_text("data", encoding="utf-8")
+
+    resolved_file = tracker.resolve_uri(f"file://{file_path}")
+    assert resolved_file == str(file_path.resolve())
+
+    resolved_relative = tracker.resolve_uri("./file.txt")
+    assert resolved_relative == str((tmp_path / "file.txt").resolve())
+
+
+def test_virtualize_path_preserves_symlink_logical_path(tmp_path: Path) -> None:
+    """
+    Symlink paths under mounts should virtualize to the logical mount URI.
+    """
+    if os.name == "nt":
+        return
+
+    mounts_root = tmp_path / "inputs"
+    mounts_root.mkdir(parents=True, exist_ok=True)
+    target_dir = tmp_path / "target"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_file = target_dir / "data.txt"
+    target_file.write_text("symlinked", encoding="utf-8")
+    symlink_path = mounts_root / "data.txt"
+    symlink_path.symlink_to(target_file)
+
+    tracker = Tracker(run_dir=tmp_path, mounts={"inputs": str(mounts_root)})
+    uri = tracker._virtualize_path(str(symlink_path))
+
+    assert uri == "inputs://data.txt"

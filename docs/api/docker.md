@@ -1,6 +1,7 @@
 # Containers (Experimental)
 
-This page is kept for backwards compatibility. Prefer `containers.md`.
+This page is kept for backwards compatibility. Prefer
+`../integrations/containers.md`.
 
 ::: consist.integrations.containers
     options:

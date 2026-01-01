@@ -112,3 +112,48 @@ def test_lineage_service_prints(monkeypatch):
     service.print_lineage("data_v1")
 
     assert printed
+
+
+def test_build_lineage_missing_run_returns_stub() -> None:
+    """
+    Missing producing run should return a node without producing_run details.
+    """
+    mock_tracker = MagicMock()
+    art = Artifact(id="a1", key="missing", run_id="missing_run")
+    mock_tracker.get_artifact.return_value = art
+    mock_tracker.get_run.return_value = None
+    mock_tracker.get_artifacts_for_run.return_value = RunArtifacts()
+
+    tree = build_lineage_tree(mock_tracker, "a1")
+    assert tree["artifact"] == art
+    assert tree["producing_run"] is None
+
+
+def test_build_lineage_cycle_does_not_recurse_forever() -> None:
+    """
+    Cycle detection should stop recursion when a run reappears.
+    """
+    mock_tracker = MagicMock()
+    run = Run(id="run_cycle", model_name="model")
+    art_root = Artifact(id="a1", key="root", run_id="run_cycle")
+    art_cycle = Artifact(id="a2", key="cycle", run_id="run_cycle")
+
+    def get_artifact(key_or_id):
+        if key_or_id == "a1":
+            return art_root
+        return None
+
+    mock_tracker.get_artifact.side_effect = get_artifact
+    mock_tracker.get_run.return_value = run
+
+    def get_artifacts_for_run(run_id):
+        return RunArtifacts(inputs={"cycle": art_cycle}, outputs={"root": art_root})
+
+    mock_tracker.get_artifacts_for_run.side_effect = get_artifacts_for_run
+
+    tree = build_lineage_tree(mock_tracker, "a1")
+    producer = tree["producing_run"]
+    assert producer["run"] == run
+    input_node = producer["inputs"][0]
+    assert input_node["artifact"] == art_cycle
+    assert input_node["producing_run"] is None

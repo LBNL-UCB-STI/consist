@@ -153,53 +153,9 @@ In practice:
 
 ## Pattern 4: Hot vs. cold data, and database-backed recovery
 
-Consist supports two complementary storage strategies:
-
-### Cold data (files on disk)
-- Artifacts are logged with file paths/URIs.
-- Loading uses the file directly.
-- Best for large binary formats or when you want to keep the database slim.
-
-### Hot data (ingested into DuckDB)
-- `tracker.ingest(artifact)` materializes the artifact into DuckDB.
-- The artifact is marked with `artifact.meta["is_ingested"] = True`.
-- This enables query performance, schema tracking, and optional recovery if the file disappears.
-
----
-
-## Database fallback policy in `consist.load`
-
-When `consist.load(...)` can’t find a file on disk, it may be able to recover data from DuckDB
-(if the artifact was ingested). This is controlled by `db_fallback`.
-
-Important: DB fallback controls **data recovery at load time**. It is distinct from:
-- cache-hit artifact hydration (record/object hydration), and
-- physical materialization (copying bytes into a target directory).
-
-- `db_fallback="inputs-only"` (default): allow DB recovery **only** if:
-  - there is an active run context
-  - the current run is **not** a cache hit
-  - the artifact is a **declared input** to that active run
-
-- `db_fallback="always"`: allow DB recovery whenever the artifact is ingested and a tracker DB is available (useful for interactive inspection).
-- `db_fallback="never"`: disable DB recovery entirely.
-
-Why the default is strict:
-- It prevents “silent DB reads” in contexts where an artifact isn’t actually part of the executing run’s declared inputs.
-- It nudges pipelines toward explicit provenance: if you want DB recovery during execution, declare the artifact as an input.
-
-Example: explicit inspection outside a run:
-
-```python
-df = consist.load(artifact, tracker=tracker, db_fallback="always")
-```
-
-Example: execution-time recovery (artifact must be an input):
-
-```python
-with tracker.start_run("step", model="my_step", inputs=[artifact], cache_mode="overwrite"):
-    df = consist.load(artifact, tracker=tracker)  # defaults to inputs-only
-```
+Ingestion and hybrid views are covered in the dedicated guide:
+[Ingestion & Hybrid Views](ingestion-and-hybrid-views.md). That doc explains when to ingest,
+how schema validation works, and how DB fallback behaves when files are missing.
 
 ---
 
@@ -223,7 +179,7 @@ On a cache hit, Consist does **not**:
 - Guarantee that `artifact.path` exists on disk without an explicit load/materialization step.
 
 If you need bytes, you typically:
-- call `consist.load(...)` for tabular artifacts (disk first, then DB fallback per `db_fallback`), or
+- call `consist.load(...)` for tabular artifacts (disk first; see Ingestion & Hybrid Views for DB fallback), or
 - implement explicit file copy/materialization for non-tabular artifacts.
 
 ### Cache misses that depend on cached inputs

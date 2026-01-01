@@ -184,7 +184,6 @@ class IdentityManager:
             if git_error_types and isinstance(e, git_error_types):
                 return "unknown_code_version"
             return "unknown_code_version"
-            return "unknown_code_version"
 
     def compute_callable_hash(
         self,

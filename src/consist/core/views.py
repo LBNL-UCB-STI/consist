@@ -116,6 +116,10 @@ class ViewRegistry:
     Registry for dynamic view classes.
     Accessing a view (e.g. registry.Person) automatically refreshes
     the underlying DuckDB SQL definition to include new files.
+
+    Use ``register(model, key=...)`` to add SQLModel schemas. Accessing the
+    attribute returns a dynamic SQLModel view class that can be queried via
+    ``select(...)``.
     """
 
     def __init__(self, tracker: "Tracker"):

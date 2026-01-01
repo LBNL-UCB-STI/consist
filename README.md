@@ -40,7 +40,6 @@ Requires Python 3.11+.
 
 ```python
 from consist import Tracker
-from pathlib import Path
 import pandas as pd
 
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
@@ -48,25 +47,25 @@ tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 def clean_data(raw_path):
     df = pd.read_csv(raw_path)
     df = df[df["value"] > 0.5]
-    # Keep outputs under the run directory for easy cleanup and portability.
     out_path = tracker.run_dir / "cleaned.parquet"
     df.to_parquet(out_path)
-    return out_path
+    return {"cleaned": out_path}  # Keys match `outputs` list
 
 result = tracker.run(
     fn=clean_data,
     inputs={"raw_path": "raw.csv"},
     outputs=["cleaned"],
 )
+
+# Re-run with identical inputs: cache hit, no execution
 result = tracker.run(
     fn=clean_data,
     inputs={"raw_path": "raw.csv"},
     outputs=["cleaned"],
 )
-# Second call with same inputs -> cache hit
 
-cleaned = result["cleaned"]
-cleaned.path  # Local path to the artifact file
+artifact = result["cleaned"]
+artifact.path   # -> PosixPath('./runs/<run_id>/cleaned.parquet')
 ```
 
 Runs return `Artifact` objects that wrap output paths with provenance metadata. Use `consist.load(artifact)` to read the data or `artifact.path` to access the file directly.
@@ -83,10 +82,50 @@ Runs return `Artifact` objects that wrap output paths with provenance metadata. 
 
 - **Container support**: Track Docker/Singularity containers as functions—image digest and mounts become part of the signature.
 
-- **Ghost Mode**: If an artifact was ingested into DuckDB, `consist.load(...)` can recover it even if the file is deleted (by default only when it’s a declared input to an uncached run).
+- **Ghost Mode**: Artifacts ingested into DuckDB can be recovered via `consist.load(...)` even if the original file is deleted. This can be useful when re-running pipelines against archived inputs.
 
 - **CLI tools**: Inspect runs, trace lineage, and validate artifacts from the command line.
 
+---
+
+## CLI
+
+Inspect provenance from the command line:
+
+```bash
+consist runs --limit 5
+```
+
+```
+                                    Recent Runs
+┏━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┓
+┃ ID                     ┃ Model              ┃ Status    ┃ Tags ┃ Created        ┃ Duration (s) ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━┩
+│ ...summaries_57cb6369  │ summaries          │ completed │      │ 2025-12-31     │ 0.61         │
+│ ...traffic_simula…     │ traffic_simulation │ completed │      │ 2025-12-31     │ 0.58         │
+│ ...assignment_14       │ assignment         │ completed │      │ 2025-12-31     │ 0.33         │
+│ ...mode_choice_14      │ mode_choice        │ completed │      │ 2025-12-31     │ 0.42         │
+│ ...utilities_14        │ calculate_utilities│ completed │      │ 2025-12-31     │ 0.65         │
+└────────────────────────┴────────────────────┴───────────┴──────┴────────────────┴──────────────┘
+```
+
+Trace how an artifact was produced:
+
+```bash
+consist lineage traffic_volumes
+```
+```
+Lineage for Artifact: traffic_volumes (a1b2c3d4)
+└── Run: traffic_simulation_14 (traffic_simulation)
+    ├── Input: assigned_trips (assignment)
+    │   └── Run: assignment_14 (assignment)
+    │       └── Input: trip_tables (mode_choice)
+    │           └── Run: mode_choice_14 (mode_choice)
+    │               └── ...
+    └── Input: network (parquet)
+```
+
+See [CLI Reference](docs/cli-reference.md) for `consist show`, `consist scenarios`, `consist preview`, and more.
 ---
 
 ## Documentation
@@ -97,15 +136,25 @@ Runs return `Artifact` objects that wrap output paths with provenance metadata. 
 
 ### Build and View Docs Locally
 
-You can build and browse the documentation locally:
+We use [Zensical](https://zensical.org/):
 
 ```bash
 pip install -e ".[docs]"
+zensical serve
+```
+
+Then open `http://localhost:8000/`.
+
+<details>
+<summary>Alternative: build with MkDocs</summary>
+
+```bash
 mkdocs serve
 ```
 
-Then open `http://127.0.0.1:8000/`.
+A `mkdocs.yml` is included for compatibility.
 
+</details>
 ---
 
 ## Current Status

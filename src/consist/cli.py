@@ -577,9 +577,7 @@ def validate(
             except ValueError:
                 batch_size = 1000
 
-        for _, key, uri, run_id in _iter_artifact_rows(
-            session, batch_size=batch_size
-        ):
+        for _, key, uri, run_id in _iter_artifact_rows(session, batch_size=batch_size):
             try:
                 abs_path = tracker.resolve_uri(uri)
                 if not Path(abs_path).exists():
