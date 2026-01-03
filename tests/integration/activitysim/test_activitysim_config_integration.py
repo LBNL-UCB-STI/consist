@@ -1,0 +1,91 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from sqlmodel import Session, select
+
+from consist.integrations.activitysim import ActivitySimConfigAdapter
+from consist.models.activitysim import ActivitySimConstants
+from tests.helpers.activitysim_fixtures import build_activitysim_test_configs
+
+
+def _log_mock_output(tracker, run_name: str, tmp_path: Path) -> None:
+    output_path = tmp_path / f"{run_name}_summary.csv"
+    output_path.write_text("a,b\n1,2\n", encoding="utf-8")
+    tracker.log_artifact(
+        output_path,
+        key=f"outputs:{run_name}",
+        direction="output",
+    )
+
+
+def test_activitysim_ingest_and_query_by_config_value(tracker, tmp_path: Path):
+    adapter = ActivitySimConfigAdapter()
+
+    base_a, overlay_a = build_activitysim_test_configs(tmp_path, sample_rate=0.25)
+    run_a = tracker.begin_run(
+        "activitysim_run_a",
+        "activitysim",
+        config={"sample_rate": 0.25},
+        cache_mode="overwrite",
+    )
+    tracker.canonicalize_config(adapter, [overlay_a, base_a], ingest=True)
+    _log_mock_output(tracker, "activitysim_run_a", tmp_path)
+    tracker.end_run()
+
+    base_b, overlay_b = build_activitysim_test_configs(tmp_path, sample_rate=0.5)
+    run_b = tracker.begin_run(
+        "activitysim_run_b",
+        "activitysim",
+        config={"sample_rate": 0.5},
+        cache_mode="overwrite",
+    )
+    tracker.canonicalize_config(adapter, [overlay_b, base_b], ingest=True)
+    _log_mock_output(tracker, "activitysim_run_b", tmp_path)
+    tracker.end_run()
+
+    if tracker.engine is None:
+        raise AssertionError("Tracker engine missing; DB tests require DuckDB.")
+    with tracker.engine.begin() as connection:
+        run_rows = connection.exec_driver_sql(
+            "SELECT DISTINCT run_id FROM global_tables.activitysim_constants "
+            "WHERE key = 'sample_rate' AND value_num = 0.5"
+        ).fetchall()
+        run_ids = [row[0] for row in run_rows]
+        assert run_ids
+
+        output_rows = connection.exec_driver_sql(
+            "SELECT a.key FROM artifact a "
+            "JOIN run_artifact_link r ON a.id = r.artifact_id "
+            "WHERE r.direction = 'output' AND r.run_id IN (%s)"
+            % ", ".join([f"'{run_id}'" for run_id in run_ids])
+        ).fetchall()
+        output_keys = [row[0] for row in output_rows]
+
+    assert set(output_keys) == {"outputs:activitysim_run_b"}
+    assert run_a.id != run_b.id
+
+
+def test_activitysim_sqlmodel_query(tracker, tmp_path: Path):
+    adapter = ActivitySimConfigAdapter()
+
+    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path, sample_rate=0.5)
+    tracker.begin_run(
+        "activitysim_sqlmodel_query",
+        "activitysim",
+        config={"sample_rate": 0.5},
+        cache_mode="overwrite",
+    )
+    tracker.canonicalize_config(adapter, [overlay_dir, base_dir], ingest=True)
+    tracker.end_run()
+
+    if tracker.engine is None:
+        raise AssertionError("Tracker engine missing; DB tests require DuckDB.")
+    with Session(tracker.engine) as session:
+        rows = session.exec(
+            select(ActivitySimConstants)
+            .where(ActivitySimConstants.key == "sample_rate")
+            .where(ActivitySimConstants.value_num == 0.5)
+        ).all()
+
+    assert rows

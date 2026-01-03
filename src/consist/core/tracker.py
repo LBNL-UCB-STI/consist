@@ -42,6 +42,7 @@ from consist.core.cache import (
 from consist.core.cache_output_logging import (
     maybe_return_cached_output_or_demote_cache_hit,
 )
+from consist.core.config_canonicalization import ConfigAdapter, ConfigContribution
 from consist.core.config_facets import ConfigFacetManager
 from consist.core.context import pop_tracker, push_tracker
 from consist.core.decorators import define_step as define_step_decorator
@@ -2425,6 +2426,128 @@ class Tracker:
             run=run,
             profile_schema=profile_schema,
         )
+
+    def canonicalize_config(
+        self,
+        adapter: ConfigAdapter,
+        config_dirs: Iterable[Union[str, Path]],
+        *,
+        run: Optional[Run] = None,
+        strict: bool = False,
+        ingest: bool = True,
+        profile_schema: bool = False,
+    ) -> ConfigContribution:
+        """
+        Canonicalize a model-specific config directory and ingest queryable slices.
+
+        Parameters
+        ----------
+        adapter : ConfigAdapter
+            Adapter implementation for the model (e.g., ActivitySim).
+        config_dirs : Iterable[Union[str, Path]]
+            Ordered config directories to canonicalize.
+        run : Optional[Run], optional
+            Run context to attach to; defaults to the active run.
+        strict : bool, default False
+            If True, adapter should error on missing references.
+        ingest : bool, default True
+            Whether to ingest any queryable tables produced by the adapter.
+        profile_schema : bool, default False
+            Whether to profile ingested schemas.
+
+        Returns
+        -------
+        ConfigContribution
+            Structured summary of logged artifacts and ingestables.
+        """
+        target_run = run
+        if target_run is None and self.current_consist:
+            target_run = self.current_consist.run
+        if target_run is None:
+            raise RuntimeError("canonicalize_config requires an active run or run=.")
+
+        config_dir_paths = [Path(p).resolve() for p in config_dirs]
+        canonical = adapter.discover(
+            config_dir_paths, identity=self.identity, strict=strict
+        )
+        result = adapter.canonicalize(
+            canonical, run=target_run, tracker=self, strict=strict
+        )
+
+        contribution = ConfigContribution(
+            identity_hash=canonical.content_hash,
+            adapter_version=getattr(adapter, "adapter_version", None),
+            artifacts=result.artifacts,
+            ingestables=result.ingestables,
+            meta={
+                "adapter": adapter.model_name,
+                "config_dirs": [str(p) for p in config_dir_paths],
+            },
+        )
+
+        self._apply_config_contribution(
+            contribution,
+            run=target_run,
+            ingest=ingest,
+            profile_schema=profile_schema,
+        )
+
+        if target_run.meta is None:
+            target_run.meta = {}
+        target_run.meta["config_bundle_hash"] = canonical.content_hash
+        target_run.meta["config_adapter"] = adapter.model_name
+        if contribution.adapter_version is not None:
+            target_run.meta["config_adapter_version"] = contribution.adapter_version
+
+        return contribution
+
+    def _apply_config_contribution(
+        self,
+        contribution: ConfigContribution,
+        *,
+        run: Run,
+        ingest: bool,
+        profile_schema: bool,
+    ) -> Dict[str, Artifact]:
+        artifacts_by_key: Dict[str, Artifact] = {}
+        for spec in contribution.artifacts:
+            art = self.log_artifact(
+                spec.path,
+                key=spec.key,
+                direction=spec.direction,
+                **spec.meta,
+            )
+            artifacts_by_key[spec.key] = art
+
+        if ingest:
+            for spec in contribution.ingestables:
+                source_key = spec.source
+                artifact = (
+                    artifacts_by_key.get(source_key)
+                    if source_key
+                    else next(iter(artifacts_by_key.values()), None)
+                )
+                if artifact is None:
+                    logging.warning(
+                        "[Consist] Skipping ingest for %s; no source artifact found.",
+                        spec.table_name,
+                    )
+                    continue
+                if source_key is None:
+                    logging.warning(
+                        "[Consist] Ingest spec for %s missing source; using %s.",
+                        spec.table_name,
+                        artifact.key,
+                    )
+                self.ingest(
+                    artifact,
+                    data=spec.rows,
+                    schema=spec.schema,
+                    run=run,
+                    profile_schema=profile_schema,
+                )
+
+        return artifacts_by_key
 
     # --- View Factory ---
 

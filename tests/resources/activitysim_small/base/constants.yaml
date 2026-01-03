@@ -1,0 +1,4 @@
+CONSTANTS:
+  STOP_CONST: 99
+  nested:
+    inner: true

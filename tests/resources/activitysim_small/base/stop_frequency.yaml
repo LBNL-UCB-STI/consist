@@ -1,0 +1,3 @@
+include_settings: constants.yaml
+SPEC: stop_frequency_coeffs.csv
+PROBS_SPEC: stop_frequency_probs.csv
