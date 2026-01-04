@@ -144,9 +144,7 @@ class ActivitySimConfigAdapter:
         if settings_path:
             config_files.insert(0, settings_path)
 
-        content_hash = compute_config_pack_hash(
-            root_dirs=root_dirs, identity=identity
-        )
+        content_hash = compute_config_pack_hash(root_dirs=root_dirs, identity=identity)
 
         return CanonicalConfig(
             root_dirs=root_dirs,
@@ -194,7 +192,9 @@ class ActivitySimConfigAdapter:
             raise ImportError("PyYAML is required for ActivitySim canonicalization.")
 
         settings = (
-            _load_effective_settings(config.root_dirs, settings_path=config.primary_config)
+            _load_effective_settings(
+                config.root_dirs, settings_path=config.primary_config
+            )
             if config.primary_config
             else {}
         )
@@ -266,7 +266,7 @@ class ActivitySimConfigAdapter:
                     IngestSpec(
                         table_name="activitysim_coefficients",
                         schema=ActivitySimCoefficients,
-                        rows=_iter_coefficients_rows(csv_path, run.id),
+                        rows=_iter_coefficients_rows(csv_path, run.id, strict=strict),
                         source=key,
                     )
                 )
@@ -275,7 +275,7 @@ class ActivitySimConfigAdapter:
                     IngestSpec(
                         table_name="activitysim_probabilities",
                         schema=ActivitySimProbabilities,
-                        rows=_iter_probabilities_rows(csv_path, run.id),
+                        rows=_iter_probabilities_rows(csv_path, run.id, strict=strict),
                         source=key,
                     )
                 )
@@ -343,7 +343,11 @@ class ActivitySimConfigAdapter:
                 value=value,
                 config_dirs=staged_root_dirs,
             )
-        for (file_name, coefficient_name, segment), value in overrides.coefficients.items():
+        for (
+            file_name,
+            coefficient_name,
+            segment,
+        ), value in overrides.coefficients.items():
             _apply_coefficients_override(
                 file_name=file_name,
                 coefficient_name=coefficient_name,
@@ -360,9 +364,7 @@ class ActivitySimConfigAdapter:
             }
         )
 
-        discovered = self.discover(
-            staged_root_dirs, identity=identity, strict=strict
-        )
+        discovered = self.discover(staged_root_dirs, identity=identity, strict=strict)
         return CanonicalConfig(
             root_dirs=discovered.root_dirs,
             primary_config=discovered.primary_config,
@@ -433,11 +435,7 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     merged = dict(base)
     for key, value in override.items():
-        if (
-            key in merged
-            and isinstance(merged[key], dict)
-            and isinstance(value, dict)
-        ):
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
             merged[key] = _deep_merge(merged[key], value)
         else:
             merged[key] = value
@@ -481,12 +479,11 @@ def _load_yaml_with_includes(
             )
             if include_path is None:
                 logging.warning(
-                    "[Consist][ActivitySim] include_settings file %s not found.", include_name
+                    "[Consist][ActivitySim] include_settings file %s not found.",
+                    include_name,
                 )
                 continue
-            include_data = _load_yaml_with_includes(
-                include_path, config_dirs, visited
-            )
+            include_data = _load_yaml_with_includes(include_path, config_dirs, visited)
             merged = _deep_merge(merged, include_data)
     merged = _deep_merge(merged, data)
     return merged
@@ -508,9 +505,7 @@ def _load_effective_settings(
             settings_paths.append(candidate)
     merged: Dict[str, Any] = {}
     for path in reversed(settings_paths):
-        merged = _deep_merge(
-            merged, _load_yaml_with_includes(path, config_dirs, set())
-        )
+        merged = _deep_merge(merged, _load_yaml_with_includes(path, config_dirs, set()))
     return merged
 
 
@@ -532,9 +527,7 @@ def _load_effective_yaml(
             paths.append(path)
     merged: Dict[str, Any] = {}
     for path in reversed(paths):
-        merged = _deep_merge(
-            merged, _load_yaml_with_includes(path, config_dirs, set())
-        )
+        merged = _deep_merge(merged, _load_yaml_with_includes(path, config_dirs, set()))
     return merged
 
 
@@ -575,9 +568,7 @@ def _resolve_model_yamls(models: Any, config_dirs: Sequence[Path]) -> list[Path]
     if unmatched:
         yaml_files: Set[str] = set()
         for config_dir in config_dirs:
-            yaml_files.update(
-                p.name for p in config_dir.glob("*.yaml") if p.is_file()
-            )
+            yaml_files.update(p.name for p in config_dir.glob("*.yaml") if p.is_file())
         logging.warning(
             "[Consist][ActivitySim] Unmatched model YAMLs for %s. Available YAMLs: %s",
             unmatched,
@@ -596,9 +587,7 @@ def _artifact_key_for_path(path: Path, config_dirs: Sequence[Path]) -> str:
     return f"config:{resolved.name}"
 
 
-def _collect_reference_values(
-    data: Any, *, allow_heuristics: bool
-) -> Set[str]:
+def _collect_reference_values(data: Any, *, allow_heuristics: bool) -> Set[str]:
     refs: Set[str] = set()
 
     def collect(value: Any) -> None:
@@ -685,9 +674,7 @@ def _collect_referenced_csvs(
             if csv_path is None:
                 if not attempted:
                     continue
-                message = (
-                    f"[Consist][ActivitySim] Missing referenced CSV {ref} in {path.name}"
-                )
+                message = f"[Consist][ActivitySim] Missing referenced CSV {ref} in {path.name}"
                 if strict:
                     raise FileNotFoundError(message)
                 logging.warning(message)
@@ -710,7 +697,9 @@ def _bundle_configs(
         cache_dir = tracker.run_dir / "config_bundles"
     cache_dir = cache_dir.resolve()
     cache_dir.mkdir(parents=True, exist_ok=True)
-    bundle_path = cache_dir / f"{run.model_name}_config_bundle_{content_hash[:10]}.tar.gz"
+    bundle_path = (
+        cache_dir / f"{run.model_name}_config_bundle_{content_hash[:10]}.tar.gz"
+    )
     if bundle_path.exists():
         return bundle_path
     with tarfile.open(bundle_path, "w:gz") as archive:
@@ -894,13 +883,22 @@ def _is_probabilities_file(file_name: str) -> bool:
     return name.endswith(_PROBABILITY_SUFFIXES)
 
 
-def _iter_coefficients_rows(path: Path, run_id: str) -> Iterable[dict[str, Any]]:
+def _iter_coefficients_rows(
+    path: Path, run_id: str, *, strict: bool = False
+) -> Iterable[dict[str, Any]]:
     with _open_csv(path) as handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames is None:
-            return
+            if strict:
+                raise ValueError(f"[Consist][ActivitySim] CSV has no headers: {path}")
+            logging.warning(
+                f"[Consist][ActivitySim] CSV has no headers, skipping ingestion: {path}"
+            )
+            return iter([])
         fieldnames = [name or "" for name in reader.fieldnames]
-        coeff_key = "coefficient_name" if "coefficient_name" in fieldnames else "coefficient"
+        coeff_key = (
+            "coefficient_name" if "coefficient_name" in fieldnames else "coefficient"
+        )
         value_key = "value" if "value" in fieldnames else None
         constrain_key = "constrain" if "constrain" in fieldnames else None
         extra_keys = {
@@ -917,7 +915,9 @@ def _iter_coefficients_rows(path: Path, run_id: str) -> Iterable[dict[str, Any]]
             coef_name = (row.get(coeff_key) or "").strip()
             if not coef_name or coef_name.startswith("#"):
                 continue
-            constrain = (row.get(constrain_key) or "").strip() if constrain_key else None
+            constrain = (
+                (row.get(constrain_key) or "").strip() if constrain_key else None
+            )
             is_constrained = None
             if constrain:
                 is_constrained = constrain.upper() in {"T", "TRUE", "1", "Y", "YES"}
@@ -955,11 +955,18 @@ def _iter_coefficients_rows(path: Path, run_id: str) -> Iterable[dict[str, Any]]
                 }
 
 
-def _iter_probabilities_rows(path: Path, run_id: str) -> Iterable[dict[str, Any]]:
+def _iter_probabilities_rows(
+    path: Path, run_id: str, *, strict: bool = False
+) -> Iterable[dict[str, Any]]:
     with _open_csv(path) as handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames is None:
-            return
+            if strict:
+                raise ValueError(f"[Consist][ActivitySim] CSV has no headers: {path}")
+            logging.warning(
+                f"[Consist][ActivitySim] CSV has no headers, skipping ingestion: {path}"
+            )
+            return iter([])
         for idx, row in enumerate(reader):
             dims: Dict[str, Any] = {}
             probs: Dict[str, Any] = {}
@@ -992,7 +999,7 @@ def _coerce_scalar(value: str) -> Any:
         return value.lower() == "true"
     num = _parse_float(value)
     if num is not None:
-        if num.is_integer():
+        if isinstance(num, float) and num.is_integer():
             return int(num)
         return num
     return value
@@ -1019,7 +1026,9 @@ def _apply_coefficients_override(
     coeff_key = (
         "coefficient_name"
         if "coefficient_name" in fieldnames
-        else "coefficient" if "coefficient" in fieldnames else None
+        else "coefficient"
+        if "coefficient" in fieldnames
+        else None
     )
     if coeff_key is None:
         raise ValueError(f"Missing coefficient column in {csv_path}")
@@ -1048,14 +1057,14 @@ def _apply_coefficients_override(
         updated += 1
 
     if updated == 0:
-        raise KeyError(
-            f"Coefficient '{coefficient_name}' not found in {csv_path}"
-        )
+        raise KeyError(f"Coefficient '{coefficient_name}' not found in {csv_path}")
 
     _write_csv(csv_path, fieldnames, rows)
 
 
-def _write_csv(path: Path, fieldnames: Sequence[str], rows: list[dict[str, Any]]) -> None:
+def _write_csv(
+    path: Path, fieldnames: Sequence[str], rows: list[dict[str, Any]]
+) -> None:
     if path.suffix == ".gz":
         handle = gzip.open(path, "wt", encoding="utf-8-sig", newline="")
     else:

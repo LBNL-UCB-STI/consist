@@ -27,9 +27,7 @@ def build_activitysim_test_configs(
         (base_dir, overlay_dir) for the staged config.
     """
     resources = (
-        Path(__file__).resolve().parent.parent
-        / "resources"
-        / "activitysim_small"
+        Path(__file__).resolve().parent.parent / "resources" / "activitysim_small"
     )
     base_src = resources / "base"
     overlay_src = resources / "overlay"

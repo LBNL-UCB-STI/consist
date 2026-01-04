@@ -62,9 +62,7 @@ def test_canonicalize_builds_ingestables_and_constants(tracker, tmp_path: Path):
     canonical = adapter.discover(
         [overlay_dir, base_dir], identity=tracker.identity, strict=True
     )
-    result = adapter.canonicalize(
-        canonical, run=run, tracker=tracker, strict=True
-    )
+    result = adapter.canonicalize(canonical, run=run, tracker=tracker, strict=True)
     tracker.end_run()
 
     artifact_names = {spec.path.name for spec in result.artifacts}
@@ -83,8 +81,7 @@ def test_canonicalize_builds_ingestables_and_constants(tracker, tmp_path: Path):
         for row in constants_rows
     )
     assert any(
-        row["key"] == "CONSTANTS.AUTO_TIME"
-        and row["file_name"] == "accessibility.yaml"
+        row["key"] == "CONSTANTS.AUTO_TIME" and row["file_name"] == "accessibility.yaml"
         for row in constants_rows
     )
 
@@ -104,9 +101,7 @@ def test_coefficients_and_probabilities_parsing(tracker, tmp_path: Path):
     canonical = adapter.discover(
         [overlay_dir, base_dir], identity=tracker.identity, strict=True
     )
-    result = adapter.canonicalize(
-        canonical, run=run, tracker=tracker, strict=True
-    )
+    result = adapter.canonicalize(canonical, run=run, tracker=tracker, strict=True)
     tracker.end_run()
 
     coeff_rows = []
@@ -118,9 +113,7 @@ def test_coefficients_and_probabilities_parsing(tracker, tmp_path: Path):
             prob_rows.extend(list(spec.rows))
 
     trip_rows = [
-        row
-        for row in coeff_rows
-        if row["file_name"].startswith("trip_scheduling")
+        row for row in coeff_rows if row["file_name"].startswith("trip_scheduling")
     ]
     assert any(row["coefficient_name"] == "trip_time" for row in trip_rows)
     assert all(row["source_type"] == "direct" for row in trip_rows)
@@ -190,9 +183,7 @@ def test_missing_include_settings_warns(tracker, tmp_path: Path, caplog):
     adapter.canonicalize(canonical, run=run, tracker=tracker, strict=False)
     tracker.end_run()
 
-    assert any(
-        "include_settings file" in record.message for record in caplog.records
-    )
+    assert any("include_settings file" in record.message for record in caplog.records)
 
 
 def test_inherit_settings_respects_primary_only(tracker, tmp_path: Path):
@@ -214,9 +205,7 @@ def test_inherit_settings_respects_primary_only(tracker, tmp_path: Path):
     canonical = adapter.discover(
         [overlay_dir, base_dir], identity=tracker.identity, strict=True
     )
-    result = adapter.canonicalize(
-        canonical, run=run, tracker=tracker, strict=True
-    )
+    result = adapter.canonicalize(canonical, run=run, tracker=tracker, strict=True)
     tracker.end_run()
 
     constants_spec = _find_ingestable(result.ingestables, "activitysim_constants")
@@ -241,9 +230,7 @@ def test_heuristic_reference_discovery_toggle(tracker, tmp_path: Path):
     canonical = adapter.discover(
         [overlay_dir, base_dir], identity=tracker.identity, strict=True
     )
-    result = adapter.canonicalize(
-        canonical, run=run, tracker=tracker, strict=True
-    )
+    result = adapter.canonicalize(canonical, run=run, tracker=tracker, strict=True)
     tracker.end_run()
 
     artifact_names = {spec.path.name for spec in result.artifacts}
@@ -254,9 +241,7 @@ def test_heuristic_reference_discovery_toggle(tracker, tmp_path: Path):
     canonical = adapter.discover(
         [overlay_dir, base_dir], identity=tracker.identity, strict=True
     )
-    result = adapter.canonicalize(
-        canonical, run=run, tracker=tracker, strict=True
-    )
+    result = adapter.canonicalize(canonical, run=run, tracker=tracker, strict=True)
     tracker.end_run()
 
     artifact_names = {spec.path.name for spec in result.artifacts}
@@ -271,9 +256,7 @@ def test_bundle_artifact_logged(tracker, tmp_path: Path):
     canonical = adapter.discover(
         [overlay_dir, base_dir], identity=tracker.identity, strict=True
     )
-    result = adapter.canonicalize(
-        canonical, run=run, tracker=tracker, strict=True
-    )
+    result = adapter.canonicalize(canonical, run=run, tracker=tracker, strict=True)
     tracker.end_run()
 
     bundle_specs = [
@@ -292,9 +275,7 @@ def test_bundle_cache_dir_reuse(tracker, tmp_path: Path):
     canonical = adapter.discover(
         [overlay_dir, base_dir], identity=tracker.identity, strict=True
     )
-    result_a = adapter.canonicalize(
-        canonical, run=run_a, tracker=tracker, strict=True
-    )
+    result_a = adapter.canonicalize(canonical, run=run_a, tracker=tracker, strict=True)
     tracker.end_run()
 
     bundle_a = next(
@@ -328,13 +309,13 @@ def test_materialize_applies_overrides(tracker, tmp_path: Path):
     canonical = adapter.discover(
         [overlay_dir, base_dir], identity=tracker.identity, strict=True
     )
-    result = adapter.canonicalize(
-        canonical, run=run, tracker=tracker, strict=True
-    )
+    result = adapter.canonicalize(canonical, run=run, tracker=tracker, strict=True)
     tracker.end_run()
 
     bundle_path = next(
-        spec.path for spec in result.artifacts if spec.meta.get("config_role") == "bundle"
+        spec.path
+        for spec in result.artifacts
+        if spec.meta.get("config_role") == "bundle"
     )
     overrides = ConfigOverrides(
         constants={
@@ -401,13 +382,13 @@ def test_materialize_hash_changes_with_overrides(tracker, tmp_path: Path):
     canonical = adapter.discover(
         [overlay_dir, base_dir], identity=tracker.identity, strict=True
     )
-    result = adapter.canonicalize(
-        canonical, run=run, tracker=tracker, strict=True
-    )
+    result = adapter.canonicalize(canonical, run=run, tracker=tracker, strict=True)
     tracker.end_run()
 
     bundle_path = next(
-        spec.path for spec in result.artifacts if spec.meta.get("config_role") == "bundle"
+        spec.path
+        for spec in result.artifacts
+        if spec.meta.get("config_role") == "bundle"
     )
 
     staged_a = adapter.materialize(

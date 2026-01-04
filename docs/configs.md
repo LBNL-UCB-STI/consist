@@ -129,6 +129,26 @@ You can also fetch facets directly:
 facet = tracker.get_config_facet(facet_id)
 ```
 
+## Model-Specific Config Adapters
+
+For complex, file-based configurations (such as ActivitySim YAML/CSV configs),
+Consist provides **config adapters**—model-specific modules that discover,
+canonicalize, and ingest configuration data into queryable tables.
+
+Unlike in-memory configs (dicts/Pydantic models), adapters handle:
+- **Discovery**: Locating config files and computing content hashes
+- **Canonicalization**: Converting config metadata into artifacts and ingestable schemas
+- **Ingestion**: Persisting calibration-sensitive parameters as queryable tables
+
+This decouples model-specific parsing logic from Consist core, making it easy
+to add new model types without coupling them to the framework.
+
+**Available adapters:**
+
+- [ActivitySim Config Adapter](integrations/config_adapters.md#activitysim) — Discover, canonicalize, and query ActivitySim YAML/CSV configurations
+
+For detailed usage and API reference, see the [Config Adapters Integration Guide](integrations/config_adapters.md).
+
 ## Examples
 
 ### Tracker.run with config + facet

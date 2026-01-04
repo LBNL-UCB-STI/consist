@@ -89,3 +89,37 @@ def test_activitysim_sqlmodel_query(tracker, tmp_path: Path):
         ).all()
 
     assert rows
+
+
+def test_activitysim_query_coefficients(tracker, tmp_path: Path):
+    """Demonstrate querying accessibility coefficients across runs."""
+    from consist.models.activitysim import ActivitySimCoefficients
+
+    adapter = ActivitySimConfigAdapter()
+
+    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path)
+    tracker.begin_run(
+        "activitysim_coeff_query",
+        "activitysim",
+        cache_mode="overwrite",
+    )
+    tracker.canonicalize_config(adapter, [overlay_dir, base_dir], ingest=True)
+    tracker.end_run()
+
+    if tracker.engine is None:
+        raise AssertionError("Tracker engine missing; DB tests require DuckDB.")
+
+    with Session(tracker.engine) as session:
+        # Query: which runs have the time coefficient from accessibility_coefficients.csv?
+        rows = session.exec(
+            select(ActivitySimCoefficients)
+            .where(ActivitySimCoefficients.coefficient_name == "time")
+            .where(ActivitySimCoefficients.file_name == "accessibility_coefficients.csv")
+        ).all()
+
+    assert len(rows) > 0, f"Expected rows, got: {rows}"
+    # time coefficient should be 1.1 from the test data
+    # Note: value_num may be stored as string in DuckDB, so we compare after converting
+    assert any(
+        float(row.value_num) == 1.1 for row in rows
+    ), f"Expected value_num=1.1, got: {[row.value_num for row in rows]}"
