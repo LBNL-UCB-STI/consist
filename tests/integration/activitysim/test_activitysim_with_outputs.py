@@ -7,7 +7,7 @@ from pathlib import Path
 from sqlmodel import Session, select
 
 from consist.integrations.activitysim import ActivitySimConfigAdapter
-from consist.models.activitysim import ActivitySimCoefficients, ActivitySimConstants
+from consist.models.activitysim import ActivitySimCoefficients
 from tests.helpers.activitysim_fixtures import build_activitysim_test_configs
 
 
@@ -24,13 +24,18 @@ def test_activitysim_config_across_multiple_scenarios(tracker, tmp_path: Path):
 
     # Scenario A: baseline
     base_a, overlay_a = build_activitysim_test_configs(tmp_path / "scenario_a")
-    run_a = tracker.begin_run("scenario_a_baseline", "activitysim", cache_mode="overwrite")
+    tracker.begin_run("scenario_a_baseline", "activitysim", cache_mode="overwrite")
     tracker.canonicalize_config(adapter, [overlay_a, base_a], ingest=True)
     tracker.end_run()
 
-    # Scenario B: different configuration (could have different coefficients in practice)
+    # Scenario B: tweak a coefficient to simulate a calibration adjustment
     base_b, overlay_b = build_activitysim_test_configs(tmp_path / "scenario_b")
-    run_b = tracker.begin_run("scenario_b_adjusted", "activitysim", cache_mode="overwrite")
+    coeffs_b = base_b / "accessibility_coefficients.csv"
+    coeffs_b.write_text(
+        "coefficient,value\ntime,1.3\ncost,2.2\n",
+        encoding="utf-8",
+    )
+    tracker.begin_run("scenario_b_adjusted", "activitysim", cache_mode="overwrite")
     tracker.canonicalize_config(adapter, [overlay_b, base_b], ingest=True)
     tracker.end_run()
 
@@ -41,11 +46,14 @@ def test_activitysim_config_across_multiple_scenarios(tracker, tmp_path: Path):
     with Session(tracker.engine) as session:
         # Get all accessibility coefficients from both runs
         coeff_rows = session.exec(
-            select(ActivitySimCoefficients)
-            .where(ActivitySimCoefficients.file_name == "accessibility_coefficients.csv")
+            select(ActivitySimCoefficients).where(
+                ActivitySimCoefficients.file_name == "accessibility_coefficients.csv"
+            )
         ).all()
 
-    assert len(coeff_rows) >= 4, "Should have coefficients from both scenarios (2+ per scenario)"
+    assert len(coeff_rows) >= 4, (
+        "Should have coefficients from both scenarios (2+ per scenario)"
+    )
 
     # Group by run to show comparison
     runs_with_coeffs = {}
@@ -56,11 +64,15 @@ def test_activitysim_config_across_multiple_scenarios(tracker, tmp_path: Path):
 
     # Both scenarios should have time and cost coefficients
     assert len(runs_with_coeffs) == 2, "Should have coefficients from 2 runs"
+    time_values = set()
     for coeffs in runs_with_coeffs.values():
         assert "time" in coeffs, "Should have time coefficient"
         assert "cost" in coeffs, "Should have cost coefficient"
-        assert coeffs["time"] == 1.1, "time coefficient should be 1.1"
+        time_values.add(coeffs["time"])
         assert coeffs["cost"] == 2.2, "cost coefficient should be 2.2"
+    assert time_values == {1.1, 1.3}, (
+        f"Expected time coefficients 1.1 and 1.3, got {time_values}"
+    )
 
     # Query 2: Find runs with specific coefficient values
     with tracker.engine.begin() as connection:
@@ -73,7 +85,9 @@ def test_activitysim_config_across_multiple_scenarios(tracker, tmp_path: Path):
             """
         ).fetchall()
 
-    assert len(high_time_coeff) >= 2, "Both scenarios should have time coefficient > 1.0"
+    assert len(high_time_coeff) >= 2, (
+        "Both scenarios should have time coefficient > 1.0"
+    )
 
     # Query 3: Count config entries across runs
     # This demonstrates how you'd aggregate config metadata for scenario comparison
@@ -83,12 +97,16 @@ def test_activitysim_config_across_multiple_scenarios(tracker, tmp_path: Path):
             """
             SELECT ac.run_id, COUNT(*) as coeff_count
             FROM global_tables.activitysim_coefficients ac
-            WHERE ac.coefficient_name = 'time' AND CAST(ac.value_num AS FLOAT) = 1.1
+            WHERE ac.coefficient_name = 'time' AND CAST(ac.value_num AS FLOAT) IN (1.1, 1.3)
             GROUP BY ac.run_id
             """
         ).fetchall()
 
-    assert len(runs_coeff_count) == 2, "Should find both scenarios with time coefficient = 1.1"
+    assert len(runs_coeff_count) == 2, (
+        "Should find both scenarios with time coefficient = 1.1"
+    )
     # Each scenario should have exactly 1 time coefficient entry
     counts = [row[1] for row in runs_coeff_count]
-    assert all(c == 1 for c in counts), "Each scenario should have 1 time coefficient entry"
+    assert all(c == 1 for c in counts), (
+        "Each scenario should have 1 time coefficient entry"
+    )

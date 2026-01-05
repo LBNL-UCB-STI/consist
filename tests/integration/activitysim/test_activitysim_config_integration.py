@@ -114,12 +114,27 @@ def test_activitysim_query_coefficients(tracker, tmp_path: Path):
         rows = session.exec(
             select(ActivitySimCoefficients)
             .where(ActivitySimCoefficients.coefficient_name == "time")
-            .where(ActivitySimCoefficients.file_name == "accessibility_coefficients.csv")
+            .where(
+                ActivitySimCoefficients.file_name == "accessibility_coefficients.csv"
+            )
         ).all()
 
     assert len(rows) > 0, f"Expected rows, got: {rows}"
     # time coefficient should be 1.1 from the test data
-    # Note: value_num may be stored as string in DuckDB, so we compare after converting
-    assert any(
-        float(row.value_num) == 1.1 for row in rows
-    ), f"Expected value_num=1.1, got: {[row.value_num for row in rows]}"
+    assert any(row.value_num == 1.1 for row in rows), (
+        f"Expected value_num=1.1, got: {[row.value_num for row in rows]}"
+    )
+
+    from sqlalchemy import Float, cast
+
+    with Session(tracker.engine) as session:
+        numeric_rows = session.exec(
+            select(ActivitySimCoefficients)
+            .where(ActivitySimCoefficients.value_num.is_not(None))
+            .where(cast(ActivitySimCoefficients.value_num, Float) > 1.0)
+            .where(ActivitySimCoefficients.coefficient_name == "time")
+        ).all()
+
+    assert numeric_rows, (
+        "Expected numeric comparison on value_num to work without casting."
+    )

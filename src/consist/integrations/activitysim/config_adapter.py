@@ -128,6 +128,14 @@ class ActivitySimConfigAdapter:
             raise ImportError("PyYAML is required for ActivitySim canonicalization.")
         settings_path = _resolve_yaml_path("settings.yaml", root_dirs)
         if settings_path is None:
+            subdir_candidates = _find_settings_yaml_subdirs(root_dirs)
+            if subdir_candidates:
+                candidates = ", ".join(str(path) for path in subdir_candidates)
+                raise FileNotFoundError(
+                    "settings.yaml not found in config_dirs. "
+                    "Pass the specific config subdirectories in order. "
+                    f"Found settings.yaml under: {candidates}"
+                )
             if strict:
                 raise FileNotFoundError("settings.yaml not found in config_dirs.")
             logging.warning(
@@ -459,6 +467,17 @@ def _resolve_yaml_path(
         if path.exists():
             return path
     return None
+
+
+def _find_settings_yaml_subdirs(config_dirs: Sequence[Path]) -> list[Path]:
+    candidates: list[Path] = []
+    for config_dir in config_dirs:
+        if not config_dir.is_dir():
+            continue
+        for path in config_dir.rglob("settings.yaml"):
+            if path.is_file():
+                candidates.append(path.parent)
+    return candidates
 
 
 def _load_yaml_with_includes(

@@ -55,7 +55,7 @@ nav = [
   { "CLI" = ["cli-reference.md"] },
   { "Architecture" = ["architecture.md"] },
   { "API Reference" = ["api/index.md", "api/public_api.md", "api/api_helpers.md", "api/tracker.md", "api/workflow.md", "api/artifact.md", "api/run.md", "api/indexing.md", "api/identity.md", "api/views.md", "api/matrix.md", "api/materialize.md"] },
-  { "Integrations" = ["integrations/index.md", "integrations/containers.md", "integrations/dlt_loader.md"] },
+  { "Integrations" = ["integrations/index.md", "integrations/config_adapters.md", "integrations/containers.md", "integrations/dlt_loader.md"] },
 ]
 
 # With the "extra_css" option you can add your own CSS styling to customize
