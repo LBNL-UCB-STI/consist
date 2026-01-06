@@ -2,21 +2,23 @@
 
 Consist provides two complementary patterns for tracking provenance: `run()` for single steps and **scenarios** for multi-step workflows. You can use either independently or combine them.
 
+If you are new, start with the [quickstart notebook](examples.md#quickstart) and then follow the tutorial series in [Example notebooks](examples.md).
+
 ---
 
 ## Common Patterns
 
-- **Parameter sweeps**: See [Predator-Prey §3](../examples/01_parameter_sweep_monte_carlo.ipynb#3-running-the-sweep-with-provenance-tracking).
-- **Iterative/feedback loops**: See [Iterative Workflows §Baseline Run](../examples/02_iterative_workflows.ipynb#baseline-run-10-iterations).
-- **Schema export**: See [Predator-Prey §4](../examples/01_parameter_sweep_monte_carlo.ipynb#4-schema-export-from-data-to-typed-queries).
-- **Lineage queries**: See [Iterative Workflows §Querying Provenance](../examples/02_iterative_workflows.ipynb#querying-provenance).
+- **Parameter sweeps**: See [Example notebooks](examples.md#tutorial-series).
+- **Iterative/feedback loops**: See [Example notebooks](examples.md#tutorial-series).
+- **Schema export**: See [Example notebooks](examples.md#tutorial-series).
+- **Lineage queries**: See [Example notebooks](examples.md#tutorial-series).
 
 ---
 
 ## Runs
 
 Runs execute a callable with explicit inputs, config, and outputs, and return a `RunResult`.
-See: [Predator-Prey §1](../examples/01_parameter_sweep_monte_carlo.ipynb#1-single-simulation-preview).
+See: [Example notebooks](examples.md#tutorial-series).
 
 ```python
 from consist import Tracker
@@ -72,7 +74,7 @@ tracker.run(
 ## Scenarios
 
 Scenarios group related steps under a parent run, useful for multi-year simulations or variant comparisons.
-See: [Iterative Workflows §Baseline Run](../examples/02_iterative_workflows.ipynb#baseline-run-10-iterations).
+See: [Example notebooks](examples.md#tutorial-series).
 
 ```python
 import consist
@@ -97,7 +99,7 @@ All steps share the same `scenario_id`, making cross-scenario queries straightfo
 ### Passing Data Between Steps
 
 Use the coupler to track artifacts flowing between steps:
-See: [Iterative Workflows §Baseline Run](../examples/02_iterative_workflows.ipynb#baseline-run-10-iterations).
+See: [Example notebooks](examples.md#tutorial-series).
 
 ```python
 with consist.scenario(
@@ -118,12 +120,26 @@ with consist.scenario(
     with sc.trace(name="simulate", input_keys=["data"]):
         df = consist.load(coupler.require("data"))
         # ... simulation logic ...
+```
+
+### Cache Hydration Options
+
+Consist defaults to metadata-only cache hits (no file copies). You can opt in to
+materializing cached files when needed:
+
+- `outputs-requested`: copy only specific cached outputs to paths you provide.
+- `outputs-all`: copy all cached outputs into a target directory.
+- `inputs-missing`: when a cache miss occurs, backfill missing inputs from prior runs
+  before executing, so downstream code can read bytes without re-running earlier steps.
+
+These can be set per run via `cache_hydration=...` and are also supported for scenario
+steps via `step_cache_hydration=...`.
 
 ## Query facets with `pivot_facets`
 
 If you log small, queryable config facets on runs, you can pivot them into a wide table
 and join them to other run metadata for analysis.
-See: [Predator-Prey §5](../examples/01_predator_prey_end_to_end.ipynb#5-querying-across-runs-with-hybrid-views).
+See: [Example notebooks](examples.md#tutorial-series).
 For when to use `config` vs `facet`, see [Concepts](concepts.md#the-config-vs-facet-distinction).
 
 ```python
@@ -140,7 +156,6 @@ rows = consist.run_query(
     select(params.c.run_id, params.c.alpha, params.c.beta, params.c.mode),
     tracker=tracker,
 )
-```
 ```
 
 ### Mixing Runs and Scenarios
@@ -185,7 +200,7 @@ with consist.scenario("baseline", tracker=tracker) as sc:
 ## Querying Results
 
 ### Finding Runs
-See: [Iterative Workflows §Querying Provenance](../examples/02_iterative_workflows.ipynb#querying-provenance).
+See: [Example notebooks](examples.md#tutorial-series).
 
 ```python
 import consist
@@ -209,7 +224,7 @@ result_2030 = runs_by_year[2030]
 ```
 
 ### Loading Artifacts
-See: [Iterative Workflows §Querying Provenance](../examples/02_iterative_workflows.ipynb#querying-provenance).
+See: [Example notebooks](examples.md#tutorial-series).
 
 ```python
 # Get artifacts for a run
@@ -221,7 +236,7 @@ df = consist.load(persons_artifact)
 ```
 
 ### Cross-Run Queries with Views
-See: [Predator-Prey §5](../examples/01_parameter_sweep_monte_carlo.ipynb#5-querying-across-runs-with-hybrid-views).
+See: [Example notebooks](examples.md#tutorial-series).
 
 Register schemas to enable SQL queries across all runs:
 
@@ -256,12 +271,14 @@ results = consist.run_query(query, tracker=tracker)
 ```
 
 Views automatically include `consist_scenario_id`, `consist_year`, and other metadata columns for filtering and grouping.
+For more on ingestion and hybrid views, see [Ingestion & Hybrid Views](ingestion-and-hybrid-views.md).
 
 ### Generating Schemas from Captured Data
 
 If you ingest tabular data into DuckDB, Consist can capture the observed schema and export an **editable SQLModel stub** so you can curate PK/FK constraints and then register the model for views.
 
 See `docs/schema-export.md` for the full workflow (CLI + Python) and column-name/`__tablename__` guidelines.
+See [Ingestion & Hybrid Views](ingestion-and-hybrid-views.md) for ingestion tradeoffs and DB fallback behavior.
 
 ---
 

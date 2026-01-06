@@ -406,9 +406,42 @@ class Tracker:
         include_stats_comments: bool = True,
     ) -> str:
         """
-        Export a captured artifact schema as a SQLModel stub string for manual editing.
+        Export a captured artifact schema as a SQLModel stub for manual editing.
 
-        Exactly one of `schema_id` or `artifact_id` must be provided.
+        Exactly one of ``schema_id`` or ``artifact_id`` must be provided. The
+        generated Python source is returned and can optionally be written to
+        ``out_path``.
+
+        Parameters
+        ----------
+        schema_id : Optional[str], optional
+            Schema identifier to export (from the schema registry).
+        artifact_id : Optional[Union[str, uuid.UUID]], optional
+            Artifact ID to export the associated schema.
+        out_path : Optional[Path], optional
+            If provided, write the stub to this path and return its contents.
+        table_name : Optional[str], optional
+            Override the SQL table name in the generated class.
+        class_name : Optional[str], optional
+            Override the Python class name in the generated class.
+        abstract : bool, default True
+            Whether to mark the generated class as abstract.
+        include_system_cols : bool, default False
+            Whether to include Consist system columns in the stub.
+        include_stats_comments : bool, default True
+            Whether to include column-level stats as comments.
+
+        Returns
+        -------
+        str
+            The rendered SQLModel stub source.
+
+        Raises
+        ------
+        ValueError
+            If the tracker has no database configured or if the selector is invalid.
+        KeyError
+            If no schema is found for the provided selector.
         """
         if not self.db:
             raise ValueError("Schema export requires a configured database (db_path).")
@@ -972,7 +1005,7 @@ class Tracker:
         load_inputs: Optional[bool] = None,
         executor: str = "python",
         container: Optional[Mapping[str, Any]] = None,
-        fn_args: Optional[Dict[str, Any]] = None,
+        runtime_kwargs: Optional[Dict[str, Any]] = None,
         inject_context: bool | str = False,
         output_mismatch: str = "warn",
         output_missing: str = "warn",
@@ -1227,7 +1260,7 @@ class Tracker:
                     cache_hit=result.cache_hit,
                 )
 
-            fn_args = dict(fn_args or {})
+            runtime_kwargs = dict(runtime_kwargs or {})
             config_dict: Dict[str, Any] = {}
             if config is None:
                 config_dict = {}
@@ -1246,7 +1279,11 @@ class Tracker:
             )
             call_kwargs: Dict[str, Any] = {}
 
-            if "config" in params and "config" not in fn_args and config is not None:
+            if (
+                "config" in params
+                and "config" not in runtime_kwargs
+                and config is not None
+            ):
                 call_kwargs["config"] = (
                     config if isinstance(config, BaseModel) else config_dict
                 )
@@ -1259,8 +1296,8 @@ class Tracker:
                     continue
                 if param_name in call_kwargs:
                     continue
-                if param_name in fn_args:
-                    call_kwargs[param_name] = fn_args[param_name]
+                if param_name in runtime_kwargs:
+                    call_kwargs[param_name] = runtime_kwargs[param_name]
                     continue
                 if load_inputs and isinstance(inputs, Mapping):
                     if param_name in input_artifacts_by_key:
@@ -1277,7 +1314,7 @@ class Tracker:
                 if param_name in config_dict:
                     call_kwargs[param_name] = config_dict[param_name]
 
-            for key, value in fn_args.items():
+            for key, value in runtime_kwargs.items():
                 if key not in call_kwargs:
                     call_kwargs[key] = value
 
@@ -1875,6 +1912,23 @@ class Tracker:
         Selection priority:
         1) Highest `iteration` (when present)
         2) Newest `created_at` (fallback when no iteration is set)
+
+        Parameters
+        ----------
+        parent_id : Optional[str], optional
+            Filter by scenario/parent run ID.
+        model : Optional[str], optional
+            Filter by model name.
+        status : Optional[str], optional
+            Filter by run status.
+        year : Optional[int], optional
+            Filter by run year.
+        tags : Optional[List[str]], optional
+            Filter runs that contain all provided tags.
+        metadata : Optional[Dict[str, Any]], optional
+            Filter by exact matches in ``Run.meta`` (client-side filter).
+        limit : int, default 10_000
+            Maximum number of runs to consider.
         """
         return self.queries.find_latest_run(
             parent_id=parent_id,
@@ -1889,6 +1943,11 @@ class Tracker:
     def get_latest_run_id(self, **kwargs) -> str:
         """
         Convenience wrapper to return the latest run ID for the given filters.
+
+        Parameters
+        ----------
+        **kwargs : Any
+            Filters forwarded to ``find_latest_run``.
         """
         return self.queries.get_latest_run_id(**kwargs)
 
@@ -2435,6 +2494,26 @@ class Tracker:
     ) -> Any:
         """
         Convenience wrapper for loading a matrix view from tracked artifacts.
+
+        Parameters
+        ----------
+        concept_key : str
+            Semantic key for the matrix artifacts.
+        variables : Optional[List[str]], optional
+            Variables to load from each Zarr store; defaults to all variables.
+        run_ids : Optional[List[str]], optional
+            Restrict to specific run IDs.
+        parent_id : Optional[str], optional
+            Filter by scenario/parent run ID.
+        model : Optional[str], optional
+            Filter by model name.
+        status : Optional[str], optional
+            Filter by run status.
+
+        Returns
+        -------
+        Any
+            An ``xarray.Dataset`` containing the combined matrix data.
         """
         factory = MatrixViewFactory(self)
         return factory.load_matrix_view(
@@ -2455,6 +2534,15 @@ class Tracker:
     ) -> Optional[str]:
         """
         Materialize a cached artifact onto the filesystem.
+
+        This copies bytes from the resolved artifact URI to ``destination_path``.
+        It does not perform database-backed reconstruction.
+
+        Returns
+        -------
+        Optional[str]
+            The destination path for the materialized artifact, or ``None`` if
+            missing and ``on_missing="warn"``.
         """
         result = materialize_artifacts(
             tracker=self,
@@ -2866,6 +2954,18 @@ class Tracker:
     ) -> Optional[Dict[str, Any]]:
         """
         Load the full config snapshot for a historical run.
+
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+        allow_missing : bool, default False
+            Return ``None`` if the snapshot is missing instead of raising.
+
+        Returns
+        -------
+        Optional[Dict[str, Any]]
+            The stored config payload, or ``None`` if missing and ``allow_missing``.
         """
         record = self.get_run_record(run_id, allow_missing=allow_missing)
         if record is None:
@@ -2909,12 +3009,18 @@ class Tracker:
     def get_run_outputs(self, run_id: str) -> Dict[str, Artifact]:
         """
         Return output artifacts for a run, keyed by artifact key.
+
+        Returns an empty dict if the database is not configured or the run is
+        unknown to the tracker.
         """
         return self.get_artifacts_for_run(run_id).outputs
 
     def get_run_inputs(self, run_id: str) -> Dict[str, Artifact]:
         """
         Return input artifacts for a run, keyed by artifact key.
+
+        Returns an empty dict if the database is not configured or the run is
+        unknown to the tracker.
         """
         return self.get_artifacts_for_run(run_id).inputs
 
@@ -3006,6 +3112,15 @@ class Tracker:
     ) -> None:
         """
         Print a formatted lineage tree for an artifact.
+
+        Parameters
+        ----------
+        artifact_key_or_id : Union[str, uuid.UUID]
+            Artifact key or UUID to print.
+        max_depth : Optional[int], optional
+            Maximum depth to traverse (0 prints only the artifact).
+        show_run_ids : bool, default False
+            Include run IDs alongside artifact entries.
         """
         self.lineage.print_lineage(
             artifact_key_or_id=artifact_key_or_id,
@@ -3371,7 +3486,9 @@ class Tracker:
         """
         Attach metadata to a function without changing execution behavior.
 
-        This is used by Tracker.run/ScenarioContext.run to infer defaults.
+        This decorator lets you attach defaults such as ``outputs``, ``tags``, or
+        ``cache_mode`` to a function. ``Tracker.run`` and ``ScenarioContext.run``
+        read this metadata when executing the function.
         """
         return define_step_decorator(**kwargs)
 

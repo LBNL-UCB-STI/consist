@@ -328,3 +328,20 @@ def test_ingest_with_invalid_data_in_strict_mode(tracker, engine):
             )
         ).first()
         assert result is None, "Table 'strict_person' should not have been created."
+
+
+def test_ingest_missing_dlt_dependency_raises(tracker, monkeypatch, tmp_path) -> None:
+    """
+    Missing dlt dependency should raise ImportError during ingestion.
+    """
+    from consist.integrations import dlt_loader
+
+    monkeypatch.setattr(dlt_loader, "dlt", None)
+
+    data_path = tmp_path / "data.json"
+    data_path.write_text('[{"id": 1}]', encoding="utf-8")
+
+    with tracker.start_run("run_missing_dlt", "test_model"):
+        artifact = tracker.log_artifact(data_path, "missing_dlt", driver="json")
+        with pytest.raises(ImportError):
+            tracker.ingest(artifact=artifact, data=[{"id": 1}])

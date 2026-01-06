@@ -10,9 +10,10 @@ of the execution history and status of various models and workflows.
 import cmd
 import shlex
 import json
+import os
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Mapping
+from typing import Any, Dict, Iterable, List, Optional, Mapping, Tuple
 
 import pandas as pd
 import typer
@@ -20,7 +21,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlmodel import Session
 
 from consist import Tracker
@@ -416,6 +417,45 @@ def _render_summary(summary_data: Dict[str, Any]) -> None:
     console.print(model_table)
 
 
+def _iter_artifact_rows(
+    session: Session, *, batch_size: int
+) -> Iterable[Tuple[uuid.UUID, str, str, Optional[str]]]:
+    from consist.models.artifact import Artifact
+
+    last_created = None
+    last_id = None
+    while True:
+        stmt = (
+            select(
+                Artifact.id,
+                Artifact.key,
+                Artifact.uri,
+                Artifact.run_id,
+                Artifact.created_at,
+            )
+            .order_by(Artifact.created_at, Artifact.id)
+            .limit(batch_size)
+        )
+        if last_created is not None and last_id is not None:
+            stmt = stmt.where(
+                or_(
+                    Artifact.created_at > last_created,
+                    and_(
+                        Artifact.created_at == last_created,
+                        Artifact.id > last_id,
+                    ),
+                )
+            )
+
+        batch = session.exec(stmt).all()
+        if not batch:
+            break
+        for art_id, key, uri, run_id, created_at in batch:
+            yield art_id, key, uri, run_id
+        last_id = batch[-1][0]
+        last_created = batch[-1][4]
+
+
 def _render_scenarios(tracker: Tracker, limit: int = 20) -> None:
     """Shared logic for displaying scenario overview (scenarios are parent runs)."""
     with Session(tracker.engine) as session:
@@ -529,19 +569,21 @@ def validate(
     tracker = get_tracker(db_path)
 
     with Session(tracker.engine) as session:
-        from consist.models.artifact import Artifact
-        from sqlmodel import select
-
-        artifacts = session.exec(select(Artifact)).all()
-
         missing = []
-        for art in artifacts:
+        batch_size = 1000
+        if env_batch_size := os.getenv("CONSIST_VALIDATE_BATCH_SIZE"):
             try:
-                abs_path = tracker.resolve_uri(art.uri)
+                batch_size = max(1, int(env_batch_size))
+            except ValueError:
+                batch_size = 1000
+
+        for _, key, uri, run_id in _iter_artifact_rows(session, batch_size=batch_size):
+            try:
+                abs_path = tracker.resolve_uri(uri)
                 if not Path(abs_path).exists():
-                    missing.append(art)
+                    missing.append((key, uri, run_id))
             except Exception:
-                missing.append(art)
+                missing.append((key, uri, run_id))
 
         if not missing:
             console.print("[green]✓ All artifacts validated successfully[/green]")
@@ -554,8 +596,8 @@ def validate(
         table.add_column("URI", style="dim")
         table.add_column("Run ID", style="cyan")
 
-        for art in missing[:50]:  # Limit display
-            table.add_row(art.key, art.uri, art.run_id or "-")
+        for key, uri, run_id in missing[:50]:  # Limit display
+            table.add_row(key, uri, run_id or "-")
 
         console.print(table)
 

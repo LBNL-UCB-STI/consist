@@ -338,7 +338,7 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
         fn=prepare_data,
         name="prepare_data",
         outputs=["prepared_data"],
-        fn_args={"rows": 8},
+        runtime_kwargs={"rows": 8},
     )
     prepared_artifact = prepared_result.outputs["prepared_data"]
     # Materialize the predecessor output into DuckDB so downstream steps can still
@@ -383,7 +383,7 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
         fn=prepare_data,
         name="prepare_data",
         outputs=["prepared_data"],
-        fn_args={"rows": 8},
+        runtime_kwargs={"rows": 8},
     )
     prepared_artifact_2 = prepared_result_2.outputs["prepared_data"]
     assert prepared_artifact_2.uri == prepared_artifact.uri

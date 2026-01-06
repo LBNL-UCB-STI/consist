@@ -36,21 +36,32 @@ plugins:
 
 nav:
   - Home: index.md
-  - User Guide: usage-guide.md
-  - Configuration & Facets: configs.md
-  - Schema Export: schema-export.md
-  - Caching & Hydration: caching-and-hydration.md
+  - Getting Started:
+      - Concepts: concepts.md
+      - Usage Guide: usage-guide.md
+      - Examples: examples.md
+      - Configuration & Facets: configs.md
+  - Core Topics:
+      - Caching & Hydration: caching-and-hydration.md
+      - Mounts & Portability: mounts-and-portability.md
+      - Ingestion & Hybrid Views: ingestion-and-hybrid-views.md
+      - Schema Export: schema-export.md
   - CLI Reference: cli-reference.md
   - Architecture: architecture.md
   - API Reference:
+      - Overview: api/index.md
       - Public API: api/public_api.md
       - Helpers: api/api_helpers.md
       - Tracker: api/tracker.md
+      - Workflow Contexts: api/workflow.md
       - Artifact: api/artifact.md
       - Run: api/run.md
       - Indexing: api/indexing.md
       - Identity Manager: api/identity.md
-      - View Factory: api/views.md
-  - Integrations (Experimental):
-      - Containers: api/containers.md
-      - DLT Loader: api/dlt_loader.md
+      - Views: api/views.md
+      - Matrix Views: api/matrix.md
+      - Materialization: api/materialize.md
+  - Integrations:
+      - Overview: integrations/index.md
+      - Containers: integrations/containers.md
+      - DLT Loader: integrations/dlt_loader.md

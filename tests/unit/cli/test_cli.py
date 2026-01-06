@@ -1,4 +1,4 @@
-"""TODO: add unit coverage for query/helper utilities when expanded (tools.queries, pagination)."""
+"""TODO: add unit coverage for query/helper utilities when expanded (tools.queries)."""
 
 import json
 import uuid
@@ -424,6 +424,74 @@ def test_schema_export_command_schema_not_found_exits_1(mock_db_session, tmp_pat
             )
         assert result.exit_code == 1
         assert "Captured schema not found" in result.stdout
+
+
+def test_validate_paginates_artifacts(tmp_path, monkeypatch):
+    db_path = tmp_path / "validate_test.duckdb"
+    engine = create_engine(f"duckdb:///{db_path}")
+
+    core_tables = [getattr(Artifact, "__table__")]
+    with engine.connect() as connection:
+        with connection.begin():
+            SQLModel.metadata.drop_all(connection, tables=core_tables)
+            SQLModel.metadata.create_all(connection, tables=core_tables)
+
+    present_path = tmp_path / "present.txt"
+    present_path.write_text("ok", encoding="utf-8")
+    present_path_2 = tmp_path / "present_2.txt"
+    present_path_2.write_text("ok", encoding="utf-8")
+
+    missing_path = tmp_path / "missing.txt"
+
+    artifacts = [
+        Artifact(
+            id=uuid.uuid4(),
+            key="present",
+            uri=str(present_path),
+            driver="txt",
+            run_id="run_a",
+            hash="hash_present",
+            created_at=datetime(2025, 1, 1, 0, 0),
+        ),
+        Artifact(
+            id=uuid.uuid4(),
+            key="missing",
+            uri=str(missing_path),
+            driver="txt",
+            run_id="run_b",
+            hash="hash_missing",
+            created_at=datetime(2025, 1, 1, 0, 1),
+        ),
+        Artifact(
+            id=uuid.uuid4(),
+            key="present_2",
+            uri=str(present_path_2),
+            driver="txt",
+            run_id="run_c",
+            hash="hash_present_2",
+            created_at=datetime(2025, 1, 1, 0, 2),
+        ),
+    ]
+
+    with Session(engine) as session:
+        session.add_all(artifacts)
+        session.commit()
+
+    tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
+    assert tracker.db is not None
+    tracker.db.engine = cast(Engine, engine)
+
+    monkeypatch.setenv("CONSIST_VALIDATE_BATCH_SIZE", "2")
+
+    with patch("consist.cli.get_tracker", return_value=tracker):
+        result = runner.invoke(app, ["validate", "--db-path", str(db_path)])
+
+    assert result.exit_code == 0
+    assert "Found 1 missing artifacts" in result.stdout
+    assert "missing" in result.stdout
+    assert "present_2.txt" not in result.stdout
+
+    engine.dispose()
 
 
 def test_summary_no_runs_exits_cleanly(tmp_path):

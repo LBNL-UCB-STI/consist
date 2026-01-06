@@ -76,3 +76,41 @@ def test_cache_hit_demotion_emits_guidance_warning_and_happy_path_no_warning(
     assert not any(
         "Demoting cache hit to cache miss" in r.message for r in caplog.records
     )
+
+
+def test_cache_hit_relog_ingested_output_without_demotion(
+    tracker, tmp_path, caplog
+) -> None:
+    """
+    Cached ingested outputs should not demote when re-logged by key.
+    """
+    input_file = tmp_path / "input.csv"
+    input_file.write_text("id,val\n1,100\n")
+
+    with tracker.start_run(
+        "run_ingested",
+        model="model",
+        inputs=[str(input_file)],
+    ) as t:
+        out_path = t.run_dir / "out.csv"
+        out_path.write_text("id,val\n1,2\n", encoding="utf-8")
+        art = t.log_artifact(out_path, key="out", direction="output")
+
+    tracker.db.update_artifact_meta(art, {"is_ingested": True})
+    out_path.unlink()
+
+    caplog.set_level(logging.WARNING)
+    with tracker.start_run(
+        "run_ingested_cached",
+        model="model",
+        inputs=[str(input_file)],
+    ) as t:
+        assert t.is_cached
+        placeholder = Path("missing.csv")
+        cached = t.log_artifact(placeholder, key="out", direction="output")
+        assert cached.key == "out"
+        assert t.is_cached
+
+    assert not any(
+        "Demoting cache hit to cache miss" in r.message for r in caplog.records
+    )

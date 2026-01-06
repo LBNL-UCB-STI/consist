@@ -188,6 +188,7 @@ def hydrate_cache_hit_outputs(
         raise RuntimeError("Cannot hydrate cache hit: no active run.")
 
     record.cached_run = cached_run
+    target_run = record.run
 
     cached_items = tracker.get_artifacts_for_run(cached_run.id)
 
@@ -306,7 +307,7 @@ def hydrate_cache_hit_outputs(
                 items=items, on_missing=on_missing
             )
             if materialized:
-                run.meta["materialized_outputs"] = materialized
+                target_run.meta["materialized_outputs"] = materialized
     except Exception as e:
         if active_options.cache_hydration == "outputs-all":
             raise
@@ -316,9 +317,9 @@ def hydrate_cache_hit_outputs(
             e,
         )
 
-    run.meta["cache_hit"] = True
-    run.meta["cache_source"] = cached_run.id
-    run.meta["declared_outputs"] = list(cached_items.outputs.keys())
+    target_run.meta["cache_hit"] = True
+    target_run.meta["cache_source"] = cached_run.id
+    target_run.meta["declared_outputs"] = list(cached_items.outputs.keys())
 
     return cached_items
 

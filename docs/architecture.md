@@ -106,9 +106,22 @@ Consist maintains two synchronized records for resilience:
 
 ---
 
+## Testing & Coverage Focus
+
+The test suite prioritizes correctness for production workflows and portability:
+
+- Cache hydration across run directories (metadata-only, requested/all outputs, missing-input reconstruction, permission/mount issues).
+- Path virtualization and mount resolution (workspace URIs, symlink handling, stale/moved run directories).
+- Persistence resilience (lock retries, constraint conflict handling, JSON snapshot safety).
+- Ingestion and data virtualization (DLT ingestion paths, strict schema validation, hybrid view behavior).
+- CLI/query helpers for inspection workflows (filters, preview error modes).
+
+---
+
 ## Path Virtualization
 
 Absolute paths break portability. Consist stores relative URIs and resolves them at runtime.
+For a focused guide, see [Mounts & Portability](mounts-and-portability.md).
 
 ```
 User logs: /mnt/data/land_use.csv

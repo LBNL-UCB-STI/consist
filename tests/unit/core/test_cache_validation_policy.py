@@ -117,3 +117,42 @@ def test_cache_validation_policy_rejects_invalid_value(tracker) -> None:
             validate_cached_outputs="not-a-policy",
         ):
             pass
+
+
+def test_cache_validation_warning_includes_mount_hint(tmp_path, caplog) -> None:
+    """
+    Cache validation failures should include mount diagnostics hints.
+    """
+    from consist.core.tracker import Tracker
+
+    caplog.set_level("WARNING")
+    db_path = str(tmp_path / "provenance.db")
+    old_mount = tmp_path / "old_outputs"
+    new_mount = tmp_path / "new_outputs"
+    old_mount.mkdir(parents=True, exist_ok=True)
+    new_mount.mkdir(parents=True, exist_ok=True)
+
+    tracker = Tracker(run_dir=tmp_path / "runs", db_path=db_path)
+    tracker.mounts["outputs"] = str(old_mount)
+
+    output_path = old_mount / "cached.csv"
+    output_path.write_text("value\n1\n", encoding="utf-8")
+
+    with tracker.start_run("seed", model="model", cache_mode="overwrite"):
+        tracker.log_artifact(output_path, key="out", direction="output")
+
+    output_path.unlink()
+    tracker.mounts["outputs"] = str(new_mount)
+
+    with tracker.start_run(
+        "check",
+        model="model",
+        cache_mode="reuse",
+        validate_cached_outputs="eager",
+    ) as t:
+        assert not t.is_cached
+
+    assert any("Cache Validation Failed" in record.message for record in caplog.records)
+    assert any("Mount root mismatch" in record.message for record in caplog.records)
+    if tracker.engine:
+        tracker.engine.dispose()
