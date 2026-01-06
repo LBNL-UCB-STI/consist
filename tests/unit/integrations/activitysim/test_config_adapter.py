@@ -8,7 +8,6 @@ import yaml
 import pytest
 
 from consist.integrations.activitysim import ActivitySimConfigAdapter, ConfigOverrides
-from consist.models.activitysim import ActivitySimConstants
 from tests.helpers.activitysim_fixtures import build_activitysim_test_configs
 
 
@@ -72,7 +71,7 @@ def test_canonicalize_builds_ingestables_and_constants(tracker, tmp_path: Path):
     assert "trip_scheduling_coefficients.csv.gz" in artifact_names
     assert any("config_bundle" in name for name in artifact_names)
 
-    constants_spec = _find_ingestable(result.ingestables, "activitysim_constants")
+    constants_spec = _find_ingestable(result.ingestables, "activitysim_constants_cache")
     assert constants_spec is not None
 
     constants_rows = list(constants_spec.rows)
@@ -84,13 +83,50 @@ def test_canonicalize_builds_ingestables_and_constants(tracker, tmp_path: Path):
         row["key"] == "CONSTANTS.AUTO_TIME" and row["file_name"] == "accessibility.yaml"
         for row in constants_rows
     )
+    assert any(
+        row["key"] == "CONSTANTS.TRANSIT_MODES" and row["value_type"] == "json"
+        for row in constants_rows
+    )
 
     table_names = {spec.table_name for spec in result.ingestables}
     assert table_names == {
-        ActivitySimConstants.__tablename__,
-        "activitysim_coefficients",
-        "activitysim_probabilities",
+        "activitysim_constants_cache",
+        "activitysim_coefficients_cache",
+        "activitysim_coefficients_template_refs_cache",
+        "activitysim_probabilities_cache",
+        "activitysim_probabilities_entries_cache",
+        "activitysim_probabilities_meta_entries_cache",
+        "activitysim_config_ingest_run_link",
     }
+
+
+def test_prepare_config_plan_builds_row_factories(tracker, tmp_path: Path):
+    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path)
+    adapter = ActivitySimConfigAdapter()
+
+    plan = tracker.prepare_config(adapter, [overlay_dir, base_dir], strict=True)
+
+    assert plan.identity_hash
+    assert plan.adapter_name == "activitysim"
+    assert any(spec.rows and callable(spec.rows) for spec in plan.ingestables)
+
+
+def test_config_plan_dataframes(tracker, tmp_path: Path):
+    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path)
+    adapter = ActivitySimConfigAdapter()
+
+    plan = tracker.prepare_config(adapter, [overlay_dir, base_dir], strict=True)
+
+    constants_df = plan.constants_df()
+    coeffs_df = plan.coefficients_df()
+    probs_df = plan.probabilities_df()
+
+    assert not constants_df.empty
+    assert not coeffs_df.empty
+    assert not probs_df.empty
+    assert "file_name" in constants_df.columns
+    assert "coefficient_name" in coeffs_df.columns
+    assert "row_index" in probs_df.columns
 
 
 def test_coefficients_and_probabilities_parsing(tracker, tmp_path: Path):
@@ -106,17 +142,48 @@ def test_coefficients_and_probabilities_parsing(tracker, tmp_path: Path):
 
     coeff_rows = []
     prob_rows = []
+    template_rows = []
+    prob_entries = []
+    prob_meta_entries = []
     for spec in result.ingestables:
-        if spec.table_name == "activitysim_coefficients":
+        if spec.table_name == "activitysim_coefficients_cache":
             coeff_rows.extend(list(spec.rows))
-        elif spec.table_name == "activitysim_probabilities":
+        elif spec.table_name == "activitysim_probabilities_cache":
             prob_rows.extend(list(spec.rows))
+        elif spec.table_name == "activitysim_coefficients_template_refs_cache":
+            template_rows = list(spec.rows)
+        elif spec.table_name == "activitysim_probabilities_entries_cache":
+            prob_entries.extend(list(spec.rows))
+        elif spec.table_name == "activitysim_probabilities_meta_entries_cache":
+            prob_meta_entries.extend(list(spec.rows))
 
     trip_rows = [
         row for row in coeff_rows if row["file_name"].startswith("trip_scheduling")
     ]
     assert any(row["coefficient_name"] == "trip_time" for row in trip_rows)
     assert all(row["source_type"] == "direct" for row in trip_rows)
+
+    dimensional_rows = [
+        row
+        for row in coeff_rows
+        if row["file_name"] == "cdap_interaction_coefficients.csv"
+    ]
+    assert dimensional_rows
+    assert all(row["source_type"] == "dimensional" for row in dimensional_rows)
+    assert any(
+        row["dims_json"] == '{"activity": "H", "interaction_ptypes": 11}'
+        for row in dimensional_rows
+    )
+    assert template_rows
+    assert any(
+        row["referenced_coefficient"] == "coef_topology_walk_multiplier_work"
+        for row in template_rows
+    )
+    assert any(row["key"] == "auto" and row["value_num"] == 0.7 for row in prob_entries)
+    assert any(
+        row["key"] == "depart_range_start" and row["value_num"] == 5.0
+        for row in prob_meta_entries
+    )
 
     stop_rows = [
         row for row in coeff_rows if row["file_name"] == "stop_frequency_coeffs.csv"
@@ -208,7 +275,7 @@ def test_inherit_settings_respects_primary_only(tracker, tmp_path: Path):
     result = adapter.canonicalize(canonical, run=run, tracker=tracker, strict=True)
     tracker.end_run()
 
-    constants_spec = _find_ingestable(result.ingestables, "activitysim_constants")
+    constants_spec = _find_ingestable(result.ingestables, "activitysim_constants_cache")
     assert constants_spec is not None
     constants_rows = list(constants_spec.rows)
     assert any(

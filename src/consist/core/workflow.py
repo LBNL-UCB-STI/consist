@@ -24,6 +24,7 @@ from consist.types import ArtifactRef, FacetLike, HashInputs
 from pathlib import Path
 
 if TYPE_CHECKING:
+    from consist.core.config_canonicalization import ConfigPlan
     from consist.core.tracker import Tracker
 
 
@@ -300,6 +301,9 @@ class ScenarioContext:
         model: Optional[str] = None,
         description: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
+        config_plan: Optional["ConfigPlan"] = None,
+        config_plan_ingest: bool = True,
+        config_plan_profile_schema: bool = False,
         inputs: Optional[
             Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]
         ] = None,
@@ -366,6 +370,9 @@ class ScenarioContext:
             model=resolved_model,
             description=description,
             config=config,
+            config_plan=config_plan,
+            config_plan_ingest=config_plan_ingest,
+            config_plan_profile_schema=config_plan_profile_schema,
             inputs=resolved_inputs,
             input_keys=None,
             optional_input_keys=None,
@@ -413,6 +420,9 @@ class ScenarioContext:
         model: Optional[str] = None,
         description: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
+        config_plan: Optional["ConfigPlan"] = None,
+        config_plan_ingest: bool = True,
+        config_plan_profile_schema: bool = False,
         inputs: Optional[
             Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]
         ] = None,
@@ -469,6 +479,9 @@ class ScenarioContext:
                 model=resolved_model,
                 description=description,
                 config=config,
+                config_plan=config_plan,
+                config_plan_ingest=config_plan_ingest,
+                config_plan_profile_schema=config_plan_profile_schema,
                 inputs=resolved_inputs,
                 input_keys=None,
                 optional_input_keys=None,

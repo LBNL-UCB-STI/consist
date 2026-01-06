@@ -6,6 +6,7 @@ models:
   - atwork_subtour_scheduling
   - trip_scheduling
   - stop_frequency
+  - trip_purpose
 households_sample_size: 1000
 chunk_size: 10
 trace_hh_id: 42

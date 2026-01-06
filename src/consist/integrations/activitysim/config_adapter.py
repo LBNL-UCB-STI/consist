@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import gzip
 import json
 import logging
 import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Sequence, Set, TYPE_CHECKING
+from typing import IO, Any, Dict, Iterable, Optional, Sequence, Set, TYPE_CHECKING
 
 from consist.core.config_canonicalization import (
     ArtifactSpec,
@@ -18,9 +19,13 @@ from consist.core.config_canonicalization import (
 )
 from consist.core.identity import IdentityManager
 from consist.models.activitysim import (
-    ActivitySimCoefficients,
-    ActivitySimConstants,
-    ActivitySimProbabilities,
+    ActivitySimCoefficientsCache,
+    ActivitySimCoefficientTemplateRefsCache,
+    ActivitySimConstantsCache,
+    ActivitySimProbabilitiesCache,
+    ActivitySimProbabilitiesEntriesCache,
+    ActivitySimProbabilitiesMetaEntriesCache,
+    ActivitySimConfigIngestRunLink,
 )
 from consist.models.run import Run
 
@@ -48,8 +53,9 @@ _HEURISTIC_SUFFIXES = ("_FILE", "_PATH", "_SPEC", "_SETTINGS")
 _COEFFICIENT_SUFFIXES = (
     "_coefficients.csv",
     "_coeffs.csv",
-    "_coefficients_template.csv",
 )
+
+_COEFFICIENT_TEMPLATE_SUFFIXES = ("_coefficients_template.csv",)
 
 _PROBABILITY_SUFFIXES = ("_probs.csv",)
 
@@ -66,6 +72,154 @@ _MODEL_ALIAS_MAP = {
     "atwork_subtour_mode_choice": "tour_mode_choice",
     "write_tables": "summarize",
 }
+
+_PROBABILITIES_META_KEYS = {
+    "depart_range_start",
+    "depart_range_end",
+    "tour_hour",
+    "trip_num",
+    "vehicle_year",
+}
+
+
+@dataclass(frozen=True)
+class _FileHandler:
+    predicate: Any
+    table_name: str
+    schema: type
+    row_fn: Any
+    row_kwargs: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class _IngestSpecBuilder:
+    plan_only: bool
+    run_id: Optional[str]
+
+    def build_cache_specs(
+        self,
+        *,
+        table_name: str,
+        schema: type,
+        row_fn: Any,
+        source_path: Path,
+        source_key: str,
+        content_hash: str,
+        strict: bool,
+        row_kwargs: Optional[dict[str, Any]] = None,
+        link: bool = True,
+    ) -> list[IngestSpec]:
+        if self.plan_only:
+
+            def rows(
+                run_id: str,
+                p: Path = source_path,
+                s: bool = strict,
+                kwargs: dict[str, Any] = row_kwargs or {},
+                h: str = content_hash,
+            ) -> Iterable[dict[str, Any]]:
+                return _with_content_hash(row_fn(p, run_id, strict=s, **kwargs), h)
+        else:
+            if self.run_id is None:
+                raise RuntimeError("ActivitySim canonicalize requires run.")
+            rows = _with_content_hash(
+                row_fn(source_path, self.run_id, strict=strict, **(row_kwargs or {})),
+                content_hash,
+            )
+        specs = [
+            IngestSpec(
+                table_name=table_name,
+                schema=schema,
+                rows=rows,
+                source_path=source_path,
+                source=source_key,
+                content_hash=content_hash,
+                dedupe_on_hash=True,
+            )
+        ]
+        if link:
+            specs.append(
+                self.link_spec(
+                    table_names=[table_name],
+                    content_hash=content_hash,
+                    source_path=source_path,
+                    source_key=source_key,
+                )
+            )
+        return specs
+
+    def build_constants_specs(
+        self,
+        *,
+        rows_factory: Any,
+        source_path: Path,
+        source_key: str,
+        content_hash: str,
+    ) -> list[IngestSpec]:
+        if self.plan_only:
+
+            def rows(
+                run_id: str,
+                rows_fn: Any = rows_factory,
+                h: str = content_hash,
+            ) -> Iterable[dict[str, Any]]:
+                return _with_content_hash(rows_fn(run_id), h)
+        else:
+            if self.run_id is None:
+                raise RuntimeError("ActivitySim canonicalize requires run.")
+            rows = _with_content_hash(rows_factory(self.run_id), content_hash)
+        return [
+            IngestSpec(
+                table_name="activitysim_constants_cache",
+                schema=ActivitySimConstantsCache,
+                rows=rows,
+                source_path=source_path,
+                source=source_key,
+                content_hash=content_hash,
+                dedupe_on_hash=True,
+            ),
+            self.link_spec(
+                table_names=["activitysim_constants_cache"],
+                content_hash=content_hash,
+                source_path=source_path,
+                source_key=source_key,
+            ),
+        ]
+
+    def link_spec(
+        self,
+        *,
+        table_names: list[str],
+        content_hash: str,
+        source_path: Path,
+        source_key: str,
+    ) -> IngestSpec:
+        if self.plan_only:
+
+            def rows(
+                run_id: str,
+                t: list[str] = table_names,
+                h: str = content_hash,
+                f: str = source_path.name,
+            ) -> list[dict[str, Any]]:
+                return [_run_link_row(run_id, table_name, h, f) for table_name in t]
+        else:
+            if self.run_id is None:
+                raise RuntimeError("ActivitySim canonicalize requires run.")
+            rows = [
+                _run_link_row(self.run_id, table_name, content_hash, source_path.name)
+                for table_name in table_names
+            ]
+        return IngestSpec(
+            table_name="activitysim_config_ingest_run_link",
+            schema=ActivitySimConfigIngestRunLink,
+            rows=rows,
+            source_path=source_path,
+            source=source_key,
+        )
+
+
+_CSV_HANDLERS: list[_FileHandler]
 
 
 @dataclass
@@ -85,6 +239,8 @@ class ActivitySimConfigAdapter:
         Whether to create a config bundle tarball artifact.
     bundle_cache_dir : Optional[Path]
         Optional shared bundle cache directory; defaults to `<run_dir>/config_bundles`.
+    check_probabilities : bool
+        Whether to warn when probability rows do not sum to 1.0.
     """
 
     model_name: str = "activitysim"
@@ -92,6 +248,7 @@ class ActivitySimConfigAdapter:
     allow_heuristic_refs: bool = True
     bundle_configs: bool = True
     bundle_cache_dir: Optional[Path] = None
+    check_probabilities: bool = False
 
     def discover(
         self,
@@ -166,9 +323,10 @@ class ActivitySimConfigAdapter:
         self,
         config: CanonicalConfig,
         *,
-        run: Run,
-        tracker: "Tracker",
+        run: Optional[Run] = None,
+        tracker: Optional["Tracker"] = None,
         strict: bool = False,
+        plan_only: bool = False,
     ) -> CanonicalizationResult:
         """
         Convert a discovered config into artifacts and ingestable tables.
@@ -177,12 +335,14 @@ class ActivitySimConfigAdapter:
         ----------
         config : CanonicalConfig
             Discovered config metadata for this run.
-        run : Run
+        run : Optional[Run]
             Active run used for artifact/ingest attribution.
-        tracker : Tracker
+        tracker : Optional[Tracker]
             Tracker instance used for artifact logging and ingest.
         strict : bool, default False
             If True, raise on missing referenced files.
+        plan_only : bool, default False
+            If True, return specs without run-scoped artifacts or row materialization.
 
         Returns
         -------
@@ -235,7 +395,9 @@ class ActivitySimConfigAdapter:
         for csv_path in referenced:
             add_artifact(csv_path, role="csv")
 
-        if self.bundle_configs:
+        if self.bundle_configs and not plan_only:
+            if run is None or tracker is None:
+                raise RuntimeError("ActivitySim bundling requires run and tracker.")
             bundle_path = _bundle_configs(
                 config_dirs=config.root_dirs,
                 run=run,
@@ -248,47 +410,153 @@ class ActivitySimConfigAdapter:
 
         artifacts = list(artifacts_by_path.values())
 
-        constants_rows = _build_constants_rows(
-            run_id=run.id,
-            config=config,
-            settings=settings,
-            inherit_settings=inherit_settings,
+        builder = _IngestSpecBuilder(
+            plan_only=plan_only, run_id=run.id if run else None
         )
-        if constants_rows and config.primary_config:
-            ingestables.append(
-                IngestSpec(
-                    table_name="activitysim_constants",
-                    schema=ActivitySimConstants,
-                    rows=constants_rows,
-                    source=_artifact_key_for_path(
-                        config.primary_config, config.root_dirs
-                    ),
+
+        if config.primary_config:
+            source_key = _artifact_key_for_path(config.primary_config, config.root_dirs)
+            file_hash = config.content_hash
+
+            def rows_factory(
+                run_id: str,
+                cfg: CanonicalConfig = config,
+                s: dict[str, Any] = settings,
+                inherit: bool = inherit_settings,
+            ) -> Iterable[dict[str, Any]]:
+                return _build_constants_rows(
+                    run_id=run_id,
+                    config=cfg,
+                    settings=s,
+                    inherit_settings=inherit,
+                )
+
+            ingestables.extend(
+                builder.build_constants_specs(
+                    rows_factory=rows_factory,
+                    source_path=config.primary_config,
+                    source_key=source_key,
+                    content_hash=file_hash,
                 )
             )
 
         for csv_path in referenced:
             file_name = csv_path.name
             key = _artifact_key_for_path(csv_path, config.root_dirs)
-            if _is_coefficients_file(file_name):
-                ingestables.append(
-                    IngestSpec(
-                        table_name="activitysim_coefficients",
-                        schema=ActivitySimCoefficients,
-                        rows=_iter_coefficients_rows(csv_path, run.id, strict=strict),
-                        source=key,
+            file_hash = _digest_path(csv_path, tracker)
+            if _is_probabilities_file(file_name):
+                ingestables.extend(
+                    self._build_probabilities_ingest_specs(
+                        builder=builder,
+                        csv_path=csv_path,
+                        source_key=key,
+                        content_hash=file_hash,
+                        strict=strict,
                     )
                 )
-            elif _is_probabilities_file(file_name):
-                ingestables.append(
-                    IngestSpec(
-                        table_name="activitysim_probabilities",
-                        schema=ActivitySimProbabilities,
-                        rows=_iter_probabilities_rows(csv_path, run.id, strict=strict),
-                        source=key,
+                continue
+
+            for handler in _CSV_HANDLERS:
+                if handler.predicate(file_name):
+                    ingestables.extend(
+                        builder.build_cache_specs(
+                            table_name=handler.table_name,
+                            schema=handler.schema,
+                            row_fn=handler.row_fn,
+                            source_path=csv_path,
+                            source_key=key,
+                            content_hash=file_hash,
+                            strict=strict,
+                            row_kwargs=handler.row_kwargs,
+                        )
                     )
-                )
+                    break
 
         return CanonicalizationResult(artifacts=artifacts, ingestables=ingestables)
+
+    def _build_probabilities_ingest_specs(
+        self,
+        *,
+        builder: _IngestSpecBuilder,
+        csv_path: Path,
+        source_key: str,
+        content_hash: str,
+        strict: bool,
+    ) -> list[IngestSpec]:
+        specs: list[IngestSpec] = []
+        specs.extend(
+            builder.build_cache_specs(
+                table_name="activitysim_probabilities_cache",
+                schema=ActivitySimProbabilitiesCache,
+                row_fn=_iter_probabilities_rows,
+                source_path=csv_path,
+                source_key=source_key,
+                content_hash=content_hash,
+                strict=strict,
+                row_kwargs={"check_probabilities": self.check_probabilities},
+                link=False,
+            )
+        )
+        specs.extend(
+            builder.build_cache_specs(
+                table_name="activitysim_probabilities_entries_cache",
+                schema=ActivitySimProbabilitiesEntriesCache,
+                row_fn=_iter_probabilities_entries,
+                source_path=csv_path,
+                source_key=source_key,
+                content_hash=content_hash,
+                strict=strict,
+                link=False,
+            )
+        )
+        specs.extend(
+            builder.build_cache_specs(
+                table_name="activitysim_probabilities_meta_entries_cache",
+                schema=ActivitySimProbabilitiesMetaEntriesCache,
+                row_fn=_iter_probabilities_meta_entries,
+                source_path=csv_path,
+                source_key=source_key,
+                content_hash=content_hash,
+                strict=strict,
+                link=False,
+            )
+        )
+        specs.append(
+            builder.link_spec(
+                table_names=[
+                    "activitysim_probabilities_cache",
+                    "activitysim_probabilities_entries_cache",
+                    "activitysim_probabilities_meta_entries_cache",
+                ],
+                content_hash=content_hash,
+                source_path=csv_path,
+                source_key=source_key,
+            )
+        )
+        return specs
+
+    def bundle_artifact(
+        self, config: CanonicalConfig, *, run: Run, tracker: "Tracker"
+    ) -> Optional[ArtifactSpec]:
+        """
+        Build a bundle artifact spec for a run-scoped config archive.
+        """
+        if not self.bundle_configs:
+            return None
+        bundle_path = _bundle_configs(
+            config_dirs=config.root_dirs,
+            run=run,
+            tracker=tracker,
+            content_hash=config.content_hash,
+            cache_dir=self.bundle_cache_dir,
+        )
+        spec = ArtifactSpec(
+            path=bundle_path,
+            key=_artifact_key_for_path(bundle_path, config.root_dirs),
+            direction="input",
+            meta={"config_role": "bundle", "content_hash": config.content_hash},
+        )
+        return spec
 
     def materialize(
         self,
@@ -380,6 +648,46 @@ class ActivitySimConfigAdapter:
             external_files=discovered.external_files,
             content_hash=content_hash,
         )
+
+    def build_facet(
+        self, config: CanonicalConfig, *, facet_spec: dict[str, Any]
+    ) -> dict[str, Any]:
+        """
+        Build a facet dict from adapter-specific facet specs.
+
+        Supported keys in facet_spec:
+        - yaml: { "file.yaml": ["CONSTANTS.foo", {"key": "CONSTANTS.bar", "alias": "bar"}] }
+        - coefficients: { "file.csv": ["coef_name", {"key": "coef", "alias": "alias"}] }
+        """
+        if yaml is None:
+            raise ImportError("PyYAML is required for ActivitySim canonicalization.")
+        settings = (
+            _load_effective_settings(
+                config.root_dirs, settings_path=config.primary_config
+            )
+            if config.primary_config
+            else {}
+        )
+        inherit_settings = bool(settings.get("inherit_settings", False))
+        facet: dict[str, Any] = {}
+
+        for file_name, entries in (facet_spec.get("yaml") or {}).items():
+            data = _load_effective_yaml(file_name, config.root_dirs, inherit_settings)
+            constants = data.get("CONSTANTS", {}) if isinstance(data, dict) else {}
+            for key, alias in _parse_facet_entries(entries):
+                const_key = (
+                    key[len("CONSTANTS.") :] if key.startswith("CONSTANTS.") else key
+                )
+                value = _get_nested_value(constants, const_key.split("."))
+                facet[alias or key] = value
+
+        for file_name, entries in (facet_spec.get("coefficients") or {}).items():
+            csv_path = _resolve_csv_reference(file_name, config.root_dirs)[0]
+            for key, alias in _parse_facet_entries(entries):
+                value = _read_coefficient_value(csv_path, key) if csv_path else None
+                facet[alias or key] = value
+
+        return facet
 
 
 @dataclass
@@ -837,6 +1145,30 @@ def _set_nested_value(data: Dict[str, Any], keys: list[str], value: Any) -> None
     cursor[keys[-1]] = value
 
 
+def _get_nested_value(data: Dict[str, Any], keys: list[str]) -> Any:
+    cursor: Any = data
+    for key in keys:
+        if not isinstance(cursor, dict) or key not in cursor:
+            return None
+        cursor = cursor[key]
+    return cursor
+
+
+def _parse_facet_entries(entries: Any) -> list[tuple[str, Optional[str]]]:
+    parsed: list[tuple[str, Optional[str]]] = []
+    if not isinstance(entries, list):
+        return parsed
+    for item in entries:
+        if isinstance(item, str):
+            parsed.append((item, None))
+        elif isinstance(item, dict):
+            key = item.get("key")
+            if not key:
+                continue
+            parsed.append((str(key), item.get("alias")))
+    return parsed
+
+
 def _flatten_constants(constants: Dict[str, Any]) -> Dict[str, Any]:
     flattened: Dict[str, Any] = {}
 
@@ -846,9 +1178,7 @@ def _flatten_constants(constants: Dict[str, Any]) -> Dict[str, Any]:
                 new_prefix = f"{prefix}.{key}" if prefix else str(key)
                 walk(new_prefix, sub_value)
         elif isinstance(value, list):
-            for idx, sub_value in enumerate(value):
-                new_prefix = f"{prefix}.{idx}" if prefix else str(idx)
-                walk(new_prefix, sub_value)
+            flattened[prefix] = value
         else:
             flattened[prefix] = value
 
@@ -897,6 +1227,11 @@ def _is_coefficients_file(file_name: str) -> bool:
     return name.endswith(_COEFFICIENT_SUFFIXES)
 
 
+def _is_coefficients_template_file(file_name: str) -> bool:
+    name = file_name[:-3] if file_name.endswith(".csv.gz") else file_name
+    return name.endswith(_COEFFICIENT_TEMPLATE_SUFFIXES)
+
+
 def _is_probabilities_file(file_name: str) -> bool:
     name = file_name[:-3] if file_name.endswith(".csv.gz") else file_name
     return name.endswith(_PROBABILITY_SUFFIXES)
@@ -913,13 +1248,27 @@ def _iter_coefficients_rows(
             logging.warning(
                 f"[Consist][ActivitySim] CSV has no headers, skipping ingestion: {path}"
             )
-            return iter([])
+            return
         fieldnames = [name or "" for name in reader.fieldnames]
         coeff_key = (
             "coefficient_name" if "coefficient_name" in fieldnames else "coefficient"
         )
         value_key = "value" if "value" in fieldnames else None
         constrain_key = "constrain" if "constrain" in fieldnames else None
+        dims_keys = [
+            name
+            for name in fieldnames
+            if name
+            and name
+            not in {
+                coeff_key,
+                value_key,
+                constrain_key,
+                "description",
+                "comment",
+                "notes",
+            }
+        ]
         extra_keys = {
             "description",
             "comment",
@@ -950,6 +1299,27 @@ def _iter_coefficients_rows(
                     "source_type": "direct",
                     "value_raw": raw,
                     "value_num": _parse_float(raw),
+                    "dims_json": None,
+                    "constrain": constrain or None,
+                    "is_constrained": is_constrained,
+                }
+                continue
+            if coeff_key == "coefficient" and dims_keys:
+                dims = {
+                    key: _coerce_scalar(row.get(key) or "")
+                    for key in dims_keys
+                    if row.get(key) not in {None, ""}
+                }
+                raw = coef_name
+                yield {
+                    "run_id": run_id,
+                    "file_name": path.name,
+                    "coefficient_name": "coefficient",
+                    "segment": "",
+                    "source_type": "dimensional",
+                    "value_raw": raw,
+                    "value_num": _parse_float(raw),
+                    "dims_json": json.dumps(dims, sort_keys=True) if dims else None,
                     "constrain": constrain or None,
                     "is_constrained": is_constrained,
                 }
@@ -969,12 +1339,61 @@ def _iter_coefficients_rows(
                     "source_type": "template",
                     "value_raw": raw,
                     "value_num": _parse_float(raw),
+                    "dims_json": None,
                     "constrain": constrain or None,
                     "is_constrained": is_constrained,
                 }
 
 
 def _iter_probabilities_rows(
+    path: Path,
+    run_id: str,
+    *,
+    strict: bool = False,
+    check_probabilities: bool = False,
+) -> Iterable[dict[str, Any]]:
+    with _open_csv(path) as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            if strict:
+                raise ValueError(f"[Consist][ActivitySim] CSV has no headers: {path}")
+            logging.warning(
+                f"[Consist][ActivitySim] CSV has no headers, skipping ingestion: {path}"
+            )
+            return
+        for idx, row in enumerate(reader):
+            dims: Dict[str, Any] = {}
+            probs: Dict[str, Any] = {}
+            for key, value in row.items():
+                if value is None or value == "":
+                    continue
+                numeric = _parse_float(value)
+                if numeric is not None:
+                    if _is_probabilities_meta_key(key):
+                        dims[key] = numeric
+                    else:
+                        probs[key] = numeric
+                else:
+                    dims[key] = _coerce_scalar(value)
+            if check_probabilities and probs:
+                total = sum(probs.values())
+                if abs(total - 1.0) > 1e-6:
+                    logging.warning(
+                        "[Consist][ActivitySim] Probabilities sum != 1.0 in %s row %s (sum=%s).",
+                        path.name,
+                        idx,
+                        total,
+                    )
+            yield {
+                "run_id": run_id,
+                "file_name": path.name,
+                "row_index": idx,
+                "dims": dims,
+                "probs": probs,
+            }
+
+
+def _iter_probabilities_entries(
     path: Path, run_id: str, *, strict: bool = False
 ) -> Iterable[dict[str, Any]]:
     with _open_csv(path) as handle:
@@ -985,25 +1404,169 @@ def _iter_probabilities_rows(
             logging.warning(
                 f"[Consist][ActivitySim] CSV has no headers, skipping ingestion: {path}"
             )
-            return iter([])
+            return
         for idx, row in enumerate(reader):
-            dims: Dict[str, Any] = {}
-            probs: Dict[str, Any] = {}
+            if not row:
+                continue
             for key, value in row.items():
                 if value is None or value == "":
                     continue
                 numeric = _parse_float(value)
-                if numeric is not None:
-                    probs[key] = numeric
-                else:
-                    dims[key] = _coerce_scalar(value)
-            yield {
-                "run_id": run_id,
-                "file_name": path.name,
-                "row_index": idx,
-                "dims": dims,
-                "probs": probs,
-            }
+                if numeric is None:
+                    continue
+                if _is_probabilities_meta_key(key):
+                    continue
+                yield {
+                    "run_id": run_id,
+                    "file_name": path.name,
+                    "row_index": idx,
+                    "key": key,
+                    "value_num": numeric,
+                }
+
+
+def _iter_probabilities_meta_entries(
+    path: Path, run_id: str, *, strict: bool = False
+) -> Iterable[dict[str, Any]]:
+    with _open_csv(path) as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            if strict:
+                raise ValueError(f"[Consist][ActivitySim] CSV has no headers: {path}")
+            logging.warning(
+                f"[Consist][ActivitySim] CSV has no headers, skipping ingestion: {path}"
+            )
+            return
+        for idx, row in enumerate(reader):
+            if not row:
+                continue
+            for key, value in row.items():
+                if value is None or value == "":
+                    continue
+                numeric = _parse_float(value)
+                if numeric is None:
+                    continue
+                if not _is_probabilities_meta_key(key):
+                    continue
+                yield {
+                    "run_id": run_id,
+                    "file_name": path.name,
+                    "row_index": idx,
+                    "key": key,
+                    "value_num": numeric,
+                }
+
+
+def _is_probabilities_meta_key(key: str) -> bool:
+    return key in _PROBABILITIES_META_KEYS
+
+
+def _digest_path(path: Path, tracker: Optional["Tracker"]) -> str:
+    if tracker is not None:
+        return tracker.identity.digest_path(path)
+    return _file_sha256(path)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _with_content_hash(
+    rows: Iterable[dict[str, Any]], content_hash: str
+) -> Iterable[dict[str, Any]]:
+    for row in rows:
+        updated = dict(row)
+        updated.pop("run_id", None)
+        updated["content_hash"] = content_hash
+        yield updated
+
+
+def _run_link_row(
+    run_id: str, table_name: str, content_hash: str, file_name: str
+) -> dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "table_name": table_name,
+        "content_hash": content_hash,
+        "file_name": file_name,
+    }
+
+
+def _iter_coefficients_template_refs(
+    path: Path, run_id: str, *, strict: bool = False
+) -> Iterable[dict[str, Any]]:
+    with _open_csv(path) as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            if strict:
+                raise ValueError(f"[Consist][ActivitySim] CSV has no headers: {path}")
+            logging.warning(
+                f"[Consist][ActivitySim] CSV has no headers, skipping ingestion: {path}"
+            )
+            return
+        fieldnames = [name or "" for name in reader.fieldnames]
+        coeff_key = (
+            "coefficient_name" if "coefficient_name" in fieldnames else "coefficient"
+        )
+        extra_keys = {
+            "description",
+            "comment",
+            "notes",
+            coeff_key,
+        }
+        for row in reader:
+            if not row:
+                continue
+            coef_name = (row.get(coeff_key) or "").strip()
+            if not coef_name or coef_name.startswith("#"):
+                continue
+            for column, raw_value in row.items():
+                if column in extra_keys:
+                    continue
+                raw = (raw_value or "").strip()
+                if not raw or raw.startswith("#"):
+                    continue
+                yield {
+                    "run_id": run_id,
+                    "file_name": path.name,
+                    "coefficient_name": coef_name,
+                    "segment": column,
+                    "referenced_coefficient": raw,
+                }
+
+
+def _read_coefficient_value(
+    path: Optional[Path], coefficient_name: str
+) -> Optional[str]:
+    if path is None:
+        return None
+    with _open_csv(path) as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            return None
+        fieldnames = [name or "" for name in reader.fieldnames]
+        coeff_key = (
+            "coefficient_name"
+            if "coefficient_name" in fieldnames
+            else "coefficient"
+            if "coefficient" in fieldnames
+            else None
+        )
+        if coeff_key is None:
+            return None
+        value_key = "value" if "value" in fieldnames else None
+        for row in reader:
+            name = (row.get(coeff_key) or "").strip()
+            if name != coefficient_name:
+                continue
+            if value_key:
+                return (row.get(value_key) or "").strip() or None
+            return None
+    return None
 
 
 def _parse_float(value: str) -> Optional[float]:
@@ -1094,7 +1657,23 @@ def _write_csv(
         writer.writerows(rows)
 
 
-def _open_csv(path: Path):
+def _open_csv(path: Path) -> IO[str]:
     if path.suffix == ".gz":
         return gzip.open(path, "rt", encoding="utf-8-sig", newline="")
     return path.open("r", encoding="utf-8-sig", newline="")
+
+
+_CSV_HANDLERS = [
+    _FileHandler(
+        predicate=_is_coefficients_file,
+        table_name="activitysim_coefficients_cache",
+        schema=ActivitySimCoefficientsCache,
+        row_fn=_iter_coefficients_rows,
+    ),
+    _FileHandler(
+        predicate=_is_coefficients_template_file,
+        table_name="activitysim_coefficients_template_refs_cache",
+        schema=ActivitySimCoefficientTemplateRefsCache,
+        row_fn=_iter_coefficients_template_refs,
+    ),
+]

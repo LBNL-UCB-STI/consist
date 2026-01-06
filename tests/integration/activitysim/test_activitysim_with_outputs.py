@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlmodel import Session, select
-
 from consist.integrations.activitysim import ActivitySimConfigAdapter
-from consist.models.activitysim import ActivitySimCoefficients
 from tests.helpers.activitysim_fixtures import build_activitysim_test_configs
 
 
@@ -43,13 +40,17 @@ def test_activitysim_config_across_multiple_scenarios(tracker, tmp_path: Path):
         raise AssertionError("Tracker engine missing; DB tests require DuckDB.")
 
     # Query 1: Compare coefficients across both scenarios
-    with Session(tracker.engine) as session:
-        # Get all accessibility coefficients from both runs
-        coeff_rows = session.exec(
-            select(ActivitySimCoefficients).where(
-                ActivitySimCoefficients.file_name == "accessibility_coefficients.csv"
-            )
-        ).all()
+    with tracker.engine.begin() as connection:
+        coeff_rows = connection.exec_driver_sql(
+            """
+            SELECT l.run_id, c.coefficient_name, c.value_num
+            FROM global_tables.activitysim_coefficients_cache c
+            JOIN global_tables.activitysim_config_ingest_run_link l
+              ON l.content_hash = c.content_hash
+             AND l.table_name = 'activitysim_coefficients_cache'
+            WHERE c.file_name = 'accessibility_coefficients.csv'
+            """
+        ).fetchall()
 
     assert len(coeff_rows) >= 4, (
         "Should have coefficients from both scenarios (2+ per scenario)"
@@ -58,9 +59,8 @@ def test_activitysim_config_across_multiple_scenarios(tracker, tmp_path: Path):
     # Group by run to show comparison
     runs_with_coeffs = {}
     for row in coeff_rows:
-        if row.run_id not in runs_with_coeffs:
-            runs_with_coeffs[row.run_id] = {}
-        runs_with_coeffs[row.run_id][row.coefficient_name] = float(row.value_num)
+        run_id, coefficient_name, value_num = row
+        runs_with_coeffs.setdefault(run_id, {})[coefficient_name] = float(value_num)
 
     # Both scenarios should have time and cost coefficients
     assert len(runs_with_coeffs) == 2, "Should have coefficients from 2 runs"
@@ -80,8 +80,12 @@ def test_activitysim_config_across_multiple_scenarios(tracker, tmp_path: Path):
         # "Find all runs where time coefficient > 1.0"
         high_time_coeff = connection.exec_driver_sql(
             """
-            SELECT * FROM global_tables.activitysim_coefficients
-            WHERE coefficient_name = 'time' AND CAST(value_num AS FLOAT) > 1.0
+            SELECT l.run_id, c.coefficient_name, c.value_num
+            FROM global_tables.activitysim_coefficients_cache c
+            JOIN global_tables.activitysim_config_ingest_run_link l
+              ON l.content_hash = c.content_hash
+             AND l.table_name = 'activitysim_coefficients_cache'
+            WHERE c.coefficient_name = 'time' AND CAST(c.value_num AS FLOAT) > 1.0
             """
         ).fetchall()
 
@@ -95,10 +99,13 @@ def test_activitysim_config_across_multiple_scenarios(tracker, tmp_path: Path):
         # Count coefficient entries per run
         runs_coeff_count = connection.exec_driver_sql(
             """
-            SELECT ac.run_id, COUNT(*) as coeff_count
-            FROM global_tables.activitysim_coefficients ac
-            WHERE ac.coefficient_name = 'time' AND CAST(ac.value_num AS FLOAT) IN (1.1, 1.3)
-            GROUP BY ac.run_id
+            SELECT l.run_id, COUNT(*) as coeff_count
+            FROM global_tables.activitysim_coefficients_cache c
+            JOIN global_tables.activitysim_config_ingest_run_link l
+              ON l.content_hash = c.content_hash
+             AND l.table_name = 'activitysim_coefficients_cache'
+            WHERE c.coefficient_name = 'time' AND CAST(c.value_num AS FLOAT) IN (1.1, 1.3)
+            GROUP BY l.run_id
             """
         ).fetchall()
 
