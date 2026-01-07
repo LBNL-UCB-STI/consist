@@ -8,7 +8,21 @@ import logging
 import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, Any, Dict, Iterable, Optional, Sequence, Set, TYPE_CHECKING
+from typing import (
+    IO,
+    Any,
+    Dict,
+    Iterable,
+    Literal,
+    Optional,
+    Sequence,
+    Set,
+    TYPE_CHECKING,
+    Union,
+)
+
+from sqlalchemy.sql import Executable
+from sqlmodel import SQLModel, col
 
 from consist.core.config_canonicalization import (
     ArtifactSpec,
@@ -688,6 +702,412 @@ class ActivitySimConfigAdapter:
                 facet[alias or key] = value
 
         return facet
+
+    @staticmethod
+    def _normalize_where(where: Optional[Union[Iterable[Any], Any]]) -> list[Any]:
+        if where is None:
+            return []
+        if isinstance(where, (list, tuple, set)):
+            return list(where)
+        return [where]
+
+    @staticmethod
+    def _resolve_value_column(table: type[SQLModel], value_column: str) -> Any:
+        if not hasattr(table, value_column):
+            raise ValueError(
+                f"Unknown value_column {value_column!r} for {table.__name__}."
+            )
+        return getattr(table, value_column)
+
+    def run_link_query(
+        self,
+        table: type[SQLModel],
+        *,
+        columns: Optional[Iterable[Any]] = None,
+        where: Optional[Union[Iterable[Any], Any]] = None,
+        join_on: Optional[Iterable[str]] = None,
+        table_name: Optional[str] = None,
+    ) -> Executable:
+        """
+        Build a run-linked query for a config cache table.
+        """
+        from consist.api import config_run_query
+
+        return config_run_query(
+            table,
+            link_table=ActivitySimConfigIngestRunLink,
+            table_name=table_name,
+            columns=columns,
+            where=where,
+            join_on=join_on,
+        )
+
+    def run_link_rows(
+        self,
+        table: type[SQLModel],
+        *,
+        columns: Optional[Iterable[Any]] = None,
+        where: Optional[Union[Iterable[Any], Any]] = None,
+        join_on: Optional[Iterable[str]] = None,
+        table_name: Optional[str] = None,
+        tracker: Optional["Tracker"] = None,
+    ) -> list:
+        """
+        Execute a run-linked query for a config cache table.
+        """
+        from consist.api import config_run_rows
+
+        return config_run_rows(
+            table,
+            link_table=ActivitySimConfigIngestRunLink,
+            table_name=table_name,
+            columns=columns,
+            where=where,
+            join_on=join_on,
+            tracker=tracker,
+        )
+
+    def constants_query(
+        self,
+        *,
+        key: Optional[str] = None,
+        file_name: Optional[str] = None,
+        value_column: str = "value_num",
+        columns: Optional[Iterable[Any]] = None,
+        where: Optional[Union[Iterable[Any], Any]] = None,
+        join_on: Optional[Iterable[str]] = None,
+    ) -> Executable:
+        """
+        Build a query for ActivitySim constants joined to runs.
+
+        Defaults to selecting (run_id, value_column) when columns is not provided.
+        """
+        clauses: list[Any] = []
+        if key is not None:
+            clauses.append(ActivitySimConstantsCache.key == key)
+        if file_name is not None:
+            clauses.append(ActivitySimConstantsCache.file_name == file_name)
+        clauses.extend(self._normalize_where(where))
+
+        if columns is None:
+            value_attr = self._resolve_value_column(
+                ActivitySimConstantsCache, value_column
+            )
+            columns = [ActivitySimConfigIngestRunLink.run_id, value_attr]
+
+        return self.run_link_query(
+            ActivitySimConstantsCache,
+            columns=columns,
+            where=clauses,
+            join_on=join_on,
+        )
+
+    def constants_rows(
+        self,
+        *,
+        key: Optional[str] = None,
+        file_name: Optional[str] = None,
+        value_column: str = "value_num",
+        columns: Optional[Iterable[Any]] = None,
+        where: Optional[Union[Iterable[Any], Any]] = None,
+        join_on: Optional[Iterable[str]] = None,
+        tracker: Optional["Tracker"] = None,
+    ) -> list:
+        """
+        Fetch ActivitySim constants joined to runs.
+
+        Defaults to selecting (run_id, value_column) when columns is not provided.
+        """
+        if columns is None:
+            value_attr = self._resolve_value_column(
+                ActivitySimConstantsCache, value_column
+            )
+            columns = [ActivitySimConfigIngestRunLink.run_id, value_attr]
+
+        clauses: list[Any] = []
+        if key is not None:
+            clauses.append(ActivitySimConstantsCache.key == key)
+        if file_name is not None:
+            clauses.append(ActivitySimConstantsCache.file_name == file_name)
+        clauses.extend(self._normalize_where(where))
+
+        return self.run_link_rows(
+            ActivitySimConstantsCache,
+            columns=columns,
+            where=clauses,
+            join_on=join_on,
+            tracker=tracker,
+        )
+
+    def constants_by_run(
+        self,
+        *,
+        key: Optional[str] = None,
+        file_name: Optional[str] = None,
+        value_column: str = "value_num",
+        where: Optional[Union[Iterable[Any], Any]] = None,
+        join_on: Optional[Iterable[str]] = None,
+        collapse: Literal["first", "last", "list", "error"] = "list",
+        tracker: Optional["Tracker"] = None,
+    ) -> dict[str, Any]:
+        """
+        Return constants grouped by run_id.
+        """
+        rows = self.constants_rows(
+            key=key,
+            file_name=file_name,
+            value_column=value_column,
+            where=where,
+            join_on=join_on,
+            tracker=tracker,
+        )
+        return self._collapse_run_values(rows, collapse=collapse)
+
+    def coefficients_query(
+        self,
+        *,
+        coefficient: Optional[str] = None,
+        file_name: Optional[str] = None,
+        segment: Optional[str] = None,
+        value_column: str = "value_num",
+        columns: Optional[Iterable[Any]] = None,
+        where: Optional[Union[Iterable[Any], Any]] = None,
+        join_on: Optional[Iterable[str]] = None,
+    ) -> Executable:
+        """
+        Build a query for ActivitySim coefficients joined to runs.
+
+        Defaults to selecting (run_id, value_column) when columns is not provided.
+        """
+        clauses: list[Any] = []
+        if coefficient is not None:
+            clauses.append(ActivitySimCoefficientsCache.coefficient_name == coefficient)
+        if file_name is not None:
+            clauses.append(ActivitySimCoefficientsCache.file_name == file_name)
+        if segment is not None:
+            clauses.append(ActivitySimCoefficientsCache.segment == segment)
+        clauses.extend(self._normalize_where(where))
+
+        if columns is None:
+            value_attr = self._resolve_value_column(
+                ActivitySimCoefficientsCache, value_column
+            )
+            columns = [ActivitySimConfigIngestRunLink.run_id, value_attr]
+
+        return self.run_link_query(
+            ActivitySimCoefficientsCache,
+            columns=columns,
+            where=clauses,
+            join_on=join_on,
+        )
+
+    def coefficients_rows(
+        self,
+        *,
+        coefficient: Optional[str] = None,
+        file_name: Optional[str] = None,
+        segment: Optional[str] = None,
+        value_column: str = "value_num",
+        columns: Optional[Iterable[Any]] = None,
+        where: Optional[Union[Iterable[Any], Any]] = None,
+        join_on: Optional[Iterable[str]] = None,
+        tracker: Optional["Tracker"] = None,
+    ) -> list:
+        """
+        Fetch ActivitySim coefficients joined to runs.
+
+        Defaults to selecting (run_id, value_column) when columns is not provided.
+        """
+        if columns is None:
+            value_attr = self._resolve_value_column(
+                ActivitySimCoefficientsCache, value_column
+            )
+            columns = [ActivitySimConfigIngestRunLink.run_id, value_attr]
+
+        clauses: list[Any] = []
+        if coefficient is not None:
+            clauses.append(ActivitySimCoefficientsCache.coefficient_name == coefficient)
+        if file_name is not None:
+            clauses.append(ActivitySimCoefficientsCache.file_name == file_name)
+        if segment is not None:
+            clauses.append(ActivitySimCoefficientsCache.segment == segment)
+        clauses.extend(self._normalize_where(where))
+
+        return self.run_link_rows(
+            ActivitySimCoefficientsCache,
+            columns=columns,
+            where=clauses,
+            join_on=join_on,
+            tracker=tracker,
+        )
+
+    def coefficients_by_run(
+        self,
+        *,
+        coefficient: Optional[str] = None,
+        file_name: Optional[str] = None,
+        segment: Optional[str] = None,
+        value_column: str = "value_num",
+        where: Optional[Union[Iterable[Any], Any]] = None,
+        join_on: Optional[Iterable[str]] = None,
+        collapse: Literal["first", "last", "list", "error"] = "list",
+        tracker: Optional["Tracker"] = None,
+    ) -> dict[str, Any]:
+        """
+        Return coefficients grouped by run_id.
+        """
+        rows = self.coefficients_rows(
+            coefficient=coefficient,
+            file_name=file_name,
+            segment=segment,
+            value_column=value_column,
+            where=where,
+            join_on=join_on,
+            tracker=tracker,
+        )
+        return self._collapse_run_values(rows, collapse=collapse)
+
+    def coefficients_combinations(
+        self,
+        *,
+        coefficients: Union[str, Iterable[str]],
+        file_name: Optional[str] = None,
+        segment: Optional[str] = None,
+        value_column: str = "value_num",
+        where: Optional[Union[Iterable[Any], Any]] = None,
+        join_on: Optional[Iterable[str]] = None,
+        require_all: bool = True,
+        missing_value: Any = None,
+        collapse: Literal["first", "last", "list", "error"] = "error",
+        tracker: Optional["Tracker"] = None,
+    ) -> dict[tuple[Any, ...], list[str]]:
+        """
+        Group runs by unique combinations of coefficient values.
+
+        Returns a mapping of (coeff_values...) -> [run_id, ...] following the order
+        of the `coefficients` argument.
+        """
+        if isinstance(coefficients, str):
+            coeff_list = [coefficients]
+        else:
+            coeff_list = list(coefficients)
+        if not coeff_list:
+            raise ValueError("coefficients_combinations requires at least one name.")
+
+        if collapse not in {"first", "last", "list", "error"}:
+            raise ValueError(
+                "collapse must be one of: 'first', 'last', 'list', 'error'"
+            )
+
+        value_attr = self._resolve_value_column(
+            ActivitySimCoefficientsCache, value_column
+        )
+        clauses: list[Any] = [
+            col(ActivitySimCoefficientsCache.coefficient_name).in_(coeff_list)
+        ]
+        if file_name is not None:
+            clauses.append(ActivitySimCoefficientsCache.file_name == file_name)
+        if segment is not None:
+            clauses.append(ActivitySimCoefficientsCache.segment == segment)
+        clauses.extend(self._normalize_where(where))
+
+        rows = self.run_link_rows(
+            ActivitySimCoefficientsCache,
+            columns=[
+                ActivitySimConfigIngestRunLink.run_id,
+                ActivitySimCoefficientsCache.coefficient_name,
+                value_attr,
+            ],
+            where=clauses,
+            join_on=join_on,
+            tracker=tracker,
+        )
+
+        by_run: dict[str, dict[str, list[Any]]] = {}
+        for row in rows:
+            if not isinstance(row, Sequence) or isinstance(row, (str, bytes)):
+                raise ValueError(
+                    "Expected rows to include (run_id, coefficient, value)."
+                )
+            if len(row) < 3:
+                raise ValueError(
+                    "Expected rows to include (run_id, coefficient, value)."
+                )
+            run_id = row[0]
+            coeff = row[1]
+            value = row[2]
+            by_run.setdefault(run_id, {}).setdefault(coeff, []).append(value)
+
+        combos: dict[tuple[Any, ...], list[str]] = {}
+        for run_id, values_by_coeff in by_run.items():
+            if require_all and any(c not in values_by_coeff for c in coeff_list):
+                continue
+
+            combo_values: list[Any] = []
+            for coeff in coeff_list:
+                values = values_by_coeff.get(coeff, [])
+                if not values:
+                    combo_values.append(missing_value)
+                    continue
+                if len(values) > 1:
+                    if collapse == "error":
+                        raise ValueError(
+                            "Multiple values per run_id; set collapse or refine filters."
+                        )
+                    if collapse == "first":
+                        combo_values.append(values[0])
+                        continue
+                    if collapse == "last":
+                        combo_values.append(values[-1])
+                        continue
+                    combo_values.append(tuple(values))
+                    continue
+                combo_values.append(values[0])
+
+            combo = tuple(combo_values)
+            combos.setdefault(combo, []).append(run_id)
+
+        for run_ids in combos.values():
+            run_ids.sort()
+
+        return combos
+
+    @staticmethod
+    def _collapse_run_values(
+        rows: Iterable[Any],
+        *,
+        collapse: Literal["first", "last", "list", "error"],
+    ) -> dict[str, Any]:
+        by_run: dict[str, list[Any]] = {}
+        for row in rows:
+            if not isinstance(row, Sequence) or isinstance(row, (str, bytes)):
+                raise ValueError(
+                    "Expected rows to include (run_id, value) for collapse."
+                )
+            if len(row) < 2:
+                raise ValueError(
+                    "Expected rows to include (run_id, value) for collapse."
+                )
+            run_id = row[0]
+            value = row[1]
+            by_run.setdefault(run_id, []).append(value)
+
+        if collapse == "list":
+            return by_run
+        if collapse == "first":
+            return {run_id: values[0] for run_id, values in by_run.items() if values}
+        if collapse == "last":
+            return {run_id: values[-1] for run_id, values in by_run.items() if values}
+        if collapse == "error":
+            collisions = {
+                run_id: values for run_id, values in by_run.items() if len(values) > 1
+            }
+            if collisions:
+                raise ValueError(
+                    "Multiple values per run_id; use collapse='list' or refine filters."
+                )
+            return {run_id: values[0] for run_id, values in by_run.items() if values}
+        raise ValueError("collapse must be one of: 'first', 'last', 'list', 'error'")
 
 
 @dataclass

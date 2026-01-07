@@ -45,6 +45,8 @@ from consist.api import (
     find_runs,
     db_session,
     run_query,
+    config_run_query,
+    config_run_rows,
     pivot_facets,
 )
 
@@ -85,5 +87,7 @@ __all__ = [
     "find_runs",
     "db_session",
     "run_query",
+    "config_run_query",
+    "config_run_rows",
     "pivot_facets",
 ]

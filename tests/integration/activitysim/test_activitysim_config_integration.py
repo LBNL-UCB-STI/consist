@@ -113,22 +113,18 @@ def test_activitysim_query_coefficients(tracker, tmp_path: Path):
     if tracker.engine is None:
         raise AssertionError("Tracker engine missing; DB tests require DuckDB.")
 
-    with Session(tracker.engine) as session:
-        # Query: which runs have the time coefficient from accessibility_coefficients.csv?
-        rows = session.exec(
-            select(ActivitySimCoefficientsCache)
-            .where(ActivitySimCoefficientsCache.coefficient_name == "time")
-            .where(
-                ActivitySimCoefficientsCache.file_name
-                == "accessibility_coefficients.csv"
-            )
-        ).all()
+    rows = adapter.coefficients_rows(
+        coefficient="time",
+        file_name="accessibility_coefficients.csv",
+        tracker=tracker,
+    )
 
     assert len(rows) > 0, f"Expected rows, got: {rows}"
     # time coefficient should be 1.1 from the test data
-    assert any(row.value_num == 1.1 for row in rows), (
-        f"Expected value_num=1.1, got: {[row.value_num for row in rows]}"
+    assert any(value == 1.1 for _, value in rows), (
+        f"Expected value_num=1.1, got: {[value for _, value in rows]}"
     )
+    assert {run_id for run_id, _ in rows} == {"activitysim_coeff_query"}
 
     from sqlalchemy import Float, cast
 

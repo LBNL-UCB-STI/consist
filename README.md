@@ -18,7 +18,7 @@ Multi-run simulation workflows typically accumulate friction:
 pip install consist
 ```
 
-Requires Python 3.11+.
+**Requires Python 3.11+**
 
 ---
 
@@ -59,7 +59,7 @@ artifact = result["cleaned"]
 artifact.path   # -> PosixPath('./runs/<run_id>/cleaned.parquet')
 ```
 
-**Key insight**: Consist computes a fingerprint from your code version, config, and input files. If you re-run with the same fingerprint, cached results return instantly. Different inputs/config? Full re-execution, with lineage recorded.
+**Key insight**: Consist computes a fingerprint from your code version, config, and input files. If you re-run with the same fingerprint, cached results return instantly—no re-execution, no data movement. Change anything upstream? Only affected downstream steps re-execute.
 
 ---
 
@@ -122,44 +122,56 @@ See [CLI Reference](docs/cli-reference.md) for `consist show`, `consist scenario
 
 ## Model-Specific Configuration Tracking
 
-For complex, file-based model configurations (YAML hierarchies, CSV parameters), Consist provides **config adapters** that automatically discover, canonicalize, and make configurations queryable.
+For complex, file-based model configurations (YAML hierarchies, CSV parameters), Consist provides **config adapters** that automatically discover, canonicalize, and make configurations queryable. See [Config Adapters Integration Guide](docs/integrations/config_adapters.md) for details.
 
-**ActivitySim Example:**
-
-Track how calibration parameters change across scenarios:
+<details>
+<summary>ActivitySim example (config adapters + cached runs)</summary>
 
 ```python
+from pathlib import Path
+import argparse
+
+from activitysim.cli.run import add_run_args, run as run_activitysim_cli
+from consist import Tracker
 from consist.integrations.activitysim import ActivitySimConfigAdapter
 
+tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 adapter = ActivitySimConfigAdapter()
 
-# Baseline scenario
-run_baseline = tracker.begin_run("baseline", "activitysim")
-tracker.canonicalize_config(adapter, ["configs/base"])
-tracker.end_run()
+def run_activitysim(config_dir: Path, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    parser = argparse.ArgumentParser()
+    add_run_args(parser)
+    args = parser.parse_args(["-c", str(config_dir), "-o", str(output_dir)])
+    run_activitysim_cli(args)
 
-# Sensitivity test (adjusted time coefficient)
-run_adjusted = tracker.begin_run("time_coeff_1.5", "activitysim")
-tracker.canonicalize_config(adapter, ["configs/adjusted"])
-tracker.end_run()
+def run_scenario(name: str, config_dir: Path) -> None:
+    output_dir = tracker.run_dir / "activitysim_outputs" / name
+    plan = tracker.prepare_config(adapter, [config_dir])
+    tracker.run(
+        fn=run_activitysim,
+        name="activitysim",
+        run_id=f"activitysim_{name}",
+        config={"scenario": name},
+        config_plan=plan,  # plan hash participates in cache identity
+        runtime_kwargs={"config_dir": config_dir, "output_dir": output_dir},
+        capture_dir=output_dir,
+        cache_mode="reuse",
+    )
+
+run_scenario("baseline", Path("./configs/base"))
+run_scenario("time_coeff_1.5", Path("./configs/adjusted"))
 
 # Query: which runs used which coefficients?
-from sqlmodel import Session, select
-from consist.models.activitysim import ActivitySimCoefficients
-
-with Session(tracker.engine) as session:
-    results = session.exec(
-        select(ActivitySimCoefficients)
-        .where(ActivitySimCoefficients.coefficient_name == "time")
-    ).all()
-    # See how time coefficient changed across runs
+time_coeff_runs = adapter.coefficients_by_run(
+    coefficient="time",
+    collapse="first",
+    tracker=tracker,
+)
+for run_id, value in time_coeff_runs.items():
+    print(f"Run: {run_id}, Time coefficient: {value}")
 ```
-
-Config adapters handle:
-- **Automatic discovery** of YAML inheritance and CSV references
-- **Content hashing** for config-based run identity
-- **Queryable tables** for calibration-sensitive parameters (constants, coefficients, probabilities)
-- **Config bundling** for reproducibility and scenario materialization
+</details>
 
 See [Config Adapters Integration Guide](docs/integrations/config_adapters.md) for ActivitySim details, best practices, and examples.
 
@@ -167,19 +179,26 @@ See [Config Adapters Integration Guide](docs/integrations/config_adapters.md) fo
 
 ## Where to Go Next
 
-**I maintain or develop simulation tools (ActivitySim, SUMO, etc.):**
-- Start with [Usage Guide](docs/usage-guide.md) for integration patterns. Container support lets you wrap existing tools without modification.
-- For ActivitySim users: See [Config Adapters](docs/integrations/config_adapters.md) to track and query calibration parameters across scenario runs.
+**I maintain or develop simulation tools:**
+- Start with [Usage Guide](docs/usage-guide.md) for integration patterns
+- See [Container Integration Guide](docs/containers-guide.md) to wrap existing tools with provenance and caching
+- For ActivitySim users: See [Config Adapters](docs/integrations/config_adapters.md) to track and query calibration parameters
 
-**I'm an MPO official or practitioner who runs models:**
-- No coding required. See [CLI Reference](docs/cli-reference.md) to query and compare results from the command line.
-- For ActivitySim scenarios: [Config Adapters](docs/integrations/config_adapters.md) make it easy to see exactly which parameters changed between scenario runs.
+**I'm a practitioner who runs models:**
+- No coding required. See [CLI Reference](docs/cli-reference.md) to query and compare results from the command line
+- Need help? Check [Troubleshooting](docs/troubleshooting.md) for common issues and solutions
 
 **I'm a researcher building simulation workflows:**
-- See [Concepts](docs/concepts.md) for mental models, then [Ingestion & Hybrid Views](docs/ingestion-and-hybrid-views.md) for SQL-native analytics and reproducibility.
+- See [Concepts](docs/concepts.md) for mental models
+- Then [Ingestion & Hybrid Views](docs/ingestion-and-hybrid-views.md) for SQL-native analytics
+- See [DLT Loader Guide](docs/dlt-loader-guide.md) for schema-validated data ingestion
 
 **I want to understand how it works:**
-- [Concepts](docs/concepts.md) explains the mental model. [Architecture](docs/architecture.md) goes deeper into caching and lineage tracking.
+- [Concepts](docs/concepts.md) explains the mental model
+- [Architecture](docs/architecture.md) goes deeper into caching and lineage tracking
+
+**I'm debugging an issue:**
+- See [Troubleshooting Guide](docs/troubleshooting.md) for cache issues, mount problems, data schema errors, and container failures
 
 ---
 

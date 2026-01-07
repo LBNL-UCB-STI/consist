@@ -88,23 +88,14 @@ tracker.canonicalize_config(adapter, [config_dir_adjusted], ingest=True)
 tracker.end_run()
 
 # Query which runs used a specific sample_rate
-from sqlmodel import Session, select
-from consist.models.activitysim import (
-    ActivitySimConstantsCache,
-    ActivitySimConfigIngestRunLink,
+rows_by_run = adapter.constants_by_run(
+    key="sample_rate",
+    collapse="first",
+    tracker=tracker,
 )
 
-with Session(tracker.engine) as session:
-    rows = session.exec(
-        select(ActivitySimConfigIngestRunLink.run_id, ActivitySimConstantsCache.value_num)
-        .join(
-            ActivitySimConstantsCache,
-            ActivitySimConstantsCache.content_hash
-            == ActivitySimConfigIngestRunLink.content_hash,
-        )
-        .where(ActivitySimConfigIngestRunLink.table_name == "activitysim_constants_cache")
-        .where(ActivitySimConstantsCache.key == "sample_rate")
-    ).all()
+# Use in joins/facet analyses
+sample_rate_sq = adapter.constants_query(key="sample_rate").subquery()
 ```
 
 **2. Precompute config plans for caching + orchestration**
