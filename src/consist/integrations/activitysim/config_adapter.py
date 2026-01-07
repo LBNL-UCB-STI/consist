@@ -22,7 +22,7 @@ from typing import (
 )
 
 from sqlalchemy.sql import Executable
-from sqlmodel import SQLModel
+from sqlmodel import SQLModel, col
 
 from consist.core.config_canonicalization import (
     ArtifactSpec,
@@ -966,6 +966,111 @@ class ActivitySimConfigAdapter:
             tracker=tracker,
         )
         return self._collapse_run_values(rows, collapse=collapse)
+
+    def coefficients_combinations(
+        self,
+        *,
+        coefficients: Union[str, Iterable[str]],
+        file_name: Optional[str] = None,
+        segment: Optional[str] = None,
+        value_column: str = "value_num",
+        where: Optional[Union[Iterable[Any], Any]] = None,
+        join_on: Optional[Iterable[str]] = None,
+        require_all: bool = True,
+        missing_value: Any = None,
+        collapse: Literal["first", "last", "list", "error"] = "error",
+        tracker: Optional["Tracker"] = None,
+    ) -> dict[tuple[Any, ...], list[str]]:
+        """
+        Group runs by unique combinations of coefficient values.
+
+        Returns a mapping of (coeff_values...) -> [run_id, ...] following the order
+        of the `coefficients` argument.
+        """
+        if isinstance(coefficients, str):
+            coeff_list = [coefficients]
+        else:
+            coeff_list = list(coefficients)
+        if not coeff_list:
+            raise ValueError("coefficients_combinations requires at least one name.")
+
+        if collapse not in {"first", "last", "list", "error"}:
+            raise ValueError(
+                "collapse must be one of: 'first', 'last', 'list', 'error'"
+            )
+
+        value_attr = self._resolve_value_column(
+            ActivitySimCoefficientsCache, value_column
+        )
+        clauses: list[Any] = [
+            col(ActivitySimCoefficientsCache.coefficient_name).in_(coeff_list)
+        ]
+        if file_name is not None:
+            clauses.append(ActivitySimCoefficientsCache.file_name == file_name)
+        if segment is not None:
+            clauses.append(ActivitySimCoefficientsCache.segment == segment)
+        clauses.extend(self._normalize_where(where))
+
+        rows = self.run_link_rows(
+            ActivitySimCoefficientsCache,
+            columns=[
+                ActivitySimConfigIngestRunLink.run_id,
+                ActivitySimCoefficientsCache.coefficient_name,
+                value_attr,
+            ],
+            where=clauses,
+            join_on=join_on,
+            tracker=tracker,
+        )
+
+        by_run: dict[str, dict[str, list[Any]]] = {}
+        for row in rows:
+            if not isinstance(row, Sequence) or isinstance(row, (str, bytes)):
+                raise ValueError(
+                    "Expected rows to include (run_id, coefficient, value)."
+                )
+            if len(row) < 3:
+                raise ValueError(
+                    "Expected rows to include (run_id, coefficient, value)."
+                )
+            run_id = row[0]
+            coeff = row[1]
+            value = row[2]
+            by_run.setdefault(run_id, {}).setdefault(coeff, []).append(value)
+
+        combos: dict[tuple[Any, ...], list[str]] = {}
+        for run_id, values_by_coeff in by_run.items():
+            if require_all and any(c not in values_by_coeff for c in coeff_list):
+                continue
+
+            combo_values: list[Any] = []
+            for coeff in coeff_list:
+                values = values_by_coeff.get(coeff, [])
+                if not values:
+                    combo_values.append(missing_value)
+                    continue
+                if len(values) > 1:
+                    if collapse == "error":
+                        raise ValueError(
+                            "Multiple values per run_id; set collapse or refine filters."
+                        )
+                    if collapse == "first":
+                        combo_values.append(values[0])
+                        continue
+                    if collapse == "last":
+                        combo_values.append(values[-1])
+                        continue
+                    combo_values.append(tuple(values))
+                    continue
+                combo_values.append(values[0])
+
+            combo = tuple(combo_values)
+            combos.setdefault(combo, []).append(run_id)
+
+        for run_ids in combos.values():
+            run_ids.sort()
+
+        return combos
 
     @staticmethod
     def _collapse_run_values(

@@ -179,12 +179,12 @@ See [Config Adapters Integration Guide](docs/integrations/config_adapters.md) fo
 
 ## Where to Go Next
 
-**I maintain or develop simulation tools (ActivitySim, SUMO, BEAM, etc.):**
+**I maintain or develop simulation tools:**
 - Start with [Usage Guide](docs/usage-guide.md) for integration patterns
 - See [Container Integration Guide](docs/containers-guide.md) to wrap existing tools with provenance and caching
 - For ActivitySim users: See [Config Adapters](docs/integrations/config_adapters.md) to track and query calibration parameters
 
-**I'm an MPO official or practitioner who runs models:**
+**I'm a practitioner who runs models:**
 - No coding required. See [CLI Reference](docs/cli-reference.md) to query and compare results from the command line
 - Need help? Check [Troubleshooting](docs/troubleshooting.md) for common issues and solutions
 
