@@ -18,7 +18,7 @@ Multi-run simulation workflows typically accumulate friction:
 pip install consist
 ```
 
-Requires Python 3.11+.
+**Requires Python 3.11+**
 
 ---
 
@@ -59,7 +59,7 @@ artifact = result["cleaned"]
 artifact.path   # -> PosixPath('./runs/<run_id>/cleaned.parquet')
 ```
 
-**Key insight**: Consist computes a fingerprint from your code version, config, and input files. If you re-run with the same fingerprint, cached results return instantly. Different inputs/config? Full re-execution, with lineage recorded.
+**Key insight**: Consist computes a fingerprint from your code version, config, and input files. If you re-run with the same fingerprint, cached results return instantly—no re-execution, no data movement. Change anything upstream? Only affected downstream steps re-execute.
 
 ---
 
@@ -130,29 +130,30 @@ Track how calibration parameters change across scenarios:
 
 ```python
 from consist.integrations.activitysim import ActivitySimConfigAdapter
+from consist.models.activitysim import ActivitySimCoefficientsCache
+from sqlmodel import Session, select
 
 adapter = ActivitySimConfigAdapter()
+tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
-# Baseline scenario
-run_baseline = tracker.begin_run("baseline", "activitysim")
-tracker.canonicalize_config(adapter, ["configs/base"])
+# Baseline scenario: discover and ingest config
+tracker.begin_run("baseline", "activitysim")
+tracker.canonicalize_config(adapter, ["configs/base"], ingest=True)
 tracker.end_run()
 
-# Sensitivity test (adjusted time coefficient)
-run_adjusted = tracker.begin_run("time_coeff_1.5", "activitysim")
-tracker.canonicalize_config(adapter, ["configs/adjusted"])
+# Sensitivity test: adjusted coefficients
+tracker.begin_run("time_coeff_1.5", "activitysim")
+tracker.canonicalize_config(adapter, ["configs/adjusted"], ingest=True)
 tracker.end_run()
 
 # Query: which runs used which coefficients?
-from sqlmodel import Session, select
-from consist.models.activitysim import ActivitySimCoefficients
-
 with Session(tracker.engine) as session:
-    results = session.exec(
-        select(ActivitySimCoefficients)
-        .where(ActivitySimCoefficients.coefficient_name == "time")
+    time_coeff_runs = session.exec(
+        select(ActivitySimCoefficientsCache)
+        .where(ActivitySimCoefficientsCache.coefficient_name == "time")
     ).all()
-    # See how time coefficient changed across runs
+    for row in time_coeff_runs:
+        print(f"Run: {row.consist_run_id}, Time coefficient: {row.value_num}")
 ```
 
 Config adapters handle:
@@ -167,19 +168,26 @@ See [Config Adapters Integration Guide](docs/integrations/config_adapters.md) fo
 
 ## Where to Go Next
 
-**I maintain or develop simulation tools (ActivitySim, SUMO, etc.):**
-- Start with [Usage Guide](docs/usage-guide.md) for integration patterns. Container support lets you wrap existing tools without modification.
-- For ActivitySim users: See [Config Adapters](docs/integrations/config_adapters.md) to track and query calibration parameters across scenario runs.
+**I maintain or develop simulation tools (ActivitySim, SUMO, BEAM, etc.):**
+- Start with [Usage Guide](docs/usage-guide.md) for integration patterns
+- See [Container Integration Guide](docs/containers-guide.md) to wrap existing tools with provenance and caching
+- For ActivitySim users: See [Config Adapters](docs/integrations/config_adapters.md) to track and query calibration parameters
 
 **I'm an MPO official or practitioner who runs models:**
-- No coding required. See [CLI Reference](docs/cli-reference.md) to query and compare results from the command line.
-- For ActivitySim scenarios: [Config Adapters](docs/integrations/config_adapters.md) make it easy to see exactly which parameters changed between scenario runs.
+- No coding required. See [CLI Reference](docs/cli-reference.md) to query and compare results from the command line
+- Need help? Check [Troubleshooting](docs/troubleshooting.md) for common issues and solutions
 
 **I'm a researcher building simulation workflows:**
-- See [Concepts](docs/concepts.md) for mental models, then [Ingestion & Hybrid Views](docs/ingestion-and-hybrid-views.md) for SQL-native analytics and reproducibility.
+- See [Concepts](docs/concepts.md) for mental models
+- Then [Ingestion & Hybrid Views](docs/ingestion-and-hybrid-views.md) for SQL-native analytics
+- See [DLT Loader Guide](docs/dlt-loader-guide.md) for schema-validated data ingestion
 
 **I want to understand how it works:**
-- [Concepts](docs/concepts.md) explains the mental model. [Architecture](docs/architecture.md) goes deeper into caching and lineage tracking.
+- [Concepts](docs/concepts.md) explains the mental model
+- [Architecture](docs/architecture.md) goes deeper into caching and lineage tracking
+
+**I'm debugging an issue:**
+- See [Troubleshooting Guide](docs/troubleshooting.md) for cache issues, mount problems, data schema errors, and container failures
 
 ---
 

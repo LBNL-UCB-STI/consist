@@ -21,6 +21,7 @@ signature = hash(code_version + config + input_hashes)
 - Different signature: execute and record new lineage.
 
 This means you can safely re-run a workflow with the same inputs and config without redoing work, while still getting new results when anything changes.
+On cache hits, Consist returns output artifact metadata without copying files; load or hydrate outputs only when you need bytes.
 
 ## The config vs facet distinction
 
@@ -43,6 +44,10 @@ Guidance:
 - **Outputs** are named artifacts you declare when you call `consist.run(...)` (or `tracker.run(...)`). Consist stores their paths and provenance metadata for later lookup and querying.
 
 To keep outputs portable, write them under `tracker.run_dir` or a mounted `outputs://` root. That keeps artifact paths relative and consistent across machines.
+
+### Input mappings and auto-loading
+
+Inputs can be passed as a list (hash-only) or a mapping (hash + parameter injection). When you use a mapping, Consist matches input keys to function parameters and auto-loads those artifacts into the call by default. If you want to pass raw paths instead, set `load_inputs=False` and pass the paths explicitly (for example, via `runtime_kwargs`).
 
 ## When to use each pattern
 

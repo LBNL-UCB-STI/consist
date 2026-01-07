@@ -54,12 +54,15 @@ Consist automatically records what code, configuration, and input data produced 
 - [Configuration & Facets](configs.md) – Config hashing and queryable metadata
 - [Caching & Hydration](caching-and-hydration.md) – Caching patterns and data management policies
 - [Ingestion & Hybrid Views](ingestion-and-hybrid-views.md) – SQL queries across runs
+- [DLT Loader Integration](dlt-loader-guide.md) – Schema-validated data ingestion with DuckDB
 - [Mounts & Portability](mounts-and-portability.md) – Reproducible workflows with external data
 
 ### Advanced / Reference
 
 - [Architecture](architecture.md) – Implementation details and design decisions
+- [Container Integration](containers-guide.md) – Docker/Singularity with ActivitySim, SUMO, and other tools
 - [CLI Reference](cli-reference.md) – All command-line tools
+- [Troubleshooting](troubleshooting.md) – Common errors, debugging, and solutions
 - [API Overview](api/index.md) – Function and class reference
 
 ---
@@ -81,14 +84,20 @@ See [Glossary](glossary.md) for full definitions of all terms, or [Concepts](con
 **I need to speed up my pipeline:**
 → [Caching & Hydration](caching-and-hydration.md)
 
+**I want to debug a cache miss or other issue:**
+→ [Troubleshooting](troubleshooting.md)
+
 **I want to know which config produced a result:**
 → [CLI: `consist lineage`](cli-reference.md#trace-lineage)
 
 **I want to compare results across 50 scenarios:**
-→ [Usage Guide: Cross-Run Queries](usage-guide.md#querying-across-runs)
+→ [Usage Guide: Cross-Run Queries](usage-guide.md#querying-results)
+
+**I want to ingest data for SQL analysis across runs:**
+→ [DLT Loader Integration](dlt-loader-guide.md)
 
 **I want to share my study for reproducibility:**
 → [Mounts & Portability](mounts-and-portability.md)
 
-**I want to integrate with an existing tool (ActivitySim, SUMO, etc.):**
-→ [Usage Guide: Integration Patterns](usage-guide.md#advanced-patterns)
+**I want to integrate with an existing tool (ActivitySim, SUMO, BEAM):**
+→ [Container Integration Guide](containers-guide.md)
