@@ -1,19 +1,26 @@
 """
 This module provides a mechanism for managing the active Consist `Tracker` instance
-globally within a thread.
+within an async-safe context.
 
-It uses a thread-safe stack (`_TRACKER_STACK`) to keep track of nested `start_run`
+It uses a context-local stack (`_TRACKER_STACK`) to keep track of nested `start_run`
 contexts, ensuring that `log_artifact` and other context-dependent operations
 always refer to the correct `Tracker` instance.
 """
 
-from typing import Optional, List, TYPE_CHECKING
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Iterator, Optional, Sequence, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
 
-# Thread-safe storage for the active tracker stack
-_TRACKER_STACK: List["Tracker"] = []
+# Context-local storage for the active tracker stack
+_TRACKER_STACK: ContextVar[Sequence["Tracker"]] = ContextVar(
+    "consist_tracker_stack", default=()
+)
+_DEFAULT_TRACKER: ContextVar[Optional["Tracker"]] = ContextVar(
+    "consist_default_tracker", default=None
+)
 
 
 def get_active_tracker() -> "Tracker":
@@ -36,15 +43,18 @@ def get_active_tracker() -> "Tracker":
     RuntimeError
         If no `Tracker` instance is currently active (i.e., the stack is empty).
         This typically means Consist API functions are being called outside
-        a `with tracker.start_run():` block or a `tracker.run`/`tracker.trace` call.
+        a `with tracker.start_run():` block or a `tracker.run`/`tracker.trace`
+        (or `consist.start_run`/`consist.run`/`consist.trace`) call.
     """
-    if not _TRACKER_STACK:
+    stack = _TRACKER_STACK.get()
+    if not stack:
         raise RuntimeError(
             "No active Consist run found. "
-            "Ensure you are within a 'with tracker.start_run():' block "
-            "or have manually set the active tracker."
+            "Ensure you are within a 'with tracker.start_run()' or "
+            "'with consist.start_run(...)' block, or use tracker.run/trace "
+            "or consist.run/trace."
         )
-    return _TRACKER_STACK[-1]
+    return stack[-1]
 
 
 def push_tracker(tracker: "Tracker") -> None:
@@ -60,7 +70,8 @@ def push_tracker(tracker: "Tracker") -> None:
     tracker : Tracker
         The `Tracker` instance to be made active.
     """
-    _TRACKER_STACK.append(tracker)
+    stack = _TRACKER_STACK.get()
+    _TRACKER_STACK.set((*stack, tracker))
 
 
 def pop_tracker() -> Optional["Tracker"]:
@@ -76,6 +87,28 @@ def pop_tracker() -> Optional["Tracker"]:
         The `Tracker` instance that was removed from the stack, or `None` if the
         stack was already empty.
     """
-    if _TRACKER_STACK:
-        return _TRACKER_STACK.pop()
-    return None
+    stack = _TRACKER_STACK.get()
+    if not stack:
+        return None
+    tracker = stack[-1]
+    _TRACKER_STACK.set(stack[:-1])
+    return tracker
+
+
+def get_default_tracker() -> Optional["Tracker"]:
+    """
+    Returns the default `Tracker` for the current context, if set.
+    """
+    return _DEFAULT_TRACKER.get()
+
+
+@contextmanager
+def use_tracker(tracker: "Tracker") -> Iterator["Tracker"]:
+    """
+    Temporarily set the default `Tracker` within a scoped context.
+    """
+    token = _DEFAULT_TRACKER.set(tracker)
+    try:
+        yield tracker
+    finally:
+        _DEFAULT_TRACKER.reset(token)

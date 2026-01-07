@@ -40,14 +40,14 @@ Guidance:
 ## How inputs and outputs are treated
 
 - **Inputs** are files or values that influence computation. File inputs are hashed by content to ensure the signature reflects the actual data.
-- **Outputs** are named artifacts you declare when you call `tracker.run(...)`. Consist stores their paths and provenance metadata for later lookup and querying.
+- **Outputs** are named artifacts you declare when you call `consist.run(...)` (or `tracker.run(...)`). Consist stores their paths and provenance metadata for later lookup and querying.
 
 To keep outputs portable, write them under `tracker.run_dir` or a mounted `outputs://` root. That keeps artifact paths relative and consistent across machines.
 
 ## When to use each pattern
 
-- `tracker.run(...)` for standalone steps or when calling library functions.
+- `consist.run(...)` (or `tracker.run(...)`) for standalone steps or when calling library functions.
 - `scenario.trace(...)` for inline code blocks within a workflow.
 - `scenario.run(...)` when you want cache-skip behavior (the function does not execute on cache hit).
 
-If you are unsure, start with `tracker.run(...)`. It is the simplest pattern and works well for most first-time use cases.
+If you are unsure, start with `consist.run(...)` inside a `use_tracker(...)` scope. It is the simplest pattern and works well for most first-time use cases.

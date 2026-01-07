@@ -19,8 +19,8 @@ files that should affect caching without being stored as structured metadata.
 
 You can pass config parameters via the high-level APIs:
 
-- `Tracker.run(...)`
-- `Tracker.trace(...)`
+- `consist.run(...)` / `consist.trace(...)`
+- `Tracker.run(...)` / `Tracker.trace(...)` (explicit tracker form)
 - `ScenarioContext.run(...)`
 - `ScenarioContext.trace(...)`
 
@@ -152,44 +152,56 @@ For detailed usage and API reference, see the [Config Adapters Integration Guide
 
 ## Examples
 
-### Tracker.run with config + facet
+### consist.run with config + facet
 
 ```python
-tracker.run(
-    fn=run_beam_step,
-    name="beam",
-    config=beam_cfg,
-    facet={"memory_gb": beam_cfg.memory_gb},
-    hash_inputs=[("beam_hocon", beam_cfg_path)],
-)
+import consist
+from consist import use_tracker
+
+with use_tracker(tracker):
+    consist.run(
+        fn=run_beam_step,
+        name="beam",
+        config=beam_cfg,
+        facet={"memory_gb": beam_cfg.memory_gb},
+        hash_inputs=[("beam_hocon", beam_cfg_path)],
+    )
 ```
 
-### Tracker.run with config_plan (config adapters)
+### consist.run with config_plan (config adapters)
 
 ```python
 from consist.integrations.activitysim import ActivitySimConfigAdapter
 
+import consist
+from consist import use_tracker
+
 adapter = ActivitySimConfigAdapter()
 plan = tracker.prepare_config(adapter, [overlay_dir, base_dir])
 
-tracker.run(
-    fn=run_activitysim,
-    name="activitysim",
-    config={"scenario": "baseline"},
-    config_plan=plan,
-    cache_mode="auto",
-)
+with use_tracker(tracker):
+    consist.run(
+        fn=run_activitysim,
+        name="activitysim",
+        config={"scenario": "baseline"},
+        config_plan=plan,
+        cache_mode="auto",
+    )
 ```
 
 ### ScenarioContext.run with facet_from
 
 ```python
-with tracker.scenario("demo", tags=["travel"]) as sc:
-    sc.run(
-        fn=run_activitysim,
-        name="activitysim",
-        config=asim_cfg,
-        facet_from=["scenario", "sample_rate"],
-        hash_inputs=[("asim_yaml", asim_config_dir)],
-    )
+import consist
+from consist import use_tracker
+
+with use_tracker(tracker):
+    with consist.scenario("demo", tags=["travel"]) as sc:
+        sc.run(
+            fn=run_activitysim,
+            name="activitysim",
+            config=asim_cfg,
+            facet_from=["scenario", "sample_rate"],
+            hash_inputs=[("asim_yaml", asim_config_dir)],
+        )
 ```

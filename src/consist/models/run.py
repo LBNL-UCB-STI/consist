@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field as PydanticField
+from pydantic import BaseModel, ConfigDict, Field as PydanticField
 
 from sqlalchemy import Column, JSON, String
 from sqlmodel import Field, SQLModel
@@ -169,8 +169,7 @@ class RunArtifacts(BaseModel):
     inputs: Dict[str, Artifact] = PydanticField(default_factory=dict)
     outputs: Dict[str, Artifact] = PydanticField(default_factory=dict)
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class RunResult(BaseModel):
@@ -182,8 +181,7 @@ class RunResult(BaseModel):
     outputs: Dict[str, Artifact] = PydanticField(default_factory=dict)
     cache_hit: bool = False
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     @property
     def output(self) -> Optional[Artifact]:

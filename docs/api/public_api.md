@@ -12,8 +12,12 @@ This page defines what Consist considers its **public API** for the `0.1.x` seri
 
 - [`consist.scenario`](api_helpers.md#consist.api.scenario)
 - [`consist.single_step_scenario`](api_helpers.md#consist.api.single_step_scenario)
-- [`Tracker.define_step(...)`](tracker.md#consist.core.tracker.Tracker.define_step)
-- [`ScenarioContext`](workflow.md#consist.core.workflow.ScenarioContext) (returned by `tracker.scenario(...)`) with `.run(...)` and `.trace(...)`
+- [`consist.run`](api_helpers.md#consist.api.run)
+- [`consist.trace`](api_helpers.md#consist.api.trace)
+- [`consist.start_run`](api_helpers.md#consist.api.start_run)
+- [`consist.define_step`](api_helpers.md#consist.api.define_step)
+- [`consist.use_tracker`](api_helpers.md#consist.api.use_tracker)
+- [`ScenarioContext`](workflow.md#consist.core.workflow.ScenarioContext) (returned by `consist.scenario(...)`) with `.run(...)` and `.trace(...)`
 - [`RunContext`](workflow.md#consist.core.workflow.RunContext) (injected via `inject_context=True`)
 - [`Coupler`](workflow.md#consist.core.coupler.Coupler) (available at `scenario.coupler`)
 
@@ -27,7 +31,9 @@ This page defines what Consist considers its **public API** for the `0.1.x` seri
 - [`consist.cached_output`](api_helpers.md#consist.api.cached_output)
 - [`consist.cached_artifacts`](api_helpers.md#consist.api.cached_artifacts)
 - [`consist.log_meta`](api_helpers.md#consist.api.log_meta)
-- [`Tracker.define_step(...)`](tracker.md#consist.core.tracker.Tracker.define_step)
+- [`consist.current_run`](api_helpers.md#consist.api.current_run)
+- [`consist.current_consist`](api_helpers.md#consist.api.current_consist)
+- [`Tracker.define_step(...)`](tracker.md#consist.core.tracker.Tracker.define_step) (explicit tracker form)
 - [`Tracker.materialize(...)`](tracker.md#consist.core.tracker.Tracker.materialize)
 
 ### Querying and views
