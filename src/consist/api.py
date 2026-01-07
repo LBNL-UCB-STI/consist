@@ -4,6 +4,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import (
     Any,
+    Callable,
     Dict,
     Hashable,
     Iterable,
@@ -23,11 +24,16 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import SQLModel, Session, select
 
 # Internal imports
-from consist.core.context import get_active_tracker
+from consist.core.context import (
+    get_active_tracker,
+    get_default_tracker,
+    use_tracker as _use_tracker,
+)
+from consist.core.decorators import define_step as define_step_decorator
 from consist.core.views import create_view_model
 from consist.core.workflow import OutputCapture
 from consist.models.artifact import Artifact
-from consist.models.run import Run
+from consist.models.run import ConsistRecord, Run, RunResult
 from consist.models.run_config_kv import RunConfigKV
 from consist.core.tracker import Tracker
 from consist.types import ArtifactRef
@@ -74,6 +80,49 @@ def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
 # --- Core Access ---
 
 
+def _resolve_tracker(tracker: Optional["Tracker"]) -> "Tracker":
+    if tracker is not None:
+        return tracker
+    default = get_default_tracker()
+    if default is None:
+        raise RuntimeError(
+            "No default tracker configured for consist.run(). Provide one of:\n"
+            "  1. Pass tracker= argument: consist.run(fn=..., tracker=my_tracker)\n"
+            "  2. Set default context: with consist.use_tracker(my_tracker): consist.run(...)\n"
+            "  3. Use Tracker directly: my_tracker.run(fn=...)"
+        )
+    return default
+
+
+@contextmanager
+def use_tracker(tracker: "Tracker") -> Iterator["Tracker"]:
+    """
+    Set a fallback (default) tracker for Consist API entrypoints.
+
+    This configures which tracker is used by consist.run(), consist.start_run(), etc.
+    when called outside an active run context (i.e., when the tracker stack is empty).
+    Once inside a run, the tracker becomes "active" via push_tracker() and is accessed
+    by logging functions like consist.log_artifact().
+    """
+    with _use_tracker(tracker) as tr:
+        yield tr
+
+
+def define_step(
+    *,
+    outputs: Optional[list[str]] = None,
+    tags: Optional[list[str]] = None,
+    description: Optional[str] = None,
+):
+    """
+    Attach metadata to a function without changing execution behavior.
+
+    This decorator lets you attach defaults such as ``outputs`` or ``tags`` to a
+    function. ``Tracker.run`` and ``ScenarioContext.run`` read this metadata.
+    """
+    return define_step_decorator(outputs=outputs, tags=tags, description=description)
+
+
 @contextmanager
 def scenario(name: str, tracker: Optional["Tracker"] = None, **kwargs: Any):
     """
@@ -93,7 +142,7 @@ def scenario(name: str, tracker: Optional["Tracker"] = None, **kwargs: Any):
     ScenarioContext
         Scenario context manager.
     """
-    tr = tracker or current_tracker()
+    tr = _resolve_tracker(tracker)
     with tr.scenario(name, **kwargs) as sc:
         yield sc
 
@@ -124,10 +173,54 @@ def single_step_scenario(
     ScenarioContext
         Scenario context manager for the single step.
     """
-    tr = tracker or current_tracker()
+    tr = _resolve_tracker(tracker)
     with tr.scenario(name, **kwargs) as sc:
         with sc.trace(step_name or name):
             yield sc
+
+
+@contextmanager
+def start_run(
+    run_id: str,
+    model: str,
+    tracker: Optional["Tracker"] = None,
+    **kwargs: Any,
+) -> Iterator["Tracker"]:
+    """
+    Context manager to initiate and manage a Consist run with a default tracker.
+    """
+    tr = _resolve_tracker(tracker)
+    with tr.start_run(run_id=run_id, model=model, **kwargs) as active:
+        yield active
+
+
+def run(
+    fn: Optional[Callable[..., Any]] = None,
+    name: Optional[str] = None,
+    *,
+    tracker: Optional["Tracker"] = None,
+    **kwargs: Any,
+) -> RunResult:
+    """
+    Execute a function-shaped run using the default tracker.
+    """
+    tr = _resolve_tracker(tracker)
+    return tr.run(fn=fn, name=name, **kwargs)
+
+
+@contextmanager
+def trace(
+    name: str,
+    *,
+    tracker: Optional["Tracker"] = None,
+    **kwargs: Any,
+) -> Iterator["Tracker"]:
+    """
+    Manual tracing context manager using the default tracker.
+    """
+    tr = _resolve_tracker(tracker)
+    with tr.trace(name=name, **kwargs) as active:
+        yield active
 
 
 def current_tracker() -> "Tracker":
@@ -153,6 +246,29 @@ def current_tracker() -> "Tracker":
     return get_active_tracker()
 
 
+def current_run() -> Optional[Run]:
+    """
+    Return the active run if one is in progress, otherwise ``None``.
+    """
+    try:
+        tracker = get_active_tracker()
+    except RuntimeError:
+        return None
+    current_consist = tracker.current_consist
+    return current_consist.run if current_consist else None
+
+
+def current_consist() -> Optional[ConsistRecord]:
+    """
+    Return the active Consist record if one is in progress, otherwise ``None``.
+    """
+    try:
+        tracker = get_active_tracker()
+    except RuntimeError:
+        return None
+    return tracker.current_consist
+
+
 # --- Cache helpers ---
 
 
@@ -170,7 +286,11 @@ def cached_artifacts(direction: str = "output") -> Dict[str, Artifact]:
     Dict[str, Artifact]
         Mapping from artifact key to Artifact, or empty dict if no cache hit.
     """
-    return current_tracker().cached_artifacts(direction=direction)
+    try:
+        tracker = get_active_tracker()
+    except RuntimeError:
+        return {}
+    return tracker.cached_artifacts(direction=direction)
 
 
 def cached_output(key: Optional[str] = None) -> Optional[Artifact]:
@@ -187,7 +307,11 @@ def cached_output(key: Optional[str] = None) -> Optional[Artifact]:
     Optional[Artifact]
         Cached artifact instance or ``None`` if no cache hit exists.
     """
-    return current_tracker().cached_output(key=key)
+    try:
+        tracker = get_active_tracker()
+    except RuntimeError:
+        return None
+    return tracker.cached_output(key=key)
 
 
 def get_artifact(
@@ -347,6 +471,7 @@ def log_dataframe(
         Artifact direction relative to the run.
     tracker : Optional[Tracker], optional
         Tracker instance to use; defaults to the active tracker.
+        If None and no active run context exists, raises RuntimeError.
     path : Optional[Union[str, Path]], optional
         Output path; defaults to `<run_dir>/outputs/<run_subdir>/<key>.<driver>` for the
         active run as determined by the tracker's run subdir configuration.

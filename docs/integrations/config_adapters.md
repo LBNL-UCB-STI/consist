@@ -110,19 +110,23 @@ with Session(tracker.engine) as session:
 **2. Precompute config plans for caching + orchestration**
 
 Prepare config artifacts and ingestion specs before a run, then apply them
-inside `Tracker.run` or `Tracker.trace`:
+inside `consist.run`/`consist.trace` (or `Tracker.run`/`Tracker.trace`):
 
 ```python
+import consist
+from consist import use_tracker
+
 adapter = ActivitySimConfigAdapter()
 plan = tracker.prepare_config(adapter, [overlay_dir, base_dir])
 
-tracker.run(
-    fn=run_activitysim,
-    name="activitysim",
-    config={"scenario": "baseline"},
-    config_plan=plan,
-    cache_mode="auto",
-)
+with use_tracker(tracker):
+    consist.run(
+        fn=run_activitysim,
+        name="activitysim",
+        config={"scenario": "baseline"},
+        config_plan=plan,
+        cache_mode="auto",
+    )
 ```
 
 **3. Apply parameter adjustments for sensitivity testing**

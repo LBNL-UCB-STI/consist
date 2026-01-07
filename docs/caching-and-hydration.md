@@ -81,19 +81,23 @@ For multi-step workflows, the most robust pattern is:
 - each step logs outputs as artifacts
 - the next step declares those artifacts as inputs
 
-Using `tracker.scenario(...)`:
+Using `consist.scenario(...)`:
 
 ```python
-with tracker.scenario("my_scenario") as scenario:
-    with scenario.trace("ingest"):
-        raw = tracker.log_artifact("raw.csv", key="raw", direction="output")
-        scenario.coupler.set("raw", raw)
+import consist
+from consist import use_tracker
 
-    # `input_keys=[...]` declares step inputs by Coupler key without repeating
-    # `scenario.coupler.require(...)` in the `inputs=[...]` list.
-    with scenario.trace("transform", input_keys=["raw"]):
-        raw_art = scenario.coupler.require("raw")
-        df = consist.load(raw_art, tracker=tracker)
+with use_tracker(tracker):
+    with consist.scenario("my_scenario") as scenario:
+        with scenario.trace("ingest"):
+            raw = consist.log_artifact("raw.csv", key="raw", direction="output")
+            scenario.coupler.set("raw", raw)
+
+        # `input_keys=[...]` declares step inputs by Coupler key without repeating
+        # `scenario.coupler.require(...)` in the `inputs=[...]` list.
+        with scenario.trace("transform", input_keys=["raw"]):
+            raw_art = scenario.coupler.require("raw")
+            df = consist.load(raw_art, tracker=tracker)
 ```
 
 Notes:
@@ -114,21 +118,25 @@ If you have an expensive callable (including imported functions or bound methods
 
 ---
 
-## Pattern 2: Cached runs with `tracker.run`
+## Pattern 2: Cached runs with `consist.run`
 
-Use `tracker.run(...)` with declared outputs to get cache-aware execution for function-shaped steps.
+Use `consist.run(...)` with declared outputs to get cache-aware execution for function-shaped steps.
 
 ```python
 def clean(raw_file: Path):
     ...
     return {"cleaned": cleaned_df}
 
-result = tracker.run(
-    fn=clean,
-    inputs={"raw_file": Path("raw.csv")},
-    outputs=["cleaned"],
-    load_inputs=True,
-)
+import consist
+from consist import use_tracker
+
+with use_tracker(tracker):
+    result = consist.run(
+        fn=clean,
+        inputs={"raw_file": Path("raw.csv")},
+        outputs=["cleaned"],
+        load_inputs=True,
+    )
 ```
 
 ---
@@ -328,7 +336,7 @@ The main knobs are:
   - `inputs-missing`: on cache misses, copy missing input bytes into the current `run_dir`.
   - `outputs-requested`: on cache hits, copy only specified cached outputs to requested paths.
   - `outputs-all`: on cache hits, copy all cached outputs into a target directory.
-- Scenario default: pass `step_cache_hydration="inputs-missing"` to `tracker.scenario(...)`
+- Scenario default: pass `step_cache_hydration="inputs-missing"` to `consist.scenario(...)`
   to apply a default policy to all steps unless overridden.
 - `materialize_cached_output_paths`: required for `outputs-requested`.
 - `materialize_cached_outputs_dir`: required for `outputs-all`.

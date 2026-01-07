@@ -20,8 +20,12 @@ If you are new, start with the [quickstart notebook](examples.md#quickstart) and
 Runs execute a callable with explicit inputs, config, and outputs, and return a `RunResult`.
 See: [Example notebooks](examples.md#tutorial-series).
 
+Consist recommends a scoped default tracker for new code. The explicit `tracker.run(...)`
+and `tracker.scenario(...)` forms remain supported.
+
 ```python
-from consist import Tracker
+import consist
+from consist import Tracker, define_step, use_tracker
 from pydantic import BaseModel
 from pathlib import Path
 import pandas as pd
@@ -30,23 +34,21 @@ class CleaningConfig(BaseModel):
     threshold: float = 0.5
     remove_outliers: bool = True
 
-tracker = Tracker(
-    run_dir="./runs",
-    db_path="./provenance.duckdb",
-)
+tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
-@tracker.define_step(outputs=["cleaned"])
+@define_step(outputs=["cleaned"])
 def clean_data(raw_file: Path, config: CleaningConfig):
     df = pd.read_csv(raw_file)
     df = df[df["value"] >= config.threshold]
     return {"cleaned": df}
 
-result = tracker.run(
-    fn=clean_data,
-    inputs={"raw_file": Path("raw.csv")},
-    config=CleaningConfig(threshold=0.5),
-    load_inputs=True,
-)
+with use_tracker(tracker):
+    result = consist.run(
+        fn=clean_data,
+        inputs={"raw_file": Path("raw.csv")},
+        config=CleaningConfig(threshold=0.5),
+        load_inputs=True,
+    )
 
 cleaned_artifact = result.outputs["cleaned"]
 ```
@@ -61,12 +63,13 @@ def run_legacy_model(upstream_artifact, ctx):
     legacy_model.run()
     ctx.capture_outputs(Path("outputs"), pattern="*.csv")
 
-tracker.run(
-    fn=run_legacy_model,
-    inputs={"upstream_artifact": Path("input.csv")},
-    depends_on=["config.yaml", "parameters.json"],
-    inject_context="ctx",
-)
+with use_tracker(tracker):
+    consist.run(
+        fn=run_legacy_model,
+        inputs={"upstream_artifact": Path("input.csv")},
+        depends_on=["config.yaml", "parameters.json"],
+        inject_context="ctx",
+    )
 ```
 
 ---
@@ -78,20 +81,21 @@ See: [Example notebooks](examples.md#tutorial-series).
 
 ```python
 import consist
-from consist import Tracker
+from consist import Tracker, use_tracker
 
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
-with consist.scenario("baseline", tracker=tracker, model="travel_demand") as sc:
+with use_tracker(tracker):
+    with consist.scenario("baseline", model="travel_demand") as sc:
 
-    with sc.trace(name="initialize", run_id="baseline_init"):
-        df_pop = load_population()
-        consist.log_dataframe(df_pop, key="population", schema=Population)
-    
-    for year in [2020, 2030, 2040]:
-        with sc.trace(name="simulate", run_id=f"baseline_{year}", year=year):
-            df_result = run_model(year)
-            consist.log_dataframe(df_result, key="persons", schema=Person)
+        with sc.trace(name="initialize", run_id="baseline_init"):
+            df_pop = load_population()
+            consist.log_dataframe(df_pop, key="population", schema=Population)
+
+        for year in [2020, 2030, 2040]:
+            with sc.trace(name="simulate", run_id=f"baseline_{year}", year=year):
+                df_result = run_model(year)
+                consist.log_dataframe(df_result, key="persons", schema=Person)
 ```
 
 All steps share the same `scenario_id`, making cross-scenario queries straightforward.
@@ -102,24 +106,24 @@ Use the coupler to track artifacts flowing between steps:
 See: [Example notebooks](examples.md#tutorial-series).
 
 ```python
-with consist.scenario(
-    "baseline",
-    tracker=tracker,
-    step_cache_hydration="inputs-missing",
-) as sc:
-    coupler = sc.coupler
-    
-    with sc.trace(name="preprocess"):
-        df = preprocess_data()
-        art = consist.log_dataframe(df, key="processed")
-        coupler.set("data", art)
-    
-    # Declare upstream artifacts as step inputs so caching and provenance are correct.
-    # `input_keys=[...]` avoids repeating `coupler.require(...)` in `inputs=[...]`.
-    # Use `optional_input_keys=[...]` to include artifacts only if they already exist.
-    with sc.trace(name="simulate", input_keys=["data"]):
-        df = consist.load(coupler.require("data"))
-        # ... simulation logic ...
+with use_tracker(tracker):
+    with consist.scenario(
+        "baseline",
+        step_cache_hydration="inputs-missing",
+    ) as sc:
+        coupler = sc.coupler
+
+        with sc.trace(name="preprocess"):
+            df = preprocess_data()
+            art = consist.log_dataframe(df, key="processed")
+            coupler.set("data", art)
+
+        # Declare upstream artifacts as step inputs so caching and provenance are correct.
+        # `input_keys=[...]` avoids repeating `coupler.require(...)` in `inputs=[...]`.
+        # Use `optional_input_keys=[...]` to include artifacts only if they already exist.
+        with sc.trace(name="simulate", input_keys=["data"]):
+            df = consist.load(coupler.require("data"))
+            # ... simulation logic ...
 ```
 
 ### Cache Hydration Options
@@ -160,21 +164,22 @@ rows = consist.run_query(
 
 ### Mixing Runs and Scenarios
 
-Call `tracker.run(...)` inside a scenario when a step should be cached independently:
+Call `consist.run(...)` inside a scenario when a step should be cached independently:
 
 ```python
 def expensive_preprocessing(network_file: Path):
     ...
     return {"processed": processed_df}
 
-with consist.scenario("baseline", tracker=tracker) as sc:
-    preprocess = tracker.run(
-        fn=expensive_preprocessing,
-        inputs={"network_file": Path("network.geojson")},
-        outputs=["processed"],
-        load_inputs=True,
-    )
-    sc.coupler.update(preprocess.outputs)
+with use_tracker(tracker):
+    with consist.scenario("baseline") as sc:
+        preprocess = consist.run(
+            fn=expensive_preprocessing,
+            inputs={"network_file": Path("network.geojson")},
+            outputs=["processed"],
+            load_inputs=True,
+        )
+        sc.coupler.update(preprocess.outputs)
 ```
 
 ### Function-Shaped Scenario Steps (Skip on Cache Hit)
@@ -184,15 +189,16 @@ If you want Consist to *skip* calling an expensive function/bound method on cach
 still hydrating cached outputs into the Coupler), use `sc.run(...)`:
 
 ```python
-with consist.scenario("baseline", tracker=tracker) as sc:
-    sc.run(
-        name="beam_preprocess",
-        fn=beamPreprocessor.run,  # imported function or bound method
-        inputs={"data": "data"},
-        output_paths={"beam_inputs": "beam_inputs.parquet"},
-        load_inputs=False,
-    )
-    beam_inputs = sc.coupler.require("beam_inputs")
+with use_tracker(tracker):
+    with consist.scenario("baseline") as sc:
+        sc.run(
+            name="beam_preprocess",
+            fn=beamPreprocessor.run,  # imported function or bound method
+            inputs={"data": "data"},
+            output_paths={"beam_inputs": "beam_inputs.parquet"},
+            load_inputs=False,
+        )
+        beam_inputs = sc.coupler.require("beam_inputs")
 ```
 
 ---

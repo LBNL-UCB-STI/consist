@@ -43,12 +43,16 @@ When Consist cannot find a matching cached result, so the function must execute.
 Dictionary of parameters that affect computation, and are included in the cache signature. Example:
 
 ```python
-tracker.run(
-    fn=my_model,
-    config={"year": 2030, "scenario": "baseline"},  # Part of signature
-    inputs={...},
-    outputs=[...]
-)
+import consist
+from consist import use_tracker
+
+with use_tracker(tracker):
+    consist.run(
+        fn=my_model,
+        config={"year": 2030, "scenario": "baseline"},  # Part of signature
+        inputs={...},
+        outputs=[...]
+    )
 ```
 
 Changing config invalidates cache and triggers re-execution. Config is hashed (not stored as-is) to allow large nested dictionaries.
@@ -83,13 +87,17 @@ A small, queryable piece of metadata extracted from config. Unlike config (which
 
 **Example**:
 ```python
-tracker.run(
-    fn=my_model,
-    config={"huge_model_config": ...},  # Not queryable directly (too large)
-    facet={"year": 2030, "scenario": "baseline"},  # Indexed and queryable
-    inputs={...},
-    outputs=[...]
-)
+import consist
+from consist import use_tracker
+
+with use_tracker(tracker):
+    consist.run(
+        fn=my_model,
+        config={"huge_model_config": ...},  # Not queryable directly (too large)
+        facet={"year": 2030, "scenario": "baseline"},  # Indexed and queryable
+        inputs={...},
+        outputs=[...]
+    )
 
 # Later: query all 2030 runs
 df = tracker.find_runs(facet_year=2030)
@@ -185,12 +193,16 @@ A single execution of a tracked function or workflow step. A run records:
 
 **Example**:
 ```python
-result = tracker.run(
-    fn=clean_data,
-    inputs={"raw_path": "raw.csv"},
-    config={"threshold": 0.5},
-    outputs=["cleaned"],
-)
+import consist
+from consist import use_tracker
+
+with use_tracker(tracker):
+    result = consist.run(
+        fn=clean_data,
+        inputs={"raw_path": "raw.csv"},
+        config={"threshold": 0.5},
+        outputs=["cleaned"],
+    )
 ```
 
 This creates a Run with one input artifact, one config dict, and one output artifact.
@@ -267,4 +279,3 @@ A SQL view that combines:
 Hybrid views let you query across runs without requiring all data to be ingested, reducing storage overhead.
 
 **See also**: Ingestion, Virtualization
-

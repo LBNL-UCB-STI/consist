@@ -7,7 +7,7 @@ Consist uses intelligent caching to skip redundant computation. This page explai
 Consist computes a fingerprint (signature) from three components:
 
 1. **Your function's code** – Git commit hash + local modifications
-2. **Configuration** – The `config` dict you pass to `tracker.run()`
+2. **Configuration** – The `config` dict you pass to `consist.run()`
 3. **Input files** – SHA256 hashes of files in the `inputs` dict
 
 If you run the same function with the same code, config, and inputs, the signature is identical. When Consist sees an identical signature, it returns the cached result from a previous run instead of re-executing.
@@ -15,35 +15,41 @@ If you run the same function with the same code, config, and inputs, the signatu
 ## Example
 
 ```python
-# First run
-result1 = tracker.run(
-    fn=clean_data,
-    inputs={"raw_df": "data.csv"},      # Hash of data.csv
-    config={"threshold": 0.5},          # Hash of this config
-    outputs=["cleaned"],
-)
+import consist
+from consist import Tracker, use_tracker
+
+tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+
+with use_tracker(tracker):
+    # First run
+    result1 = consist.run(
+        fn=clean_data,
+        inputs={"raw_df": "data.csv"},      # Hash of data.csv
+        config={"threshold": 0.5},          # Hash of this config
+        outputs=["cleaned"],
+    )
 # Signature: SHA256("clean_data_v1" + "threshold:0.5" + "data.csv_hash")
 # Output: executed, returned new result
 
 
-# Second run with identical inputs/config
-result2 = tracker.run(
-    fn=clean_data,
-    inputs={"raw_df": "data.csv"},      # Same hash
-    config={"threshold": 0.5},          # Same hash
-    outputs=["cleaned"],
-)
+    # Second run with identical inputs/config
+    result2 = consist.run(
+        fn=clean_data,
+        inputs={"raw_df": "data.csv"},      # Same hash
+        config={"threshold": 0.5},          # Same hash
+        outputs=["cleaned"],
+    )
 # Signature: same as above
 # Output: cache hit! Result returned instantly without execution
 
 
-# Third run with different config
-result3 = tracker.run(
-    fn=clean_data,
-    inputs={"raw_df": "data.csv"},      # Same hash
-    config={"threshold": 0.8},          # Different hash!
-    outputs=["cleaned"],
-)
+    # Third run with different config
+    result3 = consist.run(
+        fn=clean_data,
+        inputs={"raw_df": "data.csv"},      # Same hash
+        config={"threshold": 0.8},          # Different hash!
+        outputs=["cleaned"],
+    )
 # Signature: different (config changed)
 # Output: cache miss, function executes, new run recorded
 ```

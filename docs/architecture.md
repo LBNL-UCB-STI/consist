@@ -226,13 +226,17 @@ Events are emitted but failures in hooks don't crash the run—they're logged an
 
 ## Context Stack
 
-Consist maintains a thread-local stack of active trackers, allowing nested contexts and implicit tracker resolution:
+Consist maintains a context-local stack of active trackers, allowing nested contexts and implicit tracker resolution:
 
 ```python
-with tracker.scenario("baseline") as sc:
-    # consist.log_artifact() finds the active tracker automatically
-    with sc.step(name="simulate"):
-        consist.log_dataframe(df, key="results")  # No tracker= needed
+import consist
+from consist import use_tracker
+
+with use_tracker(tracker):
+    with consist.scenario("baseline") as sc:
+        # consist.log_artifact() finds the active tracker automatically
+        with sc.step(name="simulate"):
+            consist.log_dataframe(df, key="results")  # No tracker= needed
 ```
 
 This enables clean APIs where most functions don't require explicit tracker parameters.

@@ -46,11 +46,23 @@ def reset_context():
     Automatically resets the global Consist context before and after each test.
     This prevents state (like active runs) from leaking between tests.
     """
-    if hasattr(context, "_TRACKER_STACK"):
+    if hasattr(context, "_TRACKER_STACK") and hasattr(context._TRACKER_STACK, "set"):
+        context._TRACKER_STACK.set(())
+    elif hasattr(context, "_TRACKER_STACK"):
         context._TRACKER_STACK.clear()
+    if hasattr(context, "_DEFAULT_TRACKER") and hasattr(
+        context._DEFAULT_TRACKER, "set"
+    ):
+        context._DEFAULT_TRACKER.set(None)
     yield
-    if hasattr(context, "_TRACKER_STACK"):
+    if hasattr(context, "_TRACKER_STACK") and hasattr(context._TRACKER_STACK, "set"):
+        context._TRACKER_STACK.set(())
+    elif hasattr(context, "_TRACKER_STACK"):
         context._TRACKER_STACK.clear()
+    if hasattr(context, "_DEFAULT_TRACKER") and hasattr(
+        context._DEFAULT_TRACKER, "set"
+    ):
+        context._DEFAULT_TRACKER.set(None)
 
 
 @pytest.fixture(autouse=True)
