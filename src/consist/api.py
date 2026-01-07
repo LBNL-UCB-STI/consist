@@ -18,7 +18,7 @@ from typing import (
 )
 
 import pandas as pd
-from sqlalchemy import MetaData, Table, case, func, select as sa_select, Subquery
+from sqlalchemy import MetaData, Table, and_, case, func, select as sa_select, Subquery
 from sqlalchemy.sql import Executable
 from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import SQLModel, Session, select
@@ -620,6 +620,125 @@ def run_query(query: Executable, tracker: Optional["Tracker"] = None) -> list:
     tr = tracker or current_tracker()
     with Session(tr.engine) as session:
         return session.exec(query).all()
+
+
+def config_run_query(
+    table: Type[SQLModel],
+    *,
+    link_table: Type[SQLModel],
+    table_name: Optional[str] = None,
+    columns: Optional[Iterable[Any]] = None,
+    where: Optional[Union[Iterable[Any], Any]] = None,
+    join_on: Optional[Iterable[str]] = None,
+) -> Executable:
+    """
+    Build a query joining a config cache table to its run-link table.
+
+    This is a convenience helper for config adapter tables that are deduplicated
+    by content hash and linked to runs via a separate link table.
+
+    Parameters
+    ----------
+    table : Type[SQLModel]
+        Config cache table to query (e.g., ActivitySimCoefficientsCache).
+    link_table : Type[SQLModel]
+        Link table storing run_id/content_hash (e.g., ActivitySimConfigIngestRunLink).
+    table_name : Optional[str], optional
+        Optional filter for link_table.table_name. Defaults to table.__tablename__
+        if link_table has a table_name column.
+    columns : Optional[Iterable[Any]], optional
+        Columns to select. Defaults to (link_table.run_id, table).
+    where : Optional[Union[Iterable[Any], Any]], optional
+        Optional filter clauses to apply to the query.
+    join_on : Optional[Iterable[str]], optional
+        Column names to join on. Defaults to content_hash and file_name when available.
+
+    Returns
+    -------
+    Executable
+        SQL query joining the config table to runs.
+    """
+    if columns is None:
+        if not hasattr(link_table, "run_id"):
+            raise ValueError(
+                "config_run_query requires link_table to have a run_id column "
+                "when columns is not specified."
+            )
+        columns_list = [link_table.run_id, table]
+    else:
+        if isinstance(columns, (list, tuple, set)):
+            columns_list = list(columns)
+        else:
+            columns_list = [columns]
+        if not columns_list:
+            raise ValueError("config_run_query requires at least one column.")
+
+    if join_on is None:
+        join_on = ["content_hash"]
+        if hasattr(table, "file_name") and hasattr(link_table, "file_name"):
+            join_on.append("file_name")
+    else:
+        join_on = list(join_on)
+        if not join_on:
+            raise ValueError("config_run_query join_on requires at least one column.")
+
+    join_clauses = []
+    for column in join_on:
+        if not hasattr(table, column) or not hasattr(link_table, column):
+            raise ValueError(
+                f"config_run_query join_on column {column!r} must exist on table and link_table."
+            )
+        join_clauses.append(getattr(table, column) == getattr(link_table, column))
+
+    stmt = (
+        select(*columns_list).select_from(table).join(link_table, and_(*join_clauses))
+    )
+
+    resolved_table_name = table_name
+    if resolved_table_name is None and hasattr(link_table, "table_name"):
+        resolved_table_name = getattr(table, "__tablename__", None)
+    if resolved_table_name is not None:
+        if not hasattr(link_table, "table_name"):
+            raise ValueError(
+                "config_run_query table_name provided but link_table has no table_name column."
+            )
+        stmt = stmt.where(getattr(link_table, "table_name") == resolved_table_name)
+
+    if where is not None:
+        if isinstance(where, (list, tuple, set)):
+            clauses = list(where)
+        else:
+            clauses = [where]
+        for clause in clauses:
+            stmt = stmt.where(clause)
+
+    return stmt
+
+
+def config_run_rows(
+    table: Type[SQLModel],
+    *,
+    link_table: Type[SQLModel],
+    table_name: Optional[str] = None,
+    columns: Optional[Iterable[Any]] = None,
+    where: Optional[Union[Iterable[Any], Any]] = None,
+    join_on: Optional[Iterable[str]] = None,
+    tracker: Optional["Tracker"] = None,
+) -> list:
+    """
+    Execute a config run query and return rows.
+
+    This is a convenience wrapper around ``config_run_query`` + ``run_query``.
+    """
+    query = config_run_query(
+        table,
+        link_table=link_table,
+        table_name=table_name,
+        columns=columns,
+        where=where,
+        join_on=join_on,
+    )
+    return run_query(query, tracker=tracker)
 
 
 def pivot_facets(

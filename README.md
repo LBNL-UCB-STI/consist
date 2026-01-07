@@ -122,45 +122,56 @@ See [CLI Reference](docs/cli-reference.md) for `consist show`, `consist scenario
 
 ## Model-Specific Configuration Tracking
 
-For complex, file-based model configurations (YAML hierarchies, CSV parameters), Consist provides **config adapters** that automatically discover, canonicalize, and make configurations queryable.
+For complex, file-based model configurations (YAML hierarchies, CSV parameters), Consist provides **config adapters** that automatically discover, canonicalize, and make configurations queryable. See [Config Adapters Integration Guide](docs/integrations/config_adapters.md) for details.
 
-**ActivitySim Example:**
-
-Track how calibration parameters change across scenarios:
+<details>
+<summary>ActivitySim example (config adapters + cached runs)</summary>
 
 ```python
+from pathlib import Path
+import argparse
+
+from activitysim.cli.run import add_run_args, run as run_activitysim_cli
+from consist import Tracker
 from consist.integrations.activitysim import ActivitySimConfigAdapter
-from consist.models.activitysim import ActivitySimCoefficientsCache
-from sqlmodel import Session, select
 
-adapter = ActivitySimConfigAdapter()
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+adapter = ActivitySimConfigAdapter()
 
-# Baseline scenario: discover and ingest config
-tracker.begin_run("baseline", "activitysim")
-tracker.canonicalize_config(adapter, ["configs/base"], ingest=True)
-tracker.end_run()
+def run_activitysim(config_dir: Path, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    parser = argparse.ArgumentParser()
+    add_run_args(parser)
+    args = parser.parse_args(["-c", str(config_dir), "-o", str(output_dir)])
+    run_activitysim_cli(args)
 
-# Sensitivity test: adjusted coefficients
-tracker.begin_run("time_coeff_1.5", "activitysim")
-tracker.canonicalize_config(adapter, ["configs/adjusted"], ingest=True)
-tracker.end_run()
+def run_scenario(name: str, config_dir: Path) -> None:
+    output_dir = tracker.run_dir / "activitysim_outputs" / name
+    plan = tracker.prepare_config(adapter, [config_dir])
+    tracker.run(
+        fn=run_activitysim,
+        name="activitysim",
+        run_id=f"activitysim_{name}",
+        config={"scenario": name},
+        config_plan=plan,  # plan hash participates in cache identity
+        runtime_kwargs={"config_dir": config_dir, "output_dir": output_dir},
+        capture_dir=output_dir,
+        cache_mode="reuse",
+    )
+
+run_scenario("baseline", Path("./configs/base"))
+run_scenario("time_coeff_1.5", Path("./configs/adjusted"))
 
 # Query: which runs used which coefficients?
-with Session(tracker.engine) as session:
-    time_coeff_runs = session.exec(
-        select(ActivitySimCoefficientsCache)
-        .where(ActivitySimCoefficientsCache.coefficient_name == "time")
-    ).all()
-    for row in time_coeff_runs:
-        print(f"Run: {row.consist_run_id}, Time coefficient: {row.value_num}")
+time_coeff_runs = adapter.coefficients_by_run(
+    coefficient="time",
+    collapse="first",
+    tracker=tracker,
+)
+for run_id, value in time_coeff_runs.items():
+    print(f"Run: {run_id}, Time coefficient: {value}")
 ```
-
-Config adapters handle:
-- **Automatic discovery** of YAML inheritance and CSV references
-- **Content hashing** for config-based run identity
-- **Queryable tables** for calibration-sensitive parameters (constants, coefficients, probabilities)
-- **Config bundling** for reproducibility and scenario materialization
+</details>
 
 See [Config Adapters Integration Guide](docs/integrations/config_adapters.md) for ActivitySim details, best practices, and examples.
 

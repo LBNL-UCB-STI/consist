@@ -1021,16 +1021,140 @@ class Tracker:
         """
         Execute a function-shaped run with caching and output handling.
 
+        This method executes a callable (or container) with automatic provenance tracking,
+        intelligent caching based on code+config+inputs, and artifact logging.
+
         Parameters
         ----------
-        config_plan : Optional[ConfigPlan]
-            Optional precomputed config plan to apply to the run. The plan's identity
-            hash is folded into the run config hash and its artifacts/ingestables are
-            applied once the run starts (skipped on cache hits).
+        fn : Optional[Callable]
+            The function to execute. Required for executor='python'. Can be None for executor='container'.
+        name : Optional[str]
+            Human-readable name for the run. Defaults to function name if not provided.
+        run_id : Optional[str], optional
+            Unique identifier for this run. Auto-generated if not provided.
+        model : Optional[str], optional
+            Model/component name for categorizing runs. Defaults to the run name.
+        description : Optional[str], optional
+            Human-readable description of the run.
+        config : Optional[Dict[str, Any]], optional
+            Configuration parameters. Becomes part of the cache signature. Can be a dict or Pydantic model.
+        config_plan : Optional[ConfigPlan], optional
+            Precomputed config plan (e.g., from ActivitySim adapter). The plan's identity hash
+            is folded into the run config hash and its artifacts/ingestables are applied on cache miss.
         config_plan_ingest : bool, default True
             Whether to ingest tables from the config plan.
         config_plan_profile_schema : bool, default False
             Whether to profile ingested schemas for the config plan.
+        inputs : Optional[Mapping[str, ArtifactRef] | Iterable[ArtifactRef]], optional
+            Input files or artifacts.
+            - Dict: Maps names to paths/Artifacts. Auto-loads into function parameters (default load_inputs=True).
+            - List/Iterable: Hashed for cache key but not auto-loaded (use load_inputs=False).
+        input_keys : Optional[Iterable[str] | str], optional
+            Deprecated. Use `inputs` mapping instead.
+        optional_input_keys : Optional[Iterable[str] | str], optional
+            Deprecated. Use `inputs` mapping instead.
+        depends_on : Optional[List[ArtifactRef]], optional
+            Additional file paths or artifacts to hash for the cache signature (e.g., config files).
+
+        tags : Optional[List[str]], optional
+            Labels for filtering and organizing runs (e.g., ["production", "baseline"]).
+        facet : Optional[FacetLike], optional
+            Queryable metadata facets (small config values) logged to the run.
+        facet_from : Optional[List[str]], optional
+            List of config keys to extract and log as facets.
+        facet_schema_version : Optional[Union[str, int]], optional
+            Schema version for facet compatibility tracking.
+        facet_index : Optional[bool], optional
+            Whether to index facets for faster queries.
+
+        hash_inputs : Optional[HashInputs], optional
+            Strategy for hashing inputs: "fast" (mtime), "full" (content), or None (auto-detect).
+
+        year : Optional[int], optional
+            Year metadata (for multi-year simulations). Included in provenance.
+        iteration : Optional[int], optional
+            Iteration count (for iterative workflows). Included in provenance.
+        parent_run_id : Optional[str], optional
+            Parent run ID (for nested runs in scenarios).
+
+        outputs : Optional[List[str]], optional
+            Names of output artifacts to log (for executor='python' with auto-loaded DataFrames).
+            Maps artifact key to ingested table name.
+        output_paths : Optional[Mapping[str, ArtifactRef]], optional
+            Output file paths to log. Dict maps artifact keys to host paths or Artifact refs.
+        capture_dir : Optional[Path], optional
+            Directory to scan for outputs (legacy tools that write to specific dirs).
+        capture_pattern : str, default "*"
+            Glob pattern for capturing outputs (used with capture_dir).
+
+        cache_mode : str, default "reuse"
+            Cache behavior: "reuse" (return cache hit), "overwrite" (always re-execute), or "skip_check".
+        cache_hydration : Optional[str], optional
+            Materialization strategy for cache hits:
+            - "outputs-requested": Copy only output_paths to disk
+            - "outputs-all": Copy all cached outputs to run_artifact_dir
+            - "inputs-missing": Backfill missing inputs from prior runs before executing
+        validate_cached_outputs : str, default "lazy"
+            Validation for cached outputs: "lazy" (check if files exist), "strict", or "none".
+
+        load_inputs : Optional[bool], optional
+            Whether to auto-load input artifacts into function parameters.
+            Defaults to True if inputs is a dict, False if a list.
+        executor : str, default "python"
+            Execution backend: "python" (call fn directly) or "container" (use Docker/Singularity).
+        container : Optional[Mapping[str, Any]], optional
+            Container spec (required if executor='container'). Must contain 'image' and 'command'.
+        runtime_kwargs : Optional[Dict[str, Any]], optional
+            Additional kwargs to pass to fn at runtime (merged with auto-loaded inputs).
+        inject_context : bool | str, optional
+            If True or a parameter name, inject a RunContext as that parameter (for file I/O, output logging).
+
+        output_mismatch : str, default "warn"
+            Behavior when output count doesn't match: "warn", "error", or "ignore".
+        output_missing : str, default "warn"
+            Behavior when expected outputs are missing: "warn", "error", or "ignore".
+
+        Returns
+        -------
+        RunResult
+            Contains:
+            - `outputs`: Dict[str, Artifact] of logged output artifacts
+            - `cache_hit`: bool indicating if this was a cache hit
+            - `run_id`: The run's unique identifier
+
+        Raises
+        ------
+        ValueError
+            If fn is None (for executor='python'), or if container/output_paths not provided for executor='container'.
+        RuntimeError
+            If the function execution fails or container execution returns non-zero code.
+
+        Examples
+        --------
+        Simple data processing:
+
+        >>> def clean_data(raw: pd.DataFrame) -> pd.DataFrame:
+        ...     return raw[raw['value'] > 0.5]
+        >>>
+        >>> result = tracker.run(
+        ...     fn=clean_data,
+        ...     inputs={"raw": Path("raw.csv")},
+        ...     outputs=["cleaned"],
+        ... )
+
+        With config for cache distinction:
+
+        >>> result = tracker.run(
+        ...     fn=clean_data,
+        ...     inputs={"raw": Path("raw.csv")},
+        ...     config={"threshold": 0.5},
+        ...     outputs=["cleaned"],
+        ... )
+
+        See Also
+        --------
+        start_run : Manual run context management (more control)
+        trace : Context manager alternative (always executes, even on cache hit)
         """
         if executor not in {"python", "container"}:
             raise ValueError("Tracker.run supports executor='python' or 'container'.")
@@ -1556,18 +1680,137 @@ class Tracker:
         output_missing: str = "warn",
     ) -> Iterator["Tracker"]:
         """
-        Manual tracing context manager for a run.
+        Context manager for inline tracing of a run with inline execution.
+
+        This context manager allows you to define a run directly within a `with` block,
+        with the Python code inside executing every time (even on cache hits). This differs
+        from `tracker.run()`, which skips execution on cache hits.
+
+        Use `trace()` when you need inline control: for data loading, file I/O, or
+        integrations that require code execution regardless of cache state.
 
         Parameters
         ----------
-        config_plan : Optional[ConfigPlan]
-            Optional precomputed config plan to apply to the run. The plan's identity
-            hash is folded into the run config hash and its artifacts/ingestables are
-            applied once the run starts (skipped on cache hits).
+        name : str
+            Human-readable name for the run. Also defaults the model name if not provided.
+        run_id : Optional[str], optional
+            Unique identifier for this run. Auto-generated if not provided.
+        model : Optional[str], optional
+            Model/component name for categorizing runs. Defaults to the run name.
+        description : Optional[str], optional
+            Human-readable description of the run.
+        config : Optional[Dict[str, Any]], optional
+            Configuration parameters. Becomes part of the cache signature. Can be a dict or Pydantic model.
+        config_plan : Optional[ConfigPlan], optional
+            Precomputed config plan (e.g., from ActivitySim adapter). The plan's identity hash
+            is folded into the run config hash and its artifacts/ingestables are applied on cache miss.
         config_plan_ingest : bool, default True
             Whether to ingest tables from the config plan.
         config_plan_profile_schema : bool, default False
             Whether to profile ingested schemas for the config plan.
+
+        inputs : Optional[Mapping[str, ArtifactRef] | Iterable[ArtifactRef]], optional
+            Input files or artifacts.
+            - Dict: Maps names to paths/Artifacts. Logged as inputs but not auto-loaded.
+            - List/Iterable: Hashed for cache key but not auto-loaded.
+        input_keys : Optional[Iterable[str] | str], optional
+            Deprecated. Use `inputs` mapping instead.
+        optional_input_keys : Optional[Iterable[str] | str], optional
+            Deprecated. Use `inputs` mapping instead.
+        depends_on : Optional[List[ArtifactRef]], optional
+            Additional file paths or artifacts to hash for the cache signature (e.g., config files).
+
+        tags : Optional[List[str]], optional
+            Labels for filtering and organizing runs (e.g., ["production", "baseline"]).
+        facet : Optional[FacetLike], optional
+            Queryable metadata facets (small config values) logged to the run.
+        facet_from : Optional[List[str]], optional
+            List of config keys to extract and log as facets.
+        facet_schema_version : Optional[Union[str, int]], optional
+            Schema version for facet compatibility tracking.
+        facet_index : Optional[bool], optional
+            Whether to index facets for faster queries.
+
+        hash_inputs : Optional[HashInputs], optional
+            Strategy for hashing inputs: "fast" (mtime), "full" (content), or None (auto-detect).
+
+        year : Optional[int], optional
+            Year metadata (for multi-year simulations). Included in provenance.
+        iteration : Optional[int], optional
+            Iteration count (for iterative workflows). Included in provenance.
+        parent_run_id : Optional[str], optional
+            Parent run ID (for nested runs in scenarios).
+
+        outputs : Optional[List[str]], optional
+            Names of output artifacts to log. Each item is a key name for logged outputs.
+        output_paths : Optional[Mapping[str, ArtifactRef]], optional
+            Output file paths to log. Dict maps artifact keys to host paths or Artifact refs.
+        capture_dir : Optional[Path], optional
+            Directory to scan for outputs. New/modified files are auto-logged.
+        capture_pattern : str, default "*"
+            Glob pattern for capturing outputs (used with capture_dir).
+
+        cache_mode : str, default "reuse"
+            Cache behavior: "reuse" (return cache hit), "overwrite" (always re-execute), or "skip_check".
+        cache_hydration : Optional[str], optional
+            Materialization strategy for cache hits:
+            - "outputs-requested": Copy only output_paths to disk
+            - "outputs-all": Copy all cached outputs to run_artifact_dir
+            - "inputs-missing": Backfill missing inputs from prior runs before executing
+        validate_cached_outputs : str, default "lazy"
+            Validation for cached outputs: "lazy" (check if files exist), "strict", or "none".
+
+        output_mismatch : str, default "warn"
+            Behavior when output count doesn't match: "warn", "error", or "ignore".
+        output_missing : str, default "warn"
+            Behavior when expected outputs are missing: "warn", "error", or "ignore".
+
+        Yields
+        ------
+        Tracker
+            The current `Tracker` instance for use within the `with` block.
+
+        Raises
+        ------
+        ValueError
+            If output_mismatch or output_missing are invalid values.
+        RuntimeError
+            If output validation fails based on validation settings.
+
+        Notes
+        -----
+        Unlike `tracker.run()`, the Python code inside a `trace()` block ALWAYS executes,
+        even on cache hits. This is useful for side effects, data loading, or code that
+        should run regardless of cache state.
+
+        If you want to skip execution on cache hits (like `tracker.run()`), consider using
+        `tracker.run()` with a callable instead.
+
+        Examples
+        --------
+        Simple inline tracing with file capture:
+
+        >>> with tracker.trace(
+        ...     "my_analysis",
+        ...     output_paths={"results": "./results.csv"}
+        ... ):
+        ...     df = pd.read_csv("raw.csv")
+        ...     df["value"] = df["value"] * 2
+        ...     df.to_csv("./results.csv", index=False)
+
+        Multi-year simulation:
+
+        >>> with tracker.scenario("baseline") as sc:
+        ...     for year in [2020, 2030, 2040]:
+        ...         with sc.trace(name="simulate", year=year):
+        ...             results = run_model(year)
+        ...             tracker.log_artifact(results, key="output")
+
+        See Also
+        --------
+        run : Function-shaped alternative (skips on cache hit)
+        scenario : Multi-step workflow grouping
+        start_run : Imperative alternative for run lifecycle management
         """
         resolved_model = model or name
 
