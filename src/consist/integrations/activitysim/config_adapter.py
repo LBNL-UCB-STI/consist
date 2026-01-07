@@ -443,7 +443,7 @@ class ActivitySimConfigAdapter:
         for csv_path in referenced:
             file_name = csv_path.name
             key = _artifact_key_for_path(csv_path, config.root_dirs)
-            file_hash = _digest_path(csv_path, tracker)
+            file_hash = _digest_path_with_name(csv_path, tracker)
             if _is_probabilities_file(file_name):
                 ingestables.extend(
                     self._build_probabilities_ingest_specs(
@@ -1465,6 +1465,15 @@ def _digest_path(path: Path, tracker: Optional["Tracker"]) -> str:
     if tracker is not None:
         return tracker.identity.digest_path(path)
     return _file_sha256(path)
+
+
+def _digest_path_with_name(path: Path, tracker: Optional["Tracker"]) -> str:
+    content_hash = _digest_path(path, tracker)
+    digest = hashlib.sha256()
+    digest.update(path.name.encode("utf-8"))
+    digest.update(b":")
+    digest.update(content_hash.encode("utf-8"))
+    return digest.hexdigest()
 
 
 def _file_sha256(path: Path) -> str:

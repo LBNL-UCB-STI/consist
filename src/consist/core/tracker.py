@@ -1155,6 +1155,7 @@ class Tracker:
             config_for_run["__consist_config_plan__"] = {
                 "adapter": config_plan.adapter_name,
                 "hash": config_plan.identity_hash,
+                "adapter_version": config_plan.adapter_version,
             }
 
         start_kwargs: Dict[str, Any] = {
@@ -1643,6 +1644,7 @@ class Tracker:
             config_for_run["__consist_config_plan__"] = {
                 "adapter": config_plan.adapter_name,
                 "hash": config_plan.identity_hash,
+                "adapter_version": config_plan.adapter_version,
             }
 
         start_kwargs: Dict[str, Any] = {

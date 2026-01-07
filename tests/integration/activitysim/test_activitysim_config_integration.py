@@ -192,6 +192,37 @@ def test_activitysim_config_plan_apply(tracker, tmp_path: Path):
     assert matches, "Expected facet lookup to find the run by auto_time."
 
 
+def test_activitysim_config_plan_run_applies_ingest(tracker, tmp_path: Path):
+    adapter = ActivitySimConfigAdapter()
+    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path)
+
+    plan = tracker.prepare_config(
+        adapter,
+        [overlay_dir, base_dir],
+        strict=True,
+    )
+
+    tracker.run(
+        fn=lambda: None,
+        name="activitysim_plan_run",
+        model="activitysim",
+        config_plan=plan,
+        cache_mode="overwrite",
+    )
+
+    if tracker.engine is None:
+        raise AssertionError("Tracker engine missing; DB tests require DuckDB.")
+
+    with Session(tracker.engine) as session:
+        rows = session.exec(
+            select(ActivitySimConstantsCache).where(
+                ActivitySimConstantsCache.key == "sample_rate"
+            )
+        ).all()
+
+    assert rows, "Expected config plan ingest during Tracker.run."
+
+
 def test_activitysim_template_refs_ingested(tracker, tmp_path: Path):
     from consist.models.activitysim import ActivitySimCoefficientTemplateRefsCache
 

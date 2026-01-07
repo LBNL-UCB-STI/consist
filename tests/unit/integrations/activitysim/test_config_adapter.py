@@ -8,6 +8,7 @@ import yaml
 import pytest
 
 from consist.integrations.activitysim import ActivitySimConfigAdapter, ConfigOverrides
+from consist.integrations.activitysim.config_adapter import _digest_path_with_name
 from tests.helpers.activitysim_fixtures import build_activitysim_test_configs
 
 
@@ -98,6 +99,20 @@ def test_canonicalize_builds_ingestables_and_constants(tracker, tmp_path: Path):
         "activitysim_probabilities_meta_entries_cache",
         "activitysim_config_ingest_run_link",
     }
+
+
+def test_digest_includes_file_name(tmp_path: Path):
+    file_a = tmp_path / "same_a.csv"
+    file_b = tmp_path / "same_b.csv"
+    payload = "a,b\n1,2\n"
+
+    file_a.write_text(payload)
+    file_b.write_text(payload)
+
+    hash_a = _digest_path_with_name(file_a, tracker=None)
+    hash_b = _digest_path_with_name(file_b, tracker=None)
+
+    assert hash_a != hash_b
 
 
 def test_prepare_config_plan_builds_row_factories(tracker, tmp_path: Path):

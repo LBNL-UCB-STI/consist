@@ -2,7 +2,25 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
 from consist.core.tracker import Tracker
+
+
+def _dummy_config_plan(*, adapter_version: str) -> ConfigPlan:
+    canonical = CanonicalConfig(
+        root_dirs=[],
+        primary_config=None,
+        config_files=[],
+        external_files=[],
+        content_hash="plan_hash",
+    )
+    return ConfigPlan(
+        adapter_name="dummy",
+        adapter_version=adapter_version,
+        canonical=canonical,
+        artifacts=[],
+        ingestables=[],
+    )
 
 
 def test_scenario_lifecycle(tracker: Tracker):
@@ -192,3 +210,46 @@ def test_step_default_path_includes_model_name(tracker: Tracker):
         abs_path.parent
         == tracker.run_dir / "outputs" / "scen_model_dir" / "model_x" / "iteration_2"
     )
+
+
+def test_run_config_plan_includes_adapter_version(tracker: Tracker):
+    plan_v1 = _dummy_config_plan(adapter_version="1.0")
+    tracker.run(
+        fn=lambda: None,
+        name="plan_run_v1",
+        config_plan=plan_v1,
+        cache_mode="overwrite",
+    )
+    record_v1 = tracker.last_run
+    assert record_v1 is not None
+    assert (
+        record_v1.config["__consist_config_plan__"]["adapter_version"] == "1.0"
+    )
+    hash_v1 = record_v1.run.config_hash
+
+    plan_v2 = _dummy_config_plan(adapter_version="2.0")
+    tracker.run(
+        fn=lambda: None,
+        name="plan_run_v2",
+        config_plan=plan_v2,
+        cache_mode="overwrite",
+    )
+    record_v2 = tracker.last_run
+    assert record_v2 is not None
+    hash_v2 = record_v2.run.config_hash
+
+    assert hash_v1 != hash_v2
+
+
+def test_scenario_run_with_config_plan(tracker: Tracker):
+    plan = _dummy_config_plan(adapter_version="3.1")
+    with tracker.scenario("scen_plan") as sc:
+        sc.run(
+            fn=lambda: None,
+            name="step",
+            config_plan=plan,
+            cache_mode="overwrite",
+        )
+        record = tracker.last_run
+        assert record is not None
+        assert record.config["__consist_config_plan__"]["adapter_version"] == "3.1"
