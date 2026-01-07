@@ -14,6 +14,15 @@ from consist.models.artifact_schema import (
 from consist.models.config_facet import ConfigFacet
 from consist.models.run import Run
 from consist.models.run_config_kv import RunConfigKV
+from consist.models.activitysim import (
+    ActivitySimCoefficientsCache,
+    ActivitySimCoefficientTemplateRefsCache,
+    ActivitySimConfigIngestRunLink,
+    ActivitySimConstantsCache,
+    ActivitySimProbabilitiesCache,
+    ActivitySimProbabilitiesEntriesCache,
+    ActivitySimProbabilitiesMetaEntriesCache,
+)
 
 __all__ = [
     "Artifact",
@@ -21,6 +30,13 @@ __all__ = [
     "ArtifactSchemaField",
     "ArtifactSchemaObservation",
     "ConfigFacet",
+    "ActivitySimConstantsCache",
+    "ActivitySimCoefficientsCache",
+    "ActivitySimCoefficientTemplateRefsCache",
+    "ActivitySimProbabilitiesCache",
+    "ActivitySimProbabilitiesEntriesCache",
+    "ActivitySimProbabilitiesMetaEntriesCache",
+    "ActivitySimConfigIngestRunLink",
     "Run",
     "RunConfigKV",
 ]

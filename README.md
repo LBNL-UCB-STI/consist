@@ -120,13 +120,60 @@ See [CLI Reference](docs/cli-reference.md) for `consist show`, `consist scenario
 
 ---
 
+## Model-Specific Configuration Tracking
+
+For complex, file-based model configurations (YAML hierarchies, CSV parameters), Consist provides **config adapters** that automatically discover, canonicalize, and make configurations queryable.
+
+**ActivitySim Example:**
+
+Track how calibration parameters change across scenarios:
+
+```python
+from consist.integrations.activitysim import ActivitySimConfigAdapter
+
+adapter = ActivitySimConfigAdapter()
+
+# Baseline scenario
+run_baseline = tracker.begin_run("baseline", "activitysim")
+tracker.canonicalize_config(adapter, ["configs/base"])
+tracker.end_run()
+
+# Sensitivity test (adjusted time coefficient)
+run_adjusted = tracker.begin_run("time_coeff_1.5", "activitysim")
+tracker.canonicalize_config(adapter, ["configs/adjusted"])
+tracker.end_run()
+
+# Query: which runs used which coefficients?
+from sqlmodel import Session, select
+from consist.models.activitysim import ActivitySimCoefficients
+
+with Session(tracker.engine) as session:
+    results = session.exec(
+        select(ActivitySimCoefficients)
+        .where(ActivitySimCoefficients.coefficient_name == "time")
+    ).all()
+    # See how time coefficient changed across runs
+```
+
+Config adapters handle:
+- **Automatic discovery** of YAML inheritance and CSV references
+- **Content hashing** for config-based run identity
+- **Queryable tables** for calibration-sensitive parameters (constants, coefficients, probabilities)
+- **Config bundling** for reproducibility and scenario materialization
+
+See [Config Adapters Integration Guide](docs/integrations/config_adapters.md) for ActivitySim details, best practices, and examples.
+
+---
+
 ## Where to Go Next
 
 **I maintain or develop simulation tools (ActivitySim, SUMO, etc.):**
 - Start with [Usage Guide](docs/usage-guide.md) for integration patterns. Container support lets you wrap existing tools without modification.
+- For ActivitySim users: See [Config Adapters](docs/integrations/config_adapters.md) to track and query calibration parameters across scenario runs.
 
 **I'm an MPO official or practitioner who runs models:**
 - No coding required. See [CLI Reference](docs/cli-reference.md) to query and compare results from the command line.
+- For ActivitySim scenarios: [Config Adapters](docs/integrations/config_adapters.md) make it easy to see exactly which parameters changed between scenario runs.
 
 **I'm a researcher building simulation workflows:**
 - See [Concepts](docs/concepts.md) for mental models, then [Ingestion & Hybrid Views](docs/ingestion-and-hybrid-views.md) for SQL-native analytics and reproducibility.

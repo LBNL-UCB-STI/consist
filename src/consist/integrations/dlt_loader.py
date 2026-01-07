@@ -23,7 +23,18 @@ Key functionalities include:
 
 import uuid
 import pandas as pd
-from typing import Optional, Any, Iterable, Union, Type, Set, Dict, Tuple
+from typing import (
+    Optional,
+    Any,
+    Iterable,
+    Union,
+    Type,
+    Set,
+    Dict,
+    Tuple,
+    get_args,
+    get_origin,
+)
 from sqlmodel import SQLModel
 from consist.models.artifact import Artifact
 from consist.models.run import Run
@@ -438,15 +449,36 @@ def _sqlmodel_to_dlt_columns(model: Type[SQLModel]) -> Dict[str, Dict[str, Any]]
         A dictionary where keys are column names and values are dictionaries
         containing `dlt` column properties (e.g., `data_type`, `nullable`).
     """
-    columns = {}
+
+    def _normalize_types(annotation: Any) -> set[Any]:
+        origin = get_origin(annotation)
+        if origin is None:
+            return {annotation}
+        if origin in {list, dict, tuple}:
+            return {annotation}
+        if getattr(origin, "__name__", "") == "Annotated":
+            args = get_args(annotation)
+            return _normalize_types(args[0]) if args else {annotation}
+        args = get_args(annotation)
+        if not args:
+            return {annotation}
+        normalized: set[Any] = set()
+        for arg in args:
+            if arg is type(None):
+                continue
+            normalized |= _normalize_types(arg)
+        return normalized or {annotation}
+
+    columns: Dict[str, Dict[str, Any]] = {}
     for name, field in model.model_fields.items():
         py_type = field.annotation
+        normalized = _normalize_types(py_type)
         dlt_type = "text"
-        if py_type is int or py_type is Optional[int]:
-            dlt_type = "bigint"
-        elif py_type is float or py_type is Optional[float]:
+        if float in normalized:
             dlt_type = "double"
-        elif py_type is bool or py_type is Optional[bool]:
+        elif int in normalized:
+            dlt_type = "bigint"
+        elif bool in normalized:
             dlt_type = "bool"
         columns[name] = {"data_type": dlt_type, "nullable": not field.is_required()}
     return columns

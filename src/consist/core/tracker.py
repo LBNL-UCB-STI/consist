@@ -42,6 +42,11 @@ from consist.core.cache import (
 from consist.core.cache_output_logging import (
     maybe_return_cached_output_or_demote_cache_hit,
 )
+from consist.core.config_canonicalization import (
+    ConfigAdapter,
+    ConfigContribution,
+    ConfigPlan,
+)
 from consist.core.config_facets import ConfigFacetManager
 from consist.core.context import pop_tracker, push_tracker
 from consist.core.decorators import define_step as define_step_decorator
@@ -980,6 +985,9 @@ class Tracker:
         model: Optional[str] = None,
         description: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
+        config_plan: Optional[ConfigPlan] = None,
+        config_plan_ingest: bool = True,
+        config_plan_profile_schema: bool = False,
         inputs: Optional[
             Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]
         ] = None,
@@ -1012,6 +1020,17 @@ class Tracker:
     ) -> RunResult:
         """
         Execute a function-shaped run with caching and output handling.
+
+        Parameters
+        ----------
+        config_plan : Optional[ConfigPlan]
+            Optional precomputed config plan to apply to the run. The plan's identity
+            hash is folded into the run config hash and its artifacts/ingestables are
+            applied once the run starts (skipped on cache hits).
+        config_plan_ingest : bool, default True
+            Whether to ingest tables from the config plan.
+        config_plan_profile_schema : bool, default False
+            Whether to profile ingested schemas for the config plan.
         """
         if executor not in {"python", "container"}:
             raise ValueError("Tracker.run supports executor='python' or 'container'.")
@@ -1120,10 +1139,29 @@ class Tracker:
             )
             cache_mode = "overwrite"
 
+        config_for_run = config
+        if config_plan is not None:
+            if config is None:
+                config_for_run = {}
+            elif isinstance(config, BaseModel):
+                config_for_run = config.model_dump()
+            else:
+                config_for_run = dict(config)
+            if "__consist_config_plan__" in config_for_run:
+                logging.warning(
+                    "[Consist] Overwriting user-provided '__consist_config_plan__' in config for run %s.",
+                    run_id,
+                )
+            config_for_run["__consist_config_plan__"] = {
+                "adapter": config_plan.adapter_name,
+                "hash": config_plan.identity_hash,
+                "adapter_version": config_plan.adapter_version,
+            }
+
         start_kwargs: Dict[str, Any] = {
             "run_id": run_id,
             "model": resolved_model,
-            "config": config,
+            "config": config_for_run,
             "inputs": resolved_inputs or None,
             "tags": tags,
             "description": description,
@@ -1191,6 +1229,14 @@ class Tracker:
                     run=current_consist.run,
                     outputs=outputs_map,
                     cache_hit=True,
+                )
+
+            if config_plan is not None:
+                self.apply_config_plan(
+                    config_plan,
+                    run=current_consist.run,
+                    ingest=config_plan_ingest,
+                    profile_schema=config_plan_profile_schema,
                 )
 
             if executor == "container":
@@ -1481,6 +1527,9 @@ class Tracker:
         model: Optional[str] = None,
         description: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
+        config_plan: Optional[ConfigPlan] = None,
+        config_plan_ingest: bool = True,
+        config_plan_profile_schema: bool = False,
         inputs: Optional[
             Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]
         ] = None,
@@ -1508,6 +1557,17 @@ class Tracker:
     ) -> Iterator["Tracker"]:
         """
         Manual tracing context manager for a run.
+
+        Parameters
+        ----------
+        config_plan : Optional[ConfigPlan]
+            Optional precomputed config plan to apply to the run. The plan's identity
+            hash is folded into the run config hash and its artifacts/ingestables are
+            applied once the run starts (skipped on cache hits).
+        config_plan_ingest : bool, default True
+            Whether to ingest tables from the config plan.
+        config_plan_profile_schema : bool, default False
+            Whether to profile ingested schemas for the config plan.
         """
         resolved_model = model or name
 
@@ -1568,10 +1628,29 @@ class Tracker:
                 tags=tags,
             )
 
+        config_for_run = config
+        if config_plan is not None:
+            if config is None:
+                config_for_run = {}
+            elif isinstance(config, BaseModel):
+                config_for_run = config.model_dump()
+            else:
+                config_for_run = dict(config)
+            if "__consist_config_plan__" in config_for_run:
+                logging.warning(
+                    "[Consist] Overwriting user-provided '__consist_config_plan__' in config for run %s.",
+                    run_id,
+                )
+            config_for_run["__consist_config_plan__"] = {
+                "adapter": config_plan.adapter_name,
+                "hash": config_plan.identity_hash,
+                "adapter_version": config_plan.adapter_version,
+            }
+
         start_kwargs: Dict[str, Any] = {
             "run_id": run_id,
             "model": resolved_model,
-            "config": config,
+            "config": config_for_run,
             "inputs": resolved_inputs or None,
             "tags": tags,
             "description": description,
@@ -1615,6 +1694,13 @@ class Tracker:
 
             output_base_dir = self.run_artifact_dir()
             try:
+                if config_plan is not None and not t.is_cached:
+                    self.apply_config_plan(
+                        config_plan,
+                        run=current_consist.run,
+                        ingest=config_plan_ingest,
+                        profile_schema=config_plan_profile_schema,
+                    )
                 if capture_dir is not None:
                     with t.capture_outputs(capture_dir, pattern=capture_pattern):
                         yield t
@@ -2425,6 +2511,316 @@ class Tracker:
             run=run,
             profile_schema=profile_schema,
         )
+
+    def canonicalize_config(
+        self,
+        adapter: ConfigAdapter,
+        config_dirs: Iterable[Union[str, Path]],
+        *,
+        run: Optional[Run] = None,
+        strict: bool = False,
+        ingest: bool = True,
+        profile_schema: bool = False,
+    ) -> ConfigContribution:
+        """
+        Canonicalize a model-specific config directory and ingest queryable slices.
+
+        Parameters
+        ----------
+        adapter : ConfigAdapter
+            Adapter implementation for the model (e.g., ActivitySim).
+        config_dirs : Iterable[Union[str, Path]]
+            Ordered config directories to canonicalize.
+        run : Optional[Run], optional
+            Run context to attach to; defaults to the active run.
+        strict : bool, default False
+            If True, adapter should error on missing references.
+        ingest : bool, default True
+            Whether to ingest any queryable tables produced by the adapter.
+        profile_schema : bool, default False
+            Whether to profile ingested schemas.
+
+        Returns
+        -------
+        ConfigContribution
+            Structured summary of logged artifacts and ingestables.
+        """
+        target_run = run
+        if target_run is None and self.current_consist:
+            target_run = self.current_consist.run
+        if target_run is None:
+            raise RuntimeError("canonicalize_config requires an active run or run=.")
+
+        config_dir_paths = [Path(p).resolve() for p in config_dirs]
+        canonical = adapter.discover(
+            config_dir_paths, identity=self.identity, strict=strict
+        )
+        result = adapter.canonicalize(
+            canonical, run=target_run, tracker=self, strict=strict
+        )
+
+        contribution = ConfigContribution(
+            identity_hash=canonical.content_hash,
+            adapter_version=getattr(adapter, "adapter_version", None),
+            artifacts=result.artifacts,
+            ingestables=result.ingestables,
+            meta={
+                "adapter": adapter.model_name,
+                "config_dirs": [str(p) for p in config_dir_paths],
+            },
+        )
+
+        self._apply_config_contribution(
+            contribution,
+            run=target_run,
+            ingest=ingest,
+            profile_schema=profile_schema,
+        )
+
+        if target_run.meta is None:
+            target_run.meta = {}
+        target_run.meta["config_bundle_hash"] = canonical.content_hash
+        target_run.meta["config_adapter"] = adapter.model_name
+        if contribution.adapter_version is not None:
+            target_run.meta["config_adapter_version"] = contribution.adapter_version
+
+        return contribution
+
+    def prepare_config(
+        self,
+        adapter: ConfigAdapter,
+        config_dirs: Iterable[Union[str, Path]],
+        *,
+        strict: bool = False,
+        facet_spec: Optional[Dict[str, Any]] = None,
+        facet_schema_name: Optional[str] = None,
+        facet_schema_version: Optional[Union[str, int]] = None,
+        facet_index: Optional[bool] = None,
+    ) -> ConfigPlan:
+        """
+        Prepare a config plan without logging artifacts or ingesting data.
+
+        Parameters
+        ----------
+        adapter : ConfigAdapter
+            Adapter implementation for the model (e.g., ActivitySim).
+        config_dirs : Iterable[Union[str, Path]]
+            Ordered config directories to canonicalize.
+        strict : bool, default False
+            If True, adapter should error on missing references.
+        facet_spec : Optional[Dict[str, Any]], optional
+            Adapter-specific facet extraction spec.
+        facet_schema_name : Optional[str], optional
+            Optional facet schema name for persistence.
+        facet_schema_version : Optional[Union[str, int]], optional
+            Optional facet schema version for persistence.
+        facet_index : Optional[bool], optional
+            Optional flag controlling KV facet indexing.
+
+        Returns
+        -------
+        ConfigPlan
+            Pre-run config plan containing artifacts and ingestables.
+        """
+        config_dir_paths = [Path(p).resolve() for p in config_dirs]
+        canonical = adapter.discover(
+            config_dir_paths, identity=self.identity, strict=strict
+        )
+        result = adapter.canonicalize(
+            canonical, strict=strict, plan_only=True, run=None, tracker=None
+        )
+        facet_data = None
+        if facet_spec is not None:
+            if hasattr(adapter, "build_facet"):
+                facet_data = adapter.build_facet(canonical, facet_spec=facet_spec)
+                if facet_data is not None:
+                    facet_data = self.identity.normalize_json(facet_data)
+            else:
+                raise ValueError(
+                    "facet_spec provided but adapter does not support build_facet()."
+                )
+
+        return ConfigPlan(
+            adapter_name=adapter.model_name,
+            adapter_version=getattr(adapter, "adapter_version", None),
+            canonical=canonical,
+            artifacts=result.artifacts,
+            ingestables=result.ingestables,
+            facet=facet_data,
+            facet_schema_name=facet_schema_name,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
+            meta={
+                "adapter": adapter.model_name,
+                "config_dirs": [str(p) for p in config_dir_paths],
+            },
+            adapter=adapter,
+        )
+
+    def apply_config_plan(
+        self,
+        plan: ConfigPlan,
+        *,
+        run: Optional[Run] = None,
+        ingest: bool = True,
+        profile_schema: bool = False,
+        adapter: Optional[ConfigAdapter] = None,
+    ) -> ConfigContribution:
+        """
+        Apply a pre-run config plan to the active run.
+
+        Parameters
+        ----------
+        plan : ConfigPlan
+            Plan produced by `prepare_config`.
+        run : Optional[Run], optional
+            Run context to attach to; defaults to the active run.
+        ingest : bool, default True
+            Whether to ingest any queryable tables produced by the adapter.
+        profile_schema : bool, default False
+            Whether to profile ingested schemas.
+        adapter : Optional[ConfigAdapter], optional
+            Adapter instance used to create run-scoped artifacts, if needed.
+
+        Returns
+        -------
+        ConfigContribution
+            Structured summary of logged artifacts and ingestables.
+        """
+        target_run = run
+        if target_run is None and self.current_consist:
+            target_run = self.current_consist.run
+        if target_run is None:
+            raise RuntimeError("apply_config_plan requires an active run or run=.")
+
+        artifacts = list(plan.artifacts)
+        adapter_ref = adapter or plan.adapter
+        bundle_artifact = getattr(adapter_ref, "bundle_artifact", None)
+        if callable(bundle_artifact):
+            bundle_spec = bundle_artifact(plan.canonical, run=target_run, tracker=self)
+            if bundle_spec is not None:
+                artifacts.append(bundle_spec)
+
+        contribution = ConfigContribution(
+            identity_hash=plan.identity_hash,
+            adapter_version=plan.adapter_version,
+            artifacts=artifacts,
+            ingestables=plan.ingestables,
+            facet=plan.facet,
+            facet_schema_name=plan.facet_schema_name,
+            facet_schema_version=plan.facet_schema_version,
+            meta=dict(plan.meta or {}),
+        )
+
+        self._apply_config_contribution(
+            contribution,
+            run=target_run,
+            ingest=ingest,
+            profile_schema=profile_schema,
+        )
+
+        if target_run.meta is None:
+            target_run.meta = {}
+        target_run.meta["config_bundle_hash"] = plan.identity_hash
+        target_run.meta["config_adapter"] = plan.adapter_name
+        if plan.adapter_version is not None:
+            target_run.meta["config_adapter_version"] = plan.adapter_version
+
+        if plan.facet is not None:
+            facet_dict = plan.facet
+            if self.current_consist is not None:
+                self.current_consist.facet = facet_dict
+            schema_name = (
+                plan.facet_schema_name
+                or self.config_facets.infer_schema_name(None, facet_dict)
+            )
+            self.config_facets.persist_facet(
+                run=target_run,
+                model=target_run.model_name,
+                facet_dict=facet_dict,
+                schema_name=schema_name,
+                schema_version=plan.facet_schema_version,
+                index_kv=plan.facet_index if plan.facet_index is not None else True,
+            )
+
+        return contribution
+
+    def _apply_config_contribution(
+        self,
+        contribution: ConfigContribution,
+        *,
+        run: Run,
+        ingest: bool,
+        profile_schema: bool,
+    ) -> Dict[str, Artifact]:
+        artifacts_by_key: Dict[str, Artifact] = {}
+        for spec in contribution.artifacts:
+            art = self.log_artifact(
+                spec.path,
+                key=spec.key,
+                direction=spec.direction,
+                **spec.meta,
+            )
+            artifacts_by_key[spec.key] = art
+
+        if ingest:
+            for spec in contribution.ingestables:
+                source_key = spec.source
+                artifact = (
+                    artifacts_by_key.get(source_key)
+                    if source_key
+                    else next(iter(artifacts_by_key.values()), None)
+                )
+                if artifact is None:
+                    logging.warning(
+                        "[Consist] Skipping ingest for %s; no source artifact found.",
+                        spec.table_name,
+                    )
+                    continue
+                if spec.rows is None:
+                    logging.warning(
+                        "[Consist] Skipping ingest for %s; no rows provided.",
+                        spec.table_name,
+                    )
+                    continue
+                if spec.dedupe_on_hash and spec.content_hash:
+                    if self._ingest_cache_hit(spec.table_name, spec.content_hash):
+                        logging.info(
+                            "[Consist] Skipping ingest for %s; cache hit for %s.",
+                            spec.table_name,
+                            spec.content_hash,
+                        )
+                        continue
+                if source_key is None:
+                    logging.warning(
+                        "[Consist] Ingest spec for %s missing source; using %s.",
+                        spec.table_name,
+                        artifact.key,
+                    )
+                rows = spec.rows(run.id) if callable(spec.rows) else spec.rows
+                self.ingest(
+                    artifact,
+                    data=rows,
+                    schema=spec.schema,
+                    run=run,
+                    profile_schema=profile_schema,
+                )
+
+        return artifacts_by_key
+
+    def _ingest_cache_hit(self, table_name: str, content_hash: str) -> bool:
+        if self.engine is None:
+            return False
+        try:
+            with self.engine.begin() as connection:
+                result = connection.exec_driver_sql(
+                    f"SELECT 1 FROM global_tables.{table_name} "
+                    "WHERE content_hash = ? LIMIT 1",
+                    (content_hash,),
+                ).fetchone()
+            return result is not None
+        except Exception:
+            return False
 
     # --- View Factory ---
 

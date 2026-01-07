@@ -27,6 +27,7 @@ You can pass config parameters via the high-level APIs:
 Relevant arguments:
 
 - `config: dict | BaseModel | None`
+- `config_plan: ConfigPlan | None`
 - `facet: dict | BaseModel | None`
 - `facet_from: list[str] | None`
 - `hash_inputs: list[Path | str | (label, Path|str)] | None`
@@ -129,6 +130,26 @@ You can also fetch facets directly:
 facet = tracker.get_config_facet(facet_id)
 ```
 
+## Model-Specific Config Adapters
+
+For complex, file-based configurations (such as ActivitySim YAML/CSV configs),
+Consist provides **config adapters**—model-specific modules that discover,
+canonicalize, and ingest configuration data into queryable tables.
+
+Unlike in-memory configs (dicts/Pydantic models), adapters handle:
+- **Discovery**: Locating config files and computing content hashes
+- **Canonicalization**: Converting config metadata into artifacts and ingestable schemas
+- **Ingestion**: Persisting calibration-sensitive parameters as queryable tables
+
+This decouples model-specific parsing logic from Consist core, making it easy
+to add new model types without coupling them to the framework.
+
+**Available adapters:**
+
+- [ActivitySim Config Adapter](integrations/config_adapters.md#activitysim) — Discover, canonicalize, and query ActivitySim YAML/CSV configurations
+
+For detailed usage and API reference, see the [Config Adapters Integration Guide](integrations/config_adapters.md).
+
 ## Examples
 
 ### Tracker.run with config + facet
@@ -140,6 +161,23 @@ tracker.run(
     config=beam_cfg,
     facet={"memory_gb": beam_cfg.memory_gb},
     hash_inputs=[("beam_hocon", beam_cfg_path)],
+)
+```
+
+### Tracker.run with config_plan (config adapters)
+
+```python
+from consist.integrations.activitysim import ActivitySimConfigAdapter
+
+adapter = ActivitySimConfigAdapter()
+plan = tracker.prepare_config(adapter, [overlay_dir, base_dir])
+
+tracker.run(
+    fn=run_activitysim,
+    name="activitysim",
+    config={"scenario": "baseline"},
+    config_plan=plan,
+    cache_mode="auto",
 )
 ```
 
