@@ -222,9 +222,7 @@ def test_run_config_plan_includes_adapter_version(tracker: Tracker):
     )
     record_v1 = tracker.last_run
     assert record_v1 is not None
-    assert (
-        record_v1.config["__consist_config_plan__"]["adapter_version"] == "1.0"
-    )
+    assert record_v1.config["__consist_config_plan__"]["adapter_version"] == "1.0"
     hash_v1 = record_v1.run.config_hash
 
     plan_v2 = _dummy_config_plan(adapter_version="2.0")

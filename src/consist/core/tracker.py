@@ -2697,9 +2697,7 @@ class Tracker:
         adapter_ref = adapter or plan.adapter
         bundle_artifact = getattr(adapter_ref, "bundle_artifact", None)
         if callable(bundle_artifact):
-            bundle_spec = bundle_artifact(
-                plan.canonical, run=target_run, tracker=self
-            )
+            bundle_spec = bundle_artifact(plan.canonical, run=target_run, tracker=self)
             if bundle_spec is not None:
                 artifacts.append(bundle_spec)
 

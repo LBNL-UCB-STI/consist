@@ -1052,7 +1052,7 @@ def _unpack_bundle(*, bundle_path: Path, output_dir: Path) -> list[Path]:
             if top not in seen:
                 seen.add(top)
                 top_level.append(top)
-        archive.extractall(output_dir)
+        archive.extractall(output_dir, filter="data")
 
     staged_root_dirs = [
         (output_dir / name) for name in top_level if (output_dir / name).is_dir()
@@ -1237,18 +1237,45 @@ def _is_probabilities_file(file_name: str) -> bool:
     return name.endswith(_PROBABILITY_SUFFIXES)
 
 
+def _validate_csv_headers(
+    reader: csv.DictReader, path: Path, *, strict: bool = False
+) -> bool:
+    """
+    Validate that a CSV reader has fieldnames.
+
+    Parameters
+    ----------
+    reader : csv.DictReader
+        The CSV reader to validate.
+    path : Path
+        Path to the CSV file (for error messages).
+    strict : bool, default False
+        If True, raise ValueError when headers are missing.
+        If False, log warning and return False.
+
+    Returns
+    -------
+    bool
+        True if headers are present, False otherwise.
+    """
+    if reader.fieldnames is None:
+        if strict:
+            raise ValueError(f"[Consist][ActivitySim] CSV has no headers: {path}")
+        logging.warning(
+            f"[Consist][ActivitySim] CSV has no headers, skipping ingestion: {path}"
+        )
+        return False
+    return True
+
+
 def _iter_coefficients_rows(
     path: Path, run_id: str, *, strict: bool = False
 ) -> Iterable[dict[str, Any]]:
     with _open_csv(path) as handle:
         reader = csv.DictReader(handle)
-        if reader.fieldnames is None:
-            if strict:
-                raise ValueError(f"[Consist][ActivitySim] CSV has no headers: {path}")
-            logging.warning(
-                f"[Consist][ActivitySim] CSV has no headers, skipping ingestion: {path}"
-            )
+        if not _validate_csv_headers(reader, path, strict=strict):
             return
+        assert reader.fieldnames is not None
         fieldnames = [name or "" for name in reader.fieldnames]
         coeff_key = (
             "coefficient_name" if "coefficient_name" in fieldnames else "coefficient"
@@ -1354,12 +1381,7 @@ def _iter_probabilities_rows(
 ) -> Iterable[dict[str, Any]]:
     with _open_csv(path) as handle:
         reader = csv.DictReader(handle)
-        if reader.fieldnames is None:
-            if strict:
-                raise ValueError(f"[Consist][ActivitySim] CSV has no headers: {path}")
-            logging.warning(
-                f"[Consist][ActivitySim] CSV has no headers, skipping ingestion: {path}"
-            )
+        if not _validate_csv_headers(reader, path, strict=strict):
             return
         for idx, row in enumerate(reader):
             dims: Dict[str, Any] = {}
@@ -1398,12 +1420,7 @@ def _iter_probabilities_entries(
 ) -> Iterable[dict[str, Any]]:
     with _open_csv(path) as handle:
         reader = csv.DictReader(handle)
-        if reader.fieldnames is None:
-            if strict:
-                raise ValueError(f"[Consist][ActivitySim] CSV has no headers: {path}")
-            logging.warning(
-                f"[Consist][ActivitySim] CSV has no headers, skipping ingestion: {path}"
-            )
+        if not _validate_csv_headers(reader, path, strict=strict):
             return
         for idx, row in enumerate(reader):
             if not row:
@@ -1430,12 +1447,7 @@ def _iter_probabilities_meta_entries(
 ) -> Iterable[dict[str, Any]]:
     with _open_csv(path) as handle:
         reader = csv.DictReader(handle)
-        if reader.fieldnames is None:
-            if strict:
-                raise ValueError(f"[Consist][ActivitySim] CSV has no headers: {path}")
-            logging.warning(
-                f"[Consist][ActivitySim] CSV has no headers, skipping ingestion: {path}"
-            )
+        if not _validate_csv_headers(reader, path, strict=strict):
             return
         for idx, row in enumerate(reader):
             if not row:
@@ -1609,8 +1621,8 @@ def _apply_coefficients_override(
         raise FileNotFoundError(f"CSV file not found for override: {file_name}")
     with _open_csv(csv_path) as handle:
         reader = csv.DictReader(handle)
-        if reader.fieldnames is None:
-            raise ValueError(f"CSV missing headers: {csv_path}")
+        _validate_csv_headers(reader, csv_path, strict=True)
+        assert reader.fieldnames is not None
         fieldnames = [name or "" for name in reader.fieldnames]
         rows = list(reader)
 
