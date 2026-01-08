@@ -77,6 +77,11 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     features_artifact: Optional[Artifact] = None
     raw_artifact: Optional[Artifact] = None
 
+    @consist.coupler_schema
+    class WorkflowCoupler:
+        raw_table: Artifact
+        features: Artifact
+
     with tracker.scenario(
         scenario_id,
         config={"seed": 7},  # identity config (hashed)
@@ -85,6 +90,8 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
         hash_inputs=[("scenario_config", scenario_cfg_path)],  # hash-only attachment(s)
         tags=["e2e", "scenario_header"],
     ) as scenario:
+        scenario.declare_outputs("raw_table", "features", required=True)
+        typed = scenario.coupler_schema(WorkflowCoupler)
 
         def ingest_step():
             df = pd.DataFrame({"value": range(6), "category": ["a"] * 6})
@@ -106,6 +113,7 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
             outputs=["raw_table"],
         )
         raw_artifact = ingest_result.outputs["raw_table"]
+        assert typed.raw_table.id == raw_artifact.id
 
         def transform_step(raw_table: pd.DataFrame):
             df_raw = raw_table
@@ -130,6 +138,7 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
             load_inputs=True,
         )
         features_artifact = transform_result.outputs["features"]
+        assert typed.features.id == features_artifact.id
 
     # JSON snapshot
     json_file = tracker.run_dir / "consist.json"
@@ -454,7 +463,13 @@ def test_scenario_run_skips_callable_on_cache_hit(tracker: Tracker):
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(f"calls={len(calls)}\n")
 
+    @consist.coupler_schema
+    class DemoCoupler:
+        out: Artifact
+
     with tracker.scenario("run_demo_A") as sc:
+        sc.declare_outputs("out", required=True)
+        typed = sc.coupler_schema(DemoCoupler)
         result: RunResult = sc.run(
             name="produce",
             fn=expensive_step,
@@ -464,6 +479,7 @@ def test_scenario_run_skips_callable_on_cache_hit(tracker: Tracker):
         )
         assert result.outputs["out"].key == "out"
         assert sc.coupler.require("out").id == result.outputs["out"].id
+        assert typed.out.id == result.outputs["out"].id
 
     assert calls == ["called"]
     assert result.outputs["out"].path.read_text() == "calls=1\n"
@@ -471,6 +487,8 @@ def test_scenario_run_skips_callable_on_cache_hit(tracker: Tracker):
     # Repeat with the same signature (code/config/inputs). This should be a cache hit
     # and should NOT execute `expensive_step()` again.
     with tracker.scenario("run_demo_B") as sc:
+        sc.declare_outputs("out", required=True)
+        typed = sc.coupler_schema(DemoCoupler)
         result: RunResult = sc.run(
             name="produce",
             fn=expensive_step,
@@ -480,6 +498,7 @@ def test_scenario_run_skips_callable_on_cache_hit(tracker: Tracker):
         )
         assert result.outputs["out"].key == "out"
         assert sc.coupler.require("out").id == result.outputs["out"].id
+        assert typed.out.id == result.outputs["out"].id
 
     assert calls == ["called"]
     assert result.outputs["out"].path.read_text() == "calls=1\n"

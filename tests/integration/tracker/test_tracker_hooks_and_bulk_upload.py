@@ -21,11 +21,11 @@ def test_bulk_upload_and_description(tracker: Tracker, tmp_path: Path):
         hook_log.append(f"FAILED: {run.id} - {error}")
 
     # Create test files
-    test_files = []
+    test_files = {}
     for i in range(3):
         f = tmp_path / f"data_{i}.csv"
         f.write_text(f"col1,col2\\n{i},{i * 2}\\n")
-        test_files.append(f)
+        test_files[f"data_{i}"] = f
 
     # Run with new features - success case
     with tracker.start_run(
@@ -62,7 +62,7 @@ def test_bulk_upload_and_description(tracker: Tracker, tmp_path: Path):
 
     # Test 4: Verify artifacts have hashes
     print("\\n=== Verifying Artifact Hashes ===")
-    for art in arts:
+    for art in arts.values():
         print(f"  {art.key}: hash={art.hash[:16]}...")
 
     print("\\n✅ All new features working correctly!")

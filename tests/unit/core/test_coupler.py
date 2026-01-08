@@ -5,7 +5,7 @@ from typing import cast
 
 import pytest
 
-from consist.core.coupler import Coupler
+from consist.core.coupler import Coupler, coupler_schema
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
 
@@ -122,3 +122,38 @@ def test_coupler_cached_aliases_delegate_to_adopt_cached_output() -> None:
 def test_coupler_adopt_cached_output_without_tracker_is_noop() -> None:
     coupler = Coupler()
     assert coupler.adopt_cached_output("anything") is None
+
+
+def test_coupler_declare_outputs_tracks_missing_required() -> None:
+    coupler = Coupler()
+    coupler.declare_outputs("zarr", "csv", required={"zarr": True, "csv": False})
+
+    assert coupler.missing_declared_outputs() == ["zarr"]
+
+    coupler.set("zarr", _artifact(key="zarr"))
+    assert coupler.missing_declared_outputs() == []
+
+
+def test_coupler_collect_by_keys_updates_coupler() -> None:
+    coupler = Coupler()
+    outputs = {"a": _artifact(key="a"), "b": _artifact(key="b")}
+
+    collected = coupler.collect_by_keys(outputs, "a", prefix="2024_")
+
+    assert "2024_a" in coupler
+    assert collected == {"2024_a": outputs["a"]}
+
+
+def test_coupler_schema_wraps_attribute_access() -> None:
+    @coupler_schema
+    class WorkflowCoupler:
+        a: Artifact
+        b: Artifact
+
+    coupler = Coupler()
+    schema = WorkflowCoupler(coupler)
+    artifact = _artifact(key="a")
+
+    schema.a = artifact
+    assert schema.a == artifact
+    assert coupler.require("a") == artifact

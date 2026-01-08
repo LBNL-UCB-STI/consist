@@ -301,6 +301,28 @@ with use_tracker(tracker):
 - Consist tracks this as part of the cache key
 - If the population artifact hasn't changed, this step's cache is still valid
 
+**Optional: Declare outputs and use a typed coupler view**
+
+```python
+from consist import coupler_schema
+
+@coupler_schema
+class WorkflowCoupler:
+    zarr_skims: Artifact
+
+with use_tracker(tracker):
+    with consist.scenario("workflow") as sc:
+        sc.declare_outputs("zarr_skims", required=True)
+        typed = sc.coupler_schema(WorkflowCoupler)
+
+        compile_result = sc.run("compile", fn=asim_compile_runner.run)
+        sc.collect_by_keys(compile_result.outputs, "zarr_skims")
+
+        # typed access + automatic coupler lookup
+        sc.run("main", fn=asim_runner.run, input_keys="zarr_skims")
+        _ = typed.zarr_skims
+```
+
 ### Example: Parameter Sweep in a Scenario
 
 ```python

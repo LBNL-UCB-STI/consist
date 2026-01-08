@@ -32,6 +32,7 @@ from consist.core.context import (
 from consist.core.decorators import define_step as define_step_decorator
 from consist.core.views import create_view_model
 from consist.core.workflow import OutputCapture
+from consist.core.coupler import CouplerSchemaBase, coupler_schema as _coupler_schema
 from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord, Run, RunResult
 from consist.models.run_config_kv import RunConfigKV
@@ -55,6 +56,7 @@ except ImportError:
     tables = None
 
 T = TypeVar("T", bound=SQLModel)
+SchemaT = TypeVar("SchemaT", bound=CouplerSchemaBase)
 LoadResult = Union[pd.DataFrame, pd.Series, "xarray.Dataset", pd.HDFStore]
 
 
@@ -121,6 +123,13 @@ def define_step(
     function. ``Tracker.run`` and ``ScenarioContext.run`` read this metadata.
     """
     return define_step_decorator(outputs=outputs, tags=tags, description=description)
+
+
+def coupler_schema(cls: type[SchemaT]) -> type[SchemaT]:
+    """
+    Decorator that builds a typed Coupler view from an annotated class.
+    """
+    return _coupler_schema(cls)
 
 
 @contextmanager
@@ -395,6 +404,28 @@ def log_artifact(
     """
     return get_active_tracker().log_artifact(
         path=path, key=key, direction=direction, schema=schema, driver=driver, **meta
+    )
+
+
+def log_artifacts(
+    outputs: Mapping[str, ArtifactRef],
+    *,
+    direction: str = "output",
+    driver: Optional[str] = None,
+    metadata_by_key: Optional[Mapping[str, Dict[str, Any]]] = None,
+    **shared_meta: Any,
+) -> Dict[str, Artifact]:
+    """
+    Log multiple artifacts in a single call for efficiency.
+
+    This function is a convenient proxy to `consist.core.tracker.Tracker.log_artifacts`.
+    """
+    return get_active_tracker().log_artifacts(
+        outputs,
+        direction=direction,
+        driver=driver,
+        metadata_by_key=metadata_by_key,
+        **shared_meta,
     )
 
 
