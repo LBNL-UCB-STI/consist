@@ -93,13 +93,22 @@ def create_view_model(model: Type[T], name: Optional[str] = None) -> Type[T]:
 
             default_factory = getattr(field_info, "default_factory", None)
             if default_factory is not None:
-                namespace[field_name] = Field(
-                    default_factory=default_factory, sa_column=sa_column
-                )
+                if sa_column is not None:
+                    namespace[field_name] = Field(
+                        default_factory=default_factory, sa_column=sa_column
+                    )
+                else:
+                    namespace[field_name] = Field(default_factory=default_factory)
             else:
-                namespace[field_name] = Field(
-                    default=getattr(field_info, "default", None), sa_column=sa_column
-                )
+                if sa_column is not None:
+                    namespace[field_name] = Field(
+                        default=getattr(field_info, "default", None),
+                        sa_column=sa_column,
+                    )
+                else:
+                    namespace[field_name] = Field(
+                        default=getattr(field_info, "default", None)
+                    )
 
     # 5. Create Dynamic Class
     def exec_body(ns):

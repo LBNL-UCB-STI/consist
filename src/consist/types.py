@@ -10,6 +10,7 @@ These are intentionally minimal and dependency-tolerant:
 
 from __future__ import annotations
 
+from enum import Enum
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -17,6 +18,7 @@ from typing import (
     Mapping,
     Optional,
     Protocol,
+    Literal,
     TypeAlias,
     Union,
     runtime_checkable,
@@ -39,6 +41,18 @@ ArtifactRef: TypeAlias = Union["Artifact", PathLike]
 
 HashInput: TypeAlias = Union[PathLike, tuple[str, PathLike]]
 HashInputs: TypeAlias = Optional[list[HashInput]]
+
+# Known artifact drivers used by Consist loaders.
+DriverLiteral: TypeAlias = Literal[
+    "parquet",
+    "csv",
+    "zarr",
+    "json",
+    "h5_table",
+    "h5",
+    "hdf5",
+    "other",
+]
 
 
 @runtime_checkable

@@ -250,3 +250,35 @@ def test_loader_drivers(run_dir: Path):
         assert isinstance(loaded_ds, xr.Dataset)
         assert "temperature" in loaded_ds
         assert loaded_ds.dims["x"] == 2
+
+
+def test_loader_json_and_h5_table(run_dir: Path):
+    """
+    Verify additional driver dispatches: JSON (DataFrame) and HDF5 table (DataFrame).
+    """
+    tracker = Tracker(run_dir=run_dir)
+
+    json_path = run_dir / "payload.json"
+    df_json = pd.DataFrame({"col": [1, 2, 3]})
+    df_json.to_json(json_path, orient="records")
+
+    with tracker.start_run("run_json", model="model_A"):
+        art_json = tracker.log_artifact(json_path, key="json_payload", driver="json")
+
+    loaded_json = load(art_json, tracker=tracker)
+    assert isinstance(loaded_json, pd.DataFrame)
+    assert loaded_json["col"].tolist() == [1, 2, 3]
+
+    pytest.importorskip("tables")
+    h5_path = run_dir / "payload.h5"
+    df_h5 = pd.DataFrame({"value": [10, 20]})
+    df_h5.to_hdf(h5_path, key="table", mode="w")
+
+    with tracker.start_run("run_h5", model="model_A"):
+        art_h5 = tracker.log_artifact(
+            h5_path, key="h5_payload", driver="h5_table", table_path="table"
+        )
+
+    loaded_h5 = load(art_h5, tracker=tracker)
+    assert isinstance(loaded_h5, pd.DataFrame)
+    assert loaded_h5["value"].tolist() == [10, 20]

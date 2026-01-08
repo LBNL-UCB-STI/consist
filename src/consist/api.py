@@ -9,12 +9,15 @@ from typing import (
     Hashable,
     Iterable,
     Iterator,
+    Literal,
     Mapping,
     Optional,
+    Protocol,
     TYPE_CHECKING,
     Type,
     TypeVar,
     Union,
+    overload,
 )
 
 import pandas as pd
@@ -58,6 +61,31 @@ except ImportError:
 T = TypeVar("T", bound=SQLModel)
 SchemaT = TypeVar("SchemaT", bound=CouplerSchemaBase)
 LoadResult = Union[pd.DataFrame, pd.Series, "xarray.Dataset", pd.HDFStore]
+
+
+class ArtifactLike(Protocol):
+    driver: str
+    uri: str
+    meta: Dict[str, Any]
+
+    @property
+    def path(self) -> Path: ...
+
+
+class DataFrameArtifact(ArtifactLike, Protocol):
+    driver: Literal["parquet", "csv", "h5_table"]
+
+
+class JsonArtifact(ArtifactLike, Protocol):
+    driver: Literal["json"]
+
+
+class ZarrArtifact(ArtifactLike, Protocol):
+    driver: Literal["zarr"]
+
+
+class HdfStoreArtifact(ArtifactLike, Protocol):
+    driver: Literal["h5", "hdf5"]
 
 
 def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
@@ -988,8 +1016,68 @@ def capture_outputs(
 # --- Data Loading ---
 
 
+@overload
 def load(
     artifact: Artifact,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> LoadResult: ...
+
+
+@overload
+def load(
+    artifact: DataFrameArtifact,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> pd.DataFrame: ...
+
+
+@overload
+def load(
+    artifact: JsonArtifact,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> pd.DataFrame | pd.Series: ...
+
+
+@overload
+def load(
+    artifact: ZarrArtifact,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> "xarray.Dataset": ...
+
+
+@overload
+def load(
+    artifact: HdfStoreArtifact,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> pd.HDFStore: ...
+
+
+@overload
+def load(
+    artifact: ArtifactLike,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> LoadResult: ...
+
+
+def load(
+    artifact: ArtifactLike,
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
