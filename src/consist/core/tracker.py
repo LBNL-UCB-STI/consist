@@ -2552,8 +2552,7 @@ class Tracker:
             if extra_keys:
                 extras = ", ".join(sorted(str(key) for key in extra_keys))
                 raise ValueError(
-                    "metadata_by_key contains keys not present in outputs: "
-                    f"{extras}"
+                    f"metadata_by_key contains keys not present in outputs: {extras}"
                 )
 
         keys = list(outputs.keys())

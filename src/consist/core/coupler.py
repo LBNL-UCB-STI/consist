@@ -129,6 +129,50 @@ class Coupler:
     ) -> None:
         """
         Declare expected coupler outputs for runtime validation and documentation.
+
+        This method enables early detection of missing outputs by validating at scenario
+        exit time that all required outputs have been set. Optional outputs are tracked
+        but not validated.
+
+        Parameters
+        ----------
+        *names : str
+            Output names to declare.
+        required : bool or Mapping[str, bool], default False
+            If bool: applies to all declared outputs.
+            If Mapping: per-key required status (e.g., {"persons": True, "jobs": False}).
+        description : Mapping[str, str], optional
+            Human-readable descriptions of outputs for documentation.
+
+        Raises
+        ------
+        TypeError
+            If any name is not a string.
+        ValueError
+            If any name is empty after stripping whitespace.
+
+        Examples
+        --------
+        Declare all outputs as required:
+        ```python
+        coupler.declare_outputs("persons", "households", required=True)
+        ```
+
+        Mix required and optional:
+        ```python
+        coupler.declare_outputs(
+            "persons", "households", "legacy_format",
+            required={"persons": True, "households": True, "legacy_format": False}
+        )
+        ```
+
+        With descriptions:
+        ```python
+        coupler.declare_outputs(
+            "skims",
+            description={"skims": "Zone-to-zone travel times in Zarr format"}
+        )
+        ```
         """
         if not names:
             return
@@ -168,6 +212,48 @@ class Coupler:
     ) -> Dict[str, Artifact]:
         """
         Collect explicit artifacts into the coupler by key.
+
+        This method selectively ingests artifacts from a mapping, storing them under
+        optionally-prefixed keys. Useful when a step returns many outputs but you
+        only want specific ones, or when you need to namespace outputs by scenario/year.
+
+        Parameters
+        ----------
+        artifacts : Mapping[str, Artifact]
+            Mapping of available artifacts (e.g., from a step's outputs dict).
+        *keys : str
+            Keys to collect from the mapping.
+        prefix : str, default ""
+            Prefix to prepend to coupler keys (e.g., "2030_" -> "2030_persons").
+
+        Returns
+        -------
+        Dict[str, Artifact]
+            Mapping of (prefixed) keys -> ingested artifacts.
+
+        Raises
+        ------
+        TypeError
+            If artifacts is not a mapping or if any key is not a string.
+        KeyError
+            If any requested key is not present in artifacts.
+
+        Examples
+        --------
+        Collect specific outputs from a subprocess result:
+        ```python
+        result = sc.run("step", fn=some_func)  # returns RunResult with outputs dict
+        sc.collect_by_keys(result.outputs, "persons", "households")
+        # Now coupler.get("persons") and coupler.get("households") are available
+        ```
+
+        With year prefix (scenario/temporal namespacing):
+        ```python
+        for year in [2020, 2030, 2040]:
+            result = sc.run(f"forecast_{year}", fn=forecast_fn, year=year)
+            sc.collect_by_keys(result.outputs, "skims", "population", prefix=f"{year}_")
+        # coupler contains: "2020_skims", "2020_population", "2030_skims", etc.
+        ```
         """
         if not isinstance(artifacts, Mapping):
             raise TypeError("collect_by_keys expects a mapping of artifacts.")
@@ -193,6 +279,38 @@ class DeclaredOutput:
 class CouplerSchemaBase:
     """
     Runtime wrapper that exposes a Coupler with attribute-style access.
+
+    This base class is used by the `coupler_schema` decorator to provide typed,
+    attribute-based access to coupler artifacts. It is not typically instantiated
+    directly; instead, use the decorator on a class with type annotations.
+
+    Attributes
+    ----------
+    coupler : Coupler
+        The underlying Coupler instance (accessible via the `coupler` property).
+
+    Methods
+    -------
+    get(key) : Optional[Artifact]
+        Return artifact for key, or None if unset.
+    require(key) : Artifact
+        Return artifact for key, raising KeyError if unset.
+    set(key, artifact) : Artifact
+        Set artifact for key.
+    update(artifacts, **kwargs)
+        Bulk update the coupler.
+
+    Examples
+    --------
+    Typically not used directly; instantiate decorated classes instead:
+    ```python
+    @coupler_schema
+    class MyOutputs:
+        data: Artifact
+
+    schema = MyOutputs(coupler)
+    schema.data = some_artifact  # Type-safe access
+    ```
     """
 
     def __init__(self, coupler: Coupler) -> None:
@@ -200,20 +318,25 @@ class CouplerSchemaBase:
 
     @property
     def coupler(self) -> Coupler:
+        """Access the underlying Coupler instance."""
         return self._coupler
 
     def get(self, key: str) -> Optional[Artifact]:
+        """Return artifact for key, or None if unset."""
         return self._coupler.get(key)
 
     def require(self, key: str) -> Artifact:
+        """Return artifact for key, raising KeyError if unset."""
         return self._coupler.require(key)
 
     def set(self, key: str, artifact: Artifact) -> Artifact:
+        """Set artifact for key."""
         return self._coupler.set(key, artifact)
 
     def update(
         self, artifacts: Optional[Dict[str, Artifact]] = None, /, **kwargs: Artifact
     ) -> None:
+        """Bulk update the coupler."""
         self._coupler.update(artifacts, **kwargs)
 
 
@@ -224,9 +347,75 @@ def coupler_schema(cls: type[SchemaT]) -> type[SchemaT]:
     """
     Decorator that turns an annotated class into a typed Coupler view.
 
-    The resulting class expects a Coupler instance at construction time and
-    exposes properties for each annotated key. The decorator is opt-in and
-    purely additive; it does not affect runtime behavior unless used.
+    Transforms an annotated class into a runtime wrapper that provides type-safe,
+    attribute-style access to Coupler artifacts. Each annotation becomes a read/write
+    property that calls `coupler.require()` on access (getter) and `coupler.set()`
+    on assignment (setter).
+
+    The decorator is opt-in and purely additive:
+    - Does not affect existing Coupler behavior
+    - No changes needed to internal caching or artifact tracking
+    - IDE provides autocomplete and type hints for artifact access
+    - Runtime errors are descriptive ("missing key X, available: Y, Z")
+
+    Parameters
+    ----------
+    cls : type
+        A class with type annotations. Each annotation name becomes a property.
+        (Private fields starting with "_" are skipped.)
+
+    Returns
+    -------
+    type
+        A new class inheriting from CouplerSchemaBase with typed properties.
+
+    Raises
+    ------
+    ValueError
+        If the class has no annotations.
+
+    Examples
+    --------
+    Basic usage with type-safe properties:
+    ```python
+    from consist import coupler_schema
+    from consist.models.artifact import Artifact
+
+    @coupler_schema
+    class MyWorkflowOutputs:
+        persons: Artifact
+        households: Artifact
+        jobs: Artifact
+
+    # In a scenario context:
+    typed = sc.coupler_schema(MyWorkflowOutputs)
+    typed.persons = artifact1  # type-safe set
+    retrieved = typed.persons  # type-safe get, raises KeyError if not set
+    ```
+
+    With docstrings for documentation:
+    ```python
+    @coupler_schema
+    class ActivitySimOutputs:
+        \"\"\"Outputs from ActivitySim model run.\"\"\"
+        persons: Artifact  # Person records with activity schedules
+        households: Artifact  # Household attributes and linkages
+        skims: Artifact  # Zone-to-zone travel time skims in Zarr format
+
+    typed = sc.coupler_schema(ActivitySimOutputs)
+    # All properties enforce correct access via coupler.require(key)
+    ```
+
+    Attribute access automatically validates:
+    ```python
+    @coupler_schema
+    class Outputs:
+        data: Artifact
+
+    typed = sc.coupler_schema(Outputs)
+    # typed.data raises KeyError with helpful message if not set
+    # KeyError: Coupler missing key='data'. Available keys: ...
+    ```
     """
     annotations: Dict[str, Any] = dict(getattr(cls, "__annotations__", {}) or {})
     if not annotations:

@@ -128,6 +128,39 @@ def define_step(
 def coupler_schema(cls: type[SchemaT]) -> type[SchemaT]:
     """
     Decorator that builds a typed Coupler view from an annotated class.
+
+    This is the public API entry point for the `coupler_schema` decorator.
+    See `consist.core.coupler.coupler_schema` for full documentation and examples.
+
+    Parameters
+    ----------
+    cls : type
+        A class with type annotations for coupler keys.
+
+    Returns
+    -------
+    type
+        A new class with typed properties wrapping a Coupler.
+
+    Raises
+    ------
+    ValueError
+        If the class has no annotations.
+
+    Examples
+    --------
+    ```python
+    @consist.coupler_schema
+    class WorkflowOutputs:
+        persons: Artifact
+        households: Artifact
+
+    # Use in a scenario
+    with consist.scenario("workflow") as sc:
+        typed = sc.coupler_schema(WorkflowOutputs)
+        typed.persons = artifact1
+        result = typed.persons  # Type-safe access
+    ```
     """
     return _coupler_schema(cls)
 
@@ -419,6 +452,69 @@ def log_artifacts(
     Log multiple artifacts in a single call for efficiency.
 
     This function is a convenient proxy to `consist.core.tracker.Tracker.log_artifacts`.
+    It logs a batch of related artifacts with optional per-key metadata customization.
+
+    Parameters
+    ----------
+    outputs : Mapping[str, ArtifactRef]
+        Mapping of key -> path/Artifact to log. Keys must be strings and explicitly
+        chosen by the caller (not inferred from filenames).
+    direction : str, default "output"
+        "input" or "output" for the current run context.
+    driver : Optional[str], optional
+        Explicitly specify driver for all artifacts. If None, inferred from file extension.
+    metadata_by_key : Optional[Mapping[str, Dict[str, Any]]], optional
+        Per-key metadata overrides applied on top of shared metadata.
+    **shared_meta : Any
+        Metadata key-value pairs applied to ALL logged artifacts.
+
+    Returns
+    -------
+    Dict[str, Artifact]
+        Mapping of key -> logged Artifact.
+
+    Raises
+    ------
+    RuntimeError
+        If called outside an active run context.
+    ValueError
+        If metadata_by_key contains keys not in outputs, or if any value is None.
+    TypeError
+        If mapping keys are not strings.
+
+    Examples
+    --------
+    Log multiple outputs with shared metadata:
+    ```python
+    artifacts = consist.log_artifacts(
+        {
+            "persons": "results/persons.parquet",
+            "households": "results/households.parquet",
+            "jobs": "results/jobs.parquet"
+        },
+        year=2030,
+        scenario="base"
+    )
+    # All three artifacts get year=2030 and scenario="base"
+    ```
+
+    Mix shared and per-key metadata:
+    ```python
+    artifacts = consist.log_artifacts(
+        {
+            "persons": "output/persons.parquet",
+            "households": "output/households.parquet"
+        },
+        metadata_by_key={
+            "households": {"role": "primary_unit", "weight": 1.0}
+        },
+        dataset_version="v2",
+        simulation_id="run_001"
+    )
+    # persons gets: dataset_version="v2", simulation_id="run_001"
+    # households gets: dataset_version="v2", simulation_id="run_001",
+    #                  role="primary_unit", weight=1.0
+    ```
     """
     return get_active_tracker().log_artifacts(
         outputs,

@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
 SchemaT = TypeVar("SchemaT", bound=CouplerSchemaBase)
 
+
 class OutputCapture:
     """
     Holder for artifacts collected inside a ``capture_outputs`` context.
@@ -216,9 +217,7 @@ class ScenarioContext:
         """
         Declare outputs that should be present in the scenario coupler.
         """
-        self.coupler.declare_outputs(
-            *names, required=required, description=description
-        )
+        self.coupler.declare_outputs(*names, required=required, description=description)
 
     def collect_by_keys(
         self, artifacts: Mapping[str, Artifact], *keys: str, prefix: str = ""
@@ -707,8 +706,7 @@ class ScenarioContext:
             missing_outputs = self.coupler.missing_declared_outputs()
             if missing_outputs:
                 missing_error = RuntimeError(
-                    "Scenario missing declared outputs: "
-                    f"{', '.join(missing_outputs)}."
+                    f"Scenario missing declared outputs: {', '.join(missing_outputs)}."
                 )
 
         # 1. Restore Header Context
@@ -720,11 +718,14 @@ class ScenarioContext:
 
         # 2. Handle Status
         status = "failed" if exc_type or missing_error else "completed"
+        error_for_end_run: Optional[Exception] = None
+        if missing_error is not None:
+            error_for_end_run = missing_error
+        elif isinstance(exc_val, Exception):
+            error_for_end_run = exc_val
         if exc_type or missing_error:
             # Enrich metadata with failure context
-            self._header_record.run.meta["failed_with"] = str(
-                exc_val or missing_error
-            )
+            self._header_record.run.meta["failed_with"] = str(exc_val or missing_error)
             if self._last_step_name:
                 self._header_record.run.meta["failed_step"] = self._last_step_name
             if missing_outputs:
@@ -737,7 +738,7 @@ class ScenarioContext:
         logging.debug(
             f"[ScenarioContext] Ending header {self.run_id} with status={status}"
         )
-        self.tracker.end_run(status=status, error=exc_val or missing_error)
+        self.tracker.end_run(status=status, error=error_for_end_run)
 
         # Defensive: ensure header status/meta are persisted even if future end_run
         # behavior changes. We temporarily restore the header to flush/sync explicitly.

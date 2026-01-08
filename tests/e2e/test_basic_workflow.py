@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 import consist
 from consist.cli import app as cli_app
 from consist.core.identity import IdentityManager
+from consist.core.coupler import CouplerSchemaBase
 from consist.core.tracker import Tracker
 from consist.core.workflow import RunContext
 from consist.models.artifact import Artifact
@@ -78,7 +79,7 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     raw_artifact: Optional[Artifact] = None
 
     @consist.coupler_schema
-    class WorkflowCoupler:
+    class WorkflowCoupler(CouplerSchemaBase):
         raw_table: Artifact
         features: Artifact
 
@@ -464,7 +465,7 @@ def test_scenario_run_skips_callable_on_cache_hit(tracker: Tracker):
         out_path.write_text(f"calls={len(calls)}\n")
 
     @consist.coupler_schema
-    class DemoCoupler:
+    class DemoCoupler(CouplerSchemaBase):
         out: Artifact
 
     with tracker.scenario("run_demo_A") as sc:

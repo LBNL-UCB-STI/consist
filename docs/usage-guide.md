@@ -303,24 +303,66 @@ with use_tracker(tracker):
 
 **Optional: Declare outputs and use a typed coupler view**
 
+Output validation and typed coupler access provide safety and ergonomics:
+
 ```python
 from consist import coupler_schema
 
 @coupler_schema
 class WorkflowCoupler:
+    """Schema for workflow outputs with IDE autocomplete support."""
     zarr_skims: Artifact
+    synthetic_population: Artifact
 
 with use_tracker(tracker):
     with consist.scenario("workflow") as sc:
-        sc.declare_outputs("zarr_skims", required=True)
+        # Declare what outputs are required (optional, but catches missing data early)
+        sc.declare_outputs(
+            "zarr_skims", "synthetic_population",
+            required={"zarr_skims": True, "synthetic_population": True}
+        )
+
+        # Get a typed view for attribute-style access
         typed = sc.coupler_schema(WorkflowCoupler)
 
+        # Run a step and collect specific outputs
         compile_result = sc.run("compile", fn=asim_compile_runner.run)
-        sc.collect_by_keys(compile_result.outputs, "zarr_skims")
+        sc.collect_by_keys(compile_result.outputs, "zarr_skims", "synthetic_population")
 
-        # typed access + automatic coupler lookup
+        # Typed attribute access with IDE autocomplete (type-safe)
+        skims_artifact = typed.zarr_skims
         sc.run("main", fn=asim_runner.run, input_keys="zarr_skims")
-        _ = typed.zarr_skims
+```
+
+**How output validation works:**
+- If a required output is not set before the scenario exits, a `RuntimeError` is raised
+- This catches data flow bugs early rather than failing downstream
+- Mix required and optional outputs with per-key granularity
+
+**When a missing output error occurs:**
+```
+RuntimeError: Scenario missing declared outputs: synthetic_population, zarr_skims.
+```
+
+**Bulk logging with metadata:**
+```python
+with consist.scenario("outputs") as sc:
+    # Log multiple files at once with explicit keys
+    outputs = sc.log_artifacts(
+        {
+            "persons": "results/persons.parquet",
+            "households": "results/households.parquet",
+            "jobs": "results/jobs.parquet"
+        },
+        metadata_by_key={
+            "households": {"role": "primary_unit"},
+            "jobs": {"role": "employment_proxy"}
+        },
+        year=2030,
+        scenario_name="base"
+    )
+    # All get year=2030, scenario_name="base"
+    # households also gets role="primary_unit"
 ```
 
 ### Example: Parameter Sweep in a Scenario

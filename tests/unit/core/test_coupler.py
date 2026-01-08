@@ -5,7 +5,7 @@ from typing import cast
 
 import pytest
 
-from consist.core.coupler import Coupler, coupler_schema
+from consist.core.coupler import Coupler, CouplerSchemaBase, coupler_schema
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
 
@@ -146,7 +146,7 @@ def test_coupler_collect_by_keys_updates_coupler() -> None:
 
 def test_coupler_schema_wraps_attribute_access() -> None:
     @coupler_schema
-    class WorkflowCoupler:
+    class WorkflowCoupler(CouplerSchemaBase):
         a: Artifact
         b: Artifact
 
