@@ -16,8 +16,10 @@ from typing import (
     TYPE_CHECKING,
     Type,
     TypeVar,
+    TypeGuard,
     Union,
     overload,
+    runtime_checkable,
 )
 
 import pandas as pd
@@ -63,7 +65,15 @@ SchemaT = TypeVar("SchemaT", bound=CouplerSchemaBase)
 LoadResult = Union[pd.DataFrame, pd.Series, "xarray.Dataset", pd.HDFStore]
 
 
+@runtime_checkable
 class ArtifactLike(Protocol):
+    """
+    Structural typing for artifact-like objects.
+
+    Any object with `driver`, `uri`, `meta` attributes and a `path` property
+    can be used where ArtifactLike is expected.
+    """
+
     driver: str
     uri: str
     meta: Dict[str, Any]
@@ -72,19 +82,38 @@ class ArtifactLike(Protocol):
     def path(self) -> Path: ...
 
 
+@runtime_checkable
 class DataFrameArtifact(ArtifactLike, Protocol):
+    """Artifact that loads as pandas DataFrame or Series."""
+
     driver: Literal["parquet", "csv", "h5_table"]
 
 
+@runtime_checkable
+class TabularArtifact(ArtifactLike, Protocol):
+    """Artifact that loads as tabular data (DataFrame, Series, or both)."""
+
+    driver: Literal["parquet", "csv", "h5_table", "json"]
+
+
+@runtime_checkable
 class JsonArtifact(ArtifactLike, Protocol):
+    """Artifact that loads as pandas DataFrame or Series from JSON."""
+
     driver: Literal["json"]
 
 
+@runtime_checkable
 class ZarrArtifact(ArtifactLike, Protocol):
+    """Artifact that loads as xarray.Dataset."""
+
     driver: Literal["zarr"]
 
 
+@runtime_checkable
 class HdfStoreArtifact(ArtifactLike, Protocol):
+    """Artifact that loads as pandas HDFStore."""
+
     driver: Literal["h5", "hdf5"]
 
 
@@ -1016,14 +1045,133 @@ def capture_outputs(
 # --- Data Loading ---
 
 
+# Type Guards for artifact narrowing
+# These enable runtime type checking with static type refinement
+
+
+def is_dataframe_artifact(artifact: ArtifactLike) -> TypeGuard[DataFrameArtifact]:
+    """
+    Type guard: narrow artifact to DataFrame-compatible types (parquet, csv, h5_table).
+
+    Use this to enable type-safe loading and IDE autocomplete:
+
+    ```python
+    if is_dataframe_artifact(artifact):
+        df = load(artifact)  # Type checker knows return is DataFrame
+        df.head()  # IDE autocomplete works!
+    ```
+
+    Parameters
+    ----------
+    artifact : ArtifactLike
+        Artifact to check.
+
+    Returns
+    -------
+    bool
+        True if artifact driver is parquet, csv, or h5_table.
+    """
+    return artifact.driver in ("parquet", "csv", "h5_table")
+
+
+def is_tabular_artifact(artifact: ArtifactLike) -> TypeGuard[TabularArtifact]:
+    """
+    Type guard: narrow artifact to any tabular format (parquet, csv, h5_table, json).
+
+    Parameters
+    ----------
+    artifact : ArtifactLike
+        Artifact to check.
+
+    Returns
+    -------
+    bool
+        True if artifact driver produces tabular data.
+    """
+    return artifact.driver in ("parquet", "csv", "h5_table", "json")
+
+
+def is_json_artifact(artifact: ArtifactLike) -> TypeGuard[JsonArtifact]:
+    """
+    Type guard: narrow artifact to JSON format.
+
+    Parameters
+    ----------
+    artifact : ArtifactLike
+        Artifact to check.
+
+    Returns
+    -------
+    bool
+        True if artifact driver is json.
+    """
+    return artifact.driver == "json"
+
+
+def is_zarr_artifact(artifact: ArtifactLike) -> TypeGuard[ZarrArtifact]:
+    """
+    Type guard: narrow artifact to Zarr format.
+
+    Use this when you know an artifact should be Zarr and want type-safe loading:
+
+    ```python
+    if is_zarr_artifact(artifact):
+        ds = load(artifact)  # Type checker knows return is xarray.Dataset
+        ds.dims  # IDE autocomplete works!
+    ```
+
+    Parameters
+    ----------
+    artifact : ArtifactLike
+        Artifact to check.
+
+    Returns
+    -------
+    bool
+        True if artifact driver is zarr.
+    """
+    return artifact.driver == "zarr"
+
+
+def is_hdf_artifact(artifact: ArtifactLike) -> TypeGuard[HdfStoreArtifact]:
+    """
+    Type guard: narrow artifact to HDF5 format (h5 or hdf5).
+
+    Parameters
+    ----------
+    artifact : ArtifactLike
+        Artifact to check.
+
+    Returns
+    -------
+    bool
+        True if artifact driver is h5 or hdf5.
+    """
+    return artifact.driver in ("h5", "hdf5")
+
+
+# Overload signatures ordered from most specific to least specific
+# Type checkers evaluate overloads in declaration order
+
+
 @overload
 def load(
-    artifact: Artifact,
+    artifact: ZarrArtifact,
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
     **kwargs: Any,
-) -> LoadResult: ...
+) -> "xarray.Dataset": ...
+
+
+@overload
+def load(
+    artifact: HdfStoreArtifact,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> pd.HDFStore: ...
 
 
 @overload
@@ -1048,22 +1196,22 @@ def load(
 
 @overload
 def load(
-    artifact: ZarrArtifact,
+    artifact: TabularArtifact,
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
     **kwargs: Any,
-) -> "xarray.Dataset": ...
+) -> pd.DataFrame | pd.Series: ...
 
 
 @overload
 def load(
-    artifact: HdfStoreArtifact,
+    artifact: Artifact,
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
     **kwargs: Any,
-) -> pd.HDFStore: ...
+) -> LoadResult: ...
 
 
 @overload

@@ -50,6 +50,17 @@ from consist.api import (
     config_run_query,
     config_run_rows,
     pivot_facets,
+    # Type guards for artifact narrowing
+    is_dataframe_artifact,
+    is_tabular_artifact,
+    is_json_artifact,
+    is_zarr_artifact,
+    is_hdf_artifact,
+)
+
+# Types
+from consist.types import (
+    DriverType,
 )
 
 __all__ = [
@@ -58,6 +69,8 @@ __all__ = [
     "Run",
     "RunResult",
     "Artifact",
+    # Types
+    "DriverType",
     # Indexing helpers
     "FacetIndex",
     "RunFieldIndex",
@@ -94,4 +107,10 @@ __all__ = [
     "config_run_query",
     "config_run_rows",
     "pivot_facets",
+    # Type guards for artifact narrowing
+    "is_dataframe_artifact",
+    "is_tabular_artifact",
+    "is_json_artifact",
+    "is_zarr_artifact",
+    "is_hdf_artifact",
 ]

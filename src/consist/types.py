@@ -55,6 +55,44 @@ DriverLiteral: TypeAlias = Literal[
 ]
 
 
+class DriverType(str, Enum):
+    """
+    Known artifact format handlers for Consist loaders.
+
+    This enum provides a single source of truth for driver names, enabling:
+    - Type-safe driver comparison (instead of magic strings)
+    - IDE autocomplete when checking driver types
+    - Easy iteration over known drivers
+    - Validation in Artifact models
+
+    Note: The Artifact model itself uses `str` for SQLModel compatibility,
+    but this enum is used in type guards and validation logic.
+
+    Examples
+    --------
+    Check artifact type:
+    ```python
+    if artifact.driver == DriverType.PARQUET.value:
+        df = load(artifact)  # Type checker knows return is DataFrame
+    ```
+
+    Or use type guards (see `is_parquet`, `is_zarr`, etc. in api.py):
+    ```python
+    if is_parquet_artifact(artifact):
+        df = load(artifact)  # Type narrowing works!
+    ```
+    """
+
+    PARQUET = "parquet"
+    CSV = "csv"
+    ZARR = "zarr"
+    JSON = "json"
+    H5_TABLE = "h5_table"
+    H5 = "h5"
+    HDF5 = "hdf5"
+    OTHER = "other"
+
+
 @runtime_checkable
 class HasConsistFacet(Protocol):
     def to_consist_facet(self) -> FacetLike: ...
