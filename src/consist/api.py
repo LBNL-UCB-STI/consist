@@ -42,7 +42,7 @@ from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord, Run, RunResult
 from consist.models.run_config_kv import RunConfigKV
 from consist.core.tracker import Tracker
-from consist.types import ArtifactRef
+from consist.types import ArtifactRef, DriverType
 
 if TYPE_CHECKING:
     import xarray
@@ -82,35 +82,30 @@ class ArtifactLike(Protocol):
     def path(self) -> Path: ...
 
 
-@runtime_checkable
 class DataFrameArtifact(ArtifactLike, Protocol):
     """Artifact that loads as pandas DataFrame or Series."""
 
     driver: Literal["parquet", "csv", "h5_table"]
 
 
-@runtime_checkable
 class TabularArtifact(ArtifactLike, Protocol):
     """Artifact that loads as tabular data (DataFrame, Series, or both)."""
 
     driver: Literal["parquet", "csv", "h5_table", "json"]
 
 
-@runtime_checkable
 class JsonArtifact(ArtifactLike, Protocol):
     """Artifact that loads as pandas DataFrame or Series from JSON."""
 
     driver: Literal["json"]
 
 
-@runtime_checkable
 class ZarrArtifact(ArtifactLike, Protocol):
     """Artifact that loads as xarray.Dataset."""
 
     driver: Literal["zarr"]
 
 
-@runtime_checkable
 class HdfStoreArtifact(ArtifactLike, Protocol):
     """Artifact that loads as pandas HDFStore."""
 
@@ -1071,12 +1066,16 @@ def is_dataframe_artifact(artifact: ArtifactLike) -> TypeGuard[DataFrameArtifact
     bool
         True if artifact driver is parquet, csv, or h5_table.
     """
-    return artifact.driver in ("parquet", "csv", "h5_table")
+    return artifact.driver in DriverType.dataframe_drivers()
 
 
 def is_tabular_artifact(artifact: ArtifactLike) -> TypeGuard[TabularArtifact]:
     """
     Type guard: narrow artifact to any tabular format (parquet, csv, h5_table, json).
+
+    Note: This is broader than `is_dataframe_artifact()`, so `load()` returns
+    `DataFrame | Series` for tabular artifacts. Use `is_dataframe_artifact()`
+    for the narrower DataFrame-only return type.
 
     Parameters
     ----------
@@ -1088,7 +1087,7 @@ def is_tabular_artifact(artifact: ArtifactLike) -> TypeGuard[TabularArtifact]:
     bool
         True if artifact driver produces tabular data.
     """
-    return artifact.driver in ("parquet", "csv", "h5_table", "json")
+    return artifact.driver in DriverType.tabular_drivers()
 
 
 def is_json_artifact(artifact: ArtifactLike) -> TypeGuard[JsonArtifact]:
@@ -1105,7 +1104,7 @@ def is_json_artifact(artifact: ArtifactLike) -> TypeGuard[JsonArtifact]:
     bool
         True if artifact driver is json.
     """
-    return artifact.driver == "json"
+    return artifact.driver == DriverType.JSON.value
 
 
 def is_zarr_artifact(artifact: ArtifactLike) -> TypeGuard[ZarrArtifact]:
@@ -1130,7 +1129,7 @@ def is_zarr_artifact(artifact: ArtifactLike) -> TypeGuard[ZarrArtifact]:
     bool
         True if artifact driver is zarr.
     """
-    return artifact.driver == "zarr"
+    return artifact.driver in DriverType.zarr_drivers()
 
 
 def is_hdf_artifact(artifact: ArtifactLike) -> TypeGuard[HdfStoreArtifact]:
@@ -1147,7 +1146,7 @@ def is_hdf_artifact(artifact: ArtifactLike) -> TypeGuard[HdfStoreArtifact]:
     bool
         True if artifact driver is h5 or hdf5.
     """
-    return artifact.driver in ("h5", "hdf5")
+    return artifact.driver in DriverType.hdf_drivers()
 
 
 # Overload signatures ordered from most specific to least specific

@@ -92,6 +92,39 @@ class DriverType(str, Enum):
     HDF5 = "hdf5"
     OTHER = "other"
 
+    @classmethod
+    def dataframe_drivers(cls) -> frozenset[str]:
+        """Drivers that load as pandas DataFrame."""
+        return frozenset(
+            {
+                cls.PARQUET.value,
+                cls.CSV.value,
+                cls.H5_TABLE.value,
+            }
+        )
+
+    @classmethod
+    def tabular_drivers(cls) -> frozenset[str]:
+        """Drivers that load as tabular data (DataFrame or Series)."""
+        return frozenset(
+            {
+                cls.PARQUET.value,
+                cls.CSV.value,
+                cls.H5_TABLE.value,
+                cls.JSON.value,
+            }
+        )
+
+    @classmethod
+    def zarr_drivers(cls) -> frozenset[str]:
+        """Drivers that load as xarray.Dataset."""
+        return frozenset({cls.ZARR.value})
+
+    @classmethod
+    def hdf_drivers(cls) -> frozenset[str]:
+        """Drivers that load as pandas HDFStore."""
+        return frozenset({cls.H5.value, cls.HDF5.value})
+
 
 @runtime_checkable
 class HasConsistFacet(Protocol):

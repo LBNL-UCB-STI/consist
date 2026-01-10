@@ -520,6 +520,8 @@ with use_tracker(tracker):
         beam_inputs = sc.coupler.require("beam_inputs")
 ```
 
+If your step operates on large files, prefer path-based inputs and keep `load_inputs=False` to avoid eager reads; use `cache_hydration` to ensure cached outputs exist on disk when needed.
+
 <details>
 <summary>Alternative: log file outputs inside the step</summary>
 

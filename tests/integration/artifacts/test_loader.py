@@ -282,3 +282,57 @@ def test_loader_json_and_h5_table(run_dir: Path):
     loaded_h5 = load(art_h5, tracker=tracker)
     assert isinstance(loaded_h5, pd.DataFrame)
     assert loaded_h5["value"].tolist() == [10, 20]
+
+
+def test_loader_type_guard_dispatch(run_dir: Path):
+    """
+    Integration coverage for type-guard driven load dispatch.
+
+    This mirrors the recommended pattern:
+    - use type guards to narrow the artifact
+    - call load() with the narrowed type
+    """
+    from consist import (
+        is_dataframe_artifact,
+        is_json_artifact,
+        is_zarr_artifact,
+    )
+
+    tracker = Tracker(run_dir=run_dir)
+
+    csv_path = run_dir / "guard.csv"
+    df_csv = pd.DataFrame({"col": [1, 2]})
+    df_csv.to_csv(csv_path, index=False)
+
+    json_path = run_dir / "guard.json"
+    df_json = pd.DataFrame({"col": [3, 4]})
+    df_json.to_json(json_path, orient="records")
+
+    with tracker.start_run("run_guard_csv", model="model_A"):
+        art_csv = tracker.log_artifact(csv_path, key="csv_guard", driver="csv")
+
+    with tracker.start_run("run_guard_json", model="model_A"):
+        art_json = tracker.log_artifact(json_path, key="json_guard", driver="json")
+
+    assert is_dataframe_artifact(art_csv)
+    loaded_csv = load(art_csv, tracker=tracker)
+    assert isinstance(loaded_csv, pd.DataFrame)
+    assert loaded_csv["col"].tolist() == [1, 2]
+
+    assert is_json_artifact(art_json)
+    loaded_json = load(art_json, tracker=tracker)
+    assert isinstance(loaded_json, (pd.DataFrame, pd.Series))
+
+    if HAS_ZARR:
+        import xarray as xr
+
+        zarr_path = run_dir / "guard.zarr"
+        ds = xr.Dataset({"temp": (("x", "y"), np.random.rand(2, 2))})
+        ds.to_zarr(zarr_path)
+
+        with tracker.start_run("run_guard_zarr", model="model_A"):
+            art_zarr = tracker.log_artifact(zarr_path, key="zarr_guard")
+
+        assert is_zarr_artifact(art_zarr)
+        loaded_ds = load(art_zarr, tracker=tracker)
+        assert isinstance(loaded_ds, xr.Dataset)

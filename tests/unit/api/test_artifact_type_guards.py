@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from consist import (
     is_dataframe_artifact,
     is_tabular_artifact,
@@ -14,11 +13,6 @@ from consist import (
 from consist.models.artifact import Artifact
 from consist.api import (
     ArtifactLike,
-    DataFrameArtifact,
-    TabularArtifact,
-    JsonArtifact,
-    ZarrArtifact,
-    HdfStoreArtifact,
 )
 
 
@@ -45,7 +39,16 @@ class TestDriverType:
         for dt in DriverType:
             assert isinstance(dt.value, str)
             # Verify member name matches value in expected format
-            assert dt.value in ("parquet", "csv", "zarr", "json", "h5_table", "h5", "hdf5", "other")
+            assert dt.value in (
+                "parquet",
+                "csv",
+                "zarr",
+                "json",
+                "h5_table",
+                "h5",
+                "hdf5",
+                "other",
+            )
 
     def test_driver_type_comparison(self) -> None:
         """Verify DriverType enums can be compared by value."""
@@ -131,61 +134,9 @@ class TestTypeGuards:
 
 
 class TestRuntimeCheckable:
-    """Test @runtime_checkable protocol support."""
+    """Test runtime-checkable protocol support."""
 
     def test_artifact_isinstance_artifactlike(self) -> None:
         """Verify Artifact instances pass isinstance checks for ArtifactLike."""
         art = _artifact("parquet")
         assert isinstance(art, ArtifactLike)
-
-    def test_artifact_isinstance_dataframe_artifact(self) -> None:
-        """Verify parquet Artifact passes isinstance check for DataFrameArtifact."""
-        art = _artifact("parquet")
-        assert isinstance(art, DataFrameArtifact)
-
-    def test_artifact_isinstance_zarr_artifact(self) -> None:
-        """Verify zarr Artifact passes isinstance check for ZarrArtifact."""
-        art = _artifact("zarr")
-        assert isinstance(art, ZarrArtifact)
-
-    def test_artifact_isinstance_json_artifact(self) -> None:
-        """Verify json Artifact passes isinstance check for JsonArtifact."""
-        art = _artifact("json")
-        assert isinstance(art, JsonArtifact)
-
-    def test_artifact_isinstance_hdf_artifact(self) -> None:
-        """Verify h5 Artifact passes isinstance check for HdfStoreArtifact."""
-        art = _artifact("h5")
-        assert isinstance(art, HdfStoreArtifact)
-
-    def test_artifact_isinstance_tabular_artifact(self) -> None:
-        """Verify tabular Artifacts pass isinstance check for TabularArtifact."""
-        for driver in ("parquet", "csv", "h5_table", "json"):
-            art = _artifact(driver)
-            assert isinstance(art, TabularArtifact), f"Expected {driver} to be TabularArtifact"
-
-    def test_isinstance_checks_structural_typing_only(self) -> None:
-        """Verify protocol checks use structural typing (attributes only, not Literal values).
-
-        Note: @runtime_checkable protocols only validate that attributes exist,
-        not their specific values. Use type guards (is_dataframe_artifact, etc.)
-        for runtime validation of Literal type constraints.
-        """
-        # All Artifact instances pass isinstance for all protocols
-        # because they all have the required attributes (driver, uri, meta, path)
-        zarr_art = _artifact("zarr")
-        parquet_art = _artifact("parquet")
-
-        # Both pass structural checks (have driver, uri, meta, path)
-        assert isinstance(zarr_art, ArtifactLike)
-        assert isinstance(parquet_art, ArtifactLike)
-
-        # Both also pass protocol checks (because protocols only check structure)
-        assert isinstance(zarr_art, DataFrameArtifact)
-        assert isinstance(parquet_art, DataFrameArtifact)
-
-        # Use type guards for actual Literal type validation
-        assert is_zarr_artifact(zarr_art)
-        assert not is_zarr_artifact(parquet_art)
-        assert is_dataframe_artifact(parquet_art)
-        assert not is_dataframe_artifact(zarr_art)
