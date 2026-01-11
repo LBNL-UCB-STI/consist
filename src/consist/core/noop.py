@@ -82,6 +82,18 @@ class NoopCoupler:
         self._artifacts[key] = artifact
         return artifact
 
+    def set_from_artifact(self, key: str, value: Any) -> Any:
+        """
+        Set an artifact, accepting both Artifact objects and artifact-like values.
+
+        This method is useful when integrating with optional dependencies where you may
+        receive either real Artifacts or artifact-like objects with .path/.uri properties.
+
+        All forms are stored in the coupler and can be retrieved with get() or require().
+        """
+        self._artifacts[key] = value
+        return value
+
     def update(
         self, artifacts: Optional[Dict[str, Any]] = None, /, **kwargs: Any
     ) -> None:

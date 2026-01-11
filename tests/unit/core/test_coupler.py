@@ -157,3 +157,71 @@ def test_coupler_schema_wraps_attribute_access() -> None:
     schema.a = artifact
     assert schema.a == artifact
     assert coupler.require("a") == artifact
+
+
+def test_coupler_set_from_artifact_with_real_artifact() -> None:
+    """Test set_from_artifact with a real Artifact object."""
+    coupler = Coupler()
+    art = _artifact(key="data")
+
+    result = coupler.set_from_artifact("data", art)
+
+    assert result == art
+    assert coupler.get("data") == art
+
+
+def test_coupler_set_from_artifact_with_artifact_like() -> None:
+    """Test set_from_artifact with an artifact-like object (has .path and .uri)."""
+    from consist.core.noop import NoopArtifact
+
+    coupler = Coupler()
+    noop_art = NoopArtifact(
+        key="persons",
+        path=Path("workspace/persons.parquet"),
+        uri="workspace://persons.parquet",
+    )
+
+    result = coupler.set_from_artifact("persons", noop_art)
+
+    assert result == noop_art
+    assert coupler.get("persons") == noop_art
+
+
+def test_coupler_set_from_artifact_with_path() -> None:
+    """Test set_from_artifact with a Path object."""
+    coupler = Coupler()
+    path = Path("workspace/data.csv")
+
+    result = coupler.set_from_artifact("data", path)
+
+    assert result == path
+    assert coupler.get("data") == path
+
+
+def test_coupler_set_from_artifact_with_string_path() -> None:
+    """Test set_from_artifact with a string path."""
+    coupler = Coupler()
+    path_str = "workspace/data.csv"
+
+    result = coupler.set_from_artifact("data", path_str)
+
+    assert result == path_str
+    assert coupler.get("data") == path_str
+
+
+def test_coupler_set_from_artifact_works_with_schema() -> None:
+    """Test that set_from_artifact works through CouplerSchemaBase."""
+
+    @coupler_schema
+    class WorkflowCoupler(CouplerSchemaBase):
+        persons: Artifact
+
+    coupler = Coupler()
+    schema = WorkflowCoupler(coupler)
+    art = _artifact(key="persons")
+
+    # Should be able to call set_from_artifact on schema too
+    result = schema.set_from_artifact("persons", art)
+
+    assert result == art
+    assert schema.persons == art

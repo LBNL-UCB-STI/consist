@@ -31,6 +31,49 @@ class Coupler:
         self._artifacts[key] = artifact
         return artifact
 
+    def set_from_artifact(self, key: str, value: Any) -> Any:
+        """
+        Set an artifact, accepting both Artifact objects and artifact-like values.
+
+        This method is useful when integrating with optional dependencies (like noop mode)
+        where you may receive either:
+        - A real Artifact (when tracking is enabled)
+        - An artifact-like object with .path and .uri properties (noop mode)
+        - A Path or string (fallback)
+
+        All three forms are stored in the coupler and can be retrieved with get() or require().
+
+        Parameters
+        ----------
+        key : str
+            The coupler key (e.g., "persons", "skims").
+        value : Artifact or artifact-like or Path or str
+            The value to store. Can be a real Artifact, artifact-like object with
+            .path/.uri properties, a Path, or a string path.
+
+        Returns
+        -------
+        Any
+            The value that was stored.
+
+        Examples
+        --------
+        Using with optional Consist dependency:
+        ```python
+        # Works whether log_output returns Artifact or NoopArtifact
+        artifact = tracker.log_output(path, key="persons")
+        coupler.set_from_artifact("persons", artifact)
+        ```
+
+        Mixed real and fallback artifacts:
+        ```python
+        artifact = log_output(path) or path  # Fallback to path string
+        coupler.set_from_artifact("key", artifact)  # Handles both
+        ```
+        """
+        self._artifacts[key] = value
+        return value
+
     def update(
         self, artifacts: Optional[Dict[str, Artifact]] = None, /, **kwargs: Artifact
     ) -> None:
@@ -332,6 +375,10 @@ class CouplerSchemaBase:
     def set(self, key: str, artifact: Artifact) -> Artifact:
         """Set artifact for key."""
         return self._coupler.set(key, artifact)
+
+    def set_from_artifact(self, key: str, value: Any) -> Any:
+        """Set artifact, accepting both Artifact and artifact-like objects."""
+        return self._coupler.set_from_artifact(key, value)
 
     def update(
         self, artifacts: Optional[Dict[str, Artifact]] = None, /, **kwargs: Artifact
