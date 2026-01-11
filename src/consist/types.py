@@ -25,7 +25,7 @@ from typing import (
 )
 
 try:
-    from pydantic import BaseModel  # type: ignore
+    from pydantic import BaseModel
 except Exception:  # pragma: no cover
     BaseModel = object  # type: ignore[misc,assignment]
 

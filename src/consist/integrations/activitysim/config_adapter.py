@@ -47,7 +47,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from consist.core.tracker import Tracker
 
 try:
-    import yaml  # type: ignore[import-not-found]
+    import yaml
 except ImportError:  # pragma: no cover - optional dependency
     yaml = None
 

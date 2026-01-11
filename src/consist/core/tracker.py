@@ -96,7 +96,7 @@ def _resolve_input_ref(
 
 def _is_xarray_dataset(value: Any) -> bool:
     try:
-        import xarray as xr  # type: ignore[import-not-found]
+        import xarray as xr
     except ImportError:
         return False
     return isinstance(value, xr.Dataset)
@@ -104,7 +104,7 @@ def _is_xarray_dataset(value: Any) -> bool:
 
 def _write_xarray_dataset(dataset: Any, path: Path) -> None:
     try:
-        import xarray as xr  # type: ignore[import-not-found]
+        import xarray as xr
     except ImportError as exc:
         raise ImportError("xarray is required to log xarray.Dataset outputs.") from exc
     if not isinstance(dataset, xr.Dataset):
@@ -1106,6 +1106,9 @@ class Tracker:
             Container spec (required if executor='container'). Must contain 'image' and 'command'.
         runtime_kwargs : Optional[Dict[str, Any]], optional
             Additional kwargs to pass to fn at runtime (merged with auto-loaded inputs).
+            These values are not part of the cache signature; use them for handles
+            or runtime-only dependencies. Consider `consist.require_runtime_kwargs`
+            to enforce required keys.
         inject_context : bool | str, optional
             If True or a parameter name, inject a RunContext as that parameter (for file I/O, output logging).
 
@@ -1431,6 +1434,18 @@ class Tracker:
                 )
 
             runtime_kwargs = dict(runtime_kwargs or {})
+            required_runtime = getattr(fn, "__consist_runtime_required__", ())
+            if required_runtime:
+                missing = [
+                    name for name in required_runtime if name not in runtime_kwargs
+                ]
+                if missing:
+                    missing_list = ", ".join(sorted(missing))
+                    raise ValueError(
+                        f"Missing runtime_kwargs for {resolved_name!r}: {missing_list}. "
+                        "Provide them via runtime_kwargs={...} or remove "
+                        "@consist.require_runtime_kwargs."
+                    )
             config_dict: Dict[str, Any] = {}
             if config is None:
                 config_dict = {}

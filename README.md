@@ -177,6 +177,44 @@ See [Config Adapters Integration Guide](docs/integrations/config_adapters.md) fo
 
 ---
 
+## Protocols and Noop Mode
+
+Consist exposes protocol-based interfaces so integrations can type-check cleanly even
+when tracking is disabled. Use `create_tracker` to return a real tracker or a noop
+implementation based on configuration.
+
+```python
+from pathlib import Path
+from consist import Tracker, TrackerLike, create_tracker
+
+def build_tracker() -> Tracker:
+    return Tracker(run_dir=Path("./runs"), db_path=Path("./provenance.duckdb"))
+
+tracker: TrackerLike = create_tracker(
+    enabled=settings.consist.enabled,
+    tracker_factory=build_tracker,
+)
+
+with tracker.scenario("baseline") as sc:
+    result = sc.run(
+        fn=run_step,
+        name="step",
+        runtime_kwargs={"input_path": "inputs.csv"},
+        output_paths={"out": "outputs.parquet"},
+    )
+    artifact = result.outputs["out"]
+    print(artifact.path)
+```
+
+Protocols are available at `consist.protocols`:
+
+- `ArtifactLike`
+- `RunResultLike`
+- `ScenarioLike`
+- `TrackerLike`
+
+---
+
 ## Where to Go Next
 
 **I maintain or develop simulation tools:**

@@ -102,6 +102,17 @@ def get_default_tracker() -> Optional["Tracker"]:
     return _DEFAULT_TRACKER.get()
 
 
+def set_default_tracker(tracker: Optional["Tracker"]) -> Optional["Tracker"]:
+    """
+    Set the default `Tracker` for the current context.
+
+    Returns the previous default tracker, if any.
+    """
+    previous = _DEFAULT_TRACKER.get()
+    _DEFAULT_TRACKER.set(tracker)
+    return previous
+
+
 @contextmanager
 def use_tracker(tracker: "Tracker") -> Iterator["Tracker"]:
     """

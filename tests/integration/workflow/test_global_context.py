@@ -104,7 +104,9 @@ def test_global_introspection(tracker):
         assert t.current_consist.run.id == "intro"
 
     # Outside context, should raise RuntimeError
-    with pytest.raises(RuntimeError, match="No active Consist run"):
+    with pytest.raises(
+        RuntimeError, match="No active Consist run and no default tracker configured"
+    ):
         consist.current_tracker()
 
 
@@ -122,6 +124,12 @@ def test_default_tracker_and_introspection_helpers(tracker):
     with consist.use_tracker(tracker):
         result = consist.run(fn=noop, name="noop")
         assert result.run.model_name == "noop"
+
+    # Default tracker fallback for current_tracker
+    previous = consist.set_current_tracker(tracker)
+    assert previous is None
+    assert consist.current_tracker() is tracker
+    consist.set_current_tracker(None)
 
     # Outside any run: helpers should be graceful
     assert consist.current_run() is None

@@ -163,7 +163,7 @@ class ViewRegistry:
                 )
                 view_name = f"v_{concept_key}"
                 factory.create_hybrid_view(view_name, concept_key, schema_model=model)
-                return cached  # ty: ignore[invalid-return-type]
+                return cached
 
             # This calls create_hybrid_view inside
             # We don't need the return value (the python class) necessarily
@@ -172,7 +172,7 @@ class ViewRegistry:
 
             # 3. Update Cache & Return
             self._class_cache[name] = view_cls
-            return view_cls  # ty: ignore[invalid-return-type]
+            return view_cls
 
         raise AttributeError(f"'ViewRegistry' object has no attribute '{name}'")
 
@@ -223,7 +223,7 @@ class ViewFactory:
         # Pass schema_model to handle empty states
         self.create_hybrid_view(view_name, concept_key, schema_model=model)
 
-        return create_view_model(model, name=view_name)  # ty: ignore[invalid-return-type]
+        return create_view_model(model, name=view_name)
 
     def create_hybrid_view(
         self,

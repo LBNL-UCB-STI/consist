@@ -25,13 +25,17 @@ from consist.api import (
     trace,
     start_run,
     log_artifact,
+    log_input,
+    log_output,
     log_artifacts,
     log_dataframe,
     define_step,
+    require_runtime_kwargs,
     coupler_schema,
     ingest,
     capture_outputs,
     use_tracker,
+    set_current_tracker,
     current_tracker,
     current_run,
     current_consist,
@@ -41,6 +45,7 @@ from consist.api import (
     cached_artifacts,
     get_artifact,
     scenario,
+    noop_scenario,
     single_step_scenario,
     register_views,
     find_run,
@@ -62,6 +67,15 @@ from consist.api import (
 from consist.types import (
     DriverType,
 )
+from consist.core.noop import (
+    NoopArtifact,
+    NoopCoupler,
+    NoopRunResult,
+    NoopScenarioContext,
+    NoopTracker,
+)
+from consist.runtime import create_tracker
+from consist.protocols import ArtifactLike, RunResultLike, ScenarioLike, TrackerLike
 
 __all__ = [
     # Core objects
@@ -71,6 +85,16 @@ __all__ = [
     "Artifact",
     # Types
     "DriverType",
+    "NoopArtifact",
+    "NoopCoupler",
+    "NoopRunResult",
+    "NoopScenarioContext",
+    "NoopTracker",
+    "create_tracker",
+    "ArtifactLike",
+    "RunResultLike",
+    "ScenarioLike",
+    "TrackerLike",
     # Indexing helpers
     "FacetIndex",
     "RunFieldIndex",
@@ -82,13 +106,17 @@ __all__ = [
     "trace",
     "start_run",
     "log_artifact",
+    "log_input",
+    "log_output",
     "log_artifacts",
     "log_dataframe",
     "define_step",
+    "require_runtime_kwargs",
     "coupler_schema",
     "ingest",
     "capture_outputs",
     "use_tracker",
+    "set_current_tracker",
     "current_tracker",
     "current_run",
     "current_consist",
@@ -98,6 +126,7 @@ __all__ = [
     "cached_artifacts",
     "get_artifact",
     "scenario",
+    "noop_scenario",
     "single_step_scenario",
     "register_views",
     "find_run",

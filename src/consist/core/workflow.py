@@ -371,6 +371,8 @@ class ScenarioContext:
 
         This method wraps ``Tracker.run`` while ensuring the scenario header
         is updated with step metadata and artifacts.
+        Use ``runtime_kwargs`` for runtime-only inputs and `consist.require_runtime_kwargs`
+        to validate required keys.
         """
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")

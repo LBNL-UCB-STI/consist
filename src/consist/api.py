@@ -32,9 +32,14 @@ from sqlmodel import SQLModel, Session, select
 from consist.core.context import (
     get_active_tracker,
     get_default_tracker,
+    set_default_tracker,
     use_tracker as _use_tracker,
 )
-from consist.core.decorators import define_step as define_step_decorator
+from consist.core.decorators import (
+    define_step as define_step_decorator,
+    require_runtime_kwargs as require_runtime_kwargs_decorator,
+)
+from consist.core.noop import NoopRunContext, NoopScenarioContext
 from consist.core.views import create_view_model
 from consist.core.workflow import OutputCapture
 from consist.core.coupler import CouplerSchemaBase, coupler_schema as _coupler_schema
@@ -128,7 +133,7 @@ def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
     Type[T]
         SQLModel subclass with ``table=True`` pointing at the hybrid view.
     """
-    return create_view_model(model, name)  # ty: ignore[invalid-return-type]
+    return create_view_model(model, name)
 
 
 # --- Core Access ---
@@ -162,6 +167,15 @@ def use_tracker(tracker: "Tracker") -> Iterator["Tracker"]:
         yield tr
 
 
+def set_current_tracker(tracker: Optional["Tracker"]) -> Optional["Tracker"]:
+    """
+    Set the default tracker used by Consist entrypoints outside active runs.
+
+    Returns the previously configured default tracker, if any.
+    """
+    return set_default_tracker(tracker)
+
+
 def define_step(
     *,
     outputs: Optional[list[str]] = None,
@@ -175,6 +189,17 @@ def define_step(
     function. ``Tracker.run`` and ``ScenarioContext.run`` read this metadata.
     """
     return define_step_decorator(outputs=outputs, tags=tags, description=description)
+
+
+def require_runtime_kwargs(*names: str) -> Callable[[Callable[..., Any]], Callable]:
+    """
+    Enforce the presence of required runtime_kwargs when a step is executed.
+
+    Use this decorator to catch missing runtime-only inputs early, before
+    executing a run. It validates that each required name is present in the
+    `runtime_kwargs` passed to `Tracker.run` or `ScenarioContext.run`.
+    """
+    return require_runtime_kwargs_decorator(*names)
 
 
 def coupler_schema(cls: type[SchemaT]) -> type[SchemaT]:
@@ -218,7 +243,13 @@ def coupler_schema(cls: type[SchemaT]) -> type[SchemaT]:
 
 
 @contextmanager
-def scenario(name: str, tracker: Optional["Tracker"] = None, **kwargs: Any):
+def scenario(
+    name: str,
+    tracker: Optional["Tracker"] = None,
+    *,
+    enabled: bool = True,
+    **kwargs: Any,
+):
     """
     Proxy for ``Tracker.scenario`` to avoid importing the tracker directly.
 
@@ -228,6 +259,9 @@ def scenario(name: str, tracker: Optional["Tracker"] = None, **kwargs: Any):
         Name of the scenario (used for the header run ID).
     tracker : Optional[Tracker], optional
         Tracker instance to use; defaults to the active global tracker.
+    enabled : bool, default True
+        If False, returns a noop scenario context that executes without provenance
+        tracking while preserving Coupler/RunResult ergonomics.
     **kwargs : Any
         Additional arguments forwarded to ``Tracker.scenario``.
 
@@ -236,9 +270,22 @@ def scenario(name: str, tracker: Optional["Tracker"] = None, **kwargs: Any):
     ScenarioContext
         Scenario context manager.
     """
+    if not enabled:
+        yield NoopScenarioContext(name, **kwargs)
+        return
     tr = _resolve_tracker(tracker)
     with tr.scenario(name, **kwargs) as sc:
         yield sc
+
+
+@contextmanager
+def noop_scenario(name: str, **kwargs: Any):
+    """
+    Scenario context that executes without provenance tracking.
+
+    Provides Coupler/RunResult compatibility for disabled Consist use cases.
+    """
+    yield NoopScenarioContext(name, **kwargs)
 
 
 @contextmanager
@@ -319,12 +366,10 @@ def trace(
 
 def current_tracker() -> "Tracker":
     """
-    Retrieves the currently active `Tracker` instance from the global context.
+    Retrieves the active `Tracker` instance from the global context.
 
-    This function provides a way to access the `Tracker` object that is managing
-    the current run. It's particularly useful when you need to interact with
-    Consist's features (like logging artifacts or querying run history) from
-    within a function that doesn't explicitly receive the `Tracker` object as an argument.
+    If no run is active, this function falls back to the default tracker (if set
+    via `consist.use_tracker` or `consist.set_current_tracker`).
 
     Returns
     -------
@@ -334,10 +379,20 @@ def current_tracker() -> "Tracker":
     Raises
     ------
     RuntimeError
-        If no `Tracker` is active in the current context. This typically happens
-        if called outside of a `consist.start_run` block or a `tracker.run`/`tracker.trace` call.
+        If no `Tracker` is active in the current context and no default tracker
+        has been configured.
     """
-    return get_active_tracker()
+    try:
+        return get_active_tracker()
+    except RuntimeError:
+        default = get_default_tracker()
+        if default is None:
+            raise RuntimeError(
+                "No active Consist run and no default tracker configured. "
+                "Use consist.set_current_tracker(tracker) or "
+                "with consist.use_tracker(tracker): ..."
+            ) from None
+        return default
 
 
 def current_run() -> Optional[Run]:
@@ -447,8 +502,10 @@ def log_artifact(
     direction: str = "output",
     schema: Optional[Type[SQLModel]] = None,
     driver: Optional[str] = None,
+    *,
+    enabled: bool = True,
     **meta,
-) -> Artifact:
+) -> ArtifactLike:
     """
     Logs an artifact (file or data reference) to the currently active run.
 
@@ -472,6 +529,8 @@ def log_artifact(
     driver : Optional[str], optional
         Explicitly specify the driver (e.g., 'h5_table').
         If None, the driver is inferred from the file extension.
+    enabled : bool, default True
+        If False, returns a noop artifact object without requiring an active run.
     **meta : Any
         Additional key-value pairs to store in the artifact's flexible `meta` field.
 
@@ -487,6 +546,15 @@ def log_artifact(
     ValueError
         If `key` is not provided when `path` is a path-like (str/Path).
     """
+    if not enabled:
+        return NoopRunContext().log_artifact(
+            path=path,
+            key=key,
+            direction=direction,
+            schema=schema,
+            driver=driver,
+            **meta,
+        )
     return get_active_tracker().log_artifact(
         path=path, key=key, direction=direction, schema=schema, driver=driver, **meta
     )
@@ -498,8 +566,9 @@ def log_artifacts(
     direction: str = "output",
     driver: Optional[str] = None,
     metadata_by_key: Optional[Mapping[str, Dict[str, Any]]] = None,
+    enabled: bool = True,
     **shared_meta: Any,
-) -> Dict[str, Artifact]:
+) -> Mapping[str, ArtifactLike]:
     """
     Log multiple artifacts in a single call for efficiency.
 
@@ -517,13 +586,15 @@ def log_artifacts(
         Explicitly specify driver for all artifacts. If None, inferred from file extension.
     metadata_by_key : Optional[Mapping[str, Dict[str, Any]]], optional
         Per-key metadata overrides applied on top of shared metadata.
+    enabled : bool, default True
+        If False, returns noop artifact objects without requiring an active run.
     **shared_meta : Any
         Metadata key-value pairs applied to ALL logged artifacts.
 
     Returns
     -------
-    Dict[str, Artifact]
-        Mapping of key -> logged Artifact.
+    Mapping[str, ArtifactLike]
+        Mapping of key -> logged Artifact-like objects.
 
     Raises
     ------
@@ -568,12 +639,69 @@ def log_artifacts(
     #                  role="primary_unit", weight=1.0
     ```
     """
+    if not enabled:
+        ctx = NoopRunContext()
+        artifacts: Dict[str, Artifact] = {}
+        per_key_meta = metadata_by_key or {}
+        for key, ref in outputs.items():
+            meta = dict(shared_meta)
+            meta.update(per_key_meta.get(key, {}))
+            artifacts[str(key)] = ctx.log_artifact(
+                ref, key=str(key), direction=direction, driver=driver, **meta
+            )
+        return artifacts
     return get_active_tracker().log_artifacts(
         outputs,
         direction=direction,
         driver=driver,
         metadata_by_key=metadata_by_key,
         **shared_meta,
+    )
+
+
+def log_input(
+    path: ArtifactRef,
+    key: Optional[str] = None,
+    *,
+    schema: Optional[Type[SQLModel]] = None,
+    driver: Optional[str] = None,
+    enabled: bool = True,
+    **meta,
+) -> ArtifactLike:
+    """
+    Log an input artifact to the active run, or return a noop artifact when disabled.
+    """
+    return log_artifact(
+        path=path,
+        key=key,
+        direction="input",
+        schema=schema,
+        driver=driver,
+        enabled=enabled,
+        **meta,
+    )
+
+
+def log_output(
+    path: ArtifactRef,
+    key: Optional[str] = None,
+    *,
+    schema: Optional[Type[SQLModel]] = None,
+    driver: Optional[str] = None,
+    enabled: bool = True,
+    **meta,
+) -> ArtifactLike:
+    """
+    Log an output artifact to the active run, or return a noop artifact when disabled.
+    """
+    return log_artifact(
+        path=path,
+        key=key,
+        direction="output",
+        schema=schema,
+        driver=driver,
+        enabled=enabled,
+        **meta,
     )
 
 
@@ -715,7 +843,7 @@ def register_views(*models: Type[SQLModel]) -> Dict[str, Type[SQLModel]]:
     Dict[str, Type[SQLModel]]
         Mapping from model class name to the generated view model.
     """
-    return {m.__name__: create_view_model(m) for m in models}  # ty: ignore[invalid-return-type]
+    return {m.__name__: create_view_model(m) for m in models}
 
 
 def find_run(tracker: Optional["Tracker"] = None, **filters: Any) -> Optional[Run]:

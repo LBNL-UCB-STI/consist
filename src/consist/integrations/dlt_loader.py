@@ -41,7 +41,7 @@ from consist.models.run import Run
 
 # Optional dependency: `dlt` is only required when using ingestion helpers.
 try:
-    import dlt  # type: ignore[import-not-found]
+    import dlt
 except ImportError:
     dlt = None
 

@@ -299,7 +299,7 @@ def _ingestable_df(
     Collect rows from matching ingestables and return a Pandas DataFrame.
     """
     try:
-        import pandas as pd  # type: ignore[import-not-found]
+        import pandas as pd
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise ImportError("Pandas is required to build DataFrames.") from exc
     table_names = [table_names] if isinstance(table_names, str) else list(table_names)

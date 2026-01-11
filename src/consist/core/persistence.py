@@ -1,7 +1,4 @@
 import time
-
-# ty: ignore[invalid-argument-type] is used on SQLAlchemy joins/where clauses that
-# ty currently mis-types as bool; these are valid SQLAlchemy expressions.
 import random
 import logging
 import uuid
