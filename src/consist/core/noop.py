@@ -448,15 +448,8 @@ def _run_noop_step(
         result = fn(**call_kwargs)
 
     outputs_map: Dict[str, NoopArtifact] = {}
-    base_dir = output_base_dir or Path.cwd()
     if output_paths:
         for key, ref in output_paths.items():
-            path = _resolve_noop_output_path(ref, base_dir)
-            if not path.exists():
-                logging.warning(
-                    "[Consist] Run %r missing outputs: %s", resolved_name, [str(key)]
-                )
-                continue
             outputs_map[str(key)] = _build_noop_artifact(ref, key=str(key))
 
     if outputs and result is not None:
