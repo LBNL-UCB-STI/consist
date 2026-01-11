@@ -5,7 +5,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import inspect
 import logging
-from typing import TYPE_CHECKING, Any, Dict, Iterator, Mapping, Optional, Sequence, Type, TypeVar, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Iterator,
+    Mapping,
+    Optional,
+    Sequence,
+    Type,
+    TypeVar,
+    cast,
+)
 import uuid
 
 from consist.core.coupler import CouplerSchemaBase, DeclaredOutput
