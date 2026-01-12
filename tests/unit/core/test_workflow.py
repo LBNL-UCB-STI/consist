@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from consist.core.coupler import SchemaValidatingCoupler
 from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
 from consist.core.tracker import Tracker
 
@@ -78,6 +79,23 @@ def test_scenario_context(tracker: Tracker):
     run = tracker.get_run("header")
     assert run is not None
     # assert run.status == "completed" # TODO: Figure out why this is still "running"
+
+
+def test_scenario_coupler_kw_not_serialized(tracker: Tracker):
+    """
+    Ensure a coupler passed to scenario(...) is treated as runtime-only and
+    not serialized into run metadata.
+    """
+    with tracker.scenario(
+        "scen_coupler_meta",
+        coupler=SchemaValidatingCoupler(schema={"demo": "doc"}),
+    ):
+        pass
+
+    run = tracker.get_run("scen_coupler_meta")
+    assert run is not None
+    meta = run.meta or {}
+    assert "coupler" not in meta
 
 
 def test_scenario_trace_input_keys_declares_inputs(tracker: Tracker):

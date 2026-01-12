@@ -677,6 +677,8 @@ class ScenarioContext:
         # 1. Start Header Run
         # We use begin_run directly to initialize state
         run_id = self.kwargs.pop("run_id", self.name)
+        # Coupler is a runtime-only object and should not be serialized into run meta.
+        self.kwargs.pop("coupler", None)
         self.tracker.begin_run(
             run_id=run_id,
             model=self.model,
