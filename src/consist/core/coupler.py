@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, TYPE_CHECKING, TypeVar, cast
@@ -25,7 +26,6 @@ class Coupler:
     def __init__(self, tracker: Optional["Tracker"] = None) -> None:
         self.tracker = tracker
         self._artifacts: Dict[str, Artifact] = {}
-        self._declared_outputs: Dict[str, DeclaredOutput] = {}
 
     def set(self, key: str, artifact: Artifact) -> Artifact:
         self._artifacts[key] = artifact
@@ -164,92 +164,6 @@ class Coupler:
         """Alias for `adopt_cached_output()` (kept for backwards compatibility)."""
         return self.adopt_cached_output(key=key)
 
-    def declare_outputs(
-        self,
-        *names: str,
-        required: bool | Mapping[str, bool] = False,
-        description: Optional[Mapping[str, str]] = None,
-    ) -> None:
-        """
-        Declare expected coupler outputs for runtime validation and documentation.
-
-        This method enables early detection of missing outputs by validating at scenario
-        exit time that all required outputs have been set. Optional outputs are tracked
-        but not validated.
-
-        Parameters
-        ----------
-        *names : str
-            Output names to declare.
-        required : bool or Mapping[str, bool], default False
-            If bool: applies to all declared outputs.
-            If Mapping: per-key required status (e.g., {"persons": True, "jobs": False}).
-        description : Mapping[str, str], optional
-            Human-readable descriptions of outputs for documentation.
-
-        Raises
-        ------
-        TypeError
-            If any name is not a string.
-        ValueError
-            If any name is empty after stripping whitespace.
-
-        Examples
-        --------
-        Declare all outputs as required:
-        ```python
-        coupler.declare_outputs("persons", "households", required=True)
-        ```
-
-        Mix required and optional:
-        ```python
-        coupler.declare_outputs(
-            "persons", "households", "legacy_format",
-            required={"persons": True, "households": True, "legacy_format": False}
-        )
-        ```
-
-        With descriptions:
-        ```python
-        coupler.declare_outputs(
-            "skims",
-            description={"skims": "Zone-to-zone travel times in Zarr format"}
-        )
-        ```
-        """
-        if not names:
-            return
-        if isinstance(required, Mapping):
-            required_map = {str(k): bool(v) for k, v in required.items()}
-            default_required = False
-        else:
-            required_map = {}
-            default_required = bool(required)
-        description_map = {str(k): v for k, v in (description or {}).items()}
-        for name in names:
-            if not isinstance(name, str):
-                raise TypeError("Coupler output names must be strings.")
-            key = name.strip()
-            if not key:
-                raise ValueError("Coupler output names cannot be empty.")
-            entry = self._declared_outputs.get(key, DeclaredOutput())
-            entry.required = entry.required or required_map.get(key, default_required)
-            if key in description_map:
-                entry.description = description_map[key]
-            self._declared_outputs[key] = entry
-
-    def missing_declared_outputs(self) -> list[str]:
-        """
-        Return required declared outputs that have not been set in the coupler.
-        """
-        return sorted(
-            [
-                key
-                for key, entry in self._declared_outputs.items()
-                if entry.required and key not in self._artifacts
-            ]
-        )
-
     def collect_by_keys(
         self, artifacts: Mapping[str, Artifact], *keys: str, prefix: str = ""
     ) -> Dict[str, Artifact]:
@@ -311,6 +225,248 @@ class Coupler:
             self.set(coupler_key, artifact)
             collected[coupler_key] = artifact
         return collected
+
+
+class SchemaValidatingCoupler(Coupler):
+    """
+    A Coupler that validates against a workflow-defined schema.
+
+    Extends the base Coupler to provide runtime validation and documentation.
+    When a schema is provided, the coupler will:
+    - Warn about undocumented keys being set
+    - Validate completeness at scenario exit
+    - Provide human-readable descriptions for expected outputs
+
+    This is useful for workflows that want to enforce a consistent set of output
+    keys and catch typos or missing outputs early.
+
+    Parameters
+    ----------
+    schema : dict[str, str], optional
+        Mapping of coupler keys to their descriptions.
+        If provided, warnings are issued for undocumented keys.
+        If None, no schema validation is performed (standard Coupler behavior).
+    tracker : Tracker, optional
+        Optional Tracker for artifact resolution and caching.
+    **kwargs
+        Additional arguments passed to parent Coupler.
+
+    Examples
+    --------
+    Define a schema for your workflow:
+
+    ```python
+    PILATES_COUPLER_SCHEMA = {
+        "zarr_skims": "Path to zarr skims store (updated by BEAM)",
+        "beam_outputs": "BEAM traffic assignment outputs",
+        "activity_demand_outputs": "ActivitySim demand outputs",
+        "usim_datastore_h5": "UrbanSim datastore H5",
+    }
+    ```
+
+    Create a validating coupler and use it in a scenario:
+
+    ```python
+    from consist import SchemaValidatingCoupler
+
+    coupler = SchemaValidatingCoupler(schema=PILATES_COUPLER_SCHEMA)
+    scenario = consist.Scenario(..., coupler=coupler)
+
+    # Set outputs as usual
+    coupler.set("zarr_skims", skims_artifact)
+
+    # At scenario exit, check for missing required outputs
+    missing = coupler.missing_declared_outputs()
+    if missing:
+        logger.warning(f"Coupler outputs never set: {missing}")
+    ```
+
+    Undocumented keys trigger warnings:
+
+    ```python
+    coupler["typo_key"] = artifact  # Warning: "Setting undocumented key..."
+    ```
+    """
+
+    def __init__(self, schema: Optional[Dict[str, str]] = None, **kwargs) -> None:
+        """
+        Initialize a schema-validating coupler.
+
+        Parameters
+        ----------
+        schema : dict[str, str], optional
+            Mapping of valid coupler keys to their descriptions.
+        **kwargs
+            Passed to parent Coupler.__init__ (includes tracker parameter).
+        """
+        super().__init__(**kwargs)
+        self.schema = schema or {}
+        self._undocumented_keys: list[str] = []
+        self._declared_outputs: Dict[str, DeclaredOutput] = {}
+
+    def set(self, key: str, artifact: Artifact) -> Artifact:
+        """
+        Set an artifact, warning if key is not in schema.
+
+        Parameters
+        ----------
+        key : str
+            The coupler key.
+        artifact : Artifact
+            The artifact to store.
+
+        Returns
+        -------
+        Artifact
+            The artifact that was set.
+        """
+        if self.schema and key not in self.schema:
+            self._undocumented_keys.append(key)
+            warnings.warn(
+                f"Setting undocumented coupler key '{key}'. "
+                f"Expected keys: {list(self.schema.keys())}",
+                UserWarning,
+                stacklevel=2,
+            )
+        return super().set(key, artifact)
+
+    def validate_all_schema_keys_set(self) -> list[str]:
+        """
+        Return schema keys that were never set in the coupler.
+
+        Useful for checking at scenario exit whether all expected outputs
+        were produced. Compare to `missing_declared_outputs()` which only
+        checks for required declared outputs.
+
+        Returns
+        -------
+        list[str]
+            Schema keys that were never set, sorted.
+        """
+        return sorted([key for key in self.schema if key not in self._artifacts])
+
+    def describe_schema(self) -> Dict[str, str]:
+        """
+        Return the schema (mapping of keys to descriptions).
+
+        Useful for documentation and validation reporting.
+
+        Returns
+        -------
+        dict[str, str]
+            Mapping of coupler keys to their descriptions.
+        """
+        return dict(self.schema)
+
+    def declare_outputs(
+        self,
+        *names: str,
+        required: bool | Mapping[str, bool] = False,
+        description: Optional[Mapping[str, str]] = None,
+    ) -> None:
+        """
+        Declare expected coupler outputs for runtime validation and documentation.
+
+        This method enables early detection of missing outputs by validating at scenario
+        exit time that all required outputs have been set. Can be used in conjunction
+        with a schema, or independently for dynamic output declarations.
+
+        Parameters
+        ----------
+        *names : str
+            Output names to declare.
+        required : bool or Mapping[str, bool], default False
+            If bool: applies to all declared outputs.
+            If Mapping: per-key required status (e.g., {"persons": True, "jobs": False}).
+        description : Mapping[str, str], optional
+            Human-readable descriptions of outputs for documentation.
+
+        Raises
+        ------
+        TypeError
+            If any name is not a string.
+        ValueError
+            If any name is empty after stripping whitespace.
+
+        Examples
+        --------
+        Declare all outputs as required:
+
+        ```python
+        coupler.declare_outputs("persons", "households", required=True)
+        ```
+
+        Mix required and optional:
+
+        ```python
+        coupler.declare_outputs(
+            "persons", "households", "legacy_format",
+            required={"persons": True, "households": True, "legacy_format": False}
+        )
+        ```
+
+        With descriptions:
+
+        ```python
+        coupler.declare_outputs(
+            "skims",
+            description={"skims": "Zone-to-zone travel times in Zarr format"}
+        )
+        ```
+
+        Combine with schema-based validation:
+
+        ```python
+        # Define schema for expected outputs
+        coupler = SchemaValidatingCoupler(schema={"persons": "...", "households": "..."})
+
+        # Add runtime-declared optional outputs
+        coupler.declare_outputs("extra_field", required=False)
+
+        # Check for missing required outputs at scenario exit
+        missing = coupler.missing_declared_outputs()
+        ```
+        """
+        if not names:
+            return
+        if isinstance(required, Mapping):
+            required_map = {str(k): bool(v) for k, v in required.items()}
+            default_required = False
+        else:
+            required_map = {}
+            default_required = bool(required)
+        description_map = {str(k): v for k, v in (description or {}).items()}
+        for name in names:
+            if not isinstance(name, str):
+                raise TypeError("Coupler output names must be strings.")
+            key = name.strip()
+            if not key:
+                raise ValueError("Coupler output names cannot be empty.")
+            entry = self._declared_outputs.get(key, DeclaredOutput())
+            entry.required = entry.required or required_map.get(key, default_required)
+            if key in description_map:
+                entry.description = description_map[key]
+            self._declared_outputs[key] = entry
+
+    def missing_declared_outputs(self) -> list[str]:
+        """
+        Return required declared outputs that have not been set in the coupler.
+
+        This checks only outputs declared via declare_outputs(), not schema keys.
+        Use validate_all_schema_keys_set() to check schema-based validation.
+
+        Returns
+        -------
+        list[str]
+            Sorted list of required declared outputs that are missing.
+        """
+        return sorted(
+            [
+                key
+                for key, entry in self._declared_outputs.items()
+                if entry.required and key not in self._artifacts
+            ]
+        )
 
 
 @dataclass

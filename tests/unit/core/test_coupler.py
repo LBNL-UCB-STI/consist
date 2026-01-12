@@ -5,7 +5,12 @@ from typing import cast
 
 import pytest
 
-from consist.core.coupler import Coupler, CouplerSchemaBase, coupler_schema
+from consist.core.coupler import (
+    Coupler,
+    SchemaValidatingCoupler,
+    CouplerSchemaBase,
+    coupler_schema,
+)
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
 
@@ -125,7 +130,7 @@ def test_coupler_adopt_cached_output_without_tracker_is_noop() -> None:
 
 
 def test_coupler_declare_outputs_tracks_missing_required() -> None:
-    coupler = Coupler()
+    coupler = SchemaValidatingCoupler()
     coupler.declare_outputs("zarr", "csv", required={"zarr": True, "csv": False})
 
     assert coupler.missing_declared_outputs() == ["zarr"]

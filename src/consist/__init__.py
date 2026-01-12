@@ -11,6 +11,7 @@ from consist.models.artifact import Artifact
 
 # Core
 from consist.core.tracker import Tracker
+from consist.core.coupler import Coupler, SchemaValidatingCoupler
 from consist.core.indexing import (
     FacetIndex,
     RunFieldIndex,
@@ -80,6 +81,8 @@ from consist.protocols import ArtifactLike, RunResultLike, ScenarioLike, Tracker
 __all__ = [
     # Core objects
     "Tracker",
+    "Coupler",
+    "SchemaValidatingCoupler",
     "Run",
     "RunResult",
     "Artifact",

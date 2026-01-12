@@ -20,7 +20,7 @@ from typing import (
 from consist import Artifact
 from consist.models.run import ConsistRecord, RunResult
 from typing import TYPE_CHECKING
-from consist.core.coupler import Coupler, CouplerSchemaBase
+from consist.core.coupler import SchemaValidatingCoupler, CouplerSchemaBase
 from consist.core.input_utils import coerce_input_map
 from consist.types import ArtifactRef, FacetLike, HashInputs
 from pathlib import Path
@@ -115,8 +115,9 @@ class ScenarioContext:
 
     Attributes
     ----------
-    coupler : Coupler
+    coupler : SchemaValidatingCoupler
         Scenario-local artifact registry for passing outputs between steps.
+        Supports both schema-based and runtime-declared output validation.
     """
 
     def __init__(
@@ -143,7 +144,7 @@ class ScenarioContext:
         self._inputs: Dict[str, Artifact] = {}
         self._first_step_started: bool = False
         self._last_step_name: Optional[str] = None
-        self.coupler = Coupler(tracker)
+        self.coupler = SchemaValidatingCoupler(tracker=tracker)
 
     @property
     def run_id(self) -> str:

@@ -301,9 +301,61 @@ with use_tracker(tracker):
 - Consist tracks this as part of the cache key
 - If the population artifact hasn't changed, this step's cache is still valid
 
-**Optional: Declare outputs and use a typed coupler view**
+**Optional: Output Validation with SchemaValidatingCoupler**
 
-Output validation and typed coupler access provide safety and ergonomics:
+Output validation catches data flow bugs early—when you forget to set an expected output or misspell a key name, you get immediate feedback rather than silent failures downstream.
+
+Consist uses `SchemaValidatingCoupler` by default in all scenarios, which supports two validation patterns:
+
+**Pattern A: Schema-based validation (define keys upfront)**
+
+```python
+from consist import SchemaValidatingCoupler
+
+# Define your coupler schema once
+WORKFLOW_SCHEMA = {
+    "zarr_skims": "Zone-to-zone travel times in Zarr format",
+    "synthetic_population": "Synthetic population with activity schedules",
+}
+
+with use_tracker(tracker):
+    # Create a coupler with schema validation
+    coupler = SchemaValidatingCoupler(schema=WORKFLOW_SCHEMA)
+    with consist.scenario("workflow", coupler=coupler) as sc:
+        # Run steps and set outputs
+        compile_result = sc.run("compile", fn=asim_compile_runner.run)
+        sc.coupler.set("zarr_skims", compile_result.outputs["zarr_skims"])
+
+        # At scenario exit, validate all schema keys were set
+        missing = sc.coupler.validate_all_schema_keys_set()
+        if missing:
+            raise RuntimeError(f"Missing coupler outputs: {missing}")
+```
+
+**Pattern B: Runtime-declared validation (declare as you go)**
+
+```python
+with use_tracker(tracker):
+    with consist.scenario("workflow") as sc:
+        # Declare required outputs dynamically
+        sc.declare_outputs(
+            "zarr_skims", "synthetic_population",
+            required={"zarr_skims": True, "synthetic_population": True}
+        )
+
+        # Run steps and set outputs
+        compile_result = sc.run("compile", fn=asim_compile_runner.run)
+        sc.coupler.set("zarr_skims", compile_result.outputs["zarr_skims"])
+
+        # Check for missing required outputs
+        missing = sc.coupler.missing_declared_outputs()
+        if missing:
+            raise RuntimeError(f"Missing required outputs: {missing}")
+```
+
+**Optional: Type-safe access with coupler_schema decorator**
+
+For IDE autocomplete support, use the `coupler_schema` decorator:
 
 ```python
 from consist import coupler_schema
@@ -316,33 +368,23 @@ class WorkflowCoupler:
 
 with use_tracker(tracker):
     with consist.scenario("workflow") as sc:
-        # Declare what outputs are required (optional, but catches missing data early)
-        sc.declare_outputs(
-            "zarr_skims", "synthetic_population",
-            required={"zarr_skims": True, "synthetic_population": True}
-        )
-
         # Get a typed view for attribute-style access
         typed = sc.coupler_schema(WorkflowCoupler)
 
-        # Run a step and collect specific outputs
+        # Run a step and collect outputs
         compile_result = sc.run("compile", fn=asim_compile_runner.run)
         sc.collect_by_keys(compile_result.outputs, "zarr_skims", "synthetic_population")
 
         # Typed attribute access with IDE autocomplete (type-safe)
-        skims_artifact = typed.zarr_skims
+        skims_artifact = typed.zarr_skims  # IDE knows this is an Artifact
         sc.run("main", fn=asim_runner.run, input_keys="zarr_skims")
 ```
 
-**How output validation works:**
-- If a required output is not set before the scenario exits, a `RuntimeError` is raised
-- This catches data flow bugs early rather than failing downstream
-- Mix required and optional outputs with per-key granularity
-
-**When a missing output error occurs:**
-```
-RuntimeError: Scenario missing declared outputs: synthetic_population, zarr_skims.
-```
+**Benefits:**
+- **Schema-based**: Typos are caught immediately with warnings (e.g., "Setting undocumented coupler key 'zar_skims'")
+- **Runtime-declared**: Mix required and optional outputs with per-key granularity
+- **Both together**: Define core outputs in schema, add optional runtime outputs
+- **Type safety (optional)**: Use `coupler_schema` decorator for IDE autocomplete on typed coupler views
 
 **Bulk logging with metadata:**
 ```python
