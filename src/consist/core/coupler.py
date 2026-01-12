@@ -301,8 +301,34 @@ class SchemaValidatingCoupler(Coupler):
         """
         super().__init__(**kwargs)
         self.schema = schema or {}
-        self._undocumented_keys: list[str] = []
+        self._undocumented_keys: set[str] = set()
         self._declared_outputs: Dict[str, DeclaredOutput] = {}
+
+    @property
+    def undocumented_keys(self) -> list[str]:
+        """
+        Return keys that were set but not present in the schema.
+
+        Returns
+        -------
+        list[str]
+            Sorted list of undocumented keys.
+        """
+        return sorted(self._undocumented_keys)
+
+    def _warn_undocumented_key(self, key: str) -> None:
+        if (
+            self.schema
+            and key not in self.schema
+            and key not in self._undocumented_keys
+        ):
+            self._undocumented_keys.add(key)
+            warnings.warn(
+                f"Setting undocumented coupler key '{key}'. "
+                f"Expected keys: {list(self.schema.keys())}",
+                UserWarning,
+                stacklevel=2,
+            )
 
     def set(self, key: str, artifact: Artifact) -> Artifact:
         """
@@ -320,15 +346,45 @@ class SchemaValidatingCoupler(Coupler):
         Artifact
             The artifact that was set.
         """
-        if self.schema and key not in self.schema:
-            self._undocumented_keys.append(key)
-            warnings.warn(
-                f"Setting undocumented coupler key '{key}'. "
-                f"Expected keys: {list(self.schema.keys())}",
-                UserWarning,
-                stacklevel=2,
-            )
+        self._warn_undocumented_key(key)
         return super().set(key, artifact)
+
+    def set_from_artifact(self, key: str, value: Any) -> Any:
+        """
+        Set an artifact-like value, warning if key is not in schema.
+
+        Parameters
+        ----------
+        key : str
+            The coupler key.
+        value : Any
+            Artifact or artifact-like value to store.
+
+        Returns
+        -------
+        Any
+            The stored value.
+        """
+        self._warn_undocumented_key(key)
+        self._artifacts[key] = value
+        return value
+
+    def update(
+        self, artifacts: Optional[Dict[str, Artifact]] = None, /, **kwargs: Artifact
+    ) -> None:
+        """
+        Bulk-update the coupler mapping with schema validation.
+
+        Examples
+        --------
+        `coupler.update({"persons": art})` or `coupler.update(persons=art)`
+        """
+        if artifacts:
+            for key, artifact in artifacts.items():
+                self.set(key, artifact)
+        if kwargs:
+            for key, artifact in kwargs.items():
+                self.set(key, artifact)
 
     def validate_all_schema_keys_set(self) -> list[str]:
         """
@@ -426,6 +482,11 @@ class SchemaValidatingCoupler(Coupler):
         # Check for missing required outputs at scenario exit
         missing = coupler.missing_declared_outputs()
         ```
+
+        Notes
+        -----
+        Required status is "sticky": once an output is marked required, later
+        declarations cannot downgrade it to optional.
         """
         if not names:
             return
@@ -464,9 +525,23 @@ class SchemaValidatingCoupler(Coupler):
             [
                 key
                 for key, entry in self._declared_outputs.items()
-                if entry.required and key not in self._artifacts
+                if entry.required
+                and (key not in self._artifacts or self._artifacts[key] is None)
             ]
         )
+
+    def validate(self) -> list[str]:
+        """
+        Return missing required outputs from schema and runtime declarations.
+
+        Returns
+        -------
+        list[str]
+            Sorted list of missing required outputs.
+        """
+        missing = set(self.validate_all_schema_keys_set())
+        missing.update(self.missing_declared_outputs())
+        return sorted(missing)
 
 
 @dataclass

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import warnings
 from typing import cast
 
 import pytest
@@ -139,6 +140,14 @@ def test_coupler_declare_outputs_tracks_missing_required() -> None:
     assert coupler.missing_declared_outputs() == []
 
 
+def test_coupler_missing_declared_outputs_treats_none_as_missing() -> None:
+    coupler = SchemaValidatingCoupler()
+    coupler.declare_outputs("required", required=True)
+
+    coupler.set("required", cast(Artifact, None))
+    assert coupler.missing_declared_outputs() == ["required"]
+
+
 def test_coupler_collect_by_keys_updates_coupler() -> None:
     coupler = Coupler()
     outputs = {"a": _artifact(key="a"), "b": _artifact(key="b")}
@@ -162,6 +171,69 @@ def test_coupler_schema_wraps_attribute_access() -> None:
     schema.a = artifact
     assert schema.a == artifact
     assert coupler.require("a") == artifact
+
+
+def test_schema_warns_on_undocumented_key() -> None:
+    coupler = SchemaValidatingCoupler(schema={"known": "doc"})
+
+    with pytest.warns(UserWarning, match="undocumented"):
+        coupler.set("unknown", _artifact(key="unknown"))
+
+
+def test_schema_update_warns_on_undocumented_key() -> None:
+    coupler = SchemaValidatingCoupler(schema={"known": "doc"})
+
+    with pytest.warns(UserWarning, match="undocumented"):
+        coupler.update({"unknown": _artifact(key="unknown")})
+
+
+def test_schema_set_from_artifact_warns_on_undocumented_key() -> None:
+    coupler = SchemaValidatingCoupler(schema={"known": "doc"})
+
+    with pytest.warns(UserWarning, match="undocumented"):
+        coupler.set_from_artifact("unknown", _artifact(key="unknown"))
+
+
+def test_schema_warns_only_once_per_key() -> None:
+    coupler = SchemaValidatingCoupler(schema={"known": "doc"})
+    art = _artifact(key="unknown")
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        coupler.set("unknown", art)
+        coupler.set("unknown", art)
+
+    assert len(captured) == 1
+
+
+def test_schema_validate_all_schema_keys_set() -> None:
+    coupler = SchemaValidatingCoupler(schema={"a": "doc", "b": "doc"})
+    coupler.set("a", _artifact(key="a"))
+
+    assert coupler.validate_all_schema_keys_set() == ["b"]
+
+
+def test_schema_describe_schema_returns_mapping_copy() -> None:
+    schema = {"persons": "Population data", "jobs": "Employment data"}
+    coupler = SchemaValidatingCoupler(schema=schema)
+
+    assert coupler.describe_schema() == schema
+    assert coupler.describe_schema() is not schema
+
+
+def test_schema_validate_combines_schema_and_declared_outputs() -> None:
+    coupler = SchemaValidatingCoupler(schema={"a": "doc", "b": "doc"})
+    coupler.declare_outputs("c", required=True)
+    coupler.set("a", _artifact(key="a"))
+
+    assert coupler.validate() == ["b", "c"]
+
+
+def test_schema_undocumented_keys_property() -> None:
+    coupler = SchemaValidatingCoupler(schema={"known": "doc"})
+    coupler.set("unknown", _artifact(key="unknown"))
+
+    assert coupler.undocumented_keys == ["unknown"]
 
 
 def test_coupler_set_from_artifact_with_real_artifact() -> None:

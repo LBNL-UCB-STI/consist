@@ -154,6 +154,7 @@ class NoopCoupler:
         required: bool | Mapping[str, bool] = False,
         description: Optional[Mapping[str, str]] = None,
     ) -> None:
+        # NOTE: Keep in sync with SchemaValidatingCoupler.declare_outputs.
         if not names:
             return
         if isinstance(required, Mapping):
@@ -180,7 +181,8 @@ class NoopCoupler:
             [
                 key
                 for key, entry in self._declared_outputs.items()
-                if entry.required and key not in self._artifacts
+                if entry.required
+                and (key not in self._artifacts or self._artifacts[key] is None)
             ]
         )
 
