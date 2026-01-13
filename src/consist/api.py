@@ -9,12 +9,17 @@ from typing import (
     Hashable,
     Iterable,
     Iterator,
+    Literal,
     Mapping,
     Optional,
+    Protocol,
     TYPE_CHECKING,
     Type,
     TypeVar,
+    TypeGuard,
     Union,
+    overload,
+    runtime_checkable,
 )
 
 import pandas as pd
@@ -27,16 +32,22 @@ from sqlmodel import SQLModel, Session, select
 from consist.core.context import (
     get_active_tracker,
     get_default_tracker,
+    set_default_tracker,
     use_tracker as _use_tracker,
 )
-from consist.core.decorators import define_step as define_step_decorator
+from consist.core.decorators import (
+    define_step as define_step_decorator,
+    require_runtime_kwargs as require_runtime_kwargs_decorator,
+)
+from consist.core.noop import NoopRunContext, NoopScenarioContext
 from consist.core.views import create_view_model
 from consist.core.workflow import OutputCapture
+from consist.core.coupler import CouplerSchemaBase, coupler_schema as _coupler_schema
 from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord, Run, RunResult
 from consist.models.run_config_kv import RunConfigKV
 from consist.core.tracker import Tracker
-from consist.types import ArtifactRef
+from consist.types import ArtifactRef, DriverType
 
 if TYPE_CHECKING:
     import xarray
@@ -55,7 +66,55 @@ except ImportError:
     tables = None
 
 T = TypeVar("T", bound=SQLModel)
+SchemaT = TypeVar("SchemaT", bound=CouplerSchemaBase)
 LoadResult = Union[pd.DataFrame, pd.Series, "xarray.Dataset", pd.HDFStore]
+
+
+@runtime_checkable
+class ArtifactLike(Protocol):
+    """
+    Structural typing for artifact-like objects.
+
+    Any object with `driver`, `uri`, `meta` attributes and a `path` property
+    can be used where ArtifactLike is expected.
+    """
+
+    driver: str
+    uri: str
+    meta: Dict[str, Any]
+
+    @property
+    def path(self) -> Path: ...
+
+
+class DataFrameArtifact(ArtifactLike, Protocol):
+    """Artifact that loads as pandas DataFrame or Series."""
+
+    driver: Literal["parquet", "csv", "h5_table"]
+
+
+class TabularArtifact(ArtifactLike, Protocol):
+    """Artifact that loads as tabular data (DataFrame, Series, or both)."""
+
+    driver: Literal["parquet", "csv", "h5_table", "json"]
+
+
+class JsonArtifact(ArtifactLike, Protocol):
+    """Artifact that loads as pandas DataFrame or Series from JSON."""
+
+    driver: Literal["json"]
+
+
+class ZarrArtifact(ArtifactLike, Protocol):
+    """Artifact that loads as xarray.Dataset."""
+
+    driver: Literal["zarr"]
+
+
+class HdfStoreArtifact(ArtifactLike, Protocol):
+    """Artifact that loads as pandas HDFStore."""
+
+    driver: Literal["h5", "hdf5"]
 
 
 def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
@@ -74,7 +133,7 @@ def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
     Type[T]
         SQLModel subclass with ``table=True`` pointing at the hybrid view.
     """
-    return create_view_model(model, name)  # ty: ignore[invalid-return-type]
+    return create_view_model(model, name)
 
 
 # --- Core Access ---
@@ -108,6 +167,15 @@ def use_tracker(tracker: "Tracker") -> Iterator["Tracker"]:
         yield tr
 
 
+def set_current_tracker(tracker: Optional["Tracker"]) -> Optional["Tracker"]:
+    """
+    Set the default tracker used by Consist entrypoints outside active runs.
+
+    Returns the previously configured default tracker, if any.
+    """
+    return set_default_tracker(tracker)
+
+
 def define_step(
     *,
     outputs: Optional[list[str]] = None,
@@ -123,8 +191,65 @@ def define_step(
     return define_step_decorator(outputs=outputs, tags=tags, description=description)
 
 
+def require_runtime_kwargs(*names: str) -> Callable[[Callable[..., Any]], Callable]:
+    """
+    Enforce the presence of required runtime_kwargs when a step is executed.
+
+    Use this decorator to catch missing runtime-only inputs early, before
+    executing a run. It validates that each required name is present in the
+    `runtime_kwargs` passed to `Tracker.run` or `ScenarioContext.run`.
+    """
+    return require_runtime_kwargs_decorator(*names)
+
+
+def coupler_schema(cls: type[SchemaT]) -> type[SchemaT]:
+    """
+    Decorator that builds a typed Coupler view from an annotated class.
+
+    This is the public API entry point for the `coupler_schema` decorator.
+    See `consist.core.coupler.coupler_schema` for full documentation and examples.
+
+    Parameters
+    ----------
+    cls : type
+        A class with type annotations for coupler keys.
+
+    Returns
+    -------
+    type
+        A new class with typed properties wrapping a Coupler.
+
+    Raises
+    ------
+    ValueError
+        If the class has no annotations.
+
+    Examples
+    --------
+    ```python
+    @consist.coupler_schema
+    class WorkflowOutputs:
+        persons: Artifact
+        households: Artifact
+
+    # Use in a scenario
+    with consist.scenario("workflow") as sc:
+        typed = sc.coupler_schema(WorkflowOutputs)
+        typed.persons = artifact1
+        result = typed.persons  # Type-safe access
+    ```
+    """
+    return _coupler_schema(cls)
+
+
 @contextmanager
-def scenario(name: str, tracker: Optional["Tracker"] = None, **kwargs: Any):
+def scenario(
+    name: str,
+    tracker: Optional["Tracker"] = None,
+    *,
+    enabled: bool = True,
+    **kwargs: Any,
+):
     """
     Proxy for ``Tracker.scenario`` to avoid importing the tracker directly.
 
@@ -134,6 +259,9 @@ def scenario(name: str, tracker: Optional["Tracker"] = None, **kwargs: Any):
         Name of the scenario (used for the header run ID).
     tracker : Optional[Tracker], optional
         Tracker instance to use; defaults to the active global tracker.
+    enabled : bool, default True
+        If False, returns a noop scenario context that executes without provenance
+        tracking while preserving Coupler/RunResult ergonomics.
     **kwargs : Any
         Additional arguments forwarded to ``Tracker.scenario``.
 
@@ -142,9 +270,22 @@ def scenario(name: str, tracker: Optional["Tracker"] = None, **kwargs: Any):
     ScenarioContext
         Scenario context manager.
     """
+    if not enabled:
+        yield NoopScenarioContext(name, **kwargs)
+        return
     tr = _resolve_tracker(tracker)
     with tr.scenario(name, **kwargs) as sc:
         yield sc
+
+
+@contextmanager
+def noop_scenario(name: str, **kwargs: Any):
+    """
+    Scenario context that executes without provenance tracking.
+
+    Provides Coupler/RunResult compatibility for disabled Consist use cases.
+    """
+    yield NoopScenarioContext(name, **kwargs)
 
 
 @contextmanager
@@ -225,12 +366,10 @@ def trace(
 
 def current_tracker() -> "Tracker":
     """
-    Retrieves the currently active `Tracker` instance from the global context.
+    Retrieves the active `Tracker` instance from the global context.
 
-    This function provides a way to access the `Tracker` object that is managing
-    the current run. It's particularly useful when you need to interact with
-    Consist's features (like logging artifacts or querying run history) from
-    within a function that doesn't explicitly receive the `Tracker` object as an argument.
+    If no run is active, this function falls back to the default tracker (if set
+    via `consist.use_tracker` or `consist.set_current_tracker`).
 
     Returns
     -------
@@ -240,10 +379,20 @@ def current_tracker() -> "Tracker":
     Raises
     ------
     RuntimeError
-        If no `Tracker` is active in the current context. This typically happens
-        if called outside of a `consist.start_run` block or a `tracker.run`/`tracker.trace` call.
+        If no `Tracker` is active in the current context and no default tracker
+        has been configured.
     """
-    return get_active_tracker()
+    try:
+        return get_active_tracker()
+    except RuntimeError:
+        default = get_default_tracker()
+        if default is None:
+            raise RuntimeError(
+                "No active Consist run and no default tracker configured. "
+                "Use consist.set_current_tracker(tracker) or "
+                "with consist.use_tracker(tracker): ..."
+            ) from None
+        return default
 
 
 def current_run() -> Optional[Run]:
@@ -353,8 +502,10 @@ def log_artifact(
     direction: str = "output",
     schema: Optional[Type[SQLModel]] = None,
     driver: Optional[str] = None,
+    *,
+    enabled: bool = True,
     **meta,
-) -> Artifact:
+) -> ArtifactLike:
     """
     Logs an artifact (file or data reference) to the currently active run.
 
@@ -378,6 +529,8 @@ def log_artifact(
     driver : Optional[str], optional
         Explicitly specify the driver (e.g., 'h5_table').
         If None, the driver is inferred from the file extension.
+    enabled : bool, default True
+        If False, returns a noop artifact object without requiring an active run.
     **meta : Any
         Additional key-value pairs to store in the artifact's flexible `meta` field.
 
@@ -393,8 +546,162 @@ def log_artifact(
     ValueError
         If `key` is not provided when `path` is a path-like (str/Path).
     """
+    if not enabled:
+        return NoopRunContext().log_artifact(
+            path=path,
+            key=key,
+            direction=direction,
+            schema=schema,
+            driver=driver,
+            **meta,
+        )
     return get_active_tracker().log_artifact(
         path=path, key=key, direction=direction, schema=schema, driver=driver, **meta
+    )
+
+
+def log_artifacts(
+    outputs: Mapping[str, ArtifactRef],
+    *,
+    direction: str = "output",
+    driver: Optional[str] = None,
+    metadata_by_key: Optional[Mapping[str, Dict[str, Any]]] = None,
+    enabled: bool = True,
+    **shared_meta: Any,
+) -> Mapping[str, ArtifactLike]:
+    """
+    Log multiple artifacts in a single call for efficiency.
+
+    This function is a convenient proxy to `consist.core.tracker.Tracker.log_artifacts`.
+    It logs a batch of related artifacts with optional per-key metadata customization.
+
+    Parameters
+    ----------
+    outputs : Mapping[str, ArtifactRef]
+        Mapping of key -> path/Artifact to log. Keys must be strings and explicitly
+        chosen by the caller (not inferred from filenames).
+    direction : str, default "output"
+        "input" or "output" for the current run context.
+    driver : Optional[str], optional
+        Explicitly specify driver for all artifacts. If None, inferred from file extension.
+    metadata_by_key : Optional[Mapping[str, Dict[str, Any]]], optional
+        Per-key metadata overrides applied on top of shared metadata.
+    enabled : bool, default True
+        If False, returns noop artifact objects without requiring an active run.
+    **shared_meta : Any
+        Metadata key-value pairs applied to ALL logged artifacts.
+
+    Returns
+    -------
+    Mapping[str, ArtifactLike]
+        Mapping of key -> logged Artifact-like objects.
+
+    Raises
+    ------
+    RuntimeError
+        If called outside an active run context.
+    ValueError
+        If metadata_by_key contains keys not in outputs, or if any value is None.
+    TypeError
+        If mapping keys are not strings.
+
+    Examples
+    --------
+    Log multiple outputs with shared metadata:
+    ```python
+    artifacts = consist.log_artifacts(
+        {
+            "persons": "results/persons.parquet",
+            "households": "results/households.parquet",
+            "jobs": "results/jobs.parquet"
+        },
+        year=2030,
+        scenario="base"
+    )
+    # All three artifacts get year=2030 and scenario="base"
+    ```
+
+    Mix shared and per-key metadata:
+    ```python
+    artifacts = consist.log_artifacts(
+        {
+            "persons": "output/persons.parquet",
+            "households": "output/households.parquet"
+        },
+        metadata_by_key={
+            "households": {"role": "primary_unit", "weight": 1.0}
+        },
+        dataset_version="v2",
+        simulation_id="run_001"
+    )
+    # persons gets: dataset_version="v2", simulation_id="run_001"
+    # households gets: dataset_version="v2", simulation_id="run_001",
+    #                  role="primary_unit", weight=1.0
+    ```
+    """
+    if not enabled:
+        ctx = NoopRunContext()
+        artifacts: Dict[str, Artifact] = {}
+        per_key_meta = metadata_by_key or {}
+        for key, ref in outputs.items():
+            meta = dict(shared_meta)
+            meta.update(per_key_meta.get(key, {}))
+            artifacts[str(key)] = ctx.log_artifact(
+                ref, key=str(key), direction=direction, driver=driver, **meta
+            )
+        return artifacts
+    return get_active_tracker().log_artifacts(
+        outputs,
+        direction=direction,
+        driver=driver,
+        metadata_by_key=metadata_by_key,
+        **shared_meta,
+    )
+
+
+def log_input(
+    path: ArtifactRef,
+    key: Optional[str] = None,
+    *,
+    schema: Optional[Type[SQLModel]] = None,
+    driver: Optional[str] = None,
+    enabled: bool = True,
+    **meta,
+) -> ArtifactLike:
+    """
+    Log an input artifact to the active run, or return a noop artifact when disabled.
+    """
+    return log_artifact(
+        path=path,
+        key=key,
+        direction="input",
+        schema=schema,
+        driver=driver,
+        enabled=enabled,
+        **meta,
+    )
+
+
+def log_output(
+    path: ArtifactRef,
+    key: Optional[str] = None,
+    *,
+    schema: Optional[Type[SQLModel]] = None,
+    driver: Optional[str] = None,
+    enabled: bool = True,
+    **meta,
+) -> ArtifactLike:
+    """
+    Log an output artifact to the active run, or return a noop artifact when disabled.
+    """
+    return log_artifact(
+        path=path,
+        key=key,
+        direction="output",
+        schema=schema,
+        driver=driver,
+        enabled=enabled,
+        **meta,
     )
 
 
@@ -536,7 +843,7 @@ def register_views(*models: Type[SQLModel]) -> Dict[str, Type[SQLModel]]:
     Dict[str, Type[SQLModel]]
         Mapping from model class name to the generated view model.
     """
-    return {m.__name__: create_view_model(m) for m in models}  # ty: ignore[invalid-return-type]
+    return {m.__name__: create_view_model(m) for m in models}
 
 
 def find_run(tracker: Optional["Tracker"] = None, **filters: Any) -> Optional[Run]:
@@ -861,8 +1168,191 @@ def capture_outputs(
 # --- Data Loading ---
 
 
+# Type Guards for artifact narrowing
+# These enable runtime type checking with static type refinement
+
+
+def is_dataframe_artifact(artifact: ArtifactLike) -> TypeGuard[DataFrameArtifact]:
+    """
+    Type guard: narrow artifact to DataFrame-compatible types (parquet, csv, h5_table).
+
+    Use this to enable type-safe loading and IDE autocomplete:
+
+    ```python
+    if is_dataframe_artifact(artifact):
+        df = load(artifact)  # Type checker knows return is DataFrame
+        df.head()  # IDE autocomplete works!
+    ```
+
+    Parameters
+    ----------
+    artifact : ArtifactLike
+        Artifact to check.
+
+    Returns
+    -------
+    bool
+        True if artifact driver is parquet, csv, or h5_table.
+    """
+    return artifact.driver in DriverType.dataframe_drivers()
+
+
+def is_tabular_artifact(artifact: ArtifactLike) -> TypeGuard[TabularArtifact]:
+    """
+    Type guard: narrow artifact to any tabular format (parquet, csv, h5_table, json).
+
+    Note: This is broader than `is_dataframe_artifact()`, so `load()` returns
+    `DataFrame | Series` for tabular artifacts. Use `is_dataframe_artifact()`
+    for the narrower DataFrame-only return type.
+
+    Parameters
+    ----------
+    artifact : ArtifactLike
+        Artifact to check.
+
+    Returns
+    -------
+    bool
+        True if artifact driver produces tabular data.
+    """
+    return artifact.driver in DriverType.tabular_drivers()
+
+
+def is_json_artifact(artifact: ArtifactLike) -> TypeGuard[JsonArtifact]:
+    """
+    Type guard: narrow artifact to JSON format.
+
+    Parameters
+    ----------
+    artifact : ArtifactLike
+        Artifact to check.
+
+    Returns
+    -------
+    bool
+        True if artifact driver is json.
+    """
+    return artifact.driver == DriverType.JSON.value
+
+
+def is_zarr_artifact(artifact: ArtifactLike) -> TypeGuard[ZarrArtifact]:
+    """
+    Type guard: narrow artifact to Zarr format.
+
+    Use this when you know an artifact should be Zarr and want type-safe loading:
+
+    ```python
+    if is_zarr_artifact(artifact):
+        ds = load(artifact)  # Type checker knows return is xarray.Dataset
+        ds.dims  # IDE autocomplete works!
+    ```
+
+    Parameters
+    ----------
+    artifact : ArtifactLike
+        Artifact to check.
+
+    Returns
+    -------
+    bool
+        True if artifact driver is zarr.
+    """
+    return artifact.driver in DriverType.zarr_drivers()
+
+
+def is_hdf_artifact(artifact: ArtifactLike) -> TypeGuard[HdfStoreArtifact]:
+    """
+    Type guard: narrow artifact to HDF5 format (h5 or hdf5).
+
+    Parameters
+    ----------
+    artifact : ArtifactLike
+        Artifact to check.
+
+    Returns
+    -------
+    bool
+        True if artifact driver is h5 or hdf5.
+    """
+    return artifact.driver in DriverType.hdf_drivers()
+
+
+# Overload signatures ordered from most specific to least specific
+# Type checkers evaluate overloads in declaration order
+
+
+@overload
+def load(
+    artifact: ZarrArtifact,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> "xarray.Dataset": ...
+
+
+@overload
+def load(
+    artifact: HdfStoreArtifact,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> pd.HDFStore: ...
+
+
+@overload
+def load(
+    artifact: DataFrameArtifact,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> pd.DataFrame: ...
+
+
+@overload
+def load(
+    artifact: JsonArtifact,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> pd.DataFrame | pd.Series: ...
+
+
+@overload
+def load(
+    artifact: TabularArtifact,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> pd.DataFrame | pd.Series: ...
+
+
+@overload
 def load(
     artifact: Artifact,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> LoadResult: ...
+
+
+@overload
+def load(
+    artifact: ArtifactLike,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> LoadResult: ...
+
+
+def load(
+    artifact: ArtifactLike,
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",

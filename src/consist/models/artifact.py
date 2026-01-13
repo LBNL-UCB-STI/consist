@@ -89,7 +89,11 @@ class Artifact(SQLModel, table=True):
     )
 
     # Driver Info
-    driver: str = Field(description="Format handler: parquet, csv, zarr, h5, git")
+    # Valid drivers: parquet, csv, zarr, json, h5_table, h5, hdf5, other
+    # (See DriverType enum in consist.types for the authoritative list)
+    driver: str = Field(
+        description="Format handler: parquet, csv, zarr, json, h5_table, h5, hdf5, or other"
+    )
 
     # Content Hash (for deduplication and content-addressable lookups)
     hash: Optional[str] = Field(

@@ -3,6 +3,7 @@ from sqlmodel import Session, select
 
 from consist.core.tracker import Tracker
 from consist.models.run import Run
+from consist.models.artifact import Artifact
 
 
 def test_scenario_failure_marks_header_and_clears_state(tracker: Tracker):
@@ -49,3 +50,25 @@ def test_scenario_status_persistence_debug(tracker: Tracker):
         f"Header status mismatch: header_db={header_db.status}, "
         f"_last_consist={last_status_val}, db_row={db_status}"
     )
+
+
+def test_scenario_missing_declared_outputs_marks_failed(tracker: Tracker):
+    with pytest.raises(RuntimeError, match="missing declared outputs"):
+        with tracker.scenario("scenario_missing_outputs") as sc:
+            sc.declare_outputs("expected", required=True)
+
+    header = tracker.get_run("scenario_missing_outputs")
+    assert header.status == "failed"
+    assert "expected" in header.meta.get("missing_outputs", [])
+
+
+def test_scenario_declared_outputs_satisfied(tracker: Tracker):
+    with tracker.scenario("scenario_declared_ok") as sc:
+        sc.declare_outputs("expected", required=True)
+        sc.coupler.set(
+            "expected",
+            Artifact(key="expected", uri="workspace://expected.csv", driver="csv"),
+        )
+
+    header = tracker.get_run("scenario_declared_ok")
+    assert header.status == "completed"

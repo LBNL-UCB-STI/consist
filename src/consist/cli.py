@@ -898,7 +898,7 @@ def preview(
         return
 
     try:
-        import xarray as xr  # type: ignore[import-not-found]
+        import xarray as xr
     except ImportError:
         xr = None
 
@@ -1126,7 +1126,7 @@ class ConsistShell(cmd.Cmd):
                 return
 
             try:
-                import xarray as xr  # type: ignore[import-not-found]
+                import xarray as xr
             except ImportError:
                 xr = None
 
@@ -1235,7 +1235,7 @@ class ConsistShell(cmd.Cmd):
                 return
 
             try:
-                import xarray as xr  # type: ignore[import-not-found]
+                import xarray as xr
             except ImportError:
                 xr = None
 

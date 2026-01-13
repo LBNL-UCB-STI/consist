@@ -301,6 +301,112 @@ with use_tracker(tracker):
 - Consist tracks this as part of the cache key
 - If the population artifact hasn't changed, this step's cache is still valid
 
+**Optional: Output Validation with SchemaValidatingCoupler**
+
+Output validation catches data flow bugs early—when you forget to set an expected output or misspell a key name, you get immediate feedback rather than silent failures downstream.
+
+Consist uses `SchemaValidatingCoupler` by default in all scenarios, which supports two validation patterns:
+
+**Pattern A: Schema-based validation (define keys upfront)**
+
+```python
+from consist import SchemaValidatingCoupler
+
+# Define your coupler schema once
+WORKFLOW_SCHEMA = {
+    "zarr_skims": "Zone-to-zone travel times in Zarr format",
+    "synthetic_population": "Synthetic population with activity schedules",
+}
+
+with use_tracker(tracker):
+    # Create a coupler with schema validation
+    coupler = SchemaValidatingCoupler(schema=WORKFLOW_SCHEMA)
+    with consist.scenario("workflow", coupler=coupler) as sc:
+        # Run steps and set outputs
+        compile_result = sc.run("compile", fn=asim_compile_runner.run)
+        sc.coupler.set("zarr_skims", compile_result.outputs["zarr_skims"])
+
+        # At scenario exit, validate all schema keys were set
+        missing = sc.coupler.validate_all_schema_keys_set()
+        if missing:
+            raise RuntimeError(f"Missing coupler outputs: {missing}")
+```
+
+**Pattern B: Runtime-declared validation (declare as you go)**
+
+```python
+with use_tracker(tracker):
+    with consist.scenario("workflow") as sc:
+        # Declare required outputs dynamically
+        sc.declare_outputs(
+            "zarr_skims", "synthetic_population",
+            required={"zarr_skims": True, "synthetic_population": True}
+        )
+
+        # Run steps and set outputs
+        compile_result = sc.run("compile", fn=asim_compile_runner.run)
+        sc.coupler.set("zarr_skims", compile_result.outputs["zarr_skims"])
+
+        # Check for missing required outputs
+        missing = sc.coupler.missing_declared_outputs()
+        if missing:
+            raise RuntimeError(f"Missing required outputs: {missing}")
+```
+
+**Optional: Type-safe access with coupler_schema decorator**
+
+For IDE autocomplete support, use the `coupler_schema` decorator:
+
+```python
+from consist import coupler_schema
+
+@coupler_schema
+class WorkflowCoupler:
+    """Schema for workflow outputs with IDE autocomplete support."""
+    zarr_skims: Artifact
+    synthetic_population: Artifact
+
+with use_tracker(tracker):
+    with consist.scenario("workflow") as sc:
+        # Get a typed view for attribute-style access
+        typed = sc.coupler_schema(WorkflowCoupler)
+
+        # Run a step and collect outputs
+        compile_result = sc.run("compile", fn=asim_compile_runner.run)
+        sc.collect_by_keys(compile_result.outputs, "zarr_skims", "synthetic_population")
+
+        # Typed attribute access with IDE autocomplete (type-safe)
+        skims_artifact = typed.zarr_skims  # IDE knows this is an Artifact
+        sc.run("main", fn=asim_runner.run, input_keys="zarr_skims")
+```
+
+**Benefits:**
+- **Schema-based**: Typos are caught immediately with warnings (e.g., "Setting undocumented coupler key 'zar_skims'")
+- **Runtime-declared**: Mix required and optional outputs with per-key granularity
+- **Both together**: Define core outputs in schema, add optional runtime outputs
+- **Type safety (optional)**: Use `coupler_schema` decorator for IDE autocomplete on typed coupler views
+
+**Bulk logging with metadata:**
+```python
+with consist.scenario("outputs") as sc:
+    # Log multiple files at once with explicit keys
+    outputs = sc.log_artifacts(
+        {
+            "persons": "results/persons.parquet",
+            "households": "results/households.parquet",
+            "jobs": "results/jobs.parquet"
+        },
+        metadata_by_key={
+            "households": {"role": "primary_unit"},
+            "jobs": {"role": "employment_proxy"}
+        },
+        year=2030,
+        scenario_name="base"
+    )
+    # All get year=2030, scenario_name="base"
+    # households also gets role="primary_unit"
+```
+
 ### Example: Parameter Sweep in a Scenario
 
 ```python
@@ -455,6 +561,8 @@ with use_tracker(tracker):
         )
         beam_inputs = sc.coupler.require("beam_inputs")
 ```
+
+If your step operates on large files, prefer path-based inputs and keep `load_inputs=False` to avoid eager reads; use `cache_hydration` to ensure cached outputs exist on disk when needed.
 
 <details>
 <summary>Alternative: log file outputs inside the step</summary>

@@ -13,12 +13,14 @@ from typing import (
     Mapping,
     Iterator,
     Union,
+    Type,
+    TypeVar,
 )
 
 from consist import Artifact
 from consist.models.run import ConsistRecord, RunResult
 from typing import TYPE_CHECKING
-from consist.core.coupler import Coupler
+from consist.core.coupler import SchemaValidatingCoupler, CouplerSchemaBase
 from consist.core.input_utils import coerce_input_map
 from consist.types import ArtifactRef, FacetLike, HashInputs
 from pathlib import Path
@@ -26,6 +28,8 @@ from pathlib import Path
 if TYPE_CHECKING:
     from consist.core.config_canonicalization import ConfigPlan
     from consist.core.tracker import Tracker
+
+SchemaT = TypeVar("SchemaT", bound=CouplerSchemaBase)
 
 
 class OutputCapture:
@@ -68,6 +72,9 @@ class RunContext:
     def log_output(self, *args: Any, **kwargs: Any) -> Artifact:
         return self._tracker.log_output(*args, **kwargs)
 
+    def log_artifacts(self, *args: Any, **kwargs: Any) -> Dict[str, Artifact]:
+        return self._tracker.log_artifacts(*args, **kwargs)
+
     def log_meta(self, **kwargs: Any) -> None:
         self._tracker.log_meta(**kwargs)
 
@@ -108,8 +115,9 @@ class ScenarioContext:
 
     Attributes
     ----------
-    coupler : Coupler
+    coupler : SchemaValidatingCoupler
         Scenario-local artifact registry for passing outputs between steps.
+        Supports both schema-based and runtime-declared output validation.
     """
 
     def __init__(
@@ -136,7 +144,7 @@ class ScenarioContext:
         self._inputs: Dict[str, Artifact] = {}
         self._first_step_started: bool = False
         self._last_step_name: Optional[str] = None
-        self.coupler = Coupler(tracker)
+        self.coupler = SchemaValidatingCoupler(tracker=tracker)
 
     @property
     def run_id(self) -> str:
@@ -200,6 +208,31 @@ class ScenarioContext:
 
         self._inputs[key] = artifact
         return artifact
+
+    def declare_outputs(
+        self,
+        *names: str,
+        required: bool | Mapping[str, bool] = False,
+        description: Optional[Mapping[str, str]] = None,
+    ) -> None:
+        """
+        Declare outputs that should be present in the scenario coupler.
+        """
+        self.coupler.declare_outputs(*names, required=required, description=description)
+
+    def collect_by_keys(
+        self, artifacts: Mapping[str, Artifact], *keys: str, prefix: str = ""
+    ) -> Dict[str, Artifact]:
+        """
+        Collect explicit artifacts into the scenario coupler by key.
+        """
+        return self.coupler.collect_by_keys(artifacts, *keys, prefix=prefix)
+
+    def coupler_schema(self, schema: Type[SchemaT]) -> SchemaT:
+        """
+        Return a typed coupler view for the provided schema class.
+        """
+        return schema(self.coupler)
 
     def _coerce_keys(self, value: Optional[Iterable[str] | str]) -> List[str]:
         if value is None:
@@ -339,6 +372,8 @@ class ScenarioContext:
 
         This method wraps ``Tracker.run`` while ensuring the scenario header
         is updated with step metadata and artifacts.
+        Use ``runtime_kwargs`` for runtime-only inputs and `consist.require_runtime_kwargs`
+        to validate required keys.
         """
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
@@ -642,6 +677,8 @@ class ScenarioContext:
         # 1. Start Header Run
         # We use begin_run directly to initialize state
         run_id = self.kwargs.pop("run_id", self.name)
+        # Coupler is a runtime-only object and should not be serialized into run meta.
+        self.kwargs.pop("coupler", None)
         self.tracker.begin_run(
             run_id=run_id,
             model=self.model,
@@ -668,6 +705,15 @@ class ScenarioContext:
         exc_val: Optional[BaseException],
         exc_tb: Optional[TracebackType],
     ) -> bool:
+        missing_error: Optional[RuntimeError] = None
+        missing_outputs: list[str] = []
+        if exc_type is None:
+            missing_outputs = self.coupler.missing_declared_outputs()
+            if missing_outputs:
+                missing_error = RuntimeError(
+                    f"Scenario missing declared outputs: {', '.join(missing_outputs)}."
+                )
+
         # 1. Restore Header Context
         self.tracker.current_consist = self._header_record
         if self._suspended_cache_options is not None:
@@ -676,12 +722,19 @@ class ScenarioContext:
             raise RuntimeError("Scenario header record was not captured.")
 
         # 2. Handle Status
-        status = "failed" if exc_type else "completed"
-        if exc_type:
+        status = "failed" if exc_type or missing_error else "completed"
+        error_for_end_run: Optional[Exception] = None
+        if missing_error is not None:
+            error_for_end_run = missing_error
+        elif isinstance(exc_val, Exception):
+            error_for_end_run = exc_val
+        if exc_type or missing_error:
             # Enrich metadata with failure context
-            self._header_record.run.meta["failed_with"] = str(exc_val)
+            self._header_record.run.meta["failed_with"] = str(exc_val or missing_error)
             if self._last_step_name:
                 self._header_record.run.meta["failed_step"] = self._last_step_name
+            if missing_outputs:
+                self._header_record.run.meta["missing_outputs"] = missing_outputs
 
         # 3. End Run
         # This handles DB sync, JSON flush, and event emission
@@ -690,7 +743,7 @@ class ScenarioContext:
         logging.debug(
             f"[ScenarioContext] Ending header {self.run_id} with status={status}"
         )
-        self.tracker.end_run(status=status)
+        self.tracker.end_run(status=status, error=error_for_end_run)
 
         # Defensive: ensure header status/meta are persisted even if future end_run
         # behavior changes. We temporarily restore the header to flush/sync explicitly.
@@ -724,5 +777,8 @@ class ScenarioContext:
         self.tracker.current_consist = None
         self._header_record = None
         self._suspended_cache_mode = None
+
+        if missing_error:
+            raise missing_error
 
         return False  # Propagate exceptions

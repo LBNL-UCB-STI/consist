@@ -83,6 +83,29 @@ class TestLogInputOutput:
         assert len(consist_record.outputs) >= 1
         assert consist_record.outputs[0].key == "output1"
 
+    def test_log_artifacts_logs_mapping(self, tracker, run_dir: Path):
+        first = run_dir / "first.csv"
+        second = run_dir / "second.csv"
+        first.write_text("a,b\n1,2\n")
+        second.write_text("c,d\n3,4\n")
+
+        with tracker.start_run("run_005", "test_model"):
+            logged = tracker.log_artifacts(
+                {"first": first, "second": second},
+                batch="demo",
+                metadata_by_key={"second": {"kind": "special"}},
+            )
+
+        assert set(logged) == {"first", "second"}
+        assert logged["first"].meta.get("batch") == "demo"
+        assert logged["second"].meta.get("batch") == "demo"
+        assert logged["second"].meta.get("kind") == "special"
+        assert [art.key for art in tracker.last_run.outputs] == ["first", "second"]
+
+    def test_log_artifacts_requires_run_context(self, tracker):
+        with pytest.raises(RuntimeError, match="run context"):
+            tracker.log_artifacts({"orphan": "missing.csv"})
+
 
 class TestCreatedAtIso:
     """Tests for the created_at_iso property on Artifact model."""

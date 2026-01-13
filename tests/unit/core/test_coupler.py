@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+import warnings
 from typing import cast
 
 import pytest
 
-from consist.core.coupler import Coupler
+from consist.core.coupler import (
+    Coupler,
+    SchemaValidatingCoupler,
+    CouplerSchemaBase,
+    coupler_schema,
+)
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
 
@@ -122,3 +128,177 @@ def test_coupler_cached_aliases_delegate_to_adopt_cached_output() -> None:
 def test_coupler_adopt_cached_output_without_tracker_is_noop() -> None:
     coupler = Coupler()
     assert coupler.adopt_cached_output("anything") is None
+
+
+def test_coupler_declare_outputs_tracks_missing_required() -> None:
+    coupler = SchemaValidatingCoupler()
+    coupler.declare_outputs("zarr", "csv", required={"zarr": True, "csv": False})
+
+    assert coupler.missing_declared_outputs() == ["zarr"]
+
+    coupler.set("zarr", _artifact(key="zarr"))
+    assert coupler.missing_declared_outputs() == []
+
+
+def test_coupler_missing_declared_outputs_treats_none_as_missing() -> None:
+    coupler = SchemaValidatingCoupler()
+    coupler.declare_outputs("required", required=True)
+
+    coupler.set("required", cast(Artifact, None))
+    assert coupler.missing_declared_outputs() == ["required"]
+
+
+def test_coupler_collect_by_keys_updates_coupler() -> None:
+    coupler = Coupler()
+    outputs = {"a": _artifact(key="a"), "b": _artifact(key="b")}
+
+    collected = coupler.collect_by_keys(outputs, "a", prefix="2024_")
+
+    assert "2024_a" in coupler
+    assert collected == {"2024_a": outputs["a"]}
+
+
+def test_coupler_schema_wraps_attribute_access() -> None:
+    @coupler_schema
+    class WorkflowCoupler(CouplerSchemaBase):
+        a: Artifact
+        b: Artifact
+
+    coupler = Coupler()
+    schema = WorkflowCoupler(coupler)
+    artifact = _artifact(key="a")
+
+    schema.a = artifact
+    assert schema.a == artifact
+    assert coupler.require("a") == artifact
+
+
+def test_schema_warns_on_undocumented_key() -> None:
+    coupler = SchemaValidatingCoupler(schema={"known": "doc"})
+
+    with pytest.warns(UserWarning, match="undocumented"):
+        coupler.set("unknown", _artifact(key="unknown"))
+
+
+def test_schema_update_warns_on_undocumented_key() -> None:
+    coupler = SchemaValidatingCoupler(schema={"known": "doc"})
+
+    with pytest.warns(UserWarning, match="undocumented"):
+        coupler.update({"unknown": _artifact(key="unknown")})
+
+
+def test_schema_set_from_artifact_warns_on_undocumented_key() -> None:
+    coupler = SchemaValidatingCoupler(schema={"known": "doc"})
+
+    with pytest.warns(UserWarning, match="undocumented"):
+        coupler.set_from_artifact("unknown", _artifact(key="unknown"))
+
+
+def test_schema_warns_only_once_per_key() -> None:
+    coupler = SchemaValidatingCoupler(schema={"known": "doc"})
+    art = _artifact(key="unknown")
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        coupler.set("unknown", art)
+        coupler.set("unknown", art)
+
+    assert len(captured) == 1
+
+
+def test_schema_validate_all_schema_keys_set() -> None:
+    coupler = SchemaValidatingCoupler(schema={"a": "doc", "b": "doc"})
+    coupler.set("a", _artifact(key="a"))
+
+    assert coupler.validate_all_schema_keys_set() == ["b"]
+
+
+def test_schema_describe_schema_returns_mapping_copy() -> None:
+    schema = {"persons": "Population data", "jobs": "Employment data"}
+    coupler = SchemaValidatingCoupler(schema=schema)
+
+    assert coupler.describe_schema() == schema
+    assert coupler.describe_schema() is not schema
+
+
+def test_schema_validate_combines_schema_and_declared_outputs() -> None:
+    coupler = SchemaValidatingCoupler(schema={"a": "doc", "b": "doc"})
+    coupler.declare_outputs("c", required=True)
+    coupler.set("a", _artifact(key="a"))
+
+    assert coupler.validate() == ["b", "c"]
+
+
+def test_schema_undocumented_keys_property() -> None:
+    coupler = SchemaValidatingCoupler(schema={"known": "doc"})
+    coupler.set("unknown", _artifact(key="unknown"))
+
+    assert coupler.undocumented_keys == ["unknown"]
+
+
+def test_coupler_set_from_artifact_with_real_artifact() -> None:
+    """Test set_from_artifact with a real Artifact object."""
+    coupler = Coupler()
+    art = _artifact(key="data")
+
+    result = coupler.set_from_artifact("data", art)
+
+    assert result == art
+    assert coupler.get("data") == art
+
+
+def test_coupler_set_from_artifact_with_artifact_like() -> None:
+    """Test set_from_artifact with an artifact-like object (has .path and .uri)."""
+    from consist.core.noop import NoopArtifact
+
+    coupler = Coupler()
+    noop_art = NoopArtifact(
+        key="persons",
+        path=Path("workspace/persons.parquet"),
+        uri="workspace://persons.parquet",
+    )
+
+    result = coupler.set_from_artifact("persons", noop_art)
+
+    assert result == noop_art
+    assert coupler.get("persons") == noop_art
+
+
+def test_coupler_set_from_artifact_with_path() -> None:
+    """Test set_from_artifact with a Path object."""
+    coupler = Coupler()
+    path = Path("workspace/data.csv")
+
+    result = coupler.set_from_artifact("data", path)
+
+    assert result == path
+    assert coupler.get("data") == path
+
+
+def test_coupler_set_from_artifact_with_string_path() -> None:
+    """Test set_from_artifact with a string path."""
+    coupler = Coupler()
+    path_str = "workspace/data.csv"
+
+    result = coupler.set_from_artifact("data", path_str)
+
+    assert result == path_str
+    assert coupler.get("data") == path_str
+
+
+def test_coupler_set_from_artifact_works_with_schema() -> None:
+    """Test that set_from_artifact works through CouplerSchemaBase."""
+
+    @coupler_schema
+    class WorkflowCoupler(CouplerSchemaBase):
+        persons: Artifact
+
+    coupler = Coupler()
+    schema = WorkflowCoupler(coupler)
+    art = _artifact(key="persons")
+
+    # Should be able to call set_from_artifact on schema too
+    result = schema.set_from_artifact("persons", art)
+
+    assert result == art
+    assert schema.persons == art

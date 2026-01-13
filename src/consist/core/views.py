@@ -93,13 +93,22 @@ def create_view_model(model: Type[T], name: Optional[str] = None) -> Type[T]:
 
             default_factory = getattr(field_info, "default_factory", None)
             if default_factory is not None:
-                namespace[field_name] = Field(
-                    default_factory=default_factory, sa_column=sa_column
-                )
+                if sa_column is not None:
+                    namespace[field_name] = Field(
+                        default_factory=default_factory, sa_column=sa_column
+                    )
+                else:
+                    namespace[field_name] = Field(default_factory=default_factory)
             else:
-                namespace[field_name] = Field(
-                    default=getattr(field_info, "default", None), sa_column=sa_column
-                )
+                if sa_column is not None:
+                    namespace[field_name] = Field(
+                        default=getattr(field_info, "default", None),
+                        sa_column=sa_column,
+                    )
+                else:
+                    namespace[field_name] = Field(
+                        default=getattr(field_info, "default", None)
+                    )
 
     # 5. Create Dynamic Class
     def exec_body(ns):
@@ -154,7 +163,7 @@ class ViewRegistry:
                 )
                 view_name = f"v_{concept_key}"
                 factory.create_hybrid_view(view_name, concept_key, schema_model=model)
-                return cached  # ty: ignore[invalid-return-type]
+                return cached
 
             # This calls create_hybrid_view inside
             # We don't need the return value (the python class) necessarily
@@ -163,7 +172,7 @@ class ViewRegistry:
 
             # 3. Update Cache & Return
             self._class_cache[name] = view_cls
-            return view_cls  # ty: ignore[invalid-return-type]
+            return view_cls
 
         raise AttributeError(f"'ViewRegistry' object has no attribute '{name}'")
 
@@ -214,7 +223,7 @@ class ViewFactory:
         # Pass schema_model to handle empty states
         self.create_hybrid_view(view_name, concept_key, schema_model=model)
 
-        return create_view_model(model, name=view_name)  # ty: ignore[invalid-return-type]
+        return create_view_model(model, name=view_name)
 
     def create_hybrid_view(
         self,

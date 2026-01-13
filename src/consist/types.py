@@ -10,6 +10,7 @@ These are intentionally minimal and dependency-tolerant:
 
 from __future__ import annotations
 
+from enum import Enum
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -17,13 +18,14 @@ from typing import (
     Mapping,
     Optional,
     Protocol,
+    Literal,
     TypeAlias,
     Union,
     runtime_checkable,
 )
 
 try:
-    from pydantic import BaseModel  # type: ignore
+    from pydantic import BaseModel
 except Exception:  # pragma: no cover
     BaseModel = object  # type: ignore[misc,assignment]
 
@@ -39,6 +41,89 @@ ArtifactRef: TypeAlias = Union["Artifact", PathLike]
 
 HashInput: TypeAlias = Union[PathLike, tuple[str, PathLike]]
 HashInputs: TypeAlias = Optional[list[HashInput]]
+
+# Known artifact drivers used by Consist loaders.
+DriverLiteral: TypeAlias = Literal[
+    "parquet",
+    "csv",
+    "zarr",
+    "json",
+    "h5_table",
+    "h5",
+    "hdf5",
+    "other",
+]
+
+
+class DriverType(str, Enum):
+    """
+    Known artifact format handlers for Consist loaders.
+
+    This enum provides a single source of truth for driver names, enabling:
+    - Type-safe driver comparison (instead of magic strings)
+    - IDE autocomplete when checking driver types
+    - Easy iteration over known drivers
+    - Validation in Artifact models
+
+    Note: The Artifact model itself uses `str` for SQLModel compatibility,
+    but this enum is used in type guards and validation logic.
+
+    Examples
+    --------
+    Check artifact type:
+    ```python
+    if artifact.driver == DriverType.PARQUET.value:
+        df = load(artifact)  # Type checker knows return is DataFrame
+    ```
+
+    Or use type guards (see `is_parquet`, `is_zarr`, etc. in api.py):
+    ```python
+    if is_parquet_artifact(artifact):
+        df = load(artifact)  # Type narrowing works!
+    ```
+    """
+
+    PARQUET = "parquet"
+    CSV = "csv"
+    ZARR = "zarr"
+    JSON = "json"
+    H5_TABLE = "h5_table"
+    H5 = "h5"
+    HDF5 = "hdf5"
+    OTHER = "other"
+
+    @classmethod
+    def dataframe_drivers(cls) -> frozenset[str]:
+        """Drivers that load as pandas DataFrame."""
+        return frozenset(
+            {
+                cls.PARQUET.value,
+                cls.CSV.value,
+                cls.H5_TABLE.value,
+            }
+        )
+
+    @classmethod
+    def tabular_drivers(cls) -> frozenset[str]:
+        """Drivers that load as tabular data (DataFrame or Series)."""
+        return frozenset(
+            {
+                cls.PARQUET.value,
+                cls.CSV.value,
+                cls.H5_TABLE.value,
+                cls.JSON.value,
+            }
+        )
+
+    @classmethod
+    def zarr_drivers(cls) -> frozenset[str]:
+        """Drivers that load as xarray.Dataset."""
+        return frozenset({cls.ZARR.value})
+
+    @classmethod
+    def hdf_drivers(cls) -> frozenset[str]:
+        """Drivers that load as pandas HDFStore."""
+        return frozenset({cls.H5.value, cls.HDF5.value})
 
 
 @runtime_checkable

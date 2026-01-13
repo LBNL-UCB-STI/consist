@@ -96,7 +96,7 @@ def _resolve_input_ref(
 
 def _is_xarray_dataset(value: Any) -> bool:
     try:
-        import xarray as xr  # type: ignore[import-not-found]
+        import xarray as xr
     except ImportError:
         return False
     return isinstance(value, xr.Dataset)
@@ -104,7 +104,7 @@ def _is_xarray_dataset(value: Any) -> bool:
 
 def _write_xarray_dataset(dataset: Any, path: Path) -> None:
     try:
-        import xarray as xr  # type: ignore[import-not-found]
+        import xarray as xr
     except ImportError as exc:
         raise ImportError("xarray is required to log xarray.Dataset outputs.") from exc
     if not isinstance(dataset, xr.Dataset):
@@ -1106,6 +1106,9 @@ class Tracker:
             Container spec (required if executor='container'). Must contain 'image' and 'command'.
         runtime_kwargs : Optional[Dict[str, Any]], optional
             Additional kwargs to pass to fn at runtime (merged with auto-loaded inputs).
+            These values are not part of the cache signature; use them for handles
+            or runtime-only dependencies. Consider `consist.require_runtime_kwargs`
+            to enforce required keys.
         inject_context : bool | str, optional
             If True or a parameter name, inject a RunContext as that parameter (for file I/O, output logging).
 
@@ -1431,6 +1434,18 @@ class Tracker:
                 )
 
             runtime_kwargs = dict(runtime_kwargs or {})
+            required_runtime = getattr(fn, "__consist_runtime_required__", ())
+            if required_runtime:
+                missing = [
+                    name for name in required_runtime if name not in runtime_kwargs
+                ]
+                if missing:
+                    missing_list = ", ".join(sorted(missing))
+                    raise ValueError(
+                        f"Missing runtime_kwargs for {resolved_name!r}: {missing_list}. "
+                        "Provide them via runtime_kwargs={...} or remove "
+                        "@consist.require_runtime_kwargs."
+                    )
             config_dict: Dict[str, Any] = {}
             if config is None:
                 config_dict = {}
@@ -2488,73 +2503,91 @@ class Tracker:
 
     def log_artifacts(
         self,
-        paths: List[Union[str, Path]],
+        outputs: Mapping[str, ArtifactRef],
         direction: str = "output",
         driver: Optional[str] = None,
+        metadata_by_key: Optional[Mapping[str, Dict[str, Any]]] = None,
         **shared_meta: Any,
-    ) -> List[Artifact]:
+    ) -> Dict[str, Artifact]:
         """
         Log multiple artifacts in a single call for efficiency.
 
         This is a convenience method for bulk artifact logging, particularly useful
         when a model produces many output files or when registering multiple inputs.
-        Each path is logged as a separate artifact, with the filename stem used as the key.
+        This requires an explicit mapping so artifact keys are always deliberate.
 
         Parameters
         ----------
-        paths : List[Union[str, Path]]
-            A list of file paths to log as artifacts.
+        outputs : mapping
+            Mapping of key -> path/Artifact to log.
         direction : str, default "output"
             Specifies whether the artifacts are "input" or "output" for the current run.
         driver : Optional[str], optional
             Explicitly specify the driver for all artifacts. If None, driver is inferred
             from each file's extension individually.
+        metadata_by_key : Optional[Mapping[str, Dict[str, Any]]], optional
+            Per-key metadata overrides applied on top of shared metadata.
         **shared_meta : Any
             Metadata key-value pairs to apply to ALL logged artifacts.
             Useful for tagging a batch of related files.
 
         Returns
         -------
-        List[Artifact]
-            A list of the created `Artifact` objects, in the same order as the input paths.
+        Dict[str, Artifact]
+            Mapping of key -> logged Artifact.
 
         Raises
         ------
         RuntimeError
             If called outside an active run context.
+        ValueError
+            If metadata_by_key contains keys not present in outputs.
+        TypeError
+            If mapping keys are not strings.
 
         Example
         -------
         ```python
-        # Log all CSV files from a directory
-        csv_files = list(Path("./outputs").glob("*.csv"))
-        artifacts = tracker.log_artifacts(csv_files, direction="output", batch="run_001")
-
-        # Log specific input files
-        inputs = tracker.log_artifacts(
-            ["data/train.parquet", "data/test.parquet"],
-            direction="input",
-            dataset_version="v2"
+        # Log explicit outputs
+        outputs = tracker.log_artifacts(
+            {"persons": "output/persons.parquet", "households": "output/households.parquet"},
+            metadata_by_key={"households": {"role": "primary"}},
+            year=2030,
         )
         ```
         """
         if not self.current_consist:
             raise RuntimeError("Cannot log artifacts outside of a run context.")
 
-        artifacts = []
-        for path in paths:
-            path_obj = Path(path)
-            key = path_obj.stem
-            art = self.log_artifact(
-                str(path_obj),
-                key=key,
-                direction=direction,
-                driver=driver,
-                **shared_meta,
-            )
-            artifacts.append(art)
+        if not isinstance(outputs, MappingABC):
+            raise TypeError("log_artifacts requires a mapping of key -> artifact.")
 
-        return artifacts
+        if metadata_by_key:
+            extra_keys = set(metadata_by_key).difference(outputs)
+            if extra_keys:
+                extras = ", ".join(sorted(str(key) for key in extra_keys))
+                raise ValueError(
+                    f"metadata_by_key contains keys not present in outputs: {extras}"
+                )
+
+        keys = list(outputs.keys())
+        for key in keys:
+            if not isinstance(key, str):
+                raise TypeError("log_artifacts keys must be strings.")
+
+        base_meta = dict(shared_meta)
+        logged: Dict[str, Artifact] = {}
+        for key in sorted(keys):
+            value = outputs[key]
+            if value is None:
+                raise ValueError(f"log_artifacts received None for key {key!r}.")
+            meta = dict(base_meta)
+            if metadata_by_key and key in metadata_by_key:
+                meta.update(metadata_by_key[key])
+            logged[key] = self.log_artifact(
+                value, key=key, direction=direction, driver=driver, **meta
+            )
+        return logged
 
     def log_input(
         self,

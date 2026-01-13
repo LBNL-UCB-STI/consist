@@ -28,3 +28,23 @@ def define_step(
         return func
 
     return decorator
+
+
+def require_runtime_kwargs(*names: str) -> Callable[[Callable], Callable]:
+    """
+    Declare required runtime kwargs for a Consist-executed function.
+
+    Tracker.run/ScenarioContext.run will raise a ValueError if any of the
+    declared names are missing from runtime_kwargs.
+    """
+    if not names:
+        raise ValueError("require_runtime_kwargs requires at least one name.")
+    for name in names:
+        if not isinstance(name, str) or not name:
+            raise ValueError("require_runtime_kwargs expects non-empty string names.")
+
+    def decorator(func: Callable) -> Callable:
+        func.__consist_runtime_required__ = tuple(names)
+        return func
+
+    return decorator

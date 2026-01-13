@@ -13,6 +13,9 @@
         - config
         - inputs
         - add_input
+        - declare_outputs
+        - collect_by_keys
+        - coupler_schema
         - run
         - trace
       filters:
