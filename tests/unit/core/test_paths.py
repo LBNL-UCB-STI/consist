@@ -52,6 +52,21 @@ def test_virtualize_path_with_mounts(tmp_path):
     assert result == "./consist.json"
 
 
+def test_virtualize_path_prefers_specific_mount(tmp_path: Path) -> None:
+    """
+    Paths under more specific mount roots should use the most specific scheme.
+    """
+    parent = tmp_path / "data"
+    child = parent / "project"
+    child.mkdir(parents=True, exist_ok=True)
+
+    mounts = {"inputs": str(parent), "inputs_project": str(child)}
+    tracker = Tracker(run_dir=tmp_path, mounts=mounts)
+
+    result = tracker._virtualize_path(str(child / "file.csv"))
+    assert result == "inputs_project://file.csv"
+
+
 def test_resolve_uri_file_and_workspace_paths(tmp_path: Path) -> None:
     """
     Resolve file:// and run-relative URIs to absolute paths.
