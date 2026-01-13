@@ -2,6 +2,7 @@ import logging
 import os
 import types
 from copy import copy
+from pathlib import Path
 from typing import Any, List, Optional, TYPE_CHECKING, Type, TypeVar, Dict, Tuple
 from sqlalchemy import Column
 from sqlmodel import select, Session, text, SQLModel, Field
@@ -20,6 +21,19 @@ def _quote_ident(identifier: str) -> str:
     Quote an identifier for DuckDB SQL (double-quote, escaping embedded quotes).
     """
     return '"' + identifier.replace('"', '""') + '"'
+
+
+def _safe_duckdb_path_literal(path_str: str) -> str:
+    """
+    Return a SQL-safe, quoted literal for a DuckDB file path.
+
+    Ensures the path resolves and exists, then escapes single quotes.
+    """
+    resolved = Path(path_str).resolve()
+    if not resolved.exists():
+        raise ValueError(f"Path does not exist: {resolved}")
+    escaped = str(resolved).replace("'", "''")
+    return f"'{escaped}'"
 
 
 def create_view_model(model: Type[T], name: Optional[str] = None) -> Type[T]:
@@ -287,7 +301,7 @@ class ViewFactory:
             # We use an alias 't' for the data table and 'r' for the run table
             hot_query = f"""
                 SELECT t.*, r.parent_run_id AS consist_scenario_id
-                FROM global_tables.{concept_key} t
+                FROM global_tables.{_quote_ident(concept_key)} t
                 LEFT JOIN run r ON t.consist_run_id = r.id
             """
             parts.append(hot_query)
@@ -331,9 +345,10 @@ class ViewFactory:
         else:
             query = "\nUNION ALL BY NAME\n".join(parts)
 
+        quoted_view_name = _quote_ident(view_name)
         with self.tracker.engine.begin() as conn:
-            conn.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
-            sql = f"CREATE VIEW {view_name} AS \n{query}"
+            conn.execute(text(f"DROP VIEW IF EXISTS {quoted_view_name}"))
+            sql = f"CREATE VIEW {quoted_view_name} AS \n{query}"
             conn.execute(text(sql))
 
         return True
@@ -442,10 +457,8 @@ class ViewFactory:
             path_list = []
 
             for item in items:
-                # Escape single quotes in paths for SQL safety
-                safe_path = item["path"].replace("'", "''")
-                # Quote the path for the list
-                path_list.append(f"'{safe_path}'")
+                safe_path = _safe_duckdb_path_literal(item["path"])
+                path_list.append(safe_path)
 
                 # Handle None/NULL for scenario
                 scenario_val = f"'{item['scenario']}'" if item["scenario"] else "NULL"
@@ -454,7 +467,7 @@ class ViewFactory:
 
                 # Row format: (path, run_id, art_id, year, iter, scenario)
                 row = (
-                    f"'{safe_path}'",
+                    safe_path,
                     f"'{item['run_id']}'",
                     f"'{item['art_id']}'",
                     year_val,
@@ -470,7 +483,7 @@ class ViewFactory:
             else:
                 continue
 
-            cte_name = f"meta_{driver}_{concept_key}"
+            cte_name = _quote_ident(f"meta_{driver}_{concept_key}")
             cte_values = ",\n        ".join(meta_rows)
 
             query = f"""

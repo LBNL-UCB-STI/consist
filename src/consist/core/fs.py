@@ -49,7 +49,16 @@ class FileSystemManager:
         if "://" in uri:
             scheme, rel_path = uri.split("://", 1)
             if scheme in self.mounts:
-                path_str = str(Path(self.mounts[scheme]) / rel_path)
+                mount_root = Path(self.mounts[scheme]).resolve()
+                resolved = (mount_root / rel_path).resolve()
+                try:
+                    resolved.relative_to(mount_root)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Path traversal detected in URI {uri!r}. "
+                        f"Resolved to {resolved}, outside mount {mount_root}."
+                    ) from exc
+                path_str = str(resolved)
             elif scheme == "file":
                 path_str = rel_path
 
@@ -116,9 +125,8 @@ class FileSystemManager:
         # We use the resolved path for workspace checks to ensure we aren't
         # accidentally aliasing the workspace itself.
         try:
-            rel = os.path.relpath(resolved_path, self.run_dir)
-            if not rel.startswith(".."):
-                return f"./{Path(rel).as_posix()}"
+            rel = resolved_path.relative_to(self.run_dir.resolve())
+            return f"./{rel.as_posix()}"
         except ValueError:
             pass
 

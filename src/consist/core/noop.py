@@ -20,6 +20,7 @@ from typing import (
 import uuid
 
 from consist.core.coupler import CouplerSchemaBase, DeclaredOutput
+from consist.core.validation import validate_artifact_key
 from consist.protocols import TrackerLike
 
 if TYPE_CHECKING:
@@ -79,6 +80,7 @@ class NoopCoupler:
         self._declared_outputs: Dict[str, DeclaredOutput] = {}
 
     def set(self, key: str, artifact: Any) -> Any:
+        validate_artifact_key(key)
         self._artifacts[key] = artifact
         return artifact
 
@@ -103,6 +105,7 @@ class NoopCoupler:
             self._artifacts.update(kwargs)
 
     def get(self, key: str) -> Optional[Any]:
+        validate_artifact_key(key)
         return self._artifacts.get(key)
 
     def require(self, key: str) -> Any:
@@ -170,6 +173,7 @@ class NoopCoupler:
             key = name.strip()
             if not key:
                 raise ValueError("Coupler output names cannot be empty.")
+            validate_artifact_key(key)
             entry = self._declared_outputs.get(key, DeclaredOutput())
             entry.required = entry.required or required_map.get(key, default_required)
             if key in description_map:
@@ -381,6 +385,7 @@ class NoopTracker(TrackerLike):
 def _build_noop_artifact(
     value: Any, *, key: str, meta: Optional[Dict[str, Any]] = None
 ) -> NoopArtifact:
+    validate_artifact_key(key)
     if isinstance(value, NoopArtifact):
         return value
     if hasattr(value, "path"):

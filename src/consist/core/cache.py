@@ -1,5 +1,6 @@
 import logging
 import weakref
+from copy import deepcopy
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Protocol, runtime_checkable, TYPE_CHECKING, cast
@@ -210,9 +211,12 @@ def hydrate_cache_hit_outputs(
     active_options = options or ActiveRunCacheOptions()
 
     for art in cached_items.outputs.values():
+        # Deep-clone artifacts to prevent metadata sharing between cached run and active run.
+        # This ensures mutations to artifact.meta in active run don't affect cached run.
+        cloned = deepcopy(art)
         # Attach tracker ref so Artifact.path can lazily resolve URIs on demand.
-        art._tracker = weakref.ref(tracker)
-        record.outputs.append(art)
+        cloned._tracker = weakref.ref(tracker)
+        record.outputs.append(cloned)
 
     # Ensure the new (cached) run has DB links to its hydrated outputs.
     if link_outputs:
@@ -303,8 +307,14 @@ def hydrate_cache_hit_outputs(
                     )
                     items.append((art, source, out_dir / source.name))
 
+            allowed_base = (
+                None
+                if active_options.cache_hydration
+                in {"outputs-requested", "outputs-all"}
+                else tracker.run_dir
+            )
             materialized = materialize_artifacts_from_sources(
-                items=items, on_missing=on_missing
+                items=items, allowed_base=allowed_base, on_missing=on_missing
             )
             if materialized:
                 target_run.meta["materialized_outputs"] = materialized
@@ -447,7 +457,9 @@ def materialize_missing_inputs(
         from consist.core.materialize import materialize_artifacts_from_sources
 
         materialized.update(
-            materialize_artifacts_from_sources(items, on_missing="warn")
+            materialize_artifacts_from_sources(
+                items, allowed_base=tracker.run_dir, on_missing="warn"
+            )
         )
         for artifact, _, destination in items:
             artifact.abs_path = str(destination)

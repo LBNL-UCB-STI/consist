@@ -144,6 +144,30 @@ class ScenarioContext:
         self._inputs: Dict[str, Artifact] = {}
         self._first_step_started: bool = False
         self._last_step_name: Optional[str] = None
+
+        # ARTIFACT STORAGE ARCHITECTURE
+        # ==============================
+        # Artifacts flow through multiple storage locations:
+        #
+        # 1. ConsistRecord.run.outputs (in-memory list, authoritative during run)
+        #    - Populated by hydrate_cache_hit_outputs() on cache hit
+        #    - Populated by tracker.log_artifact() when step produces outputs
+        #    - Each artifact is independent (deep-cloned on cache hit)
+        #
+        # 2. coupler._artifacts (dict, convenience access for scenarios)
+        #    - Populated from ConsistRecord.run.outputs via coupler.update()
+        #    - Allows step code to access outputs by key: coupler.get("key")
+        #    - Automatically synced after each tracker.run() call
+        #
+        # 3. Tracker._artifact_cache (internal, for runtime tracking)
+        #    - Derived from ConsistRecord.run.outputs
+        #    - Used for convenience lookups within tracker
+        #
+        # SYNCHRONIZATION POINTS:
+        # - After cache hit: hydrate_cache_hit_outputs() → record.outputs → coupler.update()
+        # - After user log: log_artifact() → record.outputs → coupler.update()
+        # - Consistency: Artifacts in coupler are independent copies (no cross-run mutations)
+        #
         self.coupler = SchemaValidatingCoupler(tracker=tracker)
 
     @property

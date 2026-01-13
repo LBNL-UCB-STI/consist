@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Optional
 
 
@@ -48,7 +48,12 @@ def parse_mount_uri(uri: str) -> Optional[tuple[str, str]]:
     scheme, rel_path = uri.split("://", 1)
     if not scheme or not rel_path:
         return None
-    return scheme, rel_path
+    rel_posix = PurePosixPath(rel_path)
+    if rel_posix.is_absolute():
+        return None
+    if any(part == ".." for part in rel_posix.parts):
+        return None
+    return scheme, rel_posix.as_posix()
 
 
 def build_mount_resolution_hint(

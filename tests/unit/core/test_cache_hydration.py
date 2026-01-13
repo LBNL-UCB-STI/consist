@@ -367,6 +367,7 @@ def test_build_materialize_items_and_materialize_from_sources(tmp_path: Path) ->
 
     materialized = materialize_artifacts_from_sources(
         [(artifact, source_file, tmp_path / "dest.txt")],
+        allowed_base=tmp_path,
         on_missing="raise",
     )
     assert materialized == {"alpha": str((tmp_path / "dest.txt").resolve())}

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, TYPE_CHECKING, TypeVar, cast
 
 from consist.models.artifact import Artifact
+from consist.core.validation import validate_artifact_key
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
@@ -28,6 +29,7 @@ class Coupler:
         self._artifacts: Dict[str, Artifact] = {}
 
     def set(self, key: str, artifact: Artifact) -> Artifact:
+        validate_artifact_key(key)
         self._artifacts[key] = artifact
         return artifact
 
@@ -71,6 +73,7 @@ class Coupler:
         coupler.set_from_artifact("key", artifact)  # Handles both
         ```
         """
+        validate_artifact_key(key)
         self._artifacts[key] = value
         return value
 
@@ -91,6 +94,7 @@ class Coupler:
 
     def get(self, key: str) -> Optional[Artifact]:
         """Return the current artifact for `key`, or None if unset."""
+        validate_artifact_key(key)
         return self._artifacts.get(key)
 
     def require(self, key: str) -> Artifact:
@@ -218,6 +222,7 @@ class Coupler:
         for key in keys:
             if not isinstance(key, str):
                 raise TypeError("collect_by_keys keys must be strings.")
+            validate_artifact_key(key)
             if key not in artifacts:
                 raise KeyError(f"Missing artifact for key {key!r}.")
             coupler_key = f"{prefix}{key}"
@@ -503,6 +508,7 @@ class SchemaValidatingCoupler(Coupler):
             key = name.strip()
             if not key:
                 raise ValueError("Coupler output names cannot be empty.")
+            validate_artifact_key(key)
             entry = self._declared_outputs.get(key, DeclaredOutput())
             entry.required = entry.required or required_map.get(key, default_required)
             if key in description_map:

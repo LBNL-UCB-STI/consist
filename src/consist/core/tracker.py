@@ -61,6 +61,11 @@ from consist.core.lineage import LineageService
 from consist.core.materialize import materialize_artifacts
 from consist.core.matrix import MatrixViewFactory
 from consist.core.queries import RunQueryService
+from consist.core.validation import (
+    validate_config_structure,
+    validate_run_meta,
+    validate_run_strings,
+)
 from consist.core.workflow import OutputCapture, RunContext, ScenarioContext
 from consist.core.input_utils import coerce_input_map
 from consist.models.artifact import Artifact
@@ -350,7 +355,8 @@ class Tracker:
         if target_run is None:
             return self.run_dir / "outputs"
 
-        base_dir = self.run_dir / "outputs"
+        workspace_dir = self.run_dir.resolve()
+        base_dir = (self.run_dir / "outputs").resolve()
         artifact_dir = (
             target_run.meta.get("artifact_dir")
             if isinstance(target_run.meta, dict)
@@ -361,8 +367,22 @@ class Tracker:
         if isinstance(artifact_dir, str) and artifact_dir:
             artifact_path = Path(artifact_dir)
             if artifact_path.is_absolute():
-                return artifact_path
-            return base_dir / artifact_path
+                resolved = artifact_path.resolve()
+                try:
+                    resolved.relative_to(workspace_dir)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"artifact_dir must remain within {workspace_dir}; got {resolved}"
+                    ) from exc
+                return resolved
+            resolved = (base_dir / artifact_path).resolve()
+            try:
+                resolved.relative_to(base_dir)
+            except ValueError as exc:
+                raise ValueError(
+                    f"artifact_dir {artifact_dir!r} escapes base directory {base_dir}"
+                ) from exc
+            return resolved
 
         subdir = (
             self._run_subdir_fn(target_run)
@@ -381,7 +401,14 @@ class Tracker:
                 "run_subdir must be a relative path; got an absolute path."
             )
 
-        return base_dir / subdir_path
+        resolved = (base_dir / subdir_path).resolve()
+        try:
+            resolved.relative_to(base_dir)
+        except ValueError as exc:
+            raise ValueError(
+                f"run_subdir must resolve under {base_dir}; got {resolved}"
+            ) from exc
+        return resolved
 
     @staticmethod
     def _safe_run_id(run_id: str) -> str:
@@ -495,53 +522,21 @@ class Tracker:
         Internal helper to look up a run's signature (Merkle identity) via the database.
         Used by IdentityManager to stabilize input hashes against ephemeral Run IDs.
         """
-        cached = self._run_signature_cache.get(run_id)
-        if cached is not None:
-            return cached
-
         # 1. Check active run (unlikely for inputs, but good for completeness)
         if self.current_consist and self.current_consist.run.id == run_id:
-            signature = self.current_consist.run.signature
-            if signature:
-                self._run_signature_cache[run_id] = signature
-            return signature
+            return self.current_consist.run.signature
         # 2. Check Database
         if self.db:
             run = self.db.get_run(run_id)
             if run:
-                signature = run.signature
-                if signature:
-                    self._run_signature_cache[run_id] = signature
-                    if (
-                        len(self._run_signature_cache)
-                        > self._run_signature_cache_max_entries
-                    ):
-                        self._run_signature_cache.pop(
-                            next(iter(self._run_signature_cache))
-                        )
-                return signature
+                return run.signature
         return None
 
     def _prefetch_run_signatures(self, inputs: Iterable[Artifact]) -> None:
         """
         Warm the run-signature cache for input artifacts in bulk to reduce DB chatter.
         """
-        if not self.db:
-            return
-        run_ids = {
-            str(a.run_id)
-            for a in inputs
-            if a.run_id and a.run_id not in self._run_signature_cache
-        }
-        if not run_ids:
-            return
-        signatures = self.db.get_run_signatures(list(run_ids))
-        if not signatures:
-            return
-        for run_id, signature in signatures.items():
-            self._run_signature_cache[run_id] = signature
-            if len(self._run_signature_cache) > self._run_signature_cache_max_entries:
-                self._run_signature_cache.pop(next(iter(self._run_signature_cache)))
+        return
 
     def _coerce_facet_mapping(self, obj: Any, label: str) -> Dict[str, Any]:
         if obj is None:
@@ -603,7 +598,7 @@ class Tracker:
             Strategy for caching: "reuse", "overwrite", or "readonly".
         artifact_dir : Optional[Union[str, Path]], optional
             Override the per-run artifact directory. Relative paths are resolved
-            under ``<run_dir>/outputs``. Absolute paths are used as-is.
+            under ``<run_dir>/outputs``. Absolute paths must remain within ``run_dir``.
         facet : Optional[FacetLike], optional
             Optional small, queryable configuration facet to persist alongside the run.
             This is distinct from `config` (which is hashed and stored in the JSON snapshot).
@@ -670,6 +665,8 @@ class Tracker:
                 "Call end_run() first."
             )
 
+        validate_run_strings(model_name=model, description=description, tags=tags)
+
         (
             cache_hydration,
             materialize_cached_output_paths,
@@ -726,6 +723,9 @@ class Tracker:
             kwargs["consist_hash_inputs"] = digest_map
 
         config_dict = self.identity.normalize_json(config_dict)
+        if not isinstance(config_dict, MappingABC):
+            raise TypeError("config must be a mapping after normalization.")
+        validate_config_structure(config_dict)
 
         # Compute core identity hashes early
         # Important: keep the stored config snapshot as user-provided config, but include
@@ -736,6 +736,8 @@ class Tracker:
         git_hash = self.identity.get_code_version()
 
         kwargs["_physical_run_dir"] = str(self.run_dir)
+        if kwargs:
+            validate_run_meta(kwargs)
 
         now = datetime.now(UTC)
         run = Run(
@@ -2126,7 +2128,15 @@ class Tracker:
                 run.input_hash or "",
                 run.git_hash or "",
             )
-            self._local_cache_index[cache_key] = run
+            if cache_key in self._local_cache_index:
+                logging.warning(
+                    "Cache key collision detected (extremely rare): %s. "
+                    "Keeping first cached run (created %s).",
+                    cache_key,
+                    self._local_cache_index[cache_key].created_at,
+                )
+            else:
+                self._local_cache_index[cache_key] = run
             if len(self._local_cache_index) > self._local_cache_max_entries:
                 # FIFO eviction (dict preserves insertion order).
                 self._local_cache_index.pop(next(iter(self._local_cache_index)))

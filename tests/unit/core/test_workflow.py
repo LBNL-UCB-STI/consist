@@ -200,18 +200,14 @@ def test_run_artifact_dir_overrides(tracker: Tracker, tmp_path: Path):
     assert abs_path.parent == tracker.run_dir / "outputs" / "custom" / "dir"
 
     absolute_dir = tmp_path / "absolute_outputs"
-    with tracker.start_run(
-        "override_abs",
-        model="override_model",
-        artifact_dir=absolute_dir,
-        cache_mode="overwrite",
-    ) as t:
-        artifact = t.log_dataframe(df, key="series_abs")
-
-    assert artifact is not None
-    assert artifact.abs_path is not None
-    abs_path = Path(artifact.abs_path)
-    assert abs_path.parent == absolute_dir
+    with pytest.raises(ValueError, match="artifact_dir must remain within"):
+        with tracker.start_run(
+            "override_abs",
+            model="override_model",
+            artifact_dir=absolute_dir,
+            cache_mode="overwrite",
+        ) as t:
+            t.run_artifact_dir()
 
 
 def test_step_default_path_includes_model_name(tracker: Tracker):
