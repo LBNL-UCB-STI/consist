@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Mapping, Sequence
 
@@ -13,9 +14,21 @@ MAX_TAG_LENGTH = 256
 MAX_CONFIG_KEY_LENGTH = 256
 MAX_CONFIG_VALUE_LENGTH = 1_000_000
 
-MAX_METADATA_ITEMS = 200
-MAX_METADATA_KEY_LENGTH = 256
-MAX_METADATA_VALUE_LENGTH = 65_536
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+MAX_METADATA_ITEMS = _env_int("CONSIST_MAX_METADATA_ITEMS", 200)
+MAX_METADATA_KEY_LENGTH = _env_int("CONSIST_MAX_METADATA_KEY_LENGTH", 256)
+MAX_METADATA_VALUE_LENGTH = _env_int("CONSIST_MAX_METADATA_VALUE_LENGTH", 65_536)
 ALLOWED_METADATA_TYPES = (str, int, float, bool, type(None), list, dict)
 
 
@@ -97,7 +110,8 @@ def validate_run_meta(meta: Mapping[str, Any]) -> None:
         raise TypeError(f"Run metadata must be a mapping, got {type(meta)}")
     if len(meta) > MAX_METADATA_ITEMS:
         raise ValueError(
-            f"Run metadata exceeds {MAX_METADATA_ITEMS} items (got {len(meta)})."
+            f"Run metadata exceeds {MAX_METADATA_ITEMS} items (got {len(meta)}). "
+            "Set CONSIST_MAX_METADATA_ITEMS to override."
         )
     for key, value in meta.items():
         if not isinstance(key, str):
@@ -106,7 +120,8 @@ def validate_run_meta(meta: Mapping[str, Any]) -> None:
             raise ValueError("Metadata keys cannot be empty.")
         if len(key) > MAX_METADATA_KEY_LENGTH:
             raise ValueError(
-                f"Metadata key exceeds {MAX_METADATA_KEY_LENGTH} chars: {key}"
+                f"Metadata key exceeds {MAX_METADATA_KEY_LENGTH} chars: {key}. "
+                "Set CONSIST_MAX_METADATA_KEY_LENGTH to override."
             )
         if not isinstance(value, ALLOWED_METADATA_TYPES):
             raise TypeError(
@@ -114,10 +129,12 @@ def validate_run_meta(meta: Mapping[str, Any]) -> None:
             )
         if isinstance(value, str) and len(value) > MAX_METADATA_VALUE_LENGTH:
             raise ValueError(
-                f"Metadata value for '{key}' exceeds {MAX_METADATA_VALUE_LENGTH} chars."
+                f"Metadata value for '{key}' exceeds {MAX_METADATA_VALUE_LENGTH} chars. "
+                "Set CONSIST_MAX_METADATA_VALUE_LENGTH to override."
             )
         if isinstance(value, (list, dict)):
             if len(str(value)) > MAX_METADATA_VALUE_LENGTH:
                 raise ValueError(
-                    f"Metadata value for '{key}' exceeds {MAX_METADATA_VALUE_LENGTH} chars."
+                    f"Metadata value for '{key}' exceeds {MAX_METADATA_VALUE_LENGTH} chars. "
+                    "Set CONSIST_MAX_METADATA_VALUE_LENGTH to override."
                 )

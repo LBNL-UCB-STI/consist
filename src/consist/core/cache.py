@@ -307,12 +307,13 @@ def hydrate_cache_hit_outputs(
                     )
                     items.append((art, source, out_dir / source.name))
 
-            allowed_base = (
-                None
-                if active_options.cache_hydration
-                in {"outputs-requested", "outputs-all"}
-                else tracker.run_dir
-            )
+            allow_external_paths = bool(getattr(tracker, "allow_external_paths", False))
+            if (
+                isinstance(target_run.meta, dict)
+                and "allow_external_paths" in target_run.meta
+            ):
+                allow_external_paths = bool(target_run.meta["allow_external_paths"])
+            allowed_base = None if allow_external_paths else tracker.run_dir
             materialized = materialize_artifacts_from_sources(
                 items=items, allowed_base=allowed_base, on_missing=on_missing
             )

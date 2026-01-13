@@ -42,6 +42,7 @@ class FileSystemManager:
         -------
         str
             Absolute resolved path on the local filesystem.
+            For mounted URIs, Consist rejects path traversal that escapes the mount root.
         """
         path_str = uri
 

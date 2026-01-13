@@ -43,6 +43,7 @@ class ArtifactManager:
             Identifier of the run that produced the artifact.
         key : Optional[str], optional
             Logical name for the artifact; required when ``path`` is a string.
+            Must follow artifact-key rules (no empty key, no ``..``/``//``, length <= 256).
         direction : str, default "output"
             Whether the artifact is treated as an "input" or "output" of the run.
         schema : Optional[Type[SQLModel]], optional
@@ -61,6 +62,8 @@ class ArtifactManager:
         ------
         ValueError
             If ``path`` is a string and ``key`` is not provided.
+        TypeError
+            If ``key`` is not a string when provided.
         """
         artifact_obj = None
         resolved_abs_path = None

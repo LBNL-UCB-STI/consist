@@ -99,6 +99,13 @@ def _resolve_input_ref(
     )
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _is_xarray_dataset(value: Any) -> bool:
     try:
         import xarray as xr
@@ -218,6 +225,7 @@ class Tracker:
         schemas: Optional[List[Type[SQLModel]]] = None,
         access_mode: AccessMode = "standard",
         run_subdir_fn: Optional[Callable[[Run], str]] = None,
+        allow_external_paths: Optional[bool] = None,
     ):
         """
         Initialize a Consist Tracker.
@@ -250,6 +258,9 @@ class Tracker:
         run_subdir_fn : Optional[Callable[[Run], str]], default None
             Optional callable that returns a relative subdirectory name for a run.
             When provided, this takes precedence over the default pattern.
+        allow_external_paths : Optional[bool], default None
+            Allow artifact directories and cached-output materialization to write
+            outside `run_dir`. Defaults to CONSIST_ALLOW_EXTERNAL_PATHS when unset.
         """
         # 1. Initialize FileSystem Service
         # (This handles the mkdir and path resolution internally now)
@@ -261,6 +272,9 @@ class Tracker:
 
         self.access_mode = access_mode
         self._run_subdir_fn = run_subdir_fn
+        if allow_external_paths is None:
+            allow_external_paths = _env_bool("CONSIST_ALLOW_EXTERNAL_PATHS", False)
+        self.allow_external_paths = bool(allow_external_paths)
 
         self.db_path = os.fspath(db_path) if db_path is not None else None
         self.identity = IdentityManager(
@@ -347,7 +361,9 @@ class Tracker:
         Returns
         -------
         Path
-            Directory under ``run_dir`` where run artifacts should be written.
+            Directory under ``run_dir`` where run artifacts should be written by default.
+            Absolute artifact_dir values outside ``run_dir`` are only allowed when
+            allow_external_paths is enabled.
         """
         target_run = run
         if target_run is None and self.current_consist:
@@ -368,19 +384,22 @@ class Tracker:
             artifact_path = Path(artifact_dir)
             if artifact_path.is_absolute():
                 resolved = artifact_path.resolve()
-                try:
-                    resolved.relative_to(workspace_dir)
-                except ValueError as exc:
-                    raise ValueError(
-                        f"artifact_dir must remain within {workspace_dir}; got {resolved}"
-                    ) from exc
+                if not self._allow_external_paths_for_run(target_run):
+                    try:
+                        resolved.relative_to(workspace_dir)
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"artifact_dir must remain within {workspace_dir}; got {resolved}. "
+                            "Set allow_external_paths=True or CONSIST_ALLOW_EXTERNAL_PATHS=1 to override."
+                        ) from exc
                 return resolved
             resolved = (base_dir / artifact_path).resolve()
             try:
                 resolved.relative_to(base_dir)
             except ValueError as exc:
                 raise ValueError(
-                    f"artifact_dir {artifact_dir!r} escapes base directory {base_dir}"
+                    f"artifact_dir {artifact_dir!r} escapes base directory {base_dir}. "
+                    "Set allow_external_paths=True or CONSIST_ALLOW_EXTERNAL_PATHS=1 to override."
                 ) from exc
             return resolved
 
@@ -549,6 +568,11 @@ class Tracker:
             return dict(obj)
         raise ValueError(f"Tracker {label} must be a mapping or Pydantic model.")
 
+    def _allow_external_paths_for_run(self, run: Optional[Run]) -> bool:
+        if run and isinstance(run.meta, dict) and "allow_external_paths" in run.meta:
+            return bool(run.meta["allow_external_paths"])
+        return self.allow_external_paths
+
     # --- Run Management ---
 
     def begin_run(
@@ -562,6 +586,7 @@ class Tracker:
         cache_mode: str = "reuse",
         *,
         artifact_dir: Optional[Union[str, Path]] = None,
+        allow_external_paths: Optional[bool] = None,
         facet: Optional[FacetLike] = None,
         facet_from: Optional[List[str]] = None,
         hash_inputs: HashInputs = None,
@@ -585,20 +610,26 @@ class Tracker:
         run_id : str
             A unique identifier for the current run.
         model : str
-            A descriptive name for the model or process being executed.
+            A descriptive name for the model or process being executed (non-empty,
+            length-limited).
         config : Union[Dict[str, Any], BaseModel, None], optional
             Configuration parameters for this run.
+            Keys must be strings; extremely large string values are rejected.
         inputs : Optional[list[ArtifactRef]], optional
             A list of input paths (str/Path) or Artifact references.
         tags : Optional[List[str]], optional
-            A list of string labels for categorization and filtering.
+            A list of string labels for categorization and filtering (non-empty, length-limited).
         description : Optional[str], optional
             A human-readable description of the run's purpose.
         cache_mode : str, default "reuse"
             Strategy for caching: "reuse", "overwrite", or "readonly".
         artifact_dir : Optional[Union[str, Path]], optional
             Override the per-run artifact directory. Relative paths are resolved
-            under ``<run_dir>/outputs``. Absolute paths must remain within ``run_dir``.
+            under ``<run_dir>/outputs``. Absolute paths must remain within ``run_dir``
+            unless allow_external_paths is enabled.
+        allow_external_paths : Optional[bool], optional
+            Allow artifact_dir and cached-output materialization outside ``run_dir``.
+            Defaults to the Tracker setting when unset.
         facet : Optional[FacetLike], optional
             Optional small, queryable configuration facet to persist alongside the run.
             This is distinct from `config` (which is hashed and stored in the JSON snapshot).
@@ -615,6 +646,8 @@ class Tracker:
             Whether to flatten and index facet keys/values for DB querying.
         **kwargs : Any
             Additional metadata. Special keywords `year` and `iteration` can be used.
+            Metadata keys/values are validated and size-limited; use
+            CONSIST_MAX_METADATA_ITEMS/KEY_LENGTH/VALUE_LENGTH to override.
 
         Returns
         -------
@@ -702,6 +735,8 @@ class Tracker:
 
         if artifact_dir is not None:
             kwargs["artifact_dir"] = str(artifact_dir)
+        if allow_external_paths is not None:
+            kwargs["allow_external_paths"] = bool(allow_external_paths)
 
         if config is None:
             config_dict: Dict[str, Any] = {}
@@ -2128,7 +2163,7 @@ class Tracker:
                 run.input_hash or "",
                 run.git_hash or "",
             )
-            if cache_key in self._local_cache_index:
+            if cache_key in self._local_cache_index and cache_mode != "overwrite":
                 logging.warning(
                     "Cache key collision detected (extremely rare): %s. "
                     "Keeping first cached run (created %s).",
@@ -3853,6 +3888,7 @@ class Tracker:
             If the URI cannot be fully resolved (e.g., scheme not mounted),
             it returns the most resolved path or the original URI after
             attempting to make it absolute.
+            Mounted URIs are validated to prevent path traversal outside the mount root.
         """
         return self.fs.resolve_uri(uri)
 

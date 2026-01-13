@@ -393,9 +393,12 @@ def run_container(
     command : Union[str, List[str]]
         The command to execute inside the container. Can be a string or a list of strings
         (for exec form).
+        Commands are validated for non-empty tokens and a maximum length.
     volumes : Dict[str, str]
         A dictionary mapping host paths to container paths for volume mounts.
         Example: `{"/host/path": "/container/path"}`.
+        Host paths are resolved and validated against tracker mounts when present;
+        relative paths are resolved against the first mount root.
     inputs : List[ArtifactRef]
         A list of paths (str/Path) or `Artifact` objects on the host machine that serve
         as inputs to the containerized process. These are logged as Consist inputs.
@@ -403,9 +406,11 @@ def run_container(
         A list of paths on the host machine that are expected to be generated or
         modified by the containerized process. These paths will be scanned and
         logged as Consist output artifacts.
+        Host paths are validated against tracker mounts when present.
     outputs : Dict[str, str]
         Alternatively, pass a mapping of logical output keys to host paths.
         The artifact will be logged with the provided key instead of the filename.
+        Host paths are validated against tracker mounts when present.
     environment : Optional[Dict[str, str]], optional
         A dictionary of environment variables to set inside the container. Defaults to empty.
     working_dir : Optional[str], optional

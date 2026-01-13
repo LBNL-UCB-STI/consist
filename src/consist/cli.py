@@ -532,7 +532,7 @@ def search(
     ),
     limit: int = typer.Option(20, help="Maximum results."),
 ) -> None:
-    """Search for runs by ID, model name, or tags."""
+    """Search for runs by ID, model name, or tags (query length is capped)."""
     tracker = get_tracker(db_path)
     if not query or len(query) > MAX_SEARCH_QUERY_LENGTH:
         raise typer.BadParameter(

@@ -67,6 +67,7 @@ def materialize_artifacts(
     - If the artifact's resolved source path exists, it is copied to the destination.
     - If it does not exist, behavior depends on `on_missing`.
     - If the destination already exists, it is left untouched.
+    - Destination paths cannot be symlinks and will not be overwritten if the type differs.
 
     This function does not attempt database-backed reconstruction. Higher-level code
     can decide when to call `consist.load(...)` or enable DB recovery.
@@ -159,6 +160,7 @@ def materialize_artifacts_from_sources(
     This is useful for rehydrating cached inputs from historical run directories
     when the current run directory is different from the original producer.
     Existing destination paths are left untouched.
+    Destination paths cannot be symlinks and will not be overwritten if the type differs.
 
     Parameters
     ----------
@@ -178,7 +180,8 @@ def materialize_artifacts_from_sources(
             except ValueError as exc:
                 raise ValueError(
                     f"Destination path {destination_path} is outside allowed base "
-                    f"{allowed_base_path}"
+                    f"{allowed_base_path}. Set allow_external_paths=True or "
+                    "CONSIST_ALLOW_EXTERNAL_PATHS=1 to override."
                 ) from exc
         _ensure_destination_not_symlink(destination_path)
         destination_path.parent.mkdir(parents=True, exist_ok=True)

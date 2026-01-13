@@ -29,6 +29,7 @@ class Coupler:
         self._artifacts: Dict[str, Artifact] = {}
 
     def set(self, key: str, artifact: Artifact) -> Artifact:
+        """Store an artifact under a validated key."""
         validate_artifact_key(key)
         self._artifacts[key] = artifact
         return artifact
@@ -48,7 +49,7 @@ class Coupler:
         Parameters
         ----------
         key : str
-            The coupler key (e.g., "persons", "skims").
+            The coupler key (e.g., "persons", "skims"). Must follow artifact-key rules.
         value : Artifact or artifact-like or Path or str
             The value to store. Can be a real Artifact, artifact-like object with
             .path/.uri properties, a Path, or a string path.
@@ -93,7 +94,7 @@ class Coupler:
             self._artifacts.update(kwargs)
 
     def get(self, key: str) -> Optional[Artifact]:
-        """Return the current artifact for `key`, or None if unset."""
+        """Return the current artifact for `key`, or None if unset (key is validated)."""
         validate_artifact_key(key)
         return self._artifacts.get(key)
 

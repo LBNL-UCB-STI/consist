@@ -257,6 +257,7 @@ class ViewFactory:
 
         "Hot" data refers to records already materialized into a DuckDB table (e.g., via ingestion).
         "Cold" data refers to records still residing in file-based artifacts (e.g., Parquet, CSV).
+        Identifiers are quoted for SQL safety; missing cold-file paths are skipped at view creation.
 
         Parameters
         ----------
