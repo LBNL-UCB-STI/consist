@@ -91,7 +91,7 @@ Caching is most valuable in workflows with many runs and expensive computation. 
 
 **Example 1: Land-Use Model Sensitivity Analysis**
 
-Transportation planners use activity-based models to evaluate how pricing policies affect commute patterns. A sensitivity sweep tests 40 parameter combinations (toll levels: 0–$10, parking costs: $2–$15, transit pass subsidies: 0–50%).
+Transportation planners use activity-based models to evaluate how pricing policies affect commute patterns. A sensitivity sweep tests 40 parameter combinations (toll levels: 0–\$10, parking costs: \$2-\$15, transit pass subsidies: 0–50%).
 
 - Each ActivitySim run: 30 minutes (generating synthetic population tours)
 - Without caching: 40 runs × 30 min = 1200 minutes (20 hours)
