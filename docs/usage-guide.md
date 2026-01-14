@@ -303,16 +303,24 @@ with use_tracker(tracker):
 
 **Optional: Output Validation with SchemaValidatingCoupler**
 
-Output validation catches data flow bugs early—when you forget to set an expected output or misspell a key name, you get immediate feedback rather than silent failures downstream.
+Output validation catches mistakes early—when you forget to set an expected output or misspell a key name, you get immediate feedback rather than discovering it downstream when your model crashes or produces silent errors.
 
-Consist uses `SchemaValidatingCoupler` by default in all scenarios, which supports two validation patterns:
+Consist uses `SchemaValidatingCoupler` by default in all scenarios. You have three patterns to choose from. **Most users just need Pattern A.** Pick based on your workflow:
 
-**Pattern A: Schema-based validation (define keys upfront)**
+- **Pattern A (Recommended):** You know all your workflow outputs upfront (e.g., "I always produce `zarr_skims` and `population`"). Define them once, Consist validates they're set.
+- **Pattern B:** Your outputs are dynamic or optional (e.g., "I produce `results.csv` always, but `debug_report.csv` only if debugging=True"). Declare them as you build, with per-key required flags.
+- **Pattern C (Advanced):** You want IDE autocomplete when accessing coupler outputs (type-safe, `coupler.zarr_skims` instead of `coupler.require("zarr_skims")`). Use the decorator.
+
+---
+
+**Pattern A: Schema-based validation (define keys upfront) — START HERE**
+
+Use this when you know your workflow outputs ahead of time.
 
 ```python
 from consist import SchemaValidatingCoupler
 
-# Define your coupler schema once
+# Define your coupler schema once (at top of file or in config)
 WORKFLOW_SCHEMA = {
     "zarr_skims": "Zone-to-zone travel times in Zarr format",
     "synthetic_population": "Synthetic population with activity schedules",
@@ -332,7 +340,15 @@ with use_tracker(tracker):
             raise RuntimeError(f"Missing coupler outputs: {missing}")
 ```
 
+**When to use:** Static workflows where steps always produce the same outputs.
+
+**Benefits:** Typos caught immediately with warnings (e.g., "Setting undocumented coupler key 'zar_skims'"). Clean, predictable workflow structure.
+
+---
+
 **Pattern B: Runtime-declared validation (declare as you go)**
+
+Use this when outputs are dynamic or optional (e.g., optional debug outputs).
 
 ```python
 with use_tracker(tracker):
@@ -342,6 +358,10 @@ with use_tracker(tracker):
             "zarr_skims", "synthetic_population",
             required={"zarr_skims": True, "synthetic_population": True}
         )
+
+        # Optionally add more outputs later (not required)
+        if debugging:
+            sc.declare_outputs("debug_report", required={"debug_report": False})
 
         # Run steps and set outputs
         compile_result = sc.run("compile", fn=asim_compile_runner.run)
@@ -353,9 +373,15 @@ with use_tracker(tracker):
             raise RuntimeError(f"Missing required outputs: {missing}")
 ```
 
-**Optional: Type-safe access with coupler_schema decorator**
+**When to use:** Workflows with optional outputs, branching logic, or conditional outputs.
 
-For IDE autocomplete support, use the `coupler_schema` decorator:
+**Benefits:** Mix required and optional outputs with per-key granularity. Add outputs dynamically without modifying schema.
+
+---
+
+**Pattern C: Type-safe access with coupler_schema decorator**
+
+Use this if you want IDE autocomplete when accessing coupler keys (optional convenience feature).
 
 ```python
 from consist import coupler_schema
@@ -380,11 +406,13 @@ with use_tracker(tracker):
         sc.run("main", fn=asim_runner.run, input_keys="zarr_skims")
 ```
 
-**Benefits:**
-- **Schema-based**: Typos are caught immediately with warnings (e.g., "Setting undocumented coupler key 'zar_skims'")
-- **Runtime-declared**: Mix required and optional outputs with per-key granularity
-- **Both together**: Define core outputs in schema, add optional runtime outputs
-- **Type safety (optional)**: Use `coupler_schema` decorator for IDE autocomplete on typed coupler views
+**When to use:** Large, complex workflows where you want IDE hints (optional; not needed for most users).
+
+**Benefits:** IDE autocomplete for `coupler.zarr_skims`. Better IDE support in complex workflows.
+
+---
+
+**Combining patterns:** You can define a schema (Pattern A) and add runtime outputs (Pattern B): core outputs in schema, optional runtime outputs declared dynamically.
 
 **Bulk logging with metadata:**
 ```python
@@ -542,27 +570,98 @@ with use_tracker(tracker):
             # ... simulation ...
 ```
 
-### Function-Shaped Scenario Steps (Skip on Cache Hit)
+## When Does Code Execute? Understanding `sc.run()` vs `sc.trace()`
 
-`sc.trace(...)` is a context manager, so its block always executes even on cache hits. If you want Consist to skip calling expensive code on cache hits, use `sc.run(...)`:
+When building multi-step scientific workflows, a critical question arises: **Does my Python code run every time, or only when inputs change?** This section clarifies the difference between `sc.run()` and `sc.trace()`, two fundamental Consist patterns that differ in execution behavior on cache hits.
+
+### The Core Distinction
+
+On a **cache hit** (when Consist finds previously-cached results for this step with the same inputs):
+
+- **`sc.trace(...)`** — Your Python block *always executes*. Consist returns cached outputs, but your code still runs. Use this for logging, diagnostics, or steps that must track intermediate state every run.
+
+- **`sc.run(...)`** — Your Python function *only executes on cache miss*. On a cache hit, Consist skips calling your function entirely and returns the cached output. Use this for expensive operations like scientific simulations, data processing, or model fitting.
+
+### Why This Matters: Performance & Side Effects
+
+Consider an expensive simulation that takes 2 hours. Running it 100 times with the same inputs would normally take 200 hours of compute. With Consist:
+
+- If you use `sc.trace()`: code runs 100 times (200 hours) — caching provides metadata only
+- If you use `sc.run()`: code runs once (2 hours), then 99 cache hits retrieve results instantly
+
+**Side effects also differ.** If your step writes temporary files, updates external systems, or has other side effects, `sc.trace()` repeats them on every run, while `sc.run()` skips them on cache hits.
+
+### Example: ActivitySim-Style Land Use Simulation
+
+Here's a realistic example showing the difference:
+
+#### Using `sc.trace()` (Always Runs)
 
 ```python
 with use_tracker(tracker):
     with consist.scenario("baseline") as sc:
-        def beam_preprocess(data):
-            # Prepare inputs for the external model
-            return data
+        # This block executes every time, even on cache hits
+        with sc.trace(
+            name="prepare_land_use",
+            inputs={"geojson": Path("land_use.geojson")},
+            year=2030
+        ):
+            # This code ALWAYS runs—useful if you log, print status, etc.
+            print(f"Processing land use for year {year}")
+            zones = load_zones("land_use.geojson")
 
-        sc.run(
-            name="beam_preprocess",
-            fn=beam_preprocess,  # Only called on cache miss
-            inputs={"data": Path("data.parquet")},
-            outputs=["beam_inputs"],
-        )
-        beam_inputs = sc.coupler.require("beam_inputs")
+            # But Consist returns cached output if it exists
+            df_zones = pd.DataFrame(zones)
+            artifact = consist.log_dataframe(df_zones, key="zones")
+            sc.coupler.set("zones", artifact)
 ```
 
-If your step operates on large files, prefer path-based inputs and keep `load_inputs=False` to avoid eager reads; use `cache_hydration` to ensure cached outputs exist on disk when needed.
+#### Using `sc.run()` (Skips on Cache Hit)
+
+```python
+with use_tracker(tracker):
+    with consist.scenario("baseline") as sc:
+        def prepare_land_use(geojson_path: Path) -> pd.DataFrame:
+            # This function ONLY runs on cache miss
+            # On cache hit, Consist returns cached output without calling it
+            print(f"Processing land use")  # Only prints on first run
+            zones = load_zones(geojson_path)
+            return pd.DataFrame(zones)
+
+        result = sc.run(
+            name="prepare_land_use",
+            fn=prepare_land_use,
+            inputs={"geojson_path": Path("land_use.geojson")},
+            outputs=["zones"],
+            load_inputs=True,  # Auto-load Path → argument
+        )
+        sc.coupler.set("zones", result.outputs["zones"])
+```
+
+### Which Should You Use?
+
+Choose based on your workflow needs:
+
+| Scenario | Use | Why |
+|----------|-----|-----|
+| Expensive simulation, model fitting, or large data transformation | `sc.run()` | Skip re-execution on cache hits; critical for 2+ hour runtimes or iterative analysis |
+| Steps that log, print diagnostics, or validate state on every run | `sc.trace()` | Need to see side effects repeated; cheaper operations that re-run quickly |
+| Multi-year simulation where early years are cached, new years execute | `sc.run()` | Each year has independent cache entry; skip re-running 2020 when computing 2030 |
+| Mixed: some expensive, some diagnostic | Both in same scenario | Use `sc.run()` for expensive steps, `sc.trace()` for cheap validation |
+
+### Practical Guidance
+
+**For most scientific workflows, prefer `sc.run()`** when:
+- Your function is deterministic (no randomness unless seeded in config)
+- It doesn't have important side effects outside the outputs you log
+- You can structure it as a pure function (inputs → outputs)
+
+**Use `sc.trace()`** when:
+- You need to run initialization or setup code that triggers external systems
+- You want explicit control over what happens every run vs. only on cache miss
+- Your step is fast enough that re-execution overhead doesn't matter
+
+**On large file inputs:** If your function receives multi-GB files, set `load_inputs=False` and use `cache_hydration="inputs-missing"` to ensure input files are available on cache misses without re-loading on every run.
 
 <details>
 <summary>Alternative: log file outputs inside the step</summary>

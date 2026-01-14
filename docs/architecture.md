@@ -35,12 +35,55 @@ This Merkle DAG structure means:
 
 ### Ghost Mode
 
-Intermediate files can be deleted to save disk space. As long as the provenance database records the lineage and content hashes, Consist can:
+Consist enables "Ghost Mode" — the ability to delete intermediate files while preserving provenance and recoverability. As long as the provenance database records the lineage and content hashes, Consist can:
+
 - Verify that a cached result is valid (signature matches)
 - Identify which upstream run produced a missing artifact
 - Re-execute only the necessary steps to regenerate data
 
-This is useful for long-running studies where you want to keep provenance forever but can't store every intermediate file.
+**When You Need This**
+
+Long-running research workflows accumulate massive intermediate datasets that you want to keep for lineage but eventually need to reclaim space. Consider a 30-year climate simulation:
+
+```
+Year 2020: Compute temperature fields → Store (500GB) → Use as input for 2021
+Year 2021: Compute temperature fields → Store (500GB) → Use as input for 2022
+... (31 years × 500GB = 15.5TB)
+Year 2050: Final results published
+```
+
+Once you've published results (2030–2050), you can safely delete 2020–2029 intermediate files. The provenance database still tracks what those files contained (via content hashes). If you later need to re-run 2031, Consist automatically:
+1. Detects that 2030's output is missing from disk
+2. Checks if 2030's signature matches a cached computation
+3. Re-runs 2030 (which depends on 2029, which depends on 2028, etc.)
+4. Materializes only the files needed for the downstream run
+
+**How It Works**
+
+When you log an artifact in Consist, three pieces of information are persisted:
+
+- **Content hash** (SHA256 of file bytes) — Stored in the database
+- **URI and metadata** — Stored as provenance
+- **Actual file** — On disk (optional in Ghost Mode)
+
+On cache hits, if a file is missing from disk:
+```python
+# Run 2030 tries to load output from 2029 (now deleted)
+with tracker.start_run("2030"):
+    upstream_data = consist.log_artifact("year_2029_temps.parquet")
+    # Ghost Mode: URI and hash exist in DB, file is missing
+    # Consist checks the signature and re-runs 2029 if needed
+    df = upstream_data.load()  # Transparently materializes from re-run
+```
+
+The re-execution respects the same cache key (code + config + inputs), so if inputs haven't changed, no additional computation is triggered—Consist reuses the prior computation and materializes its output on-demand.
+
+**Best Practices**
+
+- Use Ghost Mode for intermediate outputs in long-running studies, not critical published results.
+- Keep the provenance database (`provenance.duckdb`) on reliable storage; it's the source of truth for recovery.
+- Archive deleted files alongside the database for offline recovery if needed.
+- Test recovery workflows (intentional deletion + re-run) before relying on Ghost Mode in production.
 
 ---
 
@@ -61,20 +104,119 @@ Key fields for workflow tracking:
 - `Run.tags` — String labels for filtering (stored as JSON array)
 - `Artifact.hash` — SHA256 content hash for deduplication and verification
 
-### Config queryability (facets + hash-only attachments)
+### Configuration Management: Tracking Large, Complex Configs
 
-Consist separates configuration into:
+Scientific simulations often involve complex, large configuration files: ActivitySim YAML and csv spanning 5MB, BEAM routing configs, climate model parameter trees. Consist provides strategies to make these configurations part of your provenance without storing them as bulky database fields.
 
-- **Identity config**: `Tracker.begin_run(..., config=...)` drives `Run.config_hash` and caching identity, but is not stored as a queryable blob in DuckDB.
-- **Facet (queryable config)**: `Tracker.begin_run(..., facet=...)` stores a minimal JSON snapshot (deduped) and optionally indexes flattened keys for filtering. If the facet is derived from config values, use `facet_from=[...]` to extract keys directly from `config` and avoid duplication.
-- **Hash-only attachments**: `Tracker.begin_run(..., hash_inputs=[...])` folds file/directory digests into the run identity (via `__consist_hash_inputs__`) without storing the raw configs in DuckDB (useful for BEAM HOCON trees, ActivitySim config folders, etc.). Dotfiles are ignored by default for directory hashing.
+#### Why This Matters: Configuration as Provenance
 
-DuckDB tables used:
+Configuration is critical for reproducibility: the same code + different config = different results. Consist must:
+- Track config as part of the cache key (so changing parameters invalidates cache)
+- Make config searchable (so you can find "all runs with alpha=0.5")
+- Avoid bloating the provenance database with massive YAML files
 
-- `config_facet`: deduped facet JSON keyed by a canonical hash, namespaced by `Run.model_name`
-- `run_config_kv`: flattened, typed key/value index for facet filtering (`str|num|bool|json|null`)
+The challenge: A 50MB ActivitySim config file is too large to store as a queryable blob, but you can't just ignore it.
 
-Note: time-series filtering should use `Run.year` (a first-class indexed column) rather than duplicating `year` in the facet.
+#### Three Configuration Strategies
+
+Consist separates configuration into three patterns. Choose based on your workflow:
+
+**Strategy 1: Identity Config (For Cache Keys, Not Queries)**
+
+Use this when configuration is important for caching but doesn't need to be queryable in the database.
+
+```python
+from pydantic import BaseModel
+
+class SimulationConfig(BaseModel):
+    alpha: float = 0.5
+    beta: float = 1.0
+
+tracker.start_run(
+    "run_001",
+    config=SimulationConfig(alpha=0.5, beta=1.0)
+)
+```
+
+Consist hashes the config deterministically and includes it in the run signature. Changes to alpha or beta invalidate the cache. Use when: Config is part of the cache key but you don't need to filter by it.
+
+**Strategy 2: Facet (Queryable Configuration)**
+
+Use this when you want to search and filter runs by configuration values.
+
+```python
+tracker.start_run(
+    "run_001",
+    config=SimulationConfig(alpha=0.5, beta=1.0),
+    facet={"alpha": 0.5, "beta": 1.0, "scenario": "baseline"}
+)
+```
+
+Consist stores the facet as a small JSON snapshot in DuckDB and deduplicates identical facets. You can query: "Find all runs where alpha > 0.4 and scenario='baseline'". Use when: You're running parameter sweeps and want to find results by parameter value.
+
+**Strategy 3: Hash-Only Attachments (For Large Files, No Database Storage)**
+
+Use this when configuration files are too large to query and don't need to be stored.
+
+```python
+tracker.start_run(
+    "run_001",
+    hash_inputs=[
+        Path("./activitysim_config"),  # 50MB directory
+        Path("./beam_config.hocon"),   # 30MB config file
+    ]
+)
+```
+
+Consist computes a fingerprint (SHA256 hash) of the config files. This fingerprint becomes part of the run signature (changing config invalidates cache). The actual config content is not stored. Use when: Configuration files are 10MB+ or you don't need to query by config values.
+
+#### Combining Strategies: The Typical Pattern
+
+Most real workflows use all three:
+
+```python
+import consist
+from pydantic import BaseModel
+
+class SimConfig(BaseModel):
+    year: int
+    scenario: str
+    demand_elasticity: float
+
+# Start run with all three
+result = tracker.start_run(
+    "baseline_2030",
+    config=SimConfig(
+        year=2030,
+        scenario="baseline",
+        demand_elasticity=0.8
+    ),
+    facet={
+        # Queryable fields: year and scenario
+        "year": 2030,
+        "scenario": "baseline",
+    },
+    hash_inputs=[
+        # Large external configs hashed for cache key but not stored
+        Path("./activitysim"),
+        Path("./network_config.yaml")
+    ]
+)
+```
+
+Result:
+- Cache key includes: config hash + ActivitySim hash + network hash
+- Database stores only the small facet (year, scenario)
+- You can query by year/scenario; ActivitySim changes tracked via fingerprints
+
+#### Database Tables
+
+Consist uses these tables for configuration tracking:
+
+- `config_facet`: Deduplicated facet JSON keyed by a canonical hash, namespaced by run model
+- `run_config_kv`: Flattened, typed key/value index for facet filtering
+
+Note: Use `Run.year` (a first-class indexed column) for time-series filtering rather than duplicating year in the facet.
 
 ---
 

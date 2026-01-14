@@ -16,30 +16,106 @@ This page uses a few terms very precisely. The goal is to separate **provenance 
 (Artifacts and Runs) from **physical bytes on disk** (files/directories) and from
 **database-backed data** (DuckDB tables).
 
-### “Hydrate” vs “materialize” (recommended vocabulary)
+## Hydration vs Materialization: Recovering Information vs. Ensuring Files Exist
 
-Consist workflows often need two different actions when accessing previously-cached data:
+When Consist finds a cached result, it needs to "bring that result back" into your new run. But **what does 'bringing back' mean?** This section clarifies the distinction between recovering information about a previous result versus ensuring the actual files exist on your current system.
 
-1) **Artifact hydration (record/object hydration)**  
-   Creating or retrieving an `Artifact` object that has the right identity and metadata
-   (e.g., `id`, `uri`, `run_id`, `meta`, and a resolvable `.path` via mounts) so it can be
-   passed around as provenance.
+### The Two Types of Recovery
 
-   - This is what Consist does on a cache hit in the core `Tracker`: it “hydrates”
-     the cached *output artifacts* into the new run context as `Artifact` objects.
-   - Artifact hydration does **not** imply that files are copied, downloaded, or re-created.
+Imagine you run a climate simulation in `/scratch/simulation_2024/` and it produces a 50GB results file. Six months later, you run a new analysis with the same inputs. Consist recognizes a cache hit. Now:
 
-2) **Physical materialization (bytes-on-disk materialization)**  
-   Ensuring the corresponding artifact data *exists at a specific filesystem location*
-   (e.g., copying a cached file into a new scratch directory, extracting it, or otherwise
-   creating bytes on disk).
+**Artifact Hydration** = Recovering the *information* about that result: "This result came from run `abc123`, it's a Parquet file called `results.parquet`, and it contains monthly precipitation data." Consist creates an `Artifact` object with the metadata, URIs, and provenance—all the *information* needed to reference and load the result.
 
-   - This is not done automatically by the core `Tracker` cache path.
-   - Some integrations (notably the containers API) intentionally materialize cached outputs
-     because callers expect host paths to exist.
+**Materialization** = Ensuring the *actual bytes* exist on your new system: copying the 50GB `results.parquet` file from its original location into your new run directory so your analysis code can read it from disk.
 
-When reading “hydrate” below, assume **artifact hydration** unless the text explicitly says
-“materialize bytes on disk”.
+The key insight: **Hydration is fast and automatic; materialization is optional and explicit.**
+
+### Why Consist Does This
+
+By default, Consist only hydrates metadata. This saves disk space and time:
+- Metadata recovery is instant (lookup in provenance database)
+- Files stay in their original location or database
+- You pay for file copying *only if you ask for it*
+
+This is useful when:
+- You're running 100 variations of an analysis on the same simulated data—you don't need 100 copies of that 50GB results file
+- Your downstream code can load from the original file path (via mounted storage or database fallback)
+- You want minimal disk overhead for large-scale parameter sweeps
+
+### When to Materialize: Making Cached Files Local
+
+You'll want to materialize cached outputs (copy bytes to your current run) in a few cases:
+
+1. **Extending a scenario in a new workspace:** You cached results in `/workspace/2024`, now you want to continue analysis in `/workspace/2025`. Use `cache_hydration="inputs-missing"` to automatically copy input files your executing steps need.
+
+2. **Preparing outputs for external tools:** Some tools expect files to exist locally. Use `cache_hydration="outputs-requested"` with `materialize_cached_output_paths` to copy specific cached outputs you need.
+
+3. **Ensuring full reproducibility locally:** You want all results locally accessible without remote mounts. Use `cache_hydration="outputs-all"` to copy all cached outputs into a local directory.
+
+### Example: Climate Data Workflow
+
+```python
+# First run: simulate climate for years 2020-2030, takes 24 hours
+with tracker.start_run(
+    "climate_baseline",
+    scenario_id="baseline",
+    model="climate_sim",
+    year=2030,
+    cache_mode="overwrite"
+):
+    results = run_climate_model()  # 50GB output
+    tracker.log_artifact(results, key="precip")
+
+# Later: analysis that only needs metadata about the result
+with tracker.start_run(
+    "analyze_trends",
+    scenario_id="baseline",
+    model="analysis",
+    inputs=[cached_precip_artifact],
+    cache_hydration="metadata",  # Default: no copying
+):
+    # Consist hydrated the Artifact object with metadata
+    # You can query properties, compute signatures, check provenance
+    print(f"Result came from run {cached_precip_artifact.run_id}")
+
+    # If you need the actual bytes, you explicitly load them:
+    df = consist.load(cached_precip_artifact)  # Loads from original location
+
+# Later: need to ensure files exist locally for external tool
+with tracker.start_run(
+    "export_for_visualization",
+    scenario_id="baseline",
+    model="export",
+    cache_hydration="outputs-requested",
+    materialize_cached_output_paths={
+        "precip": Path("./local_outputs/precip.parquet")
+    }
+):
+    # Consist copies the cached precip.parquet into ./local_outputs/
+    # Now your external tool can see real files
+    subprocess.run(["qgis", "export_for_visualization.py"])
+```
+
+### Default Behavior: Metadata-Only Hydration
+
+By default, `cache_hydration="metadata"`:
+- Fast: no filesystem operations
+- Efficient: no disk duplication
+- Requires explicit `consist.load()` when you need bytes
+
+This is the right default for scientific workflows because:
+- You often analyze cached results programmatically (via `consist.load()`)
+- Large simulations benefit from avoiding disk copies
+- Provenance and signature verification don't need bytes on disk
+
+### Practical Decision Table
+
+| Your Need | Use This | Tradeoff |
+|-----------|----------|----------|
+| Run parameter sweeps on cached simulation | `metadata` (default) | No disk copy; must load data via `consist.load()` |
+| Extend analysis in a new workspace | `inputs-missing` | Copies only missing input files; fast on cache hits |
+| Run external tool that needs local files | `outputs-requested` | Copy only what you ask for; must list outputs explicitly |
+| Ensure all cached data is accessible locally | `outputs-all` | Copies everything; uses disk space but guarantees file paths exist |
 
 ### Runs, signatures, and cache hits
 
@@ -286,6 +362,8 @@ cache hits.
 | Materialize a few outputs on cache hits | `outputs-requested` | On cache hits, for requested outputs | Requires `materialize_cached_output_paths`. |
 | Make all cached outputs exist locally | `outputs-all` | On cache hits, for all outputs | Requires `materialize_cached_outputs_dir`. |
 
+Most users should stick with the default `metadata` mode. Use the other modes only when downstream tools require the actual files to exist on disk.
+
 ---
 
 ## Practical Guidance
@@ -351,6 +429,22 @@ You can enable lightweight diagnostics to understand where time is going:
 - `CONSIST_CACHE_TIMING=1` logs timing for cache-hit phases during `begin_run`
   (signature prefetch, input hashing, cache lookup, validation, hydration).
 - `CONSIST_CACHE_DEBUG=1` logs cache hit/miss details and signatures.
+
+Example output with `CONSIST_CACHE_TIMING=1`:
+
+```text
+[cache_timing] signature_prefetch=2.1ms input_hashing=145.8ms cache_lookup=3.4ms validate=0.6ms hydration=0.2ms
+```
+
+Interpretation: input hashing dominates, so consider ingesting large tabular inputs or passing Consist-produced artifacts instead of raw files.
+
+Example output with `CONSIST_CACHE_DEBUG=1`:
+
+```text
+[cache_debug] hit=True signature=7e9c1c inputs=3 outputs=2 hydration=metadata
+```
+
+Interpretation: the cache hit returned metadata only; if downstream tools need files, select an outputs hydration mode.
 
 If you need strict safety for missing outputs, use `validate_cached_outputs="eager"`,
 accepting the additional filesystem checks.

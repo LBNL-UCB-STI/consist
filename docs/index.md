@@ -69,8 +69,8 @@ Consist automatically records what code, configuration, and input data produced 
 
 ## Key Terms
 
-- **Run**: A single execution with tracked inputs, config, and outputs
-- **Artifact**: A file with provenance metadata attached
+- **Run**: A single execution with tracked inputs, config, and outputs. Runs are the unit of cache reuse and comparison, so keeping them consistent lets you skip expensive recomputation.
+- **Artifact**: A file with provenance metadata attached. Artifacts are the concrete outputs you can trace, load, or hydrate later, which is how Consist keeps results reproducible.
 - **Signature**: Fingerprint of code + config + inputs. Identical signatures = cache hit
 - **Scenario**: A parent run grouping related child runs
 - **Provenance**: Complete history of where a result came from

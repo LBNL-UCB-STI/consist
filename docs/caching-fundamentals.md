@@ -63,7 +63,7 @@ with use_tracker(tracker):
 | Function code | ❌ No | Code hash changes → signature changes |
 | `runtime_kwargs` | ✅ Yes | runtime_kwargs are NOT hashed; don't affect signature |
 | Output file names | ✅ Yes | Output names don't affect signature |
-| Comments in code | ❌ No | Code still hashes to same value if not committed |
+| Comments in code | Depends | Committed comment changes affect the code hash; uncommitted changes mark the repo dirty and break cache. |
 
 ## What Does Cache Return?
 
@@ -87,27 +87,39 @@ See [Caching & Hydration](caching-and-hydration.md) if you need to force file co
 
 ## When Caching Saves Time
 
-Caching is most valuable in workflows with many runs and expensive computation:
+Caching is most valuable in workflows with many runs and expensive computation. Here are realistic scenarios from scientific domains:
 
-**Example 1: Parameter sweep**
-- 100 parameter combinations to test
-- Each run is 10 minutes
-- Without caching: 1000 minutes total
-- If 80 are cache hits: 200 minutes + 200 cached = 400 minutes total (60% savings)
+**Example 1: Land-Use Model Sensitivity Analysis**
 
-**Example 2: Iterative development**
-- You're developing a 5-step pipeline
-- Step 3 takes 1 hour
-- You fix a bug in step 3's code
-- Without caching: re-run steps 1-2 (wasted 2 hours)
-- With caching: steps 1-2 are hits, only step 3 re-executes (20 minutes)
+Transportation planners use activity-based models to evaluate how pricing policies affect commute patterns. A sensitivity sweep tests 40 parameter combinations (toll levels: 0–$10, parking costs: $2–$15, transit pass subsidies: 0–50%).
 
-**Example 3: Multi-scenario analysis**
-- You have a shared upstream model (2 hours)
-- Run with 20 different downstream configs
-- First scenario: 2 hours upstream + 5 minutes downstream
-- Scenarios 2-20: cache hits on upstream (5 minutes each)
-- Total: 2.5 hours instead of 42 hours
+- Each ActivitySim run: 30 minutes (generating synthetic population tours)
+- Without caching: 40 runs × 30 min = 1200 minutes (20 hours)
+- With caching: Base population synthesis (30 min, once) + 39 parameter tweaks with cache hits (5 min each, only trip mode choice re-run) = 30 + (39 × 5) = 225 minutes (3.75 hours)
+- **Time saved: 81% reduction in modeling time**
+
+**Example 2: ActivitySim Calibration Iteration**
+
+Mode choice coefficients need iterative calibration against observed transit ridership. A modeler:
+1. Runs population synthesis (45 minutes, computationally heavy)
+2. Generates tours (20 minutes)
+3. Runs mode choice with initial coefficients (10 minutes)
+
+After reviewing results, the coefficients are adjusted slightly and the model reruns.
+
+- Without caching: Repeat all 3 steps = 75 minutes per iteration × 5 iterations = 375 minutes total
+- With caching: Step 1–2 are cache hits (data unchanged), only step 3 re-executes = 45 + 20 (cached) + (10 × 5 iterations) = 115 minutes
+- **Time saved: 69% reduction; frees analyst time for interpretation**
+
+**Example 3: Climate Change Multi-Scenario Ensemble**
+
+Climate researchers downscale global circulation models (GCMs) for regional impact studies. A baseline scenario and 8 future scenarios (4 emissions pathways × 2 time horizons) all share the same preprocessing pipeline.
+
+- Baseline preprocessing (temperature interpolation, bias correction): 2 hours
+- Each scenario-specific downscaling: 15 minutes
+- Without caching: 9 × (2 hours + 15 min) = 20.25 hours
+- With caching: Preprocessing once (2 hours), then 8 scenario runs hit cache on preprocessing = 2 hours + (8 × 15 min) = 3 hours
+- **Time saved: 85% reduction; enables rapid ensemble exploration for stakeholder analysis**
 
 ## Next Steps
 
