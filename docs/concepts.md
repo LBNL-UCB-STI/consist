@@ -27,16 +27,24 @@ On cache hits, Consist returns output artifact metadata without copying files; l
 
 This is a key concept for making runs both reproducible and queryable.
 
+When you configure a run, you make a choice: should this parameter trigger a re-run if it changes (cache invalidation), or should it be searchable so you can find "all runs where this parameter had that value"?
+
+**Config** (affects reproducibility): Parameters that change behavior. Consist hashes config values into your run's signature. If config changes, the signature changes, and cached results don't apply—you must re-run. Use this for anything that should invalidate the cache.
+
+**Facet** (enables filtering): Queryable metadata you want to search by. Facets are stored in the database without affecting caching. You can ask "show all runs where year=2030 and scenario='baseline'" without storing the entire config. Use this when you want analytics without cache invalidation.
+
+**Practical example**: You have a 100KB ActivitySim config file. Store the whole file as `config=...` (it hashes into the signature, so changes trigger re-runs). But extract small, queryable pieces: `facet={"year": 2030, "mode_choice_coefficient": 0.5}`. Now you can search "find runs where coefficient > 0.4" without bloating the database with raw csv inputs.
+
+**Quick decision tree:**
+- "Should changing this parameter re-run my model?" → `config`
+- "Do I want to search/filter by this value later?" → `facet`
+- "Both?" → Use both. A value can be in config (cache invalidation) and facet (queryable).
+
 | Parameter     | Affects Cache? | Queryable?      | Use For                                        |
 |---------------|----------------|-----------------|------------------------------------------------|
 | `config=`     | Yes            | No (by default) | Parameters that change behavior                |
 | `facet=`      | No             | Yes (indexed)   | Metadata for filtering/grouping                |
 | `facet_from=` | —              | Yes             | Extract specific keys from config for querying |
-
-Guidance:
-- Put anything that should trigger a re-run into `config`.
-- Put metadata you want to filter or group by into `facet`.
-- Use `facet_from` when a config value is useful for querying but should still affect the cache.
 
 ## How inputs and outputs are treated
 
@@ -48,6 +56,33 @@ To keep outputs portable, write them under `tracker.run_dir` or a mounted `outpu
 ### Input mappings and auto-loading
 
 Inputs can be passed as a list (hash-only) or a mapping (hash + parameter injection). When you use a mapping, Consist matches input keys to function parameters and auto-loads those artifacts into the call by default. If you want to pass raw paths instead, set `load_inputs=False` and pass the paths explicitly (for example, via `runtime_kwargs`).
+
+Concrete example:
+
+```python
+import pandas as pd
+
+def summarize_trips(trips_df):
+    return trips_df["distance_miles"].mean()
+
+# Auto-loading: mapping keys match function params, so Consist loads the DataFrame.
+result = consist.run(
+    fn=summarize_trips,
+    inputs={"trips_df": trips_artifact},
+)
+
+def summarize_trips_from_path(trips_path: str):
+    df = pd.read_parquet(trips_path)
+    return df["distance_miles"].mean()
+
+# No auto-loading: you get the raw path and load it yourself.
+result = consist.run(
+    fn=summarize_trips_from_path,
+    inputs={"trips_path": trips_artifact},
+    load_inputs=False,
+    runtime_kwargs={"trips_path": trips_artifact.path},
+)
+```
 
 ## When to use each pattern
 

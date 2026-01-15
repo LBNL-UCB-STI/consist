@@ -6,13 +6,15 @@ This page defines key terms used in Consist documentation.
 
 ## Artifact
 
-A file produced or consumed by a run, with provenance metadata attached. Artifacts record:
+A file (CSV, Parquet, HDF5, etc.) produced or used by a run, with metadata attached to track its origin and integrity. Think of it as a "named, tracked file" that Consist remembers who created it and can verify hasn't been corrupted.
+
+Artifacts record:
 - The file path and format (CSV, Parquet, HDF5, etc.)
 - Which run created or used it (for inputs)
 - A content hash (SHA256) for integrity checking
 - Optional ingestion status (whether it was stored in DuckDB)
 
-**Example**: A Parquet file `results.parquet` is an Artifact if it was produced by a run and tracked by Consist.
+**Research example**: When you publish results (a transportation demand forecast, climate projections, or zoning capacity map), each output file is an Artifact. You can ask "who created this file?" (`consist lineage traffic_volumes`), verify it hasn't been corrupted, and trace it back to the exact code version and config that produced it.
 
 **See also**: Run, Provenance, Ingestion
 
@@ -23,6 +25,8 @@ A file produced or consumed by a run, with provenance metadata attached. Artifac
 When Consist skips execution because it finds a previous run with an identical signature. The cached results (artifact metadata and optionally file copies) are returned instantly.
 
 **Example**: You run a function with config `{"threshold": 0.5}` on input `data.csv`, then re-run with the exact same config and input. Second execution is a cache hit—no computation happens.
+
+**Research example**: In a parameter sweep (testing 20 demand elasticity values), the first run re-executes your demand model. Runs 2-20 are all cache hits for preprocessing (same input data, same code) but misses for the demand model (different elasticity). Consist skips 19 preprocessing steps, saving hours.
 
 **Opposite**: Cache miss (run must execute)
 
@@ -35,6 +39,16 @@ When Consist skips execution because it finds a previous run with an identical s
 When Consist cannot find a matching cached result, so the function must execute. The outputs are recorded as a new run and new artifacts are created.
 
 **See also**: Cache Hit, Signature
+
+---
+
+## Canonical Hashing
+
+Converting configuration data (dicts, YAML, etc.) into a single, consistent fingerprint, regardless of field order or how numbers are formatted. This ensures `{"a": 1, "b": 2}` and `{"b": 2, "a": 1}` produce the same hash, so Consist treats them as identical configurations.
+
+**Why it matters**: Without canonical hashing, the same config in different orders would produce different cache keys, breaking reproducibility.
+
+**See also**: Signature, Config
 
 ---
 
@@ -56,6 +70,8 @@ with use_tracker(tracker):
 ```
 
 Changing config invalidates cache and triggers re-execution. Config is hashed (not stored as-is) to allow large nested dictionaries.
+
+**Research example**: Your config might be a 50MB ActivitySim parameter file. Consist hashes it into the cache key, so if a colleague changes a mode choice coefficient, Consist automatically knows to re-run your demand model (cache miss). Without this, you'd have to manually remember which config changes require re-running which steps.
 
 **See also**: Facet, Signature
 
@@ -81,7 +97,9 @@ An optional Python library for loading data into data warehouses. Consist integr
 
 ## Facet
 
-A small, queryable piece of metadata extracted from config. Unlike config (which is hashed and not stored), facets are indexed in DuckDB for filtering.
+A small, queryable subset of configuration (e.g., `{"year": 2030, "scenario": "baseline"}`) that's indexed in DuckDB so you can filter runs. Use facets when you want to ask "show me all runs where year=2030" without storing the entire 50MB config file.
+
+Unlike identity config (which is hashed into the cache key), facets are stored queryably in the database for filtering and analysis.
 
 **Use case**: Your config is a 10 MB YAML file (too large to store). You extract `{"year": 2030, "parking_cost": 5.0}` as facets and query runs by year/parking_cost.
 
@@ -103,6 +121,8 @@ with use_tracker(tracker):
 df = tracker.find_runs(facet_year=2030)
 ```
 
+**Research example**: You're running demand models for 10 years (2020-2050) × 3 scenarios (baseline, transit-friendly, congestion pricing). You set `facet={"year": 2030, "scenario": "transit-friendly"}` for each run. Later, your colleague asks "show me all 2040 sensitivity tests." You query `facet_year=2040` and get 50 runs instantly—no manual searching through 500 run directories.
+
 **See also**: Config, Signature
 
 ---
@@ -119,11 +139,21 @@ Consist's ability to recover artifacts that exist only in the provenance databas
 
 ## Hydration
 
-The process of reconstructing artifact metadata (what run created it, with what config) without copying file bytes. Cache hits hydrate artifacts into the current run context.
+Recovering the metadata and location information about a previous run's output without copying the file bytes. On a cache hit, Consist "hydrates" the output artifact so you know where it came from and can access it, but doesn't necessarily copy it to your current run directory.
 
-**Hydration ≠ copying files.** A hydrated artifact has provenance metadata but may not have file bytes copied to the new run's directory.
+**Hydration ≠ copying files.** A hydrated artifact has provenance metadata but may not have file bytes copied to the new run's directory. By default, Consist recovers the information but doesn't copy files (saves disk space). You opt in to copying files when needed.
 
 **See also**: Materialization, Cache Hit
+
+---
+
+## Identity Config
+
+The full set of configuration parameters that affect a run's cache signature; if identity config changes, the run must re-execute. Unlike facets (which are just for querying), identity config is hashed into the cache key to ensure cache invalidation when parameters change.
+
+**Example**: If your `config` dict contains `{"year": 2030, "mode_choice_coefficient": 0.5}`, both values are hashed into the signature. Changing either value invalidates cache.
+
+**See also**: Config, Facet, Signature
 
 ---
 
@@ -161,9 +191,19 @@ traffic_volumes (artifact)
 
 ---
 
+## Merkle DAG
+
+A chain of computations where each step's inputs are linked to the outputs of previous steps, creating an unbreakable record of data lineage. Like a railroad consist (the specific order of locomotives and cars), each simulation year depends on the previous year's output.
+
+**Why it matters**: This structure enables Consist to detect when cached results are valid (all upstream inputs haven't changed) and to recover missing data if needed.
+
+**See also**: Signature, Lineage, Artifact
+
+---
+
 ## Materialization
 
-Storing artifact data (actual bytes) in DuckDB, making it recoverable even if the original file is deleted. More complete than hydration.
+Saving the actual bytes of a data file into DuckDB (the provenance database) so it's recoverable even if the original file gets deleted. If you ingest a 10GB result file, DuckDB stores a copy so you can retrieve it later without the original file.
 
 **Materialization = copying bytes into the database**
 **Hydration = recovering metadata without bytes**
@@ -177,6 +217,8 @@ Storing artifact data (actual bytes) in DuckDB, making it recoverable even if th
 Complete history of where a result came from: code version, configuration, input data, and compute environment. Consist records provenance automatically for every run.
 
 **Why it matters**: Reproducibility ("Can I re-run this exactly?"), Accountability ("Which config made this figure?"), Debugging ("Why did this change?")
+
+**Research example**: You published a land-use forecast that shows 10% job growth in downtown. A policy maker asks "is that Figure 3a or Figure 3b from the report?" You run `consist show <run_id>` and instantly see: code version (commit SHA), exact config parameters (zoning policy, density cap), which parcel survey data, and when it ran. You can reproduce it exactly or change one parameter and show the difference. Without provenance, you'd spend hours reconstructing assumptions.
 
 **See also**: Artifact, Lineage, Signature
 
@@ -207,6 +249,8 @@ with use_tracker(tracker):
 
 This creates a Run with one input artifact, one config dict, and one output artifact.
 
+**Research example**: In climate modeling, each year's downscaling (e.g., 2030 temperature downscaling) is a separate Run. The provenance database stores 20 runs (2031-2050) all under one scenario, linked by data flow (year 2030's output feeds year 2031's input). You can query: "which runs used GCM model X?" or "what was the total compute time across all 2050 runs?" or "trace 2050's data back to the original global model."
+
 **See also**: Artifact, Scenario
 
 ---
@@ -229,18 +273,18 @@ A grouping of related runs. Scenarios are useful for organizing multi-variant st
 
 ## Signature
 
-A fingerprint (SHA256 hash) of code version + config + input artifact hashes. Identical signatures = identical outputs (assuming deterministic functions). Used as the cache key.
+A unique fingerprint of a run created by hashing together your code version, configuration parameters, and input data. It's like a "run ID" that Consist compares across executions to detect when the same inputs, code, and config have been run before.
 
 **How it works**:
 1. Function code is hashed (git commit SHA + modified files)
-2. Config dict is hashed
+2. Config dict is hashed deterministically (canonical hashing)
 3. Input file hashes are computed
 4. All three are combined: `signature = SHA256(code + config + inputs)`
 5. This signature is the cache key
 
-**Why**: If you re-run with the same signature, Consist knows the result will be the same, so it returns the cached version instantly.
+**Why**: If you re-run with the same signature, Consist knows the result will be the same, so it returns the cached version instantly. Identical signatures = identical outputs (assuming deterministic functions).
 
-**See also**: Cache Hit, Config, Artifact
+**See also**: Cache Hit, Config, Artifact, Canonical Hashing
 
 ---
 

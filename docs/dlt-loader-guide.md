@@ -21,10 +21,29 @@ The DLT (Data Load Tool) integration enables robust, schema-validated ingestion 
 ### Use DLT for:
 
 - **Large datasets** (100K+ rows) → streaming ingestion with DuckDB backend
+  - *Transportation*: 50 runs × 1M persons per run = 50M total household records across all scenarios
+  - *Climate*: Multi-year ensemble with 50 model runs, each producing regional summaries that you'll compare statistically
+  - *Urban Planning*: Parcel-level zoning changes tracked across 20 scenario runs for cumulative analysis
+
 - **Schema evolution tracking** → understand how data structure changes across runs
+  - *Transportation*: New land use categories added in run 15; need to understand impact on mode choice modeling
+  - *Climate*: Regional variables refined across ensemble members; track when resolution changed
+  - *Urban Planning*: Zoning class definitions evolved across policy iterations; audit the timeline
+
 - **Schema validation** → enforce types, nullability, PKs before loading
+  - *Transportation*: Catch mode="car_pool" typos before querying mode choice; enforce person_id uniqueness
+  - *Climate*: Ensure temperature is numeric (not string from CSV parsing); reject runs with missing required variables
+  - *Urban Planning*: Validate parcel_ids are unique across scenarios; catch mixed data types in zoning codes
+
 - **Complex data** → nested structures, unions, evolving columns
+  - *Transportation*: Person-trip links where one trip can have multiple stages; household composition variations
+  - *Climate*: Variable-length time series per location; nested metadata for model parameters
+  - *Urban Planning*: Multi-level zoning (district → block → parcel) with hierarchical relationships
+
 - **Cross-run analysis** → query data from multiple runs together with `tracker.views`
+  - *Transportation*: "Compare average trip distance across all 50 scenarios in one SQL query"
+  - *Climate*: "Find 95th percentile precipitation across ensemble members by region"
+  - *Urban Planning*: "Count parcels zoned commercial across all scenarios, grouped by district"
 
 **Example:**
 ```python
@@ -36,9 +55,24 @@ df = tracker.views.Persons.select("consist_run_id", "age")
 ### Use Direct Logging for:
 
 - **Small results** (<10K rows) → lightweight, no schema overhead
+  - *Transportation*: Single scenario's summary statistics (e.g., 10 lines showing mode split by district)
+  - *Climate*: One-off diagnostics (e.g., 50 error logs from model runs, not for re-analysis)
+  - *Urban Planning*: Quick impact breakdown (e.g., 3 numbers showing acres zoned before/after one proposal)
+
 - **One-off analyses** → not meant for cross-run queries
+  - *Transportation*: Single debug run showing why trip generation failed in zone 42
+  - *Climate*: Quick sensitivity test to new parameter value; won't compare with baseline
+  - *Urban Planning*: Ad-hoc impact assessment for one proposal that stakeholders asked about once
+
 - **Simple CSVs/Parquets** → no schema validation needed
-- **External data** → data you don't own (e.g., from a file on disk)
+  - *Transportation*: Raw travel demand model export (you'll validate in downstream step)
+  - *Climate*: Raw gridded output from climate model (too large for DuckDB anyway; just store for archival)
+  - *Urban Planning*: External zoning shapefile you imported (you don't own, can't enforce schema)
+
+- **External data** → data you don't own or control
+  - *Transportation*: Census data, transit schedules, road networks from external sources
+  - *Climate*: Observational data, boundary conditions from other modeling teams
+  - *Urban Planning*: Parcel maps from county assessor, regulatory texts from local government
 
 **Example:**
 ```python
@@ -109,12 +143,19 @@ tracker.log_dataframe(df, key="persons", schema=Person)
 ```python
 from sqlmodel import select, func
 
-# Query all persons from all runs
+# Compute an aggregate over a single run_id.
 with Session(tracker.engine) as session:
     avg_age = session.exec(
+        # Filter to one Consist run and take an average over the ingested rows.
         select(func.avg(Person.age)).where(Person.consist_run_id == "run_123")
     ).first()
     print(f"Average age in run_123: {avg_age}")
+```
+
+Expected output:
+
+```text
+Average age in run_123: 30.0
 ```
 
 ---
