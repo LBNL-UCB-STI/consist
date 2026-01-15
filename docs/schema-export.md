@@ -38,6 +38,8 @@ Schema export uses the schema captured from a DuckDB-ingested table. In practice
 
 If you already see `schema_id` in an artifact’s `meta`, you’re ready to export.
 
+You can also capture schemas **without ingestion** for CSV/Parquet artifacts by enabling lightweight file profiling at log time (`profile_file_schema=True`, optional `file_schema_sample_rows=`). This writes the same `schema_id` pointer into `artifact.meta`, allowing schema export even if the original file is later missing or moved.
+
 ## Exporting from the CLI
 
 Export by artifact UUID (recommended UX for now):

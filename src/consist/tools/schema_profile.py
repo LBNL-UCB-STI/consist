@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Literal
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from consist.core.identity import IdentityManager
+from consist.tools.file_batches import yield_file_batches
 
 PROFILE_VERSION = 1
 
@@ -120,6 +121,102 @@ def profile_duckdb_table(
         "source": source,
         "table_schema": table_schema,
         "table_name": table_name,
+        "sample_rows": sample_rows,
+        "n_columns": len(fields),
+        "truncated": truncated_flags,
+    }
+
+    profile_obj: Dict[str, Any] = dict(hash_obj)
+    if len(fields) > MAX_FIELDS:
+        truncated_flags["fields"] = True
+        profile_obj["fields"] = []
+
+    schema_json: Optional[Dict[str, Any]] = profile_obj
+    if _json_size_bytes(profile_obj) > MAX_SCHEMA_JSON_BYTES:
+        truncated_flags["schema_json"] = True
+        schema_json = None
+
+    inline_profile_json: Optional[Dict[str, Any]] = profile_obj
+    if schema_json is None or _json_size_bytes(profile_obj) > MAX_INLINE_PROFILE_BYTES:
+        truncated_flags["inline_profile"] = True
+        inline_profile_json = None
+
+    return SchemaProfileResult(
+        schema_id=schema_id,
+        summary=summary,
+        schema_json=schema_json,
+        inline_profile_json=inline_profile_json,
+        fields=fields,
+    )
+
+
+def profile_file_schema(
+    *,
+    identity: IdentityManager,
+    path: str,
+    driver: Literal["parquet", "csv"],
+    sample_rows: Optional[int],
+    source: str = "file",
+) -> SchemaProfileResult:
+    """
+    Infer a schema profile for a file-based tabular artifact.
+
+    Parameters
+    ----------
+    identity : IdentityManager
+        Identity manager used to hash the canonical schema payload.
+    path : str
+        Filesystem path to the file to profile.
+    driver : {"parquet", "csv"}
+        File format driver for the profiler.
+    sample_rows : Optional[int]
+        Maximum number of rows to sample for dtype inference. None means no limit.
+    source : str, default "file"
+        Source label for the schema observation.
+
+    Returns
+    -------
+    SchemaProfileResult
+        Schema profile payload including per-field rows and summary metadata.
+    """
+    batches = yield_file_batches(path, driver=driver, max_rows=sample_rows)
+    df = None
+    for batch in batches:
+        df = batch
+        break
+
+    fields: List[SchemaFieldProfile] = []
+    if df is not None:
+        for i, (col, dtype) in enumerate(df.dtypes.items(), start=1):
+            fields.append(
+                SchemaFieldProfile(
+                    name=str(col),
+                    logical_type=str(dtype).lower(),
+                    nullable=True,
+                    ordinal_position=i,
+                )
+            )
+
+    truncated_flags: Dict[str, Any] = {
+        "fields": False,
+        "schema_json": False,
+        "inline_profile": False,
+    }
+
+    field_rows = [f.to_row() for f in fields]
+    hash_obj: Dict[str, Any] = {
+        "profile_version": PROFILE_VERSION,
+        "source": source,
+        "driver": driver,
+        "fields": field_rows,
+    }
+    schema_id = identity.canonical_json_sha256(hash_obj)
+
+    summary = {
+        "profile_version": PROFILE_VERSION,
+        "schema_id": schema_id,
+        "source": source,
+        "driver": driver,
         "sample_rows": sample_rows,
         "n_columns": len(fields),
         "truncated": truncated_flags,

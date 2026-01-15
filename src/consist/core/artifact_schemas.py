@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any, Dict, Optional, Literal
 
 from consist.models.artifact import Artifact
 from consist.models.run import Run
@@ -117,5 +117,120 @@ class ArtifactSchemaManager:
                 getattr(artifact, "key", None),
                 table_schema,
                 table_name,
+                e,
+            )
+
+    def profile_file_artifact(
+        self,
+        *,
+        artifact: Artifact,
+        run: Run,
+        resolved_path: str,
+        driver: Literal["parquet", "csv"],
+        sample_rows: Optional[int],
+        source: str = "file",
+    ) -> None:
+        """
+        Profile a file-based artifact and persist schema records.
+
+        Notes
+        -----
+        This is intended to capture a lightweight file schema snapshot without ingestion.
+
+        Parameters
+        ----------
+        artifact : Artifact
+            Artifact being profiled.
+        run : Run
+            Run context for the schema observation.
+        resolved_path : str
+            Resolved filesystem path to the artifact.
+        driver : str
+            File format driver (e.g., "csv", "parquet").
+        sample_rows : Optional[int]
+            Maximum rows to sample when inferring schema.
+        source : str, default "file"
+            Source label for the schema observation.
+
+        Returns
+        -------
+        None
+        """
+        if not self.tracker.db:
+            return
+
+        try:
+            if isinstance(getattr(artifact, "meta", None), dict) and artifact.meta.get(
+                "schema_id"
+            ):
+                return
+            from consist.models.artifact_schema import (
+                ArtifactSchema,
+                ArtifactSchemaField,
+                ArtifactSchemaObservation,
+            )
+            from consist.tools.schema_profile import profile_file_schema
+
+            result = profile_file_schema(
+                identity=self.tracker.identity,
+                path=resolved_path,
+                driver=driver,
+                sample_rows=sample_rows,
+                source=source,
+            )
+            truncated = result.summary.get("truncated") or {}
+            if any(bool(v) for v in truncated.values()):
+                logging.warning(
+                    "[Consist] Schema profile for file=%s was truncated (flags=%s). "
+                    "Per-field rows are still stored for schema export, but the full JSON profile may be unavailable.",
+                    resolved_path,
+                    truncated,
+                )
+
+            schema_row = ArtifactSchema(
+                id=result.schema_id,
+                profile_version=result.summary.get("profile_version", 1),
+                summary_json=result.summary,
+                profile_json=result.schema_json,
+            )
+            field_rows = [
+                ArtifactSchemaField(
+                    schema_id=result.schema_id,
+                    ordinal_position=f.ordinal_position,
+                    name=f.name,
+                    logical_type=f.logical_type,
+                    nullable=f.nullable,
+                    stats_json=f.stats,
+                    is_enum=f.is_enum,
+                    enum_values_json=f.enum_values,
+                )
+                for f in result.fields
+            ]
+
+            self.tracker.db.upsert_artifact_schema(schema_row, field_rows)
+            self.tracker.db.insert_artifact_schema_observation(
+                ArtifactSchemaObservation(
+                    artifact_id=artifact.id,
+                    schema_id=result.schema_id,
+                    run_id=run.id,
+                    source=result.summary.get("source", source),
+                    sample_rows=result.summary.get("sample_rows"),
+                )
+            )
+
+            meta_updates: Dict[str, Any] = {
+                "schema_id": result.schema_id,
+                "schema_summary": result.summary,
+            }
+            if result.inline_profile_json is not None:
+                meta_updates["schema_profile"] = result.inline_profile_json
+
+            self.tracker.db.update_artifact_meta(artifact, meta_updates)
+
+        except Exception as e:
+            logging.warning(
+                "[Consist] Failed to profile file schema for artifact=%s path=%s: %s",
+                getattr(artifact, "key", None),
+                resolved_path,
                 e,
             )
