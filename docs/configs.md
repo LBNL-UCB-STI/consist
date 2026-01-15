@@ -104,6 +104,79 @@ Digests are recorded in:
 - `config["__consist_hash_inputs__"]` (identity-only payload)
 - `run.meta["consist_hash_inputs"]` (audit/debugging)
 
+### When to Use Hash-Only Inputs
+
+`hash_inputs` solves a specific problem: **Configuration files that must affect the cache key but are too large or unstructured to query in the database.**
+
+**The Trade-off**
+
+Normally, you pass configuration two ways:
+
+1. **Via `config=`** — Stored in the database, queryable, but large configs (5MB+) bloat the DB and become expensive to search.
+2. **Not tracked** — Smaller footprint, but changes to external files don't invalidate the cache, risking incorrect cache hits.
+
+`hash_inputs` is the middle ground: **Hash the files so cache keys change when they do, but don't store the content.**
+
+**Example: ActivitySim Configuration**
+
+ActivitySim projects use a 5MB+ directory of YAML and csv configuration files. The config affects simulation output, so it must change the cache signature. But the YAML is:
+- Too large to store as a queryable facet (exceeds the 16 KB limit)
+- Unstructured (hundreds of files with complex nested keys)
+- Not useful for filtering runs (you don't query "find runs where beam.memory=180")
+
+Instead, hash the config directory:
+
+```python
+import consist
+from pathlib import Path
+
+asim_config_dir = Path("./configs/activitysim")
+
+with use_tracker(tracker):
+    # First run with baseline config
+    result1 = consist.run(
+        fn=run_activitysim,
+        name="asim_baseline",
+        config={"scenario": "baseline"},
+        hash_inputs=[("asim_config", asim_config_dir)],
+    )
+
+# Later: You edit the YAML config (change a parameter)
+# The directory hash changes → signature changes → cache miss
+# ActivitySim re-runs with the new config
+
+    # Second run with updated config
+    result2 = consist.run(
+        fn=run_activitysim,
+        name="asim_baseline",
+        config={"scenario": "baseline"},  # Same config dict
+        hash_inputs=[("asim_config", asim_config_dir)],  # Different hash
+    )
+# Different signature (hash_inputs changed) → fresh run
+```
+
+**Comparison: config vs hash_inputs**
+
+| Approach | Space | Queryable | Cache Behavior |
+|---|---|---|---|
+| `config={"yaml": large_dict}` | Bloated DB | Yes, but slow | Cache respects changes |
+| `hash_inputs=[path]` | Minimal | No | Cache respects changes |
+| Ignore files | Minimal | N/A | Cache miss if files change (BAD) |
+
+For large, unstructured configs like ActivitySim YAML, use `hash_inputs`.
+
+**Audit Trail**
+
+Even though the file content isn't stored, Consist records the hash for debugging:
+
+```python
+run = tracker.get_run("asim_baseline_001")
+print(run.meta["consist_hash_inputs"])
+# Output: {"asim_config": "sha256:a1b2c3..."}
+```
+
+This lets you correlate runs with specific configuration states without storing the full config.
+
 ## Querying Facets in DuckDB
 
 Facet persistence creates two tables:

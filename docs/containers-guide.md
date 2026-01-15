@@ -20,7 +20,7 @@ Containers are ideal when:
 **Not ideal for:**
 - Simple Python functions (use `consist.run()` instead)
 - Workflows where you want fine-grained step caching (use `scenario()` + `consist.run()`)
-- Development/debugging (overhead of container startup)
+- Development/debugging (container startup adds latency during iteration, but can be fine for lightweight images)
 
 ---
 
@@ -36,7 +36,7 @@ When you execute a container, Consist computes a **container signature** from:
 
 If all these match a prior run, Consist returns cached outputs **without executing the container**.
 
-**Key insight**: Changing the image tag (e.g., `my-model:v1` → `my-model:v2`) invalidates the cache. If you use `my-model:latest`, consider setting `pull_latest=True` to check for updates.
+**Key insight**: Changing the image tag (e.g., `my-model:v1` → `my-model:v2`) invalidates the cache. If you use `my-model:latest`, consider setting `pull_latest=True` to refresh the digest from the registry and ensure cache invalidation when the tag updates (use it when `latest` is truly mutable).
 
 ---
 

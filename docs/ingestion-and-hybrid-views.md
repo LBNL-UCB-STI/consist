@@ -17,8 +17,10 @@ Ingest when you want:
 - The ability to recover tabular data if files are missing.
 
 Stay cold when you want:
-- Minimal DB size.
+- Minimal DB size (data stays in files, not duplicated in DuckDB).
 - Large binary formats that are not tabular (e.g., rasters, binary blobs).
+
+“Cold” means the data lives only on disk paths; you keep provenance metadata, but you cannot query it in SQL or include it in hybrid views until you ingest it.
 
 ---
 
@@ -154,7 +156,7 @@ df = consist.load(artifact, tracker=tracker, db_fallback="always")
 
 ## Best practices
 
-- Ingest key tabular outputs that you want to analyze across many runs.
+- Ingest key tabular outputs you will compare across runs (e.g., transportation: trip tables or skim summaries; climate: aggregated metrics like monthly averages; urban planning: parcel or zoning summaries). Rule of thumb: if it is <1GB and you expect to compare it, ingest it.
 - Keep raw binary outputs cold, and use mounts for portability.
 - Register SQLModel schemas for any concept you want to query via views.
 - Use schema export to bootstrap models, then curate them.

@@ -12,6 +12,8 @@ This guide covers common errors, their root causes, and solutions.
 
 **Root Cause:** Consist returned a cache hit but didn't materialize the files to disk.
 
+Why this happens: Consist defaults to metadata-only cache hits to keep cache checks fast and avoid duplicating large files. You explicitly opt in to file copying via hydration/materialization when you need bytes on disk.
+
 **Solution:**
 
 Use cache hydration to copy files:

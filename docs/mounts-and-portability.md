@@ -6,6 +6,90 @@ URIs, and historical path resolution work.
 
 ---
 
+## Getting Started with Mounts
+
+When you set up Consist for your research project, you'll define **mounts** — mappings from short names to directories on your filesystem. These mounts let each team member keep their data in different locations while sharing a common provenance database.
+
+**The Workflow**
+
+1. **Identify your data directories**: Where are your inputs? Where do you write outputs? Where is temporary scratch space?
+2. **Assign mount names**: Choose memorable names like `inputs`, `outputs`, `scratch`, `shared`.
+3. **Define mounts in your Tracker**: Map those names to real paths on each person's machine.
+4. **Log artifacts under mounts**: Instead of absolute paths, use URIs like `inputs://land_use.csv`.
+
+**Example for a Research Team**
+
+Suppose your team shares an ActivitySim project:
+
+```python
+from consist import Tracker
+from pathlib import Path
+
+# Shared setup (agreed upon by the team)
+tracker = Tracker(
+    run_dir="./runs",
+    db_path="./provenance.duckdb",
+    mounts={
+        "inputs": "/shared/data/activitysim_inputs",      # Shared NFS mount
+        "outputs": "/local/activitysim_outputs",          # Local SSD for speed
+        "scratch": "/scratch/users/YOUR_USERNAME",        # Temporary workspace
+    },
+)
+```
+
+**On each team member's machine**, the paths differ but mount names stay the same:
+
+```python
+# Alice's setup
+tracker = Tracker(
+    run_dir="./runs",
+    db_path="./provenance.duckdb",
+    mounts={
+        "inputs": "/mnt/nfs/activitysim_inputs",          # Alice's NFS mount point
+        "outputs": "/home/alice/activitysim_outputs",
+        "scratch": "/scratch/alice",
+    },
+)
+
+# Bob's setup
+tracker = Tracker(
+    run_dir="./runs",
+    db_path="./provenance.duckdb",
+    mounts={
+        "inputs": "/data/nfs/inputs",                     # Bob's mount point
+        "outputs": "/var/cache/bob/outputs",
+        "scratch": "/tmp/bob_scratch",
+    },
+)
+```
+
+When Alice runs a simulation and logs an output:
+
+```python
+consist.log_artifact(Path("/home/alice/activitysim_outputs/results.parquet"), key="results")
+```
+
+Consist detects the mount and stores a portable URI:
+
+```
+outputs://results.parquet
+```
+
+When Bob retrieves this artifact, Consist resolves it using *his* mount configuration:
+
+```
+outputs:// → /var/cache/bob/outputs/ → /var/cache/bob/outputs/results.parquet
+```
+
+**Benefits**
+
+- **Portability**: Runs move between machines without breaking lineage.
+- **Flexibility**: Each user can customize their local paths for their hardware (local SSD, NFS, cloud storage).
+- **Shared provenance**: A single `provenance.duckdb` file shared across the team still works even if underlying filesystems differ.
+- **Isolation**: Temporary outputs stay local; shared data stays on shared infrastructure.
+
+---
+
 ## Mounts at a glance
 
 Mounts map a short scheme name to a real path on disk:
