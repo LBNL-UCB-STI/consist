@@ -19,6 +19,7 @@ dependencies = [
     "pyarrow>=22.0.0",
     "pydantic>=2.12.4",
     "pyyaml>=6.0.3",
+    "grandalf>=0.8",
     "rich>=13.7.1",
     "seaborn>=0.13.2",
     "sqlalchemy>=2.0.44",
