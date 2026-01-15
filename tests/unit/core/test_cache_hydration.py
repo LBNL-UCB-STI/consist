@@ -86,7 +86,7 @@ def test_cache_hydration_policies_end_to_end(
     cached_b = cached_outputs["b"]
 
     # Cache-hydration = metadata: cache hits hydrate artifacts only (no bytes copied).
-    tracker_b = Tracker(run_dir=run_dir_b, db_path=db_path)
+    tracker_b = Tracker(run_dir=run_dir_b, db_path=db_path, allow_external_paths=True)
     _init_core_tables(tracker_b)
     with tracker_b.start_run("meta_hit", model="producer", cache_mode="reuse"):
         pass
@@ -367,6 +367,7 @@ def test_build_materialize_items_and_materialize_from_sources(tmp_path: Path) ->
 
     materialized = materialize_artifacts_from_sources(
         [(artifact, source_file, tmp_path / "dest.txt")],
+        allowed_base=tmp_path,
         on_missing="raise",
     )
     assert materialized == {"alpha": str((tmp_path / "dest.txt").resolve())}
@@ -382,7 +383,7 @@ def test_outputs_requested_permission_denied_warns_and_continues(
     caplog.set_level(logging.WARNING)
     db_path = str(tmp_path / "provenance.db")
     run_dir = tmp_path / "runs"
-    tracker = Tracker(run_dir=run_dir, db_path=db_path)
+    tracker = Tracker(run_dir=run_dir, db_path=db_path, allow_external_paths=True)
     _init_core_tables(tracker)
 
     with tracker.start_run("seed", model="model", cache_mode="overwrite"):
@@ -499,7 +500,10 @@ def test_outputs_requested_warns_on_stale_mount_source(
         tracker_a.log_artifact(source_path, key="a", direction="output")
 
     tracker_b = Tracker(
-        run_dir=run_dir_b, db_path=db_path, mounts={"outputs": str(mount_b)}
+        run_dir=run_dir_b,
+        db_path=db_path,
+        mounts={"outputs": str(mount_b)},
+        allow_external_paths=True,
     )
     _init_core_tables(tracker_b)
 
@@ -542,7 +546,7 @@ def test_outputs_requested_warns_on_moved_run_dir(
     moved_dir = tmp_path / "runs_moved"
     run_dir_a.rename(moved_dir)
 
-    tracker_b = Tracker(run_dir=run_dir_b, db_path=db_path)
+    tracker_b = Tracker(run_dir=run_dir_b, db_path=db_path, allow_external_paths=True)
     _init_core_tables(tracker_b)
 
     dest = tmp_path / "dest.csv"

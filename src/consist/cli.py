@@ -40,12 +40,35 @@ console = Console()
 
 app.add_typer(schema_app, name="schema")
 
+MAX_CLI_LIMIT = 1_000_000
+MAX_PREVIEW_ROWS = 1_000_000
+MAX_SEARCH_QUERY_LENGTH = 256
+
 
 def output_json(data: Any) -> None:
     """Helper to output data as JSON."""
     import json
 
     print(json.dumps(data, default=str, indent=2))
+
+
+def _parse_bounded_int(value: str, *, name: str, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer (got {value!r}).") from exc
+    if parsed < minimum or parsed > maximum:
+        raise ValueError(
+            f"{name} must be between {minimum} and {maximum} (got {parsed})."
+        )
+    return parsed
+
+
+def _escape_like_pattern(value: str) -> str:
+    value = value.replace("\\", "\\\\")
+    value = value.replace("%", "\\%")
+    value = value.replace("_", "\\_")
+    return value
 
 
 def find_db_path(explicit_path: Optional[str] = None) -> str:
@@ -509,8 +532,13 @@ def search(
     ),
     limit: int = typer.Option(20, help="Maximum results."),
 ) -> None:
-    """Search for runs by ID, model name, or tags."""
+    """Search for runs by ID, model name, or tags (query length is capped)."""
     tracker = get_tracker(db_path)
+    if not query or len(query) > MAX_SEARCH_QUERY_LENGTH:
+        raise typer.BadParameter(
+            f"Query must be 1-{MAX_SEARCH_QUERY_LENGTH} characters."
+        )
+    escaped_query = _escape_like_pattern(query)
 
     with Session(tracker.engine) as session:
         from consist.models.run import Run
@@ -521,9 +549,11 @@ def search(
             select(Run)
             .where(
                 or_(
-                    Run.id.contains(query),
-                    Run.model_name.contains(query),
-                    Run.parent_run_id.contains(query) if query else False,
+                    Run.id.contains(escaped_query, escape="\\"),
+                    Run.model_name.contains(escaped_query, escape="\\"),
+                    Run.parent_run_id.contains(escaped_query, escape="\\")
+                    if escaped_query
+                    else False,
                 )
             )
             .order_by(Run.created_at.desc())
@@ -989,7 +1019,12 @@ class ConsistShell(cmd.Cmd):
             i = 0
             while i < len(args):
                 if args[i] == "--limit" and i + 1 < len(args):
-                    limit = int(args[i + 1])
+                    limit = _parse_bounded_int(
+                        args[i + 1],
+                        name="limit",
+                        minimum=1,
+                        maximum=MAX_CLI_LIMIT,
+                    )
                     i += 2
                 elif args[i] == "--model" and i + 1 < len(args):
                     model_name = args[i + 1]
@@ -1052,7 +1087,12 @@ class ConsistShell(cmd.Cmd):
             i = 1
             while i < len(args):
                 if args[i] in {"--rows", "-n"} and i + 1 < len(args):
-                    n_rows = int(args[i + 1])
+                    n_rows = _parse_bounded_int(
+                        args[i + 1],
+                        name="rows",
+                        minimum=1,
+                        maximum=MAX_PREVIEW_ROWS,
+                    )
                     i += 2
                 else:
                     i += 1
@@ -1277,9 +1317,19 @@ class ConsistShell(cmd.Cmd):
         if args:
             try:
                 if args[0] == "--limit" and len(args) > 1:
-                    limit = int(args[1])
+                    limit = _parse_bounded_int(
+                        args[1],
+                        name="limit",
+                        minimum=1,
+                        maximum=MAX_CLI_LIMIT,
+                    )
                 else:
-                    limit = int(args[0])
+                    limit = _parse_bounded_int(
+                        args[0],
+                        name="limit",
+                        minimum=1,
+                        maximum=MAX_CLI_LIMIT,
+                    )
             except ValueError:
                 console.print("[red]Error: limit must be an integer[/red]")
                 return

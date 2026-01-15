@@ -61,6 +61,11 @@ from consist.core.lineage import LineageService
 from consist.core.materialize import materialize_artifacts
 from consist.core.matrix import MatrixViewFactory
 from consist.core.queries import RunQueryService
+from consist.core.validation import (
+    validate_config_structure,
+    validate_run_meta,
+    validate_run_strings,
+)
 from consist.core.workflow import OutputCapture, RunContext, ScenarioContext
 from consist.core.input_utils import coerce_input_map
 from consist.models.artifact import Artifact
@@ -92,6 +97,13 @@ def _resolve_input_ref(
     return tracker.artifacts.create_artifact(
         resolved, run_id=None, key=key, direction="input"
     )
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _is_xarray_dataset(value: Any) -> bool:
@@ -213,6 +225,7 @@ class Tracker:
         schemas: Optional[List[Type[SQLModel]]] = None,
         access_mode: AccessMode = "standard",
         run_subdir_fn: Optional[Callable[[Run], str]] = None,
+        allow_external_paths: Optional[bool] = None,
     ):
         """
         Initialize a Consist Tracker.
@@ -245,6 +258,9 @@ class Tracker:
         run_subdir_fn : Optional[Callable[[Run], str]], default None
             Optional callable that returns a relative subdirectory name for a run.
             When provided, this takes precedence over the default pattern.
+        allow_external_paths : Optional[bool], default None
+            Allow artifact directories and cached-output materialization to write
+            outside `run_dir`. Defaults to CONSIST_ALLOW_EXTERNAL_PATHS when unset.
         """
         # 1. Initialize FileSystem Service
         # (This handles the mkdir and path resolution internally now)
@@ -256,6 +272,9 @@ class Tracker:
 
         self.access_mode = access_mode
         self._run_subdir_fn = run_subdir_fn
+        if allow_external_paths is None:
+            allow_external_paths = _env_bool("CONSIST_ALLOW_EXTERNAL_PATHS", False)
+        self.allow_external_paths = bool(allow_external_paths)
 
         self.db_path = os.fspath(db_path) if db_path is not None else None
         self.identity = IdentityManager(
@@ -342,7 +361,9 @@ class Tracker:
         Returns
         -------
         Path
-            Directory under ``run_dir`` where run artifacts should be written.
+            Directory under ``run_dir`` where run artifacts should be written by default.
+            Absolute artifact_dir values outside ``run_dir`` are only allowed when
+            allow_external_paths is enabled.
         """
         target_run = run
         if target_run is None and self.current_consist:
@@ -350,7 +371,8 @@ class Tracker:
         if target_run is None:
             return self.run_dir / "outputs"
 
-        base_dir = self.run_dir / "outputs"
+        workspace_dir = self.run_dir.resolve()
+        base_dir = (self.run_dir / "outputs").resolve()
         artifact_dir = (
             target_run.meta.get("artifact_dir")
             if isinstance(target_run.meta, dict)
@@ -361,8 +383,25 @@ class Tracker:
         if isinstance(artifact_dir, str) and artifact_dir:
             artifact_path = Path(artifact_dir)
             if artifact_path.is_absolute():
-                return artifact_path
-            return base_dir / artifact_path
+                resolved = artifact_path.resolve()
+                if not self._allow_external_paths_for_run(target_run):
+                    try:
+                        resolved.relative_to(workspace_dir)
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"artifact_dir must remain within {workspace_dir}; got {resolved}. "
+                            "Set allow_external_paths=True or CONSIST_ALLOW_EXTERNAL_PATHS=1 to override."
+                        ) from exc
+                return resolved
+            resolved = (base_dir / artifact_path).resolve()
+            try:
+                resolved.relative_to(base_dir)
+            except ValueError as exc:
+                raise ValueError(
+                    f"artifact_dir {artifact_dir!r} escapes base directory {base_dir}. "
+                    "Set allow_external_paths=True or CONSIST_ALLOW_EXTERNAL_PATHS=1 to override."
+                ) from exc
+            return resolved
 
         subdir = (
             self._run_subdir_fn(target_run)
@@ -381,7 +420,14 @@ class Tracker:
                 "run_subdir must be a relative path; got an absolute path."
             )
 
-        return base_dir / subdir_path
+        resolved = (base_dir / subdir_path).resolve()
+        try:
+            resolved.relative_to(base_dir)
+        except ValueError as exc:
+            raise ValueError(
+                f"run_subdir must resolve under {base_dir}; got {resolved}"
+            ) from exc
+        return resolved
 
     @staticmethod
     def _safe_run_id(run_id: str) -> str:
@@ -495,53 +541,21 @@ class Tracker:
         Internal helper to look up a run's signature (Merkle identity) via the database.
         Used by IdentityManager to stabilize input hashes against ephemeral Run IDs.
         """
-        cached = self._run_signature_cache.get(run_id)
-        if cached is not None:
-            return cached
-
         # 1. Check active run (unlikely for inputs, but good for completeness)
         if self.current_consist and self.current_consist.run.id == run_id:
-            signature = self.current_consist.run.signature
-            if signature:
-                self._run_signature_cache[run_id] = signature
-            return signature
+            return self.current_consist.run.signature
         # 2. Check Database
         if self.db:
             run = self.db.get_run(run_id)
             if run:
-                signature = run.signature
-                if signature:
-                    self._run_signature_cache[run_id] = signature
-                    if (
-                        len(self._run_signature_cache)
-                        > self._run_signature_cache_max_entries
-                    ):
-                        self._run_signature_cache.pop(
-                            next(iter(self._run_signature_cache))
-                        )
-                return signature
+                return run.signature
         return None
 
     def _prefetch_run_signatures(self, inputs: Iterable[Artifact]) -> None:
         """
         Warm the run-signature cache for input artifacts in bulk to reduce DB chatter.
         """
-        if not self.db:
-            return
-        run_ids = {
-            str(a.run_id)
-            for a in inputs
-            if a.run_id and a.run_id not in self._run_signature_cache
-        }
-        if not run_ids:
-            return
-        signatures = self.db.get_run_signatures(list(run_ids))
-        if not signatures:
-            return
-        for run_id, signature in signatures.items():
-            self._run_signature_cache[run_id] = signature
-            if len(self._run_signature_cache) > self._run_signature_cache_max_entries:
-                self._run_signature_cache.pop(next(iter(self._run_signature_cache)))
+        return
 
     def _coerce_facet_mapping(self, obj: Any, label: str) -> Dict[str, Any]:
         if obj is None:
@@ -553,6 +567,11 @@ class Tracker:
         if isinstance(obj, Mapping):
             return dict(obj)
         raise ValueError(f"Tracker {label} must be a mapping or Pydantic model.")
+
+    def _allow_external_paths_for_run(self, run: Optional[Run]) -> bool:
+        if run and isinstance(run.meta, dict) and "allow_external_paths" in run.meta:
+            return bool(run.meta["allow_external_paths"])
+        return self.allow_external_paths
 
     # --- Run Management ---
 
@@ -567,6 +586,7 @@ class Tracker:
         cache_mode: str = "reuse",
         *,
         artifact_dir: Optional[Union[str, Path]] = None,
+        allow_external_paths: Optional[bool] = None,
         facet: Optional[FacetLike] = None,
         facet_from: Optional[List[str]] = None,
         hash_inputs: HashInputs = None,
@@ -590,20 +610,26 @@ class Tracker:
         run_id : str
             A unique identifier for the current run.
         model : str
-            A descriptive name for the model or process being executed.
+            A descriptive name for the model or process being executed (non-empty,
+            length-limited).
         config : Union[Dict[str, Any], BaseModel, None], optional
             Configuration parameters for this run.
+            Keys must be strings; extremely large string values are rejected.
         inputs : Optional[list[ArtifactRef]], optional
             A list of input paths (str/Path) or Artifact references.
         tags : Optional[List[str]], optional
-            A list of string labels for categorization and filtering.
+            A list of string labels for categorization and filtering (non-empty, length-limited).
         description : Optional[str], optional
             A human-readable description of the run's purpose.
         cache_mode : str, default "reuse"
             Strategy for caching: "reuse", "overwrite", or "readonly".
         artifact_dir : Optional[Union[str, Path]], optional
             Override the per-run artifact directory. Relative paths are resolved
-            under ``<run_dir>/outputs``. Absolute paths are used as-is.
+            under ``<run_dir>/outputs``. Absolute paths must remain within ``run_dir``
+            unless allow_external_paths is enabled.
+        allow_external_paths : Optional[bool], optional
+            Allow artifact_dir and cached-output materialization outside ``run_dir``.
+            Defaults to the Tracker setting when unset.
         facet : Optional[FacetLike], optional
             Optional small, queryable configuration facet to persist alongside the run.
             This is distinct from `config` (which is hashed and stored in the JSON snapshot).
@@ -620,6 +646,8 @@ class Tracker:
             Whether to flatten and index facet keys/values for DB querying.
         **kwargs : Any
             Additional metadata. Special keywords `year` and `iteration` can be used.
+            Metadata keys/values are validated and size-limited; use
+            CONSIST_MAX_METADATA_ITEMS/KEY_LENGTH/VALUE_LENGTH to override.
 
         Returns
         -------
@@ -670,6 +698,8 @@ class Tracker:
                 "Call end_run() first."
             )
 
+        validate_run_strings(model_name=model, description=description, tags=tags)
+
         (
             cache_hydration,
             materialize_cached_output_paths,
@@ -705,6 +735,8 @@ class Tracker:
 
         if artifact_dir is not None:
             kwargs["artifact_dir"] = str(artifact_dir)
+        if allow_external_paths is not None:
+            kwargs["allow_external_paths"] = bool(allow_external_paths)
 
         if config is None:
             config_dict: Dict[str, Any] = {}
@@ -726,6 +758,9 @@ class Tracker:
             kwargs["consist_hash_inputs"] = digest_map
 
         config_dict = self.identity.normalize_json(config_dict)
+        if not isinstance(config_dict, MappingABC):
+            raise TypeError("config must be a mapping after normalization.")
+        validate_config_structure(config_dict)
 
         # Compute core identity hashes early
         # Important: keep the stored config snapshot as user-provided config, but include
@@ -736,6 +771,8 @@ class Tracker:
         git_hash = self.identity.get_code_version()
 
         kwargs["_physical_run_dir"] = str(self.run_dir)
+        if kwargs:
+            validate_run_meta(kwargs)
 
         now = datetime.now(UTC)
         run = Run(
@@ -2126,7 +2163,15 @@ class Tracker:
                 run.input_hash or "",
                 run.git_hash or "",
             )
-            self._local_cache_index[cache_key] = run
+            if cache_key in self._local_cache_index and cache_mode != "overwrite":
+                logging.warning(
+                    "Cache key collision detected (extremely rare): %s. "
+                    "Keeping first cached run (created %s).",
+                    cache_key,
+                    self._local_cache_index[cache_key].created_at,
+                )
+            else:
+                self._local_cache_index[cache_key] = run
             if len(self._local_cache_index) > self._local_cache_max_entries:
                 # FIFO eviction (dict preserves insertion order).
                 self._local_cache_index.pop(next(iter(self._local_cache_index)))
@@ -3843,6 +3888,7 @@ class Tracker:
             If the URI cannot be fully resolved (e.g., scheme not mounted),
             it returns the most resolved path or the original URI after
             attempting to make it absolute.
+            Mounted URIs are validated to prevent path traversal outside the mount root.
         """
         return self.fs.resolve_uri(uri)
 

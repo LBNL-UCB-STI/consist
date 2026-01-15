@@ -22,6 +22,7 @@ Key functionalities include:
 import hashlib
 import json
 import logging
+import shlex
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,8 @@ from consist.models.run import RunArtifactLink
 from consist.types import ArtifactRef
 
 logger = logging.getLogger(__name__)
+
+MAX_CONTAINER_COMMAND_LENGTH = 10_000
 
 
 @dataclass
@@ -151,6 +154,70 @@ def _container_manifest_hash(manifest: Dict[str, Any]) -> str:
     return hashlib.sha256(
         json.dumps(manifest, sort_keys=True).encode("utf-8")
     ).hexdigest()
+
+
+def _container_allowed_roots(tracker: Tracker) -> list[Path]:
+    roots: list[Path] = []
+    for root in (tracker.mounts or {}).values():
+        if isinstance(root, str) and root:
+            roots.append(Path(root))
+    return [Path(r).resolve() for r in roots]
+
+
+def _validate_host_path(host_path: Union[str, Path], allowed_roots: list[Path]) -> Path:
+    path_obj = Path(host_path)
+    if not path_obj.is_absolute() and allowed_roots:
+        path_obj = allowed_roots[0] / path_obj
+    resolved = path_obj.resolve()
+    if not allowed_roots:
+        return resolved
+    for root in allowed_roots:
+        try:
+            resolved.relative_to(root)
+            return resolved
+        except ValueError:
+            continue
+    allowed_display = ", ".join(str(r) for r in allowed_roots)
+    raise ValueError(
+        f"Host path {resolved} is outside allowed roots: {allowed_display}"
+    )
+
+
+def _coerce_container_command(command: Union[str, List[str]]) -> List[str]:
+    if isinstance(command, str):
+        if not command.strip():
+            raise ValueError("Container command cannot be empty.")
+        if len(command) > MAX_CONTAINER_COMMAND_LENGTH:
+            raise ValueError(
+                "Container command exceeds maximum length "
+                f"({MAX_CONTAINER_COMMAND_LENGTH} chars)."
+            )
+        try:
+            tokens = shlex.split(command)
+        except ValueError as exc:
+            raise ValueError(f"Invalid container command syntax: {exc}") from exc
+    else:
+        if not command:
+            raise ValueError("Container command cannot be empty.")
+        tokens = list(command)
+        for token in tokens:
+            if not isinstance(token, str):
+                raise TypeError(
+                    "Container command must be a string or list of strings."
+                )
+        total_length = sum(len(token) for token in tokens)
+        if total_length > MAX_CONTAINER_COMMAND_LENGTH:
+            raise ValueError(
+                "Container command exceeds maximum length "
+                f"({MAX_CONTAINER_COMMAND_LENGTH} chars)."
+            )
+    if not tokens:
+        raise ValueError("Container command cannot be empty.")
+    if any(not token for token in tokens):
+        raise ValueError("Container command contains empty arguments.")
+    if any("\x00" in token for token in tokens):
+        raise ValueError("Container command contains NUL bytes.")
+    return tokens
 
 
 def _reuse_or_execute_container(
@@ -326,9 +393,12 @@ def run_container(
     command : Union[str, List[str]]
         The command to execute inside the container. Can be a string or a list of strings
         (for exec form).
+        Commands are validated for non-empty tokens and a maximum length.
     volumes : Dict[str, str]
         A dictionary mapping host paths to container paths for volume mounts.
         Example: `{"/host/path": "/container/path"}`.
+        Host paths are resolved and validated against tracker mounts when present;
+        relative paths are resolved against the first mount root.
     inputs : List[ArtifactRef]
         A list of paths (str/Path) or `Artifact` objects on the host machine that serve
         as inputs to the containerized process. These are logged as Consist inputs.
@@ -336,9 +406,11 @@ def run_container(
         A list of paths on the host machine that are expected to be generated or
         modified by the containerized process. These paths will be scanned and
         logged as Consist output artifacts.
+        Host paths are validated against tracker mounts when present.
     outputs : Dict[str, str]
         Alternatively, pass a mapping of logical output keys to host paths.
         The artifact will be logged with the provided key instead of the filename.
+        Host paths are validated against tracker mounts when present.
     environment : Optional[Dict[str, str]], optional
         A dictionary of environment variables to set inside the container. Defaults to empty.
     working_dir : Optional[str], optional
@@ -378,14 +450,25 @@ def run_container(
 
     # 2. Resolve Container Identity (Image Digest)
     image_digest = _resolve_image_digest(backend, image, pull_latest=pull_latest)
-    cmd_list = command.split() if isinstance(command, str) else command
+    cmd_list = _coerce_container_command(command)
+
+    allowed_roots = _container_allowed_roots(tracker)
+    validated_volumes: Dict[str, str] = {}
+    for host_path, container_path in volumes.items():
+        validated_host = _validate_host_path(host_path, allowed_roots)
+        validated_volumes[str(validated_host)] = container_path
+    volumes = validated_volumes
+
     # Normalize outputs into (key, path) tuples
     output_specs: List[tuple[str, str]] = []
     if isinstance(outputs, dict):
         for logical_key, host_path in outputs.items():
-            output_specs.append((str(logical_key), str(host_path)))
+            validated_host = _validate_host_path(host_path, allowed_roots)
+            output_specs.append((str(logical_key), str(validated_host)))
     else:
-        output_specs = [(Path(o).name, str(o)) for o in outputs]
+        output_specs = [
+            (Path(o).name, str(_validate_host_path(o, allowed_roots))) for o in outputs
+        ]
 
     outputs_str = [p for _, p in output_specs]
 

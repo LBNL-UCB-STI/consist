@@ -4,6 +4,7 @@ from typing import List, Optional, Any, Type, TYPE_CHECKING, Callable, Union
 
 from sqlmodel import SQLModel
 from consist.models.artifact import Artifact
+from consist.core.validation import validate_artifact_key
 from consist.types import ArtifactRef
 
 if TYPE_CHECKING:
@@ -42,6 +43,7 @@ class ArtifactManager:
             Identifier of the run that produced the artifact.
         key : Optional[str], optional
             Logical name for the artifact; required when ``path`` is a string.
+            Must follow artifact-key rules (no empty key, no ``..``/``//``, length <= 256).
         direction : str, default "output"
             Whether the artifact is treated as an "input" or "output" of the run.
         schema : Optional[Type[SQLModel]], optional
@@ -60,6 +62,8 @@ class ArtifactManager:
         ------
         ValueError
             If ``path`` is a string and ``key`` is not provided.
+        TypeError
+            If ``key`` is not a string when provided.
         """
         artifact_obj = None
         resolved_abs_path = None
@@ -73,6 +77,8 @@ class ArtifactManager:
             )
             if key is None:
                 key = artifact_obj.key
+            if key is not None:
+                validate_artifact_key(key)
             if driver:
                 artifact_obj.driver = driver
             if meta:
@@ -80,6 +86,7 @@ class ArtifactManager:
         else:
             if key is None:
                 raise ValueError("Argument 'key' required when 'path' is a path-like.")
+            validate_artifact_key(key)
 
             resolved_abs_path = str(Path(path).resolve())
             uri = self.tracker.fs.virtualize_path(resolved_abs_path)

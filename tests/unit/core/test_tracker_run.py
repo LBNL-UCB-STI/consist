@@ -66,6 +66,36 @@ def test_tracker_run_cache_hit_skips_callable(tracker):
     assert second.cache_hit is True
 
 
+def test_start_run_overwrite_updates_cache_index(tracker, tmp_path):
+    input_path = tmp_path / "input.txt"
+    input_path.write_text("payload")
+    config = {"param": 1}
+
+    with tracker.start_run(
+        "run_a_overwrite", "overwrite_model", config=config, inputs=[str(input_path)]
+    ):
+        pass
+
+    with tracker.start_run(
+        "run_b_overwrite",
+        "overwrite_model",
+        config=config,
+        inputs=[str(input_path)],
+        cache_mode="overwrite",
+    ) as t:
+        assert not t.is_cached
+
+    with tracker.start_run(
+        "run_c_overwrite",
+        "overwrite_model",
+        config=config,
+        inputs=[str(input_path)],
+        cache_mode="reuse",
+    ) as t:
+        assert t.is_cached
+        assert t.current_consist.cached_run.id == "run_b_overwrite"
+
+
 def test_tracker_run_output_mismatch_warns(tracker, caplog):
     def step():
         return ["only-one"]

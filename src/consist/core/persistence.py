@@ -1,7 +1,9 @@
 import time
 import random
 import logging
+import re
 import uuid
+import json
 from typing import Optional, List, Callable, Any, Dict, Tuple, TYPE_CHECKING
 
 import pandas as pd
@@ -25,6 +27,30 @@ if TYPE_CHECKING:
     from consist.core.tracker import Tracker
     from consist.models.artifact import Artifact
     from consist.models.run import Run as RunModel
+
+
+MAX_JSON_DEPTH = 50
+
+
+def _assert_json_depth(obj: Any, *, max_depth: int) -> None:
+    stack: list[tuple[Any, int]] = [(obj, 1)]
+    while stack:
+        value, depth = stack.pop()
+        if depth > max_depth:
+            raise ValueError(f"JSON nesting depth exceeds limit of {max_depth}.")
+        if isinstance(value, dict):
+            stack.extend((v, depth + 1) for v in value.values())
+        elif isinstance(value, list):
+            stack.extend((v, depth + 1) for v in value)
+
+
+def load_json_safe(json_string: str, *, max_depth: int = MAX_JSON_DEPTH) -> Any:
+    try:
+        parsed = json.loads(json_string)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON: {exc}") from exc
+    _assert_json_depth(parsed, max_depth=max_depth)
+    return parsed
 
 
 class DatabaseManager:
@@ -72,6 +98,8 @@ class DatabaseManager:
         self.execute_with_retry(_create, operation_name="init_schema")
 
     def _table_has_column(self, *, table_name: str, column_name: str) -> bool:
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", table_name or ""):
+            return False
         try:
             with self.engine.begin() as conn:
                 rows = conn.exec_driver_sql(
@@ -589,8 +617,24 @@ class DatabaseManager:
 
     # --- Read Operations ---
 
-    def find_latest_artifact_at_uri(self, uri: str) -> Optional[Artifact]:
-        """Finds the most recent artifact created at this location by a run."""
+    def find_latest_artifact_at_uri(
+        self, uri: str, run_id: Optional[str] = None
+    ) -> Optional[Artifact]:
+        """
+        Finds the most recent artifact created at this location by a run.
+
+        Parameters
+        ----------
+        uri : str
+            The URI to search for artifacts.
+        run_id : Optional[str]
+            If provided, only return artifacts from this specific run (prevents cross-run artifact retrieval).
+
+        Returns
+        -------
+        Optional[Artifact]
+            The most recent artifact at the URI (optionally filtered by run_id), or None if not found.
+        """
 
         def _query():
             with Session(self.engine) as session:
@@ -598,9 +642,12 @@ class DatabaseManager:
                     select(Artifact)
                     .where(Artifact.uri == uri)
                     .where(Artifact.run_id.is_not(None))  # Must be produced by a run
-                    .order_by(Artifact.created_at.desc())
-                    .limit(1)
                 )
+                # If run_id is specified, filter to only that run (prevents cross-run artifact confusion)
+                if run_id is not None:
+                    statement = statement.where(Artifact.run_id == run_id)
+
+                statement = statement.order_by(Artifact.created_at.desc()).limit(1)
                 return session.exec(statement).first()
 
         try:
@@ -886,15 +933,34 @@ class DatabaseManager:
             logging.warning(f"Failed to find runs: {e}")
             return []
 
-    def get_artifact_by_uri(self, uri: str) -> Optional[Artifact]:
+    def get_artifact_by_uri(
+        self, uri: str, run_id: Optional[str] = None
+    ) -> Optional[Artifact]:
+        """
+        Get artifact by URI, optionally filtered by run_id.
+
+        Parameters
+        ----------
+        uri : str
+            The URI to retrieve.
+        run_id : Optional[str]
+            If provided, only return artifacts from this specific run.
+
+        Returns
+        -------
+        Optional[Artifact]
+            The most recent artifact at the URI (optionally filtered by run_id), or None if not found.
+        """
+
         def _query():
             with Session(self.engine) as session:
-                return session.exec(
-                    select(Artifact)
-                    .where(Artifact.uri == uri)
-                    .order_by(Artifact.created_at.desc())
-                    .limit(1)
-                ).first()
+                statement = select(Artifact).where(Artifact.uri == uri)
+                # If run_id is specified, filter to only that run
+                if run_id is not None:
+                    statement = statement.where(Artifact.run_id == run_id)
+
+                statement = statement.order_by(Artifact.created_at.desc()).limit(1)
+                return session.exec(statement).first()
 
         try:
             return self.execute_with_retry(_query)
@@ -1097,11 +1163,9 @@ class DatabaseManager:
                     if not run_tags:
                         return False
                     if isinstance(run_tags, str):
-                        import json
-
                         try:
-                            run_tags = json.loads(run_tags)
-                        except json.JSONDecodeError:
+                            run_tags = load_json_safe(run_tags, max_depth=10)
+                        except ValueError:
                             pass
                     return all(t in (run_tags or []) for t in tags)
 
