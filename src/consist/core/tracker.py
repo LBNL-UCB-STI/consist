@@ -24,6 +24,7 @@ from typing import (
     Tuple,
     Type,
     Union,
+    cast,
 )
 
 import pandas as pd
@@ -2349,6 +2350,8 @@ class Tracker:
         direction: str = "output",
         schema: Optional[Type[SQLModel]] = None,
         driver: Optional[str] = None,
+        profile_file_schema: bool = False,
+        file_schema_sample_rows: Optional[int] = 1000,
         **meta: Any,
     ) -> Artifact:
         """
@@ -2385,6 +2388,10 @@ class Tracker:
         driver : Optional[str], optional
             Explicitly specify the driver (e.g., 'h5_table').
             If None, the driver is inferred from the file extension.
+        profile_file_schema : bool, default False
+            If True, profile a lightweight schema for file-based tabular artifacts.
+        file_schema_sample_rows : Optional[int], default 1000
+            Maximum rows to sample when profiling file-based schemas.
         **meta : Any
             Additional key-value pairs to store in the artifact's flexible `meta` field.
 
@@ -2473,6 +2480,37 @@ class Tracker:
         self._flush_json()
         self._sync_artifact_to_db(artifact_obj, direction)
 
+        if (
+            profile_file_schema
+            and artifact_obj.is_tabular
+            and self.current_consist is not None
+        ):
+            try:
+                if isinstance(artifact_obj.meta, dict) and artifact_obj.meta.get(
+                    "schema_id"
+                ):
+                    return artifact_obj
+                resolved_path = artifact_obj.abs_path or self.resolve_uri(
+                    artifact_obj.uri
+                )
+                if resolved_path:
+                    driver = artifact_obj.driver
+                    if driver not in ("csv", "parquet"):
+                        return artifact_obj
+                    self.artifact_schemas.profile_file_artifact(
+                        artifact=artifact_obj,
+                        run=self.current_consist.run,
+                        resolved_path=str(resolved_path),
+                        driver=cast(Literal["csv", "parquet"], driver),
+                        sample_rows=file_schema_sample_rows,
+                        source="file",
+                    )
+            except FileNotFoundError:
+                logging.warning(
+                    "[Consist] File schema capture skipped; file not found: %s",
+                    artifact_obj.uri,
+                )
+
         return artifact_obj
 
     def log_dataframe(
@@ -2484,6 +2522,8 @@ class Tracker:
         path: Optional[Union[str, Path]] = None,
         driver: Optional[str] = None,
         meta: Optional[Dict[str, Any]] = None,
+        profile_file_schema: bool = False,
+        file_schema_sample_rows: Optional[int] = 1000,
         **to_file_kwargs: Any,
     ) -> Artifact:
         """
@@ -2506,6 +2546,10 @@ class Tracker:
             File format driver (e.g., "parquet" or "csv").
         meta : Optional[Dict[str, Any]], optional
             Additional metadata for the artifact.
+        profile_file_schema : bool, default False
+            If True, profile a lightweight schema for file-based tabular artifacts.
+        file_schema_sample_rows : Optional[int], default 1000
+            Maximum rows to sample when profiling file-based schemas.
         **to_file_kwargs : Any
             Keyword arguments forwarded to ``pd.DataFrame.to_parquet`` or ``to_csv``.
 
@@ -2540,7 +2584,13 @@ class Tracker:
 
         meta_payload = meta or {}
         art = self.log_artifact(
-            resolved_path, key=key, direction=direction, schema=schema, **meta_payload
+            resolved_path,
+            key=key,
+            direction=direction,
+            schema=schema,
+            profile_file_schema=profile_file_schema,
+            file_schema_sample_rows=file_schema_sample_rows,
+            **meta_payload,
         )
         if schema is not None:
             self.ingest(art, df, schema=schema)

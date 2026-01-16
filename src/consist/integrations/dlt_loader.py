@@ -38,6 +38,7 @@ from typing import (
 from sqlmodel import SQLModel
 from consist.models.artifact import Artifact
 from consist.models.run import Run
+from consist.tools.file_batches import yield_file_batches
 
 # Optional dependency: `dlt` is only required when using ingestion helpers.
 try:
@@ -548,11 +549,7 @@ def _yield_parquet_batches(path: str) -> Iterable[pd.DataFrame]:
     ImportError
         If `pyarrow` library is not installed.
     """
-    import pyarrow.parquet as pq
-
-    parquet_file = pq.ParquetFile(path)
-    for batch in parquet_file.iter_batches():
-        yield batch.to_pandas()
+    yield from yield_file_batches(path, driver="parquet")
 
 
 def _yield_csv_batches(path: str) -> Iterable[pd.DataFrame]:
@@ -573,5 +570,4 @@ def _yield_csv_batches(path: str) -> Iterable[pd.DataFrame]:
     pd.DataFrame
         A chunk of the CSV file as a Pandas DataFrame.
     """
-    for chunk in pd.read_csv(path, chunksize=50000):
-        yield chunk
+    yield from yield_file_batches(path, driver="csv")
