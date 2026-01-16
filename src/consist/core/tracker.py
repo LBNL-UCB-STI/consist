@@ -2350,6 +2350,7 @@ class Tracker:
         direction: str = "output",
         schema: Optional[Type[SQLModel]] = None,
         driver: Optional[str] = None,
+        content_hash: Optional[str] = None,
         profile_file_schema: bool = False,
         file_schema_sample_rows: Optional[int] = 1000,
         **meta: Any,
@@ -2388,6 +2389,9 @@ class Tracker:
         driver : Optional[str], optional
             Explicitly specify the driver (e.g., 'h5_table').
             If None, the driver is inferred from the file extension.
+        content_hash : Optional[str], optional
+            Precomputed content hash to use for the artifact instead of hashing
+            the path on disk.
         profile_file_schema : bool, default False
             If True, profile a lightweight schema for file-based tabular artifacts.
         file_schema_sample_rows : Optional[int], default 1000
@@ -2435,7 +2439,14 @@ class Tracker:
 
         # DELEGATE CREATION LOGIC
         artifact_obj = self.artifacts.create_artifact(
-            path, run_id, key, direction, schema, driver, **meta
+            path,
+            run_id,
+            key,
+            direction,
+            schema,
+            driver,
+            content_hash=content_hash,
+            **meta,
         )
 
         # Artifact contract clarification:

@@ -30,6 +30,7 @@ class ArtifactManager:
         direction: str = "output",
         schema: Optional[Type[SQLModel]] = None,
         driver: Optional[str] = None,
+        content_hash: Optional[str] = None,
         **meta: Any,
     ) -> Artifact:
         """
@@ -81,6 +82,8 @@ class ArtifactManager:
                 validate_artifact_key(key)
             if driver:
                 artifact_obj.driver = driver
+            if content_hash is not None:
+                artifact_obj.hash = content_hash
             if meta:
                 artifact_obj.meta.update(meta)
         else:
@@ -103,6 +106,8 @@ class ArtifactManager:
                     artifact_obj = parent
                     if driver:
                         artifact_obj.driver = driver
+                    if content_hash is not None:
+                        artifact_obj.hash = content_hash
                     if meta:
                         artifact_obj.meta.update(meta)
 
@@ -110,15 +115,15 @@ class ArtifactManager:
                 if driver is None:
                     driver = Path(path).suffix.lstrip(".").lower() or "unknown"
 
-                content_hash = None
-                try:
-                    content_hash = self.tracker.identity.compute_file_checksum(
-                        resolved_abs_path
-                    )
-                except Exception as e:
-                    logging.warning(
-                        f"[Consist Warning] Failed to compute hash for {path}: {e}"
-                    )
+                if content_hash is None:
+                    try:
+                        content_hash = self.tracker.identity.compute_file_checksum(
+                            resolved_abs_path
+                        )
+                    except Exception as e:
+                        logging.warning(
+                            f"[Consist Warning] Failed to compute hash for {path}: {e}"
+                        )
 
                 artifact_obj = Artifact(
                     key=key,

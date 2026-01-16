@@ -138,6 +138,7 @@ Consist distinguishes:
 - **physical bytes**: the actual on-disk file contents
 
 For Consist-produced artifacts, inputs are typically hashed by linking to the producing run’s signature (Merkle-style). For raw files (no `run_id`), Consist hashes file contents/metadata depending on configuration.
+If you already know the content hash (for example, after copying or moving a file), you can pass `content_hash=` to `log_artifact` to reuse it and skip hashing the path on disk.
 
 ### Portability and path resolution
 

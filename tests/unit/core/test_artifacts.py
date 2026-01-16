@@ -21,3 +21,17 @@ def test_create_artifact_stateless(mock_tracker):
     assert art.run_id == "run_ABC"
     assert art.key == "test"
     assert art.hash == "mock_hash"
+
+
+def test_create_artifact_uses_precomputed_hash(mock_tracker):
+    manager = ArtifactManager(mock_tracker)
+
+    art = manager.create_artifact(
+        path="/tmp/test.csv",
+        key="test",
+        run_id="run_ABC",
+        content_hash="precomputed_hash",
+    )
+
+    assert art.hash == "precomputed_hash"
+    mock_tracker.identity.compute_file_checksum.assert_not_called()

@@ -217,8 +217,13 @@ class NoopRunContext:
         self._artifacts: Dict[str, NoopArtifact] = {}
 
     def log_artifact(
-        self, path: Any, key: Optional[str] = None, **meta: Any
+        self,
+        path: Any,
+        key: Optional[str] = None,
+        content_hash: Optional[str] = None,
+        **meta: Any,
     ) -> NoopArtifact:
+        _ = content_hash
         if key is None:
             if isinstance(path, NoopArtifact):
                 key = path.key

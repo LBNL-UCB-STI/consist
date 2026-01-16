@@ -502,6 +502,7 @@ def log_artifact(
     direction: str = "output",
     schema: Optional[Type[SQLModel]] = None,
     driver: Optional[str] = None,
+    content_hash: Optional[str] = None,
     *,
     enabled: bool = True,
     **meta,
@@ -529,6 +530,9 @@ def log_artifact(
     driver : Optional[str], optional
         Explicitly specify the driver (e.g., 'h5_table').
         If None, the driver is inferred from the file extension.
+    content_hash : Optional[str], optional
+        Precomputed content hash to use for the artifact instead of hashing
+        the path on disk.
     enabled : bool, default True
         If False, returns a noop artifact object without requiring an active run.
     **meta : Any
@@ -553,10 +557,17 @@ def log_artifact(
             direction=direction,
             schema=schema,
             driver=driver,
+            content_hash=content_hash,
             **meta,
         )
     return get_active_tracker().log_artifact(
-        path=path, key=key, direction=direction, schema=schema, driver=driver, **meta
+        path=path,
+        key=key,
+        direction=direction,
+        schema=schema,
+        driver=driver,
+        content_hash=content_hash,
+        **meta,
     )
 
 
@@ -665,6 +676,7 @@ def log_input(
     *,
     schema: Optional[Type[SQLModel]] = None,
     driver: Optional[str] = None,
+    content_hash: Optional[str] = None,
     enabled: bool = True,
     **meta,
 ) -> ArtifactLike:
@@ -677,6 +689,7 @@ def log_input(
         direction="input",
         schema=schema,
         driver=driver,
+        content_hash=content_hash,
         enabled=enabled,
         **meta,
     )
@@ -688,6 +701,7 @@ def log_output(
     *,
     schema: Optional[Type[SQLModel]] = None,
     driver: Optional[str] = None,
+    content_hash: Optional[str] = None,
     enabled: bool = True,
     **meta,
 ) -> ArtifactLike:
@@ -700,6 +714,7 @@ def log_output(
         direction="output",
         schema=schema,
         driver=driver,
+        content_hash=content_hash,
         enabled=enabled,
         **meta,
     )
