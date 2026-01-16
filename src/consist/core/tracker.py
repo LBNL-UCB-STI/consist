@@ -2350,6 +2350,9 @@ class Tracker:
         direction: str = "output",
         schema: Optional[Type[SQLModel]] = None,
         driver: Optional[str] = None,
+        content_hash: Optional[str] = None,
+        force_hash_override: bool = False,
+        validate_content_hash: bool = False,
         profile_file_schema: bool = False,
         file_schema_sample_rows: Optional[int] = 1000,
         **meta: Any,
@@ -2388,6 +2391,14 @@ class Tracker:
         driver : Optional[str], optional
             Explicitly specify the driver (e.g., 'h5_table').
             If None, the driver is inferred from the file extension.
+        content_hash : Optional[str], optional
+            Precomputed content hash to use for the artifact instead of hashing
+            the path on disk.
+        force_hash_override : bool, default False
+            If True, overwrite an existing artifact hash when it differs from
+            `content_hash`. By default, mismatched overrides are ignored with a warning.
+        validate_content_hash : bool, default False
+            If True, verify `content_hash` against the on-disk data and raise on mismatch.
         profile_file_schema : bool, default False
             If True, profile a lightweight schema for file-based tabular artifacts.
         file_schema_sample_rows : Optional[int], default 1000
@@ -2435,7 +2446,16 @@ class Tracker:
 
         # DELEGATE CREATION LOGIC
         artifact_obj = self.artifacts.create_artifact(
-            path, run_id, key, direction, schema, driver, **meta
+            path,
+            run_id,
+            key,
+            direction,
+            schema,
+            driver,
+            content_hash=content_hash,
+            force_hash_override=force_hash_override,
+            validate_content_hash=validate_content_hash,
+            **meta,
         )
 
         # Artifact contract clarification:
@@ -2688,6 +2708,9 @@ class Tracker:
         self,
         path: ArtifactRef,
         key: Optional[str] = None,
+        content_hash: Optional[str] = None,
+        force_hash_override: bool = False,
+        validate_content_hash: bool = False,
         **meta: Any,
     ) -> Artifact:
         """
@@ -2699,6 +2722,14 @@ class Tracker:
             A file path (str/Path) or an existing `Artifact` reference to be logged.
         key : Optional[str], optional
             A semantic, human-readable name for the artifact.
+        content_hash : Optional[str], optional
+            Precomputed content hash to use for the artifact instead of hashing
+            the path on disk.
+        force_hash_override : bool, default False
+            If True, overwrite an existing artifact hash when it differs from
+            `content_hash`. By default, mismatched overrides are ignored with a warning.
+        validate_content_hash : bool, default False
+            If True, verify `content_hash` against the on-disk data and raise on mismatch.
         **meta : Any
             Additional key-value pairs to store in the artifact's `meta` field.
 
@@ -2707,12 +2738,23 @@ class Tracker:
         Artifact
             The created or updated `Artifact` object.
         """
-        return self.log_artifact(path, key=key, direction="input", **meta)
+        return self.log_artifact(
+            path,
+            key=key,
+            direction="input",
+            content_hash=content_hash,
+            force_hash_override=force_hash_override,
+            validate_content_hash=validate_content_hash,
+            **meta,
+        )
 
     def log_output(
         self,
         path: ArtifactRef,
         key: Optional[str] = None,
+        content_hash: Optional[str] = None,
+        force_hash_override: bool = False,
+        validate_content_hash: bool = False,
         **meta: Any,
     ) -> Artifact:
         """
@@ -2724,6 +2766,14 @@ class Tracker:
             A file path (str/Path) or an existing `Artifact` reference to be logged.
         key : Optional[str], optional
             A semantic, human-readable name for the artifact.
+        content_hash : Optional[str], optional
+            Precomputed content hash to use for the artifact instead of hashing
+            the path on disk.
+        force_hash_override : bool, default False
+            If True, overwrite an existing artifact hash when it differs from
+            `content_hash`. By default, mismatched overrides are ignored with a warning.
+        validate_content_hash : bool, default False
+            If True, verify `content_hash` against the on-disk data and raise on mismatch.
         **meta : Any
             Additional key-value pairs to store in the artifact's `meta` field.
 
@@ -2732,7 +2782,15 @@ class Tracker:
         Artifact
             The created or updated `Artifact` object.
         """
-        return self.log_artifact(path, key=key, direction="output", **meta)
+        return self.log_artifact(
+            path,
+            key=key,
+            direction="output",
+            content_hash=content_hash,
+            force_hash_override=force_hash_override,
+            validate_content_hash=validate_content_hash,
+            **meta,
+        )
 
     def load(self, artifact: Artifact, **kwargs: Any) -> Any:
         """
