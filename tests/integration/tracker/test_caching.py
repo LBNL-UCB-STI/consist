@@ -215,9 +215,7 @@ def test_log_artifact_on_cache_hit_with_content_hash_returns_cached_output(
         assert t.is_cached
 
 
-def test_log_input_reuses_existing_artifact_with_force_override(
-    tracker, dummy_input
-):
+def test_log_input_reuses_existing_artifact_with_force_override(tracker, dummy_input):
     input_path = str(dummy_input)
 
     with tracker.start_run(
@@ -277,4 +275,3 @@ def test_log_input_override_ignored_when_hash_differs(tracker, dummy_input, capl
     assert any(
         "Ignoring content_hash override" in record.message for record in caplog.records
     )
-
