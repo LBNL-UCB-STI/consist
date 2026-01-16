@@ -797,7 +797,7 @@ For more on ingestion and hybrid views, see [Ingestion & Hybrid Views](ingestion
 If you ingest tabular data into DuckDB, Consist can capture the observed schema and export an **editable SQLModel stub** so you can curate PK/FK constraints and then register the model for views.
 
 You can also opt into lightweight file schema capture when logging CSV/Parquet artifacts by passing `profile_file_schema=True` (and optionally `file_schema_sample_rows=`) to `log_artifact`. These captured schemas are stored in the provenance DB and remain available even if the original files move or are deleted.
-If you already have a content hash (e.g., after copying or moving a file), pass `content_hash=` to `log_artifact` to reuse it without re-hashing the file.
+If you already have a content hash (e.g., after copying or moving a file), pass `content_hash=` to `log_artifact` to reuse it without re-hashing the file. For safety, Consist will not overwrite an existing, different hash unless you pass `force_hash_override=True`. To verify the hash against disk, use `validate_content_hash=True`.
 
 See `docs/schema-export.md` for the full workflow (CLI + Python) and column-name/`__tablename__` guidelines.
 See [Ingestion & Hybrid Views](ingestion-and-hybrid-views.md) for ingestion tradeoffs and DB fallback behavior.

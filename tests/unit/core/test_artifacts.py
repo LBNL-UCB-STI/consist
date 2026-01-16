@@ -35,3 +35,34 @@ def test_create_artifact_uses_precomputed_hash(mock_tracker):
 
     assert art.hash == "precomputed_hash"
     mock_tracker.identity.compute_file_checksum.assert_not_called()
+
+
+def test_create_artifact_dir_uses_precomputed_hash(mock_tracker, tmp_path):
+    manager = ArtifactManager(mock_tracker)
+    data_dir = tmp_path / "data_dir"
+    data_dir.mkdir()
+
+    art = manager.create_artifact(
+        path=str(data_dir),
+        key="dir_artifact",
+        run_id="run_ABC",
+        content_hash="precomputed_hash",
+    )
+
+    assert art.hash == "precomputed_hash"
+    mock_tracker.identity.compute_file_checksum.assert_not_called()
+
+
+def test_create_artifact_rejects_mismatched_validated_hash(mock_tracker):
+    manager = ArtifactManager(mock_tracker)
+
+    with pytest.raises(ValueError, match="content_hash does not match"):
+        manager.create_artifact(
+            path="/tmp/test.csv",
+            key="test",
+            run_id="run_ABC",
+            content_hash="different_hash",
+            validate_content_hash=True,
+        )
+
+    mock_tracker.identity.compute_file_checksum.assert_called()

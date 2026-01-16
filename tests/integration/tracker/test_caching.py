@@ -180,3 +180,101 @@ def test_log_artifact_on_cache_hit_returns_cached_output(tracker, dummy_input):
         new_out = t.log_artifact("new.parquet", key="new", direction="output")
         assert new_out.key == "new"
         assert not t.is_cached
+
+
+def test_log_artifact_on_cache_hit_with_content_hash_returns_cached_output(
+    tracker, dummy_input
+):
+    config = {"param": 7}
+    input_path = str(dummy_input)
+
+    with tracker.start_run(
+        "run_A_log_artifact_cache_hash",
+        model="test_model",
+        config=config,
+        inputs=[input_path],
+    ) as t:
+        out_path = t.run_dir / "out.parquet"
+        pd.DataFrame({"a": [1]}).to_parquet(out_path)
+        produced = t.log_artifact(out_path, key="out", direction="output")
+
+    with tracker.start_run(
+        "run_B_log_artifact_cache_hash",
+        model="test_model",
+        config=config,
+        inputs=[input_path],
+    ) as t:
+        assert t.is_cached
+        returned = t.log_artifact(
+            "does-not-matter.parquet",
+            key="out",
+            direction="output",
+            content_hash="override_hash",
+        )
+        assert returned.id == produced.id
+        assert t.is_cached
+
+
+def test_log_input_reuses_existing_artifact_with_force_override(
+    tracker, dummy_input
+):
+    input_path = str(dummy_input)
+
+    with tracker.start_run(
+        "run_A_input_override",
+        model="test_model",
+        inputs=[input_path],
+    ) as t:
+        out_path = t.run_dir / "out.parquet"
+        pd.DataFrame({"a": [1]}).to_parquet(out_path)
+        produced = t.log_artifact(out_path, key="out", direction="output")
+
+    with tracker.start_run(
+        "run_B_input_override",
+        model="test_model",
+        inputs=[input_path],
+    ) as t:
+        reused = t.log_artifact(
+            out_path,
+            key="out",
+            direction="input",
+            content_hash="override_hash",
+            force_hash_override=True,
+        )
+
+    assert reused.id == produced.id
+    assert reused.run_id == produced.run_id
+    assert reused.hash == "override_hash"
+
+
+def test_log_input_override_ignored_when_hash_differs(tracker, dummy_input, caplog):
+    input_path = str(dummy_input)
+
+    with tracker.start_run(
+        "run_A_input_override_guard",
+        model="test_model",
+        inputs=[input_path],
+    ) as t:
+        out_path = t.run_dir / "out.parquet"
+        pd.DataFrame({"a": [1]}).to_parquet(out_path)
+        produced = t.log_artifact(out_path, key="out", direction="output")
+
+    caplog.set_level(logging.WARNING)
+    with tracker.start_run(
+        "run_B_input_override_guard",
+        model="test_model",
+        inputs=[input_path],
+    ) as t:
+        reused = t.log_artifact(
+            out_path,
+            key="out",
+            direction="input",
+            content_hash="override_hash",
+        )
+
+    assert reused.id == produced.id
+    assert reused.hash == produced.hash
+    assert any(
+        "Ignoring content_hash override" in record.message for record in caplog.records
+    )
+

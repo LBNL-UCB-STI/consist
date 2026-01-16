@@ -503,6 +503,8 @@ def log_artifact(
     schema: Optional[Type[SQLModel]] = None,
     driver: Optional[str] = None,
     content_hash: Optional[str] = None,
+    force_hash_override: bool = False,
+    validate_content_hash: bool = False,
     *,
     enabled: bool = True,
     **meta,
@@ -533,6 +535,11 @@ def log_artifact(
     content_hash : Optional[str], optional
         Precomputed content hash to use for the artifact instead of hashing
         the path on disk.
+    force_hash_override : bool, default False
+        If True, overwrite an existing artifact hash when it differs from
+        `content_hash`. By default, mismatched overrides are ignored with a warning.
+    validate_content_hash : bool, default False
+        If True, verify `content_hash` against the on-disk data and raise on mismatch.
     enabled : bool, default True
         If False, returns a noop artifact object without requiring an active run.
     **meta : Any
@@ -558,6 +565,8 @@ def log_artifact(
             schema=schema,
             driver=driver,
             content_hash=content_hash,
+            force_hash_override=force_hash_override,
+            validate_content_hash=validate_content_hash,
             **meta,
         )
     return get_active_tracker().log_artifact(
@@ -567,6 +576,8 @@ def log_artifact(
         schema=schema,
         driver=driver,
         content_hash=content_hash,
+        force_hash_override=force_hash_override,
+        validate_content_hash=validate_content_hash,
         **meta,
     )
 
@@ -677,11 +688,16 @@ def log_input(
     schema: Optional[Type[SQLModel]] = None,
     driver: Optional[str] = None,
     content_hash: Optional[str] = None,
+    force_hash_override: bool = False,
+    validate_content_hash: bool = False,
     enabled: bool = True,
     **meta,
 ) -> ArtifactLike:
     """
     Log an input artifact to the active run, or return a noop artifact when disabled.
+
+    Use `content_hash` to reuse a known hash; set `force_hash_override=True` to
+    overwrite existing hashes, or `validate_content_hash=True` to validate against disk.
     """
     return log_artifact(
         path=path,
@@ -690,6 +706,8 @@ def log_input(
         schema=schema,
         driver=driver,
         content_hash=content_hash,
+        force_hash_override=force_hash_override,
+        validate_content_hash=validate_content_hash,
         enabled=enabled,
         **meta,
     )
@@ -702,11 +720,16 @@ def log_output(
     schema: Optional[Type[SQLModel]] = None,
     driver: Optional[str] = None,
     content_hash: Optional[str] = None,
+    force_hash_override: bool = False,
+    validate_content_hash: bool = False,
     enabled: bool = True,
     **meta,
 ) -> ArtifactLike:
     """
     Log an output artifact to the active run, or return a noop artifact when disabled.
+
+    Use `content_hash` to reuse a known hash; set `force_hash_override=True` to
+    overwrite existing hashes, or `validate_content_hash=True` to validate against disk.
     """
     return log_artifact(
         path=path,
@@ -715,6 +738,8 @@ def log_output(
         schema=schema,
         driver=driver,
         content_hash=content_hash,
+        force_hash_override=force_hash_override,
+        validate_content_hash=validate_content_hash,
         enabled=enabled,
         **meta,
     )
