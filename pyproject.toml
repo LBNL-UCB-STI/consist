@@ -144,6 +144,7 @@ markers = [
     "flaky: marks tests as flaky/retryable",
     "timeout: marks tests with explicit timeout expectations",
 ]
+import_mode = "importlib"
 
 [tool.ruff]
 target-version = "py311"

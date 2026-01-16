@@ -16,6 +16,7 @@ from consist.core.config_canonicalization import (
     ArtifactSpec,
     CanonicalConfig,
     CanonicalizationResult,
+    ConfigAdapterOptions,
     IngestSpec,
 )
 from consist.core.config_canonicalization import ConfigPlan
@@ -68,6 +69,7 @@ class BeamConfigAdapter:
         *,
         identity: IdentityManager,
         strict: bool = False,
+        options: Optional[ConfigAdapterOptions] = None,
     ) -> CanonicalConfig:
         if ConfigFactory is None:
             raise ImportError("pyhocon is required for BEAM canonicalization.")
@@ -101,7 +103,9 @@ class BeamConfigAdapter:
         tracker: Optional["Tracker"] = None,
         strict: bool = False,
         plan_only: bool = False,
+        options: Optional[ConfigAdapterOptions] = None,
     ) -> CanonicalizationResult:
+        resolved_strict = options.strict if options is not None else strict
         if ConfigFactory is None:
             raise ImportError("pyhocon is required for BEAM canonicalization.")
         if run is None and not plan_only:
@@ -126,7 +130,7 @@ class BeamConfigAdapter:
             resolved = _resolve_reference(value, config.root_dirs)
             if resolved is None or not resolved.exists():
                 logging.warning("[Consist][BEAM] Missing referenced path: %s", value)
-                if strict:
+                if resolved_strict:
                     raise FileNotFoundError(value)
                 continue
             _add_artifact(
@@ -178,7 +182,7 @@ class BeamConfigAdapter:
             ingest_specs=self.ingest_specs,
             artifacts_by_path=artifacts_by_path,
             tracker=tracker,
-            strict=strict,
+            strict=resolved_strict,
         )
         ingestables.extend(tabular_specs)
 

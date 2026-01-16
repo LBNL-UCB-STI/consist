@@ -28,6 +28,7 @@ from consist.core.config_canonicalization import (
     ArtifactSpec,
     CanonicalConfig,
     CanonicalizationResult,
+    ConfigAdapterOptions,
     IngestSpec,
     compute_config_pack_hash,
 )
@@ -270,6 +271,7 @@ class ActivitySimConfigAdapter:
         *,
         identity: IdentityManager,
         strict: bool = False,
+        options: Optional[ConfigAdapterOptions] = None,
     ) -> CanonicalConfig:
         """
         Discover ActivitySim config files and compute a content hash.
@@ -297,6 +299,7 @@ class ActivitySimConfigAdapter:
         """
         if yaml is None:
             raise ImportError("PyYAML is required for ActivitySim canonicalization.")
+        resolved_strict = options.strict if options is not None else strict
         settings_path = _resolve_yaml_path("settings.yaml", root_dirs)
         if settings_path is None:
             subdir_candidates = _find_settings_yaml_subdirs(root_dirs)
@@ -307,7 +310,7 @@ class ActivitySimConfigAdapter:
                     "Pass the specific config subdirectories in order. "
                     f"Found settings.yaml under: {candidates}"
                 )
-            if strict:
+            if resolved_strict:
                 raise FileNotFoundError("settings.yaml not found in config_dirs.")
             logging.warning(
                 "[Consist][ActivitySim] settings.yaml not found in config_dirs=%s",
@@ -341,6 +344,7 @@ class ActivitySimConfigAdapter:
         tracker: Optional["Tracker"] = None,
         strict: bool = False,
         plan_only: bool = False,
+        options: Optional[ConfigAdapterOptions] = None,
     ) -> CanonicalizationResult:
         """
         Convert a discovered config into artifacts and ingestable tables.
@@ -372,6 +376,13 @@ class ActivitySimConfigAdapter:
         """
         if yaml is None:
             raise ImportError("PyYAML is required for ActivitySim canonicalization.")
+        resolved_strict = options.strict if options is not None else strict
+        allow_heuristics = (
+            options.allow_heuristic_refs
+            if options is not None
+            else self.allow_heuristic_refs
+        )
+        bundle_configs = options.bundle if options is not None else self.bundle_configs
 
         settings = (
             _load_effective_settings(
@@ -403,13 +414,13 @@ class ActivitySimConfigAdapter:
             config.config_files,
             config.root_dirs,
             inherit_settings=inherit_settings,
-            allow_heuristics=self.allow_heuristic_refs,
-            strict=strict,
+            allow_heuristics=allow_heuristics,
+            strict=resolved_strict,
         )
         for csv_path in referenced:
             add_artifact(csv_path, role="csv")
 
-        if self.bundle_configs and not plan_only:
+        if bundle_configs and not plan_only:
             if run is None or tracker is None:
                 raise RuntimeError("ActivitySim bundling requires run and tracker.")
             bundle_path = _bundle_configs(
@@ -465,7 +476,7 @@ class ActivitySimConfigAdapter:
                         csv_path=csv_path,
                         source_key=key,
                         content_hash=file_hash,
-                        strict=strict,
+                        strict=resolved_strict,
                     )
                 )
                 continue
@@ -480,7 +491,7 @@ class ActivitySimConfigAdapter:
                             source_path=csv_path,
                             source_key=key,
                             content_hash=file_hash,
-                            strict=strict,
+                            strict=resolved_strict,
                             row_kwargs=handler.row_kwargs,
                         )
                     )

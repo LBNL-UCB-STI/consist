@@ -120,6 +120,22 @@ with use_tracker(tracker):
     )
 ```
 
+You can also pass shared adapter options and run validation without ingesting:
+
+```python
+from consist.core.config_canonicalization import ConfigAdapterOptions
+
+options = ConfigAdapterOptions(strict=True, bundle=False, ingest=False)
+plan = tracker.prepare_config(
+    adapter,
+    [overlay_dir, base_dir],
+    options=options,
+    validate_only=True,
+)
+if plan.diagnostics and not plan.diagnostics.ok:
+    raise ValueError("Config validation failed.")
+```
+
 **3. Apply parameter adjustments for sensitivity testing**
 
 Use the `materialize()` method to apply overrides to a baseline config:

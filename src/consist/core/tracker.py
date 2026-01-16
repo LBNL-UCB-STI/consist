@@ -1,5 +1,6 @@
 import inspect
 import itertools
+from dataclasses import replace
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -45,8 +46,12 @@ from consist.core.cache_output_logging import (
 )
 from consist.core.config_canonicalization import (
     ConfigAdapter,
+    ConfigAdapterOptions,
+    CanonicalConfig,
+    CanonicalizationResult,
     ConfigContribution,
     ConfigPlan,
+    validate_config_plan,
 )
 from consist.core.config_facets import ConfigFacetManager
 from consist.core.context import pop_tracker, push_tracker
@@ -2941,15 +2946,72 @@ class Tracker:
             profile_schema=profile_schema,
         )
 
+    def _adapter_accepts_options(
+        self, adapter: ConfigAdapter, method_name: str
+    ) -> bool:
+        method = getattr(adapter, method_name, None)
+        if method is None:
+            return False
+        try:
+            signature = inspect.signature(method)
+        except (TypeError, ValueError):
+            return False
+        if "options" in signature.parameters:
+            return True
+        return any(
+            param.kind == param.VAR_KEYWORD for param in signature.parameters.values()
+        )
+
+    def _discover_config(
+        self,
+        adapter: ConfigAdapter,
+        config_dir_paths: list[Path],
+        strict: bool,
+        options: Optional[ConfigAdapterOptions],
+    ) -> CanonicalConfig:
+        kwargs: dict[str, Any] = {}
+        if options is not None and self._adapter_accepts_options(adapter, "discover"):
+            kwargs["options"] = options
+        return adapter.discover(
+            config_dir_paths, identity=self.identity, strict=strict, **kwargs
+        )
+
+    def _canonicalize_config(
+        self,
+        adapter: ConfigAdapter,
+        canonical: CanonicalConfig,
+        *,
+        run: Optional[Run],
+        tracker: Optional["Tracker"],
+        strict: bool,
+        plan_only: bool,
+        options: Optional[ConfigAdapterOptions],
+    ) -> CanonicalizationResult:
+        kwargs: dict[str, Any] = {}
+        if options is not None and self._adapter_accepts_options(
+            adapter, "canonicalize"
+        ):
+            kwargs["options"] = options
+        return adapter.canonicalize(
+            canonical,
+            run=run,
+            tracker=tracker,
+            strict=strict,
+            plan_only=plan_only,
+            **kwargs,
+        )
+
     def canonicalize_config(
         self,
         adapter: ConfigAdapter,
         config_dirs: Iterable[Union[str, Path]],
         *,
         run: Optional[Run] = None,
+        run_id: Optional[str] = None,
         strict: bool = False,
         ingest: bool = True,
         profile_schema: bool = False,
+        options: Optional[ConfigAdapterOptions] = None,
     ) -> ConfigContribution:
         """
         Canonicalize a model-specific config directory and ingest queryable slices.
@@ -2962,30 +3024,55 @@ class Tracker:
             Ordered config directories to canonicalize.
         run : Optional[Run], optional
             Run context to attach to; defaults to the active run.
+        run_id : Optional[str], optional
+            Run identifier; must match the active run when provided.
         strict : bool, default False
             If True, adapter should error on missing references.
         ingest : bool, default True
             Whether to ingest any queryable tables produced by the adapter.
         profile_schema : bool, default False
             Whether to profile ingested schemas.
+        options : Optional[ConfigAdapterOptions], optional
+            Shared adapter options that override strict/ingest defaults.
 
         Returns
         -------
         ConfigContribution
             Structured summary of logged artifacts and ingestables.
         """
+        if run is not None and run_id is not None:
+            raise ValueError("Provide either run= or run_id=, not both.")
+        if options is not None and (strict is not False or ingest is not True):
+            raise ValueError(
+                "When options= is provided, do not pass strict= or ingest=."
+            )
+        if options is not None:
+            strict = options.strict
+            ingest = options.ingest
+
         target_run = run
+        if target_run is None and run_id is not None:
+            if self.current_consist and self.current_consist.run.id == run_id:
+                target_run = self.current_consist.run
+            else:
+                raise RuntimeError(
+                    "canonicalize_config requires an active run matching run_id=."
+                )
         if target_run is None and self.current_consist:
             target_run = self.current_consist.run
         if target_run is None:
             raise RuntimeError("canonicalize_config requires an active run or run=.")
 
         config_dir_paths = [Path(p).resolve() for p in config_dirs]
-        canonical = adapter.discover(
-            config_dir_paths, identity=self.identity, strict=strict
-        )
-        result = adapter.canonicalize(
-            canonical, run=target_run, tracker=self, strict=strict
+        canonical = self._discover_config(adapter, config_dir_paths, strict, options)
+        result = self._canonicalize_config(
+            adapter,
+            canonical,
+            run=target_run,
+            tracker=self,
+            strict=strict,
+            plan_only=False,
+            options=options,
         )
 
         contribution = ConfigContribution(
@@ -3021,6 +3108,8 @@ class Tracker:
         config_dirs: Iterable[Union[str, Path]],
         *,
         strict: bool = False,
+        options: Optional[ConfigAdapterOptions] = None,
+        validate_only: bool = False,
         facet_spec: Optional[Dict[str, Any]] = None,
         facet_schema_name: Optional[str] = None,
         facet_schema_version: Optional[Union[str, int]] = None,
@@ -3037,6 +3126,10 @@ class Tracker:
             Ordered config directories to canonicalize.
         strict : bool, default False
             If True, adapter should error on missing references.
+        options : Optional[ConfigAdapterOptions], optional
+            Shared adapter options that override strict defaults.
+        validate_only : bool, default False
+            If True, validate ingestables without logging or ingesting.
         facet_spec : Optional[Dict[str, Any]], optional
             Adapter-specific facet extraction spec.
         facet_schema_name : Optional[str], optional
@@ -3051,12 +3144,20 @@ class Tracker:
         ConfigPlan
             Pre-run config plan containing artifacts and ingestables.
         """
+        if options is not None and strict is not False:
+            raise ValueError("When options= is provided, do not pass strict=.")
+        if options is not None:
+            strict = options.strict
         config_dir_paths = [Path(p).resolve() for p in config_dirs]
-        canonical = adapter.discover(
-            config_dir_paths, identity=self.identity, strict=strict
-        )
-        result = adapter.canonicalize(
-            canonical, strict=strict, plan_only=True, run=None, tracker=None
+        canonical = self._discover_config(adapter, config_dir_paths, strict, options)
+        result = self._canonicalize_config(
+            adapter,
+            canonical,
+            run=None,
+            tracker=None,
+            strict=strict,
+            plan_only=True,
+            options=options,
         )
         facet_data = None
         if facet_spec is not None:
@@ -3069,7 +3170,7 @@ class Tracker:
                     "facet_spec provided but adapter does not support build_facet()."
                 )
 
-        return ConfigPlan(
+        plan = ConfigPlan(
             adapter_name=adapter.model_name,
             adapter_version=getattr(adapter, "adapter_version", None),
             canonical=canonical,
@@ -3085,6 +3186,10 @@ class Tracker:
             },
             adapter=adapter,
         )
+        if validate_only:
+            diagnostics = validate_config_plan(plan)
+            return replace(plan, diagnostics=diagnostics)
+        return plan
 
     def apply_config_plan(
         self,
@@ -3094,6 +3199,7 @@ class Tracker:
         ingest: bool = True,
         profile_schema: bool = False,
         adapter: Optional[ConfigAdapter] = None,
+        options: Optional[ConfigAdapterOptions] = None,
     ) -> ConfigContribution:
         """
         Apply a pre-run config plan to the active run.
@@ -3110,12 +3216,19 @@ class Tracker:
             Whether to profile ingested schemas.
         adapter : Optional[ConfigAdapter], optional
             Adapter instance used to create run-scoped artifacts, if needed.
+        options : Optional[ConfigAdapterOptions], optional
+            Shared adapter options that override ingest defaults.
 
         Returns
         -------
         ConfigContribution
             Structured summary of logged artifacts and ingestables.
         """
+        if options is not None and ingest is not True:
+            raise ValueError("When options= is provided, do not pass ingest=.")
+        if options is not None:
+            ingest = options.ingest
+
         target_run = run
         if target_run is None and self.current_consist:
             target_run = self.current_consist.run
@@ -3124,11 +3237,14 @@ class Tracker:
 
         artifacts = list(plan.artifacts)
         adapter_ref = adapter or plan.adapter
-        bundle_artifact = getattr(adapter_ref, "bundle_artifact", None)
-        if callable(bundle_artifact):
-            bundle_spec = bundle_artifact(plan.canonical, run=target_run, tracker=self)
-            if bundle_spec is not None:
-                artifacts.append(bundle_spec)
+        if adapter_ref is not None and (options is None or options.bundle):
+            bundle_artifact = getattr(adapter_ref, "bundle_artifact", None)
+            if callable(bundle_artifact):
+                bundle_spec = bundle_artifact(
+                    plan.canonical, run=target_run, tracker=self
+                )
+                if bundle_spec is not None:
+                    artifacts.append(bundle_spec)
 
         contribution = ConfigContribution(
             identity_hash=plan.identity_hash,
@@ -3173,6 +3289,22 @@ class Tracker:
             )
 
         return contribution
+
+    def identity_from_config_plan(self, plan: ConfigPlan) -> str:
+        """
+        Return the identity hash derived from a config plan.
+
+        Parameters
+        ----------
+        plan : ConfigPlan
+            Config plan produced by `prepare_config`.
+
+        Returns
+        -------
+        str
+            Stable hash representing the canonical config content.
+        """
+        return plan.identity_hash
 
     def _apply_config_contribution(
         self,
