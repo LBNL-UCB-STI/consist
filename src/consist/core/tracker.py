@@ -22,6 +22,7 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    TYPE_CHECKING,
     Tuple,
     Type,
     Union,
@@ -78,6 +79,9 @@ from consist.models.artifact import Artifact
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.models.run import ConsistRecord, Run, RunArtifacts, RunResult
 from consist.types import ArtifactRef, FacetLike, HasFacetSchemaVersion, HashInputs
+
+if TYPE_CHECKING:
+    from consist.core.coupler import Coupler
 
 UTC = timezone.utc
 
@@ -317,6 +321,7 @@ class Tracker:
 
         # In-Memory State (The Source of Truth)
         self.current_consist: Optional[ConsistRecord] = None
+        self._active_coupler: Optional["Coupler"] = None
 
         # Introspection State (Last completed run)
         self._last_consist: Optional[ConsistRecord] = None
@@ -343,14 +348,14 @@ class Tracker:
             schema_resolver = None
             db = self.db
             if db is not None:
+
                 def schema_resolver(
                     artifact: Artifact,
                     *,
                     _db: DatabaseManager = db,
                 ) -> Optional[tuple[ArtifactSchema, List[ArtifactSchemaField]]]:
-                    return _db.get_artifact_schema_for_artifact(
-                        artifact_id=artifact.id
-                    )
+                    return _db.get_artifact_schema_for_artifact(artifact_id=artifact.id)
+
             openlineage_emitter = OpenLineageEmitter(
                 OpenLineageOptions(
                     enabled=True,
@@ -2516,6 +2521,8 @@ class Tracker:
                 key=key,
             )
             if cached is not None:
+                if self._active_coupler is not None and cached.key:
+                    self._active_coupler.set(cached.key, cached)
                 return cached
 
         run_id = self.current_consist.run.id if direction == "output" else None
@@ -2572,6 +2579,8 @@ class Tracker:
             self.current_consist.inputs.append(artifact_obj)
         else:
             self.current_consist.outputs.append(artifact_obj)
+            if self._active_coupler is not None and artifact_obj.key:
+                self._active_coupler.set(artifact_obj.key, artifact_obj)
 
         self._flush_json()
         self._sync_artifact_to_db(artifact_obj, direction)

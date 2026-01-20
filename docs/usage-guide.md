@@ -238,7 +238,8 @@ with use_tracker(tracker):
         sc.run(
             name="analyze",
             fn=analyze_data,
-            input_keys=["preprocessed"],
+            inputs=["preprocessed"],
+            load_inputs=True,
             outputs=["analysis"],
         )
 ```
@@ -257,7 +258,7 @@ with use_tracker(tracker):
             df = pd.read_csv("raw.csv")
             consist.log_dataframe(df, key="preprocessed")
 
-        with sc.trace(name="analyze", input_keys=["preprocessed"]):
+        with sc.trace(name="analyze", inputs=["preprocessed"]):
             df = consist.load(sc.coupler.require("preprocessed"))
             summary = df.groupby("category", as_index=False)["value"].mean()
             consist.log_dataframe(summary, key="analysis")
@@ -276,8 +277,7 @@ with use_tracker(tracker):
         # Step 1: Load and prepare
         with sc.trace(name="initialize", run_id="baseline_init"):
             df_pop = load_population()
-            pop_artifact = consist.log_dataframe(df_pop, key="population")
-            coupler.set("population", pop_artifact)  # Store for later steps
+            consist.log_dataframe(df_pop, key="population")
 
         # Step 2: Simulate for each year
         for year in [2020, 2030, 2040]:
@@ -285,27 +285,53 @@ with use_tracker(tracker):
                 name="simulate",
                 run_id=f"baseline_{year}",
                 year=year,
-                input_keys=["population"],  # Declare dependency
+                inputs=["population"],  # Declare dependency
             ):
                 # Get data from coupler (with automatic cache detection)
                 df_pop = consist.load(coupler.require("population"))
                 df_result = run_model(year, df_pop)
 
                 # Log output and store for downstream steps
-                result_artifact = consist.log_dataframe(df_result, key="persons")
-                coupler.set("persons", result_artifact)
+                consist.log_dataframe(df_result, key="persons")
 ```
 
-**What `input_keys` does:**
+**What `inputs` (list form) does:**
 - Declares that this step depends on "population" artifact
 - Consist tracks this as part of the cache key
 - If the population artifact hasn't changed, this step's cache is still valid
 
-**Optional: Output Validation with SchemaValidatingCoupler**
+**Simpler alternative (auto-load inputs with `sc.run`)**
+
+If your step can be expressed as a function, `sc.run` can auto-load inputs into
+function parameters so you don't need to call `coupler.require(...)` manually:
+
+```python
+def simulate_year(population: pd.DataFrame, config: dict) -> pd.DataFrame:
+    year = config["year"]
+    return run_model(year, population)
+
+with use_tracker(tracker):
+    with consist.scenario("baseline", model="travel_demand") as sc:
+        with sc.trace(name="initialize", run_id="baseline_init"):
+            df_pop = load_population()
+            consist.log_dataframe(df_pop, key="population")
+
+        for year in [2020, 2030, 2040]:
+            sc.run(
+                name=f"simulate_{year}",
+                fn=simulate_year,
+                inputs=["population"],
+                outputs=["persons"],
+                load_inputs=True,
+                config={"year": year},
+            )
+```
+
+**Optional: Output Validation with `require_outputs()`**
 
 Output validation catches mistakes early—when you forget to set an expected output or misspell a key name, you get immediate feedback rather than discovering it downstream when your model crashes or produces silent errors.
 
-Consist uses `SchemaValidatingCoupler` by default in all scenarios. You have three patterns to choose from. **Most users just need Pattern A.** Pick based on your workflow:
+You have three patterns to choose from. **Most users just need Pattern A.** Pick based on your workflow:
 
 - **Pattern A (Recommended):** You know all your workflow outputs upfront (e.g., "I always produce `zarr_skims` and `population`"). Define them once, Consist validates they're set.
 - **Pattern B:** Your outputs are dynamic or optional (e.g., "I produce `results.csv` always, but `debug_report.csv` only if debugging=True"). Declare them as you build, with per-key required flags.
@@ -313,31 +339,29 @@ Consist uses `SchemaValidatingCoupler` by default in all scenarios. You have thr
 
 ---
 
-**Pattern A: Schema-based validation (define keys upfront) — START HERE**
+**Pattern A: Declare required outputs upfront — START HERE**
 
 Use this when you know your workflow outputs ahead of time.
 
 ```python
-from consist import SchemaValidatingCoupler
-
-# Define your coupler schema once (at top of file or in config)
-WORKFLOW_SCHEMA = {
+# Define your expected outputs once (at top of file or in config)
+WORKFLOW_OUTPUTS = {
     "zarr_skims": "Zone-to-zone travel times in Zarr format",
     "synthetic_population": "Synthetic population with activity schedules",
 }
 
 with use_tracker(tracker):
-    # Create a coupler with schema validation
-    coupler = SchemaValidatingCoupler(schema=WORKFLOW_SCHEMA)
-    with consist.scenario("workflow", coupler=coupler) as sc:
+    with consist.scenario("workflow") as sc:
+        sc.require_outputs(
+            "zarr_skims",
+            "synthetic_population",
+            warn_undocumented=True,
+            description=WORKFLOW_OUTPUTS,
+        )
+
         # Run steps and set outputs
         compile_result = sc.run("compile", fn=asim_compile_runner.run)
-        sc.coupler.set("zarr_skims", compile_result.outputs["zarr_skims"])
-
-        # At scenario exit, validate all schema keys were set
-        missing = sc.coupler.validate_all_schema_keys_set()
-        if missing:
-            raise RuntimeError(f"Missing coupler outputs: {missing}")
+        # Outputs are synced to the coupler automatically
 ```
 
 **When to use:** Static workflows where steps always produce the same outputs.
@@ -365,7 +389,7 @@ with use_tracker(tracker):
 
         # Run steps and set outputs
         compile_result = sc.run("compile", fn=asim_compile_runner.run)
-        sc.coupler.set("zarr_skims", compile_result.outputs["zarr_skims"])
+        # Outputs are synced to the coupler automatically
 
         # Check for missing required outputs
         missing = sc.coupler.missing_declared_outputs()
@@ -403,7 +427,7 @@ with use_tracker(tracker):
 
         # Typed attribute access with IDE autocomplete (type-safe)
         skims_artifact = typed.zarr_skims  # IDE knows this is an Artifact
-        sc.run("main", fn=asim_runner.run, input_keys="zarr_skims")
+        sc.run("main", fn=asim_runner.run, inputs=["zarr_skims"], load_inputs=True)
 ```
 
 **When to use:** Large, complex workflows where you want IDE hints (optional; not needed for most users).
@@ -445,8 +469,7 @@ with use_tracker(tracker):
         # Load once, use for all variants
         with sc.trace(name="setup"):
             df = pd.read_csv("data.csv")
-            artifact = consist.log_dataframe(df, key="data")
-            coupler.set("shared_data", artifact)
+            consist.log_dataframe(df, key="data")
 
         # Test different thresholds
         for threshold in [0.3, 0.5, 0.7]:
@@ -454,7 +477,7 @@ with use_tracker(tracker):
                 name="analyze",
                 run_id=f"threshold_{threshold}",
                 threshold=threshold,
-                input_keys=["shared_data"],
+                inputs=["shared_data"],
             ):
                 df = consist.load(coupler.require("shared_data"))
                 filtered = df[df["value"] > threshold]
@@ -542,7 +565,7 @@ with use_tracker(tracker):
     with consist.scenario("baseline", step_cache_hydration="inputs-missing") as sc:
         coupler = sc.coupler
         # This step will backfill inputs if they're missing from disk
-        with sc.trace(name="simulate", input_keys=["population"]):
+        with sc.trace(name="simulate", inputs=["population"]):
             df_pop = consist.load(coupler.require("population"))
             # ... rest of simulation ...
 ```
@@ -565,7 +588,7 @@ with use_tracker(tracker):
         coupler.update(preprocess.outputs)
 
         # Later steps can use the preprocessed output
-        with sc.trace(name="simulate", input_keys=["processed"]):
+        with sc.trace(name="simulate", inputs=["processed"]):
             network = consist.load(coupler.require("processed"))
             # ... simulation ...
 ```
@@ -612,8 +635,7 @@ with use_tracker(tracker):
 
             # But Consist returns cached output if it exists
             df_zones = pd.DataFrame(zones)
-            artifact = consist.log_dataframe(df_zones, key="zones")
-            sc.coupler.set("zones", artifact)
+            consist.log_dataframe(df_zones, key="zones")
 ```
 
 #### Using `sc.run()` (Skips on Cache Hit)
@@ -635,7 +657,7 @@ with use_tracker(tracker):
             outputs=["zones"],
             load_inputs=True,  # Auto-load Path → argument
         )
-        sc.coupler.set("zones", result.outputs["zones"])
+        # Outputs are synced to the coupler automatically
 ```
 
 ### Which Should You Use?

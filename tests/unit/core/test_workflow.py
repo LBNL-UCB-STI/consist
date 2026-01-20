@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from consist.core.coupler import SchemaValidatingCoupler
+from consist.core.coupler import Coupler
 from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
 from consist.core.tracker import Tracker
 
@@ -88,7 +88,7 @@ def test_scenario_coupler_kw_not_serialized(tracker: Tracker):
     """
     with tracker.scenario(
         "scen_coupler_meta",
-        coupler=SchemaValidatingCoupler(schema={"demo": "doc"}),
+        coupler=Coupler(),
     ):
         pass
 
@@ -106,7 +106,6 @@ def test_scenario_trace_input_keys_declares_inputs(tracker: Tracker):
     with tracker.scenario("scen_input_keys") as sc:
         with sc.trace("produce") as t:
             produced = t.log_artifact("raw.csv", key="raw", direction="output")
-            sc.coupler.set("raw", produced)
 
         with sc.trace("consume", input_keys=["raw"], cache_mode="overwrite") as t:
             assert t.current_consist is not None
@@ -117,7 +116,6 @@ def test_scenario_trace_optional_input_keys_skips_missing(tracker: Tracker):
     with tracker.scenario("scen_optional_inputs") as sc:
         with sc.trace("produce") as t:
             produced = t.log_artifact("raw.csv", key="raw", direction="output")
-            sc.coupler.set("raw", produced)
 
         with sc.trace(
             "consume",
@@ -126,6 +124,53 @@ def test_scenario_trace_optional_input_keys_skips_missing(tracker: Tracker):
         ) as t:
             assert t.current_consist is not None
             assert any(a.id == produced.id for a in t.current_consist.inputs)
+
+
+def test_trace_live_sync_outputs(tracker: Tracker, tmp_path: Path) -> None:
+    with tracker.scenario("scen_live_sync") as sc:
+        with sc.trace("produce") as t:
+            out_path = tmp_path / "data.csv"
+            out_path.write_text("value\n1\n")
+            t.log_artifact(out_path, key="data", direction="output")
+
+            assert "data" in sc.coupler
+            assert sc.coupler.require("data").key == "data"
+
+
+def test_trace_cache_hit_pre_sync(tracker: Tracker, tmp_path: Path) -> None:
+    with tracker.scenario("scen_cache_hit") as sc:
+        with sc.trace("step", cache_mode="overwrite") as t:
+            out_path = tmp_path / "data.csv"
+            out_path.write_text("value\n1\n")
+            t.log_artifact(out_path, key="data", direction="output")
+
+        sc.coupler._artifacts.clear()
+        assert "data" not in sc.coupler
+
+        with sc.trace("step", run_id="scen_cache_hit_step_cached") as t:
+            assert t.is_cached
+            assert "data" in sc.coupler
+            assert sc.coupler.require("data").key == "data"
+
+
+def test_inputs_list_promotion_loads_from_coupler(
+    tracker: Tracker, tmp_path: Path
+) -> None:
+    with tracker.scenario("scen_inputs_promo") as sc:
+        with sc.trace("produce") as t:
+            out_path = tmp_path / "raw.csv"
+            out_path.write_text("value\n1\n")
+            t.log_artifact(out_path, key="raw", direction="output")
+
+        def consume(raw: pd.DataFrame) -> None:
+            assert isinstance(raw, pd.DataFrame)
+
+        sc.run(
+            fn=consume,
+            name="consume",
+            inputs=["raw"],
+            load_inputs=True,
+        )
 
 
 def test_scenario_trace_facet_from_config(tracker: Tracker):

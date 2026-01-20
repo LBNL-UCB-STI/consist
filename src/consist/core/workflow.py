@@ -20,7 +20,7 @@ from typing import (
 from consist import Artifact
 from consist.models.run import ConsistRecord, RunResult
 from typing import TYPE_CHECKING
-from consist.core.coupler import SchemaValidatingCoupler, CouplerSchemaBase
+from consist.core.coupler import Coupler, CouplerSchemaBase
 from consist.core.input_utils import coerce_input_map
 from consist.types import ArtifactRef, FacetLike, HashInputs
 from pathlib import Path
@@ -115,9 +115,9 @@ class ScenarioContext:
 
     Attributes
     ----------
-    coupler : SchemaValidatingCoupler
+    coupler : Coupler
         Scenario-local artifact registry for passing outputs between steps.
-        Supports both schema-based and runtime-declared output validation.
+        Supports runtime-declared output validation.
     """
 
     def __init__(
@@ -168,7 +168,7 @@ class ScenarioContext:
         # - After user log: log_artifact() → record.outputs → coupler.update()
         # - Consistency: Artifacts in coupler are independent copies (no cross-run mutations)
         #
-        self.coupler = SchemaValidatingCoupler(tracker=tracker)
+        self.coupler = Coupler(tracker=tracker)
 
     @property
     def run_id(self) -> str:
@@ -237,12 +237,35 @@ class ScenarioContext:
         self,
         *names: str,
         required: bool | Mapping[str, bool] = False,
+        warn_undocumented: bool = False,
         description: Optional[Mapping[str, str]] = None,
     ) -> None:
         """
         Declare outputs that should be present in the scenario coupler.
         """
-        self.coupler.declare_outputs(*names, required=required, description=description)
+        self.coupler.declare_outputs(
+            *names,
+            required=required,
+            warn_undocumented=warn_undocumented,
+            description=description,
+        )
+
+    def require_outputs(
+        self,
+        *names: str,
+        required: bool | Mapping[str, bool] = True,
+        warn_undocumented: bool = False,
+        description: Optional[Mapping[str, str]] = None,
+    ) -> None:
+        """
+        Declare required outputs that must be present at scenario exit.
+        """
+        self.coupler.require_outputs(
+            *names,
+            required=required,
+            warn_undocumented=warn_undocumented,
+            description=description,
+        )
 
     def collect_by_keys(
         self, artifacts: Mapping[str, Artifact], *keys: str, prefix: str = ""
@@ -250,7 +273,19 @@ class ScenarioContext:
         """
         Collect explicit artifacts into the scenario coupler by key.
         """
-        return self.coupler.collect_by_keys(artifacts, *keys, prefix=prefix)
+        if not isinstance(artifacts, MappingABC):
+            raise TypeError("collect_by_keys expects a mapping of artifacts.")
+        collected: Dict[str, Artifact] = {}
+        for key in keys:
+            if not isinstance(key, str):
+                raise TypeError("collect_by_keys keys must be strings.")
+            if key not in artifacts:
+                raise KeyError(f"Missing artifact for key {key!r}.")
+            coupler_key = f"{prefix}{key}"
+            artifact = artifacts[key]
+            self.coupler.set(coupler_key, artifact)
+            collected[coupler_key] = artifact
+        return collected
 
     def coupler_schema(self, schema: Type[SchemaT]) -> SchemaT:
         """
@@ -330,6 +365,20 @@ class ScenarioContext:
                 resolved_inputs.append(artifact)
 
         return resolved_inputs
+
+    def _promote_inputs_for_load(
+        self,
+        inputs: Optional[Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]],
+        load_inputs: Optional[bool],
+    ) -> Optional[Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]]:
+        if not load_inputs or inputs is None:
+            return inputs
+        if isinstance(inputs, (list, tuple)):
+            if all(isinstance(value, str) for value in inputs) and all(
+                value in self.coupler for value in inputs
+            ):
+                return {value: value for value in inputs}
+        return inputs
 
     def _resolve_output_paths(
         self, output_paths: Optional[Mapping[str, ArtifactRef]]
@@ -419,7 +468,10 @@ class ScenarioContext:
 
         effective_cache_hydration = cache_hydration or self.step_cache_hydration
 
-        resolved_inputs = self._resolve_inputs(inputs, input_keys, optional_input_keys)
+        promoted_inputs = self._promote_inputs_for_load(inputs, load_inputs)
+        resolved_inputs = self._resolve_inputs(
+            promoted_inputs, input_keys, optional_input_keys
+        )
         resolved_output_paths = self._resolve_output_paths(output_paths)
 
         result = self.tracker.run(
@@ -532,6 +584,7 @@ class ScenarioContext:
         resolved_output_paths = self._resolve_output_paths(output_paths)
 
         try:
+            self.tracker._active_coupler = self.coupler
             with self.tracker.trace(
                 name=name,
                 run_id=run_id,
@@ -564,8 +617,15 @@ class ScenarioContext:
                 output_mismatch=output_mismatch,
                 output_missing=output_missing,
             ) as t:
+                if t.is_cached:
+                    current_consist = t.current_consist
+                    if current_consist and current_consist.outputs:
+                        for artifact in current_consist.outputs:
+                            if artifact.key:
+                                self.coupler.set(artifact.key, artifact)
                 yield t
         finally:
+            self.tracker._active_coupler = None
             record = self.tracker.last_run
             if record and self._header_record:
                 if record.outputs:

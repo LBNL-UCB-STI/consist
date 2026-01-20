@@ -161,9 +161,8 @@ def run_simulation_scenario(
                 inputs=step_inputs,
                 validate_cached_outputs=validate_cached_outputs,
             ) as t:
-                cached_persons = coupler.adopt_cached_output("persons")
-                if cached_persons:
-                    coupler.set("persons", cached_persons)
+                if t.is_cached:
+                    coupler.require("persons")
                 else:
                     prev_person_art = coupler.get("persons")
                     df_adv = df_seed if idx == 0 else consist.load(prev_person_art)
@@ -171,13 +170,12 @@ def run_simulation_scenario(
                         delta = advance_delta_by_year.get(year, 1)
                         df_adv = advance_people(df_adv, delta=delta)
 
-                    prev_person_art = t.log_dataframe(
+                    t.log_dataframe(
                         df_adv,
                         key="persons",
                         schema=Person,
                         direction="output",
                     )
-                    coupler.set("persons", prev_person_art)
 
             # Step 2: generate trips via mocked container (updates number_of_trips)
             advanced_person_art = coupler.require("persons")

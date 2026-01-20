@@ -167,12 +167,11 @@ from consist import use_tracker
 with use_tracker(tracker):
     with consist.scenario("my_scenario") as scenario:
         with scenario.trace("ingest"):
-            raw = consist.log_artifact("raw.csv", key="raw", direction="output")
-            scenario.coupler.set("raw", raw)
+            consist.log_artifact("raw.csv", key="raw", direction="output")
 
-        # `input_keys=[...]` declares step inputs by Coupler key without repeating
+        # `inputs=[...]` declares step inputs by Coupler key without repeating
         # `scenario.coupler.require(...)` in the `inputs=[...]` list.
-        with scenario.trace("transform", input_keys=["raw"]):
+        with scenario.trace("transform", inputs=["raw"]):
             raw_art = scenario.coupler.require("raw")
             df = consist.load(raw_art, tracker=tracker)
 ```
