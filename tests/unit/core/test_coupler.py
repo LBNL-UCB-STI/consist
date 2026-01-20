@@ -6,11 +6,7 @@ from typing import cast
 
 import pytest
 
-from consist.core.coupler import (
-    Coupler,
-    CouplerSchemaBase,
-    coupler_schema,
-)
+from consist.core.coupler import Coupler
 from consist.models.artifact import Artifact
 
 
@@ -98,19 +94,14 @@ def test_coupler_missing_declared_outputs_treats_none_as_missing() -> None:
     assert coupler.missing_declared_outputs() == ["required"]
 
 
-def test_coupler_schema_wraps_attribute_access() -> None:
-    @coupler_schema
-    class WorkflowCoupler(CouplerSchemaBase):
-        a: Artifact
-        b: Artifact
-
+def test_coupler_collect_by_keys_updates_coupler() -> None:
     coupler = Coupler()
-    schema = WorkflowCoupler(coupler)
-    artifact = _artifact(key="a")
+    outputs = {"a": _artifact(key="a"), "b": _artifact(key="b")}
 
-    schema.a = artifact
-    assert schema.a == artifact
-    assert coupler.require("a") == artifact
+    collected = coupler.collect_by_keys(outputs, "a", prefix="2024_")
+
+    assert "2024_a" in coupler
+    assert collected == {"2024_a": outputs["a"]}
 
 
 def test_coupler_warns_on_undocumented_key() -> None:
@@ -205,21 +196,3 @@ def test_coupler_set_from_artifact_with_string_path() -> None:
 
     assert result == path_str
     assert coupler.get("data") == path_str
-
-
-def test_coupler_set_from_artifact_works_with_schema() -> None:
-    """Test that set_from_artifact works through CouplerSchemaBase."""
-
-    @coupler_schema
-    class WorkflowCoupler(CouplerSchemaBase):
-        persons: Artifact
-
-    coupler = Coupler()
-    schema = WorkflowCoupler(coupler)
-    art = _artifact(key="persons")
-
-    # Should be able to call set_from_artifact on schema too
-    result = schema.set_from_artifact("persons", art)
-
-    assert result == art
-    assert schema.persons == art

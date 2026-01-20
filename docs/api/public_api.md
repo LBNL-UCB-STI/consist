@@ -16,7 +16,6 @@ This page defines what Consist considers its **public API** for the `0.1.x` seri
 - [`consist.trace`](api_helpers.md#consist.api.trace)
 - [`consist.start_run`](api_helpers.md#consist.api.start_run)
 - [`consist.define_step`](api_helpers.md#consist.api.define_step)
-- [`consist.coupler_schema`](api_helpers.md#consist.api.coupler_schema)
 - [`consist.use_tracker`](api_helpers.md#consist.api.use_tracker)
 - [`ScenarioContext`](workflow.md#consist.core.workflow.ScenarioContext) (returned by `consist.scenario(...)`) with `.run(...)` and `.trace(...)`
 - [`RunContext`](workflow.md#consist.core.workflow.RunContext) (injected via `inject_context=True`)

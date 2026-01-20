@@ -6,29 +6,14 @@ from pathlib import Path
 import inspect
 import logging
 import warnings
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Dict,
-    Iterator,
-    Mapping,
-    Optional,
-    Sequence,
-    Type,
-    TypeVar,
-    cast,
-)
+from typing import Any, Dict, Iterator, Mapping, Optional, Sequence
 import uuid
 
-from consist.core.coupler import CouplerSchemaBase, DeclaredOutput
+from consist.core.coupler import DeclaredOutput
 from consist.core.validation import validate_artifact_key
 from consist.protocols import TrackerLike
 
-if TYPE_CHECKING:
-    from consist.core.coupler import Coupler
 from consist.models.run import Run
-
-SchemaT = TypeVar("SchemaT", bound=CouplerSchemaBase)
 
 
 @dataclass
@@ -226,6 +211,23 @@ class NoopCoupler:
             description=description,
         )
 
+    def collect_by_keys(
+        self, artifacts: Mapping[str, Any], *keys: str, prefix: str = ""
+    ) -> Dict[str, Any]:
+        if not isinstance(artifacts, Mapping):
+            raise TypeError("collect_by_keys expects a mapping of artifacts.")
+        collected: Dict[str, Any] = {}
+        for key in keys:
+            if not isinstance(key, str):
+                raise TypeError("collect_by_keys keys must be strings.")
+            if key not in artifacts:
+                raise KeyError(f"Missing artifact for key {key!r}.")
+            coupler_key = f"{prefix}{key}"
+            artifact = artifacts[key]
+            self.set(coupler_key, artifact)
+            collected[coupler_key] = artifact
+        return collected
+
     def describe_outputs(self) -> Dict[str, str]:
         """Return descriptions of declared outputs (for documentation/introspection)."""
         return dict(self._output_descriptions)
@@ -335,22 +337,7 @@ class NoopScenarioContext:
     def collect_by_keys(
         self, artifacts: Mapping[str, Any], *keys: str, prefix: str = ""
     ) -> Dict[str, Any]:
-        if not isinstance(artifacts, Mapping):
-            raise TypeError("collect_by_keys expects a mapping of artifacts.")
-        collected: Dict[str, Any] = {}
-        for key in keys:
-            if not isinstance(key, str):
-                raise TypeError("collect_by_keys keys must be strings.")
-            if key not in artifacts:
-                raise KeyError(f"Missing artifact for key {key!r}.")
-            coupler_key = f"{prefix}{key}"
-            artifact = artifacts[key]
-            self.coupler.set(coupler_key, artifact)
-            collected[coupler_key] = artifact
-        return collected
-
-    def coupler_schema(self, schema: Type[SchemaT]) -> SchemaT:
-        return schema(cast("Coupler", self.coupler))
+        return self.coupler.collect_by_keys(artifacts, *keys, prefix=prefix)
 
     def run(
         self,

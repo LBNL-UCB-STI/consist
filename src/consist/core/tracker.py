@@ -2111,6 +2111,8 @@ class Tracker:
         tags: Optional[List[str]] = None,
         model: str = "scenario",
         step_cache_hydration: Optional[str] = None,
+        coupler: Optional["Coupler"] = None,
+        require_outputs: Optional[Iterable[str]] = None,
         **kwargs: Any,
     ) -> ScenarioContext:
         """
@@ -2137,6 +2139,10 @@ class Tracker:
         step_cache_hydration : Optional[str], optional
             Default cache hydration policy for all scenario steps unless overridden
             in a specific `scenario.trace(...)` or `scenario.run(...)`.
+        coupler : Optional[Coupler], optional
+            Optional Coupler instance to use for the scenario.
+        require_outputs : Optional[Iterable[str]], optional
+            Declare required outputs at scenario creation time.
         **kwargs : Any
             Additional metadata or arguments for the header run (including `facet_from`).
 
@@ -2161,6 +2167,8 @@ class Tracker:
             tags,
             model,
             step_cache_hydration=step_cache_hydration,
+            coupler=coupler,
+            require_outputs=require_outputs,
             **kwargs,
         )
 

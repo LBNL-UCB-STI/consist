@@ -206,6 +206,28 @@ Use `scenario()` when you have multiple interdependent steps that share state or
 - Use the coupler to pass data between steps with automatic provenance tracking
 - Group runs into scenarios for easy cross-scenario queries
 
+### Understanding the Coupler
+
+The **coupler** is your scenario-scoped artifact registry. When you log an artifact with a key, it's automatically stored in the coupler, making data flow between steps explicit and traceable.
+
+**Etymology**: A coupler (like the library name "consist" from railroad terminology) is the mechanism that links train cars together. In Consist, the coupler links your workflow steps by storing and threading their outputs.
+
+**Key behaviors:**
+- When you log an artifact with a `key`, it's automatically synced to the coupler
+- You retrieve artifacts with `coupler.require(key)` or via `inputs=` declarations
+- The coupler persists across all steps in a scenario
+- Each scenario has its own coupler; they don't share data
+- On cache hits, cached outputs are pre-synced to the coupler before your step runs
+
+**You interact with the coupler when:**
+- Accessing inputs in trace blocks: `coupler.require("population")`
+- Declaring inputs to `sc.run()`: `inputs=["population"]`
+- Validating that outputs were produced: `sc.require_outputs(...)`
+
+**Live-sync (automatic):** When you log an artifact, it's immediately available in the coupler—you don't need to manually call `coupler.set()`.
+
+**For optional-Consist workflows:** If you're using Consist in optional mode (with fallback to Path objects or artifact-like objects), use `coupler.set_from_artifact(key, value)` instead of `coupler.set()`. It handles both real Artifacts and artifact-like objects (Paths, strings, noop artifacts) transparently.
+
 ### Simple Example: Two-Step Workflow
 
 ```python
@@ -246,6 +268,35 @@ with use_tracker(tracker):
 
 All steps have `scenario_id="my_analysis"`, making it easy to query together. Change preprocess logic? The preprocess step re-runs; the analyze step re-runs only if the preprocessed artifact changes. Change raw.csv? Both re-execute.
 
+### Declaring Inputs: Mapping Form vs List Form
+
+The `inputs=` parameter supports two different forms for different situations:
+
+**Mapping form** (explicit paths from disk):
+```python
+sc.run(
+    name="preprocess",
+    fn=preprocess_data,
+    inputs={"raw": Path("raw.csv")},  # Load from disk
+    outputs=["preprocessed"],
+)
+```
+Use this when you're loading data from disk for the first time.
+
+**List form** (resolve from coupler):
+```python
+sc.run(
+    name="analyze",
+    fn=analyze_data,
+    inputs=["preprocessed"],          # Resolve from coupler
+    load_inputs=True,                 # Auto-load as function parameters
+    outputs=["analysis"],
+)
+```
+Use this when the artifact is already in the coupler from a prior step. With `load_inputs=True`, each key becomes a function parameter with the loaded data. For example, `inputs=["preprocessed"]` means your function receives a `preprocessed` parameter with the loaded DataFrame.
+
+**Note**: If you have existing code using `input_keys=`, it continues to work identically. Both `inputs=` and `input_keys=` are supported and stable long-term. The `inputs=` parameter is simply the newer, preferred name.
+
 <details>
 <summary>Alternative: inline steps with sc.trace</summary>
 
@@ -265,9 +316,7 @@ with use_tracker(tracker):
 ```
 </details>
 
-### Passing Data with the Coupler
-
-The **coupler** tracks data flowing between steps and makes provenance explicit:
+### Passing Data Between Steps with the Coupler
 
 ```python
 with use_tracker(tracker):
@@ -327,116 +376,104 @@ with use_tracker(tracker):
             )
 ```
 
-**Optional: Output Validation with `require_outputs()`**
+### Output Validation
 
-Output validation catches mistakes early—when you forget to set an expected output or misspell a key name, you get immediate feedback rather than discovering it downstream when your model crashes or produces silent errors.
-
-You have three patterns to choose from. **Most users just need Pattern A.** Pick based on your workflow:
-
-- **Pattern A (Recommended):** You know all your workflow outputs upfront (e.g., "I always produce `zarr_skims` and `population`"). Define them once, Consist validates they're set.
-- **Pattern B:** Your outputs are dynamic or optional (e.g., "I produce `results.csv` always, but `debug_report.csv` only if debugging=True"). Declare them as you build, with per-key required flags.
-- **Pattern C (Advanced):** You want IDE autocomplete when accessing coupler outputs (type-safe, `coupler.zarr_skims` instead of `coupler.require("zarr_skims")`). Use the decorator.
+Consist can validate that your workflow produces expected outputs, catching typos or missing data early. You have three patterns to choose from based on your workflow. **Most users just need Pattern A.**
 
 ---
 
-**Pattern A: Declare required outputs upfront — START HERE**
+**Pattern A: Declare required outputs (Static workflows) — START HERE**
 
-Use this when you know your workflow outputs ahead of time.
+Use this when you know all your workflow outputs upfront.
 
 ```python
-# Define your expected outputs once (at top of file or in config)
-WORKFLOW_OUTPUTS = {
-    "zarr_skims": "Zone-to-zone travel times in Zarr format",
-    "synthetic_population": "Synthetic population with activity schedules",
-}
-
 with use_tracker(tracker):
     with consist.scenario("workflow") as sc:
         sc.require_outputs(
             "zarr_skims",
             "synthetic_population",
-            warn_undocumented=True,
-            description=WORKFLOW_OUTPUTS,
         )
 
-        # Run steps and set outputs
+        # Run steps—at scenario exit, missing outputs raise RuntimeError
         compile_result = sc.run("compile", fn=asim_compile_runner.run)
-        # Outputs are synced to the coupler automatically
 ```
 
-**When to use:** Static workflows where steps always produce the same outputs.
+**When to use:** Static workflows where steps always produce the same outputs (most common).
 
-**Benefits:** Typos caught immediately with warnings (e.g., "Setting undocumented coupler key 'zar_skims'"). Clean, predictable workflow structure.
+**Benefits:** Simple, clear contract. Missing outputs are caught at scenario exit. Typos are caught immediately.
+
+**Optional: Add guardrails for typos**
+```python
+sc.require_outputs(
+    "zarr_skims",
+    "synthetic_population",
+    warn_undocumented=True,  # Warn if you set other keys by mistake
+    description={
+        "zarr_skims": "Zone-to-zone travel times in Zarr format",
+        "synthetic_population": "Synthetic population with activity schedules",
+    }
+)
+```
+
+**Shortcut:** Pass required outputs directly to `scenario()`:
+```python
+with consist.scenario(
+    "workflow",
+    require_outputs=["zarr_skims", "synthetic_population"],
+) as sc:
+    ...
+```
 
 ---
 
-**Pattern B: Runtime-declared validation (declare as you go)**
+**Pattern B: Runtime-declared validation (Dynamic/optional outputs)**
 
-Use this when outputs are dynamic or optional (e.g., optional debug outputs).
+Use this when outputs are dynamic or optional (e.g., optional debug outputs, or conditional branching).
 
 ```python
 with use_tracker(tracker):
     with consist.scenario("workflow") as sc:
-        # Declare required outputs dynamically
+        # Declare outputs as you build them
         sc.declare_outputs(
             "zarr_skims", "synthetic_population",
             required={"zarr_skims": True, "synthetic_population": True}
         )
 
-        # Optionally add more outputs later (not required)
+        # Add more outputs later if needed
         if debugging:
             sc.declare_outputs("debug_report", required={"debug_report": False})
 
-        # Run steps and set outputs
+        # Run steps—missing required outputs raise RuntimeError at exit
         compile_result = sc.run("compile", fn=asim_compile_runner.run)
-        # Outputs are synced to the coupler automatically
-
-        # Check for missing required outputs
-        missing = sc.coupler.missing_declared_outputs()
-        if missing:
-            raise RuntimeError(f"Missing required outputs: {missing}")
 ```
 
-**When to use:** Workflows with optional outputs, branching logic, or conditional outputs.
+**When to use:** Workflows with per-key control over required vs optional, or conditional outputs.
 
-**Benefits:** Mix required and optional outputs with per-key granularity. Add outputs dynamically without modifying schema.
+**Benefits:** Granular per-key control. Mix required and optional outputs. Add outputs dynamically.
 
 ---
 
-**Pattern C: Type-safe access with coupler_schema decorator**
+### Selective Output Collection with `collect_by_keys()`
 
-Use this if you want IDE autocomplete when accessing coupler keys (optional convenience feature).
+By default, when a step produces multiple outputs, all are automatically synced to the coupler. Use `collect_by_keys()` when you need to:
+- Select only specific outputs from many (ignore others)
+- Namespace outputs by year or scenario (prefix them)
 
 ```python
-from consist import coupler_schema
+# Select specific outputs
+result = sc.run("step", fn=some_func)  # Produces: persons, households, jobs
+sc.collect_by_keys(result.outputs, "persons", "households")
+# coupler now has: "persons", "households" (jobs ignored)
 
-@coupler_schema
-class WorkflowCoupler:
-    """Schema for workflow outputs with IDE autocomplete support."""
-    zarr_skims: Artifact
-    synthetic_population: Artifact
+# Namespace by year (useful in multi-year simulations)
+for year in [2020, 2030, 2040]:
+    result = sc.run(f"forecast_{year}", fn=forecast_fn)
+    sc.collect_by_keys(result.outputs, "population", "skims", prefix=f"{year}_")
 
-with use_tracker(tracker):
-    with consist.scenario("workflow") as sc:
-        # Get a typed view for attribute-style access
-        typed = sc.coupler_schema(WorkflowCoupler)
-
-        # Run a step and collect outputs
-        compile_result = sc.run("compile", fn=asim_compile_runner.run)
-        sc.collect_by_keys(compile_result.outputs, "zarr_skims", "synthetic_population")
-
-        # Typed attribute access with IDE autocomplete (type-safe)
-        skims_artifact = typed.zarr_skims  # IDE knows this is an Artifact
-        sc.run("main", fn=asim_runner.run, inputs=["zarr_skims"], load_inputs=True)
+# coupler now has: "2020_population", "2020_skims", "2030_population", etc.
 ```
 
-**When to use:** Large, complex workflows where you want IDE hints (optional; not needed for most users).
-
-**Benefits:** IDE autocomplete for `coupler.zarr_skims`. Better IDE support in complex workflows.
-
 ---
-
-**Combining patterns:** You can define a schema (Pattern A) and add runtime outputs (Pattern B): core outputs in schema, optional runtime outputs declared dynamically.
 
 **Bulk logging with metadata:**
 ```python
@@ -549,6 +586,15 @@ with consist.use_tracker(tracker):
 ---
 
 ## Advanced Patterns
+
+### Cache Hits and the Coupler
+
+When Consist detects a cache hit (same step, same code version, same config and inputs):
+
+1. **In `sc.run()`**: Your function is skipped entirely. Cached outputs are returned and automatically synced to the coupler.
+2. **In `sc.trace()`**: Cached outputs are pre-synced to the coupler BEFORE your trace body runs, so you can access them with `coupler.require()` immediately. Your code still executes (unlike `sc.run()`).
+
+This means **your code doesn't need to handle cache hits differently**—the coupler is populated automatically in both cases.
 
 ### Cache Hydration
 

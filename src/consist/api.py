@@ -42,7 +42,6 @@ from consist.core.decorators import (
 from consist.core.noop import NoopRunContext, NoopScenarioContext
 from consist.core.views import create_view_model
 from consist.core.workflow import OutputCapture
-from consist.core.coupler import CouplerSchemaBase, coupler_schema as _coupler_schema
 from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord, Run, RunResult
 from consist.models.run_config_kv import RunConfigKV
@@ -66,7 +65,6 @@ except ImportError:
     tables = None
 
 T = TypeVar("T", bound=SQLModel)
-SchemaT = TypeVar("SchemaT", bound=CouplerSchemaBase)
 LoadResult = Union[pd.DataFrame, pd.Series, "xarray.Dataset", pd.HDFStore]
 
 
@@ -200,46 +198,6 @@ def require_runtime_kwargs(*names: str) -> Callable[[Callable[..., Any]], Callab
     `runtime_kwargs` passed to `Tracker.run` or `ScenarioContext.run`.
     """
     return require_runtime_kwargs_decorator(*names)
-
-
-def coupler_schema(cls: type[SchemaT]) -> type[SchemaT]:
-    """
-    Decorator that builds a typed Coupler view from an annotated class.
-
-    This is the public API entry point for the `coupler_schema` decorator.
-    See `consist.core.coupler.coupler_schema` for full documentation and examples.
-
-    Parameters
-    ----------
-    cls : type
-        A class with type annotations for coupler keys.
-
-    Returns
-    -------
-    type
-        A new class with typed properties wrapping a Coupler.
-
-    Raises
-    ------
-    ValueError
-        If the class has no annotations.
-
-    Examples
-    --------
-    ```python
-    @consist.coupler_schema
-    class WorkflowOutputs:
-        persons: Artifact
-        households: Artifact
-
-    # Use in a scenario
-    with consist.scenario("workflow") as sc:
-        typed = sc.coupler_schema(WorkflowOutputs)
-        typed.persons = artifact1
-        result = typed.persons  # Type-safe access
-    ```
-    """
-    return _coupler_schema(cls)
 
 
 @contextmanager

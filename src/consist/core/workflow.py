@@ -13,14 +13,12 @@ from typing import (
     Mapping,
     Iterator,
     Union,
-    Type,
-    TypeVar,
 )
 
 from consist import Artifact
 from consist.models.run import ConsistRecord, RunResult
 from typing import TYPE_CHECKING
-from consist.core.coupler import Coupler, CouplerSchemaBase
+from consist.core.coupler import Coupler
 from consist.core.input_utils import coerce_input_map
 from consist.types import ArtifactRef, FacetLike, HashInputs
 from pathlib import Path
@@ -28,8 +26,6 @@ from pathlib import Path
 if TYPE_CHECKING:
     from consist.core.config_canonicalization import ConfigPlan
     from consist.core.tracker import Tracker
-
-SchemaT = TypeVar("SchemaT", bound=CouplerSchemaBase)
 
 
 class OutputCapture:
@@ -128,6 +124,8 @@ class ScenarioContext:
         tags: Optional[List[str]] = None,
         model: str = "scenario",
         step_cache_hydration: Optional[str] = None,
+        coupler: Optional[Coupler] = None,
+        require_outputs: Optional[Iterable[str]] = None,
         **kwargs: Any,
     ):
         self.tracker = tracker
@@ -168,7 +166,9 @@ class ScenarioContext:
         # - After user log: log_artifact() → record.outputs → coupler.update()
         # - Consistency: Artifacts in coupler are independent copies (no cross-run mutations)
         #
-        self.coupler = Coupler(tracker=tracker)
+        self.coupler = coupler or Coupler(tracker=tracker)
+        if require_outputs:
+            self.coupler.require_outputs(*require_outputs)
 
     @property
     def run_id(self) -> str:
@@ -273,25 +273,7 @@ class ScenarioContext:
         """
         Collect explicit artifacts into the scenario coupler by key.
         """
-        if not isinstance(artifacts, MappingABC):
-            raise TypeError("collect_by_keys expects a mapping of artifacts.")
-        collected: Dict[str, Artifact] = {}
-        for key in keys:
-            if not isinstance(key, str):
-                raise TypeError("collect_by_keys keys must be strings.")
-            if key not in artifacts:
-                raise KeyError(f"Missing artifact for key {key!r}.")
-            coupler_key = f"{prefix}{key}"
-            artifact = artifacts[key]
-            self.coupler.set(coupler_key, artifact)
-            collected[coupler_key] = artifact
-        return collected
-
-    def coupler_schema(self, schema: Type[SchemaT]) -> SchemaT:
-        """
-        Return a typed coupler view for the provided schema class.
-        """
-        return schema(self.coupler)
+        return self.coupler.collect_by_keys(artifacts, *keys, prefix=prefix)
 
     def _coerce_keys(self, value: Optional[Iterable[str] | str]) -> List[str]:
         if value is None:
