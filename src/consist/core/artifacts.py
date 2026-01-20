@@ -30,6 +30,9 @@ class ArtifactManager:
         direction: str = "output",
         schema: Optional[Type[SQLModel]] = None,
         driver: Optional[str] = None,
+        content_hash: Optional[str] = None,
+        force_hash_override: bool = False,
+        validate_content_hash: bool = False,
         **meta: Any,
     ) -> Artifact:
         """
@@ -70,6 +73,42 @@ class ArtifactManager:
         mount_scheme: Optional[str] = None
         mount_root: Optional[str] = None
 
+        def _apply_content_hash_override(artifact: Artifact) -> None:
+            if content_hash is None:
+                return
+            if validate_content_hash:
+                if not resolved_abs_path:
+                    raise ValueError(
+                        "validate_content_hash=True requires a resolvable path."
+                    )
+                try:
+                    computed = self.tracker.identity.compute_file_checksum(
+                        resolved_abs_path
+                    )
+                except Exception as e:
+                    raise ValueError(
+                        f"Failed to validate content_hash for {resolved_abs_path}: {e}"
+                    ) from e
+                if computed != content_hash:
+                    raise ValueError(
+                        "content_hash does not match on-disk data for "
+                        f"{resolved_abs_path}."
+                    )
+            existing_hash = getattr(artifact, "hash", None)
+            if (
+                existing_hash
+                and existing_hash != content_hash
+                and not force_hash_override
+            ):
+                logging.warning(
+                    "[Consist Warning] Ignoring content_hash override for artifact key=%s uri=%s "
+                    "(existing hash differs). Use force_hash_override=True to override.",
+                    getattr(artifact, "key", None),
+                    getattr(artifact, "uri", None),
+                )
+                return
+            artifact.hash = content_hash
+
         if isinstance(path, Artifact):
             artifact_obj = path
             resolved_abs_path = artifact_obj.abs_path or self.tracker.resolve_uri(
@@ -81,6 +120,7 @@ class ArtifactManager:
                 validate_artifact_key(key)
             if driver:
                 artifact_obj.driver = driver
+            _apply_content_hash_override(artifact_obj)
             if meta:
                 artifact_obj.meta.update(meta)
         else:
@@ -103,6 +143,7 @@ class ArtifactManager:
                     artifact_obj = parent
                     if driver:
                         artifact_obj.driver = driver
+                    _apply_content_hash_override(artifact_obj)
                     if meta:
                         artifact_obj.meta.update(meta)
 
@@ -110,15 +151,29 @@ class ArtifactManager:
                 if driver is None:
                     driver = Path(path).suffix.lstrip(".").lower() or "unknown"
 
-                content_hash = None
-                try:
-                    content_hash = self.tracker.identity.compute_file_checksum(
-                        resolved_abs_path
-                    )
-                except Exception as e:
-                    logging.warning(
-                        f"[Consist Warning] Failed to compute hash for {path}: {e}"
-                    )
+                if content_hash is not None and validate_content_hash:
+                    try:
+                        computed = self.tracker.identity.compute_file_checksum(
+                            resolved_abs_path
+                        )
+                    except Exception as e:
+                        raise ValueError(
+                            f"Failed to validate content_hash for {resolved_abs_path}: {e}"
+                        ) from e
+                    if computed != content_hash:
+                        raise ValueError(
+                            "content_hash does not match on-disk data for "
+                            f"{resolved_abs_path}."
+                        )
+                elif content_hash is None:
+                    try:
+                        content_hash = self.tracker.identity.compute_file_checksum(
+                            resolved_abs_path
+                        )
+                    except Exception as e:
+                        logging.warning(
+                            f"[Consist Warning] Failed to compute hash for {path}: {e}"
+                        )
 
                 artifact_obj = Artifact(
                     key=key,
