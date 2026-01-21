@@ -75,6 +75,7 @@ from consist.core.validation import (
 from consist.core.workflow import OutputCapture, RunContext, ScenarioContext
 from consist.core.input_utils import coerce_input_map
 from consist.models.artifact import Artifact
+from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.models.run import ConsistRecord, Run, RunArtifacts, RunResult
 from consist.types import ArtifactRef, FacetLike, HasFacetSchemaVersion, HashInputs
 
@@ -232,6 +233,8 @@ class Tracker:
         access_mode: AccessMode = "standard",
         run_subdir_fn: Optional[Callable[[Run], str]] = None,
         allow_external_paths: Optional[bool] = None,
+        openlineage_enabled: bool = False,
+        openlineage_namespace: Optional[str] = None,
     ):
         """
         Initialize a Consist Tracker.
@@ -267,11 +270,15 @@ class Tracker:
         allow_external_paths : Optional[bool], default None
             Allow artifact directories and cached-output materialization to write
             outside `run_dir`. Defaults to CONSIST_ALLOW_EXTERNAL_PATHS when unset.
+        openlineage_enabled : bool, default False
+            Emit OpenLineage events to JSONL alongside `consist.json`.
+        openlineage_namespace : Optional[str], default None
+            Namespace for OpenLineage jobs and datasets. Defaults to the project
+            root directory name.
         """
         # 1. Initialize FileSystem Service
         # (This handles the mkdir and path resolution internally now)
         self.fs = FileSystemManager(run_dir, mounts)
-        self.events = EventManager()
 
         self.mounts = self.fs.mounts
         self.run_dir = self.fs.run_dir
@@ -325,6 +332,49 @@ class Tracker:
         self._run_signature_cache_max_entries: int = 4096
         self._run_artifacts_cache: Dict[str, RunArtifacts] = {}
         self._run_artifacts_cache_max_entries: int = 1024
+
+        self._runs_by_id: Dict[str, Run] = {}
+        openlineage_emitter = None
+        if openlineage_enabled:
+            from consist.core.openlineage import OpenLineageEmitter, OpenLineageOptions
+
+            project_root_path = Path(project_root) if project_root else Path.cwd()
+            namespace = openlineage_namespace or project_root_path.resolve().name
+            schema_resolver = None
+            db = self.db
+            if db is not None:
+
+                def schema_resolver(
+                    artifact: Artifact,
+                    *,
+                    _db: DatabaseManager = db,
+                ) -> Optional[tuple[ArtifactSchema, List[ArtifactSchemaField]]]:
+                    return _db.get_artifact_schema_for_artifact(artifact_id=artifact.id)
+
+            openlineage_emitter = OpenLineageEmitter(
+                OpenLineageOptions(
+                    enabled=True,
+                    namespace=namespace,
+                    path=self.fs.run_dir / "openlineage.jsonl",
+                ),
+                schema_resolver=schema_resolver,
+                run_lookup=self._run_lookup,
+                run_facet_resolver=self._openlineage_run_facet,
+            )
+
+        self.events = EventManager()
+        if openlineage_emitter:
+            from consist.core.lifecycle import LifecycleEmitter
+
+            self._lifecycle = LifecycleEmitter(
+                openlineage=openlineage_emitter,
+                input_resolver=self._openlineage_inputs,
+            )
+            self.on_run_start(self._lifecycle.emit_start)
+            self.on_run_complete(self._lifecycle.emit_complete)
+            self.on_run_failed(self._lifecycle.emit_failed)
+        else:
+            self._lifecycle = None
 
     @property
     def engine(self):
@@ -579,6 +629,26 @@ class Tracker:
             return bool(run.meta["allow_external_paths"])
         return self.allow_external_paths
 
+    def _run_lookup(self, run_id: str) -> Optional[Run]:
+        return self._runs_by_id.get(run_id)
+
+    def _openlineage_inputs(self) -> List[Artifact]:
+        if self.current_consist is None:
+            return []
+        return list(self.current_consist.inputs)
+
+    def _openlineage_run_facet(self, run: Run) -> Dict[str, Any]:
+        if self.current_consist is None:
+            return {}
+        if self.current_consist.run.id != run.id:
+            return {}
+        facet: Dict[str, Any] = {}
+        if self.current_consist.facet:
+            facet["config_facet"] = dict(self.current_consist.facet)
+        if self.current_consist.config:
+            facet["config_keys"] = sorted(self.current_consist.config.keys())
+        return facet
+
     # --- Run Management ---
 
     def begin_run(
@@ -796,6 +866,7 @@ class Tracker:
             started_at=now,
             created_at=now,
         )
+        self._runs_by_id[run.id] = run
 
         if run.meta is None:
             run.meta = {}
