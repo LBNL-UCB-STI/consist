@@ -154,8 +154,9 @@ def profile_file_schema(
     *,
     identity: IdentityManager,
     path: str,
-    driver: Literal["parquet", "csv"],
+    driver: Literal["parquet", "csv", "h5_table"],
     sample_rows: Optional[int],
+    table_path: Optional[str] = None,
     source: str = "file",
 ) -> SchemaProfileResult:
     """
@@ -167,10 +168,12 @@ def profile_file_schema(
         Identity manager used to hash the canonical schema payload.
     path : str
         Filesystem path to the file to profile.
-    driver : {"parquet", "csv"}
+    driver : {"parquet", "csv", "h5_table"}
         File format driver for the profiler.
     sample_rows : Optional[int]
         Maximum number of rows to sample for dtype inference. None means no limit.
+    table_path : Optional[str]
+        HDF5 table path when profiling ``h5_table`` artifacts.
     source : str, default "file"
         Source label for the schema observation.
 
@@ -179,14 +182,35 @@ def profile_file_schema(
     SchemaProfileResult
         Schema profile payload including per-field rows and summary metadata.
     """
-    batches = yield_file_batches(path, driver=driver, max_rows=sample_rows)
     df = None
-    for batch in batches:
-        df = batch
-        break
+    if driver == "h5_table":
+        if not table_path:
+            raise ValueError("table_path is required for h5_table profiling.")
+        import pandas as pd
+
+        try:
+            if sample_rows is not None:
+                df = pd.read_hdf(path, key=table_path, stop=sample_rows)
+            else:
+                df = pd.read_hdf(path, key=table_path)
+        except (TypeError, ValueError):
+            df = pd.read_hdf(path, key=table_path)
+            if sample_rows is not None:
+                df = df.head(sample_rows)
+    else:
+        batches = yield_file_batches(path, driver=driver, max_rows=sample_rows)
+        for batch in batches:
+            df = batch
+            break
 
     fields: List[SchemaFieldProfile] = []
     if df is not None:
+        import pandas as pd
+
+        if isinstance(df, pd.Series):
+            df = df.to_frame()
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("Expected pandas DataFrame or Series for schema profiling.")
         for i, (col, dtype) in enumerate(df.dtypes.items(), start=1):
             fields.append(
                 SchemaFieldProfile(
@@ -210,6 +234,8 @@ def profile_file_schema(
         "driver": driver,
         "fields": field_rows,
     }
+    if driver == "h5_table":
+        hash_obj["table_path"] = table_path
     schema_id = identity.canonical_json_sha256(hash_obj)
 
     summary = {
@@ -221,6 +247,8 @@ def profile_file_schema(
         "n_columns": len(fields),
         "truncated": truncated_flags,
     }
+    if driver == "h5_table":
+        summary["table_path"] = table_path
 
     profile_obj: Dict[str, Any] = dict(hash_obj)
     if len(fields) > MAX_FIELDS:

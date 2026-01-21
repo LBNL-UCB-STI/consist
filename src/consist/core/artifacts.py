@@ -1,6 +1,7 @@
+import hashlib
 import logging
 from pathlib import Path
-from typing import List, Optional, Any, Type, TYPE_CHECKING, Callable, Union
+from typing import List, Optional, Any, Type, TYPE_CHECKING, Callable, Union, Literal
 
 from sqlmodel import SQLModel
 from consist.models.artifact import Artifact
@@ -9,7 +10,6 @@ from consist.types import ArtifactRef
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
-
 
 def _infer_driver_from_path(path: Path) -> str:
     suffixes = [suffix.lower() for suffix in path.suffixes]
@@ -31,6 +31,73 @@ def _infer_driver_from_path(path: Path) -> str:
     if suffix == "geojson":
         return "geojson"
     return suffix or "unknown"
+
+
+def _resolve_h5_dataset(obj: Any) -> Optional[Any]:
+    if hasattr(obj, "dtype") and hasattr(obj, "shape"):
+        return obj
+    if hasattr(obj, "keys"):
+        preferred = ("table", "block0_values", "values")
+        for key in preferred:
+            try:
+                candidate = obj[key]
+            except Exception:
+                continue
+            if hasattr(candidate, "dtype") and hasattr(candidate, "shape"):
+                return candidate
+
+        for key in obj.keys():
+            try:
+                candidate = obj[key]
+            except Exception:
+                continue
+            if hasattr(candidate, "dtype") and hasattr(candidate, "shape"):
+                return candidate
+    return None
+
+
+def _hash_h5_dataset(
+    dataset: Any,
+    *,
+    chunk_rows: Optional[int],
+) -> Optional[str]:
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+
+    resolved = _resolve_h5_dataset(dataset)
+    if resolved is None:
+        return None
+
+    hasher = hashlib.sha256()
+    hasher.update(str(resolved.dtype).encode("utf-8"))
+    hasher.update(str(resolved.shape).encode("utf-8"))
+
+    shape = resolved.shape
+    if shape == ():
+        data = resolved[()]
+        hasher.update(np.asarray(data).tobytes(order="C"))
+        return hasher.hexdigest()
+
+    total_rows = int(shape[0]) if len(shape) else 0
+    if total_rows == 0:
+        return hasher.hexdigest()
+
+    rows_per_chunk = chunk_rows
+    if rows_per_chunk is None:
+        if resolved.chunks and resolved.chunks[0]:
+            rows_per_chunk = int(resolved.chunks[0])
+        else:
+            rows_per_chunk = min(1024, total_rows)
+
+    rows_per_chunk = max(1, rows_per_chunk)
+    for start in range(0, total_rows, rows_per_chunk):
+        end = min(total_rows, start + rows_per_chunk)
+        chunk = resolved[start:end]
+        hasher.update(np.asarray(chunk).tobytes(order="C"))
+
+    return hasher.hexdigest()
 
 
 class ArtifactManager:
@@ -159,20 +226,46 @@ class ArtifactManager:
                     mount_scheme = scheme
                     mount_root = str(Path(self.tracker.mounts[scheme]).resolve())
 
+            if driver is None:
+                driver = Path(path).suffix.lstrip(".").lower() or "unknown"
+
             if direction == "input" and self.tracker.db:
-                parent = self.tracker.db.find_latest_artifact_at_uri(uri)
+                parent = self.tracker.db.find_latest_artifact_at_uri(uri, driver=driver)
                 if parent:
-                    artifact_obj = parent
-                    if driver:
-                        artifact_obj.driver = driver
-                    _apply_content_hash_override(artifact_obj)
-                    if meta:
-                        artifact_obj.meta.update(meta)
+                    should_reuse = True
+                    if driver in {"h5", "hdf5"}:
+                        if content_hash is None and resolved_abs_path:
+                            try:
+                                content_hash = (
+                                    self.tracker.identity.compute_file_checksum(
+                                        resolved_abs_path
+                                    )
+                                )
+                            except Exception as e:
+                                logging.warning(
+                                    "[Consist Warning] Failed to compute hash for %s: %s",
+                                    resolved_abs_path,
+                                    e,
+                                )
+                        should_reuse = (
+                            content_hash is not None and parent.hash == content_hash
+                        )
+                    elif driver == "h5_table":
+                        should_reuse = (
+                            content_hash is not None and parent.hash == content_hash
+                        )
+
+                    if should_reuse:
+                        artifact_obj = parent
+                        if driver:
+                            artifact_obj.driver = driver
+                        _apply_content_hash_override(artifact_obj)
+                        if meta:
+                            artifact_obj.meta.update(meta)
 
             if artifact_obj is None:
                 if driver is None:
                     driver = _infer_driver_from_path(Path(path))
-
                 if content_hash is not None and validate_content_hash:
                     try:
                         computed = self.tracker.identity.compute_file_checksum(
@@ -227,6 +320,9 @@ class ArtifactManager:
         key: str,
         direction: str,
         filter_fn: Callable[[str], bool],
+        *,
+        hash_tables: bool,
+        table_hash_chunk_rows: Optional[int],
     ) -> List[Artifact]:
         """
         Discover and log HDF5 tables contained within an artifact.
@@ -243,6 +339,10 @@ class ArtifactManager:
             Either ``"input"`` or ``"output"`` to tag derived artifacts.
         filter_fn : Callable[[str], bool]
             Predicate that selects which datasets should be turned into artifacts.
+        hash_tables : bool
+            Whether to compute per-table hashes for discovered datasets.
+        table_hash_chunk_rows : Optional[int]
+            Number of rows per hash chunk when computing table hashes.
 
         Returns
         -------
@@ -266,16 +366,39 @@ class ArtifactManager:
                     if isinstance(obj, h5py.Dataset):
                         if filter_fn(name):
                             table_key = f"{key}_{name.replace('/', '_')}"
+                            table_hash = None
+                            table_meta: dict[str, Any] = {
+                                "parent_id": str(container.id),
+                                "table_path": name,
+                                "shape": list(obj.shape),
+                                "dtype": str(obj.dtype),
+                            }
+                            if hash_tables:
+                                try:
+                                    table_hash = _hash_h5_dataset(
+                                        obj, chunk_rows=table_hash_chunk_rows
+                                    )
+                                except Exception as e:
+                                    logging.warning(
+                                        "[Consist] Failed to hash HDF5 dataset %s: %s",
+                                        name,
+                                        e,
+                                    )
+                                if table_hash:
+                                    table_meta["table_hash"] = table_hash
+                                    table_meta["table_hash_algo"] = "sha256"
+                                    if table_hash_chunk_rows is not None:
+                                        table_meta["table_hash_chunk_rows"] = (
+                                            table_hash_chunk_rows
+                                        )
                             table_art = self.create_artifact(
                                 str(path_obj),
                                 run_id=container.run_id,  # FIX: Inherit Run ID
                                 key=table_key,
                                 direction=direction,
                                 driver="h5_table",
-                                parent_id=str(container.id),
-                                table_path=name,
-                                shape=list(obj.shape),
-                                dtype=str(obj.dtype),
+                                content_hash=table_hash,
+                                **table_meta,
                             )
                             table_artifacts.append(table_art)
 
@@ -293,6 +416,8 @@ class ArtifactManager:
         direction: str = "output",
         discover_tables: bool = True,
         table_filter: Optional[Union[Callable[[str], bool], List[str]]] = None,
+        hash_tables: Literal["always", "if_unchanged", "never"] = "if_unchanged",
+        table_hash_chunk_rows: Optional[int] = None,
         **meta: Any,
     ) -> tuple[Artifact, List[Artifact]]:
         """
@@ -313,6 +438,10 @@ class ArtifactManager:
             - A callable that takes a table name and returns True to include
             - A list of table names to include (exact match)
             If None, all tables are included.
+        hash_tables : {"always", "if_unchanged", "never"}, default "if_unchanged"
+            Controls whether per-table hashes are computed.
+        table_hash_chunk_rows : Optional[int], optional
+            Rows per chunk when hashing tables (defaults to dataset chunking or 1024).
         **meta : Any
             Additional metadata for the container artifact.
 
@@ -332,6 +461,18 @@ class ArtifactManager:
         path_obj = Path(path)
         if key is None:
             key = path_obj.stem
+        prior_container = None
+        if self.tracker.db:
+            try:
+                resolved_abs_path = str(path_obj.resolve())
+                uri = self.tracker.fs.virtualize_path(resolved_abs_path)
+                # Include inputs so we can compare against the last observed file hash,
+                # even when the container was logged as an input (run_id=None).
+                prior_container = self.tracker.db.find_latest_artifact_at_uri(
+                    uri, driver="h5", include_inputs=True
+                )
+            except Exception:
+                prior_container = None
 
         container = self.tracker.log_artifact(
             str(path_obj),
@@ -343,6 +484,28 @@ class ArtifactManager:
         )
 
         table_artifacts: List[Artifact] = []
+        should_hash_tables = False
+        if hash_tables not in {"always", "if_unchanged", "never"}:
+            raise ValueError(
+                "hash_tables must be one of: 'always', 'if_unchanged', 'never'."
+            )
+        if hash_tables == "always":
+            should_hash_tables = True
+        elif hash_tables == "if_unchanged":
+            if prior_container is None:
+                should_hash_tables = True
+            elif prior_container.hash and container.hash:
+                should_hash_tables = prior_container.hash == container.hash
+
+        container.meta["table_hashes_checked"] = should_hash_tables
+        if not should_hash_tables and hash_tables != "always":
+            if hash_tables == "never":
+                container.meta["table_hashes_skip_reason"] = "disabled"
+            elif prior_container is not None:
+                if prior_container.hash and container.hash:
+                    container.meta["table_hashes_skip_reason"] = "file_hash_changed"
+                else:
+                    container.meta["table_hashes_skip_reason"] = "file_hash_unavailable"
 
         if discover_tables:
             if table_filter is None:
@@ -361,11 +524,22 @@ class ArtifactManager:
                 filter_fn = table_filter
 
             table_artifacts = self.scan_h5_container(
-                container, path_obj, key, direction, filter_fn
+                container,
+                path_obj,
+                key,
+                direction,
+                filter_fn,
+                hash_tables=should_hash_tables,
+                table_hash_chunk_rows=table_hash_chunk_rows,
             )
 
+            target = (
+                self.tracker.current_consist.inputs
+                if direction == "input"
+                else self.tracker.current_consist.outputs
+            )
             for table_artifact in table_artifacts:
-                self.tracker.current_consist.outputs.append(table_artifact)
+                target.append(table_artifact)
                 self.tracker.persistence.sync_artifact(table_artifact, direction)
 
         container.meta["table_count"] = len(table_artifacts)
@@ -375,3 +549,98 @@ class ArtifactManager:
         self.tracker.persistence.sync_artifact(container, direction)
 
         return container, table_artifacts
+
+    def log_h5_table(
+        self,
+        path: Union[str, Path],
+        *,
+        table_path: str,
+        key: Optional[str] = None,
+        direction: str = "output",
+        parent: Optional[Artifact] = None,
+        hash_table: bool = True,
+        table_hash_chunk_rows: Optional[int] = None,
+        profile_file_schema: bool = False,
+        file_schema_sample_rows: Optional[int] = None,
+        **meta: Any,
+    ) -> Artifact:
+        """
+        Log a single HDF5 table as an artifact without scanning the container.
+
+        Parameters
+        ----------
+        path : Union[str, Path]
+            Path to the HDF5 file.
+        table_path : str
+            Internal HDF5 dataset path (e.g., "/households").
+        key : Optional[str], optional
+            Artifact key; defaults to "<file_stem>_<table_path>".
+        direction : str, default "output"
+            Whether this is an "input" or "output" artifact.
+        parent : Optional[Artifact], optional
+            Optional container artifact to link via parent_id.
+        hash_table : bool, default True
+            Whether to compute a per-table hash.
+        table_hash_chunk_rows : Optional[int], optional
+            Rows per chunk when hashing tables (defaults to dataset chunking or 1024).
+        profile_file_schema : bool, default False
+            Whether to profile and persist a lightweight schema for the table.
+        file_schema_sample_rows : Optional[int], optional
+            Maximum rows to sample when profiling the schema.
+        **meta : Any
+            Additional metadata for the table artifact.
+
+        Returns
+        -------
+        Artifact
+            The logged table artifact.
+        """
+        if not self.tracker.current_consist:
+            raise RuntimeError("Cannot log artifact outside of a run context.")
+
+        path_obj = Path(path)
+        if key is None:
+            suffix = table_path.lstrip("/").replace("/", "_")
+            key = f"{path_obj.stem}_{suffix}" if suffix else path_obj.stem
+
+        table_hash = None
+        if hash_table:
+            try:
+                import h5py
+            except ImportError as e:
+                raise ImportError("h5py is required to hash HDF5 tables.") from e
+            with h5py.File(str(path_obj), "r") as h5_file:
+                try:
+                    dataset = h5_file[table_path]
+                except KeyError:
+                    alt_path = (
+                        f"/{table_path}" if not table_path.startswith("/") else None
+                    )
+                    if alt_path and alt_path in h5_file:
+                        dataset = h5_file[alt_path]
+                    else:
+                        raise
+                table_hash = _hash_h5_dataset(dataset, chunk_rows=table_hash_chunk_rows)
+
+        table_meta: dict[str, Any] = {"table_path": table_path}
+        if parent is not None:
+            table_meta["parent_id"] = str(parent.id)
+        if table_hash:
+            table_meta["table_hash"] = table_hash
+            table_meta["table_hash_algo"] = "sha256"
+            if table_hash_chunk_rows is not None:
+                table_meta["table_hash_chunk_rows"] = table_hash_chunk_rows
+
+        if meta:
+            table_meta.update(meta)
+
+        return self.tracker.log_artifact(
+            str(path_obj),
+            key=key,
+            direction=direction,
+            driver="h5_table",
+            content_hash=table_hash,
+            profile_file_schema=profile_file_schema,
+            file_schema_sample_rows=file_schema_sample_rows,
+            **table_meta,
+        )

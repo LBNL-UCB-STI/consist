@@ -15,6 +15,8 @@ from sqlalchemy.types import CHAR, TypeDecorator
 
 from sqlmodel import Field, SQLModel
 
+from consist.types import DriverType
+
 UTC = timezone.utc
 
 
@@ -210,13 +212,10 @@ class Artifact(SQLModel, table=True):
             True if the artifact's driver is associated with tabular data formats
             (e.g., Parquet, CSV, SQL), False otherwise.
         """
-        return self.driver in (
-            "parquet",
-            "csv",
-            "sql",
-            "geojson",
-            "shapefile",
-            "geopackage",
+        return (
+            self.driver in DriverType.tabular_drivers()
+            or self.driver in DriverType.spatial_drivers()
+            or self.driver == "sql"
         )
 
     @property
