@@ -15,8 +15,12 @@ import sys
 if __package__ is None and __spec__ is None:
     script_dir = os.path.dirname(__file__)
     package_root = os.path.dirname(script_dir)
-    if script_dir in sys.path:
-        sys.path.remove(script_dir)
+    script_dir_real = os.path.realpath(script_dir)
+    sys.path = [
+        path
+        for path in sys.path
+        if os.path.realpath(path) != script_dir_real
+    ]
     if package_root not in sys.path:
         sys.path.insert(0, package_root)
 
