@@ -7,10 +7,22 @@ It offers functions like listing recent runs, providing a quick overview
 of the execution history and status of various models and workflows.
 """
 
+import os
+import sys
+
+# When invoked as a script (python consist/cli.py), the script directory can
+# shadow stdlib modules like "types". Ensure imports resolve from the package root.
+if __package__ is None and __spec__ is None:
+    script_dir = os.path.dirname(__file__)
+    package_root = os.path.dirname(script_dir)
+    if script_dir in sys.path:
+        sys.path.remove(script_dir)
+    if package_root not in sys.path:
+        sys.path.insert(0, package_root)
+
 import cmd
 import shlex
 import json
-import os
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Mapping, Tuple
