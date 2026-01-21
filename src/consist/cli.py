@@ -214,6 +214,12 @@ def schema_export(
     schema_id: Optional[str] = typer.Option(
         None, "--schema-id", help="Artifact schema id (hash) to export."
     ),
+    artifact_key: Optional[str] = typer.Option(
+        None,
+        "--artifact-key",
+        "--table-key",
+        help="Artifact key to export the associated captured schema.",
+    ),
     artifact_id: Optional[str] = typer.Option(
         None,
         "--artifact-id",
@@ -248,8 +254,11 @@ def schema_export(
     ),
 ) -> None:
     """Export a captured artifact schema as an editable SQLModel stub."""
-    if (schema_id is None) == (artifact_id is None):
-        console.print("[red]Provide exactly one of --schema-id or --artifact-id[/red]")
+    selectors = [schema_id, artifact_id, artifact_key]
+    if sum(1 for selector in selectors if selector is not None) != 1:
+        console.print(
+            "[red]Provide exactly one of --schema-id, --artifact-id, or --artifact-key[/red]"
+        )
         raise typer.Exit(2)
     if artifact_id is not None:
         try:
@@ -259,6 +268,12 @@ def schema_export(
             raise typer.Exit(2)
 
     tracker = get_tracker(db_path)
+    if artifact_key is not None:
+        artifact = tracker.get_artifact(artifact_key)
+        if artifact is None:
+            console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
+            raise typer.Exit(1)
+        artifact_id = str(artifact.id)
     try:
         code = tracker.export_schema_sqlmodel(
             schema_id=schema_id,
@@ -1207,8 +1222,8 @@ class ConsistShell(cmd.Cmd):
         except Exception as exc:
             console.print(f"[red]Error: {exc}[/red]")
 
-    def do_schema(self, arg: str) -> None:
-        """Show artifact schema. Usage: schema <artifact_key>"""
+    def do_schema_profile(self, arg: str) -> None:
+        """Show artifact schema. Usage: schema_profile <artifact_key>"""
         try:
             args = shlex.split(arg)
             if not args:
@@ -1313,6 +1328,62 @@ class ConsistShell(cmd.Cmd):
             console.print(
                 f"[yellow]Schema not implemented for loaded type: {type(data).__name__}[/yellow]"
             )
+        except Exception as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+
+    def do_schema_stub(self, arg: str) -> None:
+        """Export SQLModel schema stub. Usage: schema_stub <artifact_key> [--class-name NAME] [--table-name NAME] [--include-system-cols] [--no-stats-comments] [--concrete]"""
+        try:
+            args = shlex.split(arg)
+            if not args:
+                console.print("[red]Error: artifact_key required[/red]")
+                return
+
+            artifact_key = args[0]
+            class_name = None
+            table_name = None
+            include_system_cols = False
+            include_stats_comments = True
+            abstract = True
+
+            i = 1
+            while i < len(args):
+                if args[i] == "--class-name" and i + 1 < len(args):
+                    class_name = args[i + 1]
+                    i += 2
+                elif args[i] == "--table-name" and i + 1 < len(args):
+                    table_name = args[i + 1]
+                    i += 2
+                elif args[i] == "--include-system-cols":
+                    include_system_cols = True
+                    i += 1
+                elif args[i] == "--no-stats-comments":
+                    include_stats_comments = False
+                    i += 1
+                elif args[i] == "--concrete":
+                    abstract = False
+                    i += 1
+                else:
+                    i += 1
+
+            artifact = self.tracker.get_artifact(artifact_key)
+            if not artifact:
+                console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
+                return
+
+            code = self.tracker.export_schema_sqlmodel(
+                artifact_id=str(artifact.id),
+                class_name=class_name,
+                table_name=table_name,
+                abstract=abstract,
+                include_system_cols=include_system_cols,
+                include_stats_comments=include_stats_comments,
+            )
+            print(code)
+        except KeyError:
+            console.print("[red]Captured schema not found for this artifact.[/red]")
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
         except Exception as exc:
             console.print(f"[red]Error: {exc}[/red]")
 
