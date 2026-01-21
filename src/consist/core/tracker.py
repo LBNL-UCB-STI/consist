@@ -343,14 +343,14 @@ class Tracker:
             schema_resolver = None
             db = self.db
             if db is not None:
+
                 def schema_resolver(
                     artifact: Artifact,
                     *,
                     _db: DatabaseManager = db,
                 ) -> Optional[tuple[ArtifactSchema, List[ArtifactSchemaField]]]:
-                    return _db.get_artifact_schema_for_artifact(
-                        artifact_id=artifact.id
-                    )
+                    return _db.get_artifact_schema_for_artifact(artifact_id=artifact.id)
+
             openlineage_emitter = OpenLineageEmitter(
                 OpenLineageOptions(
                     enabled=True,
