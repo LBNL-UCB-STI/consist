@@ -618,7 +618,11 @@ class DatabaseManager:
     # --- Read Operations ---
 
     def find_latest_artifact_at_uri(
-        self, uri: str, run_id: Optional[str] = None
+        self,
+        uri: str,
+        run_id: Optional[str] = None,
+        driver: Optional[str] = None,
+        include_inputs: bool = False,
     ) -> Optional[Artifact]:
         """
         Finds the most recent artifact created at this location by a run.
@@ -629,6 +633,10 @@ class DatabaseManager:
             The URI to search for artifacts.
         run_id : Optional[str]
             If provided, only return artifacts from this specific run (prevents cross-run artifact retrieval).
+        driver : Optional[str]
+            If provided, only return artifacts matching the driver.
+        include_inputs : bool
+            If True, include artifacts without a producing run_id.
 
         Returns
         -------
@@ -638,14 +646,16 @@ class DatabaseManager:
 
         def _query():
             with Session(self.engine) as session:
-                statement = (
-                    select(Artifact)
-                    .where(Artifact.uri == uri)
-                    .where(Artifact.run_id.is_not(None))  # Must be produced by a run
-                )
+                statement = select(Artifact).where(Artifact.uri == uri)
+                if not include_inputs:
+                    statement = statement.where(
+                        Artifact.run_id.is_not(None)
+                    )  # Must be produced by a run
                 # If run_id is specified, filter to only that run (prevents cross-run artifact confusion)
                 if run_id is not None:
                     statement = statement.where(Artifact.run_id == run_id)
+                if driver is not None:
+                    statement = statement.where(Artifact.driver == driver)
 
                 statement = statement.order_by(Artifact.created_at.desc()).limit(1)
                 return session.exec(statement).first()

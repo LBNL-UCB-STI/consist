@@ -126,7 +126,7 @@ class ArtifactSchemaManager:
         artifact: Artifact,
         run: Run,
         resolved_path: str,
-        driver: Literal["parquet", "csv"],
+        driver: Literal["parquet", "csv", "h5_table"],
         sample_rows: Optional[int],
         source: str = "file",
     ) -> None:
@@ -171,11 +171,25 @@ class ArtifactSchemaManager:
             )
             from consist.tools.schema_profile import profile_file_schema
 
+            table_path = None
+            if driver == "h5_table":
+                if isinstance(getattr(artifact, "meta", None), dict):
+                    table_path = artifact.meta.get("table_path") or artifact.meta.get(
+                        "sub_path"
+                    )
+                if not table_path:
+                    logging.warning(
+                        "[Consist] Missing table_path for h5_table schema profile: %s",
+                        getattr(artifact, "key", None),
+                    )
+                    return
+
             result = profile_file_schema(
                 identity=self.tracker.identity,
                 path=resolved_path,
                 driver=driver,
                 sample_rows=sample_rows,
+                table_path=table_path,
                 source=source,
             )
             truncated = result.summary.get("truncated") or {}

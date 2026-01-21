@@ -2608,13 +2608,13 @@ class Tracker:
                 )
                 if resolved_path:
                     driver = artifact_obj.driver
-                    if driver not in ("csv", "parquet"):
+                    if driver not in ("csv", "parquet", "h5_table"):
                         return artifact_obj
                     self.artifact_schemas.profile_file_artifact(
                         artifact=artifact_obj,
                         run=self.current_consist.run,
                         resolved_path=str(resolved_path),
-                        driver=cast(Literal["csv", "parquet"], driver),
+                        driver=cast(Literal["csv", "parquet", "h5_table"], driver),
                         sample_rows=file_schema_sample_rows,
                         source="file",
                     )
@@ -2901,6 +2901,8 @@ class Tracker:
         direction: str = "output",
         discover_tables: bool = True,
         table_filter: Optional[Union[Callable[[str], bool], List[str]]] = None,
+        hash_tables: Literal["always", "if_unchanged", "never"] = "if_unchanged",
+        table_hash_chunk_rows: Optional[int] = None,
         **meta: Any,
     ) -> Tuple[Artifact, List[Artifact]]:
         """
@@ -2969,6 +2971,38 @@ class Tracker:
             direction=direction,
             discover_tables=discover_tables,
             table_filter=table_filter,
+            hash_tables=hash_tables,
+            table_hash_chunk_rows=table_hash_chunk_rows,
+            **meta,
+        )
+
+    def log_h5_table(
+        self,
+        path: Union[str, Path],
+        *,
+        table_path: str,
+        key: Optional[str] = None,
+        direction: str = "output",
+        parent: Optional[Artifact] = None,
+        hash_table: bool = True,
+        table_hash_chunk_rows: Optional[int] = None,
+        profile_file_schema: bool = False,
+        file_schema_sample_rows: Optional[int] = None,
+        **meta: Any,
+    ) -> Artifact:
+        """
+        Log a single HDF5 table as an artifact without scanning the container.
+        """
+        return self.artifacts.log_h5_table(
+            path,
+            table_path=table_path,
+            key=key,
+            direction=direction,
+            parent=parent,
+            hash_table=hash_table,
+            table_hash_chunk_rows=table_hash_chunk_rows,
+            profile_file_schema=profile_file_schema,
+            file_schema_sample_rows=file_schema_sample_rows,
             **meta,
         )
 
