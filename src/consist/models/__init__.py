@@ -23,6 +23,7 @@ from consist.models.activitysim import (
     ActivitySimProbabilitiesEntriesCache,
     ActivitySimProbabilitiesMetaEntriesCache,
 )
+from consist.models.beam import BeamConfigCache, BeamConfigIngestRunLink
 
 __all__ = [
     "Artifact",
@@ -37,6 +38,8 @@ __all__ = [
     "ActivitySimProbabilitiesEntriesCache",
     "ActivitySimProbabilitiesMetaEntriesCache",
     "ActivitySimConfigIngestRunLink",
+    "BeamConfigCache",
+    "BeamConfigIngestRunLink",
     "Run",
     "RunConfigKV",
 ]

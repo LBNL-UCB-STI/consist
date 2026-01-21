@@ -8,6 +8,7 @@ import yaml
 import pytest
 
 from consist.integrations.activitysim import ActivitySimConfigAdapter, ConfigOverrides
+from consist.core.config_canonicalization import ConfigAdapterOptions
 from consist.integrations.activitysim.config_adapter import _digest_path_with_name
 from tests.helpers.activitysim_fixtures import build_activitysim_test_configs
 
@@ -214,6 +215,24 @@ def test_coefficients_and_probabilities_parsing(tracker, tmp_path: Path):
     assert stop_prob_rows
     assert stop_prob_rows[0]["dims"] == {"purpose": "work"}
     assert stop_prob_rows[0]["probs"] == {"auto": 0.7, "transit": 0.3}
+
+
+def test_prepare_config_validation_and_signature(tracker, tmp_path: Path):
+    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path)
+    adapter = ActivitySimConfigAdapter()
+    options = ConfigAdapterOptions(strict=True, bundle=False, ingest=False)
+
+    plan = tracker.prepare_config(
+        adapter,
+        [overlay_dir, base_dir],
+        options=options,
+        validate_only=True,
+    )
+
+    assert plan.signature == plan.identity_hash
+    assert plan.diagnostics is not None
+    assert plan.diagnostics.ok
+    assert tracker.identity_from_config_plan(plan) == plan.identity_hash
 
 
 def test_missing_csv_lenient_logs_warning(tracker, tmp_path: Path, caplog):

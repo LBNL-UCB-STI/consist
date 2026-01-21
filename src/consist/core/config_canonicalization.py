@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -68,6 +69,76 @@ class ArtifactSpec(NamedTuple):
     key: str
     direction: Literal["input", "output"]
     meta: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ConfigAdapterOptions:
+    """
+    Shared adapter options for config canonicalization.
+
+    Attributes
+    ----------
+    strict : bool
+        If True, adapters should error on missing references.
+    bundle : bool
+        Whether to bundle configs when the adapter supports it.
+    ingest : bool
+        Whether to ingest queryable slices after canonicalization.
+    allow_heuristic_refs : bool
+        Whether adapters should scan heuristic keys for references.
+    """
+
+    strict: bool = False
+    bundle: bool = True
+    ingest: bool = True
+    allow_heuristic_refs: bool = True
+
+
+@dataclass(frozen=True)
+class ConfigDiagnostic:
+    """
+    Structured validation diagnostics for config preparation.
+
+    Attributes
+    ----------
+    message : str
+        Human-readable diagnostic message.
+    table_name : Optional[str]
+        Optional ingestable table name tied to the diagnostic.
+    source_path : Optional[Path]
+        Optional file path tied to the diagnostic.
+    artifact_key : Optional[str]
+        Optional artifact key tied to the diagnostic.
+    exception_type : Optional[str]
+        Exception type if the diagnostic originated from an exception.
+    """
+
+    message: str
+    table_name: Optional[str] = None
+    source_path: Optional[Path] = None
+    artifact_key: Optional[str] = None
+    exception_type: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ConfigDiagnostics:
+    """
+    Validation diagnostics for a config plan.
+
+    Attributes
+    ----------
+    warnings : tuple[ConfigDiagnostic, ...]
+        Non-fatal warnings discovered during validation.
+    errors : tuple[ConfigDiagnostic, ...]
+        Errors discovered during validation.
+    """
+
+    warnings: tuple[ConfigDiagnostic, ...] = ()
+    errors: tuple[ConfigDiagnostic, ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
 
 
 @dataclass(frozen=True)
@@ -234,6 +305,8 @@ class ConfigPlan(_IngestableDataFrameMixin):
         Optional flag controlling KV facet indexing.
     meta : Optional[dict[str, Any]]
         Optional metadata for the plan.
+    diagnostics : Optional[ConfigDiagnostics]
+        Optional diagnostics produced by validation.
     adapter : Optional[ConfigAdapter]
         Adapter instance for run-scoped artifacts, if available.
     """
@@ -248,11 +321,16 @@ class ConfigPlan(_IngestableDataFrameMixin):
     facet_schema_version: Optional[Union[str, int]] = None
     facet_index: Optional[bool] = None
     meta: Optional[dict[str, Any]] = None
+    diagnostics: Optional[ConfigDiagnostics] = None
     adapter: Optional["ConfigAdapter"] = None
 
     @property
     def identity_hash(self) -> str:
         return self.canonical.content_hash
+
+    @property
+    def signature(self) -> str:
+        return self.identity_hash
 
 
 class ConfigAdapter(Protocol):
@@ -268,6 +346,7 @@ class ConfigAdapter(Protocol):
         *,
         identity: IdentityManager,
         strict: bool = False,
+        options: Optional[ConfigAdapterOptions] = None,
     ) -> CanonicalConfig: ...
 
     def canonicalize(
@@ -278,6 +357,7 @@ class ConfigAdapter(Protocol):
         tracker: Optional["Tracker"] = None,
         strict: bool = False,
         plan_only: bool = False,
+        options: Optional[ConfigAdapterOptions] = None,
     ) -> CanonicalizationResult: ...
 
     def build_facet(
@@ -312,9 +392,73 @@ def _ingestable_df(
     return pd.DataFrame(rows)
 
 
+def validate_config_plan(
+    plan: ConfigPlan, *, run_id: Optional[str] = None
+) -> ConfigDiagnostics:
+    """
+    Validate a config plan without ingesting data.
+
+    Parameters
+    ----------
+    plan : ConfigPlan
+        Config plan to validate.
+    run_id : Optional[str], optional
+        Run identifier to use when materializing row factories.
+
+    Returns
+    -------
+    ConfigDiagnostics
+        Structured diagnostics describing warnings and errors.
+    """
+    errors: list[ConfigDiagnostic] = []
+    warning_list: list[ConfigDiagnostic] = []
+    resolved_run_id = run_id or "validation"
+
+    for artifact in plan.artifacts:
+        if not artifact.path.exists():
+            errors.append(
+                ConfigDiagnostic(
+                    message=f"Missing artifact path: {artifact.path}",
+                    source_path=artifact.path,
+                    artifact_key=artifact.key,
+                )
+            )
+
+    for spec in plan.ingestables:
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            try:
+                rows = spec.materialize_rows(resolved_run_id)
+                for _ in rows:
+                    pass
+            except Exception as exc:
+                errors.append(
+                    ConfigDiagnostic(
+                        message=str(exc),
+                        table_name=spec.table_name,
+                        source_path=spec.source_path,
+                        exception_type=exc.__class__.__name__,
+                    )
+                )
+            for warning in captured:
+                warning_list.append(
+                    ConfigDiagnostic(
+                        message=str(warning.message),
+                        table_name=spec.table_name,
+                        source_path=spec.source_path,
+                        exception_type=warning.category.__name__,
+                    )
+                )
+
+    return ConfigDiagnostics(warnings=tuple(warning_list), errors=tuple(errors))
+
+
 __all__ = [
     "CanonicalConfig",
     "ArtifactSpec",
+    "ConfigAdapterOptions",
+    "ConfigDiagnostic",
+    "ConfigDiagnostics",
     "IngestSpec",
     "CanonicalizationResult",
     "ConfigContribution",
@@ -323,6 +467,7 @@ __all__ = [
     "RowFactory",
     "RowSource",
     "compute_config_pack_hash",
+    "validate_config_plan",
 ]
 
 
