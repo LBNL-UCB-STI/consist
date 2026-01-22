@@ -1338,11 +1338,13 @@ class Tracker:
                 raise ValueError("Tracker.run requires a callable fn.")
 
         if executor == "container":
-            resolved_name = name or (fn.__name__ if fn else None)
+            resolved_name = name or getattr(fn, "__name__", None)
             if resolved_name is None:
                 raise ValueError("executor='container' requires a run name.")
         else:
-            resolved_name = name or fn.__name__
+            resolved_name = name or getattr(fn, "__name__", None)
+            if resolved_name is None:
+                raise ValueError("Tracker.run requires a run name.")
         resolved_model = model or resolved_name
 
         if executor == "python":

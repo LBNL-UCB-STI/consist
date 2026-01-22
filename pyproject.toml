@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "dlt>=1.18.2",
     "duckdb>=1.4.2",
     "duckdb-engine>=0.17.0",
     "ipykernel>=7.1.0",
@@ -21,6 +22,7 @@ dependencies = [
     "pyhocon>=0.3.61",
     "pyyaml>=6.0.3",
     "rich>=13.7.1",
+    "ruff>=0.14.6",
     "seaborn>=0.13.2",
     "sqlalchemy>=2.0.44",
     "sqlmodel>=0.0.31",
@@ -65,7 +67,7 @@ typecheck = [
 all = [
     "cftime>=1.6.0",
     "docker>=7.1.0",
-    "dlt>=1.18.2",
+    "dlt>=1.21.0",
     "h5py>=3.15.1",
     "pyhocon>=0.3.60",
     "PyYAML>=6.0",
@@ -86,7 +88,7 @@ test = [
 dev = [
     "black>=25.11.0",
     "docker>=7.1.0",
-    "dlt>=1.18.2",
+    "dlt>=1.21.0",
     "h5py>=3.15.1",
     "PyYAML>=6.0",
     "polars>=1.35.2",
@@ -96,7 +98,7 @@ dev = [
     "pytest-mock>=3.15.1",
     "ruff>=0.14.6",
     "tables>=3.10.2",
-    "ty>=0.0.8",
+    "ty>=0.0.13",
     "xarray>=2025.11.0",
     "zarr>=2.18,<3",
 ]
@@ -135,7 +137,7 @@ docs = [
     "mkdocs-material>=9.7.0",
     "mkdocstrings[python]>=1.0.0",
     "mkdocstrings-python>=2.0.0",
-    "zensical>=0.0.15",
+    "zensical>=0.0.17",
 ]
 
 [tool.pytest.ini_options]
@@ -154,16 +156,8 @@ line-length = 88
 include = ["src", "tests"]
 
 [[tool.ty.overrides]]
-include = ["src/consist/cli.py", "src/consist/api.py"]
-rules = { "conflicting-declarations" = "ignore", "invalid-assignment" = "ignore", "invalid-argument-type" = "ignore", "invalid-method-override" = "ignore", "no-matching-overload" = "ignore", "unresolved-attribute" = "ignore" }
-
-[[tool.ty.overrides]]
-include = ["src/consist/core/**", "src/consist/tools/**"]
-rules = { "unresolved-attribute" = "ignore" }
-
-[[tool.ty.overrides]]
 include = ["src/consist/integrations/**"]
-rules = { "invalid-argument-type" = "ignore", "invalid-assignment" = "ignore" }
+rules = { "invalid-assignment" = "ignore" }
 
 [[tool.ty.overrides]]
 include = ["tests/**"]

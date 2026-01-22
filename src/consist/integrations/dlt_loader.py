@@ -27,6 +27,7 @@ from typing import (
     Optional,
     Any,
     Iterable,
+    Iterator,
     Union,
     Type,
     Set,
@@ -34,6 +35,7 @@ from typing import (
     Tuple,
     get_args,
     get_origin,
+    cast,
 )
 from sqlmodel import SQLModel
 from consist.models.artifact import Artifact
@@ -280,6 +282,7 @@ def ingest_artifact(
         )
 
     # 1. Resolve Data Source (Streaming Batches)
+    data_source: Iterable[Any]
     if isinstance(data_iterable, str):
         file_path = data_iterable
 
@@ -344,7 +347,7 @@ def ingest_artifact(
         )
 
     # 4. Enrich Rows (Vectorized & Scalar support)
-    def _enrich_rows(source):
+    def _enrich_rows(source: Iterable[Any]) -> Iterator[Any]:
         for item in source:
             # PATH A: Vectorized (Pandas DataFrame)
             if isinstance(item, pd.DataFrame):
@@ -394,11 +397,6 @@ def ingest_artifact(
                 yield item
 
     # 5. Define Resource
-    resource_kwargs = {
-        "name": desired_table_name,
-        "write_disposition": "append",
-    }
-
     # Always hint system columns so dlt creates them even if values are NULL
     system_columns = {
         "consist_run_id": {"data_type": "text", "nullable": True},
@@ -407,20 +405,29 @@ def ingest_artifact(
         "consist_iteration": {"data_type": "bigint", "nullable": True},
     }
 
+    schema_contract = None
+    columns = system_columns
     if schema_model:
-        resource_kwargs["schema_contract"] = {
+        schema_contract = {
             "tables": "evolve",
             "columns": "freeze",
             "data_type": "freeze",
         }
         columns = _sqlmodel_to_dlt_columns(schema_model)
         columns.update(system_columns)
-        resource_kwargs["columns"] = columns
     else:
         # Loose Mode: Hint system columns, allow everything else to evolve
-        resource_kwargs["columns"] = system_columns
+        columns = system_columns
 
-    resource = dlt.resource(_enrich_rows(data_source), **resource_kwargs)
+    enriched_rows = _enrich_rows(data_source)
+    resource_factory = cast(Any, dlt.resource)
+    resource = resource_factory(
+        enriched_rows,
+        name=desired_table_name,
+        write_disposition="append",
+        columns=columns,
+        schema_contract=schema_contract,
+    )
 
     # 6. Run
     info = pipeline.run(resource)

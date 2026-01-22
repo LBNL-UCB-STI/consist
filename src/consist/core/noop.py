@@ -31,6 +31,7 @@ class NoopArtifact:
     meta: Dict[str, Any] = field(default_factory=dict)
     driver: str = "file"
     run_id: Optional[str] = None
+    id: Optional[str] = None
 
     def get_path(self) -> Path:
         return self.path

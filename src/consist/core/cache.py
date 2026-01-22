@@ -13,11 +13,23 @@ if TYPE_CHECKING:
 
 
 @runtime_checkable
+class CacheDb(Protocol):
+    def get_run(self, run_id: str) -> Optional[Run]: ...
+
+
+@runtime_checkable
+class CacheFs(Protocol):
+    def resolve_historical_path(
+        self, uri: str, original_run_dir: Optional[str]
+    ) -> str: ...
+
+
+@runtime_checkable
 class CacheHydrationContext(Protocol):
     run_dir: Path
     current_consist: Optional[ConsistRecord]
-    db: object
-    fs: object
+    db: Optional[CacheDb]
+    fs: CacheFs
 
     def resolve_uri(self, uri: str) -> str: ...
 
@@ -33,7 +45,7 @@ class CacheValidationContext(Protocol):
     """
 
     current_consist: Optional[ConsistRecord]
-    db: object
+    db: Optional[CacheDb]
     mounts: Dict[str, str]
 
     def resolve_uri(self, uri: str) -> str: ...
@@ -50,8 +62,9 @@ class CacheMaterializationContext(Protocol):
     """
 
     current_consist: Optional[ConsistRecord]
-    db: object
-    fs: object
+    db: Optional[CacheDb]
+    fs: CacheFs
+    run_dir: Path
 
     def resolve_uri(self, uri: str) -> str: ...
 
@@ -416,7 +429,8 @@ def materialize_missing_inputs(
         return
     if not tracker.current_consist:
         return
-    if not getattr(tracker, "db", None):
+    db = tracker.db
+    if db is None:
         return
 
     items: list[tuple[Artifact, Path, Path]] = []
@@ -433,7 +447,7 @@ def materialize_missing_inputs(
 
         run_id = str(artifact.run_id)
         if run_id not in run_dir_cache:
-            run = tracker.db.get_run(run_id)
+            run = db.get_run(run_id)
             run_dir_cache[run_id] = (
                 run.meta.get("_physical_run_dir") if run and run.meta else None
             )

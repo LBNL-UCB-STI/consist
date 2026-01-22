@@ -22,7 +22,7 @@ from types import ModuleType
 from typing import TYPE_CHECKING, List, Optional
 
 import pandas as pd
-from sqlmodel import select
+from sqlmodel import select, col
 
 from consist.models.artifact import Artifact
 from consist.models.run import Run
@@ -126,16 +126,16 @@ class MatrixViewFactory:
         query = (
             select(
                 Artifact.uri,
-                Run.id.label("run_id"),
+                col(Run.id).label("run_id"),
                 Run.year,
                 Run.iteration,
             )
-            .join(Run, Artifact.run_id == Run.id)
+            .join(Run, col(Artifact.run_id) == col(Run.id))
             .where(Artifact.key == concept_key)
-            .order_by(Run.year, Run.iteration)
+            .order_by(col(Run.year), col(Run.iteration))
         )
         if run_ids:
-            query = query.where(Run.id.in_(run_ids))
+            query = query.where(col(Run.id).in_(run_ids))
         if parent_id:
             query = query.where(Run.parent_run_id == parent_id)
         if model:

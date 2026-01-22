@@ -25,7 +25,7 @@ import shlex
 import json
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Mapping, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Mapping, Tuple, Literal, cast
 
 import pandas as pd
 import typer
@@ -33,8 +33,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
-from sqlalchemy import and_, or_, select
-from sqlmodel import Session
+from sqlalchemy import and_, or_, select as sa_select
+from sqlmodel import Session, col, select
 
 from consist import Tracker
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
@@ -55,6 +55,14 @@ app.add_typer(schema_app, name="schema")
 MAX_CLI_LIMIT = 1_000_000
 MAX_PREVIEW_ROWS = 1_000_000
 MAX_SEARCH_QUERY_LENGTH = 256
+
+
+def _optional_xarray() -> Any | None:
+    try:
+        import xarray as xr
+    except ImportError:
+        return None
+    return xr
 
 
 def output_json(data: Any) -> None:
@@ -279,6 +287,9 @@ def schema_export(
     if prefer_source is not None and prefer_source not in ("file", "duckdb"):
         console.print("[red]--prefer-source must be either 'file' or 'duckdb'[/red]")
         raise typer.Exit(2)
+    resolved_prefer_source: Optional[Literal["file", "duckdb"]] = None
+    if prefer_source is not None:
+        resolved_prefer_source = cast(Literal["file", "duckdb"], prefer_source)
 
     tracker = get_tracker(db_path)
     if artifact_key is not None:
@@ -297,7 +308,7 @@ def schema_export(
             abstract=abstract,
             include_system_cols=include_system_cols,
             include_stats_comments=include_stats_comments,
-            prefer_source=prefer_source,
+            prefer_source=resolved_prefer_source,
         )
     except KeyError:
         console.print("[red]Captured schema not found for the provided selector.[/red]")
@@ -494,28 +505,28 @@ def _iter_artifact_rows(
     last_id = None
     while True:
         stmt = (
-            select(
-                Artifact.id,
-                Artifact.key,
-                Artifact.uri,
-                Artifact.run_id,
-                Artifact.created_at,
+            sa_select(
+                col(Artifact.id),
+                col(Artifact.key),
+                col(Artifact.uri),
+                col(Artifact.run_id),
+                col(Artifact.created_at),
             )
-            .order_by(Artifact.created_at, Artifact.id)
+            .order_by(col(Artifact.created_at), col(Artifact.id))
             .limit(batch_size)
         )
         if last_created is not None and last_id is not None:
             stmt = stmt.where(
                 or_(
-                    Artifact.created_at > last_created,
+                    col(Artifact.created_at) > last_created,
                     and_(
-                        Artifact.created_at == last_created,
-                        Artifact.id > last_id,
+                        col(Artifact.created_at) == last_created,
+                        col(Artifact.id) > last_id,
                     ),
                 )
             )
 
-        batch = session.exec(stmt).all()
+        batch = session.exec(cast(Any, stmt)).all()
         if not batch:
             break
         for art_id, key, uri, run_id, created_at in batch:
@@ -528,19 +539,19 @@ def _render_scenarios(tracker: Tracker, limit: int = 20) -> None:
     """Shared logic for displaying scenario overview (scenarios are parent runs)."""
     with Session(tracker.engine) as session:
         from consist.models.run import Run
-        from sqlmodel import func, select
+        from sqlmodel import func
 
         # Find parent runs by looking for distinct parent_run_ids
         query = (
             select(
-                Run.parent_run_id.label("scenario_id"),  # ← Fixed: was Run.id
-                func.count(Run.id).label("run_count"),
-                func.min(Run.created_at).label("first_run"),
-                func.max(Run.created_at).label("last_run"),
+                col(Run.parent_run_id).label("scenario_id"),  # ← Fixed: was Run.id
+                func.count(col(Run.id)).label("run_count"),
+                func.min(col(Run.created_at)).label("first_run"),
+                func.max(col(Run.created_at)).label("last_run"),
             )
-            .where(Run.parent_run_id.is_not(None))
-            .group_by(Run.parent_run_id)
-            .order_by(func.max(Run.created_at).desc())
+            .where(col(Run.parent_run_id).is_not(None))
+            .group_by(col(Run.parent_run_id))
+            .order_by(func.max(col(Run.created_at)).desc())
             .limit(limit)
         )
 
@@ -587,21 +598,21 @@ def search(
 
     with Session(tracker.engine) as session:
         from consist.models.run import Run
-        from sqlmodel import select, or_
+        from sqlmodel import select, or_, col
 
         # Search in multiple fields
         search_query = (
             select(Run)
             .where(
                 or_(
-                    Run.id.contains(escaped_query, escape="\\"),
-                    Run.model_name.contains(escaped_query, escape="\\"),
-                    Run.parent_run_id.contains(escaped_query, escape="\\")
+                    col(Run.id).contains(escaped_query, escape="\\"),
+                    col(Run.model_name).contains(escaped_query, escape="\\"),
+                    col(Run.parent_run_id).contains(escaped_query, escape="\\")
                     if escaped_query
                     else False,
                 )
             )
-            .order_by(Run.created_at.desc())
+            .order_by(col(Run.created_at).desc())
             .limit(limit)
         )
 
@@ -706,7 +717,9 @@ def scenario(
         from consist.models.run import Run
 
         query = (
-            select(Run).where(Run.parent_run_id == scenario_id).order_by(Run.created_at)
+            select(Run)
+            .where(col(Run.parent_run_id) == scenario_id)
+            .order_by(col(Run.created_at))
         )
         results = session.exec(query).all()
 
@@ -972,11 +985,7 @@ def preview(
         console.print(table)
         return
 
-    try:
-        import xarray as xr
-    except ImportError:
-        xr = None
-
+    xr = _optional_xarray()
     if xr is not None and isinstance(data, (xr.Dataset, xr.DataArray)):
         ds: xr.Dataset
         if isinstance(data, xr.DataArray):
@@ -1210,11 +1219,7 @@ class ConsistShell(cmd.Cmd):
                 console.print(table)
                 return
 
-            try:
-                import xarray as xr
-            except ImportError:
-                xr = None
-
+            xr = _optional_xarray()
             if xr is not None and isinstance(data, (xr.Dataset, xr.DataArray)):
                 ds: xr.Dataset
                 if isinstance(data, xr.DataArray):
@@ -1319,11 +1324,7 @@ class ConsistShell(cmd.Cmd):
                 )
                 return
 
-            try:
-                import xarray as xr
-            except ImportError:
-                xr = None
-
+            xr = _optional_xarray()
             if xr is not None and isinstance(data, (xr.Dataset, xr.DataArray)):
                 ds: xr.Dataset
                 if isinstance(data, xr.DataArray):
@@ -1454,9 +1455,9 @@ class ConsistShell(cmd.Cmd):
         print()
         return self.do_exit(arg)
 
-    def emptyline(self) -> None:
+    def emptyline(self) -> bool:
         """Do nothing on empty line (prevent repeating last command)."""
-        pass
+        return False
 
 
 @app.command()

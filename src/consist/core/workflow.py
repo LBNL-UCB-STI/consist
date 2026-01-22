@@ -438,7 +438,9 @@ class ScenarioContext:
                 raise ValueError("ScenarioContext.run requires name when fn is None.")
             resolved_name = name
         else:
-            resolved_name = name or fn.__name__
+            resolved_name = name or getattr(fn, "__name__", None)
+            if resolved_name is None:
+                raise ValueError("ScenarioContext.run requires a run name.")
         resolved_model = model or resolved_name
         if run_id is None:
             run_id = f"{self.run_id}_{resolved_name}_{uuid.uuid4().hex[:8]}"

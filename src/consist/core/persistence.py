@@ -641,13 +641,15 @@ class DatabaseManager:
                 statement = (
                     select(Artifact)
                     .where(Artifact.uri == uri)
-                    .where(Artifact.run_id.is_not(None))  # Must be produced by a run
+                    .where(
+                        col(Artifact.run_id).is_not(None)
+                    )  # Must be produced by a run
                 )
                 # If run_id is specified, filter to only that run (prevents cross-run artifact confusion)
                 if run_id is not None:
                     statement = statement.where(Artifact.run_id == run_id)
 
-                statement = statement.order_by(Artifact.created_at.desc()).limit(1)
+                statement = statement.order_by(col(Artifact.created_at).desc()).limit(1)
                 return session.exec(statement).first()
 
         try:
@@ -694,7 +696,7 @@ class DatabaseManager:
                     .where(Run.config_hash == config_hash)
                     .where(Run.input_hash == input_hash)
                     .where(Run.git_hash == git_hash)
-                    .order_by(Run.created_at.desc())
+                    .order_by(col(Run.created_at).desc())
                     .limit(1)
                 )
                 return session.exec(statement).first()
@@ -714,7 +716,7 @@ class DatabaseManager:
                     select(Run)
                     .where(Run.status == "completed")
                     .where(Run.signature == signature)
-                    .order_by(Run.created_at.desc())
+                    .order_by(col(Run.created_at).desc())
                     .limit(1)
                 )
                 return session.exec(statement).first()
@@ -739,7 +741,7 @@ class DatabaseManager:
                     return session.exec(
                         select(Artifact)
                         .where(Artifact.key == key_or_id)
-                        .order_by(Artifact.created_at.desc())
+                        .order_by(col(Artifact.created_at).desc())
                         .limit(1)
                     ).first()
 
@@ -845,7 +847,7 @@ class DatabaseManager:
                 observations = session.exec(
                     select(ArtifactSchemaObservation)
                     .where(ArtifactSchemaObservation.artifact_id == artifact_id)
-                    .order_by(ArtifactSchemaObservation.observed_at.desc())
+                    .order_by(col(ArtifactSchemaObservation.observed_at).desc())
                 ).all()
 
                 if not observations:
@@ -942,7 +944,7 @@ class DatabaseManager:
                     statement = statement.where(Artifact.key == key)
 
                 results = session.exec(
-                    statement.order_by(Artifact.created_at.desc()).limit(limit)
+                    statement.order_by(col(Artifact.created_at).desc()).limit(limit)
                 ).all()
 
                 for artifact in results:
@@ -970,7 +972,7 @@ class DatabaseManager:
     ) -> List[Run]:
         def _query():
             with Session(self.engine) as session:
-                statement = select(Run).order_by(Run.created_at.desc())
+                statement = select(Run).order_by(col(Run.created_at).desc())
 
                 if status:
                     statement = statement.where(Run.status == status)
@@ -1047,7 +1049,7 @@ class DatabaseManager:
                 if run_id is not None:
                     statement = statement.where(Artifact.run_id == run_id)
 
-                statement = statement.order_by(Artifact.created_at.desc()).limit(1)
+                statement = statement.order_by(col(Artifact.created_at).desc()).limit(1)
                 return session.exec(statement).first()
 
         try:
@@ -1078,7 +1080,9 @@ class DatabaseManager:
     ) -> List[ConfigFacet]:
         def _query():
             with Session(self.engine) as session:
-                statement = select(ConfigFacet).order_by(ConfigFacet.created_at.desc())
+                statement = select(ConfigFacet).order_by(
+                    col(ConfigFacet.created_at).desc()
+                )
                 if namespace:
                     statement = statement.where(ConfigFacet.namespace == namespace)
                 if schema_name:
@@ -1118,7 +1122,7 @@ class DatabaseManager:
                 if namespace:
                     statement = statement.where(RunConfigKV.namespace == namespace)
                 if prefix:
-                    statement = statement.where(RunConfigKV.key.like(f"{prefix}%"))
+                    statement = statement.where(col(RunConfigKV.key).like(f"{prefix}%"))
                 results = session.exec(statement.limit(limit)).all()
                 for row in results:
                     session.expunge(row)
@@ -1203,7 +1207,9 @@ class DatabaseManager:
 
         def _query():
             with Session(self.engine) as session:
-                statement = select(RunConfigKV).where(RunConfigKV.run_id.in_(run_ids))
+                statement = select(RunConfigKV).where(
+                    col(RunConfigKV.run_id).in_(run_ids)
+                )
                 statement = statement.where(RunConfigKV.key == key)
                 if namespace:
                     statement = statement.where(RunConfigKV.namespace == namespace)
@@ -1241,7 +1247,7 @@ class DatabaseManager:
     def get_history(
         self, limit: int = 10, tags: Optional[List[str]] = None
     ) -> pd.DataFrame:
-        query = select(Run).order_by(Run.created_at.desc()).limit(limit)
+        query = select(Run).order_by(col(Run.created_at).desc()).limit(limit)
         try:
             df = pd.read_sql(query, self.engine)
             if not df.empty and tags:
