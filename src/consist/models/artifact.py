@@ -192,9 +192,9 @@ class Artifact(SQLModel, table=True):
         -------
         bool
             True if the artifact's driver is associated with matrix-like data formats
-            (e.g., Zarr, HDF5, NetCDF), False otherwise.
+            (e.g., Zarr, HDF5, NetCDF, OpenMatrix), False otherwise.
         """
-        return self.driver in ("zarr", "h5", "netcdf")
+        return self.driver in ("zarr", "h5", "netcdf", "openmatrix")
 
     @property
     def is_tabular(self) -> bool:

@@ -66,7 +66,25 @@ except ImportError:
     tables = None
 
 T = TypeVar("T", bound=SQLModel)
-LoadResult = Union[pd.DataFrame, pd.Series, "xarray.Dataset", pd.HDFStore]
+
+
+class OpenMatrixFileLike(Protocol):
+    """Minimal file-like surface for OpenMatrix/HDF5 access."""
+
+    def __contains__(self, key: object) -> bool: ...
+
+    def __getitem__(self, key: str) -> Any: ...
+
+    def close(self) -> None: ...
+
+
+LoadResult = Union[
+    pd.DataFrame,
+    pd.Series,
+    "xarray.Dataset",
+    pd.HDFStore,
+    OpenMatrixFileLike,
+]
 
 
 @runtime_checkable
@@ -116,6 +134,18 @@ class HdfStoreArtifact(ArtifactLike, Protocol):
     """Artifact that loads as pandas HDFStore."""
 
     driver: Literal["h5", "hdf5"]
+
+
+class NetCdfArtifact(ArtifactLike, Protocol):
+    """Artifact that loads as xarray.Dataset (NetCDF format)."""
+
+    driver: Literal["netcdf"]
+
+
+class OpenMatrixArtifact(ArtifactLike, Protocol):
+    """Artifact that loads as array-like structure (OpenMatrix format)."""
+
+    driver: Literal["openmatrix"]
 
 
 def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
@@ -1282,6 +1312,55 @@ def is_hdf_artifact(artifact: ArtifactLike) -> TypeGuard[HdfStoreArtifact]:
     return artifact.driver in DriverType.hdf_drivers()
 
 
+def is_netcdf_artifact(artifact: ArtifactLike) -> TypeGuard[NetCdfArtifact]:
+    """
+    Type guard: narrow artifact to NetCDF format.
+
+    Use this when you know an artifact should be NetCDF and want type-safe loading:
+
+    ```python
+    if is_netcdf_artifact(artifact):
+        ds = load(artifact)  # Type checker knows return is xarray.Dataset
+        ds.dims  # IDE autocomplete works!
+    ```
+
+    Parameters
+    ----------
+    artifact : ArtifactLike
+        Artifact to check.
+
+    Returns
+    -------
+    bool
+        True if artifact driver is netcdf.
+    """
+    return artifact.driver == DriverType.NETCDF.value
+
+
+def is_openmatrix_artifact(artifact: ArtifactLike) -> TypeGuard[OpenMatrixArtifact]:
+    """
+    Type guard: narrow artifact to OpenMatrix format.
+
+    Use this when you know an artifact should be OpenMatrix and want type-safe loading:
+
+    ```python
+    if is_openmatrix_artifact(artifact):
+        matrix_data = load(artifact)  # Type checker knows return is appropriate type
+    ```
+
+    Parameters
+    ----------
+    artifact : ArtifactLike
+        Artifact to check.
+
+    Returns
+    -------
+    bool
+        True if artifact driver is openmatrix.
+    """
+    return artifact.driver == DriverType.OPENMATRIX.value
+
+
 # Overload signatures ordered from most specific to least specific
 # Type checkers evaluate overloads in declaration order
 
@@ -1294,6 +1373,26 @@ def load(
     db_fallback: str = "inputs-only",
     **kwargs: Any,
 ) -> "xarray.Dataset": ...
+
+
+@overload
+def load(
+    artifact: NetCdfArtifact,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> "xarray.Dataset": ...
+
+
+@overload
+def load(
+    artifact: OpenMatrixArtifact,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> LoadResult: ...
 
 
 @overload
@@ -1555,6 +1654,20 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
         if xr is None:
             raise ImportError("xarray required for Zarr")
         return xr.open_zarr(path, consolidated=False, **kwargs)
+    elif driver == "netcdf":
+        if xr is None:
+            raise ImportError("xarray required for NetCDF (pip install xarray netCDF4)")
+        return xr.open_dataset(path, **kwargs)
+    elif driver == "openmatrix":
+        # Try openmatrix library first; fall back to h5py if not available
+        try:
+            omx = importlib.import_module("openmatrix")
+            # Return the file object for array-like access; caller manages close.
+            return omx.open_file(path, mode="r")
+        except ImportError:
+            # Fallback to h5py for basic HDF5 access
+            h5py = importlib.import_module("h5py")
+            return h5py.File(path, "r")
     elif driver == "json":
         return pd.read_json(path, **kwargs)
     elif driver == "h5_table":

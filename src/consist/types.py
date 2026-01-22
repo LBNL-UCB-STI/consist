@@ -47,6 +47,8 @@ DriverLiteral: TypeAlias = Literal[
     "parquet",
     "csv",
     "zarr",
+    "netcdf",
+    "openmatrix",
     "json",
     "h5_table",
     "h5",
@@ -86,6 +88,8 @@ class DriverType(str, Enum):
     PARQUET = "parquet"
     CSV = "csv"
     ZARR = "zarr"
+    NETCDF = "netcdf"
+    OPENMATRIX = "openmatrix"
     JSON = "json"
     H5_TABLE = "h5_table"
     H5 = "h5"
@@ -119,6 +123,11 @@ class DriverType(str, Enum):
     def zarr_drivers(cls) -> frozenset[str]:
         """Drivers that load as xarray.Dataset."""
         return frozenset({cls.ZARR.value})
+
+    @classmethod
+    def array_drivers(cls) -> frozenset[str]:
+        """Drivers that load as array/multi-dimensional formats (xarray.Dataset, etc.)."""
+        return frozenset({cls.ZARR.value, cls.NETCDF.value, cls.OPENMATRIX.value})
 
     @classmethod
     def hdf_drivers(cls) -> frozenset[str]:

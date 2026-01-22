@@ -21,6 +21,7 @@ Key functionalities include:
     and consistency.
 """
 
+import importlib
 import uuid
 import pandas as pd
 from typing import (
@@ -62,6 +63,16 @@ try:
 except ImportError:
     zarr = None
     xr = None
+
+try:
+    import h5py
+except ImportError:
+    h5py = None
+
+try:
+    openmatrix = importlib.import_module("openmatrix")
+except ImportError:
+    openmatrix = None
 
 
 def _handle_zarr_metadata(path: str) -> Iterable[Dict[str, Any]]:
@@ -122,6 +133,153 @@ def _handle_zarr_metadata(path: str) -> Iterable[Dict[str, Any]]:
             }
     except Exception as e:
         raise ValueError(f"Failed to extract Zarr metadata from {path}: {e}")
+
+
+def _handle_netcdf_metadata(path: str) -> Iterable[Dict[str, Any]]:
+    """
+    Extracts and yields structural metadata from a NetCDF file.
+
+    Instead of yielding raw pixel or array data, this handler focuses on providing
+    metadata such as variable names, dimensions, shapes, data types, and attributes.
+    This follows the same metadata-only strategy as Zarr ingestion.
+
+    Parameters
+    ----------
+    path : str
+        The file system path to the NetCDF file.
+
+    Yields
+    ------
+    Dict[str, Any]
+        A dictionary representing the metadata for each data variable and coordinate
+        within the NetCDF file. Each dictionary includes keys like 'variable_name',
+        'variable_type' (data or coordinate), 'dims', 'shape', 'dtype', and 'attributes'.
+
+    Raises
+    ------
+    ImportError
+        If `xarray` is not installed.
+    ValueError
+        If an error occurs during the extraction of NetCDF metadata from the specified path.
+    """
+    if not xr:
+        raise ImportError(
+            "xarray is required for NetCDF ingestion (pip install xarray netCDF4)"
+        )
+
+    try:
+        ds = xr.open_dataset(path)
+
+        # 1. Yield Data Variables
+        for var_name, da in ds.data_vars.items():
+            yield {
+                "variable_name": var_name,
+                "variable_type": "data",
+                "dims": list(da.dims),
+                "shape": list(da.shape),
+                "dtype": str(da.dtype),
+                "attributes": dict(da.attrs) if da.attrs else {},
+            }
+
+        # 2. Yield Coordinates
+        for coord_name, da in ds.coords.items():
+            yield {
+                "variable_name": coord_name,
+                "variable_type": "coordinate",
+                "dims": list(da.dims),
+                "shape": list(da.shape),
+                "dtype": str(da.dtype),
+                "attributes": dict(da.attrs) if da.attrs else {},
+            }
+    except Exception as e:
+        raise ValueError(f"Failed to extract NetCDF metadata from {path}: {e}")
+
+
+def _handle_openmatrix_metadata(path: str) -> Iterable[Dict[str, Any]]:
+    """
+    Extracts and yields structural metadata from an OpenMatrix (OMX) file.
+
+    Instead of yielding raw matrix data, this handler focuses on providing
+    metadata such as matrix names, dimensions, shapes, data types, and attributes.
+    This follows the same metadata-only strategy as Zarr and NetCDF ingestion.
+
+    The function attempts to use the `openmatrix` library for proper OMX convention
+    handling, and falls back to `h5py` for basic HDF5 access if openmatrix is unavailable.
+
+    Parameters
+    ----------
+    path : str
+        The file system path to the OpenMatrix file.
+
+    Yields
+    ------
+    Dict[str, Any]
+        A dictionary representing the metadata for each matrix within the OMX file.
+        Each dictionary includes keys like 'matrix_name', 'shape', 'dtype', 'n_rows',
+        'n_cols', and 'attributes'.
+
+    Raises
+    ------
+    ImportError
+        If neither `openmatrix` nor `h5py` is installed.
+    ValueError
+        If an error occurs during the extraction of OMX metadata from the specified path.
+    """
+    try:
+        if openmatrix:
+            # Use openmatrix library for convention-aware handling
+            with openmatrix.open_file(path, mode="r") as f:
+                # List matrices
+                matrix_names = f.list_matrices()
+                for matrix_name in matrix_names:
+                    matrix = f[matrix_name]
+                    yield {
+                        "matrix_name": matrix_name,
+                        "shape": list(matrix.shape),
+                        "dtype": str(matrix.dtype),
+                        "n_rows": matrix.shape[0] if len(matrix.shape) >= 1 else None,
+                        "n_cols": matrix.shape[1] if len(matrix.shape) >= 2 else None,
+                        "attributes": (
+                            dict(matrix.attrs) if hasattr(matrix, "attrs") else {}
+                        ),
+                    }
+        else:
+            # Fallback to h5py for basic HDF5 access
+            if not h5py:
+                raise ImportError(
+                    "h5py or openmatrix is required for OpenMatrix (pip install h5py openmatrix)"
+                )
+
+            with h5py.File(path, "r") as f:
+
+                def walk_matrices(group, prefix=""):
+                    for key, item in group.items():
+                        if isinstance(item, h5py.Dataset):
+                            # This is a matrix dataset
+                            yield {
+                                "matrix_name": key,
+                                "path": prefix + "/" + key if prefix else "/" + key,
+                                "shape": list(item.shape),
+                                "dtype": str(item.dtype),
+                                "n_rows": (
+                                    item.shape[0] if len(item.shape) >= 1 else None
+                                ),
+                                "n_cols": (
+                                    item.shape[1] if len(item.shape) >= 2 else None
+                                ),
+                                "attributes": dict(item.attrs) if item.attrs else {},
+                            }
+                        elif isinstance(item, h5py.Group):
+                            yield from walk_matrices(
+                                item, prefix + "/" + key if prefix else "/" + key
+                            )
+
+                for matrix_record in walk_matrices(f):
+                    yield matrix_record
+    except ImportError:
+        raise
+    except Exception as e:
+        raise ValueError(f"Failed to extract OpenMatrix metadata from {path}: {e}")
 
 
 def _handle_parquet_path(path: str, ctx: Dict[str, Any]) -> Tuple[Any, bool]:
@@ -305,6 +463,12 @@ def ingest_artifact(
 
         elif artifact.driver == "zarr":
             data_source = _handle_zarr_metadata(file_path)
+
+        elif artifact.driver == "netcdf":
+            data_source = _handle_netcdf_metadata(file_path)
+
+        elif artifact.driver == "openmatrix":
+            data_source = _handle_openmatrix_metadata(file_path)
 
         else:
             raise ValueError(f"Ingestion not supported for driver: {artifact.driver}")

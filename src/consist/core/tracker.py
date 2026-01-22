@@ -67,6 +67,8 @@ from consist.core.ingestion import ingest_artifact
 from consist.core.lineage import LineageService
 from consist.core.materialize import materialize_artifacts
 from consist.core.matrix import MatrixViewFactory
+from consist.core.netcdf_views import NetCdfMetadataView
+from consist.core.openmatrix_views import OpenMatrixMetadataView
 from consist.core.queries import RunQueryService
 from consist.core.validation import (
     validate_config_structure,
@@ -3041,6 +3043,130 @@ class Tracker:
             **meta,
         )
 
+    def log_netcdf_file(
+        self,
+        path: Union[str, Path],
+        key: Optional[str] = None,
+        direction: str = "output",
+        **meta: Any,
+    ) -> Artifact:
+        """
+        Log a NetCDF file as an artifact with metadata extraction.
+
+        This method provides convenient logging for NetCDF files, automatically
+        detecting the driver and storing structural metadata about variables,
+        dimensions, and coordinates.
+
+        Parameters
+        ----------
+        path : Union[str, Path]
+            Path to the NetCDF file.
+        key : Optional[str], optional
+            Semantic name for the artifact. If not provided, uses the file stem.
+        direction : str, default "output"
+            Whether this is an "input" or "output" artifact.
+        **meta : Any
+            Additional metadata for the artifact.
+
+        Returns
+        -------
+        Artifact
+            The logged artifact with metadata extracted from the NetCDF structure.
+
+        Raises
+        ------
+        RuntimeError
+            If called outside an active run context.
+        ImportError
+            If xarray is not installed.
+
+        Example
+        -------
+        ```python
+        # Log NetCDF file
+        art = tracker.log_netcdf_file("climate_data.nc", key="temperature")
+        # Optionally ingest metadata
+        tracker.ingest(art)
+        ```
+        """
+        if not self.current_consist:
+            raise RuntimeError("Cannot log artifact outside of a run context.")
+
+        path_obj = Path(path)
+        if key is None:
+            key = path_obj.stem
+
+        artifact = self.log_artifact(
+            str(path_obj),
+            key=key,
+            direction=direction,
+            driver="netcdf",
+            **meta,
+        )
+        return artifact
+
+    def log_openmatrix_file(
+        self,
+        path: Union[str, Path],
+        key: Optional[str] = None,
+        direction: str = "output",
+        **meta: Any,
+    ) -> Artifact:
+        """
+        Log an OpenMatrix (OMX) file as an artifact with metadata extraction.
+
+        This method provides convenient logging for OpenMatrix files, automatically
+        detecting the driver and storing structural metadata about matrices,
+        dimensions, and attributes.
+
+        Parameters
+        ----------
+        path : Union[str, Path]
+            Path to the OpenMatrix file.
+        key : Optional[str], optional
+            Semantic name for the artifact. If not provided, uses the file stem.
+        direction : str, default "output"
+            Whether this is an "input" or "output" artifact.
+        **meta : Any
+            Additional metadata for the artifact.
+
+        Returns
+        -------
+        Artifact
+            The logged artifact with metadata extracted from the OpenMatrix structure.
+
+        Raises
+        ------
+        RuntimeError
+            If called outside an active run context.
+        ImportError
+            If neither h5py nor openmatrix is installed.
+
+        Example
+        -------
+        ```python
+        # Log OpenMatrix file (e.g., ActivitySim travel demand)
+        art = tracker.log_openmatrix_file("demand.omx", key="travel_demand")
+        # Optionally ingest metadata
+        tracker.ingest(art)
+        ```
+        """
+        if not self.current_consist:
+            raise RuntimeError("Cannot log artifact outside of a run context.")
+
+        path_obj = Path(path)
+        if key is None:
+            key = path_obj.stem
+
+        artifact = self.log_artifact(
+            str(path_obj),
+            key=key,
+            direction=direction,
+            driver="openmatrix",
+            **meta,
+        )
+        return artifact
+
     def ingest(
         self,
         artifact: Artifact,
@@ -3684,6 +3810,61 @@ class Tracker:
             model=model,
             status=status,
         )
+
+    def netcdf_metadata(self, concept_key: str) -> NetCdfMetadataView:
+        """
+        Access NetCDF metadata views for a given artifact key.
+
+        This provides convenient access to query and explore NetCDF file structures
+        stored in Consist's metadata catalog.
+
+        Parameters
+        ----------
+        concept_key : str
+            The semantic key identifying the NetCDF artifact.
+
+        Returns
+        -------
+        NetCdfMetadataView
+            A view object with methods to explore variables, dimensions, and attributes.
+
+        Example
+        -------
+        ```python
+        view = tracker.netcdf_metadata("climate")
+        variables = view.get_variables(year=2024)
+        print(view.summary("climate"))
+        ```
+        """
+        return NetCdfMetadataView(self)
+
+    def openmatrix_metadata(self, concept_key: str) -> OpenMatrixMetadataView:
+        """
+        Access OpenMatrix metadata views for a given artifact key.
+
+        This provides convenient access to query and explore OpenMatrix file structures
+        stored in Consist's metadata catalog.
+
+        Parameters
+        ----------
+        concept_key : str
+            The semantic key identifying the OpenMatrix artifact.
+
+        Returns
+        -------
+        OpenMatrixMetadataView
+            A view object with methods to explore matrices, zones, and attributes.
+
+        Example
+        -------
+        ```python
+        view = tracker.openmatrix_metadata("demand")
+        matrices = view.get_matrices(year=2024)
+        zones = view.get_zone_counts()
+        print(view.summary("demand"))
+        ```
+        """
+        return OpenMatrixMetadataView(self)
 
     def materialize(
         self,
