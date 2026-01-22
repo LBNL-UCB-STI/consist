@@ -12,6 +12,7 @@ import shlex
 import json
 import os
 import uuid
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Mapping, Tuple
 
@@ -348,6 +349,242 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> None:
         )
 
     console.print(table)
+
+
+class LineageGraphRenderer:
+    def __init__(
+        self,
+        raw_edges: List[Tuple[str, str]],
+        labels: Dict[str, str],
+        *,
+        max_terminal_nodes: int = 6,
+        row_spacing: int = 6,
+        label_max_width: Optional[int] = None,
+        component_layout: str = "vertical",
+    ) -> None:
+        try:
+            from grandalf.layouts import SugiyamaLayout
+            from grandalf.graphs import Vertex, Edge, Graph
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise ImportError(
+                "Graph rendering requires the 'grandalf' package."
+            ) from exc
+
+        self._sugiyama_layout = SugiyamaLayout
+        self._vertex = Vertex
+        self._edge = Edge
+        self._graph = Graph
+        self._label_max_width = label_max_width
+        self._labels = self._truncate_labels(labels, label_max_width)
+        self._edge_style = "grey50"
+        if component_layout not in {"vertical", "horizontal"}:
+            raise ValueError("component_layout must be 'vertical' or 'horizontal'.")
+        self._component_layout = component_layout
+        self.pruned_inputs = 0
+        self.pruned_outputs = 0
+
+        if max_terminal_nodes < 0:
+            raise ValueError("max_terminal_nodes must be >= 0.")
+        if row_spacing < 1:
+            raise ValueError("row_spacing must be >= 1.")
+
+        self.edges_data = self._prune(raw_edges, max_terminal_nodes)
+
+        nodes_list = set()
+        for parent, child in self.edges_data:
+            nodes_list.update([parent, child])
+        if not nodes_list:
+            raise ValueError("No nodes available to render.")
+
+        vs = {name: self._vertex(name) for name in nodes_list}
+        es = [self._edge(vs[parent], vs[child]) for parent, child in self.edges_data]
+        g = self._graph(vs.values(), es)
+
+        for v in vs.values():
+            label = self._labels.get(v.data, v.data)
+            v.view = type("View", (object,), {"w": len(label) + 2, "h": 2})()
+
+        self.coords: Dict[str, Dict[str, int]] = {}
+        global_x_offset = 0
+        global_y_offset = 0
+
+        for component in g.C:
+            sug = self._sugiyama_layout(component)
+            sug.init_all()
+            sug.draw()
+
+            comp_max_x = 0
+            comp_max_y = 0
+            for layer_idx, layer in enumerate(sug.layers):
+                y_pos = layer_idx * row_spacing
+                for item in layer:
+                    v = getattr(item, "v", item)
+                    if hasattr(v, "data"):
+                        node_id = v.data
+                        label = self._labels.get(node_id, node_id)
+                        curr_x = int(v.view.xy[0]) + global_x_offset
+                        curr_y = y_pos + global_y_offset
+                        self.coords[node_id] = {
+                            "x": curr_x,
+                            "y": curr_y,
+                            "w": len(label) + 2,
+                        }
+                        comp_max_x = max(comp_max_x, curr_x + len(label) + 10)
+                        comp_max_y = max(comp_max_y, curr_y + 4)
+
+            if self._component_layout == "horizontal":
+                global_x_offset = comp_max_x
+            else:
+                global_y_offset = comp_max_y + row_spacing
+
+        min_x = min(c["x"] for c in self.coords.values())
+        for c in self.coords.values():
+            c["x"] -= min_x
+
+        self.width = max(c["x"] + c["w"] for c in self.coords.values()) + 5
+        self.height = max(c["y"] + 4 for c in self.coords.values()) + 2
+        self.grid = [[" " for _ in range(self.width)] for _ in range(self.height)]
+
+    def _prune(self, edges: List[Tuple[str, str]], limit: int) -> List[Tuple[str, str]]:
+        important = {p for p, c in edges if c.startswith("run:")}
+        pruned_edges: List[Tuple[str, str]] = []
+        outputs_by_run: Dict[str, List[str]] = {}
+        inputs_by_run: Dict[str, List[str]] = {}
+
+        indegree: Dict[str, int] = defaultdict(int)
+        outdegree: Dict[str, int] = defaultdict(int)
+        for parent, child in edges:
+            outdegree[parent] += 1
+            indegree[child] += 1
+
+        for parent, child in edges:
+            if (
+                parent.startswith("run:")
+                and not child.startswith("run:")
+                and child not in important
+            ):
+                outputs_by_run.setdefault(parent, []).append(child)
+                continue
+
+            if (
+                child.startswith("run:")
+                and not parent.startswith("run:")
+                and indegree.get(parent, 0) == 0
+                and outdegree.get(parent, 0) == 1
+            ):
+                inputs_by_run.setdefault(child, []).append(parent)
+                continue
+
+            pruned_edges.append((parent, child))
+
+        for run, artifacts in outputs_by_run.items():
+            if limit == 0:
+                if artifacts:
+                    bundle_id = f"bundle-output:{run}:{len(artifacts)}"
+                    label = f"[+{len(artifacts)} files]"
+                    self._labels[bundle_id] = self._clip_label(label)
+                    pruned_edges.append((run, bundle_id))
+                    self.pruned_outputs += len(artifacts)
+                continue
+
+            for art_id in artifacts[:limit]:
+                pruned_edges.append((run, art_id))
+            if len(artifacts) > limit:
+                bundle_id = f"bundle-output:{run}:{len(artifacts)}"
+                label = f"[+{len(artifacts) - limit} files]"
+                self._labels[bundle_id] = self._clip_label(label)
+                pruned_edges.append((run, bundle_id))
+                self.pruned_outputs += len(artifacts) - limit
+
+        for run, artifacts in inputs_by_run.items():
+            if limit == 0:
+                if artifacts:
+                    bundle_id = f"bundle-input:{run}:{len(artifacts)}"
+                    label = f"[+{len(artifacts)} inputs]"
+                    self._labels[bundle_id] = self._clip_label(label)
+                    pruned_edges.append((bundle_id, run))
+                    self.pruned_inputs += len(artifacts)
+                continue
+
+            for art_id in artifacts[:limit]:
+                pruned_edges.append((art_id, run))
+            if len(artifacts) > limit:
+                bundle_id = f"bundle-input:{run}:{len(artifacts)}"
+                label = f"[+{len(artifacts) - limit} inputs]"
+                self._labels[bundle_id] = self._clip_label(label)
+                pruned_edges.append((bundle_id, run))
+                self.pruned_inputs += len(artifacts) - limit
+
+        return pruned_edges
+
+    def _truncate_labels(
+        self, labels: Dict[str, str], max_width: Optional[int]
+    ) -> Dict[str, str]:
+        if max_width is None or max_width <= 3:
+            return labels
+        truncated: Dict[str, str] = {}
+        for node_id, label in labels.items():
+            if len(label) <= max_width:
+                truncated[node_id] = label
+                continue
+            truncated[node_id] = f"{label[: max_width - 3]}..."
+        return truncated
+
+    def _clip_label(self, label: str) -> str:
+        max_width = self._label_max_width
+        if max_width is None or max_width <= 3:
+            return label
+        if len(label) <= max_width:
+            return label
+        return f"{label[: max_width - 3]}..."
+
+    def _put(self, x: int, y: int, char: str, style: Optional[str] = None) -> None:
+        if 0 <= y < len(self.grid) and 0 <= x < len(self.grid[0]):
+            self.grid[y][x] = f"[{style}]{char}[/]" if style else char
+
+    def draw(self) -> str:
+        for parent, child in self.edges_data:
+            if parent not in self.coords or child not in self.coords:
+                continue
+            c1, c2 = self.coords[parent], self.coords[child]
+            x1 = c1["x"] + c1["w"] // 2
+            y1 = c1["y"] + 2
+            x2 = c2["x"] + c2["w"] // 2
+            y2 = c2["y"]
+            mid_y = y1 + (y2 - y1) // 2
+            for y in range(y1 + 1, mid_y + 1):
+                self._put(x1, y, "│", self._edge_style)
+            if x1 != x2:
+                self._put(x1, mid_y, "╰" if x2 > x1 else "╯", self._edge_style)
+                for x in range(min(x1, x2) + 1, max(x1, x2)):
+                    self._put(x, mid_y, "─", self._edge_style)
+                self._put(x2, mid_y, "╮" if x2 > x1 else "╭", self._edge_style)
+            for y in range(mid_y + 1, y2):
+                self._put(x2, y, "│", self._edge_style)
+            self._put(x2, y2, "▼", self._edge_style)
+
+        for node_id, c in self.coords.items():
+            label = self._labels.get(node_id, node_id)
+            if node_id.startswith("bundle:"):
+                style = "dim yellow"
+            elif node_id.startswith("run:"):
+                style = "bold blue"
+            else:
+                style = "bold green"
+            x, y, w = c["x"], c["y"], c["w"]
+            for i in range(w):
+                self._put(x + i, y, "─", style)
+                self._put(x + i, y + 2, "─", style)
+            for i in range(3):
+                self._put(x, y + i, "│", style)
+                self._put(x + w - 1, y + i, "│", style)
+            self._put(x, y, "╭", style)
+            self._put(x + w - 1, y, "╮", style)
+            self._put(x, y + 2, "╰", style)
+            self._put(x + w - 1, y + 2, "╯", style)
+            for i, char in enumerate(label):
+                self._put(x + 1 + i, y + 1, char, style)
+        return "\n".join(["".join(row) for row in self.grid])
 
 
 def _render_run_details(run: "Run") -> None:
@@ -818,6 +1055,263 @@ def lineage(
 
 
 @app.command()
+def graph(
+    run_id: str = typer.Argument(..., help="Run ID or scenario ID to visualize."),
+    db_path: str = typer.Option(
+        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    ),
+    max_terminal: int = typer.Option(
+        6,
+        "--max-terminal",
+        help="Maximum terminal outputs per run before collapsing.",
+    ),
+    label_max: Optional[int] = typer.Option(
+        None,
+        "--label-max",
+        help="Maximum label width (defaults to terminal width heuristic).",
+    ),
+    row_spacing: int = typer.Option(
+        6, "--row-spacing", help="Vertical spacing between graph layers."
+    ),
+    layout: str = typer.Option(
+        "vertical",
+        "--layout",
+        help="Component layout: vertical or horizontal.",
+        case_sensitive=False,
+    ),
+) -> None:
+    """Render a run or scenario lineage graph."""
+    tracker = get_tracker(db_path)
+
+    try:
+        _render_lineage_graph(
+            tracker,
+            run_id,
+            max_terminal=max_terminal,
+            row_spacing=row_spacing,
+            label_max=label_max,
+            layout=layout,
+        )
+    except ImportError as exc:
+        console.print(f"[red]{exc}[/red]")
+        console.print("[yellow]Hint:[/] install with `pip install grandalf`")
+        raise typer.Exit(1)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+
+def _render_lineage_graph(
+    tracker: Tracker,
+    run_id: str,
+    *,
+    max_terminal: int = 6,
+    row_spacing: int = 6,
+    label_max: Optional[int] = None,
+    layout: str = "vertical",
+) -> None:
+    if max_terminal < 0:
+        raise ValueError("max-terminal must be >= 0.")
+    if row_spacing < 1:
+        raise ValueError("row-spacing must be >= 1.")
+    layout_normalized = layout.strip().lower()
+    if layout_normalized not in {"vertical", "horizontal"}:
+        raise ValueError("layout must be 'vertical' or 'horizontal'.")
+
+    from consist.models.run import Run
+
+    console_width = console.size.width
+    if label_max is None:
+        label_max = max(12, min(40, console_width // 3))
+    elif label_max < 6:
+        raise ValueError("label-max must be >= 6.")
+
+    with Session(tracker.engine) as session:
+        scenario_exists = (
+            session.exec(
+                select(Run.id).where(Run.parent_run_id == run_id).limit(1)
+            ).first()
+            is not None
+        )
+
+    if scenario_exists:
+        edges, labels = _build_scenario_graph_edges(
+            tracker, run_id, label_max_width=label_max
+        )
+        title = f"Scenario Graph: {run_id}"
+    else:
+        edges, labels = _build_run_graph_edges(
+            tracker, run_id, label_max_width=label_max
+        )
+        title = f"Run Graph: {run_id}"
+
+    if not edges:
+        console.print("[yellow]No lineage edges found to render.[/yellow]")
+        return
+
+    target_width = max(40, console_width - 4)
+    effective_max_terminal = max_terminal
+    renderer = None
+    while True:
+        renderer = LineageGraphRenderer(
+            edges,
+            labels,
+            max_terminal_nodes=effective_max_terminal,
+            row_spacing=row_spacing,
+            label_max_width=label_max,
+            component_layout=layout_normalized,
+        )
+
+        if renderer.width <= target_width or effective_max_terminal == 0:
+            break
+        effective_max_terminal -= 1
+
+    if (
+        renderer.pruned_inputs > 0
+        or renderer.pruned_outputs > 0
+        or effective_max_terminal != max_terminal
+    ):
+        console.print(
+            "[yellow]Graph trimmed to fit terminal width:[/] "
+            f"{renderer.pruned_inputs} inputs hidden, "
+            f"{renderer.pruned_outputs} outputs hidden "
+            f"(max-terminal={effective_max_terminal})."
+        )
+
+    if renderer.width > target_width:
+        console.print(
+            "[yellow]Graph still exceeds terminal width; consider widening the terminal or lowering --label-max.[/yellow]"
+        )
+
+    console.print(Panel(renderer.draw(), title=title, border_style="cyan"))
+
+
+def _run_node_id(run_id: str) -> str:
+    return f"run:{run_id}"
+
+
+def _artifact_node_id(artifact_id: uuid.UUID) -> str:
+    return f"artifact:{artifact_id}"
+
+
+def _format_artifact_labels(
+    artifacts: Iterable["Artifact"], *, label_max_width: Optional[int] = None
+) -> Dict[str, str]:
+    by_key: Dict[str, List["Artifact"]] = defaultdict(list)
+    for artifact in artifacts:
+        by_key[artifact.key].append(artifact)
+
+    labels: Dict[str, str] = {}
+    max_width = label_max_width
+    for key, items in by_key.items():
+        if len(items) == 1:
+            label = key
+            if max_width is not None and len(label) > max_width:
+                label = f"{label[: max_width - 3]}..."
+            labels[_artifact_node_id(items[0].id)] = label
+            continue
+        for artifact in items:
+            short_id = str(artifact.id).split("-")[0]
+            label = f"{key} ({short_id})"
+            if max_width is not None and len(label) > max_width:
+                label = f"{label[: max_width - 3]}..."
+            labels[_artifact_node_id(artifact.id)] = label
+    return labels
+
+
+def _build_run_graph_edges(
+    tracker: Tracker, run_id: str, *, label_max_width: Optional[int] = None
+) -> Tuple[List[Tuple[str, str]], Dict[str, str]]:
+    run = tracker.get_run(run_id)
+    if not run:
+        raise ValueError(f"Run '{run_id}' not found.")
+
+    run_artifacts = tracker.get_artifacts_for_run(run_id)
+    inputs = sorted(run_artifacts.inputs.values(), key=lambda x: x.key)
+    outputs = sorted(run_artifacts.outputs.values(), key=lambda x: x.key)
+
+    run_label = run.id
+    if label_max_width is not None and len(run_label) > label_max_width:
+        run_label = f"{run_label[: label_max_width - 3]}..."
+    labels: Dict[str, str] = {_run_node_id(run.id): run_label}
+    labels.update(_format_artifact_labels([*inputs, *outputs], label_max_width=label_max_width))
+
+    edges: List[Tuple[str, str]] = []
+    run_node = _run_node_id(run.id)
+    for artifact in inputs:
+        edges.append((_artifact_node_id(artifact.id), run_node))
+    for artifact in outputs:
+        edges.append((run_node, _artifact_node_id(artifact.id)))
+
+    return edges, labels
+
+
+def _build_scenario_graph_edges(
+    tracker: Tracker, scenario_id: str, *, label_max_width: Optional[int] = None
+) -> Tuple[List[Tuple[str, str]], Dict[str, str]]:
+    from consist.models.run import Run, RunArtifactLink
+    from consist.models.artifact import Artifact
+
+    with Session(tracker.engine) as session:
+        runs_result = session.exec(
+            select(Run)
+            .where(Run.parent_run_id == scenario_id)
+            .order_by(Run.created_at)
+        )
+        runs = runs_result.all()
+        if runs and not isinstance(runs[0], Run):
+            runs = [row[0] for row in runs]
+
+        if not runs:
+            raise ValueError(f"No runs found for scenario '{scenario_id}'.")
+
+        run_ids = [run.id for run in runs]
+        rows = session.exec(
+            select(RunArtifactLink.run_id, RunArtifactLink.direction, Artifact)
+            .join(
+                Artifact,
+                Artifact.id == RunArtifactLink.artifact_id,  # ty: ignore[invalid-argument-type]
+            )
+            .where(RunArtifactLink.run_id.in_(run_ids))
+        ).all()
+
+    run_label_base: Dict[str, List["Run"]] = defaultdict(list)
+    for run in runs:
+        run_label_base[run.model_name or run.id].append(run)
+
+    labels: Dict[str, str] = {}
+    for base, items in run_label_base.items():
+        for run in items:
+            label = base
+            if len(items) > 1:
+                short_id = run.id.split("-")[-1][:8]
+                label = f"{base} ({short_id})"
+            if label_max_width is not None and len(label) > label_max_width:
+                label = f"{label[: label_max_width - 3]}..."
+            labels[_run_node_id(run.id)] = label
+    artifacts = [artifact for _, _, artifact in rows]
+    labels.update(_format_artifact_labels(artifacts, label_max_width=label_max_width))
+
+    inputs_by_run: Dict[str, List["Artifact"]] = defaultdict(list)
+    outputs_by_run: Dict[str, List["Artifact"]] = defaultdict(list)
+    for run_id, direction, artifact in rows:
+        if direction == "input":
+            inputs_by_run[run_id].append(artifact)
+        else:
+            outputs_by_run[run_id].append(artifact)
+
+    edges: List[Tuple[str, str]] = []
+    for run in runs:
+        run_node = _run_node_id(run.id)
+        for artifact in sorted(inputs_by_run.get(run.id, []), key=lambda x: x.key):
+            edges.append((_artifact_node_id(artifact.id), run_node))
+        for artifact in sorted(outputs_by_run.get(run.id, []), key=lambda x: x.key):
+            edges.append((run_node, _artifact_node_id(artifact.id)))
+
+    return edges, labels
+
+
+@app.command()
 def summary(
     db_path: str = typer.Option(
         "provenance.duckdb", help="Path to the Consist DuckDB database."
@@ -1073,6 +1567,131 @@ class ConsistShell(cmd.Cmd):
             _render_artifacts_table(self.tracker, arg.strip())
         except Exception as exc:
             console.print(f"[red]Error: {exc}[/red]")
+
+    def do_graph(self, arg: str) -> None:
+        """Render a run/scenario graph. Usage: graph <run_id> [--max-terminal N] [--row-spacing N] [--label-max N] [--layout vertical|horizontal]"""
+        try:
+            args = shlex.split(arg)
+            if not args:
+                console.print("[red]Error: run_id required[/red]")
+                return
+
+            run_id = args[0]
+            max_terminal = 6
+            row_spacing = 6
+            label_max: Optional[int] = None
+            layout = "vertical"
+
+            i = 1
+            while i < len(args):
+                if args[i] == "--max-terminal" and i + 1 < len(args):
+                    max_terminal = _parse_bounded_int(
+                        args[i + 1],
+                        name="max-terminal",
+                        minimum=0,
+                        maximum=MAX_CLI_LIMIT,
+                    )
+                    i += 2
+                elif args[i] == "--row-spacing" and i + 1 < len(args):
+                    row_spacing = _parse_bounded_int(
+                        args[i + 1],
+                        name="row-spacing",
+                        minimum=1,
+                        maximum=MAX_CLI_LIMIT,
+                    )
+                    i += 2
+                elif args[i] == "--label-max" and i + 1 < len(args):
+                    label_max = _parse_bounded_int(
+                        args[i + 1],
+                        name="label-max",
+                        minimum=6,
+                        maximum=MAX_CLI_LIMIT,
+                    )
+                    i += 2
+                elif args[i] == "--layout" and i + 1 < len(args):
+                    layout = args[i + 1]
+                    i += 2
+                else:
+                    i += 1
+
+            _render_lineage_graph(
+                self.tracker,
+                run_id,
+                max_terminal=max_terminal,
+                row_spacing=row_spacing,
+                label_max=label_max,
+                layout=layout,
+            )
+        except ImportError as exc:
+            console.print(f"[red]{exc}[/red]")
+            console.print("[yellow]Hint:[/] install with `pip install grandalf`")
+        except ValueError as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+        except Exception as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+
+    def _recent_graph_ids(self, limit: int = 50) -> List[str]:
+        from consist.models.run import Run
+
+        def _normalize(rows: List[Any]) -> List[str]:
+            if not rows:
+                return []
+            if isinstance(rows[0], str):
+                return rows
+            if isinstance(rows[0], Run):
+                return [row.id for row in rows]
+            return [row[0] for row in rows]
+
+        with Session(self.tracker.engine) as session:
+            run_rows = session.exec(
+                select(Run.id).order_by(Run.created_at.desc()).limit(limit)
+            ).all()
+            scenario_rows = session.exec(
+                select(Run.parent_run_id)
+                .where(Run.parent_run_id.is_not(None))
+                .order_by(Run.created_at.desc())
+                .limit(limit)
+            ).all()
+
+        run_ids = _normalize(run_rows)
+        scenario_ids = [row for row in _normalize(scenario_rows) if row]
+        seen = set()
+        combined: List[str] = []
+        for value in [*run_ids, *scenario_ids]:
+            if value not in seen:
+                combined.append(value)
+                seen.add(value)
+        return combined
+
+    def complete_graph(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+        options = ["--max-terminal", "--row-spacing", "--label-max", "--layout"]
+        layouts = ["vertical", "horizontal"]
+
+        try:
+            args = shlex.split(line)
+        except ValueError:
+            args = line.split()
+
+        if not text.startswith("-") and len(args) <= 2:
+            try:
+                return [
+                    candidate
+                    for candidate in self._recent_graph_ids()
+                    if candidate.startswith(text)
+                ]
+            except Exception:
+                return []
+
+        if args and args[-1] == "--layout":
+            return [opt for opt in layouts if opt.startswith(text)]
+
+        if len(args) >= 2 and args[-2] == "--layout":
+            return [opt for opt in layouts if opt.startswith(text)]
+
+        if text.startswith("-"):
+            return [opt for opt in options if opt.startswith(text)]
+
+        return []
 
     def do_preview(self, arg: str) -> None:
         """Preview an artifact. Usage: preview <artifact_key> [--rows N]"""
