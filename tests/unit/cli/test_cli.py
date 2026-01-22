@@ -429,6 +429,61 @@ def test_schema_export_command_schema_not_found_exits_1(mock_db_session, tmp_pat
         assert "Captured schema not found" in result.stdout
 
 
+def test_schema_export_command_rejects_invalid_prefer_source(mock_db_session, tmp_path):
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker") as m,
+    ):
+        tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
+        assert tracker.db is not None
+        tracker.db.engine = cast(Engine, mock_db_session.get_bind())
+        m.return_value = tracker
+
+        result = runner.invoke(
+            app,
+            [
+                "schema",
+                "export",
+                "--artifact-id",
+                "00000000-0000-0000-0000-000000000000",
+                "--prefer-source",
+                "bogus",
+            ],
+        )
+        assert result.exit_code == 2
+        assert "--prefer-source must be either 'file' or 'duckdb'" in result.stdout
+
+
+def test_schema_export_command_passes_prefer_source(mock_db_session, tmp_path):
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker") as m,
+    ):
+        tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
+        assert tracker.db is not None
+        tracker.db.engine = cast(Engine, mock_db_session.get_bind())
+        m.return_value = tracker
+
+        with patch.object(
+            tracker,
+            "export_schema_sqlmodel",
+            return_value="class MyTable(SQLModel, table=True):\n    pass\n",
+        ) as mock_export:
+            result = runner.invoke(
+                app,
+                [
+                    "schema",
+                    "export",
+                    "--artifact-id",
+                    "00000000-0000-0000-0000-000000000000",
+                    "--prefer-source",
+                    "duckdb",
+                ],
+            )
+        assert result.exit_code == 0
+        assert mock_export.call_args.kwargs["prefer_source"] == "duckdb"
+
+
 def test_validate_paginates_artifacts(tmp_path, monkeypatch):
     db_path = tmp_path / "validate_test.duckdb"
     engine = create_engine(f"duckdb:///{db_path}")

@@ -310,6 +310,11 @@ class Tracker:
         self.lineage = LineageService(self)
 
         self.views = ViewRegistry(self)
+        # Store registered schemas by class name for cross-session lookup.
+        # When ingest() is called in a different Python session, it can look up
+        # a schema by the artifact's schema_name (e.g., "MyDataSchema") if the
+        # tracker was initialized with schemas=[MyDataSchema, ...].
+        self._registered_schemas: Dict[str, Type[SQLModel]] = {}
         if schemas:
             if not self.db:
                 logging.warning(
@@ -317,6 +322,8 @@ class Tracker:
                 )
             else:
                 for schema in schemas:
+                    # Register by class name so we can look it up later
+                    self._registered_schemas[schema.__name__] = schema
                     self.view(schema)
 
         # In-Memory State (The Source of Truth)
@@ -516,6 +523,7 @@ class Tracker:
         abstract: bool = True,
         include_system_cols: bool = False,
         include_stats_comments: bool = True,
+        prefer_source: Optional[Literal["file", "duckdb"]] = None,
     ) -> str:
         """
         Export a captured artifact schema as a SQLModel stub for manual editing.
@@ -527,9 +535,11 @@ class Tracker:
         Parameters
         ----------
         schema_id : Optional[str], optional
-            Schema identifier to export (from the schema registry).
+            Schema identifier to export (from the schema registry). If provided,
+            prefer_source is ignored and this specific schema is used.
         artifact_id : Optional[Union[str, uuid.UUID]], optional
-            Artifact ID to export the associated schema.
+            Artifact ID to export the associated schema. When used, the schema
+            selection respects the prefer_source parameter.
         out_path : Optional[Path], optional
             If provided, write the stub to this path and return its contents.
         table_name : Optional[str], optional
@@ -542,6 +552,20 @@ class Tracker:
             Whether to include Consist system columns in the stub.
         include_stats_comments : bool, default True
             Whether to include column-level stats as comments.
+        prefer_source : {"file", "duckdb"}, optional
+            Preference hint for when user_provided schema does not exist. This is
+            useful when an artifact has both a file profile (pandas dtypes) and a
+            duckdb profile (post-ingestion types). Ignored if schema_id is provided
+            directly.
+
+            IMPORTANT: User-provided schemas (manually curated with FK constraints,
+            indexes, etc.) are ALWAYS preferred if they exist. This parameter does
+            not override user_provided schemas.
+
+            - "file": Prefer the original file schema (CSV/Parquet with pandas dtypes)
+            - "duckdb": Prefer the post-ingestion schema from the DuckDB table
+            - None (default): Prefer file, as it preserves richer type information
+              (e.g., pandas category)
 
         Returns
         -------
@@ -554,6 +578,17 @@ class Tracker:
             If the tracker has no database configured or if the selector is invalid.
         KeyError
             If no schema is found for the provided selector.
+
+        Examples
+        --------
+        Export file schema (original raw file dtypes):
+        >>> tracker.export_schema_sqlmodel(artifact_id=art.id)
+
+        Export ingested table schema (after dlt normalization):
+        >>> tracker.export_schema_sqlmodel(artifact_id=art.id, prefer_source="duckdb")
+
+        Export a specific schema directly by ID:
+        >>> tracker.export_schema_sqlmodel(schema_id="abc123xyz")
         """
         if not self.db:
             raise ValueError("Schema export requires a configured database (db_path).")
@@ -563,13 +598,19 @@ class Tracker:
         backfill_ordinals = self.access_mode != "read_only"
 
         if artifact_id is not None:
+            # When fetching by artifact, pass through the source preference.
+            # This allows users to choose between file and duckdb profiles.
             artifact_uuid = (
                 uuid.UUID(artifact_id) if isinstance(artifact_id, str) else artifact_id
             )
             fetched = self.db.get_artifact_schema_for_artifact(
-                artifact_id=artifact_uuid, backfill_ordinals=backfill_ordinals
+                artifact_id=artifact_uuid,
+                backfill_ordinals=backfill_ordinals,
+                prefer_source=prefer_source,
             )
         else:
+            # When fetching by schema_id directly, we ignore prefer_source
+            # (the user has already specified which schema they want).
             assert schema_id is not None
             fetched = self.db.get_artifact_schema(
                 schema_id=schema_id, backfill_ordinals=backfill_ordinals
@@ -2624,6 +2665,32 @@ class Tracker:
                     artifact_obj.uri,
                 )
 
+        # Store user-provided schema if one was given.
+        # User-provided schemas (manually curated with FK constraints, indexes, etc.)
+        # are stored with source="user_provided" and will be preferred over
+        # auto-profiled schemas (file or duckdb) during export.
+        # NOTE: Schema persistence requires a configured database. Without a DB,
+        # schema_name will not be set in artifact metadata, so registry-based
+        # auto-detection in ingest() won't work (but explicit schema parameter will).
+        if (
+            schema is not None
+            and artifact_obj.is_tabular
+            and self.current_consist is not None
+        ):
+            try:
+                self.artifact_schemas.profile_user_provided_schema(
+                    artifact=artifact_obj,
+                    run=self.current_consist.run,
+                    schema_model=schema,
+                    source="user_provided",
+                )
+            except Exception as e:
+                logging.warning(
+                    "[Consist] Failed to store user-provided schema for artifact=%s: %s",
+                    getattr(artifact_obj, "key", None),
+                    e,
+                )
+
         return artifact_obj
 
     def log_dataframe(
@@ -2991,8 +3058,11 @@ class Tracker:
         Parameters
         ----------
         artifact : Artifact
-            The artifact object representing the data being ingested. Its metadata
-            might include schema information.
+            The artifact object representing the data being ingested. If the artifact
+            was logged with a schema (e.g., ``log_artifact(path, schema=MySchema)``)
+            and that schema was registered with the Tracker at initialization
+            (e.g., ``Tracker(..., schemas=[MySchema])``), it will be automatically
+            looked up and used for ingestion.
         data : Optional[Union[Iterable[Dict[str, Any]], Any]], optional
             An iterable (e.g., list of dicts, generator) where each item represents a
             row of data to be ingested. If `data` is omitted, Consist attempts to
@@ -3000,7 +3070,10 @@ class Tracker:
             Can also be other data types that `dlt` can handle directly (e.g., Pandas DataFrame).
         schema : Optional[Type[SQLModel]], optional
             An optional SQLModel class that defines the expected schema for the ingested data.
-            If provided, `dlt` will use this for strict validation.
+            If provided, `dlt` will use this for strict validation and this parameter
+            takes precedence over any auto-detected schema. If not provided, Consist will
+            automatically look up the schema by name from schemas registered in Tracker.__init__
+            (using artifact.meta["schema_name"]).
         run : Optional[Run], optional
             If provided, tags data with this run's ID (Offline Mode).
             If None, uses the currently active run (Online Mode).
@@ -3022,14 +3095,54 @@ class Tracker:
             an active run context.
         Exception
             Any exception raised by the underlying `dlt` ingestion process.
+
+        Examples
+        --------
+        Auto-detected schema workflow (register schemas at tracker init):
+
+        >>> tracker = Tracker(..., schemas=[MyDataSchema])
+        >>> art = tracker.log_artifact(file.csv, schema=MyDataSchema)
+        >>> tracker.ingest(art, data=df)  # Automatically looks up and uses MyDataSchema
+
+        Cross-session workflow (schemas persist in metadata):
+
+        >>> # Session 1:
+        >>> tracker = Tracker(..., schemas=[MyDataSchema])
+        >>> art = tracker.log_artifact(file.csv, schema=MyDataSchema)
+        >>> # Session 2:
+        >>> tracker2 = Tracker(..., schemas=[MyDataSchema])
+        >>> art2 = tracker2.get_artifact("mydata")
+        >>> tracker2.ingest(art2, data=df)  # Looks up MyDataSchema by artifact's schema_name
+
+        Override auto-detection (explicit schema always wins):
+
+        >>> tracker.ingest(art, data=df, schema=DifferentSchema)  # Uses DifferentSchema
         """
         self._ensure_write_data()
+
+        # Auto-detect schema from artifact if not explicitly provided.
+        # Look up the schema by name in the tracker's registered schemas
+        # (schemas passed to Tracker.__init__).
+        resolved_schema = schema
+        if resolved_schema is None:
+            schema_name = (
+                artifact.meta.get("schema_name")
+                if hasattr(artifact, "meta") and isinstance(artifact.meta, dict)
+                else None
+            )
+            if schema_name and schema_name in self._registered_schemas:
+                resolved_schema = self._registered_schemas[schema_name]
+                logging.debug(
+                    "[Consist] Resolved schema '%s' for artifact=%s from registered schemas",
+                    schema_name,
+                    getattr(artifact, "key", None),
+                )
 
         return ingest_artifact(
             tracker=self,
             artifact=artifact,
             data=data,
-            schema=schema,
+            schema=resolved_schema,
             run=run,
             profile_schema=profile_schema,
         )

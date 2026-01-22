@@ -9,9 +9,12 @@ These tests validate the new "deduped schema" feature:
 """
 
 import json
+import uuid
+from typing import Optional
 
-from sqlmodel import Session, select
+from sqlmodel import SQLModel, Session, select
 
+from consist.models.artifact import Artifact
 from consist.models.artifact_schema import (
     ArtifactSchema,
     ArtifactSchemaField,
@@ -167,3 +170,219 @@ def test_profile_duckdb_table_respects_size_limits(tracker, monkeypatch):
         assert result.inline_profile_json is None
         assert result.summary["truncated"]["schema_json"] is True
         assert result.schema_json is None
+
+
+def test_profile_user_provided_schema_persists_fields_and_meta(tracker, sample_csv):
+    class UserSchema(SQLModel):
+        id: int
+        name: str
+        optional_count: Optional[int] = None
+
+    with tracker.start_run("user_schema_run", "demo") as t:
+        artifact = t.log_artifact(
+            sample_csv("user_schema.csv"), key="user_schema", schema=UserSchema
+        )
+
+        schema_id = artifact.meta.get("schema_id")
+        assert schema_id
+        assert artifact.meta.get("schema_name") == "UserSchema"
+        assert artifact.meta.get("schema_summary", {}).get("n_columns") == 3
+
+        with Session(t.engine) as session:
+            schema_row = session.get(ArtifactSchema, schema_id)
+            assert schema_row is not None
+
+            fields = session.exec(
+                select(ArtifactSchemaField).where(
+                    ArtifactSchemaField.schema_id == schema_id
+                )
+            ).all()
+            fields_by_name = {field.name: field for field in fields}
+            assert fields_by_name["id"].logical_type == "integer"
+            assert fields_by_name["id"].nullable is False
+            assert fields_by_name["name"].logical_type == "varchar"
+            assert fields_by_name["name"].nullable is False
+            assert fields_by_name["optional_count"].logical_type == "integer"
+            assert fields_by_name["optional_count"].nullable is True
+
+            observations = session.exec(
+                select(ArtifactSchemaObservation).where(
+                    ArtifactSchemaObservation.artifact_id == artifact.id
+                )
+            ).all()
+            assert len(observations) == 1
+            assert observations[0].source == "user_provided"
+            assert observations[0].schema_id == schema_id
+
+
+def test_get_artifact_schema_for_artifact_prefers_user_provided(tracker):
+    artifact_id = uuid.uuid4()
+    artifact = Artifact(
+        id=artifact_id,
+        key="artifact_pref",
+        uri="inputs://artifact.csv",
+        driver="csv",
+        hash="abc",
+    )
+
+    schema_user = "schema_user"
+    schema_file = "schema_file"
+    schema_duckdb = "schema_duckdb"
+
+    with Session(tracker.engine) as session:
+        session.add(artifact)
+        session.add(
+            ArtifactSchema(
+                id=schema_user,
+                summary_json={"table_name": "user_table"},
+                profile_version=1,
+            )
+        )
+        session.add(
+            ArtifactSchema(
+                id=schema_file,
+                summary_json={"table_name": "file_table"},
+                profile_version=1,
+            )
+        )
+        session.add(
+            ArtifactSchema(
+                id=schema_duckdb,
+                summary_json={"table_name": "duckdb_table"},
+                profile_version=1,
+            )
+        )
+        session.add(
+            ArtifactSchemaField(
+                schema_id=schema_user,
+                ordinal_position=1,
+                name="user_col",
+                logical_type="varchar",
+                nullable=True,
+            )
+        )
+        session.add(
+            ArtifactSchemaField(
+                schema_id=schema_file,
+                ordinal_position=1,
+                name="file_col",
+                logical_type="varchar",
+                nullable=True,
+            )
+        )
+        session.add(
+            ArtifactSchemaField(
+                schema_id=schema_duckdb,
+                ordinal_position=1,
+                name="duckdb_col",
+                logical_type="varchar",
+                nullable=True,
+            )
+        )
+        session.add(
+            ArtifactSchemaObservation(
+                artifact_id=artifact_id,
+                schema_id=schema_file,
+                source="file",
+            )
+        )
+        session.add(
+            ArtifactSchemaObservation(
+                artifact_id=artifact_id,
+                schema_id=schema_duckdb,
+                source="duckdb",
+            )
+        )
+        session.add(
+            ArtifactSchemaObservation(
+                artifact_id=artifact_id,
+                schema_id=schema_user,
+                source="user_provided",
+            )
+        )
+        session.commit()
+
+    fetched = tracker.db.get_artifact_schema_for_artifact(
+        artifact_id=artifact_id, prefer_source="duckdb"
+    )
+    assert fetched is not None
+    schema, _ = fetched
+    assert schema.id == schema_user
+
+
+def test_get_artifact_schema_for_artifact_respects_prefer_source(tracker):
+    artifact_id = uuid.uuid4()
+    artifact = Artifact(
+        id=artifact_id,
+        key="artifact_pref_no_user",
+        uri="inputs://artifact_no_user.csv",
+        driver="csv",
+        hash="def",
+    )
+
+    schema_file = "schema_file_only"
+    schema_duckdb = "schema_duckdb_only"
+
+    with Session(tracker.engine) as session:
+        session.add(artifact)
+        session.add(
+            ArtifactSchema(
+                id=schema_file,
+                summary_json={"table_name": "file_table"},
+                profile_version=1,
+            )
+        )
+        session.add(
+            ArtifactSchema(
+                id=schema_duckdb,
+                summary_json={"table_name": "duckdb_table"},
+                profile_version=1,
+            )
+        )
+        session.add(
+            ArtifactSchemaField(
+                schema_id=schema_file,
+                ordinal_position=1,
+                name="file_col",
+                logical_type="varchar",
+                nullable=True,
+            )
+        )
+        session.add(
+            ArtifactSchemaField(
+                schema_id=schema_duckdb,
+                ordinal_position=1,
+                name="duckdb_col",
+                logical_type="varchar",
+                nullable=True,
+            )
+        )
+        session.add(
+            ArtifactSchemaObservation(
+                artifact_id=artifact_id,
+                schema_id=schema_file,
+                source="file",
+            )
+        )
+        session.add(
+            ArtifactSchemaObservation(
+                artifact_id=artifact_id,
+                schema_id=schema_duckdb,
+                source="duckdb",
+            )
+        )
+        session.commit()
+
+    fetched_default = tracker.db.get_artifact_schema_for_artifact(
+        artifact_id=artifact_id
+    )
+    assert fetched_default is not None
+    schema_default, _ = fetched_default
+    assert schema_default.id == schema_file
+
+    fetched_duckdb = tracker.db.get_artifact_schema_for_artifact(
+        artifact_id=artifact_id, prefer_source="duckdb"
+    )
+    assert fetched_duckdb is not None
+    schema_duckdb_row, _ = fetched_duckdb
+    assert schema_duckdb_row.id == schema_duckdb

@@ -95,3 +95,4 @@ def test_parse_duckdb_type_pandas_fallbacks():
     assert parse_duckdb_type("bool").sqlalchemy_type_expr == "Boolean"
     assert parse_duckdb_type("datetime64[ns]").sqlalchemy_type_expr == "DateTime"
     assert parse_duckdb_type("date32").sqlalchemy_type_expr == "Date"
+    assert parse_duckdb_type("category").sqlalchemy_type_expr == "String"

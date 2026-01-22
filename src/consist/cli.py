@@ -245,11 +245,23 @@ def schema_export(
         "--abstract/--concrete",
         help="Export as an abstract SQLModel class (importable without defining a primary key).",
     ),
+    prefer_source: Optional[str] = typer.Option(
+        None,
+        "--prefer-source",
+        help="Preference hint for when user_provided schema does not exist: 'file' (original CSV/Parquet dtypes) or 'duckdb' (post-ingestion schema). User-provided schemas are ALWAYS preferred if they exist and cannot be overridden.",
+    ),
     db_path: str = typer.Option(
         "provenance.duckdb", help="Path to the DuckDB database."
     ),
 ) -> None:
-    """Export a captured artifact schema as an editable SQLModel stub."""
+    """Export a captured artifact schema as an editable SQLModel stub.
+
+    When an artifact has multiple schema profiles (file, duckdb, user_provided):
+    - User-provided schemas are ALWAYS preferred (they represent manual curation)
+    - If no user_provided schema exists, file schema is preferred by default
+      (preserves richer type information like pandas category)
+    - Use --prefer-source to specify a preference when user_provided is unavailable.
+    """
     selectors = [schema_id, artifact_id, artifact_key]
     if sum(1 for selector in selectors if selector is not None) != 1:
         console.print(
@@ -262,6 +274,11 @@ def schema_export(
         except ValueError:
             console.print("[red]--artifact-id must be a UUID[/red]")
             raise typer.Exit(2)
+
+    # Validate prefer_source if provided
+    if prefer_source is not None and prefer_source not in ("file", "duckdb"):
+        console.print("[red]--prefer-source must be either 'file' or 'duckdb'[/red]")
+        raise typer.Exit(2)
 
     tracker = get_tracker(db_path)
     if artifact_key is not None:
@@ -280,6 +297,7 @@ def schema_export(
             abstract=abstract,
             include_system_cols=include_system_cols,
             include_stats_comments=include_stats_comments,
+            prefer_source=prefer_source,
         )
     except KeyError:
         console.print("[red]Captured schema not found for the provided selector.[/red]")

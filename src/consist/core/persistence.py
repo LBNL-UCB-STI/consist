@@ -4,7 +4,7 @@ import logging
 import re
 import uuid
 import json
-from typing import Optional, List, Callable, Any, Dict, Tuple, TYPE_CHECKING
+from typing import Optional, List, Callable, Any, Dict, Tuple, TYPE_CHECKING, Literal
 
 import pandas as pd
 from sqlalchemy.exc import OperationalError, DatabaseError
@@ -785,20 +785,108 @@ class DatabaseManager:
         return schema, fields_sorted
 
     def get_artifact_schema_for_artifact(
-        self, *, artifact_id: uuid.UUID, backfill_ordinals: bool = True
+        self,
+        *,
+        artifact_id: uuid.UUID,
+        backfill_ordinals: bool = True,
+        prefer_source: Optional[Literal["file", "duckdb"]] = None,
     ) -> Optional[Tuple[ArtifactSchema, List[ArtifactSchemaField]]]:
-        def _query_schema_id() -> Optional[str]:
-            with Session(self.engine) as session:
-                artifact = session.get(Artifact, artifact_id)
-                if artifact is None:
-                    return None
-                meta = getattr(artifact, "meta", None) or {}
-                schema_id = meta.get("schema_id")
-                return schema_id if isinstance(schema_id, str) and schema_id else None
+        """
+        Fetch the schema for an artifact, optionally preferring a specific profiling source.
 
-        schema_id = self.execute_with_retry(_query_schema_id)
+        This method queries the artifact_schema_observation table to find all recorded
+        schema profiles for the artifact, then selects one based on source preference.
+
+        Parameters
+        ----------
+        artifact_id : uuid.UUID
+            The artifact to fetch the schema for.
+        backfill_ordinals : bool, default True
+            If True, automatically infer missing column ordinal positions from column order.
+        prefer_source : {"file", "duckdb"}, optional
+            Preference hint for when user_provided schema does not exist. If specified
+            and no user_provided schema is available, prefer schemas from this source.
+            If the preferred source has no observations, falls back to the default order
+            (file > duckdb). If None, uses the default preference order.
+            NOTE: prefer_source does NOT override user_provided schemas. User-provided
+            schemas are unconditionally preferred because they represent manually-curated
+            production-ready definitions.
+
+        Returns
+        -------
+        Optional[Tuple[ArtifactSchema, List[ArtifactSchemaField]]]
+            The selected schema and its fields, or None if no schema is found.
+
+        Notes
+        -----
+        Multiple profiling sources may have observed the same artifact:
+        - "user_provided": Manual schema defined by the user (ALWAYS preferred)
+        - "file": Schema inferred from the raw file (CSV/Parquet) using pandas dtypes
+        - "duckdb": Schema from the DuckDB table after dlt ingestion
+
+        Selection order:
+        1. If user_provided exists, return it (unconditional, cannot be overridden)
+        2. If prefer_source is specified and available, return it
+        3. Otherwise, use default order: file > duckdb
+
+        This ensures that manually-curated schemas with FK constraints and indexes
+        are never accidentally replaced by auto-profiled schemas.
+        """
+
+        def _query_observations() -> Optional[str]:
+            """
+            Query all schema observations for this artifact and apply preference logic
+            to select the best schema_id.
+            """
+            with Session(self.engine) as session:
+                # Fetch all observations for this artifact, most recent first.
+                # We order by observed_at DESC so that if the same source has multiple
+                # observations, we get the most recent one.
+                observations = session.exec(
+                    select(ArtifactSchemaObservation)
+                    .where(ArtifactSchemaObservation.artifact_id == artifact_id)
+                    .order_by(ArtifactSchemaObservation.observed_at.desc())
+                ).all()
+
+                if not observations:
+                    return None
+
+                # User-provided schemas are ALWAYS preferred if they exist, because they
+                # represent manually-curated, production-ready definitions with FK constraints,
+                # indexes, etc. This is unconditional: prefer_source does not override it.
+                user_provided_obs = next(
+                    (obs for obs in observations if obs.source == "user_provided"), None
+                )
+                if user_provided_obs:
+                    return user_provided_obs.schema_id
+
+                # If user explicitly requested a source and user_provided doesn't exist,
+                # use their preference.
+                if prefer_source:
+                    matching = next(
+                        (obs for obs in observations if obs.source == prefer_source),
+                        None,
+                    )
+                    if matching:
+                        return matching.schema_id
+
+                # Fall back to default preference order. File profiles preserve more type
+                # information than database profiles (e.g., pandas category vs VARCHAR),
+                # so file > duckdb (when user_provided is not available).
+                default_source_order = ["file", "duckdb"]
+                for source in default_source_order:
+                    matching = next(
+                        (obs for obs in observations if obs.source == source), None
+                    )
+                    if matching:
+                        return matching.schema_id
+
+                return None
+
+        schema_id = self.execute_with_retry(_query_observations)
         if schema_id is None:
             return None
+
         return self.get_artifact_schema(
             schema_id=schema_id, backfill_ordinals=backfill_ordinals
         )

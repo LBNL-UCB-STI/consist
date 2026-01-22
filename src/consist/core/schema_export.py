@@ -184,6 +184,12 @@ def parse_duckdb_type(logical_type: str) -> _TypeSpec:
             sqlalchemy_type_expr="String",
             sqlalchemy_imports={"String"},
         )
+    if t == "category":
+        return _TypeSpec(
+            python_type="str",
+            sqlalchemy_type_expr="String",
+            sqlalchemy_imports={"String"},
+        )
     if t in {"datetime64[ns]", "datetime64[ns, tz]"}:
         return _TypeSpec(
             python_type="datetime.datetime",
