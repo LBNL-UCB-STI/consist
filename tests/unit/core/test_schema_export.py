@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from consist.core.schema_export import render_sqlmodel_stub
+from consist.core.schema_export import parse_duckdb_type, render_sqlmodel_stub
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 
 
@@ -84,3 +84,14 @@ def test_render_sqlmodel_stub_can_include_system_cols():
     ]
     code = render_sqlmodel_stub(schema=schema, fields=fields, include_system_cols=True)
     assert "consist_run_id" in code
+
+
+def test_parse_duckdb_type_pandas_fallbacks():
+    assert parse_duckdb_type("int64").sqlalchemy_type_expr == "BigInteger"
+    assert parse_duckdb_type("uint32").sqlalchemy_type_expr == "BigInteger"
+    assert parse_duckdb_type("float64").sqlalchemy_type_expr == "Float"
+    assert parse_duckdb_type("object").sqlalchemy_type_expr == "String"
+    assert parse_duckdb_type("string[python]").sqlalchemy_type_expr == "String"
+    assert parse_duckdb_type("bool").sqlalchemy_type_expr == "Boolean"
+    assert parse_duckdb_type("datetime64[ns]").sqlalchemy_type_expr == "DateTime"
+    assert parse_duckdb_type("date32").sqlalchemy_type_expr == "Date"

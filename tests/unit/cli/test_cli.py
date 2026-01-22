@@ -399,7 +399,10 @@ def test_schema_export_command_requires_selector(mock_db_session, tmp_path):
 
         result = runner.invoke(app, ["schema", "export"])
         assert result.exit_code == 2
-        assert "Provide exactly one of --schema-id or --artifact-id" in result.stdout
+        assert (
+            "Provide exactly one of --schema-id, --artifact-id, or --artifact-key"
+            in result.stdout
+        )
 
 
 def test_schema_export_command_schema_not_found_exits_1(mock_db_session, tmp_path):

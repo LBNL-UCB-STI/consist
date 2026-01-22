@@ -44,7 +44,7 @@ def test_schema_command_uses_db_profile_when_available(tmp_path: Path, capsys) -
         session.commit()
 
     shell = ConsistShell(tracker)
-    shell.do_schema("test_artifact")
+    shell.do_schema_profile("test_artifact")
 
     captured = capsys.readouterr().out
     assert "Schema: test_artifact" in captured
