@@ -42,6 +42,7 @@ from typing import (
 from sqlmodel import SQLModel
 from consist.models.artifact import Artifact
 from consist.models.run import Run
+from consist.core.netcdf_utils import resolve_netcdf_engine
 from consist.tools.file_batches import yield_file_batches
 
 # Optional dependency: `dlt` is only required when using ingestion helpers.
@@ -176,11 +177,18 @@ def _handle_netcdf_metadata(path: str) -> Iterable[Dict[str, Any]]:
     """
     if not xr:
         raise ImportError(
-            "xarray is required for NetCDF ingestion (pip install xarray netCDF4)"
+            "xarray is required for NetCDF ingestion (pip install xarray netCDF4 h5netcdf)"
         )
 
     try:
-        ds = xr.open_dataset(path)
+        engine = resolve_netcdf_engine()
+        if engine:
+            try:
+                ds = xr.open_dataset(path, engine=engine)
+            except Exception:
+                ds = xr.open_dataset(path)
+        else:
+            ds = xr.open_dataset(path)
 
         # 1. Yield Data Variables
         for var_name, da in ds.data_vars.items():

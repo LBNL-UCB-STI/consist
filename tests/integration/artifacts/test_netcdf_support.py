@@ -9,7 +9,7 @@ from consist.types import DriverType
 xr = pytest.importorskip("xarray")
 
 
-def test_netcdf_loading(tracker: Tracker):
+def test_netcdf_loading(tracker: Tracker, write_netcdf):
     """
     Tests loading a NetCDF file as an xarray.Dataset.
 
@@ -34,7 +34,7 @@ def test_netcdf_loading(tracker: Tracker):
             "time": np.arange(10),
         },
     )
-    ds.to_netcdf(netcdf_path)
+    write_netcdf(ds, netcdf_path)
 
     # 2. Log the artifact
     with tracker.start_run("run_netcdf", model="test_model"):
@@ -60,7 +60,7 @@ def test_netcdf_loading(tracker: Tracker):
         assert loaded.dims["time"] == 10
 
 
-def test_netcdf_metadata_ingestion(tracker: Tracker):
+def test_netcdf_metadata_ingestion(tracker: Tracker, write_netcdf):
     """
     Tests metadata ingestion from NetCDF file into DuckDB.
 
@@ -88,7 +88,7 @@ def test_netcdf_metadata_ingestion(tracker: Tracker):
         },
         attrs={"source": "test_data", "version": "1.0"},
     )
-    ds.to_netcdf(netcdf_path)
+    write_netcdf(ds, netcdf_path)
 
     # 2. Log and ingest
     with tracker.start_run("run_netcdf_ingest", model="test_model"):
@@ -122,7 +122,7 @@ def test_netcdf_metadata_ingestion(tracker: Tracker):
         assert "lon" in var_names  # Coordinates should be included
 
 
-def test_netcdf_artifact_properties(tracker: Tracker):
+def test_netcdf_artifact_properties(tracker: Tracker, write_netcdf):
     """
     Tests that NetCDF artifacts have correct properties.
 
@@ -137,7 +137,7 @@ def test_netcdf_artifact_properties(tracker: Tracker):
         {"var": (("x",), np.arange(5))},
         coords={"x": np.arange(5)},
     )
-    ds.to_netcdf(netcdf_path)
+    write_netcdf(ds, netcdf_path)
 
     with tracker.start_run("run_props", model="test"):
         artifact = tracker.log_artifact(
@@ -151,7 +151,7 @@ def test_netcdf_artifact_properties(tracker: Tracker):
         assert artifact.is_tabular is False
 
 
-def test_netcdf_type_guards(tracker: Tracker):
+def test_netcdf_type_guards(tracker: Tracker, write_netcdf):
     """
     Tests type guards for NetCDF artifacts.
 
@@ -165,7 +165,7 @@ def test_netcdf_type_guards(tracker: Tracker):
     netcdf_path.parent.mkdir(parents=True, exist_ok=True)
 
     ds = xr.Dataset({"var": (("x",), np.arange(5))})
-    ds.to_netcdf(netcdf_path)
+    write_netcdf(ds, netcdf_path)
 
     with tracker.start_run("run_guard", model="test"):
         artifact = tracker.log_artifact(

@@ -12,7 +12,7 @@ h5py = pytest.importorskip("h5py")
 class TestNetCdfMetadataView:
     """Tests for NetCDF metadata views."""
 
-    def test_get_variables(self, tracker: Tracker):
+    def test_get_variables(self, tracker: Tracker, write_netcdf):
         """Test querying all variables in a NetCDF artifact."""
         if not tracker.engine:
             pytest.skip("Database not configured")
@@ -32,7 +32,7 @@ class TestNetCdfMetadataView:
                 "time": np.arange(100),
             },
         )
-        ds.to_netcdf(netcdf_path)
+        write_netcdf(ds, netcdf_path)
 
         with tracker.start_run("run_nc_view", model="test"):
             artifact = tracker.log_artifact(
@@ -52,7 +52,7 @@ class TestNetCdfMetadataView:
             assert "lon" in variables["variable_name"].values
             assert "time" in variables["variable_name"].values
 
-    def test_get_dimensions(self, tracker: Tracker):
+    def test_get_dimensions(self, tracker: Tracker, write_netcdf):
         """Test extracting dimensions from NetCDF metadata."""
         if not tracker.engine:
             pytest.skip("Database not configured")
@@ -67,7 +67,7 @@ class TestNetCdfMetadataView:
             },
             coords={"x": np.arange(5), "y": np.arange(10), "z": np.arange(15)},
         )
-        ds.to_netcdf(netcdf_path)
+        write_netcdf(ds, netcdf_path)
 
         with tracker.start_run("run_dims", model="test"):
             artifact = tracker.log_artifact(
@@ -82,7 +82,7 @@ class TestNetCdfMetadataView:
             assert dims["y"] == 10
             assert dims["z"] == 15
 
-    def test_get_data_variables(self, tracker: Tracker):
+    def test_get_data_variables(self, tracker: Tracker, write_netcdf):
         """Test filtering to only data variables (not coordinates)."""
         if not tracker.engine:
             pytest.skip("Database not configured")
@@ -97,7 +97,7 @@ class TestNetCdfMetadataView:
             },
             coords={"lat": np.arange(5), "lon": np.arange(5)},
         )
-        ds.to_netcdf(netcdf_path)
+        write_netcdf(ds, netcdf_path)
 
         with tracker.start_run("run_datavars", model="test"):
             artifact = tracker.log_artifact(
@@ -113,7 +113,7 @@ class TestNetCdfMetadataView:
         # Coordinates should not be included
         assert all(row != "coordinate" for row in data_vars["variable_type"].values)
 
-    def test_summary(self, tracker: Tracker):
+    def test_summary(self, tracker: Tracker, write_netcdf):
         """Test human-readable summary of NetCDF structure."""
         if not tracker.engine:
             pytest.skip("Database not configured")
@@ -125,7 +125,7 @@ class TestNetCdfMetadataView:
             {"temperature": (("x", "y"), np.random.randn(3, 4))},
             coords={"x": np.arange(3), "y": np.arange(4)},
         )
-        ds.to_netcdf(netcdf_path)
+        write_netcdf(ds, netcdf_path)
 
         with tracker.start_run("run_summary", model="test"):
             artifact = tracker.log_artifact(

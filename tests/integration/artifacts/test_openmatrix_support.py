@@ -206,7 +206,7 @@ def test_openmatrix_convenience_logging(tracker: Tracker):
         assert "trips" in loaded
 
 
-def test_netcdf_convenience_logging(tracker: Tracker):
+def test_netcdf_convenience_logging(tracker: Tracker, write_netcdf):
     """
     Tests the log_netcdf_file() convenience method.
 
@@ -224,7 +224,7 @@ def test_netcdf_convenience_logging(tracker: Tracker):
         {"temperature": (("x", "y"), np.random.randn(5, 5))},
         coords={"x": np.arange(5), "y": np.arange(5)},
     )
-    ds.to_netcdf(netcdf_path)
+    write_netcdf(ds, netcdf_path)
 
     with tracker.start_run("run_convenience", model="test"):
         # Use convenience method

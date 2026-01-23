@@ -40,6 +40,7 @@ from consist.core.decorators import (
     define_step as define_step_decorator,
     require_runtime_kwargs as require_runtime_kwargs_decorator,
 )
+from consist.core.netcdf_utils import resolve_netcdf_engine
 from consist.core.noop import NoopRunContext, NoopScenarioContext
 from consist.core.views import create_view_model
 from consist.core.workflow import OutputCapture
@@ -1697,7 +1698,17 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
         return xr.open_zarr(path, consolidated=False, **kwargs)
     elif driver == "netcdf":
         if xr is None:
-            raise ImportError("xarray required for NetCDF (pip install xarray netCDF4)")
+            raise ImportError(
+                "xarray required for NetCDF (pip install xarray netCDF4 h5netcdf)"
+            )
+        if "engine" in kwargs:
+            return xr.open_dataset(path, **kwargs)
+        engine = resolve_netcdf_engine()
+        if engine:
+            try:
+                return xr.open_dataset(path, engine=engine, **kwargs)
+            except Exception:
+                return xr.open_dataset(path, **kwargs)
         return xr.open_dataset(path, **kwargs)
     elif driver == "openmatrix":
         # Try openmatrix library first; fall back to h5py if not available
