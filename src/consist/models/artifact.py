@@ -89,10 +89,10 @@ class Artifact(SQLModel, table=True):
     )
 
     # Driver Info
-    # Valid drivers: parquet, csv, zarr, json, h5_table, h5, hdf5, other
+    # Valid drivers: parquet, csv, zarr, json, h5_table, h5, hdf5, geojson, shapefile, geopackage, other
     # (See DriverType enum in consist.types for the authoritative list)
     driver: str = Field(
-        description="Format handler: parquet, csv, zarr, json, h5_table, h5, hdf5, or other"
+        description="Format handler: parquet, csv, zarr, json, h5_table, h5, hdf5, geojson, shapefile, geopackage, or other"
     )
 
     # Content Hash (for deduplication and content-addressable lookups)
@@ -210,7 +210,14 @@ class Artifact(SQLModel, table=True):
             True if the artifact's driver is associated with tabular data formats
             (e.g., Parquet, CSV, SQL), False otherwise.
         """
-        return self.driver in ("parquet", "csv", "sql")
+        return self.driver in (
+            "parquet",
+            "csv",
+            "sql",
+            "geojson",
+            "shapefile",
+            "geopackage",
+        )
 
     @property
     def created_at_iso(self) -> Optional[str]:

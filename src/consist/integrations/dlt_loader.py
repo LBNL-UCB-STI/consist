@@ -22,6 +22,7 @@ Key functionalities include:
 """
 
 import importlib
+import logging
 import uuid
 import pandas as pd
 from typing import (
@@ -73,6 +74,17 @@ try:
     openmatrix = importlib.import_module("openmatrix")
 except ImportError:
     openmatrix = None
+
+try:
+    geopandas = importlib.import_module("geopandas")
+except ImportError:
+    geopandas = None
+
+
+def _json_dumps(value: Dict[str, Any]) -> str:
+    import json
+
+    return json.dumps(value, default=str)
 
 
 def _handle_zarr_metadata(path: str) -> Iterable[Dict[str, Any]]:
@@ -178,7 +190,7 @@ def _handle_netcdf_metadata(path: str) -> Iterable[Dict[str, Any]]:
                 "dims": list(da.dims),
                 "shape": list(da.shape),
                 "dtype": str(da.dtype),
-                "attributes": dict(da.attrs) if da.attrs else {},
+                "attributes": _json_dumps(dict(da.attrs)) if da.attrs else "{}",
             }
 
         # 2. Yield Coordinates
@@ -189,7 +201,7 @@ def _handle_netcdf_metadata(path: str) -> Iterable[Dict[str, Any]]:
                 "dims": list(da.dims),
                 "shape": list(da.shape),
                 "dtype": str(da.dtype),
-                "attributes": dict(da.attrs) if da.attrs else {},
+                "attributes": _json_dumps(dict(da.attrs)) if da.attrs else "{}",
             }
     except Exception as e:
         raise ValueError(f"Failed to extract NetCDF metadata from {path}: {e}")
@@ -225,8 +237,8 @@ def _handle_openmatrix_metadata(path: str) -> Iterable[Dict[str, Any]]:
     ValueError
         If an error occurs during the extraction of OMX metadata from the specified path.
     """
-    try:
-        if openmatrix:
+    if openmatrix:
+        try:
             # Use openmatrix library for convention-aware handling
             with openmatrix.open_file(path, mode="r") as f:
                 # List matrices
@@ -240,46 +252,99 @@ def _handle_openmatrix_metadata(path: str) -> Iterable[Dict[str, Any]]:
                         "n_rows": matrix.shape[0] if len(matrix.shape) >= 1 else None,
                         "n_cols": matrix.shape[1] if len(matrix.shape) >= 2 else None,
                         "attributes": (
-                            dict(matrix.attrs) if hasattr(matrix, "attrs") else {}
+                            _json_dumps(dict(matrix.attrs))
+                            if hasattr(matrix, "attrs")
+                            else "{}"
                         ),
                     }
-        else:
-            # Fallback to h5py for basic HDF5 access
+            return
+        except Exception as e:
             if not h5py:
-                raise ImportError(
-                    "h5py or openmatrix is required for OpenMatrix (pip install h5py openmatrix)"
+                raise ValueError(
+                    f"Failed to extract OpenMatrix metadata from {path}: {e}"
                 )
+            logging.debug(
+                "[Consist] OpenMatrix reader failed (%s); falling back to h5py.",
+                e,
+            )
 
-            with h5py.File(path, "r") as f:
+    # Fallback to h5py for basic HDF5 access
+    if not h5py:
+        raise ImportError(
+            "h5py or openmatrix is required for OpenMatrix (pip install h5py openmatrix)"
+        )
 
-                def walk_matrices(group, prefix=""):
-                    for key, item in group.items():
-                        if isinstance(item, h5py.Dataset):
-                            # This is a matrix dataset
-                            yield {
-                                "matrix_name": key,
-                                "path": prefix + "/" + key if prefix else "/" + key,
-                                "shape": list(item.shape),
-                                "dtype": str(item.dtype),
-                                "n_rows": (
-                                    item.shape[0] if len(item.shape) >= 1 else None
-                                ),
-                                "n_cols": (
-                                    item.shape[1] if len(item.shape) >= 2 else None
-                                ),
-                                "attributes": dict(item.attrs) if item.attrs else {},
-                            }
-                        elif isinstance(item, h5py.Group):
-                            yield from walk_matrices(
-                                item, prefix + "/" + key if prefix else "/" + key
-                            )
+    try:
+        with h5py.File(path, "r") as f:
 
-                for matrix_record in walk_matrices(f):
-                    yield matrix_record
-    except ImportError:
-        raise
+            def walk_matrices(group, prefix=""):
+                for key, item in group.items():
+                    if isinstance(item, h5py.Dataset):
+                        # This is a matrix dataset
+                        yield {
+                            "matrix_name": key,
+                            "path": prefix + "/" + key if prefix else "/" + key,
+                            "shape": list(item.shape),
+                            "dtype": str(item.dtype),
+                            "n_rows": item.shape[0] if len(item.shape) >= 1 else None,
+                            "n_cols": item.shape[1] if len(item.shape) >= 2 else None,
+                            "attributes": (
+                                _json_dumps(dict(item.attrs)) if item.attrs else "{}"
+                            ),
+                        }
+                    elif isinstance(item, h5py.Group):
+                        yield from walk_matrices(
+                            item, prefix + "/" + key if prefix else "/" + key
+                        )
+
+            for matrix_record in walk_matrices(f):
+                yield matrix_record
     except Exception as e:
         raise ValueError(f"Failed to extract OpenMatrix metadata from {path}: {e}")
+
+
+def _handle_spatial_metadata(path: str) -> Iterable[Dict[str, Any]]:
+    """
+    Extracts and yields basic metadata from spatial files.
+
+    Parameters
+    ----------
+    path : str
+        Path to a spatial file (GeoJSON, Shapefile, GeoPackage).
+
+    Yields
+    ------
+    Dict[str, Any]
+        A dictionary containing bounds, CRS, geometry types, and column info.
+
+    Raises
+    ------
+    ImportError
+        If geopandas is not installed.
+    ValueError
+        If metadata extraction fails.
+    """
+    if geopandas is None:
+        raise ImportError("geopandas is required for spatial ingestion.")
+
+    try:
+        gdf = geopandas.read_file(path)
+        geometry_name = gdf.geometry.name if hasattr(gdf, "geometry") else None
+        geometry_series = gdf.geometry if geometry_name else None
+        geometry_types = []
+        if geometry_series is not None:
+            geometry_types = geometry_series.geom_type.dropna().unique().tolist()
+
+        yield {
+            "bounds": gdf.total_bounds.tolist(),
+            "crs": str(gdf.crs) if gdf.crs else None,
+            "feature_count": len(gdf),
+            "geometry_types": geometry_types,
+            "geometry_column": geometry_name,
+            "column_names": list(gdf.columns),
+        }
+    except Exception as e:
+        raise ValueError(f"Failed to extract spatial metadata from {path}: {e}")
 
 
 def _handle_parquet_path(path: str, ctx: Dict[str, Any]) -> Tuple[Any, bool]:
@@ -469,6 +534,33 @@ def ingest_artifact(
 
         elif artifact.driver == "openmatrix":
             data_source = _handle_openmatrix_metadata(file_path)
+
+        elif artifact.driver in {"geojson", "shapefile", "geopackage"}:
+            spatial_mode = None
+            if isinstance(artifact.meta, dict):
+                spatial_mode = artifact.meta.get("spatial_ingest_mode")
+
+            if spatial_mode == "wkt":
+                if geopandas is None:
+                    raise ImportError("geopandas is required for spatial ingestion.")
+
+                gdf = geopandas.read_file(file_path)
+                geometry_name = gdf.geometry.name if hasattr(gdf, "geometry") else None
+                if not geometry_name:
+                    raise ValueError(
+                        "Spatial ingest mode 'wkt' requires geometry data."
+                    )
+
+                wkt_column = "geometry_wkt"
+                if wkt_column in gdf.columns:
+                    wkt_column = f"{wkt_column}_1"
+
+                table_df = gdf.copy()
+                table_df[wkt_column] = table_df.geometry.to_wkt()
+                table_df = table_df.drop(columns=[geometry_name])
+                data_source = [table_df]
+            else:
+                data_source = _handle_spatial_metadata(file_path)
 
         else:
             raise ValueError(f"Ingestion not supported for driver: {artifact.driver}")

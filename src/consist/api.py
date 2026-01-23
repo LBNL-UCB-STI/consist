@@ -50,6 +50,7 @@ from consist.core.tracker import Tracker
 from consist.types import ArtifactRef, DriverType
 
 if TYPE_CHECKING:
+    import geopandas
     import xarray
 
 # Import loaders for specific formats
@@ -64,6 +65,12 @@ try:
     tables = importlib.import_module("tables")
 except ImportError:
     tables = None
+
+gpd: Optional[ModuleType]
+try:
+    gpd = importlib.import_module("geopandas")
+except ImportError:
+    gpd = None
 
 T = TypeVar("T", bound=SQLModel)
 
@@ -81,6 +88,7 @@ class OpenMatrixFileLike(Protocol):
 LoadResult = Union[
     pd.DataFrame,
     pd.Series,
+    "geopandas.GeoDataFrame",
     "xarray.Dataset",
     pd.HDFStore,
     OpenMatrixFileLike,
@@ -146,6 +154,12 @@ class OpenMatrixArtifact(ArtifactLike, Protocol):
     """Artifact that loads as array-like structure (OpenMatrix format)."""
 
     driver: Literal["openmatrix"]
+
+
+class SpatialArtifact(ArtifactLike, Protocol):
+    """Artifact that loads as GeoDataFrame (spatial formats)."""
+
+    driver: Literal["geojson", "shapefile", "geopackage"]
 
 
 def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
@@ -1361,6 +1375,23 @@ def is_openmatrix_artifact(artifact: ArtifactLike) -> TypeGuard[OpenMatrixArtifa
     return artifact.driver == DriverType.OPENMATRIX.value
 
 
+def is_spatial_artifact(artifact: ArtifactLike) -> TypeGuard[SpatialArtifact]:
+    """
+    Type guard: narrow artifact to spatial formats (GeoDataFrame outputs).
+
+    Parameters
+    ----------
+    artifact : ArtifactLike
+        Artifact to check.
+
+    Returns
+    -------
+    bool
+        True if artifact driver is geojson, shapefile, or geopackage.
+    """
+    return artifact.driver in DriverType.spatial_drivers()
+
+
 # Overload signatures ordered from most specific to least specific
 # Type checkers evaluate overloads in declaration order
 
@@ -1393,6 +1424,16 @@ def load(
     db_fallback: str = "inputs-only",
     **kwargs: Any,
 ) -> LoadResult: ...
+
+
+@overload
+def load(
+    artifact: SpatialArtifact,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> "geopandas.GeoDataFrame": ...
 
 
 @overload
@@ -1663,11 +1704,21 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
         try:
             omx = importlib.import_module("openmatrix")
             # Return the file object for array-like access; caller manages close.
-            return omx.open_file(path, mode="r")
-        except ImportError:
+            omx_file = omx.open_file(path, mode="r")
+            try:
+                omx_file.list_matrices()
+            except Exception:
+                omx_file.close()
+                raise
+            return omx_file
+        except Exception:
             # Fallback to h5py for basic HDF5 access
             h5py = importlib.import_module("h5py")
             return h5py.File(path, "r")
+    elif driver in ("geojson", "shapefile", "geopackage"):
+        if gpd is None:
+            raise ImportError("geopandas required for spatial formats")
+        return gpd.read_file(path, **kwargs)
     elif driver == "json":
         return pd.read_json(path, **kwargs)
     elif driver == "h5_table":

@@ -954,6 +954,10 @@ def preview(
             console.print(
                 "[yellow]Hint:[/] install HDF5 support: `pip install -e '.[hdf5]'`"
             )
+        elif artifact.driver in {"geojson", "shapefile", "geopackage"}:
+            console.print(
+                "[yellow]Hint:[/] install spatial support: `pip install -e '.[spatial]'`"
+            )
         raise typer.Exit(1)
     except ValueError as e:
         console.print(

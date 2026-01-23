@@ -149,7 +149,15 @@ class ArtifactManager:
 
             if artifact_obj is None:
                 if driver is None:
-                    driver = Path(path).suffix.lstrip(".").lower() or "unknown"
+                    suffix = Path(path).suffix.lstrip(".").lower()
+                    if suffix == "shp":
+                        driver = "shapefile"
+                    elif suffix == "gpkg":
+                        driver = "geopackage"
+                    elif suffix == "geojson":
+                        driver = "geojson"
+                    else:
+                        driver = suffix or "unknown"
 
                 if content_hash is not None and validate_content_hash:
                     try:

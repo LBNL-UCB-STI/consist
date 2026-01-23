@@ -61,6 +61,7 @@ from consist.api import (
     is_json_artifact,
     is_zarr_artifact,
     is_hdf_artifact,
+    is_spatial_artifact,
 )
 
 # Types
@@ -142,4 +143,5 @@ __all__ = [
     "is_json_artifact",
     "is_zarr_artifact",
     "is_hdf_artifact",
+    "is_spatial_artifact",
 ]

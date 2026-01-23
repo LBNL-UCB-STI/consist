@@ -28,10 +28,11 @@ from typing import (
     Union,
     cast,
 )
+from sqlalchemy.sql import Executable
 
 import pandas as pd
 from pydantic import BaseModel
-from sqlmodel import SQLModel
+from sqlmodel import SQLModel, Session
 
 from consist.core.artifact_schemas import ArtifactSchemaManager
 from consist.core.artifacts import ArtifactManager
@@ -69,6 +70,7 @@ from consist.core.materialize import materialize_artifacts
 from consist.core.matrix import MatrixViewFactory
 from consist.core.netcdf_views import NetCdfMetadataView
 from consist.core.openmatrix_views import OpenMatrixMetadataView
+from consist.core.spatial_views import SpatialMetadataView
 from consist.core.queries import RunQueryService
 from consist.core.validation import (
     validate_config_structure,
@@ -2419,6 +2421,25 @@ class Tracker:
         """
         return self.queries.find_run(**kwargs)
 
+    def run_query(self, query: Executable) -> list:
+        """
+        Execute a SQLModel/SQLAlchemy query via the tracker engine.
+
+        Parameters
+        ----------
+        query : Executable
+            Query object (``select``, ``text``, etc.).
+
+        Returns
+        -------
+        list
+            Results of the executed query.
+        """
+        if not self.engine:
+            raise RuntimeError("Database connection required.")
+        with Session(self.engine) as session:
+            return session.exec(cast(Any, query)).all()
+
     def find_latest_run(
         self,
         *,
@@ -3865,6 +3886,29 @@ class Tracker:
         ```
         """
         return OpenMatrixMetadataView(self)
+
+    def spatial_metadata(self, concept_key: str) -> SpatialMetadataView:
+        """
+        Access spatial metadata views for a given artifact key.
+
+        Parameters
+        ----------
+        concept_key : str
+            The semantic key identifying the spatial artifact.
+
+        Returns
+        -------
+        SpatialMetadataView
+            A view object with methods to explore spatial metadata.
+
+        Example
+        -------
+        ```python
+        view = tracker.spatial_metadata("parcels")
+        bounds = view.get_bounds("parcels")
+        ```
+        """
+        return SpatialMetadataView(self)
 
     def materialize(
         self,
