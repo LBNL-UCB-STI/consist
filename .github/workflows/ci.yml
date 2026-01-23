@@ -49,10 +49,6 @@ jobs:
           --extra test
           --extra all
 
-      - name: Install h5netcdf (Linux)
-        if: runner.os == 'Linux'
-        run: uv pip install h5netcdf
-
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         run: >
