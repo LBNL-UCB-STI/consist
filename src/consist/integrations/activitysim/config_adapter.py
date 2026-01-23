@@ -101,7 +101,7 @@ _PROBABILITIES_META_KEYS = {
 class _FileHandler:
     predicate: Any
     table_name: str
-    schema: type
+    schema: type[SQLModel]
     row_fn: Any
     row_kwargs: dict[str, Any] = field(default_factory=dict)
 
@@ -115,7 +115,7 @@ class _IngestSpecBuilder:
         self,
         *,
         table_name: str,
-        schema: type,
+        schema: type[SQLModel],
         row_fn: Any,
         source_path: Path,
         source_key: str,

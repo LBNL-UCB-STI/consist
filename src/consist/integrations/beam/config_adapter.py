@@ -32,6 +32,8 @@ try:
     from pyhocon.config_tree import NonExistentKey
 except ImportError:  # pragma: no cover
     ConfigFactory = None
+    HOCONConverter = None
+    NonExistentKey = None
 
 
 _INCLUDE_RE = re.compile(r"^\s*include\s+(?:\"([^\"]+)\"|file\(\"([^\"]+)\"\))")
@@ -120,6 +122,8 @@ class BeamConfigAdapter:
                 role="conf",
             )
 
+        if config.primary_config is None:
+            raise ValueError("Beam canonicalize requires a primary_config.")
         config_tree = _load_config_tree(
             config.primary_config,
             resolve=self.resolve_substitutions,
@@ -152,8 +156,6 @@ class BeamConfigAdapter:
                 return _iter_config_rows(tree, content_hash=h)
         else:
             rows_factory = rows
-        if config.primary_config is None:
-            raise ValueError("Beam canonicalize requires a primary_config.")
         source_key = _artifact_key_for_path(config.primary_config, config.root_dirs)
         ingestables = [
             IngestSpec(
@@ -258,6 +260,8 @@ class BeamConfigAdapter:
     def build_facet(
         self, config: CanonicalConfig, *, facet_spec: dict[str, Any]
     ) -> dict[str, Any]:
+        if config.primary_config is None:
+            raise ValueError("Beam canonicalize requires a primary_config.")
         config_tree = _load_config_tree(
             config.primary_config,
             resolve=self.resolve_substitutions,
@@ -577,7 +581,7 @@ def _build_tabular_ingest_specs(
                 f"BeamIngestSpec schema {spec.schema.__name__} must include "
                 "content_hash for dedupe_on_hash."
             )
-        table_name = spec.table_name or spec.schema.__tablename__
+        table_name = spec.table_name or str(spec.schema.__tablename__)
         if spec.key == "*":
             raise ValueError("BeamIngestSpec key='*' is not supported.")
         value = _get_nested_value(config_tree, spec.key.split("."))

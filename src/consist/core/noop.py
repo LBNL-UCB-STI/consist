@@ -5,29 +5,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import inspect
 import logging
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Dict,
-    Iterator,
-    Mapping,
-    Optional,
-    Sequence,
-    Type,
-    TypeVar,
-    cast,
-)
+import warnings
+from typing import Any, Dict, Iterator, Mapping, Optional, Sequence
 import uuid
 
-from consist.core.coupler import CouplerSchemaBase, DeclaredOutput
+from consist.core.coupler import DeclaredOutput
 from consist.core.validation import validate_artifact_key
 from consist.protocols import TrackerLike
 
-if TYPE_CHECKING:
-    from consist.core.coupler import Coupler
 from consist.models.run import Run
-
-SchemaT = TypeVar("SchemaT", bound=CouplerSchemaBase)
 
 
 @dataclass
@@ -45,6 +31,7 @@ class NoopArtifact:
     meta: Dict[str, Any] = field(default_factory=dict)
     driver: str = "file"
     run_id: Optional[str] = None
+    id: Optional[str] = None
 
     def get_path(self) -> Path:
         return self.path
@@ -78,9 +65,26 @@ class NoopCoupler:
     def __init__(self) -> None:
         self._artifacts: Dict[str, Any] = {}
         self._declared_outputs: Dict[str, DeclaredOutput] = {}
+        self._warn_undocumented = False
+        self._undocumented_keys: set[str] = set()
+        self._output_descriptions: Dict[str, str] = {}
+
+    def _maybe_warn_undocumented(self, key: str) -> None:
+        if not self._warn_undocumented:
+            return
+        if key in self._declared_outputs or key in self._undocumented_keys:
+            return
+        self._undocumented_keys.add(key)
+        warnings.warn(
+            f"Setting undocumented coupler key '{key}'. "
+            f"Declared outputs: {sorted(self._declared_outputs)}",
+            UserWarning,
+            stacklevel=2,
+        )
 
     def set(self, key: str, artifact: Any) -> Any:
         validate_artifact_key(key)
+        self._maybe_warn_undocumented(key)
         self._artifacts[key] = artifact
         return artifact
 
@@ -93,6 +97,7 @@ class NoopCoupler:
 
         All forms are stored in the coupler and can be retrieved with get() or require().
         """
+        self._maybe_warn_undocumented(key)
         self._artifacts[key] = value
         return value
 
@@ -100,9 +105,11 @@ class NoopCoupler:
         self, artifacts: Optional[Dict[str, Any]] = None, /, **kwargs: Any
     ) -> None:
         if artifacts:
-            self._artifacts.update(artifacts)
+            for key, artifact in artifacts.items():
+                self.set(key, artifact)
         if kwargs:
-            self._artifacts.update(kwargs)
+            for key, artifact in kwargs.items():
+                self.set(key, artifact)
 
     def get(self, key: str) -> Optional[Any]:
         validate_artifact_key(key)
@@ -117,9 +124,6 @@ class NoopCoupler:
                 f"Did you forget to call coupler.set({key!r}, ...)?"
             )
         return artifact
-
-    def pop(self, key: str, default: Optional[Any] = None) -> Optional[Any]:
-        return self._artifacts.pop(key, default)
 
     def keys(self) -> Sequence[str]:
         return list(self._artifacts.keys())
@@ -155,11 +159,14 @@ class NoopCoupler:
         self,
         *names: str,
         required: bool | Mapping[str, bool] = False,
+        warn_undocumented: bool = False,
         description: Optional[Mapping[str, str]] = None,
     ) -> None:
-        # NOTE: Keep in sync with SchemaValidatingCoupler.declare_outputs.
+        # NOTE: Keep in sync with Coupler.declare_outputs.
         if not names:
             return
+        if warn_undocumented:
+            self._warn_undocumented = True
         if isinstance(required, Mapping):
             required_map = {str(k): bool(v) for k, v in required.items()}
             default_required = False
@@ -178,6 +185,7 @@ class NoopCoupler:
             entry.required = entry.required or required_map.get(key, default_required)
             if key in description_map:
                 entry.description = description_map[key]
+                self._output_descriptions[key] = description_map[key]
             self._declared_outputs[key] = entry
 
     def missing_declared_outputs(self) -> list[str]:
@@ -188,6 +196,20 @@ class NoopCoupler:
                 if entry.required
                 and (key not in self._artifacts or self._artifacts[key] is None)
             ]
+        )
+
+    def require_outputs(
+        self,
+        *names: str,
+        required: bool | Mapping[str, bool] = True,
+        warn_undocumented: bool = False,
+        description: Optional[Mapping[str, str]] = None,
+    ) -> None:
+        self.declare_outputs(
+            *names,
+            required=required,
+            warn_undocumented=warn_undocumented,
+            description=description,
         )
 
     def collect_by_keys(
@@ -206,6 +228,10 @@ class NoopCoupler:
             self.set(coupler_key, artifact)
             collected[coupler_key] = artifact
         return collected
+
+    def describe_outputs(self) -> Dict[str, str]:
+        """Return descriptions of declared outputs (for documentation/introspection)."""
+        return dict(self._output_descriptions)
 
 
 class NoopRunContext:
@@ -285,17 +311,34 @@ class NoopScenarioContext:
         self,
         *names: str,
         required: bool | Mapping[str, bool] = False,
+        warn_undocumented: bool = False,
         description: Optional[Mapping[str, str]] = None,
     ) -> None:
-        self.coupler.declare_outputs(*names, required=required, description=description)
+        self.coupler.declare_outputs(
+            *names,
+            required=required,
+            warn_undocumented=warn_undocumented,
+            description=description,
+        )
+
+    def require_outputs(
+        self,
+        *names: str,
+        required: bool | Mapping[str, bool] = True,
+        warn_undocumented: bool = False,
+        description: Optional[Mapping[str, str]] = None,
+    ) -> None:
+        self.coupler.require_outputs(
+            *names,
+            required=required,
+            warn_undocumented=warn_undocumented,
+            description=description,
+        )
 
     def collect_by_keys(
         self, artifacts: Mapping[str, Any], *keys: str, prefix: str = ""
     ) -> Dict[str, Any]:
         return self.coupler.collect_by_keys(artifacts, *keys, prefix=prefix)
-
-    def coupler_schema(self, schema: Type[SchemaT]) -> SchemaT:
-        return schema(cast("Coupler", self.coupler))
 
     def run(
         self,

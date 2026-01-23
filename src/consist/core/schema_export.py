@@ -159,6 +159,52 @@ def parse_duckdb_type(logical_type: str) -> _TypeSpec:
             sqlalchemy_imports={"LargeBinary"},
         )
 
+    # Pandas/Arrow dtype fallbacks (CSV profiling uses df.dtypes)
+    if t in {"int64", "int32", "int16", "int8", "uint64", "uint32", "uint16", "uint8"}:
+        return _TypeSpec(
+            python_type="int",
+            sqlalchemy_type_expr="BigInteger",
+            sqlalchemy_imports={"BigInteger"},
+        )
+    if t in {"float64", "float32", "float16"}:
+        return _TypeSpec(
+            python_type="float",
+            sqlalchemy_type_expr="Float",
+            sqlalchemy_imports={"Float"},
+        )
+    if t in {"bool", "boolean", "bool_"}:
+        return _TypeSpec(
+            python_type="bool",
+            sqlalchemy_type_expr="Boolean",
+            sqlalchemy_imports={"Boolean"},
+        )
+    if t in {"object", "string", "string[python]", "string[pyarrow]"}:
+        return _TypeSpec(
+            python_type="str",
+            sqlalchemy_type_expr="String",
+            sqlalchemy_imports={"String"},
+        )
+    if t == "category":
+        return _TypeSpec(
+            python_type="str",
+            sqlalchemy_type_expr="String",
+            sqlalchemy_imports={"String"},
+        )
+    if t in {"datetime64[ns]", "datetime64[ns, tz]"}:
+        return _TypeSpec(
+            python_type="datetime.datetime",
+            sqlalchemy_type_expr="DateTime",
+            stdlib_imports={"import datetime"},
+            sqlalchemy_imports={"DateTime"},
+        )
+    if t in {"date32", "date64"}:
+        return _TypeSpec(
+            python_type="datetime.date",
+            sqlalchemy_type_expr="Date",
+            stdlib_imports={"import datetime"},
+            sqlalchemy_imports={"Date"},
+        )
+
     # Conservative fallback: keep typing flexible and represent as JSON in SQLAlchemy.
     return _TypeSpec(
         python_type="Any",

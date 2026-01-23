@@ -19,7 +19,7 @@ def get_runs(
     status: Optional[str] = None,
 ) -> List[Run]:
     """Fetches a list of runs with optional filters."""
-    statement = select(Run).order_by(Run.created_at.desc())
+    statement = select(Run).order_by(col(Run.created_at).desc())
 
     if model_name:
         statement = statement.where(Run.model_name == model_name)
@@ -50,10 +50,10 @@ def get_summary(session: Session) -> Dict[str, Any]:
     models_stmt = select(Run.model_name, func.count(Run.id)).group_by(Run.model_name)
     models_dist = session.exec(models_stmt).all()
 
-    first_run_stmt = select(Run.created_at).order_by(Run.created_at.asc()).limit(1)
+    first_run_stmt = select(Run.created_at).order_by(col(Run.created_at).asc()).limit(1)
     first_run_date = session.exec(first_run_stmt).first()
 
-    last_run_stmt = select(Run.created_at).order_by(Run.created_at.desc()).limit(1)
+    last_run_stmt = select(Run.created_at).order_by(col(Run.created_at).desc()).limit(1)
     last_run_date = session.exec(last_run_stmt).first()
 
     return {

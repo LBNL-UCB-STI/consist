@@ -22,8 +22,10 @@ def define_step(
     """
 
     def decorator(func: Callable) -> Callable:
-        func.__consist_step__ = StepDefinition(
-            outputs=outputs, tags=tags, description=description
+        setattr(
+            func,
+            "__consist_step__",
+            StepDefinition(outputs=outputs, tags=tags, description=description),
         )
         return func
 
@@ -44,7 +46,7 @@ def require_runtime_kwargs(*names: str) -> Callable[[Callable], Callable]:
             raise ValueError("require_runtime_kwargs expects non-empty string names.")
 
     def decorator(func: Callable) -> Callable:
-        func.__consist_runtime_required__ = tuple(names)
+        setattr(func, "__consist_runtime_required__", tuple(names))
         return func
 
     return decorator

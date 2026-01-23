@@ -7,13 +7,25 @@ It offers functions like listing recent runs, providing a quick overview
 of the execution history and status of various models and workflows.
 """
 
+import os
+import sys
+
+# When invoked as a script (python consist/cli.py), the script directory can
+# shadow stdlib modules like "types". Ensure imports resolve from the package root.
+if __package__ is None and __spec__ is None:
+    script_dir = os.path.dirname(__file__)
+    package_root = os.path.dirname(script_dir)
+    script_dir_real = os.path.realpath(script_dir)
+    sys.path = [path for path in sys.path if os.path.realpath(path) != script_dir_real]
+    if package_root not in sys.path:
+        sys.path.insert(0, package_root)
+
 import cmd
 import shlex
 import json
-import os
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Mapping, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Mapping, Tuple, Literal, cast
 
 import pandas as pd
 import typer
@@ -21,8 +33,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
-from sqlalchemy import and_, or_, select
-from sqlmodel import Session
+from sqlalchemy import and_, or_, select as sa_select
+from sqlmodel import Session, col, select
 
 from consist import Tracker
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
@@ -43,6 +55,14 @@ app.add_typer(schema_app, name="schema")
 MAX_CLI_LIMIT = 1_000_000
 MAX_PREVIEW_ROWS = 1_000_000
 MAX_SEARCH_QUERY_LENGTH = 256
+
+
+def _optional_xarray() -> Any | None:
+    try:
+        import xarray as xr
+    except ImportError:
+        return None
+    return xr
 
 
 def output_json(data: Any) -> None:
@@ -198,6 +218,12 @@ def schema_export(
     schema_id: Optional[str] = typer.Option(
         None, "--schema-id", help="Artifact schema id (hash) to export."
     ),
+    artifact_key: Optional[str] = typer.Option(
+        None,
+        "--artifact-key",
+        "--table-key",
+        help="Artifact key to export the associated captured schema.",
+    ),
     artifact_id: Optional[str] = typer.Option(
         None,
         "--artifact-id",
@@ -227,13 +253,28 @@ def schema_export(
         "--abstract/--concrete",
         help="Export as an abstract SQLModel class (importable without defining a primary key).",
     ),
+    prefer_source: Optional[str] = typer.Option(
+        None,
+        "--prefer-source",
+        help="Preference hint for when user_provided schema does not exist: 'file' (original CSV/Parquet dtypes) or 'duckdb' (post-ingestion schema). User-provided schemas are ALWAYS preferred if they exist and cannot be overridden.",
+    ),
     db_path: str = typer.Option(
         "provenance.duckdb", help="Path to the DuckDB database."
     ),
 ) -> None:
-    """Export a captured artifact schema as an editable SQLModel stub."""
-    if (schema_id is None) == (artifact_id is None):
-        console.print("[red]Provide exactly one of --schema-id or --artifact-id[/red]")
+    """Export a captured artifact schema as an editable SQLModel stub.
+
+    When an artifact has multiple schema profiles (file, duckdb, user_provided):
+    - User-provided schemas are ALWAYS preferred (they represent manual curation)
+    - If no user_provided schema exists, file schema is preferred by default
+      (preserves richer type information like pandas category)
+    - Use --prefer-source to specify a preference when user_provided is unavailable.
+    """
+    selectors = [schema_id, artifact_id, artifact_key]
+    if sum(1 for selector in selectors if selector is not None) != 1:
+        console.print(
+            "[red]Provide exactly one of --schema-id, --artifact-id, or --artifact-key[/red]"
+        )
         raise typer.Exit(2)
     if artifact_id is not None:
         try:
@@ -242,7 +283,21 @@ def schema_export(
             console.print("[red]--artifact-id must be a UUID[/red]")
             raise typer.Exit(2)
 
+    # Validate prefer_source if provided
+    if prefer_source is not None and prefer_source not in ("file", "duckdb"):
+        console.print("[red]--prefer-source must be either 'file' or 'duckdb'[/red]")
+        raise typer.Exit(2)
+    resolved_prefer_source: Optional[Literal["file", "duckdb"]] = None
+    if prefer_source is not None:
+        resolved_prefer_source = cast(Literal["file", "duckdb"], prefer_source)
+
     tracker = get_tracker(db_path)
+    if artifact_key is not None:
+        artifact = tracker.get_artifact(artifact_key)
+        if artifact is None:
+            console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
+            raise typer.Exit(1)
+        artifact_id = str(artifact.id)
     try:
         code = tracker.export_schema_sqlmodel(
             schema_id=schema_id,
@@ -253,6 +308,7 @@ def schema_export(
             abstract=abstract,
             include_system_cols=include_system_cols,
             include_stats_comments=include_stats_comments,
+            prefer_source=resolved_prefer_source,
         )
     except KeyError:
         console.print("[red]Captured schema not found for the provided selector.[/red]")
@@ -449,28 +505,28 @@ def _iter_artifact_rows(
     last_id = None
     while True:
         stmt = (
-            select(
-                Artifact.id,
-                Artifact.key,
-                Artifact.uri,
-                Artifact.run_id,
-                Artifact.created_at,
+            sa_select(
+                col(Artifact.id),
+                col(Artifact.key),
+                col(Artifact.uri),
+                col(Artifact.run_id),
+                col(Artifact.created_at),
             )
-            .order_by(Artifact.created_at, Artifact.id)
+            .order_by(col(Artifact.created_at), col(Artifact.id))
             .limit(batch_size)
         )
         if last_created is not None and last_id is not None:
             stmt = stmt.where(
                 or_(
-                    Artifact.created_at > last_created,
+                    col(Artifact.created_at) > last_created,
                     and_(
-                        Artifact.created_at == last_created,
-                        Artifact.id > last_id,
+                        col(Artifact.created_at) == last_created,
+                        col(Artifact.id) > last_id,
                     ),
                 )
             )
 
-        batch = session.exec(stmt).all()
+        batch = session.exec(cast(Any, stmt)).all()
         if not batch:
             break
         for art_id, key, uri, run_id, created_at in batch:
@@ -483,19 +539,19 @@ def _render_scenarios(tracker: Tracker, limit: int = 20) -> None:
     """Shared logic for displaying scenario overview (scenarios are parent runs)."""
     with Session(tracker.engine) as session:
         from consist.models.run import Run
-        from sqlmodel import func, select
+        from sqlmodel import func
 
         # Find parent runs by looking for distinct parent_run_ids
         query = (
             select(
-                Run.parent_run_id.label("scenario_id"),  # ← Fixed: was Run.id
-                func.count(Run.id).label("run_count"),
-                func.min(Run.created_at).label("first_run"),
-                func.max(Run.created_at).label("last_run"),
+                col(Run.parent_run_id).label("scenario_id"),  # ← Fixed: was Run.id
+                func.count(col(Run.id)).label("run_count"),
+                func.min(col(Run.created_at)).label("first_run"),
+                func.max(col(Run.created_at)).label("last_run"),
             )
-            .where(Run.parent_run_id.is_not(None))
-            .group_by(Run.parent_run_id)
-            .order_by(func.max(Run.created_at).desc())
+            .where(col(Run.parent_run_id).is_not(None))
+            .group_by(col(Run.parent_run_id))
+            .order_by(func.max(col(Run.created_at)).desc())
             .limit(limit)
         )
 
@@ -542,21 +598,21 @@ def search(
 
     with Session(tracker.engine) as session:
         from consist.models.run import Run
-        from sqlmodel import select, or_
+        from sqlmodel import select, or_, col
 
         # Search in multiple fields
         search_query = (
             select(Run)
             .where(
                 or_(
-                    Run.id.contains(escaped_query, escape="\\"),
-                    Run.model_name.contains(escaped_query, escape="\\"),
-                    Run.parent_run_id.contains(escaped_query, escape="\\")
+                    col(Run.id).contains(escaped_query, escape="\\"),
+                    col(Run.model_name).contains(escaped_query, escape="\\"),
+                    col(Run.parent_run_id).contains(escaped_query, escape="\\")
                     if escaped_query
                     else False,
                 )
             )
-            .order_by(Run.created_at.desc())
+            .order_by(col(Run.created_at).desc())
             .limit(limit)
         )
 
@@ -661,7 +717,9 @@ def scenario(
         from consist.models.run import Run
 
         query = (
-            select(Run).where(Run.parent_run_id == scenario_id).order_by(Run.created_at)
+            select(Run)
+            .where(col(Run.parent_run_id) == scenario_id)
+            .order_by(col(Run.created_at))
         )
         results = session.exec(query).all()
 
@@ -927,11 +985,7 @@ def preview(
         console.print(table)
         return
 
-    try:
-        import xarray as xr
-    except ImportError:
-        xr = None
-
+    xr = _optional_xarray()
     if xr is not None and isinstance(data, (xr.Dataset, xr.DataArray)):
         ds: xr.Dataset
         if isinstance(data, xr.DataArray):
@@ -1165,11 +1219,7 @@ class ConsistShell(cmd.Cmd):
                 console.print(table)
                 return
 
-            try:
-                import xarray as xr
-            except ImportError:
-                xr = None
-
+            xr = _optional_xarray()
             if xr is not None and isinstance(data, (xr.Dataset, xr.DataArray)):
                 ds: xr.Dataset
                 if isinstance(data, xr.DataArray):
@@ -1191,8 +1241,8 @@ class ConsistShell(cmd.Cmd):
         except Exception as exc:
             console.print(f"[red]Error: {exc}[/red]")
 
-    def do_schema(self, arg: str) -> None:
-        """Show artifact schema. Usage: schema <artifact_key>"""
+    def do_schema_profile(self, arg: str) -> None:
+        """Show artifact schema. Usage: schema_profile <artifact_key>"""
         try:
             args = shlex.split(arg)
             if not args:
@@ -1274,11 +1324,7 @@ class ConsistShell(cmd.Cmd):
                 )
                 return
 
-            try:
-                import xarray as xr
-            except ImportError:
-                xr = None
-
+            xr = _optional_xarray()
             if xr is not None and isinstance(data, (xr.Dataset, xr.DataArray)):
                 ds: xr.Dataset
                 if isinstance(data, xr.DataArray):
@@ -1297,6 +1343,62 @@ class ConsistShell(cmd.Cmd):
             console.print(
                 f"[yellow]Schema not implemented for loaded type: {type(data).__name__}[/yellow]"
             )
+        except Exception as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+
+    def do_schema_stub(self, arg: str) -> None:
+        """Export SQLModel schema stub. Usage: schema_stub <artifact_key> [--class-name NAME] [--table-name NAME] [--include-system-cols] [--no-stats-comments] [--concrete]"""
+        try:
+            args = shlex.split(arg)
+            if not args:
+                console.print("[red]Error: artifact_key required[/red]")
+                return
+
+            artifact_key = args[0]
+            class_name = None
+            table_name = None
+            include_system_cols = False
+            include_stats_comments = True
+            abstract = True
+
+            i = 1
+            while i < len(args):
+                if args[i] == "--class-name" and i + 1 < len(args):
+                    class_name = args[i + 1]
+                    i += 2
+                elif args[i] == "--table-name" and i + 1 < len(args):
+                    table_name = args[i + 1]
+                    i += 2
+                elif args[i] == "--include-system-cols":
+                    include_system_cols = True
+                    i += 1
+                elif args[i] == "--no-stats-comments":
+                    include_stats_comments = False
+                    i += 1
+                elif args[i] == "--concrete":
+                    abstract = False
+                    i += 1
+                else:
+                    i += 1
+
+            artifact = self.tracker.get_artifact(artifact_key)
+            if not artifact:
+                console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
+                return
+
+            code = self.tracker.export_schema_sqlmodel(
+                artifact_id=str(artifact.id),
+                class_name=class_name,
+                table_name=table_name,
+                abstract=abstract,
+                include_system_cols=include_system_cols,
+                include_stats_comments=include_stats_comments,
+            )
+            print(code)
+        except KeyError:
+            console.print("[red]Captured schema not found for this artifact.[/red]")
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
         except Exception as exc:
             console.print(f"[red]Error: {exc}[/red]")
 
@@ -1353,9 +1455,9 @@ class ConsistShell(cmd.Cmd):
         print()
         return self.do_exit(arg)
 
-    def emptyline(self) -> None:
+    def emptyline(self) -> bool:
         """Do nothing on empty line (prevent repeating last command)."""
-        pass
+        return False
 
 
 @app.command()

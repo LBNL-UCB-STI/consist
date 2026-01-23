@@ -18,6 +18,7 @@ from typing import (
     TypeVar,
     TypeGuard,
     Union,
+    cast,
     overload,
     runtime_checkable,
 )
@@ -26,7 +27,7 @@ import pandas as pd
 from sqlalchemy import MetaData, Table, and_, case, func, select as sa_select, Subquery
 from sqlalchemy.sql import Executable
 from sqlalchemy.exc import SQLAlchemyError
-from sqlmodel import SQLModel, Session, select
+from sqlmodel import SQLModel, Session, col, select
 
 # Internal imports
 from consist.core.context import (
@@ -42,7 +43,6 @@ from consist.core.decorators import (
 from consist.core.noop import NoopRunContext, NoopScenarioContext
 from consist.core.views import create_view_model
 from consist.core.workflow import OutputCapture
-from consist.core.coupler import CouplerSchemaBase, coupler_schema as _coupler_schema
 from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord, Run, RunResult
 from consist.models.run_config_kv import RunConfigKV
@@ -66,7 +66,6 @@ except ImportError:
     tables = None
 
 T = TypeVar("T", bound=SQLModel)
-SchemaT = TypeVar("SchemaT", bound=CouplerSchemaBase)
 LoadResult = Union[pd.DataFrame, pd.Series, "xarray.Dataset", pd.HDFStore]
 
 
@@ -79,6 +78,8 @@ class ArtifactLike(Protocol):
     can be used where ArtifactLike is expected.
     """
 
+    id: Any
+    key: str
     driver: str
     uri: str
     meta: Dict[str, Any]
@@ -200,46 +201,6 @@ def require_runtime_kwargs(*names: str) -> Callable[[Callable[..., Any]], Callab
     `runtime_kwargs` passed to `Tracker.run` or `ScenarioContext.run`.
     """
     return require_runtime_kwargs_decorator(*names)
-
-
-def coupler_schema(cls: type[SchemaT]) -> type[SchemaT]:
-    """
-    Decorator that builds a typed Coupler view from an annotated class.
-
-    This is the public API entry point for the `coupler_schema` decorator.
-    See `consist.core.coupler.coupler_schema` for full documentation and examples.
-
-    Parameters
-    ----------
-    cls : type
-        A class with type annotations for coupler keys.
-
-    Returns
-    -------
-    type
-        A new class with typed properties wrapping a Coupler.
-
-    Raises
-    ------
-    ValueError
-        If the class has no annotations.
-
-    Examples
-    --------
-    ```python
-    @consist.coupler_schema
-    class WorkflowOutputs:
-        persons: Artifact
-        households: Artifact
-
-    # Use in a scenario
-    with consist.scenario("workflow") as sc:
-        typed = sc.coupler_schema(WorkflowOutputs)
-        typed.persons = artifact1
-        result = typed.persons  # Type-safe access
-    ```
-    """
-    return _coupler_schema(cls)
 
 
 @contextmanager
@@ -663,7 +624,7 @@ def log_artifacts(
     """
     if not enabled:
         ctx = NoopRunContext()
-        artifacts: Dict[str, Artifact] = {}
+        artifacts: Dict[str, ArtifactLike] = {}
         per_key_meta = metadata_by_key or {}
         for key, ref in outputs.items():
             meta = dict(shared_meta)
@@ -966,7 +927,7 @@ def run_query(query: Executable, tracker: Optional["Tracker"] = None) -> list:
     """
     tr = tracker or current_tracker()
     with Session(tr.engine) as session:
-        return session.exec(query).all()
+        return session.exec(cast(Any, query)).all()
 
 
 def config_run_query(
@@ -1038,7 +999,9 @@ def config_run_query(
         join_clauses.append(getattr(table, column) == getattr(link_table, column))
 
     stmt = (
-        select(*columns_list).select_from(table).join(link_table, and_(*join_clauses))
+        sa_select(*cast(tuple[Any, ...], tuple(columns_list)))
+        .select_from(table)
+        .join(link_table, and_(*join_clauses))
     )
 
     resolved_table_name = table_name
@@ -1057,7 +1020,7 @@ def config_run_query(
         else:
             clauses = [where]
         for clause in clauses:
-            stmt = stmt.where(clause)
+            stmt = stmt.where(cast(Any, clause))
 
     return stmt
 
@@ -1144,21 +1107,23 @@ def pivot_facets(
     value_columns = value_columns or {}
     label_map = label_map or {}
 
-    select_columns = [table.run_id.label(run_id_label)]
+    select_columns = [col(table.run_id).label(run_id_label)]
     for key in keys_list:
         column_name = value_columns.get(key, value_column)
         if column_name not in valid_columns:
             raise ValueError(
                 f"pivot_facets value_columns[{key!r}] must be one of {sorted(valid_columns)}"
             )
-        value_col = getattr(table, column_name)
+        value_col = col(getattr(table, column_name))
         label = label_map.get(key, f"{label_prefix}{key}")
         select_columns.append(
-            func.max(case((table.key == key, value_col), else_=None)).label(label)
+            func.max(case((col(table.key) == key, value_col), else_=None)).label(label)
         )
 
     stmt = (
-        select(*select_columns).where(table.key.in_(keys_list)).group_by(table.run_id)
+        select(*select_columns)
+        .where(col(table.key).in_(keys_list))
+        .group_by(col(table.run_id))
     )
     if namespace is not None:
         stmt = stmt.where(table.namespace == namespace)
@@ -1622,7 +1587,7 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
 
 
 def _load_from_db(
-    artifact: Artifact, tracker: "Tracker", **kwargs: Any
+    artifact: ArtifactLike, tracker: "Tracker", **kwargs: Any
 ) -> pd.DataFrame:
     """
     Recovers data for an artifact from the Consist DuckDB database.
@@ -1633,8 +1598,8 @@ def _load_from_db(
 
     Parameters
     ----------
-    artifact : Artifact
-        The `Artifact` object whose data is to be recovered from the database.
+    artifact : ArtifactLike
+        The artifact whose data is to be recovered from the database.
     tracker : Tracker
         The `Tracker` instance, necessary to access the database engine.
     **kwargs : Any

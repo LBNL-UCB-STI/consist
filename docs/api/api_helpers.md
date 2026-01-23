@@ -12,7 +12,6 @@
         - trace
         - start_run
         - define_step
-        - coupler_schema
         - scenario
         - single_step_scenario
         - current_tracker

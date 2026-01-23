@@ -5,7 +5,7 @@ from copy import copy
 from pathlib import Path
 from typing import Any, List, Optional, TYPE_CHECKING, Type, TypeVar, Dict, Tuple
 from sqlalchemy import Column
-from sqlmodel import select, Session, text, SQLModel, Field
+from sqlmodel import select, Session, text, SQLModel, Field, col
 
 from consist.models.artifact import Artifact
 from consist.models.run import Run
@@ -407,7 +407,7 @@ class ViewFactory:
                 select(Artifact, Run)
                 .join(Run, Artifact.run_id == Run.id)  # ty: ignore[invalid-argument-type]
                 .where(Artifact.key == concept_key)
-                .where(Artifact.driver.in_(drivers))
+                .where(col(Artifact.driver).in_(drivers))
             )
             results = session.exec(statement).all()
 

@@ -6,35 +6,8 @@ from typing import cast
 
 import pytest
 
-from consist.core.coupler import (
-    Coupler,
-    SchemaValidatingCoupler,
-    CouplerSchemaBase,
-    coupler_schema,
-)
-from consist.core.tracker import Tracker
+from consist.core.coupler import Coupler
 from consist.models.artifact import Artifact
-
-
-class FakeTracker:
-    def __init__(
-        self,
-        *,
-        cached_outputs: dict[str, Artifact] | None = None,
-        resolved_by_uri: dict[str, str] | None = None,
-    ) -> None:
-        self._cached_outputs = cached_outputs or {}
-        self._resolved_by_uri = resolved_by_uri or {}
-
-    def cached_output(self, key: str | None = None) -> Artifact | None:
-        if not self._cached_outputs:
-            return None
-        if key is None:
-            return next(iter(self._cached_outputs.values()))
-        return self._cached_outputs.get(key)
-
-    def resolve_uri(self, uri: str) -> str:
-        return self._resolved_by_uri.get(uri, uri)
 
 
 def _artifact(*, key: str, uri: str = "workspace://dummy.csv") -> Artifact:
@@ -89,8 +62,12 @@ def test_coupler_path_requires_tracker() -> None:
 
 def test_coupler_path_resolves_without_mutating_artifact() -> None:
     art = _artifact(key="data", uri="inputs://data.csv")
-    tracker = FakeTracker(resolved_by_uri={"inputs://data.csv": "/abs/data.csv"})
-    coupler = Coupler(cast(Tracker, tracker))
+    coupler = Coupler()
+    coupler.tracker = type(
+        "TrackerStub",
+        (),
+        {"resolve_uri": lambda _self, uri: "/abs/data.csv"},
+    )()
     coupler.set("data", art)
 
     assert art.abs_path is None
@@ -99,39 +76,8 @@ def test_coupler_path_resolves_without_mutating_artifact() -> None:
     assert art.abs_path is None
 
 
-def test_coupler_adopt_cached_output_sets_state() -> None:
-    cached_persons = _artifact(key="persons", uri="workspace://persons.parquet")
-    tracker = FakeTracker(cached_outputs={"persons": cached_persons})
-    coupler = Coupler(cast(Tracker, tracker))
-
-    assert coupler.get("persons") is None
-    adopted = coupler.adopt_cached_output("persons")
-    assert adopted == cached_persons
-    assert coupler.get("persons") == cached_persons
-
-
-def test_coupler_cached_aliases_delegate_to_adopt_cached_output() -> None:
-    cached = _artifact(key="persons", uri="workspace://persons.parquet")
-    tracker = FakeTracker(cached_outputs={"persons": cached})
-    coupler = Coupler(cast(Tracker, tracker))
-
-    adopted = coupler.get_cached("persons")
-    assert adopted == cached
-    assert coupler.get("persons") == cached
-
-    coupler.pop("persons")
-    adopted2 = coupler.get_cached_output("persons")
-    assert adopted2 == cached
-    assert coupler.get("persons") == cached
-
-
-def test_coupler_adopt_cached_output_without_tracker_is_noop() -> None:
-    coupler = Coupler()
-    assert coupler.adopt_cached_output("anything") is None
-
-
 def test_coupler_declare_outputs_tracks_missing_required() -> None:
-    coupler = SchemaValidatingCoupler()
+    coupler = Coupler()
     coupler.declare_outputs("zarr", "csv", required={"zarr": True, "csv": False})
 
     assert coupler.missing_declared_outputs() == ["zarr"]
@@ -141,7 +87,7 @@ def test_coupler_declare_outputs_tracks_missing_required() -> None:
 
 
 def test_coupler_missing_declared_outputs_treats_none_as_missing() -> None:
-    coupler = SchemaValidatingCoupler()
+    coupler = Coupler()
     coupler.declare_outputs("required", required=True)
 
     coupler.set("required", cast(Artifact, None))
@@ -158,44 +104,33 @@ def test_coupler_collect_by_keys_updates_coupler() -> None:
     assert collected == {"2024_a": outputs["a"]}
 
 
-def test_coupler_schema_wraps_attribute_access() -> None:
-    @coupler_schema
-    class WorkflowCoupler(CouplerSchemaBase):
-        a: Artifact
-        b: Artifact
-
+def test_coupler_warns_on_undocumented_key() -> None:
     coupler = Coupler()
-    schema = WorkflowCoupler(coupler)
-    artifact = _artifact(key="a")
-
-    schema.a = artifact
-    assert schema.a == artifact
-    assert coupler.require("a") == artifact
-
-
-def test_schema_warns_on_undocumented_key() -> None:
-    coupler = SchemaValidatingCoupler(schema={"known": "doc"})
+    coupler.require_outputs("known", warn_undocumented=True)
 
     with pytest.warns(UserWarning, match="undocumented"):
         coupler.set("unknown", _artifact(key="unknown"))
 
 
-def test_schema_update_warns_on_undocumented_key() -> None:
-    coupler = SchemaValidatingCoupler(schema={"known": "doc"})
+def test_coupler_update_warns_on_undocumented_key() -> None:
+    coupler = Coupler()
+    coupler.require_outputs("known", warn_undocumented=True)
 
     with pytest.warns(UserWarning, match="undocumented"):
         coupler.update({"unknown": _artifact(key="unknown")})
 
 
-def test_schema_set_from_artifact_warns_on_undocumented_key() -> None:
-    coupler = SchemaValidatingCoupler(schema={"known": "doc"})
+def test_coupler_set_from_artifact_warns_on_undocumented_key() -> None:
+    coupler = Coupler()
+    coupler.require_outputs("known", warn_undocumented=True)
 
     with pytest.warns(UserWarning, match="undocumented"):
         coupler.set_from_artifact("unknown", _artifact(key="unknown"))
 
 
-def test_schema_warns_only_once_per_key() -> None:
-    coupler = SchemaValidatingCoupler(schema={"known": "doc"})
+def test_coupler_warns_only_once_per_key() -> None:
+    coupler = Coupler()
+    coupler.require_outputs("known", warn_undocumented=True)
     art = _artifact(key="unknown")
 
     with warnings.catch_warnings(record=True) as captured:
@@ -206,34 +141,11 @@ def test_schema_warns_only_once_per_key() -> None:
     assert len(captured) == 1
 
 
-def test_schema_validate_all_schema_keys_set() -> None:
-    coupler = SchemaValidatingCoupler(schema={"a": "doc", "b": "doc"})
-    coupler.set("a", _artifact(key="a"))
+def test_coupler_require_outputs_defaults_required() -> None:
+    coupler = Coupler()
+    coupler.require_outputs("required")
 
-    assert coupler.validate_all_schema_keys_set() == ["b"]
-
-
-def test_schema_describe_schema_returns_mapping_copy() -> None:
-    schema = {"persons": "Population data", "jobs": "Employment data"}
-    coupler = SchemaValidatingCoupler(schema=schema)
-
-    assert coupler.describe_schema() == schema
-    assert coupler.describe_schema() is not schema
-
-
-def test_schema_validate_combines_schema_and_declared_outputs() -> None:
-    coupler = SchemaValidatingCoupler(schema={"a": "doc", "b": "doc"})
-    coupler.declare_outputs("c", required=True)
-    coupler.set("a", _artifact(key="a"))
-
-    assert coupler.validate() == ["b", "c"]
-
-
-def test_schema_undocumented_keys_property() -> None:
-    coupler = SchemaValidatingCoupler(schema={"known": "doc"})
-    coupler.set("unknown", _artifact(key="unknown"))
-
-    assert coupler.undocumented_keys == ["unknown"]
+    assert coupler.missing_declared_outputs() == ["required"]
 
 
 def test_coupler_set_from_artifact_with_real_artifact() -> None:
@@ -284,21 +196,3 @@ def test_coupler_set_from_artifact_with_string_path() -> None:
 
     assert result == path_str
     assert coupler.get("data") == path_str
-
-
-def test_coupler_set_from_artifact_works_with_schema() -> None:
-    """Test that set_from_artifact works through CouplerSchemaBase."""
-
-    @coupler_schema
-    class WorkflowCoupler(CouplerSchemaBase):
-        persons: Artifact
-
-    coupler = Coupler()
-    schema = WorkflowCoupler(coupler)
-    art = _artifact(key="persons")
-
-    # Should be able to call set_from_artifact on schema too
-    result = schema.set_from_artifact("persons", art)
-
-    assert result == art
-    assert schema.persons == art
