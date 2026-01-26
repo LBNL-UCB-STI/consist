@@ -44,17 +44,26 @@ def test_csv_end_to_end(tracker: Tracker):
     )
     df.to_csv(csv_path, index=False)
 
+    gzip_path = tracker.run_dir / "my_data.csv.gz"
+    df.to_csv(gzip_path, index=False, compression="gzip")
+
     # 1. Log Artifact
     with tracker.start_run("run_csv", model="model_A"):
         # Note: Tracker auto-detects .csv extension -> driver="csv"
         artifact = tracker.log_artifact(csv_path, key="cities_data")
+        gzip_artifact = tracker.log_artifact(gzip_path, key="cities_data_gz")
 
     assert artifact.driver == "csv"
+    assert gzip_artifact.driver == "csv"
 
     # 2. Test consist.load()
     loaded_df = load(artifact, tracker=tracker)
     assert len(loaded_df) == 2
     assert loaded_df.iloc[0]["city"] == "New York"
+
+    loaded_gz_df = load(gzip_artifact, tracker=tracker)
+    assert len(loaded_gz_df) == 2
+    assert loaded_gz_df.iloc[1]["city"] == "Paris"
 
     # 3. Test View Factory (SQL Access)
     # This proves ViewFactory is using read_csv_auto correctly

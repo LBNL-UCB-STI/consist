@@ -11,6 +11,28 @@ if TYPE_CHECKING:
     from consist.core.tracker import Tracker
 
 
+def _infer_driver_from_path(path: Path) -> str:
+    suffixes = [suffix.lower() for suffix in path.suffixes]
+    if len(suffixes) >= 2:
+        composite = "".join(suffixes[-2:])
+        if composite == ".csv.gz":
+            return "csv"
+        if composite == ".parquet.gz":
+            return "parquet"
+        if composite == ".json.gz":
+            return "json"
+        if composite == ".geojson.gz":
+            return "geojson"
+    suffix = suffixes[-1].lstrip(".") if suffixes else ""
+    if suffix == "shp":
+        return "shapefile"
+    if suffix == "gpkg":
+        return "geopackage"
+    if suffix == "geojson":
+        return "geojson"
+    return suffix or "unknown"
+
+
 class ArtifactManager:
     """
     Handles creation and discovery of Consist ``Artifact`` objects within a run.
@@ -149,15 +171,7 @@ class ArtifactManager:
 
             if artifact_obj is None:
                 if driver is None:
-                    suffix = Path(path).suffix.lstrip(".").lower()
-                    if suffix == "shp":
-                        driver = "shapefile"
-                    elif suffix == "gpkg":
-                        driver = "geopackage"
-                    elif suffix == "geojson":
-                        driver = "geojson"
-                    else:
-                        driver = suffix or "unknown"
+                    driver = _infer_driver_from_path(Path(path))
 
                 if content_hash is not None and validate_content_hash:
                     try:
