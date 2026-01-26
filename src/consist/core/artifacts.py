@@ -11,6 +11,7 @@ from consist.types import ArtifactRef
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
 
+
 def _infer_driver_from_path(path: Path) -> str:
     suffixes = [suffix.lower() for suffix in path.suffixes]
     if len(suffixes) >= 2:
@@ -227,7 +228,7 @@ class ArtifactManager:
                     mount_root = str(Path(self.tracker.mounts[scheme]).resolve())
 
             if driver is None:
-                driver = Path(path).suffix.lstrip(".").lower() or "unknown"
+                driver = _infer_driver_from_path(Path(path))
 
             if direction == "input" and self.tracker.db:
                 parent = self.tracker.db.find_latest_artifact_at_uri(uri, driver=driver)
@@ -264,8 +265,6 @@ class ArtifactManager:
                             artifact_obj.meta.update(meta)
 
             if artifact_obj is None:
-                if driver is None:
-                    driver = _infer_driver_from_path(Path(path))
                 if content_hash is not None and validate_content_hash:
                     try:
                         computed = self.tracker.identity.compute_file_checksum(
