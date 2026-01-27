@@ -470,10 +470,10 @@ class DatabaseManager:
             with Session(self.engine) as session:
                 return list(
                     session.exec(
-                    select(ArtifactSchemaRelation).where(
-                        ArtifactSchemaRelation.schema_id == schema_id
-                    )
-                ).all()
+                        select(ArtifactSchemaRelation).where(
+                            ArtifactSchemaRelation.schema_id == schema_id
+                        )
+                    ).all()
                 )
 
         try:
