@@ -10,13 +10,13 @@ Consist provides flexible patterns for tracking provenance in scientific workflo
 
 Choose based on what you're building:
 
-| Your Workflow | Pattern | Why |
-|---|---|---|
-| Single data processing step (clean, transform, aggregate) | **`run()`** | Simple, caches entire function call, lowest overhead. Use for self-contained operations. |
-| Multi-step workflow (preprocessing → simulation → analysis) | **`scenario()`** | Groups related steps, shares state via coupler, per-step caching. Use when steps have dependencies or shared configuration. |
-| Existing tool/model (subprocess, legacy code, container) | **`container` or `depends_on`** | Wraps external executables, tracks container digest as cache key. Use for black-box tools. |
-| Parameter sweep / sensitivity analysis | **`scenario()` + loop** | Run the same step with different configs, compare results. |
-| Multi-year simulation | **`scenario()` + loop** | Runs in years, each year caches independently, all years share scenario context. |
+| Your Workflow                                               | Pattern                         | Why                                                                                                                         |
+|-------------------------------------------------------------|---------------------------------|-----------------------------------------------------------------------------------------------------------------------------|
+| Single data processing step (clean, transform, aggregate)   | **`run`**                       | Simple, caches entire function call, lowest overhead. Use for self-contained operations.                                    |
+| Multi-step workflow (preprocessing → simulation → analysis) | **`scenario`**                  | Groups related steps, shares state via coupler, per-step caching. Use when steps have dependencies or shared configuration. |
+| Existing tool/model (subprocess, legacy code, container)    | **`container` or `depends_on`** | Wraps external executables, tracks container digest as cache key. Use for black-box tools.                                  |
+| Parameter sweep / sensitivity analysis                      | **`scenario`&nbsp;+&nbsp;loop** | Run the same step with different configs, compare results.                                                                  |
+| Multi-year simulation                                       | **`scenario`&nbsp;+&nbsp;loop** | Runs in years, each year caches independently, all years share scenario context.                                            |
 
 ---
 

@@ -34,7 +34,7 @@ site_author = "Zach Needell"
 #
 # Read more: https://zensical.org/docs/setup/basics/#copyright
 copyright = """
-Copyright &copy; 2025 The authors TODO TODO TODO
+Copyright &copy; 2026 The Regents of the University of California, through Lawrence Berkeley National Laboratory
 """
 
 # Zensical supports both implicit navigation and explicitly defined navigation.
@@ -50,7 +50,7 @@ Copyright &copy; 2025 The authors TODO TODO TODO
 # ]
 nav = [
   { "Home" = "index.md" },
-  { "Getting Started" = ["concepts.md", "caching-fundamentals.md", "usage-guide.md", "examples.md"] },
+  { "Getting Started" = ["concepts.md", "usage-guide.md", "caching-fundamentals.md", "examples.md"] },
   { "Core Topics" = ["configs.md", "caching-and-hydration.md", "dlt-loader-guide.md", "containers-guide.md", "mounts-and-portability.md", "ingestion-and-hybrid-views.md", "schema-export.md"] },
   { "Integrations" = ["integrations/index.md", "integrations/config_adapters.md"] },
   { "CLI Reference" = ["cli-reference.md"] },

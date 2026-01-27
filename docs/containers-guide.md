@@ -206,56 +206,6 @@ with Session(tracker.engine) as session:
 
 ---
 
-## SUMO Integration
-
-SUMO (Simulation of Urban Mobility) is a microscopic traffic simulation tool. Integration is similar to ActivitySim:
-
-```python
-from consist.integrations.containers import run_container
-from pathlib import Path
-
-tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
-
-def run_sumo_simulation(scenario_name: str, config_file: Path, network_file: Path):
-    """Execute SUMO traffic simulation with Consist provenance."""
-
-    output_dir = Path(f"./sumo_outputs/{scenario_name}")
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    result = run_container(
-        tracker=tracker,
-        run_id=f"sumo_{scenario_name}",
-        image="my-org/sumo:latest",
-        command=[
-            "sumo",
-            "-c", str(config_file),  # SUMO config file
-            "--output-prefix", f"/outputs/{scenario_name}/",
-        ],
-        volumes={
-            "./network": "/network",   # SUMO network files
-            "./scenarios": "/scenarios",
-            f"./sumo_outputs/{scenario_name}": f"/outputs/{scenario_name}",
-        },
-        inputs=[config_file, network_file],
-        outputs=[str(output_dir)],
-        environment={
-            "SUMO_HOME": "/usr/share/sumo",
-        },
-        backend_type="docker",
-    )
-
-    return result
-
-# Run with baseline network
-result = run_sumo_simulation(
-    "baseline_2024",
-    config_file=Path("./scenarios/baseline.sumo.cfg"),
-    network_file=Path("./network/network.net.xml"),
-)
-```
-
----
-
 ## Singularity / Apptainer Support
 
 If using Singularity (common on HPC clusters):

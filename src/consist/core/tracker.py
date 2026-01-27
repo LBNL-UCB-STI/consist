@@ -2300,13 +2300,15 @@ class Tracker:
                 run.input_hash or "",
                 run.git_hash or "",
             )
+            cache_hit = bool(run.meta.get("cache_hit")) if run.meta else False
             if cache_key in self._local_cache_index and cache_mode != "overwrite":
-                logging.warning(
-                    "Cache key collision detected (extremely rare): %s. "
-                    "Keeping first cached run (created %s).",
-                    cache_key,
-                    self._local_cache_index[cache_key].created_at,
-                )
+                if not cache_hit:
+                    logging.warning(
+                        "Cache key collision detected (extremely rare): %s. "
+                        "Keeping first cached run (created %s).",
+                        cache_key,
+                        self._local_cache_index[cache_key].created_at,
+                    )
             else:
                 self._local_cache_index[cache_key] = run
             if len(self._local_cache_index) > self._local_cache_max_entries:
