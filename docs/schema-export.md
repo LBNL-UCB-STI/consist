@@ -1,6 +1,6 @@
 # Schema Export (SQLModel Stubs)
 
-Consist can capture the observed (post-ingest) schema of tabular artifacts and export that schema as a **static SQLModel class stub** you can commit and edit. This is intended to reduce “retype the table definition” friction while keeping Consist honest about what it can and cannot infer.
+Consist can capture the observed (post-ingest) schema of tabular artifacts and export that schema as a **static SQLModel class stub** you can commit and edit. This reduces “retype the table definition” friction while keeping Consist honest about what it can and cannot infer.
 
 ## What You Get
 
@@ -11,6 +11,7 @@ Consist can capture the observed (post-ingest) schema of tabular artifacts and e
   - deterministic ordering (prefers `ordinal_position`)
 - “Hints” as comments (enums/stats) when available (on by default).
 - Messy column names are handled: the generated attribute name is sanitized, but the original DB column name is preserved via `Field(sa_column=Column("original", ...))` when needed.
+- Foreign keys are preserved if they were provided in a curated SQLModel schema (rendered as `Field(foreign_key="table.column")`).
 
 ## Abstract vs Concrete Exports
 
@@ -27,6 +28,8 @@ Consist does not infer semantic intent. You typically edit the stub to add:
 - indexes / uniqueness constraints
 - relationships
 - renames / normalization decisions
+
+If you pass a curated SQLModel schema to `log_artifact(..., schema=YourModel)` and it includes `foreign_key=...`, those FKs are persisted and will be re-emitted during export.
 
 ## Prerequisites
 
@@ -86,6 +89,16 @@ code = tracker.export_schema_sqlmodel(
 ```
 
 The method returns the generated string regardless of whether you write it.
+
+## Best‑Effort Foreign Key Enforcement
+
+If you want DuckDB to attempt to enforce persisted foreign keys, run:
+
+```bash
+python -m consist.cli schema apply-fks
+```
+
+This step is best‑effort: if a constraint can’t be added (e.g., due to missing parent rows), Consist logs a warning and continues.
 
 ## Where to Put the Generated File
 
