@@ -8,6 +8,7 @@ from consist import (
     is_json_artifact,
     is_zarr_artifact,
     is_hdf_artifact,
+    is_spatial_artifact,
     DriverType,
 )
 from consist.models.artifact import Artifact
@@ -30,7 +31,21 @@ class TestDriverType:
 
     def test_driver_type_has_all_known_drivers(self) -> None:
         """Verify DriverType enum contains all known drivers."""
-        expected = {"parquet", "csv", "zarr", "json", "h5_table", "h5", "hdf5", "other"}
+        expected = {
+            "parquet",
+            "csv",
+            "zarr",
+            "netcdf",
+            "openmatrix",
+            "json",
+            "h5_table",
+            "h5",
+            "hdf5",
+            "geojson",
+            "shapefile",
+            "geopackage",
+            "other",
+        }
         actual = {dt.value for dt in DriverType}
         assert actual == expected
 
@@ -43,10 +58,15 @@ class TestDriverType:
                 "parquet",
                 "csv",
                 "zarr",
+                "netcdf",
+                "openmatrix",
                 "json",
                 "h5_table",
                 "h5",
                 "hdf5",
+                "geojson",
+                "shapefile",
+                "geopackage",
                 "other",
             )
 
@@ -131,6 +151,17 @@ class TestTypeGuards:
         """Verify is_hdf_artifact rejects h5_table (different from h5/hdf5)."""
         art = _artifact("h5_table")
         assert is_hdf_artifact(art) is False
+
+    def test_is_spatial_artifact(self) -> None:
+        """Verify is_spatial_artifact recognizes spatial drivers."""
+        for driver in ("geojson", "shapefile", "geopackage"):
+            art = _artifact(driver)
+            assert is_spatial_artifact(art) is True, f"Expected {driver} to be spatial"
+
+    def test_is_spatial_artifact_rejects_csv(self) -> None:
+        """Verify is_spatial_artifact rejects non-spatial drivers."""
+        art = _artifact("csv")
+        assert is_spatial_artifact(art) is False
 
 
 class TestRuntimeCheckable:

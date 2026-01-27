@@ -17,6 +17,77 @@ MAX_INLINE_PROFILE_BYTES = 16_384
 MAX_FIELDS = 2_000
 
 
+def _normalize_index_name(name: Any, level: int) -> str:
+    if name is None or name == "":
+        return f"__index_level_{level}__"
+    return str(name)
+
+
+def _parquet_pandas_metadata(path: str) -> Optional[Dict[str, Any]]:
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        return None
+
+    try:
+        parquet_file = pq.ParquetFile(path)
+        metadata = parquet_file.metadata
+        if metadata is None:
+            return None
+        kv = metadata.metadata or {}
+        pandas_bytes = None
+        if b"pandas" in kv:
+            pandas_bytes = kv[b"pandas"]
+        elif "pandas" in kv:
+            pandas_bytes = kv["pandas"]
+        if not pandas_bytes:
+            return None
+        return json.loads(pandas_bytes.decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _parquet_index_columns(path: str) -> List[str]:
+    metadata = _parquet_pandas_metadata(path)
+    if not metadata:
+        return []
+    raw_index_columns = metadata.get("index_columns") or []
+    index_columns: List[str] = []
+    for level, entry in enumerate(raw_index_columns):
+        name = entry
+        if isinstance(entry, dict):
+            name = entry.get("name")
+        index_columns.append(_normalize_index_name(name, level))
+    return index_columns
+
+
+def _index_info_from_df(df: Any) -> tuple[List[str], Dict[str, str]]:
+    try:
+        import pandas as pd
+    except ImportError:
+        return [], {}
+
+    if not isinstance(df, pd.DataFrame):
+        return [], {}
+
+    names: List[str] = []
+    dtypes: Dict[str, str] = {}
+
+    index = df.index
+    if isinstance(index, pd.MultiIndex):
+        for i, name in enumerate(index.names):
+            norm_name = _normalize_index_name(name, i)
+            names.append(norm_name)
+            dtype = index.get_level_values(i).dtype
+            dtypes[norm_name] = str(dtype).lower()
+    else:
+        norm_name = _normalize_index_name(index.name, 0)
+        names.append(norm_name)
+        dtypes[norm_name] = str(index.dtype).lower()
+
+    return names, dtypes
+
+
 @dataclass(frozen=True)
 class SchemaFieldProfile:
     name: str
@@ -154,8 +225,9 @@ def profile_file_schema(
     *,
     identity: IdentityManager,
     path: str,
-    driver: Literal["parquet", "csv"],
+    driver: Literal["parquet", "csv", "h5_table"],
     sample_rows: Optional[int],
+    table_path: Optional[str] = None,
     source: str = "file",
 ) -> SchemaProfileResult:
     """
@@ -167,10 +239,12 @@ def profile_file_schema(
         Identity manager used to hash the canonical schema payload.
     path : str
         Filesystem path to the file to profile.
-    driver : {"parquet", "csv"}
+    driver : {"parquet", "csv", "h5_table"}
         File format driver for the profiler.
     sample_rows : Optional[int]
         Maximum number of rows to sample for dtype inference. None means no limit.
+    table_path : Optional[str]
+        HDF5 table path when profiling ``h5_table`` artifacts.
     source : str, default "file"
         Source label for the schema observation.
 
@@ -179,15 +253,60 @@ def profile_file_schema(
     SchemaProfileResult
         Schema profile payload including per-field rows and summary metadata.
     """
-    batches = yield_file_batches(path, driver=driver, max_rows=sample_rows)
     df = None
-    for batch in batches:
-        df = batch
-        break
+    index_columns: List[str] = []
+    index_dtypes: Dict[str, str] = {}
+    if driver == "parquet":
+        index_columns = _parquet_index_columns(path)
+    if driver == "h5_table":
+        if not table_path:
+            raise ValueError("table_path is required for h5_table profiling.")
+        import pandas as pd
+
+        try:
+            if sample_rows is not None:
+                df = pd.read_hdf(path, key=table_path, stop=sample_rows)
+            else:
+                df = pd.read_hdf(path, key=table_path)
+        except (TypeError, ValueError):
+            df = pd.read_hdf(path, key=table_path)
+            if sample_rows is not None:
+                df = df.head(sample_rows)
+    else:
+        batches = yield_file_batches(path, driver=driver, max_rows=sample_rows)
+        for batch in batches:
+            df = batch
+            break
 
     fields: List[SchemaFieldProfile] = []
     if df is not None:
+        import pandas as pd
+
+        if isinstance(df, pd.Series):
+            df = df.to_frame()
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("Expected pandas DataFrame or Series for schema profiling.")
+        if driver == "parquet":
+            if index_columns:
+                index_dtypes = {
+                    name: str(df[name].dtype).lower()
+                    for name in index_columns
+                    if name in df.columns
+                }
+                if len(index_dtypes) < len(index_columns):
+                    fallback_columns, fallback_dtypes = _index_info_from_df(df)
+                    for name in index_columns:
+                        if name in index_dtypes:
+                            continue
+                        if name in fallback_dtypes:
+                            index_dtypes[name] = fallback_dtypes[name]
+            else:
+                index_columns, index_dtypes = _index_info_from_df(df)
+        elif driver == "h5_table":
+            index_columns, index_dtypes = _index_info_from_df(df)
         for i, (col, dtype) in enumerate(df.dtypes.items(), start=1):
+            if driver == "parquet" and col in index_columns:
+                continue
             fields.append(
                 SchemaFieldProfile(
                     name=str(col),
@@ -209,7 +328,11 @@ def profile_file_schema(
         "source": source,
         "driver": driver,
         "fields": field_rows,
+        "index_columns": index_columns,
+        "index_dtypes": index_dtypes,
     }
+    if driver == "h5_table":
+        hash_obj["table_path"] = table_path
     schema_id = identity.canonical_json_sha256(hash_obj)
 
     summary = {
@@ -220,7 +343,11 @@ def profile_file_schema(
         "sample_rows": sample_rows,
         "n_columns": len(fields),
         "truncated": truncated_flags,
+        "index_columns": index_columns,
+        "index_dtypes": index_dtypes,
     }
+    if driver == "h5_table":
+        summary["table_path"] = table_path
 
     profile_obj: Dict[str, Any] = dict(hash_obj)
     if len(fields) > MAX_FIELDS:

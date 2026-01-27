@@ -28,10 +28,11 @@ from typing import (
     Union,
     cast,
 )
+from sqlalchemy.sql import Executable
 
 import pandas as pd
 from pydantic import BaseModel
-from sqlmodel import SQLModel
+from sqlmodel import SQLModel, Session
 
 from consist.core.artifact_schemas import ArtifactSchemaManager
 from consist.core.artifacts import ArtifactManager
@@ -67,6 +68,9 @@ from consist.core.ingestion import ingest_artifact
 from consist.core.lineage import LineageService
 from consist.core.materialize import materialize_artifacts
 from consist.core.matrix import MatrixViewFactory
+from consist.core.netcdf_views import NetCdfMetadataView
+from consist.core.openmatrix_views import OpenMatrixMetadataView
+from consist.core.spatial_views import SpatialMetadataView
 from consist.core.queries import RunQueryService
 from consist.core.validation import (
     validate_config_structure,
@@ -2417,6 +2421,25 @@ class Tracker:
         """
         return self.queries.find_run(**kwargs)
 
+    def run_query(self, query: Executable) -> list:
+        """
+        Execute a SQLModel/SQLAlchemy query via the tracker engine.
+
+        Parameters
+        ----------
+        query : Executable
+            Query object (``select``, ``text``, etc.).
+
+        Returns
+        -------
+        list
+            Results of the executed query.
+        """
+        if not self.engine:
+            raise RuntimeError("Database connection required.")
+        with Session(self.engine) as session:
+            return session.exec(cast(Any, query)).all()
+
     def find_latest_run(
         self,
         *,
@@ -2485,7 +2508,9 @@ class Tracker:
         content_hash: Optional[str] = None,
         force_hash_override: bool = False,
         validate_content_hash: bool = False,
-        profile_file_schema: bool = False,
+        reuse_if_unchanged: bool = False,
+        reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
+        profile_file_schema: bool | Literal["if_changed"] = False,
         file_schema_sample_rows: Optional[int] = 1000,
         **meta: Any,
     ) -> Artifact:
@@ -2531,8 +2556,14 @@ class Tracker:
             `content_hash`. By default, mismatched overrides are ignored with a warning.
         validate_content_hash : bool, default False
             If True, verify `content_hash` against the on-disk data and raise on mismatch.
+        reuse_if_unchanged : bool, default False
+            If True and logging an output, reuse a prior artifact row when the content hash matches.
+        reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
+            Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
+            while "any_uri" allows reuse across different URIs with the same hash.
         profile_file_schema : bool, default False
             If True, profile a lightweight schema for file-based tabular artifacts.
+            Use "if_changed" to skip profiling when a matching content hash already has a schema.
         file_schema_sample_rows : Optional[int], default 1000
             Maximum rows to sample when profiling file-based schemas.
         **meta : Any
@@ -2589,6 +2620,8 @@ class Tracker:
             content_hash=content_hash,
             force_hash_override=force_hash_override,
             validate_content_hash=validate_content_hash,
+            reuse_if_unchanged=reuse_if_unchanged,
+            reuse_scope=reuse_scope,
             **meta,
         )
 
@@ -2636,8 +2669,9 @@ class Tracker:
         self._flush_json()
         self._sync_artifact_to_db(artifact_obj, direction)
 
+        profile_mode = profile_file_schema
         if (
-            profile_file_schema
+            profile_mode
             and artifact_obj.is_tabular
             and self.current_consist is not None
         ):
@@ -2651,15 +2685,16 @@ class Tracker:
                 )
                 if resolved_path:
                     driver = artifact_obj.driver
-                    if driver not in ("csv", "parquet"):
+                    if driver not in ("csv", "parquet", "h5_table"):
                         return artifact_obj
                     self.artifact_schemas.profile_file_artifact(
                         artifact=artifact_obj,
                         run=self.current_consist.run,
                         resolved_path=str(resolved_path),
-                        driver=cast(Literal["csv", "parquet"], driver),
+                        driver=cast(Literal["csv", "parquet", "h5_table"], driver),
                         sample_rows=file_schema_sample_rows,
                         source="file",
+                        reuse_if_unchanged=profile_mode == "if_changed",
                     )
             except FileNotFoundError:
                 logging.warning(
@@ -2784,6 +2819,8 @@ class Tracker:
         direction: str = "output",
         driver: Optional[str] = None,
         metadata_by_key: Optional[Mapping[str, Dict[str, Any]]] = None,
+        reuse_if_unchanged: bool = False,
+        reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
         **shared_meta: Any,
     ) -> Dict[str, Artifact]:
         """
@@ -2862,7 +2899,13 @@ class Tracker:
             if metadata_by_key and key in metadata_by_key:
                 meta.update(metadata_by_key[key])
             logged[key] = self.log_artifact(
-                value, key=key, direction=direction, driver=driver, **meta
+                value,
+                key=key,
+                direction=direction,
+                driver=driver,
+                reuse_if_unchanged=reuse_if_unchanged,
+                reuse_scope=reuse_scope,
+                **meta,
             )
         return logged
 
@@ -2917,6 +2960,8 @@ class Tracker:
         content_hash: Optional[str] = None,
         force_hash_override: bool = False,
         validate_content_hash: bool = False,
+        reuse_if_unchanged: bool = False,
+        reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
         **meta: Any,
     ) -> Artifact:
         """
@@ -2951,6 +2996,8 @@ class Tracker:
             content_hash=content_hash,
             force_hash_override=force_hash_override,
             validate_content_hash=validate_content_hash,
+            reuse_if_unchanged=reuse_if_unchanged,
+            reuse_scope=reuse_scope,
             **meta,
         )
 
@@ -2970,6 +3017,8 @@ class Tracker:
         direction: str = "output",
         discover_tables: bool = True,
         table_filter: Optional[Union[Callable[[str], bool], List[str]]] = None,
+        hash_tables: Literal["always", "if_unchanged", "never"] = "if_unchanged",
+        table_hash_chunk_rows: Optional[int] = None,
         **meta: Any,
     ) -> Tuple[Artifact, List[Artifact]]:
         """
@@ -3038,8 +3087,164 @@ class Tracker:
             direction=direction,
             discover_tables=discover_tables,
             table_filter=table_filter,
+            hash_tables=hash_tables,
+            table_hash_chunk_rows=table_hash_chunk_rows,
             **meta,
         )
+
+    def log_h5_table(
+        self,
+        path: Union[str, Path],
+        *,
+        table_path: str,
+        key: Optional[str] = None,
+        direction: str = "output",
+        parent: Optional[Artifact] = None,
+        hash_table: bool = True,
+        table_hash_chunk_rows: Optional[int] = None,
+        profile_file_schema: bool | Literal["if_changed"] = False,
+        file_schema_sample_rows: Optional[int] = None,
+        **meta: Any,
+    ) -> Artifact:
+        """
+        Log a single HDF5 table as an artifact without scanning the container.
+        """
+        return self.artifacts.log_h5_table(
+            path,
+            table_path=table_path,
+            key=key,
+            direction=direction,
+            parent=parent,
+            hash_table=hash_table,
+            table_hash_chunk_rows=table_hash_chunk_rows,
+            profile_file_schema=profile_file_schema,
+            file_schema_sample_rows=file_schema_sample_rows,
+            **meta,
+        )
+
+    def log_netcdf_file(
+        self,
+        path: Union[str, Path],
+        key: Optional[str] = None,
+        direction: str = "output",
+        **meta: Any,
+    ) -> Artifact:
+        """
+        Log a NetCDF file as an artifact with metadata extraction.
+
+        This method provides convenient logging for NetCDF files, automatically
+        detecting the driver and storing structural metadata about variables,
+        dimensions, and coordinates.
+
+        Parameters
+        ----------
+        path : Union[str, Path]
+            Path to the NetCDF file.
+        key : Optional[str], optional
+            Semantic name for the artifact. If not provided, uses the file stem.
+        direction : str, default "output"
+            Whether this is an "input" or "output" artifact.
+        **meta : Any
+            Additional metadata for the artifact.
+
+        Returns
+        -------
+        Artifact
+            The logged artifact with metadata extracted from the NetCDF structure.
+
+        Raises
+        ------
+        RuntimeError
+            If called outside an active run context.
+        ImportError
+            If xarray is not installed.
+
+        Example
+        -------
+        ```python
+        # Log NetCDF file
+        art = tracker.log_netcdf_file("climate_data.nc", key="temperature")
+        # Optionally ingest metadata
+        tracker.ingest(art)
+        ```
+        """
+        if not self.current_consist:
+            raise RuntimeError("Cannot log artifact outside of a run context.")
+
+        path_obj = Path(path)
+        if key is None:
+            key = path_obj.stem
+
+        artifact = self.log_artifact(
+            str(path_obj),
+            key=key,
+            direction=direction,
+            driver="netcdf",
+            **meta,
+        )
+        return artifact
+
+    def log_openmatrix_file(
+        self,
+        path: Union[str, Path],
+        key: Optional[str] = None,
+        direction: str = "output",
+        **meta: Any,
+    ) -> Artifact:
+        """
+        Log an OpenMatrix (OMX) file as an artifact with metadata extraction.
+
+        This method provides convenient logging for OpenMatrix files, automatically
+        detecting the driver and storing structural metadata about matrices,
+        dimensions, and attributes.
+
+        Parameters
+        ----------
+        path : Union[str, Path]
+            Path to the OpenMatrix file.
+        key : Optional[str], optional
+            Semantic name for the artifact. If not provided, uses the file stem.
+        direction : str, default "output"
+            Whether this is an "input" or "output" artifact.
+        **meta : Any
+            Additional metadata for the artifact.
+
+        Returns
+        -------
+        Artifact
+            The logged artifact with metadata extracted from the OpenMatrix structure.
+
+        Raises
+        ------
+        RuntimeError
+            If called outside an active run context.
+        ImportError
+            If neither h5py nor openmatrix is installed.
+
+        Example
+        -------
+        ```python
+        # Log OpenMatrix file (e.g., ActivitySim travel demand)
+        art = tracker.log_openmatrix_file("demand.omx", key="travel_demand")
+        # Optionally ingest metadata
+        tracker.ingest(art)
+        ```
+        """
+        if not self.current_consist:
+            raise RuntimeError("Cannot log artifact outside of a run context.")
+
+        path_obj = Path(path)
+        if key is None:
+            key = path_obj.stem
+
+        artifact = self.log_artifact(
+            str(path_obj),
+            key=key,
+            direction=direction,
+            driver="openmatrix",
+            **meta,
+        )
+        return artifact
 
     def ingest(
         self,
@@ -3684,6 +3889,84 @@ class Tracker:
             model=model,
             status=status,
         )
+
+    def netcdf_metadata(self, concept_key: str) -> NetCdfMetadataView:
+        """
+        Access NetCDF metadata views for a given artifact key.
+
+        This provides convenient access to query and explore NetCDF file structures
+        stored in Consist's metadata catalog.
+
+        Parameters
+        ----------
+        concept_key : str
+            The semantic key identifying the NetCDF artifact.
+
+        Returns
+        -------
+        NetCdfMetadataView
+            A view object with methods to explore variables, dimensions, and attributes.
+
+        Example
+        -------
+        ```python
+        view = tracker.netcdf_metadata("climate")
+        variables = view.get_variables(year=2024)
+        print(view.summary("climate"))
+        ```
+        """
+        return NetCdfMetadataView(self)
+
+    def openmatrix_metadata(self, concept_key: str) -> OpenMatrixMetadataView:
+        """
+        Access OpenMatrix metadata views for a given artifact key.
+
+        This provides convenient access to query and explore OpenMatrix file structures
+        stored in Consist's metadata catalog.
+
+        Parameters
+        ----------
+        concept_key : str
+            The semantic key identifying the OpenMatrix artifact.
+
+        Returns
+        -------
+        OpenMatrixMetadataView
+            A view object with methods to explore matrices, zones, and attributes.
+
+        Example
+        -------
+        ```python
+        view = tracker.openmatrix_metadata("demand")
+        matrices = view.get_matrices(year=2024)
+        zones = view.get_zone_counts()
+        print(view.summary("demand"))
+        ```
+        """
+        return OpenMatrixMetadataView(self)
+
+    def spatial_metadata(self, concept_key: str) -> SpatialMetadataView:
+        """
+        Access spatial metadata views for a given artifact key.
+
+        Parameters
+        ----------
+        concept_key : str
+            The semantic key identifying the spatial artifact.
+
+        Returns
+        -------
+        SpatialMetadataView
+            A view object with methods to explore spatial metadata.
+
+        Example
+        -------
+        ```python
+        view = tracker.spatial_metadata("parcels")
+        bounds = view.get_bounds("parcels")
+        ```
+        """
+        return SpatialMetadataView(self)
 
     def materialize(
         self,

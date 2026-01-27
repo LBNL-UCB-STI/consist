@@ -40,6 +40,7 @@ from consist.core.decorators import (
     define_step as define_step_decorator,
     require_runtime_kwargs as require_runtime_kwargs_decorator,
 )
+from consist.core.netcdf_utils import resolve_netcdf_engine
 from consist.core.noop import NoopRunContext, NoopScenarioContext
 from consist.core.views import create_view_model
 from consist.core.workflow import OutputCapture
@@ -50,6 +51,7 @@ from consist.core.tracker import Tracker
 from consist.types import ArtifactRef, DriverType
 
 if TYPE_CHECKING:
+    import geopandas
     import xarray
 
 # Import loaders for specific formats
@@ -65,8 +67,33 @@ try:
 except ImportError:
     tables = None
 
+gpd: Optional[ModuleType]
+try:
+    gpd = importlib.import_module("geopandas")
+except ImportError:
+    gpd = None
+
 T = TypeVar("T", bound=SQLModel)
-LoadResult = Union[pd.DataFrame, pd.Series, "xarray.Dataset", pd.HDFStore]
+
+
+class OpenMatrixFileLike(Protocol):
+    """Minimal file-like surface for OpenMatrix/HDF5 access."""
+
+    def __contains__(self, key: object) -> bool: ...
+
+    def __getitem__(self, key: str) -> Any: ...
+
+    def close(self) -> None: ...
+
+
+LoadResult = Union[
+    pd.DataFrame,
+    pd.Series,
+    "geopandas.GeoDataFrame",
+    "xarray.Dataset",
+    pd.HDFStore,
+    OpenMatrixFileLike,
+]
 
 
 @runtime_checkable
@@ -116,6 +143,24 @@ class HdfStoreArtifact(ArtifactLike, Protocol):
     """Artifact that loads as pandas HDFStore."""
 
     driver: Literal["h5", "hdf5"]
+
+
+class NetCdfArtifact(ArtifactLike, Protocol):
+    """Artifact that loads as xarray.Dataset (NetCDF format)."""
+
+    driver: Literal["netcdf"]
+
+
+class OpenMatrixArtifact(ArtifactLike, Protocol):
+    """Artifact that loads as array-like structure (OpenMatrix format)."""
+
+    driver: Literal["openmatrix"]
+
+
+class SpatialArtifact(ArtifactLike, Protocol):
+    """Artifact that loads as GeoDataFrame (spatial formats)."""
+
+    driver: Literal["geojson", "shapefile", "geopackage"]
 
 
 def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
@@ -466,6 +511,8 @@ def log_artifact(
     content_hash: Optional[str] = None,
     force_hash_override: bool = False,
     validate_content_hash: bool = False,
+    reuse_if_unchanged: bool = False,
+    reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
     *,
     enabled: bool = True,
     **meta,
@@ -501,6 +548,11 @@ def log_artifact(
         `content_hash`. By default, mismatched overrides are ignored with a warning.
     validate_content_hash : bool, default False
         If True, verify `content_hash` against the on-disk data and raise on mismatch.
+    reuse_if_unchanged : bool, default False
+        If True and logging an output, reuse a prior artifact row when the content hash matches.
+    reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
+        Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
+        while "any_uri" allows reuse across different URIs with the same hash.
     enabled : bool, default True
         If False, returns a noop artifact object without requiring an active run.
     **meta : Any
@@ -528,6 +580,8 @@ def log_artifact(
             content_hash=content_hash,
             force_hash_override=force_hash_override,
             validate_content_hash=validate_content_hash,
+            reuse_if_unchanged=reuse_if_unchanged,
+            reuse_scope=reuse_scope,
             **meta,
         )
     return get_active_tracker().log_artifact(
@@ -539,6 +593,8 @@ def log_artifact(
         content_hash=content_hash,
         force_hash_override=force_hash_override,
         validate_content_hash=validate_content_hash,
+        reuse_if_unchanged=reuse_if_unchanged,
+        reuse_scope=reuse_scope,
         **meta,
     )
 
@@ -549,6 +605,8 @@ def log_artifacts(
     direction: str = "output",
     driver: Optional[str] = None,
     metadata_by_key: Optional[Mapping[str, Dict[str, Any]]] = None,
+    reuse_if_unchanged: bool = False,
+    reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
     enabled: bool = True,
     **shared_meta: Any,
 ) -> Mapping[str, ArtifactLike]:
@@ -630,7 +688,13 @@ def log_artifacts(
             meta = dict(shared_meta)
             meta.update(per_key_meta.get(key, {}))
             artifacts[str(key)] = ctx.log_artifact(
-                ref, key=str(key), direction=direction, driver=driver, **meta
+                ref,
+                key=str(key),
+                direction=direction,
+                driver=driver,
+                reuse_if_unchanged=reuse_if_unchanged,
+                reuse_scope=reuse_scope,
+                **meta,
             )
         return artifacts
     return get_active_tracker().log_artifacts(
@@ -638,6 +702,8 @@ def log_artifacts(
         direction=direction,
         driver=driver,
         metadata_by_key=metadata_by_key,
+        reuse_if_unchanged=reuse_if_unchanged,
+        reuse_scope=reuse_scope,
         **shared_meta,
     )
 
@@ -683,6 +749,8 @@ def log_output(
     content_hash: Optional[str] = None,
     force_hash_override: bool = False,
     validate_content_hash: bool = False,
+    reuse_if_unchanged: bool = False,
+    reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
     enabled: bool = True,
     **meta,
 ) -> ArtifactLike:
@@ -701,6 +769,8 @@ def log_output(
         content_hash=content_hash,
         force_hash_override=force_hash_override,
         validate_content_hash=validate_content_hash,
+        reuse_if_unchanged=reuse_if_unchanged,
+        reuse_scope=reuse_scope,
         enabled=enabled,
         **meta,
     )
@@ -1282,6 +1352,72 @@ def is_hdf_artifact(artifact: ArtifactLike) -> TypeGuard[HdfStoreArtifact]:
     return artifact.driver in DriverType.hdf_drivers()
 
 
+def is_netcdf_artifact(artifact: ArtifactLike) -> TypeGuard[NetCdfArtifact]:
+    """
+    Type guard: narrow artifact to NetCDF format.
+
+    Use this when you know an artifact should be NetCDF and want type-safe loading:
+
+    ```python
+    if is_netcdf_artifact(artifact):
+        ds = load(artifact)  # Type checker knows return is xarray.Dataset
+        ds.dims  # IDE autocomplete works!
+    ```
+
+    Parameters
+    ----------
+    artifact : ArtifactLike
+        Artifact to check.
+
+    Returns
+    -------
+    bool
+        True if artifact driver is netcdf.
+    """
+    return artifact.driver == DriverType.NETCDF.value
+
+
+def is_openmatrix_artifact(artifact: ArtifactLike) -> TypeGuard[OpenMatrixArtifact]:
+    """
+    Type guard: narrow artifact to OpenMatrix format.
+
+    Use this when you know an artifact should be OpenMatrix and want type-safe loading:
+
+    ```python
+    if is_openmatrix_artifact(artifact):
+        matrix_data = load(artifact)  # Type checker knows return is appropriate type
+    ```
+
+    Parameters
+    ----------
+    artifact : ArtifactLike
+        Artifact to check.
+
+    Returns
+    -------
+    bool
+        True if artifact driver is openmatrix.
+    """
+    return artifact.driver == DriverType.OPENMATRIX.value
+
+
+def is_spatial_artifact(artifact: ArtifactLike) -> TypeGuard[SpatialArtifact]:
+    """
+    Type guard: narrow artifact to spatial formats (GeoDataFrame outputs).
+
+    Parameters
+    ----------
+    artifact : ArtifactLike
+        Artifact to check.
+
+    Returns
+    -------
+    bool
+        True if artifact driver is geojson, shapefile, or geopackage.
+    """
+    return artifact.driver in DriverType.spatial_drivers()
+
+
 # Overload signatures ordered from most specific to least specific
 # Type checkers evaluate overloads in declaration order
 
@@ -1294,6 +1430,36 @@ def load(
     db_fallback: str = "inputs-only",
     **kwargs: Any,
 ) -> "xarray.Dataset": ...
+
+
+@overload
+def load(
+    artifact: NetCdfArtifact,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> "xarray.Dataset": ...
+
+
+@overload
+def load(
+    artifact: OpenMatrixArtifact,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> LoadResult: ...
+
+
+@overload
+def load(
+    artifact: SpatialArtifact,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> "geopandas.GeoDataFrame": ...
 
 
 @overload
@@ -1555,6 +1721,40 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
         if xr is None:
             raise ImportError("xarray required for Zarr")
         return xr.open_zarr(path, consolidated=False, **kwargs)
+    elif driver == "netcdf":
+        if xr is None:
+            raise ImportError(
+                "xarray required for NetCDF (pip install xarray netCDF4 h5netcdf)"
+            )
+        if "engine" in kwargs:
+            return xr.open_dataset(path, **kwargs)
+        engine = resolve_netcdf_engine()
+        if engine:
+            try:
+                return xr.open_dataset(path, engine=engine, **kwargs)
+            except Exception:
+                return xr.open_dataset(path, **kwargs)
+        return xr.open_dataset(path, **kwargs)
+    elif driver == "openmatrix":
+        # Try openmatrix library first; fall back to h5py if not available
+        try:
+            omx = importlib.import_module("openmatrix")
+            # Return the file object for array-like access; caller manages close.
+            omx_file = omx.open_file(path, mode="r")
+            try:
+                omx_file.list_matrices()
+            except Exception:
+                omx_file.close()
+                raise
+            return omx_file
+        except Exception:
+            # Fallback to h5py for basic HDF5 access
+            h5py = importlib.import_module("h5py")
+            return h5py.File(path, "r")
+    elif driver in ("geojson", "shapefile", "geopackage"):
+        if gpd is None:
+            raise ImportError("geopandas required for spatial formats")
+        return gpd.read_file(path, **kwargs)
     elif driver == "json":
         return pd.read_json(path, **kwargs)
     elif driver == "h5_table":

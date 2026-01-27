@@ -397,8 +397,9 @@ class ArtifactSchemaManager:
         artifact: Artifact,
         run: Run,
         resolved_path: str,
-        driver: Literal["parquet", "csv"],
+        driver: Literal["parquet", "csv", "h5_table"],
         sample_rows: Optional[int],
+        reuse_if_unchanged: bool = False,
         source: str = "file",
     ) -> None:
         """
@@ -420,6 +421,8 @@ class ArtifactSchemaManager:
             File format driver (e.g., "csv", "parquet").
         sample_rows : Optional[int]
             Maximum rows to sample when inferring schema.
+        reuse_if_unchanged : bool, default False
+            If True, reuse a prior schema observation when the artifact hash matches.
         source : str, default "file"
             Source label for the schema observation.
 
@@ -440,13 +443,74 @@ class ArtifactSchemaManager:
                 ArtifactSchemaField,
                 ArtifactSchemaObservation,
             )
-            from consist.tools.schema_profile import profile_file_schema
+            from consist.tools.schema_profile import (
+                MAX_INLINE_PROFILE_BYTES,
+                profile_file_schema,
+            )
+            import json
+
+            def _is_inline_profile(obj: Any) -> bool:
+                if obj is None:
+                    return False
+                return (
+                    len(
+                        json.dumps(
+                            obj,
+                            sort_keys=True,
+                            ensure_ascii=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    )
+                    <= MAX_INLINE_PROFILE_BYTES
+                )
+
+            table_path = None
+            if driver == "h5_table":
+                if isinstance(getattr(artifact, "meta", None), dict):
+                    table_path = artifact.meta.get("table_path") or artifact.meta.get(
+                        "sub_path"
+                    )
+                if not table_path:
+                    logging.warning(
+                        "[Consist] Missing table_path for h5_table schema profile: %s",
+                        getattr(artifact, "key", None),
+                    )
+                    return
+
+            if reuse_if_unchanged and artifact.hash and self.tracker.db:
+                prior_obs = self.tracker.db.find_schema_observation_for_hash(
+                    artifact.hash
+                )
+                if prior_obs is not None:
+                    schema_bundle = self.tracker.db.get_artifact_schema(
+                        schema_id=prior_obs.schema_id, backfill_ordinals=False
+                    )
+                    if schema_bundle is not None:
+                        schema_row, _fields = schema_bundle
+                        self.tracker.db.insert_artifact_schema_observation(
+                            ArtifactSchemaObservation(
+                                artifact_id=artifact.id,
+                                schema_id=schema_row.id,
+                                run_id=run.id,
+                                source=prior_obs.source,
+                                sample_rows=prior_obs.sample_rows,
+                            )
+                        )
+                        meta_updates: Dict[str, Any] = {
+                            "schema_id": schema_row.id,
+                            "schema_summary": schema_row.summary_json,
+                        }
+                        if _is_inline_profile(schema_row.profile_json):
+                            meta_updates["schema_profile"] = schema_row.profile_json
+                        self.tracker.db.update_artifact_meta(artifact, meta_updates)
+                        return
 
             result = profile_file_schema(
                 identity=self.tracker.identity,
                 path=resolved_path,
                 driver=driver,
                 sample_rows=sample_rows,
+                table_path=table_path,
                 source=source,
             )
             truncated = result.summary.get("truncated") or {}

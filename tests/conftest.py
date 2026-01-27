@@ -178,3 +178,36 @@ def sample_csv(tmp_path):
         return path
 
     return _make_csv
+
+
+@pytest.fixture
+def write_netcdf():
+    """
+    Writes a NetCDF file using the best available xarray backend.
+
+    Falls back to the default backend when h5netcdf is not installed, and skips
+    tests if the underlying NetCDF backend fails with HDF errors.
+    """
+    pytest.importorskip("xarray")
+    from consist.core.netcdf_utils import resolve_netcdf_engine
+
+    def _write(dataset, path: Path) -> None:
+        engine = resolve_netcdf_engine()
+        try:
+            if engine:
+                dataset.to_netcdf(path, engine=engine)
+            else:
+                dataset.to_netcdf(path)
+        except Exception as exc:
+            message = str(exc)
+            if (
+                "NetCDF: HDF error" in message
+                or "Problem with HDF5 dimscales" in message
+            ):
+                pytest.skip(
+                    "NetCDF backend failed with HDF5 errors. "
+                    "Install h5netcdf or use a compatible netCDF4 build."
+                )
+            raise
+
+    return _write

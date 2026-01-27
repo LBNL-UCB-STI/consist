@@ -84,3 +84,39 @@ def test_profile_file_artifact_skips_when_schema_id_present(tracker, tmp_path):
 
     assert schemas == []
     assert observations == []
+
+
+def test_log_artifact_profiles_schema_if_changed(tracker, tmp_path):
+    path_a = tmp_path / "data_a.csv"
+    path_b = tmp_path / "data_b.csv"
+    df = pd.DataFrame({"a": [1], "b": ["x"]})
+    df.to_csv(path_a, index=False)
+    df.to_csv(path_b, index=False)
+
+    with tracker.start_run("run_profile_if_changed_a", model="test_model"):
+        art_a = tracker.log_artifact(
+            path_a,
+            key="data",
+            direction="output",
+            profile_file_schema=True,
+        )
+
+    with tracker.start_run("run_profile_if_changed_b", model="test_model"):
+        art_b = tracker.log_artifact(
+            path_b,
+            key="data",
+            direction="output",
+            profile_file_schema="if_changed",
+        )
+
+    with Session(tracker.engine) as session:
+        schemas = session.exec(select(ArtifactSchema)).all()
+        observations = session.exec(select(ArtifactSchemaObservation)).all()
+
+    schema_a = tracker.db.get_artifact_schema_for_artifact(artifact_id=art_a.id)
+    schema_b = tracker.db.get_artifact_schema_for_artifact(artifact_id=art_b.id)
+    assert schema_a is not None
+    assert schema_b is not None
+    assert schema_a[0].id == schema_b[0].id
+    assert len(schemas) == 1
+    assert len(observations) == 2

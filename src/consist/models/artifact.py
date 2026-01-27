@@ -15,6 +15,8 @@ from sqlalchemy.types import CHAR, TypeDecorator
 
 from sqlmodel import Field, SQLModel
 
+from consist.types import DriverType
+
 UTC = timezone.utc
 
 
@@ -89,10 +91,10 @@ class Artifact(SQLModel, table=True):
     )
 
     # Driver Info
-    # Valid drivers: parquet, csv, zarr, json, h5_table, h5, hdf5, other
+    # Valid drivers: parquet, csv, zarr, json, h5_table, h5, hdf5, geojson, shapefile, geopackage, other
     # (See DriverType enum in consist.types for the authoritative list)
     driver: str = Field(
-        description="Format handler: parquet, csv, zarr, json, h5_table, h5, hdf5, or other"
+        description="Format handler: parquet, csv, zarr, json, h5_table, h5, hdf5, geojson, shapefile, geopackage, or other"
     )
 
     # Content Hash (for deduplication and content-addressable lookups)
@@ -192,9 +194,9 @@ class Artifact(SQLModel, table=True):
         -------
         bool
             True if the artifact's driver is associated with matrix-like data formats
-            (e.g., Zarr, HDF5, NetCDF), False otherwise.
+            (e.g., Zarr, HDF5, NetCDF, OpenMatrix), False otherwise.
         """
-        return self.driver in ("zarr", "h5", "netcdf")
+        return self.driver in ("zarr", "h5", "netcdf", "openmatrix")
 
     @property
     def is_tabular(self) -> bool:
@@ -210,7 +212,11 @@ class Artifact(SQLModel, table=True):
             True if the artifact's driver is associated with tabular data formats
             (e.g., Parquet, CSV, SQL), False otherwise.
         """
-        return self.driver in ("parquet", "csv", "sql")
+        return (
+            self.driver in DriverType.tabular_drivers()
+            or self.driver in DriverType.spatial_drivers()
+            or self.driver == "sql"
+        )
 
     @property
     def created_at_iso(self) -> Optional[str]:

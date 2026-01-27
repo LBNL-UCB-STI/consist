@@ -275,3 +275,72 @@ def test_log_input_override_ignored_when_hash_differs(tracker, dummy_input, capl
     assert any(
         "Ignoring content_hash override" in record.message for record in caplog.records
     )
+
+
+def test_log_output_reuses_same_uri_when_enabled(tracker, tmp_path):
+    path = tmp_path / "network.csv"
+    df = pd.DataFrame({"a": [1], "b": [2]})
+    df.to_csv(path, index=False)
+
+    with tracker.start_run(
+        "run_output_reuse_same_uri_a",
+        model="test_model",
+        cache_mode="overwrite",
+    ):
+        first = tracker.log_artifact(
+            path,
+            key="network",
+            direction="output",
+            reuse_if_unchanged=True,
+        )
+
+    df.to_csv(path, index=False)
+    with tracker.start_run(
+        "run_output_reuse_same_uri_b",
+        model="test_model",
+        cache_mode="overwrite",
+    ):
+        reused = tracker.log_artifact(
+            path,
+            key="network",
+            direction="output",
+            reuse_if_unchanged=True,
+        )
+
+    assert reused.id == first.id
+    assert reused.run_id == first.run_id
+
+
+def test_log_output_reuses_any_uri_when_enabled(tracker, tmp_path):
+    path_a = tmp_path / "year_1.csv"
+    path_b = tmp_path / "year_2.csv"
+    df = pd.DataFrame({"a": [1], "b": [2]})
+    df.to_csv(path_a, index=False)
+    df.to_csv(path_b, index=False)
+
+    with tracker.start_run(
+        "run_output_reuse_any_uri_a",
+        model="test_model",
+        cache_mode="overwrite",
+    ):
+        first = tracker.log_artifact(
+            path_a,
+            key="network",
+            direction="output",
+            reuse_if_unchanged=True,
+        )
+
+    with tracker.start_run(
+        "run_output_reuse_any_uri_b",
+        model="test_model",
+        cache_mode="overwrite",
+    ):
+        reused = tracker.log_artifact(
+            path_b,
+            key="network",
+            direction="output",
+            reuse_if_unchanged=True,
+            reuse_scope="any_uri",
+        )
+
+    assert reused.id == first.id

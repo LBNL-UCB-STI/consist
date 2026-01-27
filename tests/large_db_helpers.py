@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, Tuple, TypedDict, cast
 from uuid import UUID
 
 from sqlmodel import Session, and_, or_, select
@@ -24,13 +24,23 @@ def _chunked(iterable: Iterable, size: int):
         yield batch
 
 
+class SeedSample(TypedDict):
+    scale_sizes: Dict[str, int]
+    cache_tuple: Tuple[str, str, str]
+    scenario_id: str
+    lookup_key: str
+    lookup_hash: str
+    total_runs: int
+    scenario_count: int
+
+
 def _seed_base_dataset(
     session: Session,
     *,
     total_runs: int,
     runs_per_scenario: int,
     chunk_size: int,
-) -> Dict[str, object]:
+) -> SeedSample:
     base_time = datetime.now(UTC)
 
     size_10k = min(10_000, total_runs)
@@ -125,7 +135,7 @@ def _seed_base_dataset(
 
     sample["total_runs"] = total_runs
     sample["scenario_count"] = scenario_count
-    return sample
+    return cast(SeedSample, sample)
 
 
 def _seed_deep_lineage(session: Session, *, depth: int) -> UUID:
