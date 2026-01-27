@@ -665,6 +665,104 @@ class DatabaseManager:
         except Exception:
             return None
 
+    def find_latest_artifact_by_hash(
+        self,
+        content_hash: str,
+        *,
+        driver: Optional[str] = None,
+        include_inputs: bool = False,
+    ) -> Optional[Artifact]:
+        """
+        Finds the most recent artifact with the given content hash.
+
+        Parameters
+        ----------
+        content_hash : str
+            Hash to match against ``Artifact.hash``.
+        driver : Optional[str]
+            If provided, only return artifacts matching the driver.
+        include_inputs : bool
+            If True, include artifacts without a producing run_id.
+
+        Returns
+        -------
+        Optional[Artifact]
+            The most recent artifact with the given hash, or None if not found.
+        """
+
+        def _query():
+            with Session(self.engine) as session:
+                statement = select(Artifact).where(Artifact.hash == content_hash)
+                if not include_inputs:
+                    statement = statement.where(
+                        col(Artifact.run_id).is_not(None)
+                    )  # Must be produced by a run
+                if driver is not None:
+                    statement = statement.where(Artifact.driver == driver)
+                statement = statement.order_by(col(Artifact.created_at).desc()).limit(1)
+                return session.exec(statement).first()
+
+        try:
+            return self.execute_with_retry(_query)
+        except Exception:
+            return None
+
+    def find_schema_observation_for_hash(
+        self,
+        content_hash: str,
+        *,
+        prefer_source: Optional[str] = None,
+    ) -> Optional[ArtifactSchemaObservation]:
+        """
+        Find the best schema observation for artifacts matching the given hash.
+
+        Preference order mirrors ``get_artifact_schema_for_artifact``:
+        user_provided > prefer_source (if set) > file > duckdb.
+        """
+
+        def _query() -> Optional[ArtifactSchemaObservation]:
+            with Session(self.engine) as session:
+                observations = session.exec(
+                    select(ArtifactSchemaObservation)
+                    .join(
+                        Artifact,
+                        col(ArtifactSchemaObservation.artifact_id) == col(Artifact.id),
+                    )
+                    .where(Artifact.hash == content_hash)
+                    .order_by(col(ArtifactSchemaObservation.observed_at).desc())
+                ).all()
+
+                if not observations:
+                    return None
+
+                user_provided_obs = next(
+                    (obs for obs in observations if obs.source == "user_provided"), None
+                )
+                if user_provided_obs:
+                    return user_provided_obs
+
+                if prefer_source:
+                    matching = next(
+                        (obs for obs in observations if obs.source == prefer_source),
+                        None,
+                    )
+                    if matching:
+                        return matching
+
+                for source in ("file", "duckdb"):
+                    matching = next(
+                        (obs for obs in observations if obs.source == source), None
+                    )
+                    if matching:
+                        return matching
+
+                return observations[0]
+
+        try:
+            return self.execute_with_retry(_query)
+        except Exception:
+            return None
+
     def get_run(self, run_id: str) -> Optional[Run]:
         def _query():
             with Session(self.engine) as session:

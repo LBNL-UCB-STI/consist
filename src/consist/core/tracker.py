@@ -2508,7 +2508,9 @@ class Tracker:
         content_hash: Optional[str] = None,
         force_hash_override: bool = False,
         validate_content_hash: bool = False,
-        profile_file_schema: bool = False,
+        reuse_if_unchanged: bool = False,
+        reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
+        profile_file_schema: bool | Literal["if_changed"] = False,
         file_schema_sample_rows: Optional[int] = 1000,
         **meta: Any,
     ) -> Artifact:
@@ -2554,8 +2556,14 @@ class Tracker:
             `content_hash`. By default, mismatched overrides are ignored with a warning.
         validate_content_hash : bool, default False
             If True, verify `content_hash` against the on-disk data and raise on mismatch.
+        reuse_if_unchanged : bool, default False
+            If True and logging an output, reuse a prior artifact row when the content hash matches.
+        reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
+            Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
+            while "any_uri" allows reuse across different URIs with the same hash.
         profile_file_schema : bool, default False
             If True, profile a lightweight schema for file-based tabular artifacts.
+            Use "if_changed" to skip profiling when a matching content hash already has a schema.
         file_schema_sample_rows : Optional[int], default 1000
             Maximum rows to sample when profiling file-based schemas.
         **meta : Any
@@ -2612,6 +2620,8 @@ class Tracker:
             content_hash=content_hash,
             force_hash_override=force_hash_override,
             validate_content_hash=validate_content_hash,
+            reuse_if_unchanged=reuse_if_unchanged,
+            reuse_scope=reuse_scope,
             **meta,
         )
 
@@ -2659,8 +2669,9 @@ class Tracker:
         self._flush_json()
         self._sync_artifact_to_db(artifact_obj, direction)
 
+        profile_mode = profile_file_schema
         if (
-            profile_file_schema
+            profile_mode
             and artifact_obj.is_tabular
             and self.current_consist is not None
         ):
@@ -2683,6 +2694,7 @@ class Tracker:
                         driver=cast(Literal["csv", "parquet", "h5_table"], driver),
                         sample_rows=file_schema_sample_rows,
                         source="file",
+                        reuse_if_unchanged=profile_mode == "if_changed",
                     )
             except FileNotFoundError:
                 logging.warning(
@@ -2807,6 +2819,8 @@ class Tracker:
         direction: str = "output",
         driver: Optional[str] = None,
         metadata_by_key: Optional[Mapping[str, Dict[str, Any]]] = None,
+        reuse_if_unchanged: bool = False,
+        reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
         **shared_meta: Any,
     ) -> Dict[str, Artifact]:
         """
@@ -2885,7 +2899,13 @@ class Tracker:
             if metadata_by_key and key in metadata_by_key:
                 meta.update(metadata_by_key[key])
             logged[key] = self.log_artifact(
-                value, key=key, direction=direction, driver=driver, **meta
+                value,
+                key=key,
+                direction=direction,
+                driver=driver,
+                reuse_if_unchanged=reuse_if_unchanged,
+                reuse_scope=reuse_scope,
+                **meta,
             )
         return logged
 
@@ -2940,6 +2960,8 @@ class Tracker:
         content_hash: Optional[str] = None,
         force_hash_override: bool = False,
         validate_content_hash: bool = False,
+        reuse_if_unchanged: bool = False,
+        reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
         **meta: Any,
     ) -> Artifact:
         """
@@ -2974,6 +2996,8 @@ class Tracker:
             content_hash=content_hash,
             force_hash_override=force_hash_override,
             validate_content_hash=validate_content_hash,
+            reuse_if_unchanged=reuse_if_unchanged,
+            reuse_scope=reuse_scope,
             **meta,
         )
 
@@ -3078,7 +3102,7 @@ class Tracker:
         parent: Optional[Artifact] = None,
         hash_table: bool = True,
         table_hash_chunk_rows: Optional[int] = None,
-        profile_file_schema: bool = False,
+        profile_file_schema: bool | Literal["if_changed"] = False,
         file_schema_sample_rows: Optional[int] = None,
         **meta: Any,
     ) -> Artifact:

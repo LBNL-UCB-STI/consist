@@ -249,11 +249,15 @@ class NoopRunContext:
         content_hash: Optional[str] = None,
         force_hash_override: bool = False,
         validate_content_hash: bool = False,
+        reuse_if_unchanged: bool = False,
+        reuse_scope: str = "same_uri",
         **meta: Any,
     ) -> NoopArtifact:
         _ = content_hash
         _ = force_hash_override
         _ = validate_content_hash
+        _ = reuse_if_unchanged
+        _ = reuse_scope
         if key is None:
             if isinstance(path, NoopArtifact):
                 key = path.key

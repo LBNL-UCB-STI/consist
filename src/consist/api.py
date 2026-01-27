@@ -511,6 +511,8 @@ def log_artifact(
     content_hash: Optional[str] = None,
     force_hash_override: bool = False,
     validate_content_hash: bool = False,
+    reuse_if_unchanged: bool = False,
+    reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
     *,
     enabled: bool = True,
     **meta,
@@ -546,6 +548,11 @@ def log_artifact(
         `content_hash`. By default, mismatched overrides are ignored with a warning.
     validate_content_hash : bool, default False
         If True, verify `content_hash` against the on-disk data and raise on mismatch.
+    reuse_if_unchanged : bool, default False
+        If True and logging an output, reuse a prior artifact row when the content hash matches.
+    reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
+        Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
+        while "any_uri" allows reuse across different URIs with the same hash.
     enabled : bool, default True
         If False, returns a noop artifact object without requiring an active run.
     **meta : Any
@@ -573,6 +580,8 @@ def log_artifact(
             content_hash=content_hash,
             force_hash_override=force_hash_override,
             validate_content_hash=validate_content_hash,
+            reuse_if_unchanged=reuse_if_unchanged,
+            reuse_scope=reuse_scope,
             **meta,
         )
     return get_active_tracker().log_artifact(
@@ -584,6 +593,8 @@ def log_artifact(
         content_hash=content_hash,
         force_hash_override=force_hash_override,
         validate_content_hash=validate_content_hash,
+        reuse_if_unchanged=reuse_if_unchanged,
+        reuse_scope=reuse_scope,
         **meta,
     )
 
@@ -594,6 +605,8 @@ def log_artifacts(
     direction: str = "output",
     driver: Optional[str] = None,
     metadata_by_key: Optional[Mapping[str, Dict[str, Any]]] = None,
+    reuse_if_unchanged: bool = False,
+    reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
     enabled: bool = True,
     **shared_meta: Any,
 ) -> Mapping[str, ArtifactLike]:
@@ -675,7 +688,13 @@ def log_artifacts(
             meta = dict(shared_meta)
             meta.update(per_key_meta.get(key, {}))
             artifacts[str(key)] = ctx.log_artifact(
-                ref, key=str(key), direction=direction, driver=driver, **meta
+                ref,
+                key=str(key),
+                direction=direction,
+                driver=driver,
+                reuse_if_unchanged=reuse_if_unchanged,
+                reuse_scope=reuse_scope,
+                **meta,
             )
         return artifacts
     return get_active_tracker().log_artifacts(
@@ -683,6 +702,8 @@ def log_artifacts(
         direction=direction,
         driver=driver,
         metadata_by_key=metadata_by_key,
+        reuse_if_unchanged=reuse_if_unchanged,
+        reuse_scope=reuse_scope,
         **shared_meta,
     )
 
@@ -728,6 +749,8 @@ def log_output(
     content_hash: Optional[str] = None,
     force_hash_override: bool = False,
     validate_content_hash: bool = False,
+    reuse_if_unchanged: bool = False,
+    reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
     enabled: bool = True,
     **meta,
 ) -> ArtifactLike:
@@ -746,6 +769,8 @@ def log_output(
         content_hash=content_hash,
         force_hash_override=force_hash_override,
         validate_content_hash=validate_content_hash,
+        reuse_if_unchanged=reuse_if_unchanged,
+        reuse_scope=reuse_scope,
         enabled=enabled,
         **meta,
     )

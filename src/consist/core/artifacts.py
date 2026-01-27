@@ -123,6 +123,8 @@ class ArtifactManager:
         content_hash: Optional[str] = None,
         force_hash_override: bool = False,
         validate_content_hash: bool = False,
+        reuse_if_unchanged: bool = False,
+        reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
         **meta: Any,
     ) -> Artifact:
         """
@@ -143,6 +145,11 @@ class ArtifactManager:
             Schema class to record in ``meta["schema_name"]`` and ``meta["has_strict_schema"]``.
         driver : Optional[str], optional
             Explicit driver identifier (e.g., ``"h5_table"``); inferred from suffix if omitted.
+        reuse_if_unchanged : bool, default False
+            If True and logging an output, reuse a prior artifact row when the content hash matches.
+        reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
+            Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
+            while "any_uri" allows reuse across different URIs with the same hash.
         **meta : Any
             Additional metadata key/value pairs to attach to the artifact.
 
@@ -263,6 +270,48 @@ class ArtifactManager:
                         _apply_content_hash_override(artifact_obj)
                         if meta:
                             artifact_obj.meta.update(meta)
+
+            if (
+                artifact_obj is None
+                and direction == "output"
+                and reuse_if_unchanged
+                and self.tracker.db
+            ):
+                if reuse_scope not in {"same_uri", "any_uri"}:
+                    raise ValueError(
+                        "reuse_scope must be one of: 'same_uri', 'any_uri'."
+                    )
+                if content_hash is None and resolved_abs_path:
+                    try:
+                        content_hash = self.tracker.identity.compute_file_checksum(
+                            resolved_abs_path
+                        )
+                    except Exception as e:
+                        logging.warning(
+                            "[Consist Warning] Failed to compute hash for %s: %s",
+                            resolved_abs_path,
+                            e,
+                        )
+                if content_hash is not None:
+                    if reuse_scope == "same_uri":
+                        parent = self.tracker.db.find_latest_artifact_at_uri(
+                            uri, driver=driver
+                        )
+                        if parent and parent.hash == content_hash:
+                            artifact_obj = parent
+                    else:
+                        parent = self.tracker.db.find_latest_artifact_by_hash(
+                            content_hash, driver=driver
+                        )
+                        if parent is not None:
+                            artifact_obj = parent
+
+                if artifact_obj is not None:
+                    if driver:
+                        artifact_obj.driver = driver
+                    _apply_content_hash_override(artifact_obj)
+                    if meta:
+                        artifact_obj.meta.update(meta)
 
             if artifact_obj is None:
                 if content_hash is not None and validate_content_hash:
@@ -559,7 +608,7 @@ class ArtifactManager:
         parent: Optional[Artifact] = None,
         hash_table: bool = True,
         table_hash_chunk_rows: Optional[int] = None,
-        profile_file_schema: bool = False,
+        profile_file_schema: bool | Literal["if_changed"] = False,
         file_schema_sample_rows: Optional[int] = None,
         **meta: Any,
     ) -> Artifact:
@@ -584,6 +633,7 @@ class ArtifactManager:
             Rows per chunk when hashing tables (defaults to dataset chunking or 1024).
         profile_file_schema : bool, default False
             Whether to profile and persist a lightweight schema for the table.
+            Use "if_changed" to skip profiling when a matching content hash already has a schema.
         file_schema_sample_rows : Optional[int], optional
             Maximum rows to sample when profiling the schema.
         **meta : Any
