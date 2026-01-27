@@ -18,6 +18,7 @@ from consist.models.artifact_schema import (
     ArtifactSchema,
     ArtifactSchemaField,
     ArtifactSchemaObservation,
+    ArtifactSchemaRelation,
 )
 from consist.models.config_facet import ConfigFacet
 from consist.models.run import Run, RunArtifactLink
@@ -88,12 +89,14 @@ class DatabaseManager:
                     getattr(ArtifactSchema, "__table__"),
                     getattr(ArtifactSchemaField, "__table__"),
                     getattr(ArtifactSchemaObservation, "__table__"),
+                    getattr(ArtifactSchemaRelation, "__table__"),
                 ],
             )
             # DuckDB self-referential FK on run.parent_run_id blocks status updates.
             self._relax_run_parent_fk()
             # Lightweight migrations for additive schema changes.
             self._ensure_artifact_schema_field_ordinal_position()
+            self._ensure_schema_links_view()
 
         self.execute_with_retry(_create, operation_name="init_schema")
 
@@ -130,6 +133,28 @@ class DatabaseManager:
             logging.warning(
                 "Failed to add artifact_schema_field.ordinal_position column: %s", e
             )
+
+    def _ensure_schema_links_view(self) -> None:
+        """Create or replace the portable schema link view."""
+        try:
+            with self.engine.begin() as conn:
+                conn.exec_driver_sql(
+                    """
+                    CREATE OR REPLACE VIEW consist_schema_links AS
+                    SELECT
+                        rel.schema_id,
+                        src.summary_json->>'$.table_name' AS from_table,
+                        rel.from_field,
+                        rel.to_table,
+                        rel.to_field,
+                        rel.relationship_type,
+                        rel.cardinality
+                    FROM artifact_schema_relation rel
+                    JOIN artifact_schema src ON rel.schema_id = src.id
+                    """
+                )
+        except Exception as e:
+            logging.warning("Failed to create consist_schema_links view: %s", e)
 
     def backfill_artifact_schema_field_ordinals(self, *, schema_id: str) -> None:
         """
@@ -374,7 +399,10 @@ class DatabaseManager:
             logging.warning(f"Failed to insert run config kv rows: {e}")
 
     def upsert_artifact_schema(
-        self, schema: ArtifactSchema, fields: List[ArtifactSchemaField]
+        self,
+        schema: ArtifactSchema,
+        fields: List[ArtifactSchemaField],
+        relations: Optional[List[ArtifactSchemaRelation]] = None,
     ) -> None:
         """
         Upsert a deduped artifact schema and its per-field rows.
@@ -388,15 +416,24 @@ class DatabaseManager:
         def _upsert():
             with Session(self.engine) as session:
                 session.merge(schema)
-                if fields:
-                    # Idempotency: schema profiling may run multiple times for the same
-                    # schema_id (hash). Replace the normalized field rows in one shot.
-                    session.exec(
-                        delete(ArtifactSchemaField).where(
-                            ArtifactSchemaField.schema_id == schema.id  # ty: ignore[invalid-argument-type]
-                        )
+                # Idempotency: schema profiling may run multiple times for the same
+                # schema_id (hash). Replace the normalized field rows in one shot.
+                session.exec(
+                    delete(ArtifactSchemaField).where(
+                        ArtifactSchemaField.schema_id == schema.id  # ty: ignore[invalid-argument-type]
                     )
+                )
+                if fields:
                     session.add_all(fields)
+
+                # Idempotency for relational metadata
+                session.exec(
+                    delete(ArtifactSchemaRelation).where(
+                        ArtifactSchemaRelation.schema_id == schema.id  # ty: ignore[invalid-argument-type]
+                    )
+                )
+                if relations:
+                    session.add_all(relations)
                 session.commit()
 
         try:
@@ -425,6 +462,89 @@ class DatabaseManager:
                 getattr(observation, "schema_id", None),
                 e,
             )
+
+    def get_artifact_schema_relations(
+        self, *, schema_id: str
+    ) -> List[ArtifactSchemaRelation]:
+        def _query() -> List[ArtifactSchemaRelation]:
+            with Session(self.engine) as session:
+                return list(
+                    session.exec(
+                    select(ArtifactSchemaRelation).where(
+                        ArtifactSchemaRelation.schema_id == schema_id
+                    )
+                ).all()
+                )
+
+        try:
+            return self.execute_with_retry(
+                _query, operation_name="get_artifact_schema_relations"
+            )
+        except Exception as e:
+            logging.warning(
+                "Failed to fetch artifact schema relations schema_id=%s: %s",
+                schema_id,
+                e,
+            )
+            return []
+
+    def apply_physical_fks(self) -> int:
+        """
+        Best-effort creation of physical FOREIGN KEY constraints in DuckDB.
+
+        Returns the number of constraints successfully applied.
+        """
+
+        def _apply() -> int:
+            with Session(self.engine) as session:
+                rows = session.exec(
+                    select(ArtifactSchemaRelation, ArtifactSchema).where(
+                        ArtifactSchemaRelation.schema_id == ArtifactSchema.id
+                    )
+                ).all()
+
+            applied = 0
+            with self.engine.begin() as conn:
+                for rel, schema in rows:
+                    summary = getattr(schema, "summary_json", None) or {}
+                    table_name = summary.get("table_name")
+                    table_schema = summary.get("table_schema")
+                    if not isinstance(table_name, str) or not table_name:
+                        continue
+                    if isinstance(table_schema, str) and table_schema:
+                        from_table = f"{table_schema}.{table_name}"
+                    else:
+                        from_table = table_name
+                    safe_from = from_table.replace(".", "_")
+                    constraint = f"fk_{safe_from}_{rel.from_field}"
+                    stmt = (
+                        "ALTER TABLE "
+                        f"{from_table} "
+                        "ADD CONSTRAINT "
+                        f"{constraint} "
+                        f"FOREIGN KEY ({rel.from_field}) "
+                        f"REFERENCES {rel.to_table}({rel.to_field})"
+                    )
+                    try:
+                        conn.exec_driver_sql(stmt)
+                        applied += 1
+                    except Exception as e:
+                        logging.warning(
+                            "Failed to apply FK %s (%s.%s -> %s.%s): %s",
+                            constraint,
+                            from_table,
+                            rel.from_field,
+                            rel.to_table,
+                            rel.to_field,
+                            e,
+                        )
+            return applied
+
+        try:
+            return self.execute_with_retry(_apply, operation_name="apply_physical_fks")
+        except Exception as e:
+            logging.warning("Failed to apply physical FKs: %s", e)
+            return 0
 
     def link_artifact_to_run(
         self, artifact_id: uuid.UUID, run_id: str, direction: str

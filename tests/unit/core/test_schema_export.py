@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from consist.core.schema_export import parse_duckdb_type, render_sqlmodel_stub
-from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
+from consist.models.artifact_schema import (
+    ArtifactSchema,
+    ArtifactSchemaField,
+    ArtifactSchemaRelation,
+)
 
 
 def test_render_sqlmodel_stub_compiles_and_is_deterministic():
@@ -84,6 +88,39 @@ def test_render_sqlmodel_stub_can_include_system_cols():
     ]
     code = render_sqlmodel_stub(schema=schema, fields=fields, include_system_cols=True)
     assert "consist_run_id" in code
+
+
+def test_render_sqlmodel_stub_renders_foreign_keys():
+    schema = ArtifactSchema(
+        id="schema_fk", summary_json={"table_name": "children"}, profile_json=None
+    )
+    fields = [
+        ArtifactSchemaField(
+            schema_id=schema.id,
+            ordinal_position=1,
+            name="child_id",
+            logical_type="integer",
+            nullable=False,
+        ),
+        ArtifactSchemaField(
+            schema_id=schema.id,
+            ordinal_position=2,
+            name="parent_id",
+            logical_type="integer",
+            nullable=False,
+        ),
+    ]
+    relations = [
+        ArtifactSchemaRelation(
+            schema_id=schema.id,
+            from_field="parent_id",
+            to_table="parents",
+            to_field="id",
+            relationship_type="foreign_key",
+        )
+    ]
+    code = render_sqlmodel_stub(schema=schema, fields=fields, relations=relations)
+    assert "foreign_key='parents.id'" in code
 
 
 def test_parse_duckdb_type_pandas_fallbacks():

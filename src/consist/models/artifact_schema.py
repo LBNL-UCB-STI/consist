@@ -107,3 +107,31 @@ class ArtifactSchemaObservation(SQLModel, table=True):
     )
     sample_rows: Optional[int] = Field(default=None)
     observed_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
+
+
+class ArtifactSchemaRelation(SQLModel, table=True):
+    """Relational metadata (foreign keys) for a deduped ArtifactSchema."""
+
+    __tablename__ = "artifact_schema_relation"
+
+    schema_id: str = Field(
+        primary_key=True,
+        foreign_key="artifact_schema.id",
+        description="Hash of the source schema.",
+    )
+    from_field: str = Field(
+        primary_key=True,
+        description="Local column name holding the foreign key.",
+    )
+    to_table: str = Field(
+        description="Target table name (resolved from the SQLModel class)."
+    )
+    to_field: str = Field(description="Target column name.")
+    relationship_type: str = Field(
+        default="foreign_key",
+        description="Relationship type, currently only foreign_key.",
+    )
+    cardinality: Optional[str] = Field(
+        default=None,
+        description="Optional cardinality hint (e.g., many_to_one).",
+    )

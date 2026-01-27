@@ -323,6 +323,23 @@ def schema_export(
         console.print(f"[green]Wrote SQLModel stub to {out}[/green]")
 
 
+@schema_app.command("apply-fks")
+def schema_apply_fks(
+    db_path: str = typer.Option(
+        "provenance.duckdb", help="Path to the DuckDB database."
+    ),
+) -> None:
+    """Best-effort application of physical foreign key constraints."""
+    tracker = get_tracker(db_path)
+    if not tracker.db:
+        console.print("[red]Tracker database not initialized.[/red]")
+        raise typer.Exit(1)
+    applied = tracker.db.apply_physical_fks()
+    console.print(
+        f"[green]Applied {applied} foreign key constraint(s) (best-effort).[/green]"
+    )
+
+
 def _render_runs_table(
     tracker: Tracker,
     limit: int = 10,

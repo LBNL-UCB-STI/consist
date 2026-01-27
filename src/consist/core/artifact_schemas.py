@@ -151,14 +151,42 @@ class ArtifactSchemaManager:
                 ArtifactSchema,
                 ArtifactSchemaField,
                 ArtifactSchemaObservation,
+                ArtifactSchemaRelation,
             )
 
             # 1. Extract fields from the SQLModel class
             fields = []
+            relations: list[dict[str, str]] = []
             table_name = getattr(schema_model, "__tablename__", schema_model.__name__)
 
             # model_fields is a dict of field_name -> FieldInfo from Pydantic
             if hasattr(schema_model, "model_fields"):
+
+                def _resolve_fk_target(field_info: Any) -> Optional[str]:
+                    raw_fk = getattr(field_info, "foreign_key", None)
+                    if raw_fk:
+                        return str(raw_fk)
+                    sa_column = getattr(field_info, "sa_column", None)
+                    if sa_column is None:
+                        return None
+                    fk_set = getattr(sa_column, "foreign_keys", None)
+                    if not fk_set:
+                        return None
+                    for fk in fk_set:
+                        target = getattr(fk, "target_fullname", None)
+                        if target:
+                            return str(target)
+                        target_col = getattr(fk, "column", None)
+                        if target_col is not None:
+                            return str(target_col)
+                    return None
+
+                def _split_fk_target(target: str) -> Optional[tuple[str, str]]:
+                    parts = [part for part in str(target).split(".") if part]
+                    if len(parts) < 2:
+                        return None
+                    return ".".join(parts[:-1]), parts[-1]
+
                 for ordinal, (field_name, field_info) in enumerate(
                     schema_model.model_fields.items(), start=1
                 ):
@@ -188,6 +216,19 @@ class ArtifactSchemaManager:
                         )
                     )
 
+                    fk_target = _resolve_fk_target(field_info)
+                    if fk_target:
+                        parsed = _split_fk_target(fk_target)
+                        if parsed is not None:
+                            to_table, to_field = parsed
+                            relations.append(
+                                {
+                                    "from": field_name,
+                                    "to_table": to_table,
+                                    "to_field": to_field,
+                                }
+                            )
+
             # 2. Compute schema_id by hashing the normalized field definitions.
             # IMPORTANT: We do NOT include "source" in the hash. This ensures that
             # identical schemas (same fields, types, nullability) from different sources
@@ -203,10 +244,19 @@ class ArtifactSchemaManager:
                 }
                 for f in fields
             ]
+            sorted_relations = sorted(
+                relations,
+                key=lambda rel: (
+                    rel["from"],
+                    rel["to_table"],
+                    rel["to_field"],
+                ),
+            )
             hash_obj: Dict[str, Any] = {
                 "profile_version": 1,
                 "table_name": table_name,
                 "fields": field_rows,
+                "relations": sorted_relations,
             }
             schema_id = self.tracker.identity.canonical_json_sha256(hash_obj)
 
@@ -246,9 +296,21 @@ class ArtifactSchemaManager:
                 for f in fields
             ]
 
+            relation_rows = [
+                ArtifactSchemaRelation(
+                    schema_id=schema_id,
+                    from_field=rel["from"],
+                    to_table=rel["to_table"],
+                    to_field=rel["to_field"],
+                    relationship_type="foreign_key",
+                    cardinality=None,
+                )
+                for rel in sorted_relations
+            ]
+
             # 4. Persist schema and fields to database
             self.tracker.db.upsert_artifact_schema(
-                schema_row, field_rows_with_schema_id
+                schema_row, field_rows_with_schema_id, relation_rows
             )
 
             # 5. Record an observation linking this artifact to the schema
@@ -362,7 +424,7 @@ class ArtifactSchemaManager:
                 for f in result.fields
             ]
 
-            self.tracker.db.upsert_artifact_schema(schema_row, field_rows)
+            self.tracker.db.upsert_artifact_schema(schema_row, field_rows, [])
             self.tracker.db.insert_artifact_schema_observation(
                 ArtifactSchemaObservation(
                     artifact_id=artifact.id,
@@ -542,7 +604,7 @@ class ArtifactSchemaManager:
                 for f in result.fields
             ]
 
-            self.tracker.db.upsert_artifact_schema(schema_row, field_rows)
+            self.tracker.db.upsert_artifact_schema(schema_row, field_rows, [])
             self.tracker.db.insert_artifact_schema_observation(
                 ArtifactSchemaObservation(
                     artifact_id=artifact.id,

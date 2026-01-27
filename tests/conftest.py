@@ -19,6 +19,7 @@ from consist.models.artifact_schema import (
     ArtifactSchema,
     ArtifactSchemaField,
     ArtifactSchemaObservation,
+    ArtifactSchemaRelation,
 )
 from consist.models.config_facet import ConfigFacet
 from consist.models.run_config_kv import RunConfigKV
@@ -127,6 +128,7 @@ def tracker(request, run_dir: Path, tmp_path: Path) -> Iterator[Tracker]:
         getattr(ArtifactSchema, "__table__"),
         getattr(ArtifactSchemaField, "__table__"),
         getattr(ArtifactSchemaObservation, "__table__"),
+        getattr(ArtifactSchemaRelation, "__table__"),
     ]
 
     # Clean Slate Policy:
@@ -139,6 +141,7 @@ def tracker(request, run_dir: Path, tmp_path: Path) -> Iterator[Tracker]:
                 # Ensure run.parent_run_id FK is NOT ENFORCED (DuckDB limitation workaround)
                 if test_tracker.db:
                     test_tracker.db._relax_run_parent_fk()
+                    test_tracker.db._ensure_schema_links_view()
 
     yield test_tracker
 

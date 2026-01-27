@@ -17,6 +17,7 @@ from consist.models.artifact_schema import (
     ArtifactSchema,
     ArtifactSchemaField,
     ArtifactSchemaObservation,
+    ArtifactSchemaRelation,
 )
 from consist.models.config_facet import ConfigFacet
 from consist.models.run import ConsistRecord, Run, RunArtifactLink, RunArtifacts
@@ -33,6 +34,7 @@ def _init_core_tables(tracker: Tracker) -> None:
         getattr(ArtifactSchema, "__table__"),
         getattr(ArtifactSchemaField, "__table__"),
         getattr(ArtifactSchemaObservation, "__table__"),
+        getattr(ArtifactSchemaRelation, "__table__"),
     ]
     if tracker.engine:
         with tracker.engine.connect() as connection:
@@ -40,6 +42,7 @@ def _init_core_tables(tracker: Tracker) -> None:
                 SQLModel.metadata.create_all(connection, tables=core_tables)
                 if tracker.db:
                     tracker.db._relax_run_parent_fk()
+                    tracker.db._ensure_schema_links_view()
 
 
 def test_cache_hydration_policies_end_to_end(

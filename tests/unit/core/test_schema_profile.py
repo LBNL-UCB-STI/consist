@@ -12,13 +12,15 @@ import json
 import uuid
 from typing import Optional
 
-from sqlmodel import SQLModel, Session, select
+from sqlalchemy import text
+from sqlmodel import Field, SQLModel, Session, select
 
 from consist.models.artifact import Artifact
 from consist.models.artifact_schema import (
     ArtifactSchema,
     ArtifactSchemaField,
     ArtifactSchemaObservation,
+    ArtifactSchemaRelation,
 )
 
 
@@ -213,6 +215,120 @@ def test_profile_user_provided_schema_persists_fields_and_meta(tracker, sample_c
             assert len(observations) == 1
             assert observations[0].source == "user_provided"
             assert observations[0].schema_id == schema_id
+
+
+def test_profile_user_provided_schema_persists_relations_and_hash(tracker, sample_csv):
+    class HouseholdSchema(SQLModel):
+        household_id: int
+        person_id: int = Field(foreign_key="people.id")
+
+    class HouseholdSchemaAlt(SQLModel):
+        household_id: int
+        person_id: int = Field(foreign_key="persons.id")
+
+    with tracker.start_run("user_schema_relations", "demo") as t:
+        artifact_a = t.log_artifact(
+            sample_csv("user_schema_rel_a.csv"),
+            key="user_schema_rel_a",
+            schema=HouseholdSchema,
+        )
+        artifact_b = t.log_artifact(
+            sample_csv("user_schema_rel_b.csv"),
+            key="user_schema_rel_b",
+            schema=HouseholdSchemaAlt,
+        )
+
+        schema_id_a = artifact_a.meta.get("schema_id")
+        schema_id_b = artifact_b.meta.get("schema_id")
+        assert schema_id_a
+        assert schema_id_b
+        assert schema_id_a != schema_id_b
+
+        with Session(t.engine) as session:
+            relations = session.exec(
+                select(ArtifactSchemaRelation).where(
+                    ArtifactSchemaRelation.schema_id == schema_id_a
+                )
+            ).all()
+            assert len(relations) == 1
+            rel = relations[0]
+            assert rel.from_field == "person_id"
+            assert rel.to_table == "people"
+            assert rel.to_field == "id"
+
+
+def test_schema_links_view_returns_relations(tracker, sample_csv):
+    class HouseSchema(SQLModel):
+        house_id: int
+        owner_id: int = Field(foreign_key="owners.id")
+
+    with tracker.start_run("schema_links_view", "demo") as t:
+        artifact = t.log_artifact(
+            sample_csv("schema_links_view.csv"),
+            key="schema_links_view",
+            schema=HouseSchema,
+        )
+        schema_id = artifact.meta.get("schema_id")
+        assert schema_id
+
+        if t.db:
+            t.db._ensure_schema_links_view()
+
+        with Session(t.engine) as session:
+            stmt = text(
+                "SELECT from_table, from_field, to_table, to_field "
+                "FROM consist_schema_links WHERE schema_id = :schema_id"
+            ).bindparams(schema_id=schema_id)
+            rows = session.exec(stmt).all()
+            assert len(rows) == 1
+            from_table, from_field, to_table, to_field = rows[0]
+            assert from_table == "houseschema"
+            assert from_field == "owner_id"
+            assert to_table == "owners"
+            assert to_field == "id"
+
+
+def test_apply_physical_fks_best_effort(tracker):
+    assert tracker.engine is not None
+    assert tracker.db is not None
+
+    with tracker.engine.begin() as conn:
+        conn.exec_driver_sql("CREATE TABLE parents (id INTEGER PRIMARY KEY)")
+        conn.exec_driver_sql("CREATE TABLE children (id INTEGER, parent_id INTEGER)")
+
+    schema_row = ArtifactSchema(
+        id="schema_fk_apply",
+        summary_json={"table_name": "children"},
+        profile_version=1,
+    )
+    field_rows = [
+        ArtifactSchemaField(
+            schema_id="schema_fk_apply",
+            ordinal_position=1,
+            name="id",
+            logical_type="integer",
+            nullable=False,
+        ),
+        ArtifactSchemaField(
+            schema_id="schema_fk_apply",
+            ordinal_position=2,
+            name="parent_id",
+            logical_type="integer",
+            nullable=True,
+        ),
+    ]
+    relation_rows = [
+        ArtifactSchemaRelation(
+            schema_id="schema_fk_apply",
+            from_field="parent_id",
+            to_table="parents",
+            to_field="id",
+        )
+    ]
+
+    tracker.db.upsert_artifact_schema(schema_row, field_rows, relation_rows)
+    applied = tracker.db.apply_physical_fks()
+    assert applied >= 0
 
 
 def test_get_artifact_schema_for_artifact_prefers_user_provided(tracker):
