@@ -285,4 +285,4 @@ In railroad terminology, a **consist** (noun, pronounced CON-sist) is the specif
 
 ## License
 
-TODO: Open source permissive preferred
+[BSD (modified)](LICENSE)
