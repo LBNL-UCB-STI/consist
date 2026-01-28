@@ -34,6 +34,7 @@ jobs:
       - name: Install dependencies
         run: |
           uv pip install --system .[docs]
+          uv pip install --system zensical
 
       - name: Build documentation
         run: |
