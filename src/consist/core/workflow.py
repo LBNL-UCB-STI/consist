@@ -51,13 +51,15 @@ class RunContext:
     dedicated artifact directory and artifact logging methods—without needing to
     reference a global tracker instance directly.
 
-    Example
-    -------
-    >>> def my_step(ctx: RunContext):
-    ...     # Access the run's dedicated directory
-    ...     output_path = ctx.run_dir / "results.csv"
-    ...     # ... generate file ...
-    ...     ctx.log_artifact(output_path, "results")
+    Examples
+    --------
+    ```python
+    def my_step(ctx: RunContext):
+        # Access the run's dedicated directory
+        output_path = ctx.run_dir / "results.csv"
+        # ... generate file ...
+        ctx.log_artifact(output_path, "results")
+    ```
     """
 
     def __init__(self, tracker: "Tracker") -> None:
@@ -242,13 +244,15 @@ class ScenarioContext:
         Scenario-local artifact registry for passing outputs between steps.
         Supports runtime-declared output validation.
 
-    Example
-    -------
-    >>> with tracker.scenario("base_case") as sc:
-    ...     # Step 1: Pre-process
-    ...     sc.run(preprocess_fn, inputs={"raw": "data.csv"}, outputs=["clean"])
-    ...     # Step 2: Model (reads "clean" from the coupler automatically)
-    ...     sc.run(model_fn, input_keys=["clean"], outputs=["results"])
+    Examples
+    --------
+    ```python
+    with tracker.scenario("base_case") as sc:
+        # Step 1: Pre-process
+        sc.run(preprocess_fn, inputs={"raw": "data.csv"}, outputs=["clean"])
+        # Step 2: Model (reads "clean" from the coupler automatically)
+        sc.run(model_fn, input_keys=["clean"], outputs=["results"])
+    ```
     """
 
     def __init__(

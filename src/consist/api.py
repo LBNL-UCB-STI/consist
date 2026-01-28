@@ -167,17 +167,46 @@ def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
     """
     Create a SQLModel class backed by a Consist hybrid view.
 
+    This is a convenience wrapper around the view factory that lets you define
+    a SQLModel schema for a concept (e.g., a canonicalized config table, an
+    ingested dataset, or a computed artifact view) and then query it as a normal
+    SQLModel table. The returned class is a dynamic subclass with `table=True`
+    that points at a database view, so you can use it in `sqlmodel.Session`
+    queries without creating a physical table.
+
+    If you need explicit control over view naming or want to create multiple
+    named views for the same concept, use `Tracker.create_view(...)` or
+    `Tracker.view(...)` directly.
+
     Parameters
     ----------
     model : Type[T]
-        Base SQLModel describing the schema.
+        Base SQLModel describing the schema (columns and types).
     name : Optional[str], optional
-        Optional override for the generated view name.
+        Optional override for the generated view name (defaults to the model's
+        table name).
 
     Returns
     -------
     Type[T]
         SQLModel subclass with ``table=True`` pointing at the hybrid view.
+
+    Examples
+    --------
+    ```python
+    from sqlmodel import Session, select
+    from consist import view
+    from consist.models.activitysim import ActivitySimConstantsCache
+
+    # Create a dynamic view class for querying constants
+    ConstantsView = view(ActivitySimConstantsCache)
+
+    with Session(tracker.engine) as session:
+        rows = session.exec(
+            select(ConstantsView)
+            .where(ConstantsView.key == "sample_rate")
+        ).all()
+    ```
     """
     return create_view_model(model, name)
 

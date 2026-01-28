@@ -30,3 +30,5 @@ Model-specific configuration discovery and tracking.
 - Automatic discovery of YAML hierarchies and CSV references
 - Queryable configuration tables for sensitivity analysis
 - [Full guide](config_adapters.md)
+- [ActivitySim adapter](config_adapters_activitysim.md)
+- [BEAM adapter](config_adapters_beam.md)

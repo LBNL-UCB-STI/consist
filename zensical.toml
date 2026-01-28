@@ -12,6 +12,7 @@
 #
 # Read more: https://zensical.org/docs/setup/basics/#site_name
 site_name = "Consist"
+#repo_url = "https://github.com/LBNL-UCB-STI/consist"
 
 # The site_description is included in the HTML head and should contain a
 # meaningful description of the site content for use by search engines.
@@ -50,15 +51,14 @@ Copyright &copy; 2026 The Regents of the University of California, through Lawre
 # ]
 nav = [
   { "Home" = "index.md" },
-  { "Getting Started" = ["getting-started/installation.md", "concepts.md", "getting-started/pathways.md", "usage-guide.md", "caching-fundamentals.md", "examples.md"] },
+  { "Getting Started" = ["getting-started/installation.md", "concepts.md", "usage-guide.md", "caching-fundamentals.md", "examples.md", {"Command Line Interface"= "cli-reference.md"}] },
   { "Core Topics" = ["configs.md", "caching-and-hydration.md", "dlt-loader-guide.md", "containers-guide.md", "mounts-and-portability.md", "ingestion-and-hybrid-views.md", "schema-export.md"] },
-  { "Integrations" = ["integrations/index.md", "integrations/containers.md", "integrations/dlt_loader.md", "integrations/config_adapters.md"] },
-  { "CLI Reference" = ["cli-reference.md"] },
-  { "Support & Reference" = ["troubleshooting.md", "glossary.md", "concepts/rosetta-stone.md", "reference/format-support.md", "architecture.md"] },
-  { "API Reference" = ["api/index.md", "api/public_api.md", "api/api_helpers.md", "api/tracker.md", "api/workflow.md", "api/artifact.md", "api/run.md", "api/indexing.md", "api/identity.md", "api/views.md", "api/matrix.md", "api/materialize.md", { "Containers (Legacy)" = "api/docker.md" }] },
+  { "Integrations" = ["integrations/index.md", "integrations/containers.md", "integrations/dlt_loader.md", { "Config Adapters" = [{"Overview" = "integrations/config_adapters.md"}, {"BEAM" = "integrations/config_adapters_activitysim.md"}, {"Activitysim" = "integrations/config_adapters_beam.md"}] }] },
+  { "Support & Reference" = ["troubleshooting.md", "glossary.md", "architecture.md"] },
+  { "API Reference" = ["api/index.md", "api/public_api.md", "api/api_helpers.md", "api/tracker.md", "api/workflow.md", "api/artifact.md", "api/run.md", "api/indexing.md", "api/identity.md", "api/views.md", "api/matrix.md", "api/materialize.md"] },
 ]
 
-# With the "extra_css" option you can add your own CSS styling to customize
+# With the "extra_css" option you can add your own CSS styling to customizeo
 # your Zensical project according to your needs. You can add any number of
 # CSS files.
 #
@@ -137,7 +137,7 @@ features = [
     # will generate a button that allows the user to view the Markdown
     # code for the current page.
     # https://zensical.org/docs/setup/repository/#code-actions
-    #"content.action.view",
+    "content.action.view",
 
     # Code annotations allow you to add an icon with a tooltip to your
     # code blocks to provide explanations at crucial points.
@@ -172,7 +172,7 @@ features = [
     # With this feature enabled, Zensical will automatically hide parts
     # of the header when the user scrolls past a certain point.
     # https://zensical.org/docs/setup/header/#automatic-hiding
-    "header.autohide",
+#    "header.autohide",
 
     # Turn on this feature to expand all collapsible sections in the
     # navigation sidebar by default.
@@ -212,7 +212,7 @@ features = [
     # When tabs are enabled, top-level sections are rendered in a menu layer
     # below the header for viewports above 1220px, but remain as-is on mobile.
     # https://zensical.org/docs/setup/navigation/#navigation-tabs
-#    "navigation.tabs",
+    "navigation.tabs",
 
     # When sticky tabs are enabled, navigation tabs will lock below the header
     # and always remain visible when scrolling down.
@@ -317,6 +317,9 @@ paths = ["src"]
 docstring_style = "numpy"
 inherited_members = true
 show_source = false
+members = true
+show_private = false
+filters = ["!^_"]
 
 
 

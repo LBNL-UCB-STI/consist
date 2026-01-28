@@ -219,7 +219,8 @@ to add new model types without coupling them to the framework.
 
 **Available adapters:**
 
-- [ActivitySim Config Adapter](integrations/config_adapters.md#activitysim) — Discover, canonicalize, and query ActivitySim YAML/CSV configurations
+- [ActivitySim Config Adapter](integrations/config_adapters_activitysim.md) — Discover, canonicalize, and query ActivitySim YAML/CSV configurations
+- [BEAM Config Adapter](integrations/config_adapters_beam.md) — Canonicalize HOCON configs and query key/value parameters
 
 For detailed usage and API reference, see the [Config Adapters Integration Guide](integrations/config_adapters.md).
 

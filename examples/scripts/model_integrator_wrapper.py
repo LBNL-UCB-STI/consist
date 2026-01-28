@@ -86,7 +86,7 @@ if __name__ == "__main__":
 # 1. List all runs:
 #    consist runs list
 #
-# 2. View the "Rosetta Stone" (provenance) of a specific artifact:
+# 2. View the provenance of a specific artifact:
 #    consist artifacts show <artifact_id>
 #
 # 3. Export the results to a CSV for GIS/Tableau:

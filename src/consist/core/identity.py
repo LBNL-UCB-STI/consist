@@ -578,6 +578,24 @@ class IdentityManager:
     # --- External "hash-only" config inputs ---
 
     def label_for_hash_input(self, path: Union[str, Path]) -> str:
+        """
+        Create a stable, human-friendly label for a hash input path.
+
+        This is used when recording inputs that are represented only by their
+        hash (e.g., "hash-only" config inputs). The method prefers a path that
+        is relative to ``project_root`` for readability and portability, and
+        falls back to the original string if it cannot be made relative.
+
+        Parameters
+        ----------
+        path : Union[str, Path]
+            A file or directory path used as a hash input.
+
+        Returns
+        -------
+        str
+            A string label suitable for logs and provenance records.
+        """
         p = path if isinstance(path, Path) else Path(path)
         try:
             return str(p.resolve().relative_to(self.project_root))

@@ -28,7 +28,7 @@ Consist automatically records what code, configuration, and input data produced 
 
 ## By User Type
 
-**I develop or maintain simulation tools (ActivitySim, SUMO, etc.):**
+**I develop or maintain simulation tools (ActivitySim, MATSim, etc.):**
 - Start with [Concepts](concepts.md) for mental models
 - Read [Usage Guide](usage-guide.md) for API patterns and integration examples
 - See the [Container Integration Guide](containers-guide.md) for wrapping legacy code
