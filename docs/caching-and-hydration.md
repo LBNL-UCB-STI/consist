@@ -266,6 +266,11 @@ If you need bytes, you typically:
 - call `consist.load_df(...)` (or `consist.load(...)` for Relations) for tabular artifacts (disk first; see Ingestion & Hybrid Views for DB fallback), or
 - implement explicit file copy/materialization for non-tabular artifacts.
 
+If you want to work with a DuckDB Relation directly, use `consist.load_relation(...)` as a
+context manager to ensure the underlying DuckDB connection is closed. If you keep Relations
+alive in memory, Consist will warn once the active relation count crosses the
+`CONSIST_RELATION_WARN_THRESHOLD` (default 100).
+
 ### Cache misses that depend on cached inputs
 
 If a run is **not** a cache hit but its inputs include artifacts produced by cached runs,

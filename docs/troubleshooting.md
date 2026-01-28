@@ -6,6 +6,20 @@ This guide covers common errors, their root causes, and solutions.
 
 ## Cache & Provenance Issues
 
+### "Relation leak warnings"
+
+**Symptom:** Warning: `Consist has N active DuckDB relations...`
+
+**Root Cause:** Relations returned by `consist.load(...)` (tabular artifacts) keep a
+DuckDB connection open until you close them.
+
+**Solution:**
+
+- Prefer `consist.load_df(...)` if you only need a pandas DataFrame.
+- Use `consist.load_relation(...)` as a context manager to ensure connections are closed.
+- If you're intentionally holding many Relations, increase the warning threshold:
+  `CONSIST_RELATION_WARN_THRESHOLD=500`.
+
 ### "Old DBs no longer load after the Relation-first refactor"
 
 **Symptom:** Errors when reading artifacts or querying the DB after upgrading.

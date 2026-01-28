@@ -36,9 +36,12 @@
         - capture_outputs
         - load
         - load_df
+        - load_relation
         - to_df
+        - active_relation_count
         - set_current_tracker
         - noop_scenario
+        - RelationConnectionLeakWarning
         - is_dataframe_artifact
         - is_tabular_artifact
         - is_json_artifact

@@ -154,6 +154,23 @@ df = consist.load_df(artifact, tracker=tracker, db_fallback="always")
 
 ---
 
+## Loader kwargs for tabular artifacts
+
+`consist.load(...)` validates loader kwargs for tabular drivers and will raise a
+`ValueError` if you pass unsupported options.
+
+Supported kwargs by driver:
+- **parquet**: `columns`
+- **csv**: `columns`, `delimiter`, `header` (alias: `sep` -> `delimiter`)
+- **json**: `orient`, `dtype`, `convert_axes`, `convert_dates`, `precise_float`,
+  `date_unit`, `encoding`, `lines`, `compression`, `typ`
+- **h5_table**: `columns`, `where`, `start`, `stop`
+
+Use `consist.load_relation(...)` if you want a DuckDB Relation and will manage its
+lifecycle explicitly. Use `consist.load_df(...)` for a DataFrame and automatic cleanup.
+
+---
+
 ## Best practices
 
 - Ingest key tabular outputs you will compare across runs (e.g., transportation: trip tables or skim summaries; climate: aggregated metrics like monthly averages; urban planning: parcel or zoning summaries). Rule of thumb: if it is <1GB and you expect to compare it, ingest it.

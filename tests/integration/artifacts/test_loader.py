@@ -179,6 +179,37 @@ def test_loader_db_fallback_policy_paths(tracker: Tracker):
             load(cold_artifact, tracker=tracker)
 
 
+def test_loader_db_fallback_uses_dlt_table_name(tracker: Tracker):
+    import duckdb
+    from uuid import uuid4
+
+    table_name = "My Table"
+    artifact_id = uuid4()
+
+    conn = duckdb.connect(tracker.db_path)
+    conn.sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+    conn.sql(f'DROP TABLE IF EXISTS global_tables."{table_name}"')
+    conn.sql(
+        f'CREATE TABLE global_tables."{table_name}" (consist_artifact_id VARCHAR, value INTEGER)'
+    )
+    conn.sql(
+        f'INSERT INTO global_tables."{table_name}" VALUES (?, ?)',
+        params=[str(artifact_id), 42],
+    )
+    conn.close()
+
+    artifact = Artifact(
+        id=artifact_id,
+        key="fallback_key",
+        container_uri=str(tracker.run_dir / "missing.csv"),
+        driver="csv",
+        meta={"is_ingested": True, "dlt_table_name": table_name},
+    )
+
+    df = load_df(artifact, tracker=tracker, db_fallback="always")
+    assert df["value"].tolist() == [42]
+
+
 def test_loader_drivers(run_dir: Path):
     """
     Verifies that `consist.load()` correctly dispatches to the appropriate
