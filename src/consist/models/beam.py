@@ -1,3 +1,9 @@
+"""
+BEAM ingestion cache models stored in the global Consist schema.
+
+These tables hold deduplicated config entries used across runs.
+"""
+
 from __future__ import annotations
 
 from typing import Optional
@@ -7,6 +13,13 @@ from sqlmodel import Field, SQLModel
 
 
 class BeamConfigCache(SQLModel, table=True):
+    """
+    Deduplicated BEAM configuration entries stored in the global Consist schema.
+
+    Each row represents a flattened config key/value parsed during ingestion,
+    keyed by a content hash to enable cross-run reuse.
+    """
+
     __tablename__ = "beam_config_cache"
     __table_args__ = {"schema": "global_tables"}
 
@@ -20,6 +33,13 @@ class BeamConfigCache(SQLModel, table=True):
 
 
 class BeamConfigIngestRunLink(SQLModel, table=True):
+    """
+    Link runs to deduplicated BEAM config ingests.
+
+    Records which config content hashes were ingested for a run and which tables
+    they populated.
+    """
+
     __tablename__ = "beam_config_ingest_run_link"
     __table_args__ = {"schema": "global_tables"}
 

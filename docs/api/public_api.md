@@ -1,6 +1,8 @@
 # Public API (v0.1)
 
-This page defines what Consist considers its **public API** for the `0.1.x` series. Anything not listed here may change without notice.
+This page defines Consist's **public API** for the `0.1.x` series. Items listed as
+*Advanced* are still public but are primarily targeted at advanced users and may be
+more verbose, lower-level, or easier to misuse.
 
 ## Stable (intended for external users)
 
@@ -17,8 +19,10 @@ This page defines what Consist considers its **public API** for the `0.1.x` seri
 - [`consist.start_run`](api_helpers.md#consist.api.start_run)
 - [`consist.define_step`](api_helpers.md#consist.api.define_step)
 - [`consist.use_tracker`](api_helpers.md#consist.api.use_tracker)
-- [`ScenarioContext`](workflow.md#consist.core.workflow.ScenarioContext) (returned by `consist.scenario(...)`) with `.run(...)` and `.trace(...)`
+- [`ScenarioContext`](workflow.md#consist.core.workflow.ScenarioContext) (returned by `consist.scenario(...)`)
+  - `run_id`, `config`, `inputs`, `add_input`, `declare_outputs`, `require_outputs`, `collect_by_keys`, `run`, `trace`
 - [`RunContext`](workflow.md#consist.core.workflow.RunContext) (injected via `inject_context=True`)
+  - `run_dir`, `inputs`, `load`, `log_artifact`, `log_artifacts`, `log_input`, `log_output`, `log_meta`, `capture_outputs`
 - [`Coupler`](workflow.md#consist.core.coupler.Coupler) (available at `scenario.coupler`)
 
 ### Artifact logging and loading
@@ -55,16 +59,58 @@ This page defines what Consist considers its **public API** for the `0.1.x` seri
 - Matrix utilities: [`Tracker.load_matrix(...)`](tracker.md#consist.core.tracker.Tracker.load_matrix), [`MatrixViewFactory`](matrix.md#consist.core.matrix.MatrixViewFactory)
 - Schema export: [`Tracker.export_schema_sqlmodel(...)`](tracker.md#consist.core.tracker.Tracker.export_schema_sqlmodel)
 
+### Tracker methods (complete public surface)
+
+This section enumerates all non-underscore `Tracker` methods. If you're new to Consist,
+start with the **Core** and **Logging/Loading** groups and reach for **Advanced** only
+as needed.
+
+#### Core lifecycle
+
+- `begin_run`, `start_run`, `run`, `trace`, `scenario`, `end_run`
+- `define_step`, `last_run`, `is_cached`, `cached_artifacts`, `cached_output`
+- `suspend_cache_options`, `restore_cache_options`, `capture_outputs`, `log_meta`
+
+#### Logging and loading
+
+- `log_artifact`, `log_artifacts`, `log_input`, `log_output`, `log_dataframe`
+- `load`, `materialize`, `ingest`
+
+#### Querying and history
+
+- `find_runs`, `find_run`, `find_latest_run`, `get_latest_run_id`
+- `find_artifacts`, `get_artifact`, `get_artifacts_for_run`
+- `get_run`, `get_run_config`, `get_run_inputs`, `get_run_outputs`
+- `get_artifact_lineage`, `print_lineage`, `history`
+- `diff_runs`, `get_config_facet`, `get_config_facets`, `get_run_config_kv`
+- `get_config_values`, `get_config_value`, `find_runs_by_facet_kv`
+
+#### Views and matrices
+
+- `view`, `create_view`, `load_matrix`, `export_schema_sqlmodel`
+- `netcdf_metadata`, `openmatrix_metadata`, `spatial_metadata`
+
+#### Config canonicalization
+
+- `canonicalize_config`, `prepare_config`, `apply_config_plan`, `identity_from_config_plan`
+
+#### Format-specific logging
+
+- `log_h5_container`, `log_h5_table`, `log_netcdf_file`, `log_openmatrix_file`
+
+### Advanced (power-user / lower-level)
+
+These methods are still public, but are more low-level or easier to misuse.
+
+- `engine`, `set_run_subdir_fn`, `run_artifact_dir`, `resolve_uri`
+- `run_query`, `get_run_record`, `resolve_historical_path`, `load_input_bundle`
+- `get_artifact_by_uri`, `get_run_artifact`, `load_run_output`, `find_matching_run`
+- `on_run_start`, `on_run_complete`, `on_run_failed`
+
 ## Stable, but optional extras
 
 These APIs are part of the public surface, but require extra dependencies.
 
 - Ingestion helpers: [`consist.ingest`](api_helpers.md#consist.api.ingest) (install with `consist[ingest]`)
-
-## Experimental (may change without notice)
-
-These modules are useful, but are not part of the stable `0.1.x` contract yet:
-
-- [`consist.integrations.containers`](../integrations/containers.md) (container execution + caching)
-- [`consist.integrations.dlt_loader`](../integrations/dlt_loader.md) (low-level ingestion integration)
-- `consist.web` (FastAPI service)
+- [`consist.integrations.containers`](../integrations/containers.md) (container execution + caching; requires Docker or Singularity)
+- [`consist.integrations.dlt_loader`](../integrations/dlt_loader.md) (low-level ingestion integration; requires `consist[ingest]`)

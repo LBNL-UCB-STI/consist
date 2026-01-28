@@ -20,7 +20,7 @@ signature = hash(code_version + config + input_hashes)
 - Same signature: return cached outputs.
 - Different signature: execute and record new lineage.
 
-This means you can safely re-run a workflow with the same inputs and config without redoing work, while still getting new results when anything changes.
+This means you can safely re-run a workflow with the same inputs and config without re-running work, while still getting new results when anything changes.
 On cache hits, Consist returns output artifact metadata without copying files; load or hydrate outputs only when you need bytes.
 
 ## The config vs facet distinction
@@ -33,7 +33,7 @@ When you configure a run, you make a choice: should this parameter trigger a re-
 
 **Facet** (enables filtering): Queryable metadata you want to search by. Facets are stored in the database without affecting caching. You can ask "show all runs where year=2030 and scenario='baseline'" without storing the entire config. Use this when you want analytics without cache invalidation.
 
-**Practical example**: You have a 100KB ActivitySim config file. Store the whole file as `config=...` (it hashes into the signature, so changes trigger re-runs). But extract small, queryable pieces: `facet={"year": 2030, "mode_choice_coefficient": 0.5}`. Now you can search "find runs where coefficient > 0.4" without bloating the database with raw csv inputs.
+**Practical example**: Suppose you have a 100KB ActivitySim config file. Store the whole file as `config=...` (it hashes into the signature, so changes trigger re-runs). Then extract small, queryable pieces: `facet={"year": 2030, "mode_choice_coefficient": 0.5}`. This lets you search for runs where `coefficient > 0.4` without bloating the database with raw csv inputs.
 
 **Quick decision tree:**
 - "Should changing this parameter re-run my model?" → `config`

@@ -1,4 +1,4 @@
-# Containers (Experimental)
+# Containers
 
 ::: consist.integrations.containers.api
     options:
@@ -17,5 +17,3 @@
       show_root_heading: false
       show_root_toc_entry: false
       members: true
-      filters:
-        - "!^_"

@@ -1,3 +1,10 @@
+"""
+Database models for runs and run-level snapshots in the Consist main database.
+
+These tables form the core provenance ledger: runs, run↔artifact links, and
+in-memory snapshot helpers used to serialize full run records.
+"""
+
 from __future__ import annotations
 
 import uuid
@@ -15,10 +22,11 @@ UTC = timezone.utc
 
 class RunArtifactLink(SQLModel, table=True):
     """
-    A link table that represents the many-to-many relationship between Runs and Artifacts.
+    Link table that records run inputs/outputs in the main Consist database.
 
-    This table tracks which artifacts (files or data) were used as inputs
-    and which were generated as outputs for a specific run.
+    Each row connects a ``Run`` to an ``Artifact`` and records whether the artifact
+    was an input or output. This enables lineage queries and run reconstruction in
+    DuckDB without re-reading JSON snapshots.
 
     Attributes:
         run_id (str): The ID of the associated run.
@@ -41,10 +49,12 @@ class RunArtifactLink(SQLModel, table=True):
 
 class Run(SQLModel, table=True):
     """
-    Represents a single, trackable execution unit, such as a model step or a data processing workflow.
+    Primary run table in the Consist database.
 
-    Each run captures the context, configuration, and state of a specific execution,
-    allowing for reproducibility and observability.
+    Each run captures execution metadata (status, timing, identity hashes, tags)
+    and links to artifacts through ``run_artifact_link``. Full configuration details
+    live in the JSON run snapshot on disk, while the database stores hashes and
+    a queryable subset of metadata for caching and discovery.
 
     Attributes:
         id (str): A unique identifier for the run, often combining model name, year, and a UUID.
@@ -161,6 +171,8 @@ class RunArtifacts(BaseModel):
     Structured container for artifacts associated with a run.
     Allows dictionary-style access by artifact key.
 
+    This model is in-memory only and is not persisted to the database.
+
     Usage:
         artifacts.outputs['persons'] -> Artifact(...)
         artifacts.inputs['config'] -> Artifact(...)
@@ -175,6 +187,8 @@ class RunArtifacts(BaseModel):
 class RunResult(BaseModel):
     """
     Structured return value for Tracker.run/ScenarioContext.run.
+
+    This model is in-memory only and is not persisted to the database.
     """
 
     run: Run
@@ -200,7 +214,9 @@ class ConsistRecord(SQLModel):
     This class aggregates all information related to a single execution, including the
     run itself, its input and output artifacts, and a snapshot of the configuration used.
     It represents the "log as truth" by providing a complete, self-contained
-    description of what happened during the run.
+    description of what happened during the run. Consist serializes this model to
+    JSON in ``consist_runs/<run_id>.json``; the database stores a summarized view
+    (run row + artifact links + optional facets) for querying.
 
     Attributes:
         run (Run): The core `Run` object containing the execution's metadata and state.

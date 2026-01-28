@@ -1,3 +1,9 @@
+"""
+Database model for flattened config facet keys in the Consist main database.
+
+This table provides a fast, typed index for filtering runs by config values.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -11,10 +17,11 @@ UTC = timezone.utc
 
 class RunConfigKV(SQLModel, table=True):
     """
-    Query index for config facets.
+    Query index table for config facets in the Consist database.
 
     Each row represents a single flattened key from a config facet, stored in a typed column
-    to support fast filtering.
+    to support fast filtering. This table powers ``find_runs_by_facet_kv`` and related
+    search helpers.
     """
 
     __tablename__ = "run_config_kv"

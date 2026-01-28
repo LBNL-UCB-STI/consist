@@ -1,3 +1,9 @@
+"""
+ActivitySim ingestion cache models stored in the global Consist schema.
+
+These tables hold deduplicated, parsed config artifacts used across runs.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
@@ -8,7 +14,11 @@ from sqlmodel import Field, SQLModel
 
 class ActivitySimConstantsCache(SQLModel, table=True):
     """
-    Deduplicated ActivitySim constants keyed by content hash.
+    Deduplicated ActivitySim constants stored in the global Consist schema.
+
+    Rows are keyed by a content hash and represent parsed constant values from
+    ActivitySim configuration files. These tables are populated by ingestion
+    helpers and reused across runs for caching.
     """
 
     __tablename__ = "activitysim_constants_cache"
@@ -26,7 +36,9 @@ class ActivitySimConstantsCache(SQLModel, table=True):
 
 class ActivitySimCoefficientsCache(SQLModel, table=True):
     """
-    Deduplicated ActivitySim coefficients keyed by content hash.
+    Deduplicated ActivitySim coefficients stored in the global Consist schema.
+
+    Each row represents a coefficient entry parsed from ActivitySim specs.
     """
 
     __tablename__ = "activitysim_coefficients_cache"
@@ -46,7 +58,10 @@ class ActivitySimCoefficientsCache(SQLModel, table=True):
 
 class ActivitySimCoefficientTemplateRefsCache(SQLModel, table=True):
     """
-    Deduplicated template references keyed by content hash.
+    Deduplicated ActivitySim coefficient template references.
+
+    Tracks template indirections resolved during ingestion so they can be reused
+    across runs that share identical config inputs.
     """
 
     __tablename__ = "activitysim_coefficients_template_refs_cache"
@@ -61,7 +76,9 @@ class ActivitySimCoefficientTemplateRefsCache(SQLModel, table=True):
 
 class ActivitySimProbabilitiesCache(SQLModel, table=True):
     """
-    Deduplicated probabilities keyed by content hash.
+    Deduplicated ActivitySim probability tables.
+
+    These rows store aggregated probability rows for a given content hash.
     """
 
     __tablename__ = "activitysim_probabilities_cache"
@@ -76,7 +93,10 @@ class ActivitySimProbabilitiesCache(SQLModel, table=True):
 
 class ActivitySimProbabilitiesEntriesCache(SQLModel, table=True):
     """
-    Deduplicated probability entries keyed by content hash.
+    Deduplicated ActivitySim probability entries.
+
+    This is a normalized view of probability tables used for fine-grained
+    queries over individual probability values.
     """
 
     __tablename__ = "activitysim_probabilities_entries_cache"
@@ -91,7 +111,9 @@ class ActivitySimProbabilitiesEntriesCache(SQLModel, table=True):
 
 class ActivitySimProbabilitiesMetaEntriesCache(SQLModel, table=True):
     """
-    Deduplicated probability metadata entries keyed by content hash.
+    Deduplicated metadata entries for ActivitySim probability tables.
+
+    Stores parsed metadata fields associated with probability rows.
     """
 
     __tablename__ = "activitysim_probabilities_meta_entries_cache"
@@ -106,7 +128,10 @@ class ActivitySimProbabilitiesMetaEntriesCache(SQLModel, table=True):
 
 class ActivitySimConfigIngestRunLink(SQLModel, table=True):
     """
-    Link runs to deduplicated config ingests by content hash.
+    Link runs to deduplicated ActivitySim config ingests.
+
+    This join table records which config artifacts were ingested for a run and
+    which cached tables they populated.
     """
 
     __tablename__ = "activitysim_config_ingest_run_link"

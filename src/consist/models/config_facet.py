@@ -1,3 +1,10 @@
+"""
+Database model for configuration facets in the Consist main database.
+
+Facets are compact, queryable config snapshots that are deduplicated by hash
+and used to power run discovery.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -11,10 +18,11 @@ UTC = timezone.utc
 
 class ConfigFacet(SQLModel, table=True):
     """
-    A small, queryable snapshot of a run's configuration (a "facet").
+    A small, queryable snapshot of a run's configuration stored in the database.
 
     Facets are intended to be minimal and stable: only include fields that are useful
-    for inspection and filtering. Facets are deduplicated by their canonical JSON hash.
+    for inspection and filtering. Facets are deduplicated by their canonical JSON hash
+    and referenced by runs (via facet IDs) and the flattened ``run_config_kv`` index.
     """
 
     __tablename__ = "config_facet"

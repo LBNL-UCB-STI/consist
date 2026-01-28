@@ -45,10 +45,21 @@ class OutputCapture:
 
 class RunContext:
     """
-    Lightweight wrapper for injecting tracker helpers into user functions.
+    A lightweight helper object injected into user functions.
+    When you execute a run with `inject_context=True`, Consist passes a `RunContext`
+    to your function. This allows you to access run-aware helpers—like the run's
+    dedicated artifact directory and artifact logging methods—without needing to
+    reference a global tracker instance directly.
 
-    Consist passes this object when `inject_context=True` so step functions can
-    access run-aware helpers without referencing the tracker directly.
+    Examples
+    --------
+    ```python
+    def my_step(ctx: RunContext):
+        # Access the run's dedicated directory
+        output_path = ctx.run_dir / "results.csv"
+        # ... generate file ...
+        ctx.log_artifact(output_path, "results")
+    ```
     """
 
     def __init__(self, tracker: "Tracker") -> None:
@@ -56,27 +67,122 @@ class RunContext:
 
     @property
     def run_dir(self) -> Path:
-        """Run-specific output directory for the active step."""
+        """
+        Run-specific output directory for the active step.
+
+        Returns
+        -------
+        Path
+            The directory where this step should write outputs by default. This
+            value is derived from the active run and respects any per-run
+            artifact directory overrides.
+        """
         return self._tracker.run_artifact_dir()
 
     def log_artifact(self, *args: Any, **kwargs: Any) -> Artifact:
+        """
+        Log an artifact within the active run.
+
+        This is a thin wrapper around ``Tracker.log_artifact``.
+
+        Parameters
+        ----------
+        *args : Any
+            Positional arguments forwarded to ``Tracker.log_artifact``.
+        **kwargs : Any
+            Keyword arguments forwarded to ``Tracker.log_artifact``.
+
+        Returns
+        -------
+        Artifact
+            The logged artifact.
+        """
         return self._tracker.log_artifact(*args, **kwargs)
 
     def log_input(self, *args: Any, **kwargs: Any) -> Artifact:
+        """
+        Log an input artifact within the active run.
+
+        This is a thin wrapper around ``Tracker.log_input``.
+
+        Parameters
+        ----------
+        *args : Any
+            Positional arguments forwarded to ``Tracker.log_input``.
+        **kwargs : Any
+            Keyword arguments forwarded to ``Tracker.log_input``.
+
+        Returns
+        -------
+        Artifact
+            The logged input artifact.
+        """
         return self._tracker.log_input(*args, **kwargs)
 
     def log_output(self, *args: Any, **kwargs: Any) -> Artifact:
+        """
+        Log an output artifact within the active run.
+
+        This is a thin wrapper around ``Tracker.log_output``.
+
+        Parameters
+        ----------
+        *args : Any
+            Positional arguments forwarded to ``Tracker.log_output``.
+        **kwargs : Any
+            Keyword arguments forwarded to ``Tracker.log_output``.
+
+        Returns
+        -------
+        Artifact
+            The logged output artifact.
+        """
         return self._tracker.log_output(*args, **kwargs)
 
     def log_artifacts(self, *args: Any, **kwargs: Any) -> Dict[str, Artifact]:
+        """
+        Log multiple artifacts within the active run.
+
+        This is a thin wrapper around ``Tracker.log_artifacts``.
+
+        Parameters
+        ----------
+        *args : Any
+            Positional arguments forwarded to ``Tracker.log_artifacts``.
+        **kwargs : Any
+            Keyword arguments forwarded to ``Tracker.log_artifacts``.
+
+        Returns
+        -------
+        Dict[str, Artifact]
+            Mapping of artifact keys to logged artifacts.
+        """
         return self._tracker.log_artifacts(*args, **kwargs)
 
     def log_meta(self, **kwargs: Any) -> None:
+        """
+        Update metadata for the active run.
+
+        This is a thin wrapper around ``Tracker.log_meta``.
+
+        Parameters
+        ----------
+        **kwargs : Any
+            Metadata key/value pairs to merge into the run record.
+        """
         self._tracker.log_meta(**kwargs)
 
     @property
     def inputs(self) -> Dict[str, Artifact]:
-        """Mapping of input artifact keys to artifacts for the active step."""
+        """
+        Mapping of input artifact keys to artifacts for the active step.
+
+        Returns
+        -------
+        Dict[str, Artifact]
+            Dictionary of input artifacts keyed by their semantic keys. Raises a
+            ``RuntimeError`` if accessed outside an active run.
+        """
         current_consist = self._tracker.current_consist
         if current_consist is None:
             raise RuntimeError("No active run context is available.")
@@ -85,6 +191,16 @@ class RunContext:
     def load(self, key_or_artifact: Union[str, Artifact]) -> Any:
         """
         Load data from an input artifact by key or from an Artifact instance.
+
+        Parameters
+        ----------
+        key_or_artifact : Union[str, Artifact]
+            Input artifact key from ``inputs`` or an Artifact object.
+
+        Returns
+        -------
+        Any
+            Loaded data (driver-dependent).
         """
         if isinstance(key_or_artifact, str):
             key_or_artifact = self.inputs[key_or_artifact]
@@ -96,6 +212,18 @@ class RunContext:
     ) -> Iterator[OutputCapture]:
         """
         Capture files written under ``directory`` and log them as outputs on exit.
+
+        Parameters
+        ----------
+        directory : Path
+            Directory to monitor for new or modified files.
+        pattern : str, default "*"
+            Glob pattern for files to capture.
+
+        Yields
+        ------
+        OutputCapture
+            Container listing artifacts that were logged during the context.
         """
         with self._tracker.capture_outputs(directory, pattern=pattern) as cap:
             yield cap
@@ -103,17 +231,28 @@ class RunContext:
 
 class ScenarioContext:
     """
-    Manage a scenario header run and its child steps.
+    A context manager for grouping multiple steps into a single "scenario".
 
-    The context exposes ``step()`` helpers that suspend the parent header run,
-    execute child runs sequentially, and aggregate artifacts/metadata back into the
-    header record.
+    A scenario creates a parent run (the "header") that aggregates the
+    results, metadata, and lineage of all steps executed within its block.
+    It provides a `coupler` to pass artifacts between steps, making it
+    ideal for multi-stage simulation workflows.
 
     Attributes
     ----------
     coupler : Coupler
         Scenario-local artifact registry for passing outputs between steps.
         Supports runtime-declared output validation.
+
+    Examples
+    --------
+    ```python
+    with tracker.scenario("base_case") as sc:
+        # Step 1: Pre-process
+        sc.run(preprocess_fn, inputs={"raw": "data.csv"}, outputs=["clean"])
+        # Step 2: Model (reads "clean" from the coupler automatically)
+        sc.run(model_fn, input_keys=["clean"], outputs=["results"])
+    ```
     """
 
     def __init__(
@@ -172,19 +311,44 @@ class ScenarioContext:
 
     @property
     def run_id(self) -> str:
-        """The Run ID of the scenario header."""
+        """
+        Run ID of the scenario header.
+
+        Returns
+        -------
+        str
+            The run ID for the scenario header (or the scenario name if the
+            header has not been created yet).
+        """
         return self._header_record.run.id if self._header_record else self.name
 
     @property
     def config(self) -> MappingProxyType:
-        """Read-only view of the scenario configuration."""
+        """
+        Read-only view of the scenario configuration.
+
+        Returns
+        -------
+        MappingProxyType
+            Immutable mapping of configuration values for the scenario. Updates
+            are applied by changing inputs to the scenario, not by mutating this
+            mapping.
+        """
         if self._header_record:
             return MappingProxyType(self._header_record.config)
         return MappingProxyType(self.config_arg)
 
     @property
     def inputs(self) -> MappingProxyType:
-        """Read-only view of registered exogenous inputs."""
+        """
+        Read-only view of registered exogenous inputs.
+
+        Returns
+        -------
+        MappingProxyType
+            Immutable mapping of input keys to artifacts added via ``add_input``.
+            This reflects only scenario-level inputs, not step inputs.
+        """
         return MappingProxyType(self._inputs)
 
     def add_input(self, path: ArtifactRef, key: str, **kwargs) -> Artifact:
@@ -242,6 +406,18 @@ class ScenarioContext:
     ) -> None:
         """
         Declare outputs that should be present in the scenario coupler.
+
+        Parameters
+        ----------
+        *names : str
+            Output keys to declare.
+        required : bool | Mapping[str, bool], default False
+            Whether declared outputs are required. A mapping allows per-key
+            overrides.
+        warn_undocumented : bool, default False
+            If True, warn when outputs are logged that were not declared.
+        description : Optional[Mapping[str, str]], optional
+            Human-readable descriptions for declared outputs.
         """
         self.coupler.declare_outputs(
             *names,
@@ -259,6 +435,21 @@ class ScenarioContext:
     ) -> None:
         """
         Declare required outputs that must be present at scenario exit.
+
+        This is a convenience wrapper around ``declare_outputs`` that defaults
+        ``required=True``.
+
+        Parameters
+        ----------
+        *names : str
+            Output keys to require.
+        required : bool | Mapping[str, bool], default True
+            Whether required outputs are enforced. A mapping allows per-key
+            overrides.
+        warn_undocumented : bool, default False
+            If True, warn when outputs are logged that were not declared.
+        description : Optional[Mapping[str, str]], optional
+            Human-readable descriptions for required outputs.
         """
         self.coupler.require_outputs(
             *names,
@@ -272,6 +463,20 @@ class ScenarioContext:
     ) -> Dict[str, Artifact]:
         """
         Collect explicit artifacts into the scenario coupler by key.
+
+        Parameters
+        ----------
+        artifacts : Mapping[str, Artifact]
+            Source artifacts mapping (usually outputs from a step).
+        *keys : str
+            Keys to collect from the mapping.
+        prefix : str, default ""
+            Optional prefix to apply to collected keys in the coupler.
+
+        Returns
+        -------
+        Dict[str, Artifact]
+            The collected artifacts keyed by their (possibly prefixed) names.
         """
         return self.coupler.collect_by_keys(artifacts, *keys, prefix=prefix)
 

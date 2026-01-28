@@ -257,16 +257,6 @@ zensical serve
 
 Then open `http://localhost:8000/`.
 
-<details>
-<summary>Alternative: build with MkDocs</summary>
-
-```bash
-mkdocs serve
-```
-
-A `mkdocs.yml` is included for compatibility.
-
-</details>
 ---
 
 ## Current Status
@@ -285,4 +275,4 @@ In railroad terminology, a **consist** (noun, pronounced CON-sist) is the specif
 
 ## License
 
-TODO: Open source permissive preferred
+[BSD (modified)](LICENSE)
