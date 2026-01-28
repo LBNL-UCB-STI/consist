@@ -1,0 +1,3249 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Provenance tracking, intelligent caching, and data virtualization for scientific simulation workflows">
+      
+      
+        <meta name="author" content="Zach Needell">
+      
+      
+        <link rel="canonical" href="https://LBNL-UCB-STI.github.io/consist/caching-and-hydration/">
+      
+      
+        <link rel="prev" href="../configs/">
+      
+      
+        <link rel="next" href="../dlt-loader-guide/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.19">
+    
+    
+      
+        <title>Caching and Artifact Hydration Patterns - Consist</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.d4922b3c.min.css">
+      
+        
+          
+        
+        <link rel="stylesheet" href="../assets/stylesheets/modern/palette.dfe2e883.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Libre+Franklin:300,300i,400,400i,500,500i,700,700i%7CJetbrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Libre Franklin";--md-code-font:"Jetbrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,a=__md_scope)=>JSON.parse(t.getItem(a.pathname+"."+e)),__md_set=(e,t,a=localStorage,_=__md_scope)=>{try{a.setItem(_.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#caching-and-artifact-hydration-patterns" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="Consist" class="md-header__button md-logo" aria-label="Consist" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M1 7v10h1a2 2 0 1 0 4 0h12a2 2 0 1 0 4 0h1V7zm15 9h-2v-5h-4v5H8V9h8z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Consist
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Caching and Artifact Hydration Patterns
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-sun-moon" viewBox="0 0 24 24"><path d="M12 2v2M14.837 16.385a6 6 0 1 1-7.223-7.222c.624-.147.97.66.715 1.248a4 4 0 0 0 5.26 5.259c.589-.255 1.396.09 1.248.715M16 12a4 4 0 0 0-4-4M19 5l-1.256 1.256M20 12h2"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_2" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to system preference"  type="radio" name="__palette" id="__palette_2">
+    
+      <label class="md-header__button md-icon" title="Switch to system preference" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-moon" viewBox="0 0 24 24"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../getting-started/installation/" class="md-tabs__link">
+          
+  
+  Getting Started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../configs/" class="md-tabs__link">
+          
+  
+  Core Topics
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../integrations/" class="md-tabs__link">
+          
+  
+  Integrations
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../troubleshooting/" class="md-tabs__link">
+          
+  
+  Support & Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../api/" class="md-tabs__link">
+          
+  
+  API Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="Consist" class="md-nav__button md-logo" aria-label="Consist" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M1 7v10h1a2 2 0 1 0 4 0h12a2 2 0 1 0 4 0h1V7zm15 9h-2v-5h-4v5H8V9h8z"/></svg>
+
+    </a>
+    Consist
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation and Quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../usage-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Usage Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../caching-fundamentals/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    How Caching Works
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../examples/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli-reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Command Line Interface
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Core Topics
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Core Topics
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration, Identity, and Facets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Caching and Artifact Hydration Patterns
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Caching and Artifact Hydration Patterns
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#key-concepts-and-terminology" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Key Concepts and Terminology
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#hydration-vs-materialization-recovering-information-vs-ensuring-files-exist" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Hydration vs Materialization: Recovering Information vs. Ensuring Files Exist
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Hydration vs Materialization: Recovering Information vs. Ensuring Files Exist">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-two-types-of-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Two Types of Recovery
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#why-consist-does-this" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why Consist Does This
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#when-to-materialize-making-cached-files-local" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When to Materialize: Making Cached Files Local
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#example-climate-data-workflow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Example: Climate Data Workflow
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#default-behavior-metadata-only-hydration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Default Behavior: Metadata-Only Hydration
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#practical-decision-table" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Practical Decision Table
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#runs-signatures-and-cache-hits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Runs, signatures, and cache hits
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#artifact-identity-vs-artifact-bytes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Artifact identity vs. artifact bytes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#portability-and-path-resolution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Portability and path resolution
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pattern-1-step-caching-with-explicit-artifact-handoff" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pattern 1: Step caching with explicit artifact handoff
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Pattern 1: Step caching with explicit artifact handoff">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#function-shaped-steps-skip-on-cache-hit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Function-shaped steps (skip on cache hit)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pattern-2-cached-runs-with-consistrun" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pattern 2: Cached runs with consist.run
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pattern-3-resuming-after-failures-partial-pipeline-reuse" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pattern 3: Resuming after failures (partial pipeline reuse)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pattern-4-hot-vs-cold-data-and-database-backed-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pattern 4: Hot vs. cold data, and database-backed recovery
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-exactly-happens-on-a-cache-hit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What exactly happens on a cache hit?
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="What exactly happens on a cache hit?">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#core-tracker-cache-hits-tasksscenarios" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Core Tracker cache hits (tasks/scenarios)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cache-misses-that-depend-on-cached-inputs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cache misses that depend on cached inputs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#optional-cache-hit-materialization-copy-bytes-on-disk" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Optional cache-hit materialization (copy bytes on disk)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#containers-integration-cache-hits-requested-outputs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Containers integration cache hits (requested outputs)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#hydration-policy-table" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Hydration policy table
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#practical-guidance" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Practical Guidance
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Practical Guidance">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#make-caching-predictable" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Make caching predictable
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#decide-what-to-ingest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Decide what to ingest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#safe-deletion-and-long-running-pipelines" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Safe deletion and long-running pipelines
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cache-hit-performance-and-diagnostics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cache-Hit Performance and Diagnostics
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Cache-Hit Performance and Diagnostics">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#cache-and-hydration-knobs-summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cache and hydration knobs (summary)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pattern-5-shared-input-bundles-via-a-duckdb-file" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pattern 5: Shared input bundles via a DuckDB file
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Pattern 5: Shared input bundles via a DuckDB file">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#bundle-creation-producer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bundle creation (producer)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#bundle-consumption-consumer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bundle consumption (consumer)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#multi-model-workflows-from-one-bundle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multi-model workflows from one bundle
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../dlt-loader-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DLT Loader Integration Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../containers-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Container Integration Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mounts-and-portability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Mounts &amp; Portability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ingestion-and-hybrid-views/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ingestion &amp; Hybrid Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../schema-export/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Schema Export (SQLModel Stubs)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../integrations/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Integrations
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Integrations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../integrations/containers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Containers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../integrations/dlt_loader/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DLT Loader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_4" id="__nav_4_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Config Adapters
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Config Adapters
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../integrations/config_adapters/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../integrations/config_adapters_activitysim/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    BEAM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../integrations/config_adapters_beam/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Activitysim
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Support & Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Support & Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../glossary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Glossary
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../api/" class="md-nav__link ">
+              
+  
+  
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_6" id="__nav_6_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/public_api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Public API (v0.1)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/api_helpers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Helpers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/tracker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/workflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Workflow Contexts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/artifact/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/run/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Run
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/indexing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Indexing Helpers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/identity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identity Manager
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/views/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/matrix/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Matrix Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/materialize/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#key-concepts-and-terminology" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Key Concepts and Terminology
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#hydration-vs-materialization-recovering-information-vs-ensuring-files-exist" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Hydration vs Materialization: Recovering Information vs. Ensuring Files Exist
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Hydration vs Materialization: Recovering Information vs. Ensuring Files Exist">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-two-types-of-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Two Types of Recovery
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#why-consist-does-this" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why Consist Does This
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#when-to-materialize-making-cached-files-local" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When to Materialize: Making Cached Files Local
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#example-climate-data-workflow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Example: Climate Data Workflow
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#default-behavior-metadata-only-hydration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Default Behavior: Metadata-Only Hydration
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#practical-decision-table" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Practical Decision Table
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#runs-signatures-and-cache-hits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Runs, signatures, and cache hits
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#artifact-identity-vs-artifact-bytes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Artifact identity vs. artifact bytes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#portability-and-path-resolution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Portability and path resolution
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pattern-1-step-caching-with-explicit-artifact-handoff" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pattern 1: Step caching with explicit artifact handoff
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Pattern 1: Step caching with explicit artifact handoff">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#function-shaped-steps-skip-on-cache-hit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Function-shaped steps (skip on cache hit)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pattern-2-cached-runs-with-consistrun" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pattern 2: Cached runs with consist.run
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pattern-3-resuming-after-failures-partial-pipeline-reuse" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pattern 3: Resuming after failures (partial pipeline reuse)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pattern-4-hot-vs-cold-data-and-database-backed-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pattern 4: Hot vs. cold data, and database-backed recovery
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-exactly-happens-on-a-cache-hit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What exactly happens on a cache hit?
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="What exactly happens on a cache hit?">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#core-tracker-cache-hits-tasksscenarios" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Core Tracker cache hits (tasks/scenarios)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cache-misses-that-depend-on-cached-inputs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cache misses that depend on cached inputs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#optional-cache-hit-materialization-copy-bytes-on-disk" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Optional cache-hit materialization (copy bytes on disk)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#containers-integration-cache-hits-requested-outputs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Containers integration cache hits (requested outputs)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#hydration-policy-table" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Hydration policy table
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#practical-guidance" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Practical Guidance
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Practical Guidance">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#make-caching-predictable" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Make caching predictable
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#decide-what-to-ingest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Decide what to ingest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#safe-deletion-and-long-running-pipelines" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Safe deletion and long-running pipelines
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cache-hit-performance-and-diagnostics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cache-Hit Performance and Diagnostics
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Cache-Hit Performance and Diagnostics">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#cache-and-hydration-knobs-summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cache and hydration knobs (summary)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pattern-5-shared-input-bundles-via-a-duckdb-file" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pattern 5: Shared input bundles via a DuckDB file
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Pattern 5: Shared input bundles via a DuckDB file">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#bundle-creation-producer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bundle creation (producer)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#bundle-consumption-consumer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bundle consumption (consumer)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#multi-model-workflows-from-one-bundle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multi-model workflows from one bundle
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+                
+
+
+
+  
+
+
+  <nav class="md-path" aria-label="Navigation" >
+    <ol class="md-path__list">
+      
+        
+  
+  
+    <li class="md-path__item">
+      <a href=".." class="md-path__link">
+        
+  <span class="md-ellipsis">
+    Home
+  </span>
+
+      </a>
+    </li>
+  
+
+      
+      
+        
+  
+  
+    
+    
+      <li class="md-path__item">
+        <a href="../configs/" class="md-path__link">
+          
+  <span class="md-ellipsis">
+    Core Topics
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ol>
+  </nav>
+
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<h1 id="caching-and-artifact-hydration-patterns">Caching and Artifact Hydration Patterns<a class="headerlink" href="#caching-and-artifact-hydration-patterns" title="Permanent link">&para;</a></h1>
+<p>Consist’s core loop is:
+1. <strong>Declare inputs</strong> (files or upstream artifacts)
+2. <strong>Compute a run signature</strong> (code + config + inputs)
+3. <strong>Identify existing prior results if they exist</strong> (caching)
+4. <strong>Load data from the best available source if they are needed, create them if not</strong> (Look on disk first; database when appropriate; run the model if all else fails)</p>
+<p>This page focuses on practical patterns for making caching reliable, keeping pipelines portable, and choosing when/how artifacts should be “hydrated” (materialized or recovered) for downstream work.</p>
+<hr />
+<h2 id="key-concepts-and-terminology">Key Concepts and Terminology<a class="headerlink" href="#key-concepts-and-terminology" title="Permanent link">&para;</a></h2>
+<p>This page uses a few terms very precisely. The goal is to separate <strong>provenance objects</strong>
+(Artifacts and Runs) from <strong>physical bytes on disk</strong> (files/directories) and from
+<strong>database-backed data</strong> (DuckDB tables).</p>
+<h2 id="hydration-vs-materialization-recovering-information-vs-ensuring-files-exist">Hydration vs Materialization: Recovering Information vs. Ensuring Files Exist<a class="headerlink" href="#hydration-vs-materialization-recovering-information-vs-ensuring-files-exist" title="Permanent link">&para;</a></h2>
+<p>When Consist finds a cached result, it needs to "bring that result back" into your new run. But <strong>what does 'bringing back' mean?</strong> This section clarifies the distinction between recovering information about a previous result versus ensuring the actual files exist on your current system.</p>
+<h3 id="the-two-types-of-recovery">The Two Types of Recovery<a class="headerlink" href="#the-two-types-of-recovery" title="Permanent link">&para;</a></h3>
+<p>Imagine you run a climate simulation in <code>/scratch/simulation_2024/</code> and it produces a 50GB results file. Six months later, you run a new analysis with the same inputs. Consist recognizes a cache hit. Now:</p>
+<p><strong>Artifact Hydration</strong> = Recovering the <em>information</em> about that result: "This result came from run <code>abc123</code>, it's a Parquet file called <code>results.parquet</code>, and it contains monthly precipitation data." Consist creates an <code>Artifact</code> object with the metadata, URIs, and provenance—all the <em>information</em> needed to reference and load the result.</p>
+<p><strong>Materialization</strong> = Ensuring the <em>actual bytes</em> exist on your new system: copying the 50GB <code>results.parquet</code> file from its original location into your new run directory so your analysis code can read it from disk.</p>
+<p>The key insight: <strong>Hydration is fast and automatic; materialization is optional and explicit.</strong></p>
+<h3 id="why-consist-does-this">Why Consist Does This<a class="headerlink" href="#why-consist-does-this" title="Permanent link">&para;</a></h3>
+<p>By default, Consist only hydrates metadata. This saves disk space and time:
+- Metadata recovery is instant (lookup in provenance database)
+- Files stay in their original location or database
+- You pay for file copying <em>only if you ask for it</em></p>
+<p>This is useful when:
+- You're running 100 variations of an analysis on the same simulated data—you don't need 100 copies of that 50GB results file
+- Your downstream code can load from the original file path (via mounted storage or database fallback)
+- You want minimal disk overhead for large-scale parameter sweeps</p>
+<h3 id="when-to-materialize-making-cached-files-local">When to Materialize: Making Cached Files Local<a class="headerlink" href="#when-to-materialize-making-cached-files-local" title="Permanent link">&para;</a></h3>
+<p>You'll want to materialize cached outputs (copy bytes to your current run) in a few cases:</p>
+<ol>
+<li>
+<p><strong>Extending a scenario in a new workspace:</strong> You cached results in <code>/workspace/2024</code>, now you want to continue analysis in <code>/workspace/2025</code>. Use <code>cache_hydration="inputs-missing"</code> to automatically copy input files your executing steps need.</p>
+</li>
+<li>
+<p><strong>Preparing outputs for external tools:</strong> Some tools expect files to exist locally. Use <code>cache_hydration="outputs-requested"</code> with <code>materialize_cached_output_paths</code> to copy specific cached outputs you need.</p>
+</li>
+<li>
+<p><strong>Ensuring full reproducibility locally:</strong> You want all results locally accessible without remote mounts. Use <code>cache_hydration="outputs-all"</code> to copy all cached outputs into a local directory.</p>
+</li>
+</ol>
+<h3 id="example-climate-data-workflow">Example: Climate Data Workflow<a class="headerlink" href="#example-climate-data-workflow" title="Permanent link">&para;</a></h3>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1"># First run: simulate climate for years 2020-2030, takes 24 hours</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>    <span class="s2">&quot;climate_baseline&quot;</span><span class="p">,</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>    <span class="n">scenario_id</span><span class="o">=</span><span class="s2">&quot;baseline&quot;</span><span class="p">,</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;climate_sim&quot;</span><span class="p">,</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    <span class="n">year</span><span class="o">=</span><span class="mi">2030</span><span class="p">,</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    <span class="n">cache_mode</span><span class="o">=</span><span class="s2">&quot;overwrite&quot;</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="p">):</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    <span class="n">results</span> <span class="o">=</span> <span class="n">run_climate_model</span><span class="p">()</span>  <span class="c1"># 50GB output</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="n">results</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;precip&quot;</span><span class="p">)</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="c1"># Later: analysis that only needs metadata about the result</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>    <span class="s2">&quot;analyze_trends&quot;</span><span class="p">,</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>    <span class="n">scenario_id</span><span class="o">=</span><span class="s2">&quot;baseline&quot;</span><span class="p">,</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;analysis&quot;</span><span class="p">,</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">[</span><span class="n">cached_precip_artifact</span><span class="p">],</span>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;metadata&quot;</span><span class="p">,</span>  <span class="c1"># Default: no copying</span>
+</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a><span class="p">):</span>
+</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a>    <span class="c1"># Consist hydrated the Artifact object with metadata</span>
+</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>    <span class="c1"># You can query properties, compute signatures, check provenance</span>
+</span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Result came from run </span><span class="si">{</span><span class="n">cached_precip_artifact</span><span class="o">.</span><span class="n">run_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</span><span id="__span-0-23"><a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a>
+</span><span id="__span-0-24"><a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a>    <span class="c1"># If you need the actual bytes, you explicitly load them:</span>
+</span><span id="__span-0-25"><a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a>    <span class="n">df</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">cached_precip_artifact</span><span class="p">)</span>  <span class="c1"># Loads from original location</span>
+</span><span id="__span-0-26"><a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a>
+</span><span id="__span-0-27"><a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a><span class="c1"># Later: need to ensure files exist locally for external tool</span>
+</span><span id="__span-0-28"><a id="__codelineno-0-28" name="__codelineno-0-28" href="#__codelineno-0-28"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
+</span><span id="__span-0-29"><a id="__codelineno-0-29" name="__codelineno-0-29" href="#__codelineno-0-29"></a>    <span class="s2">&quot;export_for_visualization&quot;</span><span class="p">,</span>
+</span><span id="__span-0-30"><a id="__codelineno-0-30" name="__codelineno-0-30" href="#__codelineno-0-30"></a>    <span class="n">scenario_id</span><span class="o">=</span><span class="s2">&quot;baseline&quot;</span><span class="p">,</span>
+</span><span id="__span-0-31"><a id="__codelineno-0-31" name="__codelineno-0-31" href="#__codelineno-0-31"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;export&quot;</span><span class="p">,</span>
+</span><span id="__span-0-32"><a id="__codelineno-0-32" name="__codelineno-0-32" href="#__codelineno-0-32"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;outputs-requested&quot;</span><span class="p">,</span>
+</span><span id="__span-0-33"><a id="__codelineno-0-33" name="__codelineno-0-33" href="#__codelineno-0-33"></a>    <span class="n">materialize_cached_output_paths</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-0-34"><a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a>        <span class="s2">&quot;precip&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;./local_outputs/precip.parquet&quot;</span><span class="p">)</span>
+</span><span id="__span-0-35"><a id="__codelineno-0-35" name="__codelineno-0-35" href="#__codelineno-0-35"></a>    <span class="p">}</span>
+</span><span id="__span-0-36"><a id="__codelineno-0-36" name="__codelineno-0-36" href="#__codelineno-0-36"></a><span class="p">):</span>
+</span><span id="__span-0-37"><a id="__codelineno-0-37" name="__codelineno-0-37" href="#__codelineno-0-37"></a>    <span class="c1"># Consist copies the cached precip.parquet into ./local_outputs/</span>
+</span><span id="__span-0-38"><a id="__codelineno-0-38" name="__codelineno-0-38" href="#__codelineno-0-38"></a>    <span class="c1"># Now your external tool can see real files</span>
+</span><span id="__span-0-39"><a id="__codelineno-0-39" name="__codelineno-0-39" href="#__codelineno-0-39"></a>    <span class="n">subprocess</span><span class="o">.</span><span class="n">run</span><span class="p">([</span><span class="s2">&quot;qgis&quot;</span><span class="p">,</span> <span class="s2">&quot;export_for_visualization.py&quot;</span><span class="p">])</span>
+</span></code></pre></div>
+<h3 id="default-behavior-metadata-only-hydration">Default Behavior: Metadata-Only Hydration<a class="headerlink" href="#default-behavior-metadata-only-hydration" title="Permanent link">&para;</a></h3>
+<p>By default, <code>cache_hydration="metadata"</code>:
+- Fast: no filesystem operations
+- Efficient: no disk duplication
+- Requires explicit <code>consist.load()</code> when you need bytes</p>
+<p>This is the right default for scientific workflows because:
+- You often analyze cached results programmatically (via <code>consist.load()</code>)
+- Large simulations benefit from avoiding disk copies
+- Provenance and signature verification don't need bytes on disk</p>
+<h3 id="practical-decision-table">Practical Decision Table<a class="headerlink" href="#practical-decision-table" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Your Need</th>
+<th>Use This</th>
+<th>Tradeoff</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Run parameter sweeps on cached simulation</td>
+<td><code>metadata</code> (default)</td>
+<td>No disk copy; must load data via <code>consist.load()</code></td>
+</tr>
+<tr>
+<td>Extend analysis in a new workspace</td>
+<td><code>inputs-missing</code></td>
+<td>Copies only missing input files; fast on cache hits</td>
+</tr>
+<tr>
+<td>Run external tool that needs local files</td>
+<td><code>outputs-requested</code></td>
+<td>Copy only what you ask for; must list outputs explicitly</td>
+</tr>
+<tr>
+<td>Ensure all cached data is accessible locally</td>
+<td><code>outputs-all</code></td>
+<td>Copies everything; uses disk space but guarantees file paths exist</td>
+</tr>
+</tbody>
+</table>
+<h3 id="runs-signatures-and-cache-hits">Runs, signatures, and cache hits<a class="headerlink" href="#runs-signatures-and-cache-hits" title="Permanent link">&para;</a></h3>
+<p>Every run has a <strong>signature</strong> derived from:
+- <strong>code hash</strong> (tracked via <code>IdentityManager</code>)
+- <strong>config hash</strong>
+- <strong>input hash</strong> (derived from declared input artifacts)</p>
+<p>If Consist finds a previously <strong>completed</strong> run with the same signature and its outputs are still valid, the new run becomes a <strong>cache hit</strong> and reuses the prior outputs.</p>
+<p>Cache behavior is controlled via <code>cache_mode</code>:
+- <code>reuse</code> (default): reuse matching completed runs
+- <code>overwrite</code>: always execute (no cache lookup)
+- <code>readonly</code>: avoid persisting changes (useful for inspection)</p>
+<h3 id="artifact-identity-vs-artifact-bytes">Artifact identity vs. artifact bytes<a class="headerlink" href="#artifact-identity-vs-artifact-bytes" title="Permanent link">&para;</a></h3>
+<p>Consist distinguishes:
+- <strong>provenance identity</strong>: where an artifact came from (e.g., <code>artifact.run_id</code> links to the producing run)
+- <strong>physical bytes</strong>: the actual on-disk file contents</p>
+<p>For Consist-produced artifacts, inputs are typically hashed by linking to the producing run’s signature (Merkle-style). For raw files (no <code>run_id</code>), Consist hashes file contents/metadata depending on configuration.
+If you already know the content hash (for example, after copying or moving a file), you can pass <code>content_hash=</code> to <code>log_artifact</code> to reuse it and skip hashing the path on disk. To avoid accidentally mutating existing provenance, Consist ignores mismatched overrides unless <code>force_hash_override=True</code>. Use <code>validate_content_hash=True</code> to verify the override against on-disk data.</p>
+<h3 id="portability-and-path-resolution">Portability and path resolution<a class="headerlink" href="#portability-and-path-resolution" title="Permanent link">&para;</a></h3>
+<p>An artifact has a portable <code>artifact.uri</code> and a runtime-resolved <code>artifact.path</code>.
+- <code>tracker.resolve_uri(uri)</code> translates a portable URI into a host filesystem path using mounts.
+- On cache hits, Consist performs <strong>artifact hydration</strong>: it attaches cached output <code>Artifact</code>
+  objects to the active run context so downstream code can reference them.</p>
+<p>This is what keeps pipelines portable across different machines/scratch directories: code consumes
+<code>Artifact</code> objects and resolves paths through the tracker instead of embedding absolute paths.</p>
+<hr />
+<h2 id="pattern-1-step-caching-with-explicit-artifact-handoff">Pattern 1: Step caching with explicit artifact handoff<a class="headerlink" href="#pattern-1-step-caching-with-explicit-artifact-handoff" title="Permanent link">&para;</a></h2>
+<p>For multi-step workflows, the most robust pattern is:
+- each step logs outputs as artifacts
+- the next step declares those artifacts as inputs</p>
+<p>Using <code>consist.scenario(...)</code>:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">use_tracker</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="k">with</span> <span class="n">use_tracker</span><span class="p">(</span><span class="n">tracker</span><span class="p">):</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>    <span class="k">with</span> <span class="n">consist</span><span class="o">.</span><span class="n">scenario</span><span class="p">(</span><span class="s2">&quot;my_scenario&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">scenario</span><span class="p">:</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>        <span class="k">with</span> <span class="n">scenario</span><span class="o">.</span><span class="n">trace</span><span class="p">(</span><span class="s2">&quot;ingest&quot;</span><span class="p">):</span>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>            <span class="n">consist</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="s2">&quot;raw.csv&quot;</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;raw&quot;</span><span class="p">,</span> <span class="n">direction</span><span class="o">=</span><span class="s2">&quot;output&quot;</span><span class="p">)</span>
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>        <span class="c1"># `inputs=[...]` declares step inputs by Coupler key without repeating</span>
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>        <span class="c1"># `scenario.coupler.require(...)` in the `inputs=[...]` list.</span>
+</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>        <span class="k">with</span> <span class="n">scenario</span><span class="o">.</span><span class="n">trace</span><span class="p">(</span><span class="s2">&quot;transform&quot;</span><span class="p">,</span> <span class="n">inputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;raw&quot;</span><span class="p">]):</span>
+</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a>            <span class="n">raw_art</span> <span class="o">=</span> <span class="n">scenario</span><span class="o">.</span><span class="n">coupler</span><span class="o">.</span><span class="n">require</span><span class="p">(</span><span class="s2">&quot;raw&quot;</span><span class="p">)</span>
+</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>            <span class="n">df</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">raw_art</span><span class="p">,</span> <span class="n">tracker</span><span class="o">=</span><span class="n">tracker</span><span class="p">)</span>
+</span></code></pre></div>
+<p>Notes:
+- Prefer <code>scenario.coupler.require("raw")</code> over <code>get("raw")</code> in tests and templates; it fails loudly if a predecessor didn’t set the key.
+- Always pass upstream artifacts through <code>inputs=[...]</code> so caching and provenance are correct.
+- Step bodies still execute on cache hits; Consist does not “skip the Python block”.
+  - To make cache-agnostic step code easier to write, <code>tracker.log_artifact(..., direction="output")</code> will return the hydrated cached output when the current run is a cache hit and the output <code>key</code> matches a cached output.
+  - If code attempts to produce a <em>new or different</em> output on a cache hit, Consist demotes the cache hit to an executing run (so provenance remains truthful).</p>
+<h3 id="function-shaped-steps-skip-on-cache-hit">Function-shaped steps (skip on cache hit)<a class="headerlink" href="#function-shaped-steps-skip-on-cache-hit" title="Permanent link">&para;</a></h3>
+<p>If you have an expensive callable (including imported functions or bound methods) and you want Consist to skip executing it on cache hits, use <code>ScenarioContext.run(...)</code>.</p>
+<p><code>output_paths={...}</code> values are interpreted as:
+- relative paths → relative to the step run directory (<code>t.run_dir</code>)
+- URI-like strings (<code>"scheme://..."</code>) → resolved via mounts (<code>tracker.resolve_uri</code>)
+- absolute paths → used as-is</p>
+<hr />
+<h2 id="pattern-2-cached-runs-with-consistrun">Pattern 2: Cached runs with <code>consist.run</code><a class="headerlink" href="#pattern-2-cached-runs-with-consistrun" title="Permanent link">&para;</a></h2>
+<p>Use <code>consist.run(...)</code> with declared outputs to get cache-aware execution for function-shaped steps.</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">def</span><span class="w"> </span><span class="nf">clean</span><span class="p">(</span><span class="n">raw_file</span><span class="p">:</span> <span class="n">Path</span><span class="p">):</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>    <span class="o">...</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;cleaned&quot;</span><span class="p">:</span> <span class="n">cleaned_df</span><span class="p">}</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">use_tracker</span>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="k">with</span> <span class="n">use_tracker</span><span class="p">(</span><span class="n">tracker</span><span class="p">):</span>
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>    <span class="n">result</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>        <span class="n">fn</span><span class="o">=</span><span class="n">clean</span><span class="p">,</span>
+</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>        <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;raw_file&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;raw.csv&quot;</span><span class="p">)},</span>
+</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>        <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;cleaned&quot;</span><span class="p">],</span>
+</span><span id="__span-2-13"><a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a>        <span class="n">load_inputs</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-2-14"><a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>    <span class="p">)</span>
+</span></code></pre></div>
+<hr />
+<h2 id="pattern-3-resuming-after-failures-partial-pipeline-reuse">Pattern 3: Resuming after failures (partial pipeline reuse)<a class="headerlink" href="#pattern-3-resuming-after-failures-partial-pipeline-reuse" title="Permanent link">&para;</a></h2>
+<p>A common operational workflow is:
+- early steps succeed (and are cached)
+- a late step fails (e.g., ENOSPC / transient compute failure)
+- re-run should reuse upstream cached results and continue from the failure point</p>
+<p>This works when:
+- upstream outputs are logged as artifacts
+- downstream steps declare those artifacts as inputs
+- failed runs are not reused for caching (Consist only reuses completed runs)</p>
+<p>In practice:
+- re-running will cache-hit earlier steps
+- the failed step will re-execute because there is no valid completed run to reuse</p>
+<hr />
+<h2 id="pattern-4-hot-vs-cold-data-and-database-backed-recovery">Pattern 4: Hot vs. cold data, and database-backed recovery<a class="headerlink" href="#pattern-4-hot-vs-cold-data-and-database-backed-recovery" title="Permanent link">&para;</a></h2>
+<p>Ingestion and hybrid views are covered in the dedicated guide:
+<a href="../ingestion-and-hybrid-views/">Ingestion &amp; Hybrid Views</a>. That doc explains when to ingest,
+how schema validation works, and how DB fallback behaves when files are missing.</p>
+<hr />
+<h2 id="what-exactly-happens-on-a-cache-hit">What exactly happens on a cache hit?<a class="headerlink" href="#what-exactly-happens-on-a-cache-hit" title="Permanent link">&para;</a></h2>
+<p>This is the most common source of confusion, so here is the explicit behavior.</p>
+<h3 id="core-tracker-cache-hits-tasksscenarios">Core <code>Tracker</code> cache hits (tasks/scenarios)<a class="headerlink" href="#core-tracker-cache-hits-tasksscenarios" title="Permanent link">&para;</a></h3>
+<p>On a cache hit, Consist:
+- Finds a matching <strong>completed</strong> prior run with the same signature.
+- By default, <strong>skips</strong> filesystem checks for cached outputs for speed.
+  - Pass <code>validate_cached_outputs="eager"</code> if you want to require that output files exist (or are ingested).
+- <strong>Hydrates artifact objects</strong> for the cached outputs into the current run context.
+  - Paths are resolved on demand (e.g., <code>cached_output()</code>).
+  - <code>Artifact.path</code> lazily resolves via the active tracker; no filesystem checks happen until you access it.</p>
+<p>On a cache hit, Consist does <strong>not</strong>:
+- Copy files into a new run directory.
+- Recreate missing files from DuckDB automatically.
+- Guarantee that <code>artifact.path</code> exists on disk without an explicit load/materialization step.</p>
+<p>If you need bytes, you typically:
+- call <code>consist.load(...)</code> for tabular artifacts (disk first; see Ingestion &amp; Hybrid Views for DB fallback), or
+- implement explicit file copy/materialization for non-tabular artifacts.</p>
+<h3 id="cache-misses-that-depend-on-cached-inputs">Cache misses that depend on cached inputs<a class="headerlink" href="#cache-misses-that-depend-on-cached-inputs" title="Permanent link">&para;</a></h3>
+<p>If a run is <strong>not</strong> a cache hit but its inputs include artifacts produced by cached runs,
+those input artifacts are still referenced by <strong>portable URIs</strong> (e.g., <code>./outputs/foo.parquet</code>).
+By default, Consist resolves those URIs into the <strong>current</strong> run directory, which may not
+contain the bytes from the original run.</p>
+<p>To make “extend a scenario in a new run_dir” workflows work without rerunning cached steps,
+use the cache hydration policy:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>    <span class="s2">&quot;next_step&quot;</span><span class="p">,</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;step&quot;</span><span class="p">,</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">[</span><span class="n">cached_artifact</span><span class="p">],</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;inputs-missing&quot;</span><span class="p">,</span>
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="p">):</span>
+</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>    <span class="o">...</span>
+</span></code></pre></div>
+<p>With <code>cache_hydration="inputs-missing"</code>, Consist will:
+- detect missing input paths in the current run_dir,
+- locate the original run directory recorded in provenance metadata, and
+- copy those input bytes into the current run_dir before execution.</p>
+<p>This keeps cache misses fast while still ensuring the executing step can read its inputs.</p>
+<p>If the original on-disk input is missing but the artifact was ingested, Consist will
+attempt to reconstruct the input from DuckDB <strong>for CSV and Parquet artifacts only</strong>.
+Other drivers raise a <code>ValueError</code> to avoid silent or lossy conversions.</p>
+<h3 id="optional-cache-hit-materialization-copy-bytes-on-disk">Optional cache-hit materialization (copy bytes on disk)<a class="headerlink" href="#optional-cache-hit-materialization-copy-bytes-on-disk" title="Permanent link">&para;</a></h3>
+<p>Core Consist supports an <strong>opt-in</strong> policy to physically materialize cached outputs on cache hits
+by copying bytes from the cached artifact’s resolved path to a destination you provide.</p>
+<p>This is intentionally <strong>copy-only</strong> materialization (Phase 1):
+- It copies from the cached source path if it exists.
+- It does not reconstruct files from DuckDB.</p>
+<p>Enable it at run start:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>    <span class="s2">&quot;r2&quot;</span><span class="p">,</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;step&quot;</span><span class="p">,</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;outputs-all&quot;</span><span class="p">,</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>    <span class="n">materialize_cached_outputs_dir</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;some/output/dir&quot;</span><span class="p">),</span>
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="p">):</span>
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>    <span class="o">...</span>
+</span></code></pre></div>
+<p>Or materialize only specific cached outputs (by artifact key):</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>    <span class="s2">&quot;r2&quot;</span><span class="p">,</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;step&quot;</span><span class="p">,</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;outputs-requested&quot;</span><span class="p">,</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>    <span class="n">materialize_cached_output_paths</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;features&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;outputs/features.csv&quot;</span><span class="p">)},</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="p">):</span>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>    <span class="o">...</span>
+</span></code></pre></div>
+<p>Defaults remain unchanged: <code>cache_hydration="metadata"</code> (artifact hydration only).</p>
+<p>Validation rules (error cases):
+- <code>outputs-requested</code> requires <code>materialize_cached_output_paths</code> and rejects <code>materialize_cached_outputs_dir</code>.
+- <code>outputs-all</code> requires <code>materialize_cached_outputs_dir</code> and rejects <code>materialize_cached_output_paths</code>.
+- <code>metadata</code>/<code>inputs-missing</code> reject both materialization args.</p>
+<p>Operational notes:
+- <code>outputs-requested</code> will log a warning if you ask for keys that are not present in the cached outputs.
+- <code>outputs-all</code> raises <code>FileNotFoundError</code> if any cached output source file is missing.</p>
+<h3 id="containers-integration-cache-hits-requested-outputs">Containers integration cache hits (requested outputs)<a class="headerlink" href="#containers-integration-cache-hits-requested-outputs" title="Permanent link">&para;</a></h3>
+<p>The containers API is intentionally different: on a cache hit it attempts to <strong>copy cached outputs</strong>
+to the requested host output paths so downstream tooling sees real files. Internally this now uses
+the same copy-based materialization helper as core runs (policy concept is shared), but containers
+default to “requested outputs” because the caller explicitly provided host output paths.</p>
+<p>This is an integration-level choice for ergonomics; it should not be assumed for core <code>Tracker</code>
+cache hits.</p>
+<hr />
+<h2 id="hydration-policy-table">Hydration policy table<a class="headerlink" href="#hydration-policy-table" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Workflow need</th>
+<th><code>cache_hydration</code></th>
+<th>When bytes are copied</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Fast cache hits, metadata only</td>
+<td><code>metadata</code></td>
+<td>Never</td>
+<td>Default; paths may not exist in new run dirs.</td>
+</tr>
+<tr>
+<td>Extend a scenario in a new <code>run_dir</code></td>
+<td><code>inputs-missing</code></td>
+<td>On cache misses, for missing inputs only</td>
+<td>Ensures executing steps can read cached inputs.</td>
+</tr>
+<tr>
+<td>Materialize a few outputs on cache hits</td>
+<td><code>outputs-requested</code></td>
+<td>On cache hits, for requested outputs</td>
+<td>Requires <code>materialize_cached_output_paths</code>.</td>
+</tr>
+<tr>
+<td>Make all cached outputs exist locally</td>
+<td><code>outputs-all</code></td>
+<td>On cache hits, for all outputs</td>
+<td>Requires <code>materialize_cached_outputs_dir</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>Most users should stick with the default <code>metadata</code> mode. Use the other modes only when downstream tools require the actual files to exist on disk.</p>
+<hr />
+<h2 id="practical-guidance">Practical Guidance<a class="headerlink" href="#practical-guidance" title="Permanent link">&para;</a></h2>
+<h3 id="make-caching-predictable">Make caching predictable<a class="headerlink" href="#make-caching-predictable" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Declare all true dependencies as inputs (<code>inputs=[...]</code> or task parameters).</li>
+<li>Keep configs deterministic (avoid embedding timestamps/randomness unless intended).</li>
+<li>Prefer stable code identity in tests (Consist test suite patches the code hash for determinism).</li>
+</ul>
+<h3 id="decide-what-to-ingest">Decide what to ingest<a class="headerlink" href="#decide-what-to-ingest" title="Permanent link">&para;</a></h3>
+<p>Ingest when you want:
+- queryable “hot” tables in DuckDB
+- schema profiling/validation
+- optional recovery if files are deleted</p>
+<p>Keep as cold files when:
+- you don’t want to duplicate storage in DuckDB
+- artifacts are huge or already live in an external system</p>
+<h3 id="safe-deletion-and-long-running-pipelines">Safe deletion and long-running pipelines<a class="headerlink" href="#safe-deletion-and-long-running-pipelines" title="Permanent link">&para;</a></h3>
+<p>Deleting old artifacts can be safe when:
+- you’re confident they will not be loaded again, or
+- they were ingested and you intentionally allow DB recovery (usually by declaring them as inputs in a non-cached run, or by using <code>db_fallback="always"</code> in explicit analysis tooling).</p>
+<p>If you want to aggressively GC the workspace while keeping provenance usable, ingestion + intentional DB fallback is the strategy to reach for.</p>
+<hr />
+<h2 id="cache-hit-performance-and-diagnostics">Cache-Hit Performance and Diagnostics<a class="headerlink" href="#cache-hit-performance-and-diagnostics" title="Permanent link">&para;</a></h2>
+<p>Consist’s cache-hit path is optimized to minimize filesystem work by default.
+The main knobs are:</p>
+<ul>
+<li><code>validate_cached_outputs="lazy"</code> (default) skips per-output existence checks.</li>
+<li><code>cache_hydration="metadata"</code> (default) avoids copying bytes for cached outputs.</li>
+</ul>
+<h3 id="cache-and-hydration-knobs-summary">Cache and hydration knobs (summary)<a class="headerlink" href="#cache-and-hydration-knobs-summary" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>cache_mode</code>:</li>
+<li><code>reuse</code> (default): reuse cached runs when signatures match.</li>
+<li><code>overwrite</code>: always execute and replace cached outputs.</li>
+<li><code>readonly</code>: read cache but avoid persisting new outputs.</li>
+<li><code>validate_cached_outputs</code>:</li>
+<li><code>lazy</code> (default): skip filesystem checks for cached outputs.</li>
+<li><code>eager</code>: require output files to exist (or be ingested) for a cache hit.</li>
+<li><code>cache_hydration</code>:</li>
+<li><code>metadata</code> (default): hydrate artifact objects only; no bytes copied.</li>
+<li><code>inputs-missing</code>: on cache misses, copy missing input bytes into the current <code>run_dir</code>.</li>
+<li><code>outputs-requested</code>: on cache hits, copy only specified cached outputs to requested paths.</li>
+<li><code>outputs-all</code>: on cache hits, copy all cached outputs into a target directory.</li>
+<li>Scenario default: pass <code>step_cache_hydration="inputs-missing"</code> to <code>consist.scenario(...)</code>
+  to apply a default policy to all steps unless overridden.</li>
+<li><code>materialize_cached_output_paths</code>: required for <code>outputs-requested</code>.</li>
+<li><code>materialize_cached_outputs_dir</code>: required for <code>outputs-all</code>.</li>
+</ul>
+<p>For large iterative workflows, most cache-hit time is spent on:</p>
+<ul>
+<li>fetching cached outputs from the database</li>
+<li>hashing raw-file inputs (when inputs are not Consist-produced artifacts)</li>
+</ul>
+<p>You can enable lightweight diagnostics to understand where time is going:</p>
+<ul>
+<li><code>CONSIST_CACHE_TIMING=1</code> logs timing for cache-hit phases during <code>begin_run</code>
+  (signature prefetch, input hashing, cache lookup, validation, hydration).</li>
+<li><code>CONSIST_CACHE_DEBUG=1</code> logs cache hit/miss details and signatures.</li>
+</ul>
+<p>Example output with <code>CONSIST_CACHE_TIMING=1</code>:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>[cache_timing] signature_prefetch=2.1ms input_hashing=145.8ms cache_lookup=3.4ms validate=0.6ms hydration=0.2ms
+</span></code></pre></div>
+<p>Interpretation: input hashing dominates, so consider ingesting large tabular inputs or passing Consist-produced artifacts instead of raw files.</p>
+<p>Example output with <code>CONSIST_CACHE_DEBUG=1</code>:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>[cache_debug] hit=True signature=7e9c1c inputs=3 outputs=2 hydration=metadata
+</span></code></pre></div>
+<p>Interpretation: the cache hit returned metadata only; if downstream tools need files, select an outputs hydration mode.</p>
+<p>If you need strict safety for missing outputs, use <code>validate_cached_outputs="eager"</code>,
+accepting the additional filesystem checks.</p>
+<hr />
+<h2 id="pattern-5-shared-input-bundles-via-a-duckdb-file">Pattern 5: Shared input bundles via a DuckDB file<a class="headerlink" href="#pattern-5-shared-input-bundles-via-a-duckdb-file" title="Permanent link">&para;</a></h2>
+<p>If you want collaborators to start with <strong>all required inputs already packaged in a
+standalone DuckDB file</strong>, use a dedicated "bundle" run that logs inputs as outputs
+and ingests them. Sharing the DB file is enough to reproduce inputs without shipping
+the original raw files.</p>
+<h3 id="bundle-creation-producer">Bundle creation (producer)<a class="headerlink" href="#bundle-creation-producer" title="Permanent link">&para;</a></h3>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span><span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;bundle_build&quot;</span><span class="p">,</span> <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;inputs.duckdb&quot;</span><span class="p">)</span>
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;inputs_bundle_v1&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;input_bundle&quot;</span><span class="p">,</span> <span class="n">cache_mode</span><span class="o">=</span><span class="s2">&quot;overwrite&quot;</span><span class="p">):</span>
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>    <span class="n">households</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="s2">&quot;households.csv&quot;</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;households&quot;</span><span class="p">,</span> <span class="n">direction</span><span class="o">=</span><span class="s2">&quot;output&quot;</span><span class="p">)</span>
+</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>    <span class="n">persons</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="s2">&quot;persons.csv&quot;</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;persons&quot;</span><span class="p">,</span> <span class="n">direction</span><span class="o">=</span><span class="s2">&quot;output&quot;</span><span class="p">)</span>
+</span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">ingest</span><span class="p">(</span><span class="n">households</span><span class="p">)</span>
+</span><span id="__span-8-7"><a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">ingest</span><span class="p">(</span><span class="n">persons</span><span class="p">)</span>
+</span></code></pre></div>
+<p>Packaging steps:
+1. Run the bundle creation code once.
+2. Share the resulting DuckDB file (<code>inputs.duckdb</code>) with collaborators.
+3. Collaborators only need the DB file; they do <strong>not</strong> need the original CSV files.</p>
+<h3 id="bundle-consumption-consumer">Bundle consumption (consumer)<a class="headerlink" href="#bundle-consumption-consumer" title="Permanent link">&para;</a></h3>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span><span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;runs&quot;</span><span class="p">,</span> <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;inputs.duckdb&quot;</span><span class="p">)</span>
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>
+</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="n">bundle_outputs</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">load_input_bundle</span><span class="p">(</span><span class="s2">&quot;inputs_bundle_v1&quot;</span><span class="p">)</span>
+</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="n">inputs</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">bundle_outputs</span><span class="o">.</span><span class="n">values</span><span class="p">())</span>
+</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>
+</span><span id="__span-9-6"><a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
+</span><span id="__span-9-7"><a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a>    <span class="s2">&quot;simulate&quot;</span><span class="p">,</span>
+</span><span id="__span-9-8"><a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;simulate&quot;</span><span class="p">,</span>
+</span><span id="__span-9-9"><a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a>    <span class="n">inputs</span><span class="o">=</span><span class="n">inputs</span><span class="p">,</span>
+</span><span id="__span-9-10"><a id="__codelineno-9-10" name="__codelineno-9-10" href="#__codelineno-9-10"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;inputs-missing&quot;</span><span class="p">,</span>
+</span><span id="__span-9-11"><a id="__codelineno-9-11" name="__codelineno-9-11" href="#__codelineno-9-11"></a><span class="p">):</span>
+</span><span id="__span-9-12"><a id="__codelineno-9-12" name="__codelineno-9-12" href="#__codelineno-9-12"></a>    <span class="o">...</span>
+</span></code></pre></div>
+<p>Notes:
+- The bundle is identified <strong>only by run_id</strong>; no hard-coded hashes are needed.
+- <code>cache_hydration="inputs-missing"</code> will reconstruct CSV/Parquet inputs from the
+  shared DuckDB file if the original bytes are missing.</p>
+<h3 id="multi-model-workflows-from-one-bundle">Multi-model workflows from one bundle<a class="headerlink" href="#multi-model-workflows-from-one-bundle" title="Permanent link">&para;</a></h3>
+<p>Bundles can contain inputs for multiple downstream steps. Each run selects only the
+inputs it needs:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="n">bundle_outputs</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">load_input_bundle</span><span class="p">(</span><span class="s2">&quot;inputs_bundle_v1&quot;</span><span class="p">)</span>
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
+</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a>    <span class="s2">&quot;model_a&quot;</span><span class="p">,</span>
+</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;model_a&quot;</span><span class="p">,</span>
+</span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">[</span><span class="n">bundle_outputs</span><span class="p">[</span><span class="s2">&quot;input_a&quot;</span><span class="p">]],</span>
+</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;inputs-missing&quot;</span><span class="p">,</span>
+</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a><span class="p">):</span>
+</span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a>    <span class="o">...</span>
+</span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a>
+</span><span id="__span-10-11"><a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
+</span><span id="__span-10-12"><a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a>    <span class="s2">&quot;model_b&quot;</span><span class="p">,</span>
+</span><span id="__span-10-13"><a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;model_b&quot;</span><span class="p">,</span>
+</span><span id="__span-10-14"><a id="__codelineno-10-14" name="__codelineno-10-14" href="#__codelineno-10-14"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">[</span><span class="n">bundle_outputs</span><span class="p">[</span><span class="s2">&quot;input_b&quot;</span><span class="p">]],</span>
+</span><span id="__span-10-15"><a id="__codelineno-10-15" name="__codelineno-10-15" href="#__codelineno-10-15"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;inputs-missing&quot;</span><span class="p">,</span>
+</span><span id="__span-10-16"><a id="__codelineno-10-16" name="__codelineno-10-16" href="#__codelineno-10-16"></a><span class="p">):</span>
+</span><span id="__span-10-17"><a id="__codelineno-10-17" name="__codelineno-10-17" href="#__codelineno-10-17"></a>    <span class="o">...</span>
+</span></code></pre></div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-circle-arrow-up" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m16 12-4-4-4 4M12 16V8"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../configs/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Configuration, Identity, and Facets">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Configuration, Identity, and Facets
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../dlt-loader-guide/" class="md-footer__link md-footer__link--next" aria-label="Next: DLT Loader Integration Guide">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                DLT Loader Integration Guide
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 The Regents of the University of California, through Lawrence Berkeley National Laboratory
+
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/LBNL-UCB-STI/consist" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":["announce.dismiss","content.action.view","content.code.annotate","content.code.copy","content.code.select","content.footnote.tooltips","content.tabs.link","content.tooltips","navigation.expand","navigation.footer","navigation.indexes","navigation.path","navigation.sections","navigation.tabs","navigation.top","navigation.tracking","search.highlight","toc.follow"],"search":"../assets/javascripts/workers/search.e2d2d235.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.8ffeb9c9.min.js"></script>
+      
+    
+  </body>
+</html>

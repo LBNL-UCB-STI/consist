@@ -1,0 +1,182 @@
+:root {
+  /* Primary palette */
+  --consist-dark-blue: #00313c;
+  --consist-teal: #007681;
+  --consist-light-gray: #b1b3b3;
+  --consist-dark-gray: #63666a;
+
+  /* Secondary palette */
+  --consist-orange: #d57800;
+  --consist-green: #74aa50;
+  --consist-yellow: #eaaa00;
+  --consist-red: #e04e39;
+  --consist-dusty-rose: #e8927c;
+  --consist-olive: #ac9f3c;
+  --consist-blue: #4298b5;
+  --consist-purple: #5d4777;
+  --consist-burgundy: #672e45;
+}
+
+/* MkDocs Material theme overrides */
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: var(--consist-dark-blue);
+  --md-primary-fg-color--light: #0b4a58;
+  --md-primary-fg-color--dark: #001f26;
+
+  --md-accent-fg-color: var(--consist-teal);
+  --md-accent-fg-color--transparent: rgba(0, 118, 129, 0.1);
+
+  --md-default-fg-color: #111827;
+  --md-default-fg-color--light: rgba(17, 24, 39, 0.72);
+  --md-default-fg-color--lighter: rgba(17, 24, 39, 0.55);
+  --md-default-fg-color--lightest: rgba(17, 24, 39, 0.24);
+
+  --md-default-bg-color: #ffffff;
+  --md-default-bg-color--light: #fafafa;
+  --md-default-bg-color--lighter: #f6f7f8;
+  --md-default-bg-color--lightest: #f1f2f3;
+
+  --md-typeset-a-color: var(--consist-teal);
+
+  /* Header contrast on dark primary */
+  --md-primary-bg-color: #f7fafb;
+  --md-primary-bg-color--light: rgba(247, 250, 251, 0.72);
+}
+
+/* Navigation + header */
+.md-header,
+.md-tabs {
+  background: var(--consist-dark-blue);
+}
+
+[data-md-color-scheme="default"] .md-header__title,
+[data-md-color-scheme="default"] .md-header__title a,
+[data-md-color-scheme="default"] .md-header__button,
+[data-md-color-scheme="default"] .md-header__button .md-icon,
+[data-md-color-scheme="default"] .md-header__topic,
+[data-md-color-scheme="default"] .md-header__topic .md-ellipsis,
+[data-md-color-scheme="default"] .md-tabs__link {
+  color: var(--md-primary-bg-color);
+}
+
+[data-md-color-scheme="default"] .md-header .md-search__form,
+[data-md-color-scheme="default"] .md-header .md-search__input {
+  color: var(--md-primary-bg-color);
+  background-color: rgba(247, 250, 251, 0.78) !important;
+  border-color: rgba(247, 250, 251, 0.98) !important;
+  box-shadow: 0 0 0 1px rgba(247, 250, 251, 0.75) !important;
+}
+
+[data-md-color-scheme="default"] .md-header .md-search__form {
+  border-radius: 999px;
+}
+
+[data-md-color-scheme="default"] .md-header .md-search__form:focus-within {
+  background-color: rgba(247, 250, 251, 0.48) !important;
+  border-color: rgba(247, 250, 251, 0.95) !important;
+  box-shadow: 0 0 0 2px rgba(247, 250, 251, 0.7) !important;
+}
+
+[data-md-color-scheme="default"] .md-search__input::placeholder {
+  color: var(--md-primary-bg-color--light);
+}
+
+/* Search toggle button in the header (button and masked icon). */
+[data-md-color-scheme="default"] .md-header .md-search__button {
+  background-color: rgba(247, 250, 251, 0.68) !important;
+  color: rgba(13, 35, 41, 0.9) !important;
+}
+
+[data-md-color-scheme="default"] .md-header .md-search__button::before {
+  background-color: rgba(255, 255, 255, 0.98) !important;
+}
+
+[data-md-color-scheme="default"] .md-header .md-search__button::after {
+  color: rgba(13, 35, 41, 0.72) !important;
+  background: rgba(255, 255, 255, 0.75) !important;
+  border: 1px solid rgba(13, 35, 41, 0.15) !important;
+}
+
+.md-tabs__link--active,
+.md-nav__link--active,
+.md-nav__link:is(:hover, :focus) {
+  color: var(--consist-teal);
+}
+
+/* Links */
+.md-typeset a:hover {
+  color: #0b8a97;
+}
+
+/* Code blocks (keep Material’s baseline, just nudge accents) */
+.md-typeset code {
+  border-radius: 0.25rem;
+}
+
+.md-typeset :not(pre) > code {
+  border: 1px solid rgba(99, 102, 106, 0.25);
+}
+
+/* Admonitions: map common semantics to your secondary palette */
+.md-typeset .admonition,
+.md-typeset details {
+  border-radius: 0.4rem;
+}
+
+.md-typeset .admonition.note,
+.md-typeset details.note {
+  border-left-color: var(--consist-blue);
+}
+.md-typeset .admonition.note > .admonition-title,
+.md-typeset details.note > summary {
+  background-color: rgba(66, 152, 181, 0.12);
+}
+
+.md-typeset .admonition.tip,
+.md-typeset .admonition.success,
+.md-typeset details.tip,
+.md-typeset details.success {
+  border-left-color: var(--consist-green);
+}
+.md-typeset .admonition.tip > .admonition-title,
+.md-typeset .admonition.success > .admonition-title,
+.md-typeset details.tip > summary,
+.md-typeset details.success > summary {
+  background-color: rgba(116, 170, 80, 0.14);
+}
+
+.md-typeset .admonition.warning,
+.md-typeset details.warning {
+  border-left-color: var(--consist-yellow);
+}
+.md-typeset .admonition.warning > .admonition-title,
+.md-typeset details.warning > summary {
+  background-color: rgba(234, 170, 0, 0.14);
+}
+
+.md-typeset .admonition.danger,
+.md-typeset .admonition.failure,
+.md-typeset details.danger,
+.md-typeset details.failure {
+  border-left-color: var(--consist-red);
+}
+.md-typeset .admonition.danger > .admonition-title,
+.md-typeset .admonition.failure > .admonition-title,
+.md-typeset details.danger > summary,
+.md-typeset details.failure > summary {
+  background-color: rgba(224, 78, 57, 0.12);
+}
+
+/* Buttons */
+.md-typeset .md-button--primary {
+  background-color: var(--consist-teal);
+  border-color: var(--consist-teal);
+}
+.md-typeset .md-button--primary:hover {
+  background-color: #0b8a97;
+  border-color: #0b8a97;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-hue: 10;
+}
