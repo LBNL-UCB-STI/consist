@@ -246,13 +246,13 @@ def _schema_facet_from_artifact(
 
 
 def _data_source_facet_from_artifact(artifact: Artifact) -> Optional[dict[str, Any]]:
-    if not artifact.driver and not artifact.uri:
+    if not artifact.driver and not artifact.container_uri:
         return None
     data_source: dict[str, Any] = {}
     if artifact.driver:
         data_source["name"] = artifact.driver
-    if artifact.uri:
-        data_source["uri"] = artifact.uri
+    if artifact.container_uri:
+        data_source["uri"] = artifact.container_uri
     return data_source or None
 
 
@@ -281,7 +281,7 @@ def _documentation_facet_from_artifact(artifact: Artifact) -> Optional[dict[str,
 def _consist_dataset_facet(artifact: Artifact) -> Optional[dict[str, Any]]:
     facet: dict[str, Any] = {
         "key": artifact.key,
-        "uri": artifact.uri,
+        "uri": artifact.container_uri,
         "driver": artifact.driver,
         "hash": artifact.hash,
     }

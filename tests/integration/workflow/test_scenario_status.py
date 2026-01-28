@@ -67,7 +67,9 @@ def test_scenario_declared_outputs_satisfied(tracker: Tracker):
         sc.declare_outputs("expected", required=True)
         sc.coupler.set(
             "expected",
-            Artifact(key="expected", uri="workspace://expected.csv", driver="csv"),
+            Artifact(
+                key="expected", container_uri="workspace://expected.csv", driver="csv"
+            ),
         )
 
     header = tracker.get_run("scenario_declared_ok")

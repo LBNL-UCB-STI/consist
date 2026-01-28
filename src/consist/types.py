@@ -104,7 +104,7 @@ class DriverType(str, Enum):
 
     @classmethod
     def dataframe_drivers(cls) -> frozenset[str]:
-        """Drivers that load as pandas DataFrame."""
+        """Drivers that load as tabular relations."""
         return frozenset(
             {
                 cls.PARQUET.value,

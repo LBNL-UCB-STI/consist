@@ -96,7 +96,7 @@ def _seed_base_dataset(
 
         artifact = Artifact(
             key=f"artifact_{i}",
-            uri=f"outputs://artifact_{i}.parquet",
+            container_uri=f"outputs://artifact_{i}.parquet",
             driver="parquet",
             hash=f"hash_{i}",
             run_id=run_id,
@@ -157,7 +157,7 @@ def _seed_deep_lineage(session: Session, *, depth: int) -> UUID:
 
         output_artifact = Artifact(
             key=f"lineage_out_{i:03d}",
-            uri=f"outputs://lineage_out_{i:03d}.parquet",
+            container_uri=f"outputs://lineage_out_{i:03d}.parquet",
             driver="parquet",
             hash=f"lineage_hash_{i:03d}",
             run_id=run_id,
@@ -203,7 +203,7 @@ def _seed_wide_lineage(session: Session, *, input_count: int) -> UUID:
     )
     output_artifact = Artifact(
         key="wide_output",
-        uri="outputs://wide_output.parquet",
+        container_uri="outputs://wide_output.parquet",
         driver="parquet",
         hash="wide_output_hash",
         run_id=run_id,
@@ -223,7 +223,7 @@ def _seed_wide_lineage(session: Session, *, input_count: int) -> UUID:
     for i in range(input_count):
         input_artifact = Artifact(
             key=f"wide_input_{i:03d}",
-            uri=f"inputs://wide_input_{i:03d}.parquet",
+            container_uri=f"inputs://wide_input_{i:03d}.parquet",
             driver="parquet",
             hash=f"wide_input_hash_{i:03d}",
             created_at=base_time,

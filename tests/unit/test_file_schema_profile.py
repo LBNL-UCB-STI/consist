@@ -69,9 +69,7 @@ def test_profile_file_schema_parquet_index_columns(tmp_path):
         sample_rows=2,
         source="file",
     )
-    assert result.summary["index_columns"] == ["a"]
-    assert "a" not in [field.name for field in result.fields]
-    assert result.summary["index_dtypes"]["a"] == str(df.index.dtype).lower()
+    assert set(field.name for field in result.fields) == {"a", "b"}
 
 
 def test_profile_file_schema_h5_index_columns(tmp_path):
@@ -90,5 +88,4 @@ def test_profile_file_schema_h5_index_columns(tmp_path):
         sample_rows=2,
         source="file",
     )
-    assert result.summary["index_columns"] == ["a"]
-    assert result.summary["index_dtypes"]["a"] == str(df.index.dtype).lower()
+    assert set(field.name for field in result.fields) == {"a", "b"}

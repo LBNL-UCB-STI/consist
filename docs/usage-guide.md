@@ -63,7 +63,7 @@ with use_tracker(tracker):
 
 # 4. Access results
 cleaned_artifact = result.outputs["cleaned"]
-cleaned_df = consist.load(cleaned_artifact)
+cleaned_df = consist.load_df(cleaned_artifact)
 print(f"Output: {cleaned_artifact.path}")
 ```
 
@@ -310,7 +310,7 @@ with use_tracker(tracker):
             consist.log_dataframe(df, key="preprocessed")
 
         with sc.trace(name="analyze", inputs=["preprocessed"]):
-            df = consist.load(sc.coupler.require("preprocessed"))
+            df = consist.load_df(sc.coupler.require("preprocessed"))
             summary = df.groupby("category", as_index=False)["value"].mean()
             consist.log_dataframe(summary, key="analysis")
 ```
@@ -337,7 +337,7 @@ with use_tracker(tracker):
                 inputs=["population"],  # Declare dependency
             ):
                 # Get data from coupler (with automatic cache detection)
-                df_pop = consist.load(coupler.require("population"))
+                df_pop = consist.load_df(coupler.require("population"))
                 df_result = run_model(year, df_pop)
 
                 # Log output and store for downstream steps
@@ -516,7 +516,7 @@ with use_tracker(tracker):
                 threshold=threshold,
                 inputs=["shared_data"],
             ):
-                df = consist.load(coupler.require("shared_data"))
+                df = consist.load_df(coupler.require("shared_data"))
                 filtered = df[df["value"] > threshold]
                 consist.log_dataframe(filtered, key="filtered")
 ```
@@ -612,7 +612,7 @@ with use_tracker(tracker):
         coupler = sc.coupler
         # This step will backfill inputs if they're missing from disk
         with sc.trace(name="simulate", inputs=["population"]):
-            df_pop = consist.load(coupler.require("population"))
+            df_pop = consist.load_df(coupler.require("population"))
             # ... rest of simulation ...
 ```
 
@@ -635,7 +635,7 @@ with use_tracker(tracker):
 
         # Later steps can use the preprocessed output
         with sc.trace(name="simulate", inputs=["processed"]):
-            network = consist.load(coupler.require("processed"))
+            network = consist.load_df(coupler.require("processed"))
             # ... simulation ...
 ```
 
@@ -817,7 +817,7 @@ artifacts = tracker.get_artifacts_for_run(run.id)
 persons_artifact = artifacts.outputs["persons"]
 
 # Load the data
-df = consist.load(persons_artifact)
+df = consist.load_df(persons_artifact)
 ```
 
 ### Cross-Run Queries with Views

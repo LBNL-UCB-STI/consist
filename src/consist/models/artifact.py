@@ -74,8 +74,10 @@ class Artifact(SQLModel, table=True):
     Attributes:
         id (uuid.UUID): A unique identifier for the artifact.
         key (str): A semantic, human-readable name for the artifact (e.g., "households", "parcels").
-        uri (str): A portable, virtualized Uniform Resource Identifier (URI) for the artifact's
-                   location (e.g., "inputs://land_use.csv").
+        container_uri (str): A portable, virtualized Uniform Resource Identifier (URI) for the
+                   artifact's location (e.g., "inputs://land_use.csv").
+        table_path (Optional[str]): Optional path inside a container (e.g., "/tables/households").
+        array_path (Optional[str]): Optional path inside a container for array artifacts.
         driver (str): The name of the format handler used to read or write the artifact
                       (e.g., "parquet", "csv", "zarr").
         hash (Optional[str]): SHA256 content hash of the artifact's data, enabling content-addressable
@@ -98,8 +100,16 @@ class Artifact(SQLModel, table=True):
     key: str = Field(index=True, description="Semantic name, e.g., 'households'")
 
     # Location (Virtualized)
-    uri: str = Field(
+    container_uri: str = Field(
         index=True, description="Portable URI, e.g., 'inputs://land_use.csv'"
+    )
+    table_path: Optional[str] = Field(
+        default=None,
+        description="Optional path inside a container for tabular artifacts.",
+    )
+    array_path: Optional[str] = Field(
+        default=None,
+        description="Optional path inside a container for array artifacts.",
     )
 
     # Driver Info
@@ -183,13 +193,13 @@ class Artifact(SQLModel, table=True):
             tracker_obj = tracker_ref()
             if tracker_obj is not None:
                 try:
-                    return Path(tracker_obj.resolve_uri(self.uri))
+                    return Path(tracker_obj.resolve_uri(self.container_uri))
                 except Exception:
                     pass
 
         if self.abs_path:
             return Path(self.abs_path)
-        return Path(self.uri)
+        return Path(self.container_uri)
 
     # --- Format Helpers ---
 
@@ -270,7 +280,10 @@ class Artifact(SQLModel, table=True):
         str
             A string in the format "<Artifact key='...' driver='...' uri='...'>".
         """
-        return f"<Artifact key='{self.key}' driver='{self.driver}' uri='{self.uri}'>"
+        return (
+            f"<Artifact key='{self.key}' driver='{self.driver}' "
+            f"uri='{self.container_uri}'>"
+        )
 
     def __str__(self) -> str:
         """
@@ -284,4 +297,4 @@ class Artifact(SQLModel, table=True):
         str
             A string in the format "Artifact(key=..., path=...)".
         """
-        return f"Artifact(key={self.key}, path={self.uri})"
+        return f"Artifact(key={self.key}, path={self.container_uri})"

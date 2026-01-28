@@ -111,9 +111,9 @@ def test_offline_ingestion(tmp_path):
     restored_artifact = Artifact.model_validate(target_output_data)
 
     # 3. Load the physical data
-    # We need to resolve the path. Since the JSON has the 'uri',
+    # We need to resolve the path. Since the JSON has the 'container_uri',
     # we use the tracker to resolve it back to absolute path.
-    abs_path = tracker.resolve_uri(restored_artifact.uri)
+    abs_path = tracker.resolve_uri(restored_artifact.container_uri)
     logging.info(f"   -> Loading data from {abs_path}")
     df_to_load = pd.read_parquet(abs_path)
 

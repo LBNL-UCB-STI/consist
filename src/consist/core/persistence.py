@@ -742,6 +742,8 @@ class DatabaseManager:
         uri: str,
         run_id: Optional[str] = None,
         driver: Optional[str] = None,
+        table_path: Optional[str] = None,
+        array_path: Optional[str] = None,
         include_inputs: bool = False,
     ) -> Optional[Artifact]:
         """
@@ -755,6 +757,10 @@ class DatabaseManager:
             If provided, only return artifacts from this specific run (prevents cross-run artifact retrieval).
         driver : Optional[str]
             If provided, only return artifacts matching the driver.
+        table_path : Optional[str]
+            If provided, only return artifacts matching the table_path.
+        array_path : Optional[str]
+            If provided, only return artifacts matching the array_path.
         include_inputs : bool
             If True, include artifacts without a producing run_id.
 
@@ -766,7 +772,7 @@ class DatabaseManager:
 
         def _query():
             with Session(self.engine) as session:
-                statement = select(Artifact).where(Artifact.uri == uri)
+                statement = select(Artifact).where(Artifact.container_uri == uri)
                 if not include_inputs:
                     statement = statement.where(
                         col(Artifact.run_id).is_not(None)
@@ -776,6 +782,10 @@ class DatabaseManager:
                     statement = statement.where(Artifact.run_id == run_id)
                 if driver is not None:
                     statement = statement.where(Artifact.driver == driver)
+                if table_path is not None:
+                    statement = statement.where(Artifact.table_path == table_path)
+                if array_path is not None:
+                    statement = statement.where(Artifact.array_path == array_path)
 
                 statement = statement.order_by(col(Artifact.created_at).desc()).limit(1)
                 return session.exec(statement).first()
@@ -1250,7 +1260,11 @@ class DatabaseManager:
             return []
 
     def get_artifact_by_uri(
-        self, uri: str, run_id: Optional[str] = None
+        self,
+        uri: str,
+        run_id: Optional[str] = None,
+        table_path: Optional[str] = None,
+        array_path: Optional[str] = None,
     ) -> Optional[Artifact]:
         """
         Get artifact by URI, optionally filtered by run_id.
@@ -1261,6 +1275,10 @@ class DatabaseManager:
             The URI to retrieve.
         run_id : Optional[str]
             If provided, only return artifacts from this specific run.
+        table_path : Optional[str]
+            Optional table path to match.
+        array_path : Optional[str]
+            Optional array path to match.
 
         Returns
         -------
@@ -1270,10 +1288,14 @@ class DatabaseManager:
 
         def _query():
             with Session(self.engine) as session:
-                statement = select(Artifact).where(Artifact.uri == uri)
+                statement = select(Artifact).where(Artifact.container_uri == uri)
                 # If run_id is specified, filter to only that run
                 if run_id is not None:
                     statement = statement.where(Artifact.run_id == run_id)
+                if table_path is not None:
+                    statement = statement.where(Artifact.table_path == table_path)
+                if array_path is not None:
+                    statement = statement.where(Artifact.array_path == array_path)
 
                 statement = statement.order_by(col(Artifact.created_at).desc()).limit(1)
                 return session.exec(statement).first()

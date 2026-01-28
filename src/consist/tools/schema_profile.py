@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Literal
 
+import duckdb
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from consist.core.identity import IdentityManager
-from consist.tools.file_batches import yield_file_batches
+from consist.core.drivers import TableInfo, TABLE_DRIVERS
 
 PROFILE_VERSION = 1
 
@@ -86,6 +89,47 @@ def _index_info_from_df(df: Any) -> tuple[List[str], Dict[str, str]]:
         dtypes[norm_name] = str(index.dtype).lower()
 
     return names, dtypes
+
+
+def _pandas_type_to_logical(pandas_type: Optional[str]) -> str:
+    if not pandas_type:
+        return "UNKNOWN"
+    normalized = pandas_type.lower()
+    if "int" in normalized:
+        return "BIGINT"
+    if "float" in normalized or "double" in normalized:
+        return "DOUBLE"
+    if "bool" in normalized:
+        return "BOOLEAN"
+    if "datetime" in normalized or "timestamp" in normalized:
+        return "TIMESTAMP"
+    if "string" in normalized or "unicode" in normalized or "bytes" in normalized:
+        return "VARCHAR"
+    return "UNKNOWN"
+
+
+def _parquet_index_info(path: str) -> tuple[List[str], Dict[str, str]]:
+    metadata = _parquet_pandas_metadata(path)
+    if not metadata:
+        return [], {}
+    index_names: List[str] = []
+    index_types: Dict[str, str] = {}
+    raw_index_columns = metadata.get("index_columns") or []
+    columns = metadata.get("columns") or []
+    by_name = {}
+    for col in columns:
+        name = col.get("name")
+        if name is not None:
+            by_name[name] = col
+    for level, entry in enumerate(raw_index_columns):
+        name = entry
+        if isinstance(entry, dict):
+            name = entry.get("name")
+        name = _normalize_index_name(name, level)
+        index_names.append(name)
+        info = by_name.get(name) or {}
+        index_types[name] = _pandas_type_to_logical(info.get("pandas_type"))
+    return index_names, index_types
 
 
 @dataclass(frozen=True)
@@ -229,6 +273,7 @@ def profile_file_schema(
     sample_rows: Optional[int],
     table_path: Optional[str] = None,
     source: str = "file",
+    view_name: Optional[str] = None,
 ) -> SchemaProfileResult:
     """
     Infer a schema profile for a file-based tabular artifact.
@@ -253,68 +298,61 @@ def profile_file_schema(
     SchemaProfileResult
         Schema profile payload including per-field rows and summary metadata.
     """
-    df = None
-    index_columns: List[str] = []
-    index_dtypes: Dict[str, str] = {}
-    if driver == "parquet":
-        index_columns = _parquet_index_columns(path)
+    conn = duckdb.connect()
+    relation = None
     if driver == "h5_table":
         if not table_path:
             raise ValueError("table_path is required for h5_table profiling.")
         import pandas as pd
 
-        try:
-            if sample_rows is not None:
-                df = pd.read_hdf(path, key=table_path, stop=sample_rows)
-            else:
-                df = pd.read_hdf(path, key=table_path)
-        except (TypeError, ValueError):
+        if sample_rows is not None:
+            df = pd.read_hdf(path, key=table_path, stop=sample_rows)
+        else:
             df = pd.read_hdf(path, key=table_path)
-            if sample_rows is not None:
-                df = df.head(sample_rows)
-    else:
-        batches = yield_file_batches(path, driver=driver, max_rows=sample_rows)
-        for batch in batches:
-            df = batch
-            break
-
-    fields: List[SchemaFieldProfile] = []
-    if df is not None:
-        import pandas as pd
-
         if isinstance(df, pd.Series):
             df = df.to_frame()
-        if not isinstance(df, pd.DataFrame):
-            raise TypeError("Expected pandas DataFrame or Series for schema profiling.")
-        if driver == "parquet":
-            if index_columns:
-                index_dtypes = {
-                    name: str(df[name].dtype).lower()
-                    for name in index_columns
-                    if name in df.columns
-                }
-                if len(index_dtypes) < len(index_columns):
-                    fallback_columns, fallback_dtypes = _index_info_from_df(df)
-                    for name in index_columns:
-                        if name in index_dtypes:
-                            continue
-                        if name in fallback_dtypes:
-                            index_dtypes[name] = fallback_dtypes[name]
-            else:
-                index_columns, index_dtypes = _index_info_from_df(df)
-        elif driver == "h5_table":
-            index_columns, index_dtypes = _index_info_from_df(df)
-        for i, (col, dtype) in enumerate(df.dtypes.items(), start=1):
-            if driver == "parquet" and col in index_columns:
-                continue
-            fields.append(
-                SchemaFieldProfile(
-                    name=str(col),
-                    logical_type=str(dtype).lower(),
-                    nullable=True,
-                    ordinal_position=i,
+        if not isinstance(df.index, pd.RangeIndex) or df.index.name is not None:
+            df = df.reset_index()
+        for col in df.columns:
+            if isinstance(df[col].dtype, pd.StringDtype):
+                df[col] = df[col].astype("object")
+        relation = conn.from_df(df)
+    else:
+        info = TableInfo(
+            role=Path(path).stem,
+            table_path=table_path,
+            container_uri=path,
+            driver=driver,
+            schema_id=None,
+        )
+        relation = TABLE_DRIVERS.get(driver).load(info, conn)
+        if sample_rows is not None:
+            relation = relation.limit(sample_rows)
+
+    if view_name is None:
+        view_name = f"consist_tmp_schema_{uuid.uuid4().hex}"
+    fields = _describe_relation(
+        conn,
+        relation,
+        view_name,
+    )
+    if driver == "parquet":
+        index_names, index_types = _parquet_index_info(path)
+        if index_names:
+            existing = {field.name for field in fields}
+            if not isinstance(fields, list):
+                fields = list(fields)
+            for name in index_names:
+                if name in existing:
+                    continue
+                fields.append(
+                    SchemaFieldProfile(
+                        name=name,
+                        logical_type=index_types.get(name, "UNKNOWN"),
+                        nullable=True,
+                        ordinal_position=len(fields) + 1,
+                    )
                 )
-            )
 
     truncated_flags: Dict[str, Any] = {
         "fields": False,
@@ -328,8 +366,6 @@ def profile_file_schema(
         "source": source,
         "driver": driver,
         "fields": field_rows,
-        "index_columns": index_columns,
-        "index_dtypes": index_dtypes,
     }
     if driver == "h5_table":
         hash_obj["table_path"] = table_path
@@ -343,8 +379,6 @@ def profile_file_schema(
         "sample_rows": sample_rows,
         "n_columns": len(fields),
         "truncated": truncated_flags,
-        "index_columns": index_columns,
-        "index_dtypes": index_dtypes,
     }
     if driver == "h5_table":
         summary["table_path"] = table_path
@@ -371,3 +405,32 @@ def profile_file_schema(
         inline_profile_json=inline_profile_json,
         fields=fields,
     )
+
+
+def _describe_relation(
+    conn: "duckdb.DuckDBPyConnection",
+    relation: "duckdb.DuckDBPyRelation",
+    view_name: str,
+) -> List[SchemaFieldProfile]:
+    fields: List[SchemaFieldProfile] = []
+    try:
+        relation.create_view(view_name, replace=True)
+        rows = conn.sql(f"DESCRIBE {view_name}").fetchall()
+        for idx, row in enumerate(rows, start=1):
+            col_name = row[0]
+            col_type = row[1]
+            nullable_flag = row[2] if len(row) > 2 else None
+            nullable = True
+            if nullable_flag is not None:
+                nullable = str(nullable_flag).strip().upper() in {"YES", "TRUE", "1"}
+            fields.append(
+                SchemaFieldProfile(
+                    name=str(col_name),
+                    logical_type=str(col_type).lower(),
+                    nullable=nullable,
+                    ordinal_position=idx,
+                )
+            )
+    finally:
+        conn.sql(f"DROP VIEW IF EXISTS {view_name}")
+    return fields

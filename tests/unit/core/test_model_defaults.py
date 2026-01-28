@@ -22,12 +22,12 @@ def test_run_artifacts_defaults_are_isolated() -> None:
 
     first.inputs["input"] = Artifact(
         key="input",
-        uri="inputs://input.csv",
+        container_uri="inputs://input.csv",
         driver="csv",
     )
     first.outputs["output"] = Artifact(
         key="output",
-        uri="outputs://output.csv",
+        container_uri="outputs://output.csv",
         driver="csv",
     )
 
@@ -44,14 +44,14 @@ def test_consist_record_defaults_are_isolated() -> None:
     record_a.inputs.append(
         Artifact(
             key="input",
-            uri="inputs://input.csv",
+            container_uri="inputs://input.csv",
             driver="csv",
         )
     )
     record_a.outputs.append(
         Artifact(
             key="output",
-            uri="outputs://output.csv",
+            container_uri="outputs://output.csv",
             driver="csv",
         )
     )
@@ -65,8 +65,8 @@ def test_consist_record_defaults_are_isolated() -> None:
 
 
 def test_artifact_defaults_are_isolated() -> None:
-    art_a = Artifact(key="a", uri="inputs://a.csv", driver="csv")
-    art_b = Artifact(key="b", uri="inputs://b.csv", driver="csv")
+    art_a = Artifact(key="a", container_uri="inputs://a.csv", driver="csv")
+    art_b = Artifact(key="b", container_uri="inputs://b.csv", driver="csv")
 
     art_a.meta["alpha"] = "a"
 

@@ -155,7 +155,7 @@ def test_pipeline_chaining(tracker: Tracker):
 
         # Verify Identity
         assert input_artifact.key == "my_data"
-        assert input_artifact.uri == generated_artifact.uri
+        assert input_artifact.container_uri == generated_artifact.container_uri
 
     # --- Phase 3: Verification (Database) ---
     with Session(tracker.engine) as session:

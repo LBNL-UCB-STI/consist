@@ -5,6 +5,7 @@ from typing import List, Optional, Any, Type, TYPE_CHECKING, Callable, Union, Li
 
 from sqlmodel import SQLModel
 from consist.models.artifact import Artifact
+from consist.core.drivers import ARRAY_DRIVERS, TABLE_DRIVERS
 from consist.core.validation import validate_artifact_key
 from consist.types import ArtifactRef
 
@@ -13,17 +14,13 @@ if TYPE_CHECKING:
 
 
 def _infer_driver_from_path(path: Path) -> str:
+    driver = ARRAY_DRIVERS.resolve_driver(path)
+    if driver:
+        return driver
+    driver = TABLE_DRIVERS.resolve_driver(path)
+    if driver:
+        return driver
     suffixes = [suffix.lower() for suffix in path.suffixes]
-    if len(suffixes) >= 2:
-        composite = "".join(suffixes[-2:])
-        if composite == ".csv.gz":
-            return "csv"
-        if composite == ".parquet.gz":
-            return "parquet"
-        if composite == ".json.gz":
-            return "json"
-        if composite == ".geojson.gz":
-            return "geojson"
     suffix = suffixes[-1].lstrip(".") if suffixes else ""
     if suffix == "shp":
         return "shapefile"
@@ -31,6 +28,8 @@ def _infer_driver_from_path(path: Path) -> str:
         return "geopackage"
     if suffix == "geojson":
         return "geojson"
+    if suffix in {"h5", "hdf5"}:
+        return "h5"
     return suffix or "unknown"
 
 
@@ -120,6 +119,8 @@ class ArtifactManager:
         direction: str = "output",
         schema: Optional[Type[SQLModel]] = None,
         driver: Optional[str] = None,
+        table_path: Optional[str] = None,
+        array_path: Optional[str] = None,
         content_hash: Optional[str] = None,
         force_hash_override: bool = False,
         validate_content_hash: bool = False,
@@ -145,6 +146,10 @@ class ArtifactManager:
             Schema class to record in ``meta["schema_name"]`` and ``meta["has_strict_schema"]``.
         driver : Optional[str], optional
             Explicit driver identifier (e.g., ``"h5_table"``); inferred from suffix if omitted.
+        table_path : Optional[str], optional
+            Optional path inside a container for tabular artifacts.
+        array_path : Optional[str], optional
+            Optional path inside a container for array artifacts.
         reuse_if_unchanged : bool, default False
             If True and logging an output, reuse a prior artifact row when the content hash matches.
         reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
@@ -165,6 +170,10 @@ class ArtifactManager:
         TypeError
             If ``key`` is not a string when provided.
         """
+        if "table_path" in meta:
+            meta.pop("table_path")
+        if "array_path" in meta:
+            meta.pop("array_path")
         artifact_obj = None
         resolved_abs_path = None
         mount_scheme: Optional[str] = None
@@ -201,7 +210,7 @@ class ArtifactManager:
                     "[Consist Warning] Ignoring content_hash override for artifact key=%s uri=%s "
                     "(existing hash differs). Use force_hash_override=True to override.",
                     getattr(artifact, "key", None),
-                    getattr(artifact, "uri", None),
+                    getattr(artifact, "container_uri", None),
                 )
                 return
             artifact.hash = content_hash
@@ -209,7 +218,7 @@ class ArtifactManager:
         if isinstance(path, Artifact):
             artifact_obj = path
             resolved_abs_path = artifact_obj.abs_path or self.tracker.resolve_uri(
-                artifact_obj.uri
+                artifact_obj.container_uri
             )
             if key is None:
                 key = artifact_obj.key
@@ -217,6 +226,10 @@ class ArtifactManager:
                 validate_artifact_key(key)
             if driver:
                 artifact_obj.driver = driver
+            if table_path is not None:
+                artifact_obj.table_path = table_path
+            if array_path is not None:
+                artifact_obj.array_path = array_path
             _apply_content_hash_override(artifact_obj)
             if meta:
                 artifact_obj.meta.update(meta)
@@ -226,10 +239,10 @@ class ArtifactManager:
             validate_artifact_key(key)
 
             resolved_abs_path = str(Path(path).resolve())
-            uri = self.tracker.fs.virtualize_path(resolved_abs_path)
+            container_uri = self.tracker.fs.virtualize_path(resolved_abs_path)
 
-            if "://" in uri:
-                scheme = uri.split("://", 1)[0]
+            if "://" in container_uri:
+                scheme = container_uri.split("://", 1)[0]
                 if scheme in self.tracker.mounts:
                     mount_scheme = scheme
                     mount_root = str(Path(self.tracker.mounts[scheme]).resolve())
@@ -238,7 +251,12 @@ class ArtifactManager:
                 driver = _infer_driver_from_path(Path(path))
 
             if direction == "input" and self.tracker.db:
-                parent = self.tracker.db.find_latest_artifact_at_uri(uri, driver=driver)
+                parent = self.tracker.db.find_latest_artifact_at_uri(
+                    container_uri,
+                    driver=driver,
+                    table_path=table_path,
+                    array_path=array_path,
+                )
                 if parent:
                     should_reuse = True
                     if driver in {"h5", "hdf5"}:
@@ -295,7 +313,10 @@ class ArtifactManager:
                 if content_hash is not None:
                     if reuse_scope == "same_uri":
                         parent = self.tracker.db.find_latest_artifact_at_uri(
-                            uri, driver=driver
+                            container_uri,
+                            driver=driver,
+                            table_path=table_path,
+                            array_path=array_path,
                         )
                         if parent and parent.hash == content_hash:
                             artifact_obj = parent
@@ -340,8 +361,10 @@ class ArtifactManager:
 
                 artifact_obj = Artifact(
                     key=key,
-                    uri=uri,
+                    container_uri=container_uri,
                     driver=driver,
+                    table_path=table_path,
+                    array_path=array_path,
                     hash=content_hash,
                     run_id=run_id,
                     meta=meta,
@@ -417,7 +440,6 @@ class ArtifactManager:
                             table_hash = None
                             table_meta: dict[str, Any] = {
                                 "parent_id": str(container.id),
-                                "table_path": name,
                                 "shape": list(obj.shape),
                                 "dtype": str(obj.dtype),
                             }
@@ -445,6 +467,7 @@ class ArtifactManager:
                                 key=table_key,
                                 direction=direction,
                                 driver="h5_table",
+                                table_path=name,
                                 content_hash=table_hash,
                                 **table_meta,
                             )
@@ -513,11 +536,11 @@ class ArtifactManager:
         if self.tracker.db:
             try:
                 resolved_abs_path = str(path_obj.resolve())
-                uri = self.tracker.fs.virtualize_path(resolved_abs_path)
+                container_uri = self.tracker.fs.virtualize_path(resolved_abs_path)
                 # Include inputs so we can compare against the last observed file hash,
                 # even when the container was logged as an input (run_id=None).
                 prior_container = self.tracker.db.find_latest_artifact_at_uri(
-                    uri, driver="h5", include_inputs=True
+                    container_uri, driver="h5", include_inputs=True
                 )
             except Exception:
                 prior_container = None
@@ -671,7 +694,7 @@ class ArtifactManager:
                         raise
                 table_hash = _hash_h5_dataset(dataset, chunk_rows=table_hash_chunk_rows)
 
-        table_meta: dict[str, Any] = {"table_path": table_path}
+        table_meta: dict[str, Any] = {}
         if parent is not None:
             table_meta["parent_id"] = str(parent.id)
         if table_hash:
@@ -688,6 +711,7 @@ class ArtifactManager:
             key=key,
             direction=direction,
             driver="h5_table",
+            table_path=table_path,
             content_hash=table_hash,
             profile_file_schema=profile_file_schema,
             file_schema_sample_rows=file_schema_sample_rows,

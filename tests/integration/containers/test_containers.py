@@ -273,9 +273,9 @@ def test_nested_container_execution(clean_tracker: Tracker, input_file: Path):
             outputs = clean_tracker.current_consist.outputs
 
             # Input file should be logged
-            assert any(str(input_file.name) in a.uri for a in inputs)
+            assert any(str(input_file.name) in a.container_uri for a in inputs)
             # Mock backend created result.txt, so it should be logged as output
-            assert any("result.txt" in a.uri for a in outputs)
+            assert any("result.txt" in a.container_uri for a in outputs)
 
             # C. Check Metadata Injection
             meta = clean_tracker.current_consist.run.meta

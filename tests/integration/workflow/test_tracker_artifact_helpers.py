@@ -22,7 +22,7 @@ class TestLogInputOutput:
             )
 
         assert artifact.key == "my_input"
-        assert artifact.uri.endswith("input_data.csv")
+        assert artifact.container_uri.endswith("input_data.csv")
         assert artifact.driver == "csv"
         assert artifact.meta.get("schema_version") == "1.0"
 
@@ -41,7 +41,7 @@ class TestLogInputOutput:
             )
 
         assert artifact.key == "my_output"
-        assert artifact.uri.endswith("output_data.parquet")
+        assert artifact.container_uri.endswith("output_data.parquet")
         assert artifact.driver == "parquet"
         assert artifact.meta.get("version") == "2.0"
 
@@ -161,11 +161,11 @@ class TestGetArtifactByUri:
 
         with tracker.start_run("run_find_001", "test_model"):
             artifact = tracker.log_artifact(str(test_file), key="find_me")
-            uri = artifact.uri
+            uri = artifact.container_uri
             found = tracker.get_artifact_by_uri(uri)
 
         assert found is not None
-        assert found.uri == uri
+        assert found.container_uri == uri
         assert found.key == "find_me"
 
     def test_get_artifact_by_uri_finds_in_database(
@@ -176,12 +176,12 @@ class TestGetArtifactByUri:
 
         with tracker.start_run("run_db_search", "test_model"):
             artifact = tracker.log_artifact(str(test_file), key="db_search")
-            uri = artifact.uri
+            uri = artifact.container_uri
 
         found = tracker.get_artifact_by_uri(uri)
 
         assert found is not None
-        assert found.uri == uri
+        assert found.container_uri == uri
         assert found.key == "db_search"
 
     def test_get_artifact_by_uri_returns_none_for_missing(self, tracker):
@@ -200,12 +200,12 @@ class TestGetArtifactByUri:
         with tracker.start_run("run_multi_artifact", "test_model"):
             for i, f in enumerate(files):
                 art = tracker.log_artifact(str(f), key=f"artifact_{i}")
-                uris.append(art.uri)
+                uris.append(art.container_uri)
 
         for i, uri in enumerate(uris):
             found = tracker.get_artifact_by_uri(uri)
             assert found is not None
-            assert found.uri == uri
+            assert found.container_uri == uri
             assert found.key == f"artifact_{i}"
 
 
@@ -253,7 +253,7 @@ class TestLogH5Container:
             )
 
         assert container.key == "my_data"
-        assert container.uri.endswith("test_data.h5")
+        assert container.container_uri.endswith("test_data.h5")
         assert container.driver == "h5"
         assert len(tables) == 0
         assert any(art.driver == "h5" for art in tracker.last_run.outputs)

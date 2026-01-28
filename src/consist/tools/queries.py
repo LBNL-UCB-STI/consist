@@ -4,11 +4,13 @@ Reusable database queries for inspecting Consist provenance data.
 
 from typing import List, Optional, Dict, Any
 from sqlmodel import Session, select, func, col
+import duckdb
 import pandas as pd
 
 from consist.models.run import Run
 from consist.models.artifact import Artifact
 from consist.core.tracker import Tracker
+import consist
 
 
 def get_runs(
@@ -80,12 +82,13 @@ def get_artifact_preview(
         return None
 
     try:
-        # Use the public API instead of assuming tracker.load exists
-        import consist
-
-        data = consist.load(artifact, tracker=tracker, db_fallback="always")
+        data = consist.load(
+            artifact, tracker=tracker, db_fallback="always", nrows=limit
+        )
         if isinstance(data, pd.DataFrame):
             return data.head(limit)
+        if isinstance(data, duckdb.DuckDBPyRelation):
+            return consist.to_df(data)
     except FileNotFoundError:
         # Propagate so CLI can give a precise message
         raise

@@ -66,7 +66,7 @@ def maybe_return_cached_output_or_demote_cache_hit(
 
     # Artifact inputs: allow "same artifact" relog, otherwise demote.
     if isinstance(path, Artifact):
-        if path.id == cached.id or path.uri == cached.uri:
+        if path.id == cached.id or path.container_uri == cached.container_uri:
             return cached
         _demote_cache_hit(
             record,
@@ -81,7 +81,9 @@ def maybe_return_cached_output_or_demote_cache_hit(
             run_dir=tracker.run_dir,
             resolve_uri=tracker.resolve_uri,
         )
-        cached_abs = Path(cached.abs_path or tracker.resolve_uri(cached.uri)).resolve()
+        cached_abs = Path(
+            cached.abs_path or tracker.resolve_uri(cached.container_uri)
+        ).resolve()
 
         # Placeholder path => treat as "re-log by key" (common cache-agnostic pattern).
         if not candidate_abs.exists():

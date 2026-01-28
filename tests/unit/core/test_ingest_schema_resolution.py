@@ -29,7 +29,7 @@ def test_ingest_resolves_schema_from_registered_schemas(tmp_path):
     artifact = Artifact(
         id=uuid.uuid4(),
         key="artifact",
-        uri="inputs://data.csv",
+        container_uri="inputs://data.csv",
         driver="csv",
         hash="abc",
         meta={"schema_name": "MySchema"},

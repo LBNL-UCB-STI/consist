@@ -11,11 +11,11 @@ h5py = pytest.importorskip("h5py")
 
 def test_openmatrix_loading_h5py(tracker: Tracker):
     """
-    Tests loading an OpenMatrix file using h5py fallback.
+    Tests loading an OpenMatrix file using xarray-backed drivers.
 
     Verifies:
-    1. load() returns HDF5 file object for openmatrix driver
-    2. File can be accessed like a dictionary
+    1. load() returns xarray.Dataset for openmatrix driver
+    2. Dataset contains matrix variables
     3. Matrix data is accessible
     """
     # 1. Create an OpenMatrix file using h5py
@@ -45,10 +45,12 @@ def test_openmatrix_loading_h5py(tracker: Tracker):
         assert artifact.driver == "openmatrix"
         assert artifact.driver == DriverType.OPENMATRIX.value
 
-        # 4. Load the artifact (returns h5py.File or openmatrix.File)
+        # 4. Load the artifact (returns xarray.Dataset)
+        xr = pytest.importorskip("xarray")
         loaded = tracker.load(artifact)
 
-        # 5. Verify it's file-like
+        # 5. Verify dataset contents
+        assert isinstance(loaded, xr.Dataset)
         assert "am_single_vehicle" in loaded
         assert "md_single_vehicle" in loaded
         assert "pm_single_vehicle" in loaded
@@ -173,8 +175,9 @@ def test_openmatrix_type_guards(tracker: Tracker):
 
         # Type checker would narrow the return type here
         if is_openmatrix_artifact(artifact):
+            xr = pytest.importorskip("xarray")
             loaded = tracker.load(artifact)
-            # Should be file-like object at type-check time
+            assert isinstance(loaded, xr.Dataset)
             assert "matrix" in loaded
 
 
@@ -202,7 +205,9 @@ def test_openmatrix_convenience_logging(tracker: Tracker):
         assert artifact.key == "demand"
 
         # Verify can load it
+        xr = pytest.importorskip("xarray")
         loaded = tracker.load(artifact)
+        assert isinstance(loaded, xr.Dataset)
         assert "trips" in loaded
 
 

@@ -35,7 +35,7 @@ def test_capture_outputs_recursive_pattern_filters(tracker, tmp_path: Path) -> N
 
         captured_keys = {art.key for art in capture.artifacts}
         captured_paths = {
-            Path(art.abs_path or art.uri).name for art in capture.artifacts
+            Path(art.abs_path or art.container_uri).name for art in capture.artifacts
         }
 
     assert "nested" in captured_keys

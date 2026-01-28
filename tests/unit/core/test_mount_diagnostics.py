@@ -33,7 +33,7 @@ def test_log_artifact_records_mount_metadata(tmp_path: Path) -> None:
     with tracker.start_run(run_id="step", model="test"):
         art = tracker.log_artifact(data_path, key="data", direction="input")
 
-    assert art.uri == "inputs://data.csv"
+    assert art.container_uri == "inputs://data.csv"
     assert art.meta["mount_scheme"] == "inputs"
     assert art.meta["mount_root"] == str(inputs_root.resolve())
 

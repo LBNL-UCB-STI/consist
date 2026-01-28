@@ -22,11 +22,12 @@ from typing import (
     overload,
     runtime_checkable,
 )
+import weakref
 
 import pandas as pd
-from sqlalchemy import MetaData, Table, and_, case, func, select as sa_select, Subquery
+import duckdb
+from sqlalchemy import and_, case, func, select as sa_select, Subquery
 from sqlalchemy.sql import Executable
-from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import SQLModel, Session, col, select
 
 # Internal imports
@@ -40,7 +41,7 @@ from consist.core.decorators import (
     define_step as define_step_decorator,
     require_runtime_kwargs as require_runtime_kwargs_decorator,
 )
-from consist.core.netcdf_utils import resolve_netcdf_engine
+from consist.core.drivers import ARRAY_DRIVERS, TABLE_DRIVERS, ArrayInfo, TableInfo
 from consist.core.noop import NoopRunContext, NoopScenarioContext
 from consist.core.views import create_view_model
 from consist.core.workflow import OutputCapture
@@ -87,12 +88,12 @@ class OpenMatrixFileLike(Protocol):
 
 
 LoadResult = Union[
+    duckdb.DuckDBPyRelation,
     pd.DataFrame,
     pd.Series,
     "geopandas.GeoDataFrame",
     "xarray.Dataset",
     pd.HDFStore,
-    OpenMatrixFileLike,
 ]
 
 
@@ -101,14 +102,16 @@ class ArtifactLike(Protocol):
     """
     Structural typing for artifact-like objects.
 
-    Any object with `driver`, `uri`, `meta` attributes and a `path` property
+    Any object with `driver`, `container_uri`, `meta` attributes and a `path` property
     can be used where ArtifactLike is expected.
     """
 
     id: Any
     key: str
     driver: str
-    uri: str
+    container_uri: str
+    table_path: Optional[str]
+    array_path: Optional[str]
     meta: Dict[str, Any]
 
     @property
@@ -116,19 +119,19 @@ class ArtifactLike(Protocol):
 
 
 class DataFrameArtifact(ArtifactLike, Protocol):
-    """Artifact that loads as pandas DataFrame or Series."""
+    """Artifact that loads as DuckDB Relation."""
 
     driver: Literal["parquet", "csv", "h5_table"]
 
 
 class TabularArtifact(ArtifactLike, Protocol):
-    """Artifact that loads as tabular data (DataFrame, Series, or both)."""
+    """Artifact that loads as tabular data (DuckDB Relation)."""
 
     driver: Literal["parquet", "csv", "h5_table", "json"]
 
 
 class JsonArtifact(ArtifactLike, Protocol):
-    """Artifact that loads as pandas DataFrame or Series from JSON."""
+    """Artifact that loads as DuckDB Relation from JSON."""
 
     driver: Literal["json"]
 
@@ -152,7 +155,7 @@ class NetCdfArtifact(ArtifactLike, Protocol):
 
 
 class OpenMatrixArtifact(ArtifactLike, Protocol):
-    """Artifact that loads as array-like structure (OpenMatrix format)."""
+    """Artifact that loads as xarray.Dataset (OpenMatrix format)."""
 
     driver: Literal["openmatrix"]
 
@@ -1447,13 +1450,13 @@ def capture_outputs(
 
 def is_dataframe_artifact(artifact: ArtifactLike) -> TypeGuard[DataFrameArtifact]:
     """
-    Type guard: narrow artifact to DataFrame-compatible types (parquet, csv, h5_table).
+    Type guard: narrow artifact to tabular types (parquet, csv, h5_table).
 
     Use this to enable type-safe loading and IDE autocomplete:
 
     ```python
     if is_dataframe_artifact(artifact):
-        df = load(artifact)  # Type checker knows return is DataFrame
+        rel = load(artifact)  # Type checker knows return is Relation
         df.head()  # IDE autocomplete works!
     ```
 
@@ -1475,8 +1478,7 @@ def is_tabular_artifact(artifact: ArtifactLike) -> TypeGuard[TabularArtifact]:
     Type guard: narrow artifact to any tabular format (parquet, csv, h5_table, json).
 
     Note: This is broader than `is_dataframe_artifact()`, so `load()` returns
-    `DataFrame | Series` for tabular artifacts. Use `is_dataframe_artifact()`
-    for the narrower DataFrame-only return type.
+    a Relation for tabular artifacts. Use `load_df()` for a pandas escape hatch.
 
     Parameters
     ----------
@@ -1647,7 +1649,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     **kwargs: Any,
-) -> LoadResult: ...
+) -> "xarray.Dataset": ...
 
 
 @overload
@@ -1677,7 +1679,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     **kwargs: Any,
-) -> pd.DataFrame: ...
+) -> duckdb.DuckDBPyRelation: ...
 
 
 @overload
@@ -1687,7 +1689,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     **kwargs: Any,
-) -> pd.DataFrame | pd.Series: ...
+) -> duckdb.DuckDBPyRelation: ...
 
 
 @overload
@@ -1697,7 +1699,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     **kwargs: Any,
-) -> pd.DataFrame | pd.Series: ...
+) -> duckdb.DuckDBPyRelation: ...
 
 
 @overload
@@ -1761,8 +1763,9 @@ def load(
     Returns
     -------
     LoadResult
-        The loaded data, typically a Pandas DataFrame, an xarray Dataset (for Zarr),
-        or another data object depending on the artifact's `driver` and the data format.
+        The loaded data, typically a DuckDB Relation for tabular data, an xarray
+        Dataset for array formats, or another data object depending on the artifact's
+        `driver` and the data format.
 
     Raises
     ------
@@ -1801,7 +1804,7 @@ def load(
     # 2. Determine Physical Path
     # If we have a tracker, use it to resolve. Else fallback to runtime cache.
     if tracker:
-        path = tracker.resolve_uri(artifact.uri)
+        path = tracker.resolve_uri(artifact.container_uri)
     else:
         path = artifact.path
 
@@ -1812,11 +1815,14 @@ def load(
     # Driver-specific hints from metadata
     if artifact.driver == "h5_table":
         if "table_path" not in load_kwargs:
-            table_path = artifact.meta.get("table_path") or artifact.meta.get(
-                "sub_path"
-            )
+            table_path = getattr(artifact, "table_path", None)
             if table_path:
                 load_kwargs["table_path"] = table_path
+    if artifact.driver in DriverType.array_drivers():
+        if "array_path" not in load_kwargs:
+            array_path = getattr(artifact, "array_path", None)
+            if array_path:
+                load_kwargs["array_path"] = array_path
 
     # 3. Try Disk Load (Priority 1)
     if Path(path).exists():
@@ -1854,7 +1860,7 @@ def load(
                     f"Hint: pass db_fallback='always' if you explicitly want DB recovery here."
                 )
             is_declared_input = any(
-                (a.id == artifact.id) or (a.uri == artifact.uri)
+                (a.id == artifact.id) or (a.container_uri == artifact.container_uri)
                 for a in tracker.current_consist.inputs
             )
             if not is_declared_input:
@@ -1884,8 +1890,8 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
     """
     Dispatches to the correct file reader based on the artifact's driver.
 
-    This internal helper function is responsible for reading data directly from
-    a file path using appropriate libraries (e.g., pandas for Parquet/CSV, xarray for Zarr).
+    This internal helper returns DuckDB Relations for tabular formats and
+    format-specific objects for array/spatial formats.
 
     Parameters
     ----------
@@ -1899,8 +1905,8 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
     Returns
     -------
     LoadResult
-        The loaded data, typically a Pandas DataFrame, an xarray Dataset, or
-        another format-specific data object.
+        The loaded data, typically a DuckDB Relation for tabular formats, an
+        xarray Dataset for array formats, or another format-specific data object.
 
     Raises
     ------
@@ -1911,70 +1917,36 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
         If an unsupported `driver` is provided, or if essential metadata (like `table_path`
         for 'h5_table' driver) is missing.
     """
-    if driver == "parquet":
-        return pd.read_parquet(path, **kwargs)
-    elif driver == "csv":
-        return pd.read_csv(path, **kwargs)
-    elif driver == "zarr":
-        if xr is None:
-            raise ImportError("xarray required for Zarr")
-        return xr.open_zarr(path, consolidated=False, **kwargs)
-    elif driver == "netcdf":
-        if xr is None:
-            raise ImportError(
-                "xarray required for NetCDF (pip install xarray netCDF4 h5netcdf)"
-            )
-        if "engine" in kwargs:
-            return xr.open_dataset(path, **kwargs)
-        engine = resolve_netcdf_engine()
-        if engine:
-            try:
-                return xr.open_dataset(path, engine=engine, **kwargs)
-            except Exception:
-                return xr.open_dataset(path, **kwargs)
-        return xr.open_dataset(path, **kwargs)
-    elif driver == "openmatrix":
-        # Try openmatrix library first; fall back to h5py if not available
-        try:
-            omx = importlib.import_module("openmatrix")
-            # Return the file object for array-like access; caller manages close.
-            omx_file = omx.open_file(path, mode="r")
-            try:
-                omx_file.list_matrices()
-            except Exception:
-                omx_file.close()
-                raise
-            return omx_file
-        except Exception:
-            # Fallback to h5py for basic HDF5 access
-            h5py = importlib.import_module("h5py")
-            return h5py.File(path, "r")
+    if driver in DriverType.tabular_drivers():
+        conn = duckdb.connect()
+        table_path = kwargs.get("table_path")
+        info = TableInfo(
+            role=Path(path).stem,
+            table_path=table_path,
+            container_uri=path,
+            driver=driver,
+            schema_id=None,
+        )
+        relation = TABLE_DRIVERS.get(driver).load(info, conn)
+        nrows = kwargs.get("nrows")
+        if nrows is not None:
+            relation = relation.limit(int(nrows))
+        # Keep the connection alive for downstream relation materialization.
+        _RELATION_CONNECTIONS[relation] = conn
+        return relation
+    elif driver in DriverType.array_drivers():
+        info = ArrayInfo(
+            role=Path(path).stem,
+            array_path=kwargs.get("array_path"),
+            container_uri=path,
+            driver=driver,
+            schema_id=None,
+        )
+        return ARRAY_DRIVERS.get(driver).load(info)
     elif driver in ("geojson", "shapefile", "geopackage"):
         if gpd is None:
             raise ImportError("geopandas required for spatial formats")
         return gpd.read_file(path, **kwargs)
-    elif driver == "json":
-        return pd.read_json(path, **kwargs)
-    elif driver == "h5_table":
-        if not tables:
-            raise ImportError("PyTables is required (pip install tables)")
-
-        # In this pattern, the Artifact URI points to the physical H5 file.
-        # The 'sub_path' or 'table_path' in metadata (passed via kwargs if not in artifact)
-        # tells us where to look.
-
-        # Note: consist.load(artifact) automatically passes artifact.meta as kwargs?
-        # No, we need to handle that in the main load() function or here.
-        # Let's handle it here by checking kwargs or assuming the caller (load) passed it.
-
-        key = kwargs.get("table_path") or kwargs.get("sub_path")
-        if not key:
-            raise ValueError(
-                f"Loading 'h5_table' requires 'table_path' in metadata. File: {path}"
-            )
-
-        return pd.read_hdf(path, key=key)
-
     elif driver in ("h5", "hdf5"):
         if not tables:
             raise ImportError("PyTables is required.")
@@ -1986,58 +1958,104 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
 
 def _load_from_db(
     artifact: ArtifactLike, tracker: "Tracker", **kwargs: Any
+) -> duckdb.DuckDBPyRelation:
+    """
+    Recovers data for an artifact from the Consist DuckDB database as a Relation.
+    """
+    if not tracker.db_path:
+        raise RuntimeError("Tracker has no DuckDB path configured.")
+    table_name = artifact.key
+    if not table_name or not table_name.replace("_", "").isalnum():
+        raise RuntimeError(f"Invalid table name for DuckDB load: {table_name!r}")
+    artifact_id = str(artifact.id).replace("'", "''")
+    conn = duckdb.connect(tracker.db_path, read_only=True)
+    relation = conn.sql(
+        f"SELECT * FROM global_tables.{table_name} "
+        f"WHERE consist_artifact_id = '{artifact_id}'"
+    )
+    nrows = kwargs.get("nrows")
+    if nrows is not None:
+        relation = relation.limit(int(nrows))
+    # Keep the connection alive for downstream relation materialization.
+    _RELATION_CONNECTIONS[relation] = conn
+    return relation
+
+
+def _close_relation_connection(relation: duckdb.DuckDBPyRelation) -> None:
+    conn = _RELATION_CONNECTIONS.pop(relation, None)
+    if conn is None:
+        conn = getattr(relation, "_consist_conn", None)
+        if conn is None:
+            return
+    try:
+        conn.close()
+    finally:
+        try:
+            delattr(relation, "_consist_conn")
+        except Exception:
+            pass
+
+
+_RELATION_CONNECTIONS: "weakref.WeakKeyDictionary[duckdb.DuckDBPyRelation, duckdb.DuckDBPyConnection]" = weakref.WeakKeyDictionary()
+
+
+def to_df(relation: duckdb.DuckDBPyRelation, *, close: bool = True) -> pd.DataFrame:
+    """
+    Convert a DuckDB Relation to a pandas DataFrame.
+
+    Parameters
+    ----------
+    relation : duckdb.DuckDBPyRelation
+        Relation to materialize into a DataFrame.
+    close : bool, default True
+        Whether to close the underlying DuckDB connection after materialization.
+        Use `close=False` if you plan to continue using the relation.
+    """
+    if not hasattr(relation, "df"):
+        raise TypeError("to_df expects a DuckDB Relation.")
+    try:
+        return relation.df()
+    finally:
+        if close:
+            _close_relation_connection(relation)
+
+
+def load_df(
+    artifact: ArtifactLike,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    close: bool = True,
+    **kwargs: Any,
 ) -> pd.DataFrame:
     """
-    Recovers data for an artifact from the Consist DuckDB database.
-
-    This function is used when the artifact's file is not found on disk but it has
-    been previously ingested into the database. It constructs a SQL query to
-    retrieve the data from the appropriate global table, filtering by the artifact's ID.
+    Load a tabular artifact and return a pandas DataFrame.
 
     Parameters
     ----------
     artifact : ArtifactLike
-        The artifact whose data is to be recovered from the database.
-    tracker : Tracker
-        The `Tracker` instance, necessary to access the database engine.
+        Artifact to load.
+    tracker : Optional[Tracker]
+        Tracker to use for resolving paths or DB fallback.
+    db_fallback : str, default "inputs-only"
+        Controls when DB recovery is allowed for ingested artifacts.
+    close : bool, default True
+        Whether to close the underlying DuckDB connection after materialization
+        when the load returns a Relation.
     **kwargs : Any
-        Additional keyword arguments to pass to `pd.read_sql`.
-
-    Returns
-    -------
-    pd.DataFrame
-        A Pandas DataFrame containing the recovered data.
-
-    Raises
-    ------
-    RuntimeError
-        If the data cannot be loaded from the database, for example, if the table
-        does not exist or a database error occurs.
+        Additional loader options.
     """
-    table_name = artifact.key
-    metadata = MetaData()
-    try:
-        table = Table(
-            table_name,
-            metadata,
-            schema="global_tables",
-            autoload_with=tracker.engine,
-        )
-    except SQLAlchemyError as e:
-        raise RuntimeError(
-            f"Failed to reflect DB table 'global_tables.{table_name}': {e}"
-        ) from e
-
-    if "consist_artifact_id" not in table.c:
-        raise RuntimeError(
-            f"Table 'global_tables.{table_name}' is missing consist_artifact_id."
-        )
-
-    stmt = sa_select(table).where(table.c.consist_artifact_id == str(artifact.id))
-    try:
-        return pd.read_sql(stmt, tracker.engine, **kwargs)
-    except Exception as e:
-        raise RuntimeError(f"Failed to load from DB table '{table_name}': {e}") from e
+    result = load(artifact, tracker=tracker, db_fallback=db_fallback, **kwargs)
+    if isinstance(result, duckdb.DuckDBPyRelation):
+        # Relations are intended to be short-lived; close the underlying
+        # connection by default after materialization. TODO: consider a bulk
+        # materializer that reuses a shared connection for batch loads.
+        return to_df(result, close=close)
+    if isinstance(result, pd.DataFrame):
+        return result
+    if isinstance(result, pd.Series):
+        return result.to_frame()
+    raise TypeError("load_df requires a tabular artifact.")
 
 
 def log_meta(**kwargs: Any) -> None:

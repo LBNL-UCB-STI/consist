@@ -14,10 +14,31 @@ from typing import (
 
 from consist.models.artifact import Artifact
 from consist.models.run import Run
+from consist.core.identity import IdentityManager
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
     from sqlmodel import SQLModel
+
+
+def _schema_view_name(
+    *,
+    run_id: str,
+    identity: IdentityManager,
+    container_uri: str,
+    table_path: Optional[str],
+    array_path: Optional[str],
+) -> str:
+    base = {
+        "container_uri": container_uri,
+        "table_path": table_path,
+        "array_path": array_path,
+    }
+    digest = identity.canonical_json_sha256(base)[:12]
+    safe_run = "".join(ch for ch in run_id if ch.isalnum() or ch == "_")
+    if not safe_run:
+        safe_run = "run"
+    return f"consist_tmp_{safe_run}_{digest}"
 
 
 class ArtifactSchemaManager:
@@ -528,10 +549,7 @@ class ArtifactSchemaManager:
 
             table_path = None
             if driver == "h5_table":
-                if isinstance(getattr(artifact, "meta", None), dict):
-                    table_path = artifact.meta.get("table_path") or artifact.meta.get(
-                        "sub_path"
-                    )
+                table_path = getattr(artifact, "table_path", None)
                 if not table_path:
                     logging.warning(
                         "[Consist] Missing table_path for h5_table schema profile: %s",
@@ -574,6 +592,13 @@ class ArtifactSchemaManager:
                 sample_rows=sample_rows,
                 table_path=table_path,
                 source=source,
+                view_name=_schema_view_name(
+                    run_id=str(run.id),
+                    identity=self.tracker.identity,
+                    container_uri=artifact.container_uri,
+                    table_path=table_path,
+                    array_path=getattr(artifact, "array_path", None),
+                ),
             )
             truncated = result.summary.get("truncated") or {}
             if any(bool(v) for v in truncated.values()):

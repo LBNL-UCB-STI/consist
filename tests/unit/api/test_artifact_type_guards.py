@@ -21,7 +21,7 @@ def _artifact(driver: str) -> Artifact:
     """Create a test artifact with the given driver."""
     return Artifact(
         key="test",
-        uri="workspace://test.txt",
+        container_uri="workspace://test.txt",
         driver=driver,
     )
 

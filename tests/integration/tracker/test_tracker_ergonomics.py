@@ -1,4 +1,5 @@
 import pytest
+import consist
 from consist import Tracker
 from consist.models.artifact import Artifact
 from consist.models.run import RunArtifacts
@@ -92,8 +93,8 @@ def test_run_output_helpers(tracker: Tracker, run_dir):
     assert "results" in outputs
 
     loaded = tracker.load_run_output("run_outputs", "results")
-    assert hasattr(loaded, "shape")
-    assert loaded.shape[0] == 1
+    df = consist.to_df(loaded)
+    assert df.shape[0] == 1
 
 
 def test_run_config_snapshot_access(tracker: Tracker):

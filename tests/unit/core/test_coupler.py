@@ -10,15 +10,15 @@ from consist.core.coupler import Coupler
 from consist.models.artifact import Artifact
 
 
-def _artifact(*, key: str, uri: str = "workspace://dummy.csv") -> Artifact:
-    return Artifact(key=key, uri=uri, driver="csv")
+def _artifact(*, key: str, container_uri: str = "workspace://dummy.csv") -> Artifact:
+    return Artifact(key=key, container_uri=container_uri, driver="csv")
 
 
 def test_coupler_set_get_update_mapping_protocol() -> None:
     coupler = Coupler()
     art_a = _artifact(key="a")
-    art_b = _artifact(key="b", uri="workspace://b.csv")
-    art_c = _artifact(key="c", uri="workspace://c.csv")
+    art_b = _artifact(key="b", container_uri="workspace://b.csv")
+    art_c = _artifact(key="c", container_uri="workspace://c.csv")
 
     assert coupler.get("a") is None
     assert "a" not in coupler
@@ -53,7 +53,7 @@ def test_coupler_require_raises_with_available_keys() -> None:
 
 def test_coupler_path_requires_tracker() -> None:
     coupler = Coupler()
-    coupler.set("data", _artifact(key="data", uri="inputs://data.csv"))
+    coupler.set("data", _artifact(key="data", container_uri="inputs://data.csv"))
 
     with pytest.raises(RuntimeError) as excinfo:
         coupler.path("data")
@@ -61,7 +61,7 @@ def test_coupler_path_requires_tracker() -> None:
 
 
 def test_coupler_path_resolves_without_mutating_artifact() -> None:
-    art = _artifact(key="data", uri="inputs://data.csv")
+    art = _artifact(key="data", container_uri="inputs://data.csv")
     coupler = Coupler()
     coupler.tracker = type(
         "TrackerStub",
@@ -160,14 +160,14 @@ def test_coupler_set_from_artifact_with_real_artifact() -> None:
 
 
 def test_coupler_set_from_artifact_with_artifact_like() -> None:
-    """Test set_from_artifact with an artifact-like object (has .path and .uri)."""
+    """Test set_from_artifact with an artifact-like object (has .path and .container_uri)."""
     from consist.core.noop import NoopArtifact
 
     coupler = Coupler()
     noop_art = NoopArtifact(
         key="persons",
         path=Path("workspace/persons.parquet"),
-        uri="workspace://persons.parquet",
+        container_uri="workspace://persons.parquet",
     )
 
     result = coupler.set_from_artifact("persons", noop_art)

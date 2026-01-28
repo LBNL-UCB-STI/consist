@@ -129,7 +129,7 @@ df = tracker.find_runs(facet_year=2030)
 
 ## Ghost Mode
 
-Consist's ability to recover artifacts that exist only in the provenance database (DuckDB), not as physical files. If you delete the original file but it was ingested, you can still load it via `consist.load(artifact)`.
+Consist's ability to recover artifacts that exist only in the provenance database (DuckDB), not as physical files. If you delete the original file but it was ingested, you can still load it via `consist.load(artifact)` (returns a DuckDB Relation) or `consist.load_df(artifact)`.
 
 **Use case**: Re-running a pipeline against archived input data. If inputs were previously ingested, Consist recovers them from the database instead of requiring the original files.
 

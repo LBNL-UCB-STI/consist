@@ -6,6 +6,39 @@ This guide covers common errors, their root causes, and solutions.
 
 ## Cache & Provenance Issues
 
+### "Old DBs no longer load after the Relation-first refactor"
+
+**Symptom:** Errors when reading artifacts or querying the DB after upgrading.
+
+**Root Cause:** The artifact schema changed:
+- `Artifact.uri` → `Artifact.container_uri`
+- `Artifact.table_path` added (nullable) for container formats (HDF5 tables)
+- `Artifact.array_path` added (nullable) for array formats
+- `meta["table_path"]` is no longer used
+
+**Solution:**
+
+Reset your Consist database(s) and re-run workflows:
+
+```bash
+rm ./provenance.duckdb
+rm ./test_db.duckdb
+```
+
+Then update any code that referenced `artifact.uri` or `artifact.meta["table_path"]`:
+
+```python
+# Before
+artifact.uri
+artifact.meta.get("table_path")
+
+# After
+artifact.container_uri
+artifact.table_path
+```
+
+---
+
 ### "Cache hit but output files are missing"
 
 **Symptom:** `cache_hit=True` but `artifact.path` doesn't exist on disk.

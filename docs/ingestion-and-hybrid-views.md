@@ -149,7 +149,7 @@ artifact was ingested, DB fallback can recover data depending on the policy:
 Example:
 
 ```python
-df = consist.load(artifact, tracker=tracker, db_fallback="always")
+df = consist.load_df(artifact, tracker=tracker, db_fallback="always")
 ```
 
 ---

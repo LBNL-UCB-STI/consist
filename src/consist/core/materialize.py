@@ -94,7 +94,7 @@ def materialize_artifacts(
         destination_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            source_path = Path(tracker.resolve_uri(artifact.uri)).resolve()
+            source_path = Path(tracker.resolve_uri(artifact.container_uri)).resolve()
         except (OSError, ValueError) as e:
             msg = f"[Consist] Failed to resolve URI for artifact {artifact.key!r}: {e}"
             if on_missing == "raise":

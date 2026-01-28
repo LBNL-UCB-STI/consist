@@ -4,7 +4,7 @@ import pandas as pd
 from sqlalchemy import text
 
 from consist.core.tracker import Tracker
-from consist.api import load
+from consist.api import load_df
 
 
 def test_csv_end_to_end(tracker: Tracker):
@@ -12,7 +12,7 @@ def test_csv_end_to_end(tracker: Tracker):
     Tests the end-to-end functionality for CSV artifacts within Consist.
 
     This test verifies the seamless integration of CSV files across key Consist features:
-    artifact logging, data loading via `consist.load()`, and querying through
+    artifact logging, data loading via `consist.load_df()`, and querying through
     DuckDB's "Hybrid Views" using `read_csv_auto`.
 
     What happens:
@@ -20,7 +20,7 @@ def test_csv_end_to_end(tracker: Tracker):
     2. A dummy CSV file (`my_data.csv`) is created with sample data.
     3. **Artifact Logging**: The CSV file is logged as an `Artifact` ("cities_data")
        within a `tracker.start_run` context.
-    4. **Data Loading**: `consist.load()` is used to load the CSV artifact.
+    4. **Data Loading**: `consist.load_df()` is used to load the CSV artifact.
     5. **Hybrid View Creation**: A hybrid view named `v_cities` is created for the
        "cities_data" concept.
     6. **SQL Querying**: SQL queries are executed against `v_cities` to retrieve
@@ -28,7 +28,7 @@ def test_csv_end_to_end(tracker: Tracker):
 
     What's checked:
     - The `artifact.driver` is correctly identified as "csv".
-    - `consist.load()` successfully loads the CSV data into a Pandas DataFrame,
+    - `consist.load_df()` successfully loads the CSV data into a Pandas DataFrame,
       and the content matches the original.
     - The hybrid view `v_cities` is successfully created.
     - SQL queries against `v_cities` return correct aggregated results (e.g., average score)
@@ -57,11 +57,11 @@ def test_csv_end_to_end(tracker: Tracker):
     assert gzip_artifact.driver == "csv"
 
     # 2. Test consist.load()
-    loaded_df = load(artifact, tracker=tracker)
+    loaded_df = load_df(artifact, tracker=tracker)
     assert len(loaded_df) == 2
     assert loaded_df.iloc[0]["city"] == "New York"
 
-    loaded_gz_df = load(gzip_artifact, tracker=tracker)
+    loaded_gz_df = load_df(gzip_artifact, tracker=tracker)
     assert len(loaded_gz_df) == 2
     assert loaded_gz_df.iloc[1]["city"] == "Paris"
 

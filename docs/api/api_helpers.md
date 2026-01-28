@@ -35,6 +35,8 @@
         - pivot_facets
         - capture_outputs
         - load
+        - load_df
+        - to_df
         - set_current_tracker
         - noop_scenario
         - is_dataframe_artifact

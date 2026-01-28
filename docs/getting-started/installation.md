@@ -67,7 +67,7 @@ with use_tracker(tracker):
     )
 
 # 5) Load the output
-summary = consist.load(result.outputs["summary"])
+summary = consist.load_df(result.outputs["summary"])
 print(summary)
 ```
 

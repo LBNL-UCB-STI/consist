@@ -29,4 +29,4 @@ def test_cli_infers_mounts_from_run_metadata(tmp_path: Path) -> None:
     _ensure_tracker_mounts_for_artifact(inspector, artifact)
 
     assert inspector.mounts["inputs"] == str(inputs_root.resolve())
-    assert inspector.resolve_uri(artifact.uri) == str(data_path.resolve())
+    assert inspector.resolve_uri(artifact.container_uri) == str(data_path.resolve())

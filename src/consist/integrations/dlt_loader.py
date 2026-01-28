@@ -524,9 +524,7 @@ def ingest_artifact(
             data_source = _yield_csv_batches(file_path)
 
         elif artifact.driver == "h5_table":
-            table_path = artifact.meta.get("table_path") or artifact.meta.get(
-                "sub_path"
-            )
+            table_path = getattr(artifact, "table_path", None)
             if not table_path:
                 raise ValueError(f"Artifact '{artifact.key}' missing 'table_path'.")
             data_source = _yield_h5_batches(file_path, table_path)
