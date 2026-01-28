@@ -1233,7 +1233,7 @@ class ConsistShell(cmd.Cmd):
             console.print(f"Preview: {artifact_key} [dim]({artifact.driver})[/dim]")
 
             if isinstance(data, duckdb.DuckDBPyRelation):
-                df = data.limit(n_rows).df()
+                df = consist.to_df(data.limit(n_rows), close=True)
             elif isinstance(data, pd.DataFrame):
                 df = data.head(n_rows)
             else:

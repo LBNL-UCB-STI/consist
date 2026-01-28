@@ -1,5 +1,8 @@
 from contextlib import contextmanager
 import importlib
+import logging
+import os
+import warnings
 from pathlib import Path
 from types import ModuleType
 from typing import (
@@ -43,7 +46,7 @@ from consist.core.decorators import (
 )
 from consist.core.drivers import ARRAY_DRIVERS, TABLE_DRIVERS, ArrayInfo, TableInfo
 from consist.core.noop import NoopRunContext, NoopScenarioContext
-from consist.core.views import create_view_model
+from consist.core.views import _quote_ident, create_view_model
 from consist.core.workflow import OutputCapture
 from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord, Run, RunResult
@@ -1919,7 +1922,9 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
     """
     if driver in DriverType.tabular_drivers():
         conn = duckdb.connect()
-        table_path = kwargs.get("table_path")
+        load_kwargs = dict(kwargs)
+        table_path = load_kwargs.pop("table_path", None)
+        nrows = load_kwargs.pop("nrows", None)
         info = TableInfo(
             role=Path(path).stem,
             table_path=table_path,
@@ -1927,12 +1932,12 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
             driver=driver,
             schema_id=None,
         )
-        relation = TABLE_DRIVERS.get(driver).load(info, conn)
-        nrows = kwargs.get("nrows")
+        relation = TABLE_DRIVERS.get(driver).load(info, conn, **load_kwargs)
         if nrows is not None:
             relation = relation.limit(int(nrows))
         # Keep the connection alive for downstream relation materialization.
         _RELATION_CONNECTIONS[relation] = conn
+        _maybe_warn_relation_leaks()
         return relation
     elif driver in DriverType.array_drivers():
         info = ArrayInfo(
@@ -1964,13 +1969,14 @@ def _load_from_db(
     """
     if not tracker.db_path:
         raise RuntimeError("Tracker has no DuckDB path configured.")
-    table_name = artifact.key
-    if not table_name or not table_name.replace("_", "").isalnum():
+    table_name = artifact.meta.get("dlt_table_name") or artifact.key
+    if not isinstance(table_name, str) or not table_name:
         raise RuntimeError(f"Invalid table name for DuckDB load: {table_name!r}")
     artifact_id = str(artifact.id).replace("'", "''")
     conn = duckdb.connect(tracker.db_path, read_only=True)
+    quoted_table = _quote_ident(table_name)
     relation = conn.sql(
-        f"SELECT * FROM global_tables.{table_name} "
+        f"SELECT * FROM global_tables.{quoted_table} "
         f"WHERE consist_artifact_id = '{artifact_id}'"
     )
     nrows = kwargs.get("nrows")
@@ -1978,6 +1984,7 @@ def _load_from_db(
         relation = relation.limit(int(nrows))
     # Keep the connection alive for downstream relation materialization.
     _RELATION_CONNECTIONS[relation] = conn
+    _maybe_warn_relation_leaks()
     return relation
 
 
@@ -1997,6 +2004,41 @@ def _close_relation_connection(relation: duckdb.DuckDBPyRelation) -> None:
 
 
 _RELATION_CONNECTIONS: "weakref.WeakKeyDictionary[duckdb.DuckDBPyRelation, duckdb.DuckDBPyConnection]" = weakref.WeakKeyDictionary()
+
+
+class RelationConnectionLeakWarning(RuntimeWarning):
+    """Warning emitted when relation connections appear to accumulate."""
+
+
+def active_relation_count() -> int:
+    """Return the number of active DuckDB relations tracked by Consist."""
+    return len(_RELATION_CONNECTIONS)
+
+
+def _relation_warn_threshold() -> int:
+    raw = os.getenv("CONSIST_RELATION_WARN_THRESHOLD", "")
+    if not raw:
+        return 100
+    try:
+        value = int(raw)
+    except ValueError:
+        return 100
+    return max(1, value)
+
+
+def _maybe_warn_relation_leaks() -> None:
+    count = active_relation_count()
+    threshold = _relation_warn_threshold()
+    if count < threshold:
+        return
+    message = (
+        "Consist has %d active DuckDB relations. "
+        "This may indicate unclosed relations. "
+        "Use consist.to_df(..., close=True) or "
+        "consist.load_relation(...) to ensure connections are closed."
+    )
+    logging.warning(message, count)
+    warnings.warn(message % count, RelationConnectionLeakWarning, stacklevel=2)
 
 
 def to_df(relation: duckdb.DuckDBPyRelation, *, close: bool = True) -> pd.DataFrame:
@@ -2056,6 +2098,27 @@ def load_df(
     if isinstance(result, pd.Series):
         return result.to_frame()
     raise TypeError("load_df requires a tabular artifact.")
+
+
+@contextmanager
+def load_relation(
+    artifact: ArtifactLike,
+    tracker: Optional["Tracker"] = None,
+    *,
+    db_fallback: str = "inputs-only",
+    **kwargs: Any,
+) -> Iterator[duckdb.DuckDBPyRelation]:
+    """
+    Context manager that yields a DuckDB Relation and ensures the underlying
+    connection is closed on exit.
+    """
+    result = load(artifact, tracker=tracker, db_fallback=db_fallback, **kwargs)
+    if not isinstance(result, duckdb.DuckDBPyRelation):
+        raise TypeError("load_relation requires a tabular artifact.")
+    try:
+        yield result
+    finally:
+        _close_relation_connection(result)
 
 
 def log_meta(**kwargs: Any) -> None:

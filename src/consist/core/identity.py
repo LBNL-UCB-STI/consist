@@ -380,7 +380,7 @@ class IdentityManager:
                 # Scenario A: Consist-produced artifact (Provenance Link)
                 sig_parts = [
                     f"driver:{getattr(artifact, 'driver', None)}",
-                    f"container_uri:{artifact.container_uri}",
+                    f"key:{getattr(artifact, 'key', None)}",
                 ]
                 table_path = getattr(artifact, "table_path", None)
                 array_path = getattr(artifact, "array_path", None)

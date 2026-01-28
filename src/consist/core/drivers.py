@@ -1,8 +1,16 @@
+"""
+Driver registry for tabular and array loaders.
+
+Note: We intentionally support only a vetted subset of load kwargs per driver.
+If you need additional options for a driver, add them explicitly in that
+driver's `_SUPPORTED_LOAD_KWARGS` and (optionally) `_LOAD_ALIASES`.
+"""
+
 from __future__ import annotations
 
 import importlib
 from pathlib import Path
-from typing import Any, Dict, Optional, Protocol, Sequence, Tuple
+from typing import Any, Dict, Optional, Protocol, Sequence, Tuple, Iterable
 
 import duckdb
 
@@ -23,9 +31,11 @@ class TableInfo(BaseModel):
 class Driver(Protocol):
     def discover(self, container_uri: str) -> list[TableInfo]: ...
 
-    def load(self, info: TableInfo, conn: duckdb.DuckDBPyConnection): ...
+    def load(self, info: TableInfo, conn: duckdb.DuckDBPyConnection, **kwargs: Any): ...
 
     def schema(self, info: TableInfo, conn: duckdb.DuckDBPyConnection): ...
+
+    def supported_load_kwargs(self) -> set[str]: ...
 
 
 class ArrayInfo(BaseModel):
@@ -122,7 +132,47 @@ def _safe_duckdb_path(path: str) -> str:
     return path.replace("'", "''")
 
 
+def _quote_ident(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _normalize_columns(columns: Any) -> list[str]:
+    if columns is None:
+        return []
+    if isinstance(columns, str):
+        return [columns]
+    if isinstance(columns, Iterable):
+        return [str(col) for col in columns]
+    raise TypeError("columns must be a string or iterable of strings.")
+
+
+def _validate_load_kwargs(
+    *,
+    driver_name: str,
+    kwargs: Dict[str, Any],
+    supported: set[str],
+    aliases: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    normalized: Dict[str, Any] = {}
+    alias_map = aliases or {}
+    for key, value in kwargs.items():
+        mapped = alias_map.get(key, key)
+        normalized[mapped] = value
+    unknown = set(normalized) - supported
+    if unknown:
+        allowed = ", ".join(sorted(supported))
+        unknown_list = ", ".join(sorted(unknown))
+        raise ValueError(
+            f"Unsupported load kwargs for driver '{driver_name}': {unknown_list}. "
+            f"Supported: {allowed}"
+        )
+    return normalized
+
+
 class ParquetDriver:
+    _SUPPORTED_LOAD_KWARGS = {"columns"}
+    _LOAD_ALIASES: Dict[str, str] = {}
+
     def discover(self, container_uri: str) -> list[TableInfo]:
         stem = Path(container_uri).stem
         return [
@@ -135,8 +185,21 @@ class ParquetDriver:
             )
         ]
 
-    def load(self, info: TableInfo, conn):
+    def supported_load_kwargs(self) -> set[str]:
+        return set(self._SUPPORTED_LOAD_KWARGS)
+
+    def load(self, info: TableInfo, conn, **kwargs: Any):
+        normalized = _validate_load_kwargs(
+            driver_name="parquet",
+            kwargs=kwargs,
+            supported=self._SUPPORTED_LOAD_KWARGS,
+            aliases=self._LOAD_ALIASES,
+        )
         path = _safe_duckdb_path(info.container_uri)
+        columns = _normalize_columns(normalized.get("columns"))
+        if columns:
+            col_sql = ", ".join(_quote_ident(col) for col in columns)
+            return conn.sql(f"SELECT {col_sql} FROM read_parquet('{path}')")
         return conn.sql(f"SELECT * FROM read_parquet('{path}')")
 
     def schema(self, info: TableInfo, conn):
@@ -145,6 +208,9 @@ class ParquetDriver:
 
 
 class CsvDriver:
+    _SUPPORTED_LOAD_KWARGS = {"columns", "delimiter", "header"}
+    _LOAD_ALIASES = {"sep": "delimiter"}
+
     def discover(self, container_uri: str) -> list[TableInfo]:
         stem = Path(container_uri).stem
         return [
@@ -157,9 +223,32 @@ class CsvDriver:
             )
         ]
 
-    def load(self, info: TableInfo, conn):
+    def supported_load_kwargs(self) -> set[str]:
+        return set(self._SUPPORTED_LOAD_KWARGS)
+
+    def load(self, info: TableInfo, conn, **kwargs: Any):
+        normalized = _validate_load_kwargs(
+            driver_name="csv",
+            kwargs=kwargs,
+            supported=self._SUPPORTED_LOAD_KWARGS,
+            aliases=self._LOAD_ALIASES,
+        )
         path = _safe_duckdb_path(info.container_uri)
-        return conn.sql(f"SELECT * FROM read_csv_auto('{path}')")
+        options: list[str] = []
+        delimiter = normalized.get("delimiter")
+        if delimiter is not None:
+            escaped = str(delimiter).replace("'", "''")
+            options.append(f"delim='{escaped}'")
+        header = normalized.get("header")
+        if header is not None:
+            options.append(f"header={'true' if bool(header) else 'false'}")
+        options_sql = ", " + ", ".join(options) if options else ""
+        read_expr = f"read_csv_auto('{path}'{options_sql})"
+        columns = _normalize_columns(normalized.get("columns"))
+        if columns:
+            col_sql = ", ".join(_quote_ident(col) for col in columns)
+            return conn.sql(f"SELECT {col_sql} FROM {read_expr}")
+        return conn.sql(f"SELECT * FROM {read_expr}")
 
     def schema(self, info: TableInfo, conn):
         relation = self.load(info, conn)
@@ -167,6 +256,20 @@ class CsvDriver:
 
 
 class JsonDriver:
+    _SUPPORTED_LOAD_KWARGS = {
+        "orient",
+        "dtype",
+        "convert_axes",
+        "convert_dates",
+        "precise_float",
+        "date_unit",
+        "encoding",
+        "lines",
+        "compression",
+        "typ",
+    }
+    _LOAD_ALIASES: Dict[str, str] = {}
+
     def discover(self, container_uri: str) -> list[TableInfo]:
         stem = Path(container_uri).stem
         return [
@@ -179,12 +282,21 @@ class JsonDriver:
             )
         ]
 
-    def load(self, info: TableInfo, conn):
+    def supported_load_kwargs(self) -> set[str]:
+        return set(self._SUPPORTED_LOAD_KWARGS)
+
+    def load(self, info: TableInfo, conn, **kwargs: Any):
+        normalized = _validate_load_kwargs(
+            driver_name="json",
+            kwargs=kwargs,
+            supported=self._SUPPORTED_LOAD_KWARGS,
+            aliases=self._LOAD_ALIASES,
+        )
         try:
             import pandas as pd
         except ImportError as exc:  # pragma: no cover
             raise ImportError("pandas required for json staging.") from exc
-        df = pd.read_json(info.container_uri)
+        df = pd.read_json(info.container_uri, **normalized)
         return conn.from_df(df)
 
     def schema(self, info: TableInfo, conn):
@@ -193,10 +305,22 @@ class JsonDriver:
 
 
 class H5TableDriver:
+    _SUPPORTED_LOAD_KWARGS = {"columns", "where", "start", "stop"}
+    _LOAD_ALIASES: Dict[str, str] = {}
+
     def discover(self, container_uri: str) -> list[TableInfo]:
         return []
 
-    def load(self, info: TableInfo, conn):
+    def supported_load_kwargs(self) -> set[str]:
+        return set(self._SUPPORTED_LOAD_KWARGS)
+
+    def load(self, info: TableInfo, conn, **kwargs: Any):
+        normalized = _validate_load_kwargs(
+            driver_name="h5_table",
+            kwargs=kwargs,
+            supported=self._SUPPORTED_LOAD_KWARGS,
+            aliases=self._LOAD_ALIASES,
+        )
         try:
             import pandas as pd
         except ImportError as exc:  # pragma: no cover
@@ -204,7 +328,7 @@ class H5TableDriver:
         table_path = info.table_path
         if not table_path:
             raise ValueError("HDF5 table load requires table_path.")
-        df = pd.read_hdf(info.container_uri, key=table_path)
+        df = pd.read_hdf(info.container_uri, key=table_path, **normalized)
         return conn.from_df(df)
 
     def schema(self, info: TableInfo, conn):

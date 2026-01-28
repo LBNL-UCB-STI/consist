@@ -187,6 +187,24 @@ class TestInputHashing:
         hash_b = im.compute_input_hash([art_b])
         assert hash_a != hash_b
 
+    def test_run_id_inputs_ignore_container_uri(self):
+        im = IdentityManager()
+        art_a = Artifact(
+            key="output_a",
+            container_uri="inputs://a.parquet",
+            driver="parquet",
+            run_id="run_shared",
+        )
+        art_b = Artifact(
+            key="output_a",
+            container_uri="workspace://a.parquet",
+            driver="parquet",
+            run_id="run_shared",
+        )
+        hash_a = im.compute_input_hash([art_a])
+        hash_b = im.compute_input_hash([art_b])
+        assert hash_a == hash_b
+
     def test_fast_vs_full_hashing(self):
         """
         Tests the difference between "full" (content) and "fast" (metadata) hashing.
