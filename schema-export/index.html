@@ -990,6 +990,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#besteffort-foreign-key-enforcement" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Best‑Effort Foreign Key Enforcement
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#where-to-put-the-generated-file" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2057,6 +2068,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#besteffort-foreign-key-enforcement" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Best‑Effort Foreign Key Enforcement
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#where-to-put-the-generated-file" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2225,7 +2247,7 @@
                   
 
 <h1 id="schema-export-sqlmodel-stubs">Schema Export (SQLModel Stubs)<a class="headerlink" href="#schema-export-sqlmodel-stubs" title="Permanent link">&para;</a></h1>
-<p>Consist can capture the observed (post-ingest) schema of tabular artifacts and export that schema as a <strong>static SQLModel class stub</strong> you can commit and edit. This is intended to reduce “retype the table definition” friction while keeping Consist honest about what it can and cannot infer.</p>
+<p>Consist can capture the observed (post-ingest) schema of tabular artifacts and export that schema as a <strong>static SQLModel class stub</strong> you can commit and edit. This reduces “retype the table definition” friction while keeping Consist honest about what it can and cannot infer.</p>
 <h2 id="what-you-get">What You Get<a class="headerlink" href="#what-you-get" title="Permanent link">&para;</a></h2>
 <ul>
 <li>A Python 3.11 file containing one SQLModel class stub (exported as <code>table=True</code>).</li>
@@ -2235,6 +2257,7 @@
 <li>deterministic ordering (prefers <code>ordinal_position</code>)</li>
 <li>“Hints” as comments (enums/stats) when available (on by default).</li>
 <li>Messy column names are handled: the generated attribute name is sanitized, but the original DB column name is preserved via <code>Field(sa_column=Column("original", ...))</code> when needed.</li>
+<li>Foreign keys are preserved if they were provided in a curated SQLModel schema (rendered as <code>Field(foreign_key="table.column")</code>).</li>
 </ul>
 <h2 id="abstract-vs-concrete-exports">Abstract vs Concrete Exports<a class="headerlink" href="#abstract-vs-concrete-exports" title="Permanent link">&para;</a></h2>
 <p>By default, Consist exports SQLModel classes as <strong>abstract</strong> (<code>__abstract__ = True</code>). This keeps the stub <strong>importable immediately</strong>, because SQLAlchemy requires a primary key to map a concrete table/view, and many analysis tables don’t have an obvious primary key.</p>
@@ -2250,6 +2273,7 @@
 <li>relationships</li>
 <li>renames / normalization decisions</li>
 </ul>
+<p>If you pass a curated SQLModel schema to <code>log_artifact(..., schema=YourModel)</code> and it includes <code>foreign_key=...</code>, those FKs are persisted and will be re-emitted during export.</p>
 <h2 id="prerequisites">Prerequisites<a class="headerlink" href="#prerequisites" title="Permanent link">&para;</a></h2>
 <p>Schema export uses the schema captured from a DuckDB-ingested table. In practice:</p>
 <ol>
@@ -2293,6 +2317,11 @@
 </span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="p">)</span>
 </span></code></pre></div>
 <p>The method returns the generated string regardless of whether you write it.</p>
+<h2 id="besteffort-foreign-key-enforcement">Best‑Effort Foreign Key Enforcement<a class="headerlink" href="#besteffort-foreign-key-enforcement" title="Permanent link">&para;</a></h2>
+<p>If you want DuckDB to attempt to enforce persisted foreign keys, run:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>python<span class="w"> </span>-m<span class="w"> </span>consist.cli<span class="w"> </span>schema<span class="w"> </span>apply-fks
+</span></code></pre></div>
+<p>This step is best‑effort: if a constraint can’t be added (e.g., due to missing parent rows), Consist logs a warning and continues.</p>
 <h2 id="where-to-put-the-generated-file">Where to Put the Generated File<a class="headerlink" href="#where-to-put-the-generated-file" title="Permanent link">&para;</a></h2>
 <p>Place it anywhere importable by your project (on <code>PYTHONPATH</code>), for example:</p>
 <ul>
@@ -2306,23 +2335,23 @@
 <p>1) Import the model class.
 2) Register it with the <code>Tracker</code> (at init time or after).</p>
 <h3 id="register-at-tracker-initialization">Register at Tracker initialization<a class="headerlink" href="#register-at-tracker-initialization" title="Permanent link">&para;</a></h3>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">Tracker</span>
-</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">your_pkg.models.persons</span><span class="w"> </span><span class="kn">import</span> <span class="n">Persons</span>
-</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>
-</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span><span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;./runs&quot;</span><span class="p">,</span> <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">,</span> <span class="n">schemas</span><span class="o">=</span><span class="p">[</span><span class="n">Persons</span><span class="p">])</span>
-</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="n">VPersons</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">views</span><span class="o">.</span><span class="n">Persons</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">Tracker</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">your_pkg.models.persons</span><span class="w"> </span><span class="kn">import</span> <span class="n">Persons</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span><span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;./runs&quot;</span><span class="p">,</span> <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">,</span> <span class="n">schemas</span><span class="o">=</span><span class="p">[</span><span class="n">Persons</span><span class="p">])</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="n">VPersons</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">views</span><span class="o">.</span><span class="n">Persons</span>
 </span></code></pre></div>
 <h3 id="register-later">Register later<a class="headerlink" href="#register-later" title="Permanent link">&para;</a></h3>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">your_pkg.models.persons</span><span class="w"> </span><span class="kn">import</span> <span class="n">Persons</span>
-</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>
-</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="n">VPersons</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="n">Persons</span><span class="p">)</span>  <span class="c1"># registers + creates/refreshes the hybrid view</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">your_pkg.models.persons</span><span class="w"> </span><span class="kn">import</span> <span class="n">Persons</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="n">VPersons</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="n">Persons</span><span class="p">)</span>  <span class="c1"># registers + creates/refreshes the hybrid view</span>
 </span></code></pre></div>
 <h3 id="querying">Querying<a class="headerlink" href="#querying" title="Permanent link">&para;</a></h3>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sqlmodel</span><span class="w"> </span><span class="kn">import</span> <span class="n">select</span>
-</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
-</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>
-</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="n">VPersons</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">views</span><span class="o">.</span><span class="n">Persons</span>
-</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="n">rows</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">run_query</span><span class="p">(</span><span class="n">select</span><span class="p">(</span><span class="n">VPersons</span><span class="p">)</span><span class="o">.</span><span class="n">limit</span><span class="p">(</span><span class="mi">5</span><span class="p">),</span> <span class="n">tracker</span><span class="o">=</span><span class="n">tracker</span><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sqlmodel</span><span class="w"> </span><span class="kn">import</span> <span class="n">select</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="n">VPersons</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">views</span><span class="o">.</span><span class="n">Persons</span>
+</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="n">rows</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">run_query</span><span class="p">(</span><span class="n">select</span><span class="p">(</span><span class="n">VPersons</span><span class="p">)</span><span class="o">.</span><span class="n">limit</span><span class="p">(</span><span class="mi">5</span><span class="p">),</span> <span class="n">tracker</span><span class="o">=</span><span class="n">tracker</span><span class="p">)</span>
 </span></code></pre></div>
 <p>Views automatically include Consist metadata columns (e.g. <code>consist_run_id</code>, <code>consist_year</code>, <code>consist_scenario_id</code>) for filtering and grouping.</p>
 <h2 id="column-name-rules-important">Column Name Rules (Important)<a class="headerlink" href="#column-name-rules-important" title="Permanent link">&para;</a></h2>
@@ -2334,7 +2363,7 @@
 <li>collisions become <code>__2</code>, <code>__3</code>, ...</li>
 </ul>
 <p>When the attribute name differs from the real column name, the stub uses:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="n">mass_kg</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">sa_column</span><span class="o">=</span><span class="n">Column</span><span class="p">(</span><span class="s2">&quot;Mass(kg)&quot;</span><span class="p">,</span> <span class="o">...</span><span class="p">))</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="n">mass_kg</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">sa_column</span><span class="o">=</span><span class="n">Column</span><span class="p">(</span><span class="s2">&quot;Mass(kg)&quot;</span><span class="p">,</span> <span class="o">...</span><span class="p">))</span>
 </span></code></pre></div>
 <p>This matters for views and empty-view typing: Consist now uses the <strong>original DB column name</strong> when creating typed empty views, so schemas with renamed attributes still behave correctly.</p>
 <h2 id="matching-artifacts-tables-and-__tablename__">Matching Artifacts, Tables, and <code>__tablename__</code><a class="headerlink" href="#matching-artifacts-tables-and-__tablename__" title="Permanent link">&para;</a></h2>
