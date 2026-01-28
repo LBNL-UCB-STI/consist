@@ -639,6 +639,7 @@ class Tracker:
         code = render_sqlmodel_stub(
             schema=schema,
             fields=fields,
+            db=self.db,
             table_name=table_name,
             class_name=class_name,
             abstract=abstract,

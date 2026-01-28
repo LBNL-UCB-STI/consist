@@ -10,6 +10,7 @@ from consist.models.artifact_schema import (
     ArtifactSchema,
     ArtifactSchemaField,
     ArtifactSchemaObservation,
+    ArtifactSchemaRelation,
 )
 from consist.models.config_facet import ConfigFacet
 from consist.models.run import Run
@@ -30,6 +31,7 @@ __all__ = [
     "ArtifactSchema",
     "ArtifactSchemaField",
     "ArtifactSchemaObservation",
+    "ArtifactSchemaRelation",
     "ConfigFacet",
     "ActivitySimConstantsCache",
     "ActivitySimCoefficientsCache",
