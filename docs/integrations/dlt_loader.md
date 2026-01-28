@@ -1,4 +1,4 @@
-# DLT Loader (Experimental)
+# DLT Loader
 
 Requires the optional `ingest` extra: `pip install "consist[ingest]"`.
 

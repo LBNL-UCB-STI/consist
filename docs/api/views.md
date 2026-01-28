@@ -7,9 +7,8 @@
       show_source: false
       show_root_heading: false
       show_root_toc_entry: false
-      members: true
-      filters:
-        - "!^_"
+      members:
+        - register
 
 ## View Factory
 
@@ -18,6 +17,6 @@
       show_source: false
       show_root_heading: false
       show_root_toc_entry: false
-      members: true
-      filters:
-        - "!^_"
+      members:
+        - create_view_from_model
+        - create_hybrid_view

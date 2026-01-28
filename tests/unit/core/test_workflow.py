@@ -55,7 +55,7 @@ def test_scenario_lifecycle(tracker: Tracker):
     # 5. Context Exit
     # Header should be completed
     assert tracker.get_run("scen_A") is not None
-    # assert header_run.status == "completed" # TODO: Figure out why this is still "running"
+    assert tracker.get_run("scen_A").status == "completed"
 
 
 def test_scenario_input_locking(tracker: Tracker):
@@ -78,7 +78,7 @@ def test_scenario_context(tracker: Tracker):
 
     run = tracker.get_run("header")
     assert run is not None
-    # assert run.status == "completed" # TODO: Figure out why this is still "running"
+    assert run.status == "completed"
 
 
 def test_scenario_coupler_kw_not_serialized(tracker: Tracker):

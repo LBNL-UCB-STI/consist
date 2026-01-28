@@ -1,12 +1,12 @@
 # Releasing Consist
 
-This project uses SemVer. Until `1.0.0`, breaking changes may occur in `0.y` minor releases.
+This project uses semantic versioning. Until `1.0.0`, breaking changes may occur in `0.y` minor releases.
 
 ## Pre-release checklist
 
 - License is set (`LICENSE` exists) and `README.md` reflects it.
-- CI is green: `pytest`, `ruff`, `black --check`, and `mkdocs build`.
-- Docs site metadata is updated in `mkdocs.yaml` (`site_url`, `repo_url`, `repo_name`).
+- CI is green: `pytest`, `ruff`, and `zensical serve`.
+- Docs site metadata is updated in `zensical.yaml` (`site_url`, `repo_url`, `repo_name`).
 - Changelog is updated for the release.
 - Public API changes are reviewed:
   - Python exports in `src/consist/__init__.py`

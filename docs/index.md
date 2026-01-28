@@ -1,6 +1,6 @@
 # Consist
 
-Consist automatically records what code, configuration, and input data produced each result in your simulation pipeline. It uses this to skip redundant computation, let you query results across runs, and trace lineage from any output back to its sources.
+Consist automatically records what code, configuration, and input data produced each result in your simulation pipeline. It uses this to avoid redundant computation, lets you query results across runs, and traces lineage from any output back to its sources.
 
 ---
 
@@ -8,15 +8,19 @@ Consist automatically records what code, configuration, and input data produced 
 
 **New to Consist?** Follow this path:
 
-1. **[Concepts](concepts.md)** (5 min read)
+1. **[Install & Quickstart](getting-started/installation.md)** (5 min)
+   - Install Consist from source and run a small first example
+   - Creates your first run and provenance database
+
+2. **[Concepts](concepts.md)** (5 min read)
    - Learn the mental model: Runs, Artifacts, Scenarios, and how caching works
    - Start here to understand core ideas
 
-2. **[Usage Guide](usage-guide.md)** (20 min read)
+3. **[Usage Guide](usage-guide.md)** (20 min read)
    - Build your first multi-step workflow
    - Learn patterns for runs, scenarios, and cross-run querying
 
-3. **[Example Notebooks](examples.md)**
+4. **[Example Notebooks](examples.md)**
    - Run the quickstart notebook to see caching in action
    - Follow other examples for your domain (parameter sweeps, iterative workflows, multi-scenario analysis)
 
@@ -24,13 +28,13 @@ Consist automatically records what code, configuration, and input data produced 
 
 ## By User Type
 
-**I develop or maintain simulation tools (ActivitySim, SUMO, etc.):**
+**I develop or maintain simulation tools (ActivitySim, MATSim, etc.):**
 - Start with [Concepts](concepts.md) for mental models
 - Read [Usage Guide](usage-guide.md) for API patterns and integration examples
-- See [Container Support](usage-guide.md#container-support) for wrapping legacy code
+- See the [Container Integration Guide](containers-guide.md) for wrapping legacy code
 
 **I'm an MPO official or practitioner:**
-- Skip code examples. See [CLI reference](cli-reference.md) to query and compare results from the command line
+- If you prefer not to write Python, use the [CLI reference](cli-reference.md) to query and compare results from the command line
 - Example: `consist lineage traffic_volumes` shows what produced your result
 
 **I'm building research workflows:**
@@ -46,8 +50,8 @@ Consist automatically records what code, configuration, and input data produced 
 
 - [Concepts](concepts.md) – Mental models and core ideas
 - [Caching Fundamentals](caching-fundamentals.md) – How signature-based caching works
-- [Usage Guide: Basic Runs & Scenarios](usage-guide.md#runs-and-outputs) – Simple workflows
-- [Example: Quickstart](examples.md#00_quickstart) – 5-minute first run
+- [Usage Guide: Basic Runs & Scenarios](usage-guide.md#choosing-your-pattern) – Simple workflows
+- [Example: Quickstart](examples.md#quickstart) – 5-minute first run
 
 ### Intermediate
 
@@ -71,7 +75,7 @@ Consist automatically records what code, configuration, and input data produced 
 
 - **Run**: A single execution with tracked inputs, config, and outputs. Runs are the unit of cache reuse and comparison, so keeping them consistent lets you skip expensive recomputation.
 - **Artifact**: A file with provenance metadata attached. Artifacts are the concrete outputs you can trace, load, or hydrate later, which is how Consist keeps results reproducible.
-- **Signature**: Fingerprint of code + config + inputs. Identical signatures = cache hit
+- **Signature**: Fingerprint of code + config + inputs. Identical signatures lead to a cache hit.
 - **Scenario**: A parent run grouping related child runs
 - **Provenance**: Complete history of where a result came from
 
@@ -88,7 +92,7 @@ See [Glossary](glossary.md) for full definitions of all terms, or [Concepts](con
 → [Troubleshooting](troubleshooting.md)
 
 **I want to know which config produced a result:**
-→ [CLI: `consist lineage`](cli-reference.md#trace-lineage)
+→ [CLI: `consist lineage`](cli-reference.md#consist-lineage)
 
 **I want to compare results across 50 scenarios:**
 → [Usage Guide: Cross-Run Queries](usage-guide.md#querying-results)

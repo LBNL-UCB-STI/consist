@@ -394,7 +394,17 @@ class Tracker:
 
     @property
     def engine(self):
-        """Delegates to the DatabaseManager engine."""
+        """
+        Return the SQLAlchemy engine used by this tracker.
+
+        Use this for advanced, low-level database access when the higher-level
+        tracker/query helpers are insufficient.
+
+        Returns
+        -------
+        Optional[Engine]
+            The SQLAlchemy engine if a database is configured, otherwise ``None``.
+        """
         return self.db.engine if self.db else None
 
     @staticmethod
@@ -728,7 +738,7 @@ class Tracker:
         Call end_run() when complete.
 
         This provides an alternative to the context manager pattern when you need more
-        control over the run lifecycle, such as in PILATES-like integrations where
+        control over the run lifecycle, such as in external model integrations where
         start_model_run() and complete_model_run() are separate method calls.
 
         Parameters
@@ -1131,6 +1141,13 @@ class Tracker:
         --------
         begin_run : Imperative alternative for starting runs.
         end_run : Imperative alternative for ending runs.
+
+        Example
+        -------
+        >>> with tracker.start_run("run_1", "my_model", config={"p": 1}):
+        ...     tracker.log_artifact("data.csv", "input")
+        ...     # ... execution ...
+        ...     tracker.log_artifact("results.parquet", "output")
         """
         self.begin_run(run_id=run_id, model=model, **kwargs)
         try:
@@ -2300,13 +2317,15 @@ class Tracker:
                 run.input_hash or "",
                 run.git_hash or "",
             )
+            cache_hit = bool(run.meta.get("cache_hit")) if run.meta else False
             if cache_key in self._local_cache_index and cache_mode != "overwrite":
-                logging.warning(
-                    "Cache key collision detected (extremely rare): %s. "
-                    "Keeping first cached run (created %s).",
-                    cache_key,
-                    self._local_cache_index[cache_key].created_at,
-                )
+                if not cache_hit:
+                    logging.warning(
+                        "Cache key collision detected (extremely rare): %s. "
+                        "Keeping first cached run (created %s).",
+                        cache_key,
+                        self._local_cache_index[cache_key].created_at,
+                    )
             else:
                 self._local_cache_index[cache_key] = run
             if len(self._local_cache_index) > self._local_cache_max_entries:
@@ -2434,6 +2453,11 @@ class Tracker:
         -------
         list
             Results of the executed query.
+
+        Raises
+        ------
+        RuntimeError
+            If no database is configured for this tracker.
         """
         if not self.engine:
             raise RuntimeError("Database connection required.")
@@ -2493,6 +2517,16 @@ class Tracker:
         ----------
         **kwargs : Any
             Filters forwarded to ``find_latest_run``.
+
+        Returns
+        -------
+        str
+            The run ID of the latest matching run.
+
+        Raises
+        ------
+        ValueError
+            If no runs match the provided filters.
         """
         return self.queries.get_latest_run_id(**kwargs)
 
@@ -3003,8 +3037,22 @@ class Tracker:
 
     def load(self, artifact: Artifact, **kwargs: Any) -> Any:
         """
-        Convenience method to load an artifact using the public API while
-        automatically passing this tracker for context.
+        Load an artifact using the public API while binding this tracker context.
+
+        This is equivalent to ``consist.load(artifact, tracker=self, ...)`` and
+        uses the artifact driver to select the appropriate loader.
+
+        Parameters
+        ----------
+        artifact : Artifact
+            The artifact to load.
+        **kwargs : Any
+            Loader-specific options forwarded to ``consist.load``.
+
+        Returns
+        -------
+        Any
+            The loaded data object (e.g., DataFrame, xarray.Dataset, etc.).
         """
         from consist.api import load as api_load
 
@@ -3026,8 +3074,8 @@ class Tracker:
 
         This method provides first-class HDF5 container support, automatically
         discovering and logging internal tables as child artifacts. This is
-        particularly useful for PILATES-like workflows that extensively use
-        HDF5 files containing multiple tables.
+        particularly useful for model pipelines that use HDF5 files containing
+        multiple datasets or tables.
 
         Parameters
         ----------
@@ -3044,6 +3092,11 @@ class Tracker:
             - A callable that takes a table name and returns True to include
             - A list of table names to include (exact match)
             If None, all tables are included.
+        hash_tables : Literal["always", "if_unchanged", "never"], default "if_unchanged"
+            Whether to compute content hashes for discovered tables. "if_unchanged"
+            skips hashing when a table appears unchanged based on lightweight checks.
+        table_hash_chunk_rows : Optional[int], optional
+            Row chunk size to use when hashing large tables.
         **meta : Any
             Additional metadata for the container artifact.
 
@@ -3108,6 +3161,34 @@ class Tracker:
     ) -> Artifact:
         """
         Log a single HDF5 table as an artifact without scanning the container.
+
+        Parameters
+        ----------
+        path : Union[str, Path]
+            Path to the HDF5 file on disk.
+        table_path : str
+            Internal table/dataset path inside the HDF5 container.
+        key : Optional[str], optional
+            Semantic key for the table artifact. Defaults to the dataset name.
+        direction : str, default "output"
+            Whether the table is an "input" or "output".
+        parent : Optional[Artifact], optional
+            Optional parent container artifact to link this table to.
+        hash_table : bool, default True
+            Whether to compute a content hash for the table.
+        table_hash_chunk_rows : Optional[int], optional
+            Chunk size for hashing large tables.
+        profile_file_schema : bool | Literal["if_changed"], default False
+            Whether to profile table schema and store it as metadata.
+        file_schema_sample_rows : Optional[int], optional
+            Number of rows to sample when profiling schema.
+        **meta : Any
+            Additional metadata to store on the artifact.
+
+        Returns
+        -------
+        Artifact
+            The created table artifact.
         """
         return self.artifacts.log_h5_table(
             path,
@@ -4342,7 +4423,20 @@ class Tracker:
 
     def resolve_historical_path(self, artifact: Artifact, run: Run) -> Path:
         """
-        Helper to find the physical location of an artifact from a past run.
+        Resolve the on-disk path for an artifact from a prior run.
+
+        Parameters
+        ----------
+        artifact : Artifact
+            The artifact whose historical location should be resolved.
+        run : Run
+            The run that originally produced/consumed the artifact.
+
+        Returns
+        -------
+        Path
+            The resolved filesystem path for the artifact in its original run
+            workspace.
         """
         if not run:
             return Path(self.resolve_uri(artifact.uri))
@@ -4355,13 +4449,18 @@ class Tracker:
 
     def get_run(self, run_id: str) -> Optional[Run]:
         """
-        Retrieves a single Run by its ID from the database.
+        Retrieve a single Run by its ID from the database.
 
-        Args:
-            run_id (str): The unique identifier of the run to retrieve.
+        Parameters
+        ----------
+        run_id : str
+            The unique identifier of the run to retrieve.
 
-        Returns:
-            Optional[Run]: The found Run object, or None if not found.
+        Returns
+        -------
+        Optional[Run]
+            The Run object if found, or ``None`` if missing or no database is
+            configured.
         """
         if self.db:
             return self.db.get_run(run_id)
@@ -4372,6 +4471,22 @@ class Tracker:
     ) -> Optional[ConsistRecord]:
         """
         Load the full run record snapshot from disk.
+
+        This reads the JSON snapshot produced at run time (``consist_runs/<id>.json``)
+        and returns the parsed ``ConsistRecord``.
+
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+        allow_missing : bool, default False
+            Return ``None`` if the snapshot file is missing or unreadable instead
+            of raising.
+
+        Returns
+        -------
+        Optional[ConsistRecord]
+            The parsed run record, or ``None`` if missing and ``allow_missing``.
         """
         run = self.get_run(run_id) if self.db else None
         snapshot_path = self._resolve_run_snapshot_path(run_id, run)
@@ -4417,7 +4532,18 @@ class Tracker:
 
     def get_artifacts_for_run(self, run_id: str) -> RunArtifacts:
         """
-        Retrieves inputs and outputs for a specific run, organized by key.
+        Retrieve inputs and outputs for a specific run, organized by key.
+
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+
+        Returns
+        -------
+        RunArtifacts
+            Container with ``inputs`` and ``outputs`` dicts. Returns empty
+            collections if the database is not configured.
         """
         if not self.db:
             return RunArtifacts()
@@ -4453,8 +4579,16 @@ class Tracker:
         """
         Return output artifacts for a run, keyed by artifact key.
 
-        Returns an empty dict if the database is not configured or the run is
-        unknown to the tracker.
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+
+        Returns
+        -------
+        Dict[str, Artifact]
+            Output artifacts keyed by artifact key. Returns an empty dict if the
+            database is not configured or the run is unknown.
         """
         return self.get_artifacts_for_run(run_id).outputs
 
@@ -4462,8 +4596,16 @@ class Tracker:
         """
         Return input artifacts for a run, keyed by artifact key.
 
-        Returns an empty dict if the database is not configured or the run is
-        unknown to the tracker.
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+
+        Returns
+        -------
+        Dict[str, Artifact]
+            Input artifacts keyed by artifact key. Returns an empty dict if the
+            database is not configured or the run is unknown.
         """
         return self.get_artifacts_for_run(run_id).inputs
 
@@ -4505,6 +4647,11 @@ class Tracker:
             Output artifact key to load.
         **kwargs : Any
             Forwarded to `Tracker.load(...)`.
+
+        Returns
+        -------
+        Any
+            Loaded artifact data.
         """
         artifact = self.get_run_artifact(run_id, key=key, direction="output")
         if artifact is None:
@@ -4517,8 +4664,21 @@ class Tracker:
         self, config_hash: str, input_hash: str, git_hash: str
     ) -> Optional[Run]:
         """
-        Attempts to find a previously "completed" run that matches the given
-        identity hashes.
+        Find a previously completed run that matches the identity hashes.
+
+        Parameters
+        ----------
+        config_hash : str
+            Hash of the canonicalized config for the run.
+        input_hash : str
+            Hash of the run inputs.
+        git_hash : str
+            Git commit hash captured with the run.
+
+        Returns
+        -------
+        Optional[Run]
+            The matching run, or ``None`` if not found or if no database is configured.
         """
         if self.db:
             return self.db.find_matching_run(config_hash, input_hash, git_hash)
@@ -4933,6 +5093,17 @@ class Tracker:
         This decorator lets you attach defaults such as ``outputs``, ``tags``, or
         ``cache_mode`` to a function. ``Tracker.run`` and ``ScenarioContext.run``
         read this metadata when executing the function.
+
+        Parameters
+        ----------
+        **kwargs : Any
+            Step metadata (e.g., ``outputs``, ``tags``, ``cache_mode``,
+            ``inject_context``) to attach to the function.
+
+        Returns
+        -------
+        Callable
+            A decorator that returns the original function with attached metadata.
         """
         return define_step_decorator(**kwargs)
 
@@ -4944,7 +5115,8 @@ class Tracker:
         Returns
         -------
         Optional[ConsistRecord]
-            The last completed/failed run record, or `None` if no run has executed yet.
+            The last completed/failed run record for this tracker instance,
+            or `None` if no run has executed yet.
         """
         return self._last_consist
 
@@ -4957,6 +5129,7 @@ class Tracker:
         -------
         bool
             True if the current `start_run`/`run`/`trace` execution is reusing a cached run.
+            Returns ``False`` if no run is active.
         """
         return bool(
             self.current_consist and self.current_consist.cached_run is not None
@@ -4965,6 +5138,9 @@ class Tracker:
     def suspend_cache_options(self) -> ActiveRunCacheOptions:
         """
         Suspend active-run cache options and reset them to defaults.
+
+        This is useful for helper functions that want default cache behavior
+        without mutating the caller's options.
 
         Returns
         -------
@@ -4979,10 +5155,14 @@ class Tracker:
         """
         Restore previously suspended active-run cache options.
 
+        This should typically be paired with a prior ``suspend_cache_options``
+        call to restore the caller's cache behavior.
+
         Parameters
         ----------
         options : ActiveRunCacheOptions
-            Cache options to restore.
+            Cache options to restore (usually returned by
+            ``suspend_cache_options``).
         """
         self._active_run_cache_options = options
 
