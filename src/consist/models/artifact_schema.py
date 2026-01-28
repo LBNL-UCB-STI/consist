@@ -1,3 +1,10 @@
+"""
+Database models for artifact schema profiling in the Consist main database.
+
+These tables store deduplicated schema profiles and normalized per-field rows
+to support fast schema queries and reuse across artifacts.
+"""
+
 from __future__ import annotations
 
 import uuid
@@ -14,11 +21,12 @@ UTC = timezone.utc
 
 class ArtifactSchema(SQLModel, table=True):
     """
-    Deduped schema/profile record for artifacts.
+    Deduplicated schema/profile record stored in the Consist database.
 
     This is intentionally separate from `Artifact.meta` to avoid repeating large schema
     payloads across many artifacts and runs. Artifacts store a `schema_id` pointer and
-    a small `schema_summary` inline in `meta`.
+    a small `schema_summary` inline in `meta`, while this table stores the canonical
+    schema profile JSON.
     """
 
     __tablename__ = "artifact_schema"
@@ -45,7 +53,10 @@ class ArtifactSchema(SQLModel, table=True):
 
 class ArtifactSchemaField(SQLModel, table=True):
     """
-    Normalized per-field schema rows for a deduped `ArtifactSchema`.
+    Normalized per-field schema rows for a deduplicated `ArtifactSchema`.
+
+    This table makes it possible to query schema columns/types directly in SQL
+    without parsing the JSON profile payload.
     """
 
     __tablename__ = "artifact_schema_field"
@@ -79,6 +90,9 @@ class ArtifactSchemaField(SQLModel, table=True):
 class ArtifactSchemaObservation(SQLModel, table=True):
     """
     Time-stamped observation linking an Artifact to a schema profile.
+
+    Each observation records that an artifact was profiled and linked to a
+    particular schema hash, optionally tied to a run for provenance.
     """
 
     __tablename__ = "artifact_schema_observation"

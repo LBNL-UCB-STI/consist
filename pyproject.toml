@@ -1,6 +1,6 @@
 [project]
 name = "consist"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 description = "Provenance tracking, intelligent caching, and data virtualization for scientific simulation workflows."
 readme = "README.md"
 authors = [

@@ -215,9 +215,21 @@ def use_tracker(tracker: "Tracker") -> Iterator["Tracker"]:
 
 def set_current_tracker(tracker: Optional["Tracker"]) -> Optional["Tracker"]:
     """
-    Set the default tracker used by Consist entrypoints outside active runs.
+    Set the default (fallback) tracker used by Consist entrypoints.
 
-    Returns the previously configured default tracker, if any.
+    Entrypoints like `consist.run()`, `consist.start_run()`, and `consist.scenario()`
+    use this tracker if they are called outside of an active run context and no
+    explicit `tracker=` argument is provided.
+
+    Parameters
+    ----------
+    tracker : Optional[Tracker]
+        The tracker instance to set as the default, or `None` to clear.
+
+    Returns
+    -------
+    Optional[Tracker]
+        The previously configured default tracker, if any.
     """
     return set_default_tracker(tracker)
 
@@ -287,9 +299,18 @@ def scenario(
 @contextmanager
 def noop_scenario(name: str, **kwargs: Any):
     """
-    Scenario context that executes without provenance tracking.
+    Creates a scenario context that executes without provenance tracking.
 
-    Provides Coupler/RunResult compatibility for disabled Consist use cases.
+    This is useful for debugging or running simulations where you want the
+    ergonomics of the Consist scenario API (like the Coupler and RunResult)
+    but do not want to record any metadata or artifacts to the database.
+
+    Parameters
+    ----------
+    name : str
+        Name of the scenario (for display/logging purposes).
+    **kwargs : Any
+        Additional arguments forwarded to the noop context.
     """
     yield NoopScenarioContext(name, **kwargs)
 
@@ -334,7 +355,31 @@ def start_run(
     **kwargs: Any,
 ) -> Iterator["Tracker"]:
     """
-    Context manager to initiate and manage a Consist run with a default tracker.
+    Initiate and manage a Consist run.
+
+    This context manager marks the beginning of a discrete unit of work (a "run").
+    All artifacts logged within this context will be associated with this run.
+
+    Parameters
+    ----------
+    run_id : str
+        A unique identifier for this run.
+    model : str
+        The name of the model or system being run.
+    tracker : Optional[Tracker]
+        The tracker instance to use. Defaults to the active global tracker.
+    **kwargs : Any
+        Additional parameters for the run, such as `tags`, `config`, or `inputs`.
+
+    Yields
+    ------
+    Tracker
+        The active tracker instance.
+
+    Example
+    -------
+    >>> with consist.start_run("run_123", "my_model"):
+    ...     consist.log_artifact("data.csv", "input_data")
     """
     tr = _resolve_tracker(tracker)
     with tr.start_run(run_id=run_id, model=model, **kwargs) as active:
@@ -349,7 +394,27 @@ def run(
     **kwargs: Any,
 ) -> RunResult:
     """
-    Execute a function-shaped run using the default tracker.
+    Execute a function as a tracked Consist run.
+
+    This is a high-level entrypoint that wraps a function call in a Consist run.
+    It automatically handles run start/end and result capturing.
+
+    Parameters
+    ----------
+    fn : Optional[Callable]
+        The function to execute.
+    name : Optional[str]
+        A semantic name for the run. Defaults to the function name.
+    tracker : Optional[Tracker]
+        The tracker instance to use.
+    **kwargs : Any
+        Additional arguments passed to `Tracker.run`, such as `inputs`, `tags`,
+        or `runtime_kwargs`.
+
+    Returns
+    -------
+    RunResult
+        An object containing the function's return value and the recorded `Run` record.
     """
     tr = _resolve_tracker(tracker)
     return tr.run(fn=fn, name=name, **kwargs)
@@ -363,7 +428,24 @@ def trace(
     **kwargs: Any,
 ) -> Iterator["Tracker"]:
     """
-    Manual tracing context manager using the default tracker.
+    Create a nested tracing context within an active run.
+
+    Use `trace` to break down a large run into smaller, logical steps. Each
+    traced step is recorded as a sub-run with its own inputs and outputs.
+
+    Parameters
+    ----------
+    name : str
+        Semantic name for this step/trace.
+    tracker : Optional[Tracker]
+        The tracker instance to use.
+    **kwargs : Any
+        Additional metadata or parameters for this trace.
+
+    Yields
+    ------
+    Tracker
+        The active tracker instance.
     """
     tr = _resolve_tracker(tracker)
     with tr.trace(name=name, **kwargs) as active:
@@ -403,7 +485,10 @@ def current_tracker() -> "Tracker":
 
 def current_run() -> Optional[Run]:
     """
-    Return the active run if one is in progress, otherwise ``None``.
+    Return the active `Run` record if one is in progress, otherwise ``None``.
+
+    A `Run` record contains metadata about the current execution, such as its
+    unique ID, model name, and start time.
     """
     try:
         tracker = get_active_tracker()
@@ -415,7 +500,10 @@ def current_run() -> Optional[Run]:
 
 def current_consist() -> Optional[ConsistRecord]:
     """
-    Return the active Consist record if one is in progress, otherwise ``None``.
+    Return the active `ConsistRecord` if one is in progress, otherwise ``None``.
+
+    The `ConsistRecord` is the internal state object that tracks the active
+    run's inputs, outputs, and metadata during execution.
     """
     try:
         tracker = get_active_tracker()
@@ -721,10 +809,38 @@ def log_input(
     **meta,
 ) -> ArtifactLike:
     """
-    Log an input artifact to the active run, or return a noop artifact when disabled.
+    Log an input artifact to the active run.
 
-    Use `content_hash` to reuse a known hash; set `force_hash_override=True` to
-    overwrite existing hashes, or `validate_content_hash=True` to validate against disk.
+    An input artifact represents a data source that the current run reads from.
+    Logging it creates a lineage link, allowing Consist to track which versions
+    of data produced which results.
+
+    Parameters
+    ----------
+    path : ArtifactRef
+        File path (str/Path) or an existing `Artifact` object.
+    key : Optional[str]
+        Semantic name for the artifact (e.g. "raw_households"). Required if `path`
+        is a file path.
+    schema : Optional[Type[SQLModel]]
+        Optional SQLModel class defining the data structure.
+    driver : Optional[str]
+        Explicit format driver (e.g. "parquet"). Inferred from extension if None.
+    content_hash : Optional[str]
+        Precomputed hash to avoid re-hashing large files.
+    force_hash_override : bool, default False
+        Overwrite existing hash in the database if different from `content_hash`.
+    validate_content_hash : bool, default False
+        Re-hash the file on disk to ensure it matches the provided `content_hash`.
+    enabled : bool, default True
+        If False, returns a dummy artifact object for disconnected execution.
+    **meta : Any
+        Additional metadata fields to store with the artifact.
+
+    Returns
+    -------
+    ArtifactLike
+        The logged artifact reference.
     """
     return log_artifact(
         path=path,
@@ -755,10 +871,39 @@ def log_output(
     **meta,
 ) -> ArtifactLike:
     """
-    Log an output artifact to the active run, or return a noop artifact when disabled.
+    Log an output artifact produced by the current run.
 
-    Use `content_hash` to reuse a known hash; set `force_hash_override=True` to
-    overwrite existing hashes, or `validate_content_hash=True` to validate against disk.
+    Parameters
+    ----------
+    path : ArtifactRef
+        File path (str/Path) or an existing `Artifact` object.
+    key : Optional[str]
+        Semantic name for the artifact (e.g. "processed_results"). Required if `path`
+        is a file path.
+    schema : Optional[Type[SQLModel]]
+        Optional SQLModel class defining the data structure.
+    driver : Optional[str]
+        Explicit format driver (e.g. "parquet"). Inferred from extension if None.
+    content_hash : Optional[str]
+        Precomputed hash to avoid re-hashing large files.
+    force_hash_override : bool, default False
+        Overwrite existing hash in the database if different from `content_hash`.
+    validate_content_hash : bool, default False
+        Re-hash the file on disk to ensure it matches the provided `content_hash`.
+    reuse_if_unchanged : bool, default False
+        If True, and the content hash matches a previous run's output, Consist may
+        reuse that historical artifact record.
+    reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
+        Whether to restrict reuse to the exact same file path or any path with the same hash.
+    enabled : bool, default True
+        If False, returns a dummy artifact object.
+    **meta : Any
+        Additional metadata fields to store.
+
+    Returns
+    -------
+    ArtifactLike
+        The logged artifact reference.
     """
     return log_artifact(
         path=path,
@@ -1106,9 +1251,33 @@ def config_run_rows(
     tracker: Optional["Tracker"] = None,
 ) -> list:
     """
-    Execute a config run query and return rows.
+    Execute a config-to-run join query and return the results as a list of rows.
 
-    This is a convenience wrapper around ``config_run_query`` + ``run_query``.
+    This is a high-level wrapper around `config_run_query` and `run_query`. It is
+    frequently used by integration adapters (like ActivitySim or BEAM) to retrieve
+    configuration parameters that were active during a specific run.
+
+    Parameters
+    ----------
+    table : Type[SQLModel]
+        The configuration cache table to query.
+    link_table : Type[SQLModel]
+        The table that links configuration entries to specific run IDs.
+    table_name : Optional[str]
+        Optional filter for the link table's `table_name` column.
+    columns : Optional[Iterable]
+        Specific columns to select. Defaults to the run ID and the config record.
+    where : Optional[Clause]
+        Additional SQLAlchemy filter clauses.
+    join_on : Optional[Iterable[str]]
+        Column names to join on (e.g. `["content_hash"]`).
+    tracker : Optional[Tracker]
+        The tracker to use for database access.
+
+    Returns
+    -------
+    list
+        The results of the query.
     """
     query = config_run_query(
         table,

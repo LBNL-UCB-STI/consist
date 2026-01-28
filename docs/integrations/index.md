@@ -1,7 +1,3 @@
----
-icon: lucide/puzzle
----
-
 # Integrations
 
 These integrations extend Consist's capabilities for container execution, data ingestion, and configuration management.

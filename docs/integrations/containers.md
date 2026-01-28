@@ -1,4 +1,4 @@
-# Containers (Experimental)
+# Containers
 
 ::: consist.integrations.containers.api
     options:

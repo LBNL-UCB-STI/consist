@@ -1,6 +1,3 @@
----
-icon: lucide/settings
----
 
 # Config Adapters
 
@@ -527,9 +524,9 @@ materialized = adapter.materialize_from_plan(
 
 For detailed method signatures, parameters, and return types, see:
 
-- [`ActivitySimConfigAdapter`](../../api/integrations/activitysim.md#consist.integrations.activitysim.ActivitySimConfigAdapter)
-- [`ConfigOverrides`](../../api/integrations/activitysim.md#consist.integrations.activitysim.ConfigOverrides)
-- [`Tracker.canonicalize_config()`](../../api/tracker.md#consist.core.tracker.Tracker.canonicalize_config)
+- [`ActivitySimConfigAdapter`](#activitysim)
+- [`ConfigOverrides`](#materialize-overrides)
+- [`Tracker.canonicalize_config()`](../api/tracker.md#consist.core.tracker.Tracker.canonicalize_config)
 
 #### `activitysim_probabilities_entries_cache`
 

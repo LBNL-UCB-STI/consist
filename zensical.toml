@@ -27,7 +27,7 @@ site_author = "Zach Needell"
 # The site_url is the canonical URL for your site. When building online
 # documentation you should set this.
 # Read more: https://zensical.org/docs/setup/basics/#site_url
-#site_url = "https://www.example.com/"
+site_url = "https://LBNL-UCB-STI.github.io/consist/"
 
 # The copyright notice appears in the page footer and can contain an HTML
 # fragment.
@@ -50,12 +50,12 @@ Copyright &copy; 2026 The Regents of the University of California, through Lawre
 # ]
 nav = [
   { "Home" = "index.md" },
-  { "Getting Started" = ["concepts.md", "usage-guide.md", "caching-fundamentals.md", "examples.md"] },
+  { "Getting Started" = ["getting-started/installation.md", "concepts.md", "getting-started/pathways.md", "usage-guide.md", "caching-fundamentals.md", "examples.md"] },
   { "Core Topics" = ["configs.md", "caching-and-hydration.md", "dlt-loader-guide.md", "containers-guide.md", "mounts-and-portability.md", "ingestion-and-hybrid-views.md", "schema-export.md"] },
-  { "Integrations" = ["integrations/index.md", "integrations/config_adapters.md"] },
+  { "Integrations" = ["integrations/index.md", "integrations/containers.md", "integrations/dlt_loader.md", "integrations/config_adapters.md"] },
   { "CLI Reference" = ["cli-reference.md"] },
-  { "Support & Reference" = ["troubleshooting.md", "glossary.md", "architecture.md"] },
-  { "API Reference" = ["api/index.md", "api/public_api.md", "api/api_helpers.md", "api/tracker.md", "api/workflow.md", "api/artifact.md", "api/run.md", "api/indexing.md", "api/identity.md", "api/views.md", "api/matrix.md", "api/materialize.md"] },
+  { "Support & Reference" = ["troubleshooting.md", "glossary.md", "concepts/rosetta-stone.md", "reference/format-support.md", "architecture.md"] },
+  { "API Reference" = ["api/index.md", "api/public_api.md", "api/api_helpers.md", "api/tracker.md", "api/workflow.md", "api/artifact.md", "api/run.md", "api/indexing.md", "api/identity.md", "api/views.md", "api/matrix.md", "api/materialize.md", { "Containers (Legacy)" = "api/docker.md" }] },
 ]
 
 # With the "extra_css" option you can add your own CSS styling to customize

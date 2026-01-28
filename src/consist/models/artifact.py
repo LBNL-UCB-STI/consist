@@ -1,3 +1,10 @@
+"""
+Database model for artifacts in the Consist main database.
+
+Artifacts represent tracked files/datasets and are linked to runs via the
+run_artifact_link table for provenance and caching.
+"""
+
 from __future__ import annotations
 
 import uuid
@@ -53,11 +60,16 @@ class UUIDType(TypeDecorator):
 
 class Artifact(SQLModel, table=True):
     """
-    Represents a physical data object, such as a file, directory, or database table, central to Consist's provenance tracking and caching.
+    Represents a physical data object in the Consist database.
 
-    Artifacts are the core building blocks of the provenance system, tracking the inputs
-    and outputs of runs. Each artifact has a unique identity, a virtualized location,
-    and rich metadata, supporting both "hot" (ingested) and "cold" (file-based) data strategies.
+    This table stores canonical metadata for any file/dataset Consist tracks. It is
+    linked to runs via ``run_artifact_link`` to record whether an artifact was an
+    input or output. The ``run_id`` field records the producing run (if any) and
+    is often ``None`` for external inputs.
+
+    Artifacts are the core building blocks of provenance and caching. Each artifact
+    has a unique identity, a virtualized location, and rich metadata, supporting
+    both "hot" (ingested) and "cold" (file-based) data strategies.
 
     Attributes:
         id (uuid.UUID): A unique identifier for the artifact.

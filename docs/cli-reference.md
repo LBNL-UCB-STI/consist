@@ -1,6 +1,6 @@
 # CLI Reference
 
-Consist provides command-line tools to inspect, query, and compare runs and artifacts without writing Python. Use it to answer “what ran, with what inputs, and what changed?” from your provenance database.
+Consist provides command-line tools to inspect, query, and compare runs and artifacts without writing Python code. Use it to answer “what ran, with what inputs, and what changed?” directly from your provenance database.
 
 ## Database Discovery
 

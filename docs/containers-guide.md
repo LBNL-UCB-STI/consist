@@ -532,5 +532,5 @@ This is useful if you're embedding Consist-executed containers inside a non-Cons
 ## See Also
 
 - [Usage Guide: Pattern 3 (Container Integration)](usage-guide.md#pattern-3-container-integration)
-- [Architecture: Container Support](architecture.md#container-support)
-- [Troubleshooting: Container Execution](troubleshooting.md#container-errors)
+- [Architecture: Container Integration](architecture.md#container-integration)
+- [Troubleshooting: Container Execution](troubleshooting.md#container-execution-issues)
