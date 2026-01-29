@@ -2,7 +2,6 @@ import warnings
 from pathlib import Path
 
 import pandas as pd
-import pytest
 
 from consist.api import (
     RelationConnectionLeakWarning,
