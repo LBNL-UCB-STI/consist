@@ -48,7 +48,7 @@ from consist.core.drivers import ARRAY_DRIVERS, TABLE_DRIVERS, ArrayInfo, TableI
 from consist.core.noop import NoopRunContext, NoopScenarioContext
 from consist.core.views import _quote_ident, create_view_model
 from consist.core.workflow import OutputCapture
-from consist.models.artifact import Artifact
+from consist.models.artifact import Artifact, get_tracker_ref
 from consist.models.run import ConsistRecord, Run, RunResult
 from consist.models.run_config_kv import RunConfigKV
 from consist.core.tracker import Tracker
@@ -1788,7 +1788,7 @@ def load(
             tracker = None
 
     if tracker is None:
-        tracker_ref = getattr(artifact, "_tracker", None)
+        tracker_ref = get_tracker_ref(artifact)
         if tracker_ref:
             attached_tracker = tracker_ref()
             if attached_tracker:

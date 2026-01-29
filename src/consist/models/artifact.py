@@ -27,6 +27,32 @@ from consist.types import DriverType
 UTC = timezone.utc
 
 
+def get_tracker_ref(artifact: Any) -> Optional[weakref.ReferenceType[Any]]:
+    """Safely fetch a tracker weakref without triggering Pydantic __getattr__."""
+    private_state = getattr(artifact, "__pydantic_private__", None)
+    if isinstance(private_state, dict):
+        tracker_ref = private_state.get("_tracker")
+        if tracker_ref is not None:
+            return tracker_ref
+    try:
+        return object.__getattribute__(artifact, "_tracker")
+    except Exception:
+        return None
+
+
+def set_tracker_ref(artifact: Any, tracker: Any) -> None:
+    """Attach a tracker weakref, tolerating missing Pydantic private state."""
+    tracker_ref = weakref.ref(tracker)
+    private_state = getattr(artifact, "__pydantic_private__", None)
+    if isinstance(private_state, dict):
+        private_state["_tracker"] = tracker_ref
+        return
+    try:
+        object.__setattr__(artifact, "_tracker", tracker_ref)
+    except Exception:
+        pass
+
+
 class UUIDType(TypeDecorator):
     """Platform-independent UUID type.
     Uses PostgreSQL's UUID type, otherwise uses
@@ -188,7 +214,7 @@ class Artifact(SQLModel, table=True):
         Uses the tracker when available to handle mount-aware URIs; otherwise falls
         back to the cached absolute path or the raw URI.
         """
-        tracker_ref = getattr(self, "_tracker", None)
+        tracker_ref = get_tracker_ref(self)
         if tracker_ref is not None:
             tracker_obj = tracker_ref()
             if tracker_obj is not None:

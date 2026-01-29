@@ -80,7 +80,7 @@ from consist.core.validation import (
 )
 from consist.core.workflow import OutputCapture, RunContext, ScenarioContext
 from consist.core.input_utils import coerce_input_map
-from consist.models.artifact import Artifact
+from consist.models.artifact import Artifact, get_tracker_ref, set_tracker_ref
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.models.run import ConsistRecord, Run, RunArtifacts, RunResult
 from consist.types import (
@@ -1684,8 +1684,8 @@ class Tracker:
                                 param_name,
                             )
                         artifact = input_artifacts_by_key[param_name]
-                        if getattr(artifact, "_tracker", None) is None:
-                            artifact._tracker = weakref.ref(self)
+                        if get_tracker_ref(artifact) is None:
+                            set_tracker_ref(artifact, self)
                         if artifact.driver in DriverType.tabular_drivers():
                             from consist.api import load_df
 
@@ -2714,7 +2714,7 @@ class Tracker:
                 artifact_obj.meta[k] = v
 
         # TRACKER HANDLES STATE & PERSISTENCE
-        artifact_obj._tracker = weakref.ref(self)
+        set_tracker_ref(artifact_obj, self)
         if direction == "input":
             self.current_consist.inputs.append(artifact_obj)
         else:
@@ -4131,7 +4131,7 @@ class Tracker:
         if self.db:
             artifact = self.db.get_artifact(key_or_id)
             if artifact is not None:
-                artifact._tracker = weakref.ref(self)
+                set_tracker_ref(artifact, self)
             return artifact
         return None
 
@@ -4179,7 +4179,7 @@ class Tracker:
                 uri, table_path=table_path, array_path=array_path
             )
             if artifact is not None:
-                artifact._tracker = weakref.ref(self)
+                set_tracker_ref(artifact, self)
             return artifact
 
         return None
@@ -4221,7 +4221,7 @@ class Tracker:
             creator=creator_id, consumer=consumer_id, key=key, limit=limit
         )
         for artifact in artifacts:
-            artifact._tracker = weakref.ref(self)
+            set_tracker_ref(artifact, self)
         return artifacts
 
     # --- Config Facet Query Helpers ---
@@ -4616,7 +4616,7 @@ class Tracker:
 
         artifacts = RunArtifacts(inputs=inputs, outputs=outputs)
         for artifact in itertools.chain(inputs.values(), outputs.values()):
-            artifact._tracker = weakref.ref(self)
+            set_tracker_ref(artifact, self)
         if run_id != current_run_id:
             self._run_artifacts_cache[run_id] = artifacts
             if len(self._run_artifacts_cache) > self._run_artifacts_cache_max_entries:
@@ -5262,5 +5262,5 @@ class Tracker:
                     artifact.abs_path = self.resolve_uri(artifact.container_uri)
                 except Exception:
                     pass
-            artifact._tracker = weakref.ref(self)
+            set_tracker_ref(artifact, self)
         return artifact
