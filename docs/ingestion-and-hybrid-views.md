@@ -171,6 +171,26 @@ lifecycle explicitly. Use `consist.load_df(...)` for a DataFrame and automatic c
 
 ---
 
+## HDF5 native support roadmap
+
+Today, `h5_table` uses a staging bridge (`pandas.read_hdf(...)` + `conn.from_df(...)`).
+Native HDF5 support will replace that staging step with DuckDB's HDF5 extension so
+DuckDB can query HDF5 tables directly.
+
+Still needed for native HDF5:
+- Switch `h5_table` loading to `hdf5_read(...)` in DuckDB once the extension is stable.
+- Validate behavior and version pinning for the DuckDB HDF5 extension.
+- Handle PyTables/object dtype edge cases (or document explicit fallbacks).
+- Update schema capture to run `DESCRIBE` on the native relation path.
+- Add performance/regression testing for large HDF5 tables.
+
+What native HDF5 enables:
+- Zero-copy, streaming reads from HDF5 into DuckDB (no pandas materialization).
+- Lower memory usage and faster queries for large HDF5 tables.
+- Consistent relation-first SQL workflows across Parquet/CSV/HDF5.
+
+---
+
 ## Best practices
 
 - Ingest key tabular outputs you will compare across runs (e.g., transportation: trip tables or skim summaries; climate: aggregated metrics like monthly averages; urban planning: parcel or zoning summaries). Rule of thumb: if it is <1GB and you expect to compare it, ingest it.
