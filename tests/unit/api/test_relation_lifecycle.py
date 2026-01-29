@@ -1,4 +1,5 @@
 import warnings
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -13,7 +14,7 @@ from consist.api import (
 from consist.models.artifact import Artifact
 
 
-def _csv_artifact(tmp_path: pytest.TempPathFactory) -> Artifact:
+def _csv_artifact(tmp_path: Path) -> Artifact:
     df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
     path = tmp_path / "data.csv"
     df.to_csv(path, index=False)

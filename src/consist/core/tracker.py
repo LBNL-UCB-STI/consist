@@ -8,7 +8,6 @@ import logging
 import os
 import time
 import uuid
-import weakref
 import warnings
 from pathlib import Path
 from typing import (
