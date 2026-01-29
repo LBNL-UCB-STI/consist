@@ -1081,11 +1081,11 @@ class Tracker:
                         "[Consist][cache] miss: cached run %s failed validation.",
                         cached_run.id,
                     )
-                logging.info("🔄 [Consist] Cache Miss. Running...")
+                logging.debug("🔄 [Consist] Cache Miss. Running...")
         elif cache_mode == "overwrite":
-            logging.warning("⚠️ [Consist] Cache lookup skipped (Mode: Overwrite).")
+            logging.debug("⚠️ [Consist] Cache lookup skipped (Mode: Overwrite).")
         elif cache_mode == "readonly":
-            logging.info("👁️ [Consist] Read-only mode.")
+            logging.debug("👁️ [Consist] Read-only mode.")
 
         if not self.current_consist.cached_run:
             materialize_missing_inputs(
