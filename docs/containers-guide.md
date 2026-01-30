@@ -30,7 +30,7 @@ When you execute a container, Consist computes a **container signature** from:
 
 1. **Image identity**: Full image digest (resolved from registry if `pull_latest=True`)
 2. **Command**: The exact command string and arguments
-3. **Environment**: All environment variables passed to the container
+3. **Environment**: A deterministic hash of the environment variables passed to the container
 4. **Volumes**: Container mount paths (but NOT host paths, which are run-specific)
 5. **Input data**: SHA256 hashes of input files
 
@@ -248,6 +248,9 @@ volumes = {
 }
 ```
 
+By default, Consist only allows host paths that live under configured mounts. If you need
+to allow arbitrary absolute host paths, pass `strict_mounts=False` to `run_container()`.
+
 **Important:** Host paths in `volumes` are **not part of the cache key** (they're run-specific). Only `inputs` are hashed for the signature. If you want config changes to invalidate cache, pass config files in `inputs`:
 
 ```python
@@ -283,6 +286,9 @@ Outputs can be specified as:
 
 Consist scans output directories on the **host** after container exits. Files created inside the container at mounted paths are detected automatically.
 
+Outputs must live under `tracker.run_dir` or a configured mount unless
+`allow_external_paths=True` (or `CONSIST_ALLOW_EXTERNAL_PATHS=1`) is set on the tracker.
+
 **Warning:** If the container doesn't create files at the expected paths, Consist logs a warning but doesn't fail (use `lineage_mode="full"` to capture what was created).
 
 ---
@@ -304,6 +310,10 @@ result = run_container(
 ```
 
 These variables are **part of the cache key**. Changing them invalidates the cache.
+
+Consist does **not** persist raw environment values in run metadata or container
+manifests. It stores a deterministic hash instead. If you need those values for
+reproducibility, include them in config files and add those files to `inputs`.
 
 For large configurations, mount config files instead of passing via environment:
 
