@@ -1068,21 +1068,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#strict-mode-fail-on-issues" class="md-nav__link">
+  <a href="#schema-enforcement-fail-on-issues" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Strict Mode (Fail on Issues)
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#lenient-mode-best-effort" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Lenient Mode (Best-Effort)
+        Schema Enforcement (Fail on Issues)
       
     </span>
   </a>
@@ -2647,21 +2636,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#strict-mode-fail-on-issues" class="md-nav__link">
+  <a href="#schema-enforcement-fail-on-issues" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Strict Mode (Fail on Issues)
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#lenient-mode-best-effort" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Lenient Mode (Best-Effort)
+        Schema Enforcement (Fail on Issues)
       
     </span>
   </a>
@@ -3031,7 +3009,7 @@
 <p><code>dlt</code> is an open-source library for extracting and loading data. Consist uses it to:</p>
 <ul>
 <li><strong>Ingest diverse formats</strong> (Parquet, CSV, JSON, Python objects) into DuckDB</li>
-<li><strong>Auto-detect and enforce schemas</strong> with optional strict validation</li>
+<li><strong>Auto-detect and enforce schemas</strong> (schema enforcement when provided)</li>
 <li><strong>Handle data quality issues</strong> (type mismatches, missing values, duplicates)</li>
 <li><strong>Inject Consist provenance columns</strong> (<code>consist_run_id</code>, <code>consist_artifact_id</code>, <code>consist_year</code>, etc.)</li>
 <li><strong>Scale efficiently</strong> with streaming and batching</li>
@@ -3078,9 +3056,15 @@
 <li><em>Urban Planning</em>: "Count parcels zoned commercial across all scenarios, grouped by district"</li>
 </ul>
 <p><strong>Example:</strong>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1"># DLT ingestion → can query across all runs with SQL</span>
-</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="n">df</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">views</span><span class="o">.</span><span class="n">Persons</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="s2">&quot;consist_run_id&quot;</span><span class="p">,</span> <span class="s2">&quot;age&quot;</span><span class="p">)</span>
-</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="c1"># Returns: all persons from all runs, with run context</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sqlmodel</span><span class="w"> </span><span class="kn">import</span> <span class="n">select</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="c1"># DLT ingestion → can query across all runs with SQL</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="n">VPerson</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">views</span><span class="o">.</span><span class="n">Person</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="n">rows</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">run_query</span><span class="p">(</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    <span class="n">select</span><span class="p">(</span><span class="n">VPerson</span><span class="o">.</span><span class="n">consist_run_id</span><span class="p">,</span> <span class="n">VPerson</span><span class="o">.</span><span class="n">age</span><span class="p">),</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    <span class="n">tracker</span><span class="o">=</span><span class="n">tracker</span><span class="p">,</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="p">)</span>
 </span></code></pre></div></p>
 <h3 id="use-direct-logging-for">Use Direct Logging for:<a class="headerlink" href="#use-direct-logging-for" title="Permanent link">&para;</a></h3>
 <ul>
@@ -3115,14 +3099,15 @@
 </ul>
 <p><strong>Example:</strong>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="c1"># Direct logging → no schema, just store the file</span>
-</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="n">consist</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="n">result_path</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;my_result&quot;</span><span class="p">)</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;log_result&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;demo&quot;</span><span class="p">):</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>    <span class="n">consist</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="n">result_path</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;my_result&quot;</span><span class="p">)</span>
 </span></code></pre></div></p>
 <h3 id="decision-tree">Decision Tree<a class="headerlink" href="#decision-tree" title="Permanent link">&para;</a></h3>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>Do you want to query this data across multiple runs in SQL?
 </span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>├─ YES → Use DLT (register a schema)
 </span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>├─ NO  → Do you trust the data format/types?
 </span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>│        ├─ YES → Use direct logging (tracker.log_artifact)
-</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>│        └─ NO  → Use DLT with strict validation
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>│        └─ NO  → Use DLT with a schema
 </span></code></pre></div>
 <hr />
 <h2 id="basic-dlt-workflow">Basic DLT Workflow<a class="headerlink" href="#basic-dlt-workflow" title="Permanent link">&para;</a></h2>
@@ -3158,19 +3143,21 @@
 </span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>    <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;Alice&quot;</span><span class="p">,</span> <span class="s2">&quot;Bob&quot;</span><span class="p">,</span> <span class="s2">&quot;Carol&quot;</span><span class="p">],</span>
 </span><span id="__span-5-9"><a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="p">})</span>
 </span><span id="__span-5-10"><a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a>
-</span><span id="__span-5-11"><a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a><span class="c1"># Log with schema (dlt ingestion)</span>
-</span><span id="__span-5-12"><a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a><span class="n">tracker</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span><span class="n">df</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;persons&quot;</span><span class="p">,</span> <span class="n">schema</span><span class="o">=</span><span class="n">Person</span><span class="p">)</span>
+</span><span id="__span-5-11"><a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a><span class="c1"># Log with schema (DLT ingestion)</span>
+</span><span id="__span-5-12"><a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;ingest_people&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;demo&quot;</span><span class="p">):</span>
+</span><span id="__span-5-13"><a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span><span class="n">df</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;persons&quot;</span><span class="p">,</span> <span class="n">schema</span><span class="o">=</span><span class="n">Person</span><span class="p">)</span>
 </span></code></pre></div>
 <h3 id="step-4-query-across-runs">Step 4: Query Across Runs<a class="headerlink" href="#step-4-query-across-runs" title="Permanent link">&para;</a></h3>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sqlmodel</span><span class="w"> </span><span class="kn">import</span> <span class="n">select</span><span class="p">,</span> <span class="n">func</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sqlmodel</span><span class="w"> </span><span class="kn">import</span> <span class="n">Session</span><span class="p">,</span> <span class="n">select</span><span class="p">,</span> <span class="n">func</span>
 </span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>
-</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="c1"># Compute an aggregate over a single run_id.</span>
-</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="k">with</span> <span class="n">Session</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">engine</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
-</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>    <span class="n">avg_age</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">exec</span><span class="p">(</span>
-</span><span id="__span-6-6"><a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>        <span class="c1"># Filter to one Consist run and take an average over the ingested rows.</span>
-</span><span id="__span-6-7"><a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>        <span class="n">select</span><span class="p">(</span><span class="n">func</span><span class="o">.</span><span class="n">avg</span><span class="p">(</span><span class="n">Person</span><span class="o">.</span><span class="n">age</span><span class="p">))</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">Person</span><span class="o">.</span><span class="n">consist_run_id</span> <span class="o">==</span> <span class="s2">&quot;run_123&quot;</span><span class="p">)</span>
-</span><span id="__span-6-8"><a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>    <span class="p">)</span><span class="o">.</span><span class="n">first</span><span class="p">()</span>
-</span><span id="__span-6-9"><a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a>    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Average age in run_123: </span><span class="si">{</span><span class="n">avg_age</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="c1"># Compute an aggregate over a single run_id (via the hybrid view).</span>
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="n">VPerson</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">views</span><span class="o">.</span><span class="n">Person</span>
+</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="k">with</span> <span class="n">Session</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">engine</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
+</span><span id="__span-6-6"><a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>    <span class="n">avg_age</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">exec</span><span class="p">(</span>
+</span><span id="__span-6-7"><a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>        <span class="c1"># Filter to one Consist run and take an average over the ingested rows.</span>
+</span><span id="__span-6-8"><a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>        <span class="n">select</span><span class="p">(</span><span class="n">func</span><span class="o">.</span><span class="n">avg</span><span class="p">(</span><span class="n">VPerson</span><span class="o">.</span><span class="n">age</span><span class="p">))</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">VPerson</span><span class="o">.</span><span class="n">consist_run_id</span> <span class="o">==</span> <span class="s2">&quot;run_123&quot;</span><span class="p">)</span>
+</span><span id="__span-6-9"><a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a>    <span class="p">)</span><span class="o">.</span><span class="n">first</span><span class="p">()</span>
+</span><span id="__span-6-10"><a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a>    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Average age in run_123: </span><span class="si">{</span><span class="n">avg_age</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
 </span></code></pre></div>
 <p>Expected output:</p>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>Average age in run_123: 30.0
@@ -3269,107 +3256,92 @@
 <div class="language-python highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
 </span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>
 </span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="n">df</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="s2">&quot;results.csv&quot;</span><span class="p">)</span>
-</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a><span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span>
-</span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>    <span class="n">df</span><span class="p">,</span>
-</span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>    <span class="n">key</span><span class="o">=</span><span class="s2">&quot;results&quot;</span><span class="p">,</span>
-</span><span id="__span-11-7"><a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a>    <span class="n">schema</span><span class="o">=</span><span class="n">MySchema</span><span class="p">,</span>  <span class="c1"># Validate against schema</span>
-</span><span id="__span-11-8"><a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a><span class="p">)</span>
+</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;log_results&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;demo&quot;</span><span class="p">):</span>
+</span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>    <span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span>
+</span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>        <span class="n">df</span><span class="p">,</span>
+</span><span id="__span-11-7"><a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a>        <span class="n">key</span><span class="o">=</span><span class="s2">&quot;results&quot;</span><span class="p">,</span>
+</span><span id="__span-11-8"><a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a>        <span class="n">schema</span><span class="o">=</span><span class="n">MySchema</span><span class="p">,</span>  <span class="c1"># Validate against schema</span>
+</span><span id="__span-11-9"><a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a>    <span class="p">)</span>
 </span></code></pre></div>
 <h3 id="parquet-file">Parquet File<a class="headerlink" href="#parquet-file" title="Permanent link">&para;</a></h3>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="n">consist</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span>
-</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>    <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;results.parquet&quot;</span><span class="p">),</span>
-</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>    <span class="n">key</span><span class="o">=</span><span class="s2">&quot;raw_results&quot;</span><span class="p">,</span>
-</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>    <span class="n">schema</span><span class="o">=</span><span class="n">MySchema</span><span class="p">,</span>  <span class="c1"># Optional: validate on ingest</span>
-</span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;log_parquet&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;demo&quot;</span><span class="p">):</span>
+</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span>
+</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>        <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;results.parquet&quot;</span><span class="p">),</span>
+</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>        <span class="n">key</span><span class="o">=</span><span class="s2">&quot;raw_results&quot;</span><span class="p">,</span>
+</span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a>        <span class="n">schema</span><span class="o">=</span><span class="n">MySchema</span><span class="p">,</span>  <span class="c1"># Schema is stored; call tracker.ingest(...) to ingest</span>
+</span><span id="__span-12-6"><a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a>    <span class="p">)</span>
 </span></code></pre></div>
 <h3 id="csv-file">CSV File<a class="headerlink" href="#csv-file" title="Permanent link">&para;</a></h3>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="n">consist</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span>
-</span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>    <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;results.csv&quot;</span><span class="p">),</span>
-</span><span id="__span-13-3"><a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>    <span class="n">key</span><span class="o">=</span><span class="s2">&quot;csv_results&quot;</span><span class="p">,</span>
-</span><span id="__span-13-4"><a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a>    <span class="n">schema</span><span class="o">=</span><span class="n">MySchema</span><span class="p">,</span>
-</span><span id="__span-13-5"><a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;log_csv&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;demo&quot;</span><span class="p">):</span>
+</span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span>
+</span><span id="__span-13-3"><a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>        <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;results.csv&quot;</span><span class="p">),</span>
+</span><span id="__span-13-4"><a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a>        <span class="n">key</span><span class="o">=</span><span class="s2">&quot;csv_results&quot;</span><span class="p">,</span>
+</span><span id="__span-13-5"><a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a>        <span class="n">schema</span><span class="o">=</span><span class="n">MySchema</span><span class="p">,</span>
+</span><span id="__span-13-6"><a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a>    <span class="p">)</span>
 </span></code></pre></div>
 <h3 id="zarr-netcdf-matrix-data">Zarr / NetCDF (Matrix Data)<a class="headerlink" href="#zarr-netcdf-matrix-data" title="Permanent link">&para;</a></h3>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="c1"># Zarr metadata is ingested as catalog (not raw data)</span>
-</span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="n">consist</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span>
-</span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a>    <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;simulation_output.zarr&quot;</span><span class="p">),</span>
-</span><span id="__span-14-4"><a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a>    <span class="n">key</span><span class="o">=</span><span class="s2">&quot;gridded_results&quot;</span><span class="p">,</span>
-</span><span id="__span-14-5"><a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a>    <span class="n">driver</span><span class="o">=</span><span class="s2">&quot;zarr&quot;</span><span class="p">,</span>
-</span><span id="__span-14-6"><a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a><span class="p">)</span>
-</span><span id="__span-14-7"><a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a><span class="c1"># Creates: consist.views.zarr_catalog with metadata</span>
+</span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;log_zarr&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;demo&quot;</span><span class="p">):</span>
+</span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span>
+</span><span id="__span-14-4"><a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a>        <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;simulation_output.zarr&quot;</span><span class="p">),</span>
+</span><span id="__span-14-5"><a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a>        <span class="n">key</span><span class="o">=</span><span class="s2">&quot;gridded_results&quot;</span><span class="p">,</span>
+</span><span id="__span-14-6"><a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a>        <span class="n">driver</span><span class="o">=</span><span class="s2">&quot;zarr&quot;</span><span class="p">,</span>
+</span><span id="__span-14-7"><a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a>    <span class="p">)</span>
 </span></code></pre></div>
 <hr />
 <h2 id="data-quality-error-handling">Data Quality &amp; Error Handling<a class="headerlink" href="#data-quality-error-handling" title="Permanent link">&para;</a></h2>
-<h3 id="strict-mode-fail-on-issues">Strict Mode (Fail on Issues)<a class="headerlink" href="#strict-mode-fail-on-issues" title="Permanent link">&para;</a></h3>
-<p>If data doesn't match schema exactly, fail fast:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="n">tracker</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span>
-</span><span id="__span-15-2"><a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>    <span class="n">df</span><span class="p">,</span>
-</span><span id="__span-15-3"><a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a>    <span class="n">key</span><span class="o">=</span><span class="s2">&quot;strict_results&quot;</span><span class="p">,</span>
-</span><span id="__span-15-4"><a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a>    <span class="n">schema</span><span class="o">=</span><span class="n">MySchema</span><span class="p">,</span>
-</span><span id="__span-15-5"><a id="__codelineno-15-5" name="__codelineno-15-5" href="#__codelineno-15-5"></a>    <span class="n">strict</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>  <span class="c1"># Raise if schema violated</span>
-</span><span id="__span-15-6"><a id="__codelineno-15-6" name="__codelineno-15-6" href="#__codelineno-15-6"></a><span class="p">)</span>
+<h3 id="schema-enforcement-fail-on-issues">Schema Enforcement (Fail on Issues)<a class="headerlink" href="#schema-enforcement-fail-on-issues" title="Permanent link">&para;</a></h3>
+<p>When you provide a schema, Consist enforces the column set and types. Extra
+columns raise a <code>ValueError</code>, and type mismatches are surfaced during ingestion.</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;strict_ingest&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;demo&quot;</span><span class="p">):</span>
+</span><span id="__span-15-2"><a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span>
+</span><span id="__span-15-3"><a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a>        <span class="n">df</span><span class="p">,</span>
+</span><span id="__span-15-4"><a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a>        <span class="n">key</span><span class="o">=</span><span class="s2">&quot;strict_results&quot;</span><span class="p">,</span>
+</span><span id="__span-15-5"><a id="__codelineno-15-5" name="__codelineno-15-5" href="#__codelineno-15-5"></a>        <span class="n">schema</span><span class="o">=</span><span class="n">MySchema</span><span class="p">,</span>
+</span><span id="__span-15-6"><a id="__codelineno-15-6" name="__codelineno-15-6" href="#__codelineno-15-6"></a>    <span class="p">)</span>
 </span></code></pre></div>
-<p><strong>Will raise if:</strong>
-- Column missing or extra
-- Type mismatch (e.g., string in int column)
-- Null in non-optional field
-- Primary key violation (duplicates)</p>
-<h3 id="lenient-mode-best-effort">Lenient Mode (Best-Effort)<a class="headerlink" href="#lenient-mode-best-effort" title="Permanent link">&para;</a></h3>
-<p>Try to load data, logging warnings for issues:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-16-1"><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="n">tracker</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span>
-</span><span id="__span-16-2"><a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>    <span class="n">df</span><span class="p">,</span>
-</span><span id="__span-16-3"><a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a>    <span class="n">key</span><span class="o">=</span><span class="s2">&quot;lenient_results&quot;</span><span class="p">,</span>
-</span><span id="__span-16-4"><a id="__codelineno-16-4" name="__codelineno-16-4" href="#__codelineno-16-4"></a>    <span class="n">schema</span><span class="o">=</span><span class="n">MySchema</span><span class="p">,</span>
-</span><span id="__span-16-5"><a id="__codelineno-16-5" name="__codelineno-16-5" href="#__codelineno-16-5"></a>    <span class="n">strict</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>  <span class="c1"># Default: warn and continue</span>
-</span><span id="__span-16-6"><a id="__codelineno-16-6" name="__codelineno-16-6" href="#__codelineno-16-6"></a><span class="p">)</span>
-</span></code></pre></div>
-<p><strong>Will warn on:</strong>
-- Type coercion (e.g., "123" → 123)
-- Null in non-optional field (filled with default or NULL)
-- Extra columns (ignored)
-- Missing columns (filled with NULL)</p>
+<p>If you want best-effort ingestion (no strict schema), omit the schema and let
+DLT infer the structure.</p>
 <h3 id="type-coercion">Type Coercion<a class="headerlink" href="#type-coercion" title="Permanent link">&para;</a></h3>
 <p>DLT attempts to coerce types:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-17-1"><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="n">df</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">({</span>
-</span><span id="__span-17-2"><a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a>    <span class="s2">&quot;trip_id&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;1&quot;</span><span class="p">,</span> <span class="s2">&quot;2&quot;</span><span class="p">,</span> <span class="s2">&quot;3&quot;</span><span class="p">],</span>      <span class="c1"># Strings</span>
-</span><span id="__span-17-3"><a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a>    <span class="s2">&quot;distance&quot;</span><span class="p">:</span> <span class="p">[</span><span class="mf">1.5</span><span class="p">,</span> <span class="mf">2.2</span><span class="p">,</span> <span class="mf">3.1</span><span class="p">],</span>     <span class="c1"># Floats</span>
-</span><span id="__span-17-4"><a id="__codelineno-17-4" name="__codelineno-17-4" href="#__codelineno-17-4"></a><span class="p">})</span>
-</span><span id="__span-17-5"><a id="__codelineno-17-5" name="__codelineno-17-5" href="#__codelineno-17-5"></a>
-</span><span id="__span-17-6"><a id="__codelineno-17-6" name="__codelineno-17-6" href="#__codelineno-17-6"></a><span class="c1"># Ingested as:</span>
-</span><span id="__span-17-7"><a id="__codelineno-17-7" name="__codelineno-17-7" href="#__codelineno-17-7"></a><span class="c1"># trip_id: [1, 2, 3]  (coerced to int)</span>
-</span><span id="__span-17-8"><a id="__codelineno-17-8" name="__codelineno-17-8" href="#__codelineno-17-8"></a><span class="c1"># distance: [1.5, 2.2, 3.1]  (floats)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-16-1"><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="n">df</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">({</span>
+</span><span id="__span-16-2"><a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>    <span class="s2">&quot;trip_id&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;1&quot;</span><span class="p">,</span> <span class="s2">&quot;2&quot;</span><span class="p">,</span> <span class="s2">&quot;3&quot;</span><span class="p">],</span>      <span class="c1"># Strings</span>
+</span><span id="__span-16-3"><a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a>    <span class="s2">&quot;distance&quot;</span><span class="p">:</span> <span class="p">[</span><span class="mf">1.5</span><span class="p">,</span> <span class="mf">2.2</span><span class="p">,</span> <span class="mf">3.1</span><span class="p">],</span>     <span class="c1"># Floats</span>
+</span><span id="__span-16-4"><a id="__codelineno-16-4" name="__codelineno-16-4" href="#__codelineno-16-4"></a><span class="p">})</span>
+</span><span id="__span-16-5"><a id="__codelineno-16-5" name="__codelineno-16-5" href="#__codelineno-16-5"></a>
+</span><span id="__span-16-6"><a id="__codelineno-16-6" name="__codelineno-16-6" href="#__codelineno-16-6"></a><span class="c1"># Ingested as:</span>
+</span><span id="__span-16-7"><a id="__codelineno-16-7" name="__codelineno-16-7" href="#__codelineno-16-7"></a><span class="c1"># trip_id: [1, 2, 3]  (coerced to int)</span>
+</span><span id="__span-16-8"><a id="__codelineno-16-8" name="__codelineno-16-8" href="#__codelineno-16-8"></a><span class="c1"># distance: [1.5, 2.2, 3.1]  (floats)</span>
 </span></code></pre></div>
 <p>To avoid surprises, ensure input DataFrame matches schema types:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-18-1"><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="n">df</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">astype</span><span class="p">({</span>
-</span><span id="__span-18-2"><a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a>    <span class="s2">&quot;trip_id&quot;</span><span class="p">:</span> <span class="s2">&quot;int64&quot;</span><span class="p">,</span>
-</span><span id="__span-18-3"><a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a>    <span class="s2">&quot;distance&quot;</span><span class="p">:</span> <span class="s2">&quot;float64&quot;</span><span class="p">,</span>
-</span><span id="__span-18-4"><a id="__codelineno-18-4" name="__codelineno-18-4" href="#__codelineno-18-4"></a><span class="p">})</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-17-1"><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="n">df</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">astype</span><span class="p">({</span>
+</span><span id="__span-17-2"><a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a>    <span class="s2">&quot;trip_id&quot;</span><span class="p">:</span> <span class="s2">&quot;int64&quot;</span><span class="p">,</span>
+</span><span id="__span-17-3"><a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a>    <span class="s2">&quot;distance&quot;</span><span class="p">:</span> <span class="s2">&quot;float64&quot;</span><span class="p">,</span>
+</span><span id="__span-17-4"><a id="__codelineno-17-4" name="__codelineno-17-4" href="#__codelineno-17-4"></a><span class="p">})</span>
 </span></code></pre></div>
 <h3 id="handling-missing-data">Handling Missing Data<a class="headerlink" href="#handling-missing-data" title="Permanent link">&para;</a></h3>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-19-1"><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">Trip</span><span class="p">(</span><span class="n">SQLModel</span><span class="p">,</span> <span class="n">table</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
-</span><span id="__span-19-2"><a id="__codelineno-19-2" name="__codelineno-19-2" href="#__codelineno-19-2"></a>    <span class="n">trip_id</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">primary_key</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
-</span><span id="__span-19-3"><a id="__codelineno-19-3" name="__codelineno-19-3" href="#__codelineno-19-3"></a>    <span class="n">person_id</span><span class="p">:</span> <span class="nb">int</span>
-</span><span id="__span-19-4"><a id="__codelineno-19-4" name="__codelineno-19-4" href="#__codelineno-19-4"></a>    <span class="n">departure_hour</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span>  <span class="c1"># Can be NULL</span>
-</span><span id="__span-19-5"><a id="__codelineno-19-5" name="__codelineno-19-5" href="#__codelineno-19-5"></a>    <span class="n">arrival_hour</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-18-1"><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">Trip</span><span class="p">(</span><span class="n">SQLModel</span><span class="p">,</span> <span class="n">table</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
+</span><span id="__span-18-2"><a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a>    <span class="n">trip_id</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">primary_key</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-18-3"><a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a>    <span class="n">person_id</span><span class="p">:</span> <span class="nb">int</span>
+</span><span id="__span-18-4"><a id="__codelineno-18-4" name="__codelineno-18-4" href="#__codelineno-18-4"></a>    <span class="n">departure_hour</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span>  <span class="c1"># Can be NULL</span>
+</span><span id="__span-18-5"><a id="__codelineno-18-5" name="__codelineno-18-5" href="#__codelineno-18-5"></a>    <span class="n">arrival_hour</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span>
 </span></code></pre></div>
-<p>Missing values in Optional fields → NULL in DB. Missing in required fields → error or default depending on <code>strict</code>.</p>
+<p>Missing values in Optional fields → NULL in DB. Missing in required fields → error or default depending on the schema and ingestion behavior.</p>
 <h3 id="duplicate-handling">Duplicate Handling<a class="headerlink" href="#duplicate-handling" title="Permanent link">&para;</a></h3>
-<p>Primary keys must be unique:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-20-1"><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">Household</span><span class="p">(</span><span class="n">SQLModel</span><span class="p">,</span> <span class="n">table</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
-</span><span id="__span-20-2"><a id="__codelineno-20-2" name="__codelineno-20-2" href="#__codelineno-20-2"></a>    <span class="n">household_id</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">primary_key</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
-</span><span id="__span-20-3"><a id="__codelineno-20-3" name="__codelineno-20-3" href="#__codelineno-20-3"></a>    <span class="n">size</span><span class="p">:</span> <span class="nb">int</span>
-</span><span id="__span-20-4"><a id="__codelineno-20-4" name="__codelineno-20-4" href="#__codelineno-20-4"></a>
-</span><span id="__span-20-5"><a id="__codelineno-20-5" name="__codelineno-20-5" href="#__codelineno-20-5"></a><span class="c1"># If DataFrame has duplicate household_id:</span>
-</span><span id="__span-20-6"><a id="__codelineno-20-6" name="__codelineno-20-6" href="#__codelineno-20-6"></a><span class="n">df</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">({</span>
-</span><span id="__span-20-7"><a id="__codelineno-20-7" name="__codelineno-20-7" href="#__codelineno-20-7"></a>    <span class="s2">&quot;household_id&quot;</span><span class="p">:</span> <span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">1</span><span class="p">],</span>  <span class="c1"># Duplicate!</span>
-</span><span id="__span-20-8"><a id="__codelineno-20-8" name="__codelineno-20-8" href="#__codelineno-20-8"></a>    <span class="s2">&quot;size&quot;</span><span class="p">:</span> <span class="p">[</span><span class="mi">4</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">5</span><span class="p">],</span>
-</span><span id="__span-20-9"><a id="__codelineno-20-9" name="__codelineno-20-9" href="#__codelineno-20-9"></a><span class="p">})</span>
-</span><span id="__span-20-10"><a id="__codelineno-20-10" name="__codelineno-20-10" href="#__codelineno-20-10"></a>
-</span><span id="__span-20-11"><a id="__codelineno-20-11" name="__codelineno-20-11" href="#__codelineno-20-11"></a><span class="c1"># strict=True → raises PrimaryKeyViolationError</span>
-</span><span id="__span-20-12"><a id="__codelineno-20-12" name="__codelineno-20-12" href="#__codelineno-20-12"></a><span class="c1"># strict=False → last value wins or error</span>
+<p>Primary keys are not enforced automatically in all cases. If you need
+uniqueness, deduplicate before ingestion:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-19-1"><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">Household</span><span class="p">(</span><span class="n">SQLModel</span><span class="p">,</span> <span class="n">table</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
+</span><span id="__span-19-2"><a id="__codelineno-19-2" name="__codelineno-19-2" href="#__codelineno-19-2"></a>    <span class="n">household_id</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">primary_key</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-19-3"><a id="__codelineno-19-3" name="__codelineno-19-3" href="#__codelineno-19-3"></a>    <span class="n">size</span><span class="p">:</span> <span class="nb">int</span>
+</span><span id="__span-19-4"><a id="__codelineno-19-4" name="__codelineno-19-4" href="#__codelineno-19-4"></a>
+</span><span id="__span-19-5"><a id="__codelineno-19-5" name="__codelineno-19-5" href="#__codelineno-19-5"></a><span class="c1"># If DataFrame has duplicate household_id:</span>
+</span><span id="__span-19-6"><a id="__codelineno-19-6" name="__codelineno-19-6" href="#__codelineno-19-6"></a><span class="n">df</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">({</span>
+</span><span id="__span-19-7"><a id="__codelineno-19-7" name="__codelineno-19-7" href="#__codelineno-19-7"></a>    <span class="s2">&quot;household_id&quot;</span><span class="p">:</span> <span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">1</span><span class="p">],</span>  <span class="c1"># Duplicate!</span>
+</span><span id="__span-19-8"><a id="__codelineno-19-8" name="__codelineno-19-8" href="#__codelineno-19-8"></a>    <span class="s2">&quot;size&quot;</span><span class="p">:</span> <span class="p">[</span><span class="mi">4</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">5</span><span class="p">],</span>
+</span><span id="__span-19-9"><a id="__codelineno-19-9" name="__codelineno-19-9" href="#__codelineno-19-9"></a><span class="p">})</span>
 </span></code></pre></div>
 <p>To handle duplicates, deduplicate before ingestion:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-21-1"><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a><span class="n">df</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">drop_duplicates</span><span class="p">(</span><span class="n">subset</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;household_id&quot;</span><span class="p">],</span> <span class="n">keep</span><span class="o">=</span><span class="s2">&quot;last&quot;</span><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-20-1"><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="n">df</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">drop_duplicates</span><span class="p">(</span><span class="n">subset</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;household_id&quot;</span><span class="p">],</span> <span class="n">keep</span><span class="o">=</span><span class="s2">&quot;last&quot;</span><span class="p">)</span>
 </span></code></pre></div>
 <hr />
 <h2 id="provenance-columns">Provenance Columns<a class="headerlink" href="#provenance-columns" title="Permanent link">&para;</a></h2>
@@ -3397,7 +3369,7 @@
 <tr>
 <td><code>consist_scenario_id</code></td>
 <td>str</td>
-<td>Scenario ID (if run is part of scenario)</td>
+<td>Scenario ID (available in hybrid views)</td>
 </tr>
 <tr>
 <td><code>consist_year</code></td>
@@ -3412,134 +3384,136 @@
 </tbody>
 </table>
 <h3 id="example-query">Example Query<a class="headerlink" href="#example-query" title="Permanent link">&para;</a></h3>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-22-1"><a id="__codelineno-22-1" name="__codelineno-22-1" href="#__codelineno-22-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sqlmodel</span><span class="w"> </span><span class="kn">import</span> <span class="n">Session</span><span class="p">,</span> <span class="n">select</span>
-</span><span id="__span-22-2"><a id="__codelineno-22-2" name="__codelineno-22-2" href="#__codelineno-22-2"></a>
-</span><span id="__span-22-3"><a id="__codelineno-22-3" name="__codelineno-22-3" href="#__codelineno-22-3"></a><span class="k">with</span> <span class="n">Session</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">engine</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
-</span><span id="__span-22-4"><a id="__codelineno-22-4" name="__codelineno-22-4" href="#__codelineno-22-4"></a>    <span class="c1"># Count persons per run</span>
-</span><span id="__span-22-5"><a id="__codelineno-22-5" name="__codelineno-22-5" href="#__codelineno-22-5"></a>    <span class="n">results</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">exec</span><span class="p">(</span>
-</span><span id="__span-22-6"><a id="__codelineno-22-6" name="__codelineno-22-6" href="#__codelineno-22-6"></a>        <span class="n">select</span><span class="p">(</span>
-</span><span id="__span-22-7"><a id="__codelineno-22-7" name="__codelineno-22-7" href="#__codelineno-22-7"></a>            <span class="n">Person</span><span class="o">.</span><span class="n">consist_run_id</span><span class="p">,</span>
-</span><span id="__span-22-8"><a id="__codelineno-22-8" name="__codelineno-22-8" href="#__codelineno-22-8"></a>            <span class="n">func</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="n">Person</span><span class="o">.</span><span class="n">person_id</span><span class="p">)</span><span class="o">.</span><span class="n">label</span><span class="p">(</span><span class="s2">&quot;count&quot;</span><span class="p">)</span>
-</span><span id="__span-22-9"><a id="__codelineno-22-9" name="__codelineno-22-9" href="#__codelineno-22-9"></a>        <span class="p">)</span><span class="o">.</span><span class="n">group_by</span><span class="p">(</span><span class="n">Person</span><span class="o">.</span><span class="n">consist_run_id</span><span class="p">)</span>
-</span><span id="__span-22-10"><a id="__codelineno-22-10" name="__codelineno-22-10" href="#__codelineno-22-10"></a>    <span class="p">)</span><span class="o">.</span><span class="n">all</span><span class="p">()</span>
-</span><span id="__span-22-11"><a id="__codelineno-22-11" name="__codelineno-22-11" href="#__codelineno-22-11"></a>
-</span><span id="__span-22-12"><a id="__codelineno-22-12" name="__codelineno-22-12" href="#__codelineno-22-12"></a>    <span class="k">for</span> <span class="n">run_id</span><span class="p">,</span> <span class="n">count</span> <span class="ow">in</span> <span class="n">results</span><span class="p">:</span>
-</span><span id="__span-22-13"><a id="__codelineno-22-13" name="__codelineno-22-13" href="#__codelineno-22-13"></a>        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Run </span><span class="si">{</span><span class="n">run_id</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">count</span><span class="si">}</span><span class="s2"> persons&quot;</span><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-21-1"><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sqlmodel</span><span class="w"> </span><span class="kn">import</span> <span class="n">Session</span><span class="p">,</span> <span class="n">select</span><span class="p">,</span> <span class="n">func</span>
+</span><span id="__span-21-2"><a id="__codelineno-21-2" name="__codelineno-21-2" href="#__codelineno-21-2"></a>
+</span><span id="__span-21-3"><a id="__codelineno-21-3" name="__codelineno-21-3" href="#__codelineno-21-3"></a><span class="n">VPerson</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">views</span><span class="o">.</span><span class="n">Person</span>
+</span><span id="__span-21-4"><a id="__codelineno-21-4" name="__codelineno-21-4" href="#__codelineno-21-4"></a><span class="k">with</span> <span class="n">Session</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">engine</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
+</span><span id="__span-21-5"><a id="__codelineno-21-5" name="__codelineno-21-5" href="#__codelineno-21-5"></a>    <span class="c1"># Count persons per run</span>
+</span><span id="__span-21-6"><a id="__codelineno-21-6" name="__codelineno-21-6" href="#__codelineno-21-6"></a>    <span class="n">results</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">exec</span><span class="p">(</span>
+</span><span id="__span-21-7"><a id="__codelineno-21-7" name="__codelineno-21-7" href="#__codelineno-21-7"></a>        <span class="n">select</span><span class="p">(</span>
+</span><span id="__span-21-8"><a id="__codelineno-21-8" name="__codelineno-21-8" href="#__codelineno-21-8"></a>            <span class="n">VPerson</span><span class="o">.</span><span class="n">consist_run_id</span><span class="p">,</span>
+</span><span id="__span-21-9"><a id="__codelineno-21-9" name="__codelineno-21-9" href="#__codelineno-21-9"></a>            <span class="n">func</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="n">VPerson</span><span class="o">.</span><span class="n">person_id</span><span class="p">)</span><span class="o">.</span><span class="n">label</span><span class="p">(</span><span class="s2">&quot;count&quot;</span><span class="p">)</span>
+</span><span id="__span-21-10"><a id="__codelineno-21-10" name="__codelineno-21-10" href="#__codelineno-21-10"></a>        <span class="p">)</span><span class="o">.</span><span class="n">group_by</span><span class="p">(</span><span class="n">VPerson</span><span class="o">.</span><span class="n">consist_run_id</span><span class="p">)</span>
+</span><span id="__span-21-11"><a id="__codelineno-21-11" name="__codelineno-21-11" href="#__codelineno-21-11"></a>    <span class="p">)</span><span class="o">.</span><span class="n">all</span><span class="p">()</span>
+</span><span id="__span-21-12"><a id="__codelineno-21-12" name="__codelineno-21-12" href="#__codelineno-21-12"></a>
+</span><span id="__span-21-13"><a id="__codelineno-21-13" name="__codelineno-21-13" href="#__codelineno-21-13"></a>    <span class="k">for</span> <span class="n">run_id</span><span class="p">,</span> <span class="n">count</span> <span class="ow">in</span> <span class="n">results</span><span class="p">:</span>
+</span><span id="__span-21-14"><a id="__codelineno-21-14" name="__codelineno-21-14" href="#__codelineno-21-14"></a>        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Run </span><span class="si">{</span><span class="n">run_id</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">count</span><span class="si">}</span><span class="s2"> persons&quot;</span><span class="p">)</span>
 </span></code></pre></div>
 <h3 id="filtering-by-provenance">Filtering by Provenance<a class="headerlink" href="#filtering-by-provenance" title="Permanent link">&para;</a></h3>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-23-1"><a id="__codelineno-23-1" name="__codelineno-23-1" href="#__codelineno-23-1"></a><span class="c1"># Get persons from a specific scenario year</span>
-</span><span id="__span-23-2"><a id="__codelineno-23-2" name="__codelineno-23-2" href="#__codelineno-23-2"></a><span class="k">with</span> <span class="n">Session</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">engine</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
-</span><span id="__span-23-3"><a id="__codelineno-23-3" name="__codelineno-23-3" href="#__codelineno-23-3"></a>    <span class="n">persons_2030</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">exec</span><span class="p">(</span>
-</span><span id="__span-23-4"><a id="__codelineno-23-4" name="__codelineno-23-4" href="#__codelineno-23-4"></a>        <span class="n">select</span><span class="p">(</span><span class="n">Person</span><span class="p">)</span><span class="o">.</span><span class="n">where</span><span class="p">(</span>
-</span><span id="__span-23-5"><a id="__codelineno-23-5" name="__codelineno-23-5" href="#__codelineno-23-5"></a>            <span class="n">Person</span><span class="o">.</span><span class="n">consist_year</span> <span class="o">==</span> <span class="mi">2030</span><span class="p">,</span>
-</span><span id="__span-23-6"><a id="__codelineno-23-6" name="__codelineno-23-6" href="#__codelineno-23-6"></a>            <span class="n">Person</span><span class="o">.</span><span class="n">consist_scenario_id</span> <span class="o">==</span> <span class="s2">&quot;baseline&quot;</span>
-</span><span id="__span-23-7"><a id="__codelineno-23-7" name="__codelineno-23-7" href="#__codelineno-23-7"></a>        <span class="p">)</span>
-</span><span id="__span-23-8"><a id="__codelineno-23-8" name="__codelineno-23-8" href="#__codelineno-23-8"></a>    <span class="p">)</span><span class="o">.</span><span class="n">all</span><span class="p">()</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-22-1"><a id="__codelineno-22-1" name="__codelineno-22-1" href="#__codelineno-22-1"></a><span class="c1"># Get persons from a specific scenario year</span>
+</span><span id="__span-22-2"><a id="__codelineno-22-2" name="__codelineno-22-2" href="#__codelineno-22-2"></a><span class="k">with</span> <span class="n">Session</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">engine</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
+</span><span id="__span-22-3"><a id="__codelineno-22-3" name="__codelineno-22-3" href="#__codelineno-22-3"></a>    <span class="n">persons_2030</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">exec</span><span class="p">(</span>
+</span><span id="__span-22-4"><a id="__codelineno-22-4" name="__codelineno-22-4" href="#__codelineno-22-4"></a>        <span class="n">select</span><span class="p">(</span><span class="n">VPerson</span><span class="p">)</span><span class="o">.</span><span class="n">where</span><span class="p">(</span>
+</span><span id="__span-22-5"><a id="__codelineno-22-5" name="__codelineno-22-5" href="#__codelineno-22-5"></a>            <span class="n">VPerson</span><span class="o">.</span><span class="n">consist_year</span> <span class="o">==</span> <span class="mi">2030</span><span class="p">,</span>
+</span><span id="__span-22-6"><a id="__codelineno-22-6" name="__codelineno-22-6" href="#__codelineno-22-6"></a>            <span class="n">VPerson</span><span class="o">.</span><span class="n">consist_scenario_id</span> <span class="o">==</span> <span class="s2">&quot;baseline&quot;</span>
+</span><span id="__span-22-7"><a id="__codelineno-22-7" name="__codelineno-22-7" href="#__codelineno-22-7"></a>        <span class="p">)</span>
+</span><span id="__span-22-8"><a id="__codelineno-22-8" name="__codelineno-22-8" href="#__codelineno-22-8"></a>    <span class="p">)</span><span class="o">.</span><span class="n">all</span><span class="p">()</span>
 </span></code></pre></div>
 <hr />
 <h2 id="advanced-patterns">Advanced Patterns<a class="headerlink" href="#advanced-patterns" title="Permanent link">&para;</a></h2>
 <h3 id="multi-step-ingestion-scenario">Multi-Step Ingestion (Scenario)<a class="headerlink" href="#multi-step-ingestion-scenario" title="Permanent link">&para;</a></h3>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-24-1"><a id="__codelineno-24-1" name="__codelineno-24-1" href="#__codelineno-24-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
-</span><span id="__span-24-2"><a id="__codelineno-24-2" name="__codelineno-24-2" href="#__codelineno-24-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">Tracker</span><span class="p">,</span> <span class="n">use_tracker</span>
-</span><span id="__span-24-3"><a id="__codelineno-24-3" name="__codelineno-24-3" href="#__codelineno-24-3"></a>
-</span><span id="__span-24-4"><a id="__codelineno-24-4" name="__codelineno-24-4" href="#__codelineno-24-4"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span>
-</span><span id="__span-24-5"><a id="__codelineno-24-5" name="__codelineno-24-5" href="#__codelineno-24-5"></a>    <span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;./runs&quot;</span><span class="p">,</span>
-</span><span id="__span-24-6"><a id="__codelineno-24-6" name="__codelineno-24-6" href="#__codelineno-24-6"></a>    <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">,</span>
-</span><span id="__span-24-7"><a id="__codelineno-24-7" name="__codelineno-24-7" href="#__codelineno-24-7"></a>    <span class="n">schemas</span><span class="o">=</span><span class="p">[</span><span class="n">Person</span><span class="p">,</span> <span class="n">Trip</span><span class="p">,</span> <span class="n">Household</span><span class="p">],</span>
-</span><span id="__span-24-8"><a id="__codelineno-24-8" name="__codelineno-24-8" href="#__codelineno-24-8"></a><span class="p">)</span>
-</span><span id="__span-24-9"><a id="__codelineno-24-9" name="__codelineno-24-9" href="#__codelineno-24-9"></a>
-</span><span id="__span-24-10"><a id="__codelineno-24-10" name="__codelineno-24-10" href="#__codelineno-24-10"></a><span class="k">with</span> <span class="n">use_tracker</span><span class="p">(</span><span class="n">tracker</span><span class="p">):</span>
-</span><span id="__span-24-11"><a id="__codelineno-24-11" name="__codelineno-24-11" href="#__codelineno-24-11"></a>    <span class="k">with</span> <span class="n">consist</span><span class="o">.</span><span class="n">scenario</span><span class="p">(</span><span class="s2">&quot;model_run_2030&quot;</span><span class="p">,</span> <span class="n">year</span><span class="o">=</span><span class="mi">2030</span><span class="p">)</span> <span class="k">as</span> <span class="n">sc</span><span class="p">:</span>
-</span><span id="__span-24-12"><a id="__codelineno-24-12" name="__codelineno-24-12" href="#__codelineno-24-12"></a>
-</span><span id="__span-24-13"><a id="__codelineno-24-13" name="__codelineno-24-13" href="#__codelineno-24-13"></a>        <span class="c1"># Step 1: Load persons</span>
-</span><span id="__span-24-14"><a id="__codelineno-24-14" name="__codelineno-24-14" href="#__codelineno-24-14"></a>        <span class="k">with</span> <span class="n">sc</span><span class="o">.</span><span class="n">trace</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;load_persons&quot;</span><span class="p">):</span>
-</span><span id="__span-24-15"><a id="__codelineno-24-15" name="__codelineno-24-15" href="#__codelineno-24-15"></a>            <span class="n">df_persons</span> <span class="o">=</span> <span class="n">load_population_data</span><span class="p">()</span>
-</span><span id="__span-24-16"><a id="__codelineno-24-16" name="__codelineno-24-16" href="#__codelineno-24-16"></a>            <span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span>
-</span><span id="__span-24-17"><a id="__codelineno-24-17" name="__codelineno-24-17" href="#__codelineno-24-17"></a>                <span class="n">df_persons</span><span class="p">,</span>
-</span><span id="__span-24-18"><a id="__codelineno-24-18" name="__codelineno-24-18" href="#__codelineno-24-18"></a>                <span class="n">key</span><span class="o">=</span><span class="s2">&quot;population&quot;</span><span class="p">,</span>
-</span><span id="__span-24-19"><a id="__codelineno-24-19" name="__codelineno-24-19" href="#__codelineno-24-19"></a>                <span class="n">schema</span><span class="o">=</span><span class="n">Person</span><span class="p">,</span>
-</span><span id="__span-24-20"><a id="__codelineno-24-20" name="__codelineno-24-20" href="#__codelineno-24-20"></a>            <span class="p">)</span>
-</span><span id="__span-24-21"><a id="__codelineno-24-21" name="__codelineno-24-21" href="#__codelineno-24-21"></a>
-</span><span id="__span-24-22"><a id="__codelineno-24-22" name="__codelineno-24-22" href="#__codelineno-24-22"></a>        <span class="c1"># Step 2: Simulate trips</span>
-</span><span id="__span-24-23"><a id="__codelineno-24-23" name="__codelineno-24-23" href="#__codelineno-24-23"></a>        <span class="k">with</span> <span class="n">sc</span><span class="o">.</span><span class="n">trace</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;simulate_trips&quot;</span><span class="p">):</span>
-</span><span id="__span-24-24"><a id="__codelineno-24-24" name="__codelineno-24-24" href="#__codelineno-24-24"></a>            <span class="n">df_trips</span> <span class="o">=</span> <span class="n">run_trip_simulation</span><span class="p">(</span><span class="n">df_persons</span><span class="p">)</span>
-</span><span id="__span-24-25"><a id="__codelineno-24-25" name="__codelineno-24-25" href="#__codelineno-24-25"></a>            <span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span>
-</span><span id="__span-24-26"><a id="__codelineno-24-26" name="__codelineno-24-26" href="#__codelineno-24-26"></a>                <span class="n">df_trips</span><span class="p">,</span>
-</span><span id="__span-24-27"><a id="__codelineno-24-27" name="__codelineno-24-27" href="#__codelineno-24-27"></a>                <span class="n">key</span><span class="o">=</span><span class="s2">&quot;trips&quot;</span><span class="p">,</span>
-</span><span id="__span-24-28"><a id="__codelineno-24-28" name="__codelineno-24-28" href="#__codelineno-24-28"></a>                <span class="n">schema</span><span class="o">=</span><span class="n">Trip</span><span class="p">,</span>
-</span><span id="__span-24-29"><a id="__codelineno-24-29" name="__codelineno-24-29" href="#__codelineno-24-29"></a>            <span class="p">)</span>
-</span><span id="__span-24-30"><a id="__codelineno-24-30" name="__codelineno-24-30" href="#__codelineno-24-30"></a>
-</span><span id="__span-24-31"><a id="__codelineno-24-31" name="__codelineno-24-31" href="#__codelineno-24-31"></a>        <span class="c1"># Step 3: Aggregate</span>
-</span><span id="__span-24-32"><a id="__codelineno-24-32" name="__codelineno-24-32" href="#__codelineno-24-32"></a>        <span class="k">with</span> <span class="n">sc</span><span class="o">.</span><span class="n">trace</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;aggregate&quot;</span><span class="p">):</span>
-</span><span id="__span-24-33"><a id="__codelineno-24-33" name="__codelineno-24-33" href="#__codelineno-24-33"></a>            <span class="c1"># Query previous step</span>
-</span><span id="__span-24-34"><a id="__codelineno-24-34" name="__codelineno-24-34" href="#__codelineno-24-34"></a>            <span class="k">with</span> <span class="n">Session</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">engine</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
-</span><span id="__span-24-35"><a id="__codelineno-24-35" name="__codelineno-24-35" href="#__codelineno-24-35"></a>                <span class="n">total_trips</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">exec</span><span class="p">(</span>
-</span><span id="__span-24-36"><a id="__codelineno-24-36" name="__codelineno-24-36" href="#__codelineno-24-36"></a>                    <span class="n">select</span><span class="p">(</span><span class="n">func</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="n">Trip</span><span class="o">.</span><span class="n">trip_id</span><span class="p">))</span><span class="o">.</span><span class="n">where</span><span class="p">(</span>
-</span><span id="__span-24-37"><a id="__codelineno-24-37" name="__codelineno-24-37" href="#__codelineno-24-37"></a>                        <span class="n">Trip</span><span class="o">.</span><span class="n">consist_scenario_id</span> <span class="o">==</span> <span class="s2">&quot;model_run_2030&quot;</span>
-</span><span id="__span-24-38"><a id="__codelineno-24-38" name="__codelineno-24-38" href="#__codelineno-24-38"></a>                    <span class="p">)</span>
-</span><span id="__span-24-39"><a id="__codelineno-24-39" name="__codelineno-24-39" href="#__codelineno-24-39"></a>                <span class="p">)</span><span class="o">.</span><span class="n">first</span><span class="p">()</span>
-</span><span id="__span-24-40"><a id="__codelineno-24-40" name="__codelineno-24-40" href="#__codelineno-24-40"></a>            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Total trips: </span><span class="si">{</span><span class="n">total_trips</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-23-1"><a id="__codelineno-23-1" name="__codelineno-23-1" href="#__codelineno-23-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
+</span><span id="__span-23-2"><a id="__codelineno-23-2" name="__codelineno-23-2" href="#__codelineno-23-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">Tracker</span><span class="p">,</span> <span class="n">use_tracker</span>
+</span><span id="__span-23-3"><a id="__codelineno-23-3" name="__codelineno-23-3" href="#__codelineno-23-3"></a>
+</span><span id="__span-23-4"><a id="__codelineno-23-4" name="__codelineno-23-4" href="#__codelineno-23-4"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span>
+</span><span id="__span-23-5"><a id="__codelineno-23-5" name="__codelineno-23-5" href="#__codelineno-23-5"></a>    <span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;./runs&quot;</span><span class="p">,</span>
+</span><span id="__span-23-6"><a id="__codelineno-23-6" name="__codelineno-23-6" href="#__codelineno-23-6"></a>    <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">,</span>
+</span><span id="__span-23-7"><a id="__codelineno-23-7" name="__codelineno-23-7" href="#__codelineno-23-7"></a>    <span class="n">schemas</span><span class="o">=</span><span class="p">[</span><span class="n">Person</span><span class="p">,</span> <span class="n">Trip</span><span class="p">,</span> <span class="n">Household</span><span class="p">],</span>
+</span><span id="__span-23-8"><a id="__codelineno-23-8" name="__codelineno-23-8" href="#__codelineno-23-8"></a><span class="p">)</span>
+</span><span id="__span-23-9"><a id="__codelineno-23-9" name="__codelineno-23-9" href="#__codelineno-23-9"></a>
+</span><span id="__span-23-10"><a id="__codelineno-23-10" name="__codelineno-23-10" href="#__codelineno-23-10"></a><span class="k">with</span> <span class="n">use_tracker</span><span class="p">(</span><span class="n">tracker</span><span class="p">):</span>
+</span><span id="__span-23-11"><a id="__codelineno-23-11" name="__codelineno-23-11" href="#__codelineno-23-11"></a>    <span class="k">with</span> <span class="n">consist</span><span class="o">.</span><span class="n">scenario</span><span class="p">(</span><span class="s2">&quot;model_run_2030&quot;</span><span class="p">,</span> <span class="n">year</span><span class="o">=</span><span class="mi">2030</span><span class="p">)</span> <span class="k">as</span> <span class="n">sc</span><span class="p">:</span>
+</span><span id="__span-23-12"><a id="__codelineno-23-12" name="__codelineno-23-12" href="#__codelineno-23-12"></a>
+</span><span id="__span-23-13"><a id="__codelineno-23-13" name="__codelineno-23-13" href="#__codelineno-23-13"></a>        <span class="c1"># Step 1: Load persons</span>
+</span><span id="__span-23-14"><a id="__codelineno-23-14" name="__codelineno-23-14" href="#__codelineno-23-14"></a>        <span class="k">with</span> <span class="n">sc</span><span class="o">.</span><span class="n">trace</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;load_persons&quot;</span><span class="p">):</span>
+</span><span id="__span-23-15"><a id="__codelineno-23-15" name="__codelineno-23-15" href="#__codelineno-23-15"></a>            <span class="n">df_persons</span> <span class="o">=</span> <span class="n">load_population_data</span><span class="p">()</span>
+</span><span id="__span-23-16"><a id="__codelineno-23-16" name="__codelineno-23-16" href="#__codelineno-23-16"></a>            <span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span>
+</span><span id="__span-23-17"><a id="__codelineno-23-17" name="__codelineno-23-17" href="#__codelineno-23-17"></a>                <span class="n">df_persons</span><span class="p">,</span>
+</span><span id="__span-23-18"><a id="__codelineno-23-18" name="__codelineno-23-18" href="#__codelineno-23-18"></a>                <span class="n">key</span><span class="o">=</span><span class="s2">&quot;population&quot;</span><span class="p">,</span>
+</span><span id="__span-23-19"><a id="__codelineno-23-19" name="__codelineno-23-19" href="#__codelineno-23-19"></a>                <span class="n">schema</span><span class="o">=</span><span class="n">Person</span><span class="p">,</span>
+</span><span id="__span-23-20"><a id="__codelineno-23-20" name="__codelineno-23-20" href="#__codelineno-23-20"></a>            <span class="p">)</span>
+</span><span id="__span-23-21"><a id="__codelineno-23-21" name="__codelineno-23-21" href="#__codelineno-23-21"></a>
+</span><span id="__span-23-22"><a id="__codelineno-23-22" name="__codelineno-23-22" href="#__codelineno-23-22"></a>        <span class="c1"># Step 2: Simulate trips</span>
+</span><span id="__span-23-23"><a id="__codelineno-23-23" name="__codelineno-23-23" href="#__codelineno-23-23"></a>        <span class="k">with</span> <span class="n">sc</span><span class="o">.</span><span class="n">trace</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;simulate_trips&quot;</span><span class="p">):</span>
+</span><span id="__span-23-24"><a id="__codelineno-23-24" name="__codelineno-23-24" href="#__codelineno-23-24"></a>            <span class="n">df_trips</span> <span class="o">=</span> <span class="n">run_trip_simulation</span><span class="p">(</span><span class="n">df_persons</span><span class="p">)</span>
+</span><span id="__span-23-25"><a id="__codelineno-23-25" name="__codelineno-23-25" href="#__codelineno-23-25"></a>            <span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span>
+</span><span id="__span-23-26"><a id="__codelineno-23-26" name="__codelineno-23-26" href="#__codelineno-23-26"></a>                <span class="n">df_trips</span><span class="p">,</span>
+</span><span id="__span-23-27"><a id="__codelineno-23-27" name="__codelineno-23-27" href="#__codelineno-23-27"></a>                <span class="n">key</span><span class="o">=</span><span class="s2">&quot;trips&quot;</span><span class="p">,</span>
+</span><span id="__span-23-28"><a id="__codelineno-23-28" name="__codelineno-23-28" href="#__codelineno-23-28"></a>                <span class="n">schema</span><span class="o">=</span><span class="n">Trip</span><span class="p">,</span>
+</span><span id="__span-23-29"><a id="__codelineno-23-29" name="__codelineno-23-29" href="#__codelineno-23-29"></a>            <span class="p">)</span>
+</span><span id="__span-23-30"><a id="__codelineno-23-30" name="__codelineno-23-30" href="#__codelineno-23-30"></a>
+</span><span id="__span-23-31"><a id="__codelineno-23-31" name="__codelineno-23-31" href="#__codelineno-23-31"></a>        <span class="c1"># Step 3: Aggregate</span>
+</span><span id="__span-23-32"><a id="__codelineno-23-32" name="__codelineno-23-32" href="#__codelineno-23-32"></a>        <span class="k">with</span> <span class="n">sc</span><span class="o">.</span><span class="n">trace</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;aggregate&quot;</span><span class="p">):</span>
+</span><span id="__span-23-33"><a id="__codelineno-23-33" name="__codelineno-23-33" href="#__codelineno-23-33"></a>            <span class="c1"># Query previous step</span>
+</span><span id="__span-23-34"><a id="__codelineno-23-34" name="__codelineno-23-34" href="#__codelineno-23-34"></a>            <span class="k">with</span> <span class="n">Session</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">engine</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
+</span><span id="__span-23-35"><a id="__codelineno-23-35" name="__codelineno-23-35" href="#__codelineno-23-35"></a>                <span class="n">total_trips</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">exec</span><span class="p">(</span>
+</span><span id="__span-23-36"><a id="__codelineno-23-36" name="__codelineno-23-36" href="#__codelineno-23-36"></a>                    <span class="n">select</span><span class="p">(</span><span class="n">func</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="n">Trip</span><span class="o">.</span><span class="n">trip_id</span><span class="p">))</span><span class="o">.</span><span class="n">where</span><span class="p">(</span>
+</span><span id="__span-23-37"><a id="__codelineno-23-37" name="__codelineno-23-37" href="#__codelineno-23-37"></a>                        <span class="n">Trip</span><span class="o">.</span><span class="n">consist_scenario_id</span> <span class="o">==</span> <span class="s2">&quot;model_run_2030&quot;</span>
+</span><span id="__span-23-38"><a id="__codelineno-23-38" name="__codelineno-23-38" href="#__codelineno-23-38"></a>                    <span class="p">)</span>
+</span><span id="__span-23-39"><a id="__codelineno-23-39" name="__codelineno-23-39" href="#__codelineno-23-39"></a>                <span class="p">)</span><span class="o">.</span><span class="n">first</span><span class="p">()</span>
+</span><span id="__span-23-40"><a id="__codelineno-23-40" name="__codelineno-23-40" href="#__codelineno-23-40"></a>            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Total trips: </span><span class="si">{</span><span class="n">total_trips</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
 </span></code></pre></div>
 <p>All data from steps 1-3 is queryable together:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-25-1"><a id="__codelineno-25-1" name="__codelineno-25-1" href="#__codelineno-25-1"></a><span class="c1"># Cross-step query</span>
-</span><span id="__span-25-2"><a id="__codelineno-25-2" name="__codelineno-25-2" href="#__codelineno-25-2"></a><span class="k">with</span> <span class="n">Session</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">engine</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
-</span><span id="__span-25-3"><a id="__codelineno-25-3" name="__codelineno-25-3" href="#__codelineno-25-3"></a>    <span class="n">results</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">exec</span><span class="p">(</span>
-</span><span id="__span-25-4"><a id="__codelineno-25-4" name="__codelineno-25-4" href="#__codelineno-25-4"></a>        <span class="n">select</span><span class="p">(</span><span class="n">Person</span><span class="p">,</span> <span class="n">Trip</span><span class="p">)</span><span class="o">.</span><span class="n">join</span><span class="p">(</span>
-</span><span id="__span-25-5"><a id="__codelineno-25-5" name="__codelineno-25-5" href="#__codelineno-25-5"></a>            <span class="n">Trip</span><span class="p">,</span> <span class="n">Person</span><span class="o">.</span><span class="n">person_id</span> <span class="o">==</span> <span class="n">Trip</span><span class="o">.</span><span class="n">person_id</span>
-</span><span id="__span-25-6"><a id="__codelineno-25-6" name="__codelineno-25-6" href="#__codelineno-25-6"></a>        <span class="p">)</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">Trip</span><span class="o">.</span><span class="n">consist_scenario_id</span> <span class="o">==</span> <span class="s2">&quot;model_run_2030&quot;</span><span class="p">)</span>
-</span><span id="__span-25-7"><a id="__codelineno-25-7" name="__codelineno-25-7" href="#__codelineno-25-7"></a>    <span class="p">)</span><span class="o">.</span><span class="n">all</span><span class="p">()</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-24-1"><a id="__codelineno-24-1" name="__codelineno-24-1" href="#__codelineno-24-1"></a><span class="c1"># Cross-step query</span>
+</span><span id="__span-24-2"><a id="__codelineno-24-2" name="__codelineno-24-2" href="#__codelineno-24-2"></a><span class="k">with</span> <span class="n">Session</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">engine</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
+</span><span id="__span-24-3"><a id="__codelineno-24-3" name="__codelineno-24-3" href="#__codelineno-24-3"></a>    <span class="n">results</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">exec</span><span class="p">(</span>
+</span><span id="__span-24-4"><a id="__codelineno-24-4" name="__codelineno-24-4" href="#__codelineno-24-4"></a>        <span class="n">select</span><span class="p">(</span><span class="n">Person</span><span class="p">,</span> <span class="n">Trip</span><span class="p">)</span><span class="o">.</span><span class="n">join</span><span class="p">(</span>
+</span><span id="__span-24-5"><a id="__codelineno-24-5" name="__codelineno-24-5" href="#__codelineno-24-5"></a>            <span class="n">Trip</span><span class="p">,</span> <span class="n">Person</span><span class="o">.</span><span class="n">person_id</span> <span class="o">==</span> <span class="n">Trip</span><span class="o">.</span><span class="n">person_id</span>
+</span><span id="__span-24-6"><a id="__codelineno-24-6" name="__codelineno-24-6" href="#__codelineno-24-6"></a>        <span class="p">)</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">Trip</span><span class="o">.</span><span class="n">consist_scenario_id</span> <span class="o">==</span> <span class="s2">&quot;model_run_2030&quot;</span><span class="p">)</span>
+</span><span id="__span-24-7"><a id="__codelineno-24-7" name="__codelineno-24-7" href="#__codelineno-24-7"></a>    <span class="p">)</span><span class="o">.</span><span class="n">all</span><span class="p">()</span>
 </span></code></pre></div>
 <h3 id="incremental-ingestion-batches">Incremental Ingestion (Batches)<a class="headerlink" href="#incremental-ingestion-batches" title="Permanent link">&para;</a></h3>
 <p>For very large datasets, ingest in batches:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-26-1"><a id="__codelineno-26-1" name="__codelineno-26-1" href="#__codelineno-26-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
-</span><span id="__span-26-2"><a id="__codelineno-26-2" name="__codelineno-26-2" href="#__codelineno-26-2"></a>
-</span><span id="__span-26-3"><a id="__codelineno-26-3" name="__codelineno-26-3" href="#__codelineno-26-3"></a><span class="c1"># Split large file into chunks</span>
-</span><span id="__span-26-4"><a id="__codelineno-26-4" name="__codelineno-26-4" href="#__codelineno-26-4"></a><span class="kn">import</span><span class="w"> </span><span class="nn">pandas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pd</span>
-</span><span id="__span-26-5"><a id="__codelineno-26-5" name="__codelineno-26-5" href="#__codelineno-26-5"></a>
-</span><span id="__span-26-6"><a id="__codelineno-26-6" name="__codelineno-26-6" href="#__codelineno-26-6"></a><span class="n">chunk_size</span> <span class="o">=</span> <span class="mi">100000</span>
-</span><span id="__span-26-7"><a id="__codelineno-26-7" name="__codelineno-26-7" href="#__codelineno-26-7"></a><span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">chunk</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">pd</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="s2">&quot;large_file.csv&quot;</span><span class="p">,</span> <span class="n">chunksize</span><span class="o">=</span><span class="n">chunk_size</span><span class="p">)):</span>
-</span><span id="__span-26-8"><a id="__codelineno-26-8" name="__codelineno-26-8" href="#__codelineno-26-8"></a>    <span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span>
-</span><span id="__span-26-9"><a id="__codelineno-26-9" name="__codelineno-26-9" href="#__codelineno-26-9"></a>        <span class="n">chunk</span><span class="p">,</span>
-</span><span id="__span-26-10"><a id="__codelineno-26-10" name="__codelineno-26-10" href="#__codelineno-26-10"></a>        <span class="n">key</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;data_chunk_</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
-</span><span id="__span-26-11"><a id="__codelineno-26-11" name="__codelineno-26-11" href="#__codelineno-26-11"></a>        <span class="n">schema</span><span class="o">=</span><span class="n">MySchema</span><span class="p">,</span>
-</span><span id="__span-26-12"><a id="__codelineno-26-12" name="__codelineno-26-12" href="#__codelineno-26-12"></a>    <span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-25-1"><a id="__codelineno-25-1" name="__codelineno-25-1" href="#__codelineno-25-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+</span><span id="__span-25-2"><a id="__codelineno-25-2" name="__codelineno-25-2" href="#__codelineno-25-2"></a>
+</span><span id="__span-25-3"><a id="__codelineno-25-3" name="__codelineno-25-3" href="#__codelineno-25-3"></a><span class="c1"># Split large file into chunks</span>
+</span><span id="__span-25-4"><a id="__codelineno-25-4" name="__codelineno-25-4" href="#__codelineno-25-4"></a><span class="kn">import</span><span class="w"> </span><span class="nn">pandas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pd</span>
+</span><span id="__span-25-5"><a id="__codelineno-25-5" name="__codelineno-25-5" href="#__codelineno-25-5"></a>
+</span><span id="__span-25-6"><a id="__codelineno-25-6" name="__codelineno-25-6" href="#__codelineno-25-6"></a><span class="n">chunk_size</span> <span class="o">=</span> <span class="mi">100000</span>
+</span><span id="__span-25-7"><a id="__codelineno-25-7" name="__codelineno-25-7" href="#__codelineno-25-7"></a><span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">chunk</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">pd</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="s2">&quot;large_file.csv&quot;</span><span class="p">,</span> <span class="n">chunksize</span><span class="o">=</span><span class="n">chunk_size</span><span class="p">)):</span>
+</span><span id="__span-25-8"><a id="__codelineno-25-8" name="__codelineno-25-8" href="#__codelineno-25-8"></a>    <span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span>
+</span><span id="__span-25-9"><a id="__codelineno-25-9" name="__codelineno-25-9" href="#__codelineno-25-9"></a>        <span class="n">chunk</span><span class="p">,</span>
+</span><span id="__span-25-10"><a id="__codelineno-25-10" name="__codelineno-25-10" href="#__codelineno-25-10"></a>        <span class="n">key</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;data_chunk_</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+</span><span id="__span-25-11"><a id="__codelineno-25-11" name="__codelineno-25-11" href="#__codelineno-25-11"></a>        <span class="n">schema</span><span class="o">=</span><span class="n">MySchema</span><span class="p">,</span>
+</span><span id="__span-25-12"><a id="__codelineno-25-12" name="__codelineno-25-12" href="#__codelineno-25-12"></a>    <span class="p">)</span>
 </span></code></pre></div>
-<p>DuckDB automatically unions these into a single table:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-27-1"><a id="__codelineno-27-1" name="__codelineno-27-1" href="#__codelineno-27-1"></a><span class="c1"># Query all chunks together</span>
-</span><span id="__span-27-2"><a id="__codelineno-27-2" name="__codelineno-27-2" href="#__codelineno-27-2"></a><span class="k">with</span> <span class="n">Session</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">engine</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
-</span><span id="__span-27-3"><a id="__codelineno-27-3" name="__codelineno-27-3" href="#__codelineno-27-3"></a>    <span class="n">count</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">exec</span><span class="p">(</span><span class="n">select</span><span class="p">(</span><span class="n">func</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="n">MySchema</span><span class="o">.</span><span class="n">id</span><span class="p">)))</span><span class="o">.</span><span class="n">first</span><span class="p">()</span>
+<p>DuckDB automatically unions these into a single table <strong>when the schema/table
+name is the same</strong> (for example, when you pass <code>schema=MySchema</code> each time):</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-26-1"><a id="__codelineno-26-1" name="__codelineno-26-1" href="#__codelineno-26-1"></a><span class="c1"># Query all chunks together</span>
+</span><span id="__span-26-2"><a id="__codelineno-26-2" name="__codelineno-26-2" href="#__codelineno-26-2"></a><span class="k">with</span> <span class="n">Session</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">engine</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
+</span><span id="__span-26-3"><a id="__codelineno-26-3" name="__codelineno-26-3" href="#__codelineno-26-3"></a>    <span class="n">count</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">exec</span><span class="p">(</span><span class="n">select</span><span class="p">(</span><span class="n">func</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="n">MySchema</span><span class="o">.</span><span class="n">id</span><span class="p">)))</span><span class="o">.</span><span class="n">first</span><span class="p">()</span>
 </span></code></pre></div>
 <h3 id="late-arriving-data">Late-Arriving Data<a class="headerlink" href="#late-arriving-data" title="Permanent link">&para;</a></h3>
 <p>If you ingest data, then later find more data to add:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-28-1"><a id="__codelineno-28-1" name="__codelineno-28-1" href="#__codelineno-28-1"></a><span class="c1"># Run 1: Initial data</span>
-</span><span id="__span-28-2"><a id="__codelineno-28-2" name="__codelineno-28-2" href="#__codelineno-28-2"></a><span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span><span class="n">df1</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;data&quot;</span><span class="p">,</span> <span class="n">schema</span><span class="o">=</span><span class="n">MySchema</span><span class="p">)</span>
-</span><span id="__span-28-3"><a id="__codelineno-28-3" name="__codelineno-28-3" href="#__codelineno-28-3"></a>
-</span><span id="__span-28-4"><a id="__codelineno-28-4" name="__codelineno-28-4" href="#__codelineno-28-4"></a><span class="c1"># Run 2: Additional data (same key, same schema)</span>
-</span><span id="__span-28-5"><a id="__codelineno-28-5" name="__codelineno-28-5" href="#__codelineno-28-5"></a><span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span><span class="n">df2</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;data&quot;</span><span class="p">,</span> <span class="n">schema</span><span class="o">=</span><span class="n">MySchema</span><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-27-1"><a id="__codelineno-27-1" name="__codelineno-27-1" href="#__codelineno-27-1"></a><span class="c1"># Run 1: Initial data</span>
+</span><span id="__span-27-2"><a id="__codelineno-27-2" name="__codelineno-27-2" href="#__codelineno-27-2"></a><span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span><span class="n">df1</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;data&quot;</span><span class="p">,</span> <span class="n">schema</span><span class="o">=</span><span class="n">MySchema</span><span class="p">)</span>
+</span><span id="__span-27-3"><a id="__codelineno-27-3" name="__codelineno-27-3" href="#__codelineno-27-3"></a>
+</span><span id="__span-27-4"><a id="__codelineno-27-4" name="__codelineno-27-4" href="#__codelineno-27-4"></a><span class="c1"># Run 2: Additional data (same key, same schema)</span>
+</span><span id="__span-27-5"><a id="__codelineno-27-5" name="__codelineno-27-5" href="#__codelineno-27-5"></a><span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span><span class="n">df2</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;data&quot;</span><span class="p">,</span> <span class="n">schema</span><span class="o">=</span><span class="n">MySchema</span><span class="p">)</span>
 </span></code></pre></div>
 <p>Both sets are ingested and queryable:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-29-1"><a id="__codelineno-29-1" name="__codelineno-29-1" href="#__codelineno-29-1"></a><span class="k">with</span> <span class="n">Session</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">engine</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
-</span><span id="__span-29-2"><a id="__codelineno-29-2" name="__codelineno-29-2" href="#__codelineno-29-2"></a>    <span class="c1"># Both df1 and df2 are included</span>
-</span><span id="__span-29-3"><a id="__codelineno-29-3" name="__codelineno-29-3" href="#__codelineno-29-3"></a>    <span class="n">results</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">exec</span><span class="p">(</span><span class="n">select</span><span class="p">(</span><span class="n">MySchema</span><span class="p">))</span><span class="o">.</span><span class="n">all</span><span class="p">()</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-28-1"><a id="__codelineno-28-1" name="__codelineno-28-1" href="#__codelineno-28-1"></a><span class="k">with</span> <span class="n">Session</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">engine</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
+</span><span id="__span-28-2"><a id="__codelineno-28-2" name="__codelineno-28-2" href="#__codelineno-28-2"></a>    <span class="c1"># Both df1 and df2 are included</span>
+</span><span id="__span-28-3"><a id="__codelineno-28-3" name="__codelineno-28-3" href="#__codelineno-28-3"></a>    <span class="n">results</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">exec</span><span class="p">(</span><span class="n">select</span><span class="p">(</span><span class="n">MySchema</span><span class="p">))</span><span class="o">.</span><span class="n">all</span><span class="p">()</span>
 </span></code></pre></div>
 <hr />
 <h2 id="performance-tuning">Performance Tuning<a class="headerlink" href="#performance-tuning" title="Permanent link">&para;</a></h2>
 <h3 id="batch-size">Batch Size<a class="headerlink" href="#batch-size" title="Permanent link">&para;</a></h3>
 <p>DLT loads data in batches. For large files, tune batch size:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-30-1"><a id="__codelineno-30-1" name="__codelineno-30-1" href="#__codelineno-30-1"></a><span class="c1"># In tracker initialization (future feature):</span>
-</span><span id="__span-30-2"><a id="__codelineno-30-2" name="__codelineno-30-2" href="#__codelineno-30-2"></a><span class="c1"># tracker = Tracker(..., dlt_batch_size=50000)</span>
-</span><span id="__span-30-3"><a id="__codelineno-30-3" name="__codelineno-30-3" href="#__codelineno-30-3"></a>
-</span><span id="__span-30-4"><a id="__codelineno-30-4" name="__codelineno-30-4" href="#__codelineno-30-4"></a><span class="c1"># Or split manually:</span>
-</span><span id="__span-30-5"><a id="__codelineno-30-5" name="__codelineno-30-5" href="#__codelineno-30-5"></a><span class="k">for</span> <span class="n">chunk</span> <span class="ow">in</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="s2">&quot;file.csv&quot;</span><span class="p">,</span> <span class="n">chunksize</span><span class="o">=</span><span class="mi">50000</span><span class="p">):</span>
-</span><span id="__span-30-6"><a id="__codelineno-30-6" name="__codelineno-30-6" href="#__codelineno-30-6"></a>    <span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span><span class="n">chunk</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;data&quot;</span><span class="p">,</span> <span class="n">schema</span><span class="o">=</span><span class="n">MySchema</span><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-29-1"><a id="__codelineno-29-1" name="__codelineno-29-1" href="#__codelineno-29-1"></a><span class="c1"># In tracker initialization (future feature):</span>
+</span><span id="__span-29-2"><a id="__codelineno-29-2" name="__codelineno-29-2" href="#__codelineno-29-2"></a><span class="c1"># tracker = Tracker(..., dlt_batch_size=50000)</span>
+</span><span id="__span-29-3"><a id="__codelineno-29-3" name="__codelineno-29-3" href="#__codelineno-29-3"></a>
+</span><span id="__span-29-4"><a id="__codelineno-29-4" name="__codelineno-29-4" href="#__codelineno-29-4"></a><span class="c1"># Or split manually:</span>
+</span><span id="__span-29-5"><a id="__codelineno-29-5" name="__codelineno-29-5" href="#__codelineno-29-5"></a><span class="k">for</span> <span class="n">chunk</span> <span class="ow">in</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="s2">&quot;file.csv&quot;</span><span class="p">,</span> <span class="n">chunksize</span><span class="o">=</span><span class="mi">50000</span><span class="p">):</span>
+</span><span id="__span-29-6"><a id="__codelineno-29-6" name="__codelineno-29-6" href="#__codelineno-29-6"></a>    <span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span><span class="n">chunk</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;data&quot;</span><span class="p">,</span> <span class="n">schema</span><span class="o">=</span><span class="n">MySchema</span><span class="p">)</span>
 </span></code></pre></div>
 <h3 id="indexing">Indexing<a class="headerlink" href="#indexing" title="Permanent link">&para;</a></h3>
 <p>After ingestion, create indexes for frequently queried columns:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-31-1"><a id="__codelineno-31-1" name="__codelineno-31-1" href="#__codelineno-31-1"></a><span class="c1"># Manual index (in DuckDB):</span>
-</span><span id="__span-31-2"><a id="__codelineno-31-2" name="__codelineno-31-2" href="#__codelineno-31-2"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">engine</span><span class="o">.</span><span class="n">begin</span><span class="p">()</span> <span class="k">as</span> <span class="n">conn</span><span class="p">:</span>
-</span><span id="__span-31-3"><a id="__codelineno-31-3" name="__codelineno-31-3" href="#__codelineno-31-3"></a>    <span class="n">conn</span><span class="o">.</span><span class="n">exec_driver_sql</span><span class="p">(</span>
-</span><span id="__span-31-4"><a id="__codelineno-31-4" name="__codelineno-31-4" href="#__codelineno-31-4"></a>        <span class="s2">&quot;CREATE INDEX idx_person_run ON person(consist_run_id)&quot;</span>
-</span><span id="__span-31-5"><a id="__codelineno-31-5" name="__codelineno-31-5" href="#__codelineno-31-5"></a>    <span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-30-1"><a id="__codelineno-30-1" name="__codelineno-30-1" href="#__codelineno-30-1"></a><span class="c1"># Manual index (in DuckDB):</span>
+</span><span id="__span-30-2"><a id="__codelineno-30-2" name="__codelineno-30-2" href="#__codelineno-30-2"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">engine</span><span class="o">.</span><span class="n">begin</span><span class="p">()</span> <span class="k">as</span> <span class="n">conn</span><span class="p">:</span>
+</span><span id="__span-30-3"><a id="__codelineno-30-3" name="__codelineno-30-3" href="#__codelineno-30-3"></a>    <span class="n">conn</span><span class="o">.</span><span class="n">exec_driver_sql</span><span class="p">(</span>
+</span><span id="__span-30-4"><a id="__codelineno-30-4" name="__codelineno-30-4" href="#__codelineno-30-4"></a>        <span class="s2">&quot;CREATE INDEX idx_person_run ON global_tables.person(consist_run_id)&quot;</span>
+</span><span id="__span-30-5"><a id="__codelineno-30-5" name="__codelineno-30-5" href="#__codelineno-30-5"></a>    <span class="p">)</span>
 </span></code></pre></div>
 <h3 id="file-format-choice">File Format Choice<a class="headerlink" href="#file-format-choice" title="Permanent link">&para;</a></h3>
 <ul>
@@ -3548,50 +3522,47 @@
 </ul>
 <h3 id="deduplication">Deduplication<a class="headerlink" href="#deduplication" title="Permanent link">&para;</a></h3>
 <p>If your pipeline generates duplicate records, deduplicate before ingestion:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-32-1"><a id="__codelineno-32-1" name="__codelineno-32-1" href="#__codelineno-32-1"></a><span class="n">df</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">drop_duplicates</span><span class="p">(</span><span class="n">subset</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;id&quot;</span><span class="p">])</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-31-1"><a id="__codelineno-31-1" name="__codelineno-31-1" href="#__codelineno-31-1"></a><span class="n">df</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">drop_duplicates</span><span class="p">(</span><span class="n">subset</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;id&quot;</span><span class="p">])</span>
 </span></code></pre></div>
-<p>Or use Consist's deduplication (if enabled):</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-33-1"><a id="__codelineno-33-1" name="__codelineno-33-1" href="#__codelineno-33-1"></a><span class="c1"># Mark as dedupable (currently manual):</span>
-</span><span id="__span-33-2"><a id="__codelineno-33-2" name="__codelineno-33-2" href="#__codelineno-33-2"></a><span class="c1"># consist.log_dataframe(df, key=&quot;data&quot;, dedupe_on_hash=True)</span>
-</span></code></pre></div>
+<p>Consist does not currently deduplicate automatically.</p>
 <hr />
 <h2 id="common-errors">Common Errors<a class="headerlink" href="#common-errors" title="Permanent link">&para;</a></h2>
 <h3 id="schema-mismatch">Schema Mismatch<a class="headerlink" href="#schema-mismatch" title="Permanent link">&para;</a></h3>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-34-1"><a id="__codelineno-34-1" name="__codelineno-34-1" href="#__codelineno-34-1"></a>Error: Column &#39;age&#39; expected int, got str
+<div class="language-text highlight"><pre><span></span><code><span id="__span-32-1"><a id="__codelineno-32-1" name="__codelineno-32-1" href="#__codelineno-32-1"></a>Error: Column &#39;age&#39; expected int, got str
 </span></code></pre></div>
 <p><strong>Fix:</strong> Ensure DataFrame types match schema:
-<div class="language-python highlight"><pre><span></span><code><span id="__span-35-1"><a id="__codelineno-35-1" name="__codelineno-35-1" href="#__codelineno-35-1"></a><span class="n">df</span><span class="p">[</span><span class="s2">&quot;age&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">df</span><span class="p">[</span><span class="s2">&quot;age&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="s2">&quot;int64&quot;</span><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-33-1"><a id="__codelineno-33-1" name="__codelineno-33-1" href="#__codelineno-33-1"></a><span class="n">df</span><span class="p">[</span><span class="s2">&quot;age&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">df</span><span class="p">[</span><span class="s2">&quot;age&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="s2">&quot;int64&quot;</span><span class="p">)</span>
 </span></code></pre></div></p>
 <h3 id="missing-required-column">Missing Required Column<a class="headerlink" href="#missing-required-column" title="Permanent link">&para;</a></h3>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-36-1"><a id="__codelineno-36-1" name="__codelineno-36-1" href="#__codelineno-36-1"></a>Error: Column &#39;person_id&#39; required but missing
+<div class="language-text highlight"><pre><span></span><code><span id="__span-34-1"><a id="__codelineno-34-1" name="__codelineno-34-1" href="#__codelineno-34-1"></a>Error: Column &#39;person_id&#39; required but missing
 </span></code></pre></div>
 <p><strong>Fix:</strong> Add column or make it optional:
-<div class="language-python highlight"><pre><span></span><code><span id="__span-37-1"><a id="__codelineno-37-1" name="__codelineno-37-1" href="#__codelineno-37-1"></a><span class="n">df</span><span class="p">[</span><span class="s2">&quot;person_id&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">index</span> <span class="o">+</span> <span class="mi">1</span>  <span class="c1"># Add column</span>
-</span><span id="__span-37-2"><a id="__codelineno-37-2" name="__codelineno-37-2" href="#__codelineno-37-2"></a><span class="c1"># OR</span>
-</span><span id="__span-37-3"><a id="__codelineno-37-3" name="__codelineno-37-3" href="#__codelineno-37-3"></a><span class="k">class</span><span class="w"> </span><span class="nc">MySchema</span><span class="p">(</span><span class="n">SQLModel</span><span class="p">,</span> <span class="n">table</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
-</span><span id="__span-37-4"><a id="__codelineno-37-4" name="__codelineno-37-4" href="#__codelineno-37-4"></a>    <span class="n">person_id</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span>  <span class="c1"># Make optional</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-35-1"><a id="__codelineno-35-1" name="__codelineno-35-1" href="#__codelineno-35-1"></a><span class="n">df</span><span class="p">[</span><span class="s2">&quot;person_id&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">index</span> <span class="o">+</span> <span class="mi">1</span>  <span class="c1"># Add column</span>
+</span><span id="__span-35-2"><a id="__codelineno-35-2" name="__codelineno-35-2" href="#__codelineno-35-2"></a><span class="c1"># OR</span>
+</span><span id="__span-35-3"><a id="__codelineno-35-3" name="__codelineno-35-3" href="#__codelineno-35-3"></a><span class="k">class</span><span class="w"> </span><span class="nc">MySchema</span><span class="p">(</span><span class="n">SQLModel</span><span class="p">,</span> <span class="n">table</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
+</span><span id="__span-35-4"><a id="__codelineno-35-4" name="__codelineno-35-4" href="#__codelineno-35-4"></a>    <span class="n">person_id</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span>  <span class="c1"># Make optional</span>
 </span></code></pre></div></p>
 <h3 id="primary-key-violation">Primary Key Violation<a class="headerlink" href="#primary-key-violation" title="Permanent link">&para;</a></h3>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-38-1"><a id="__codelineno-38-1" name="__codelineno-38-1" href="#__codelineno-38-1"></a>Error: Duplicate primary key value
+<div class="language-text highlight"><pre><span></span><code><span id="__span-36-1"><a id="__codelineno-36-1" name="__codelineno-36-1" href="#__codelineno-36-1"></a>Error: Duplicate primary key value
 </span></code></pre></div>
 <p><strong>Fix:</strong> Deduplicate before ingestion:
-<div class="language-python highlight"><pre><span></span><code><span id="__span-39-1"><a id="__codelineno-39-1" name="__codelineno-39-1" href="#__codelineno-39-1"></a><span class="n">df</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">drop_duplicates</span><span class="p">(</span><span class="n">subset</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;id&quot;</span><span class="p">])</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-37-1"><a id="__codelineno-37-1" name="__codelineno-37-1" href="#__codelineno-37-1"></a><span class="n">df</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">drop_duplicates</span><span class="p">(</span><span class="n">subset</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;id&quot;</span><span class="p">])</span>
 </span></code></pre></div></p>
 <h3 id="dlt-not-installed">DLT Not Installed<a class="headerlink" href="#dlt-not-installed" title="Permanent link">&para;</a></h3>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-40-1"><a id="__codelineno-40-1" name="__codelineno-40-1" href="#__codelineno-40-1"></a>ImportError: No module named &#39;dlt&#39;
+<div class="language-text highlight"><pre><span></span><code><span id="__span-38-1"><a id="__codelineno-38-1" name="__codelineno-38-1" href="#__codelineno-38-1"></a>ImportError: No module named &#39;dlt&#39;
 </span></code></pre></div>
-<p><strong>Fix:</strong> Install DLT:
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-41-1"><a id="__codelineno-41-1" name="__codelineno-41-1" href="#__codelineno-41-1"></a>pip<span class="w"> </span>install<span class="w"> </span>dlt
+<p><strong>Fix:</strong> Install the ingest extras:
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-39-1"><a id="__codelineno-39-1" name="__codelineno-39-1" href="#__codelineno-39-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;consist[ingest]&quot;</span>
 </span></code></pre></div></p>
 <h3 id="null-in-non-optional-field">Null in Non-Optional Field<a class="headerlink" href="#null-in-non-optional-field" title="Permanent link">&para;</a></h3>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-42-1"><a id="__codelineno-42-1" name="__codelineno-42-1" href="#__codelineno-42-1"></a>Warning: Null value in non-optional field &#39;age&#39;
+<div class="language-text highlight"><pre><span></span><code><span id="__span-40-1"><a id="__codelineno-40-1" name="__codelineno-40-1" href="#__codelineno-40-1"></a>Warning: Null value in non-optional field &#39;age&#39;
 </span></code></pre></div>
-<p><strong>Fix (strict mode):</strong> Ensure no nulls:
-<div class="language-python highlight"><pre><span></span><code><span id="__span-43-1"><a id="__codelineno-43-1" name="__codelineno-43-1" href="#__codelineno-43-1"></a><span class="n">df</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">dropna</span><span class="p">(</span><span class="n">subset</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;age&quot;</span><span class="p">])</span>
-</span><span id="__span-43-2"><a id="__codelineno-43-2" name="__codelineno-43-2" href="#__codelineno-43-2"></a>
-</span><span id="__span-43-3"><a id="__codelineno-43-3" name="__codelineno-43-3" href="#__codelineno-43-3"></a><span class="c1"># OR make optional:</span>
-</span><span id="__span-43-4"><a id="__codelineno-43-4" name="__codelineno-43-4" href="#__codelineno-43-4"></a><span class="k">class</span><span class="w"> </span><span class="nc">MySchema</span><span class="p">(</span><span class="n">SQLModel</span><span class="p">,</span> <span class="n">table</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
-</span><span id="__span-43-5"><a id="__codelineno-43-5" name="__codelineno-43-5" href="#__codelineno-43-5"></a>    <span class="n">age</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span>
+<p><strong>Fix (with schema enforcement):</strong> Ensure no nulls:
+<div class="language-python highlight"><pre><span></span><code><span id="__span-41-1"><a id="__codelineno-41-1" name="__codelineno-41-1" href="#__codelineno-41-1"></a><span class="n">df</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">dropna</span><span class="p">(</span><span class="n">subset</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;age&quot;</span><span class="p">])</span>
+</span><span id="__span-41-2"><a id="__codelineno-41-2" name="__codelineno-41-2" href="#__codelineno-41-2"></a>
+</span><span id="__span-41-3"><a id="__codelineno-41-3" name="__codelineno-41-3" href="#__codelineno-41-3"></a><span class="c1"># OR make optional:</span>
+</span><span id="__span-41-4"><a id="__codelineno-41-4" name="__codelineno-41-4" href="#__codelineno-41-4"></a><span class="k">class</span><span class="w"> </span><span class="nc">MySchema</span><span class="p">(</span><span class="n">SQLModel</span><span class="p">,</span> <span class="n">table</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
+</span><span id="__span-41-5"><a id="__codelineno-41-5" name="__codelineno-41-5" href="#__codelineno-41-5"></a>    <span class="n">age</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span>
 </span></code></pre></div></p>
 <hr />
 <h2 id="comparison-dlt-vs-direct-logging">Comparison: DLT vs Direct Logging<a class="headerlink" href="#comparison-dlt-vs-direct-logging" title="Permanent link">&para;</a></h2>

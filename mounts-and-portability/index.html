@@ -2089,8 +2089,13 @@ URIs, and historical path resolution work.</p>
 </span><span id="__span-1-20"><a id="__codelineno-1-20" name="__codelineno-1-20" href="#__codelineno-1-20"></a>    <span class="p">},</span>
 </span><span id="__span-1-21"><a id="__codelineno-1-21" name="__codelineno-1-21" href="#__codelineno-1-21"></a><span class="p">)</span>
 </span></code></pre></div>
-<p>When Alice runs a simulation and logs an output:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="n">consist</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;/home/alice/activitysim_outputs/results.parquet&quot;</span><span class="p">),</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;results&quot;</span><span class="p">)</span>
+<p>When Alice runs a simulation and logs an output (inside a run context):</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;asim_baseline&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;activitysim&quot;</span><span class="p">):</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>    <span class="n">consist</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>        <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;/home/alice/activitysim_outputs/results.parquet&quot;</span><span class="p">),</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>        <span class="n">key</span><span class="o">=</span><span class="s2">&quot;results&quot;</span><span class="p">,</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>        <span class="n">direction</span><span class="o">=</span><span class="s2">&quot;output&quot;</span><span class="p">,</span>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>    <span class="p">)</span>
 </span></code></pre></div>
 <p>Consist detects the mount and stores a portable URI:</p>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>outputs://results.parquet
@@ -2127,7 +2132,7 @@ URIs, and historical path resolution work.</p>
 <hr />
 <h2 id="workspace-uris-run-local-outputs">Workspace URIs (run-local outputs)<a class="headerlink" href="#workspace-uris-run-local-outputs" title="Permanent link">&para;</a></h2>
 <p>Paths under the run directory are stored relative to the active run:</p>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>./outputs/model.csv
+<div class="language-text highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>./outputs/&lt;run_id&gt;/model.csv
 </span></code></pre></div>
 <p>Internally this is treated as a workspace URI and resolved using the run's
 <code>_physical_run_dir</code> metadata. That field records the absolute run directory used

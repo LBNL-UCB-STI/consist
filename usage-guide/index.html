@@ -2659,11 +2659,14 @@
                   
 
 <h1 id="usage-guide">Usage Guide<a class="headerlink" href="#usage-guide" title="Permanent link">&para;</a></h1>
-<p>Consist provides flexible patterns for tracking provenance in scientific workflows. This guide walks you through the main usage patterns, from simple single-step runs to complex multi-year simulations.</p>
+<p>Consist provides flexible patterns for tracking provenance in scientific workflows. This guide walks you through the main usage patterns, from simple single-step runs to complex multi-year simulations. Each section is written to help:
+- <strong>Developers</strong> integrating Consist into a simulation tool
+- <strong>Practitioners</strong> running tools and wanting clearer inputs/outputs
+- <strong>Researchers</strong> managing multi-stage pipelines and reproducibility</p>
 <p><strong>New to Consist?</strong> Start with the <a href="../examples/#quickstart">quickstart notebook</a>, then work through the examples below in order.</p>
 <hr />
 <h2 id="choosing-your-pattern">Choosing Your Pattern<a class="headerlink" href="#choosing-your-pattern" title="Permanent link">&para;</a></h2>
-<p>Choose based on what you're building:</p>
+<p>Choose based on what you're building and how much structure you need:</p>
 <table>
 <thead>
 <tr>
@@ -2744,7 +2747,7 @@
 <details>
 <summary>Alternative: keep raw file paths (no auto-load)</summary>
 
-Use this when your function needs a `Path` and manages I/O directly.
+Use this when your function needs a `Path` and manages I/O directly (common for legacy tools or file-based APIs).
 
 <div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="k">def</span><span class="w"> </span><span class="nf">clean_data</span><span class="p">(</span><span class="n">raw_file</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span> <span class="n">_consist_ctx</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
 </span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>    <span class="n">df</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="n">raw_file</span><span class="p">)</span>
@@ -2810,8 +2813,10 @@ Use this when your function needs a `Path` and manages I/O directly.
 </span><span id="__span-3-13"><a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>        <span class="n">fn</span><span class="o">=</span><span class="n">run_legacy_model</span><span class="p">,</span>
 </span><span id="__span-3-14"><a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a>        <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;upstream&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;input.csv&quot;</span><span class="p">)},</span>
 </span><span id="__span-3-15"><a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a>        <span class="n">depends_on</span><span class="o">=</span><span class="p">[</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;config.yaml&quot;</span><span class="p">),</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;parameters.json&quot;</span><span class="p">)],</span>  <span class="c1"># Hash these files too</span>
-</span><span id="__span-3-16"><a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a>        <span class="n">inject_context</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
-</span><span id="__span-3-17"><a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a>    <span class="p">)</span>
+</span><span id="__span-3-16"><a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a>        <span class="n">load_inputs</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+</span><span id="__span-3-17"><a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a>        <span class="n">runtime_kwargs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;upstream&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;input.csv&quot;</span><span class="p">)},</span>  <span class="c1"># Pass raw paths at runtime</span>
+</span><span id="__span-3-18"><a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a>        <span class="n">inject_context</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-3-19"><a id="__codelineno-3-19" name="__codelineno-3-19" href="#__codelineno-3-19"></a>    <span class="p">)</span>
 </span></code></pre></div>
 <p>Captured outputs are keyed by filename stem (for example, <code>results.csv</code> -&gt; <code>results</code>).</p>
 <details>
@@ -2827,11 +2832,13 @@ If the tool always writes to a known folder and returns `None`, you can capture 
 </span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>
 </span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>    <span class="n">result</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
 </span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a>        <span class="n">fn</span><span class="o">=</span><span class="n">run_legacy_model</span><span class="p">,</span>
-</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>        <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;upstream&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;input.csv&quot;</span><span class="p">)},</span>  <span class="c1"># auto-loaded into the upstream arg</span>
+</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>        <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;upstream&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;input.csv&quot;</span><span class="p">)},</span>  <span class="c1"># hashed input</span>
 </span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a>        <span class="n">depends_on</span><span class="o">=</span><span class="p">[</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;config.yaml&quot;</span><span class="p">)],</span>
-</span><span id="__span-4-11"><a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a>        <span class="n">capture_dir</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;outputs&quot;</span><span class="p">),</span>
-</span><span id="__span-4-12"><a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a>        <span class="n">capture_pattern</span><span class="o">=</span><span class="s2">&quot;*.csv&quot;</span><span class="p">,</span>
-</span><span id="__span-4-13"><a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a>    <span class="p">)</span>
+</span><span id="__span-4-11"><a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a>        <span class="n">load_inputs</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+</span><span id="__span-4-12"><a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a>        <span class="n">runtime_kwargs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;upstream&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;input.csv&quot;</span><span class="p">)},</span>
+</span><span id="__span-4-13"><a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a>        <span class="n">capture_dir</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;outputs&quot;</span><span class="p">),</span>
+</span><span id="__span-4-14"><a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a>        <span class="n">capture_pattern</span><span class="o">=</span><span class="s2">&quot;*.csv&quot;</span><span class="p">,</span>
+</span><span id="__span-4-15"><a id="__codelineno-4-15" name="__codelineno-4-15" href="#__codelineno-4-15"></a>    <span class="p">)</span>
 </span></code></pre></div>
 </details>
 
@@ -2839,8 +2846,9 @@ If the tool always writes to a known folder and returns `None`, you can capture 
 <summary>How input mappings become function arguments</summary>
 
 When `inputs` is a mapping, Consist matches keys to function parameters and auto-loads
-those artifacts (for example, a CSV becomes a DataFrame) into the call. This is why
-`inputs={"upstream": ...}` is passed as the `upstream` argument above.
+those artifacts (for example, a CSV becomes a DataFrame) into the call by default.
+If you keep `load_inputs=True`, `inputs={"upstream": ...}` becomes the `upstream`
+argument automatically.
 
 If you want raw paths instead of auto-loaded data, set `load_inputs=False` and pass
 paths explicitly via `runtime_kwargs`.
@@ -2861,7 +2869,10 @@ paths explicitly via `runtime_kwargs`.
 - Use the coupler to pass data between steps with automatic provenance tracking
 - Group runs into scenarios for easy cross-scenario queries</p>
 <h3 id="understanding-the-coupler">Understanding the Coupler<a class="headerlink" href="#understanding-the-coupler" title="Permanent link">&para;</a></h3>
-<p>The <strong>coupler</strong> is your scenario-scoped artifact registry. When you log an artifact with a key, it's automatically stored in the coupler, making data flow between steps explicit and traceable.</p>
+<p>The <strong>coupler</strong> is your scenario-scoped artifact registry. When you log an artifact with a key, it's automatically stored in the coupler, making data flow between steps explicit and traceable. This is especially useful when:
+- You need clean handoffs between tools (developer workflows)
+- You want a clear list of outputs by name (practitioner workflows)
+- You want auditable step-to-step lineage (research workflows)</p>
 <p><strong>Etymology</strong>: A coupler (like the library name "consist" from railroad terminology) is the mechanism that links train cars together. In Consist, the coupler links your workflow steps by storing and threading their outputs.</p>
 <p><strong>Key behaviors:</strong>
 - When you log an artifact with a <code>key</code>, it's automatically synced to the coupler
@@ -2932,11 +2943,11 @@ Use this when you're loading data from disk for the first time.</p>
 </span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="p">)</span>
 </span></code></pre></div>
 Use this when the artifact is already in the coupler from a prior step. With <code>load_inputs=True</code>, each key becomes a function parameter with the loaded data. For example, <code>inputs=["preprocessed"]</code> means your function receives a <code>preprocessed</code> parameter with the loaded DataFrame.</p>
-<p><strong>Note</strong>: If you have existing code using <code>input_keys=</code>, it continues to work identically. Both <code>inputs=</code> and <code>input_keys=</code> are supported and stable long-term. The <code>inputs=</code> parameter is simply the newer, preferred name.</p>
+<p><strong>Note</strong>: If you have existing code using <code>input_keys=</code>, it continues to work for backward compatibility. <code>inputs=</code> is the preferred name for new code.</p>
 <details>
 <summary>Alternative: inline steps with sc.trace</summary>
 
-Use this when you want inline code blocks (they always execute, even on cache hits).
+Use this when you want inline code blocks (they always execute, even on cache hits). This can be useful for lightweight validation or logging.
 
 <div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="k">with</span> <span class="n">use_tracker</span><span class="p">(</span><span class="n">tracker</span><span class="p">):</span>
 </span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>    <span class="k">with</span> <span class="n">consist</span><span class="o">.</span><span class="n">scenario</span><span class="p">(</span><span class="s2">&quot;my_analysis&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">sc</span><span class="p">:</span>
@@ -3078,22 +3089,23 @@ function parameters so you don't need to call <code>coupler.require(...)</code> 
 <hr />
 <p><strong>Bulk logging with metadata:</strong>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-16-1"><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="k">with</span> <span class="n">consist</span><span class="o">.</span><span class="n">scenario</span><span class="p">(</span><span class="s2">&quot;outputs&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">sc</span><span class="p">:</span>
-</span><span id="__span-16-2"><a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>    <span class="c1"># Log multiple files at once with explicit keys</span>
-</span><span id="__span-16-3"><a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a>    <span class="n">outputs</span> <span class="o">=</span> <span class="n">sc</span><span class="o">.</span><span class="n">log_artifacts</span><span class="p">(</span>
-</span><span id="__span-16-4"><a id="__codelineno-16-4" name="__codelineno-16-4" href="#__codelineno-16-4"></a>        <span class="p">{</span>
-</span><span id="__span-16-5"><a id="__codelineno-16-5" name="__codelineno-16-5" href="#__codelineno-16-5"></a>            <span class="s2">&quot;persons&quot;</span><span class="p">:</span> <span class="s2">&quot;results/persons.parquet&quot;</span><span class="p">,</span>
-</span><span id="__span-16-6"><a id="__codelineno-16-6" name="__codelineno-16-6" href="#__codelineno-16-6"></a>            <span class="s2">&quot;households&quot;</span><span class="p">:</span> <span class="s2">&quot;results/households.parquet&quot;</span><span class="p">,</span>
-</span><span id="__span-16-7"><a id="__codelineno-16-7" name="__codelineno-16-7" href="#__codelineno-16-7"></a>            <span class="s2">&quot;jobs&quot;</span><span class="p">:</span> <span class="s2">&quot;results/jobs.parquet&quot;</span>
-</span><span id="__span-16-8"><a id="__codelineno-16-8" name="__codelineno-16-8" href="#__codelineno-16-8"></a>        <span class="p">},</span>
-</span><span id="__span-16-9"><a id="__codelineno-16-9" name="__codelineno-16-9" href="#__codelineno-16-9"></a>        <span class="n">metadata_by_key</span><span class="o">=</span><span class="p">{</span>
-</span><span id="__span-16-10"><a id="__codelineno-16-10" name="__codelineno-16-10" href="#__codelineno-16-10"></a>            <span class="s2">&quot;households&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;primary_unit&quot;</span><span class="p">},</span>
-</span><span id="__span-16-11"><a id="__codelineno-16-11" name="__codelineno-16-11" href="#__codelineno-16-11"></a>            <span class="s2">&quot;jobs&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;employment_proxy&quot;</span><span class="p">}</span>
-</span><span id="__span-16-12"><a id="__codelineno-16-12" name="__codelineno-16-12" href="#__codelineno-16-12"></a>        <span class="p">},</span>
-</span><span id="__span-16-13"><a id="__codelineno-16-13" name="__codelineno-16-13" href="#__codelineno-16-13"></a>        <span class="n">year</span><span class="o">=</span><span class="mi">2030</span><span class="p">,</span>
-</span><span id="__span-16-14"><a id="__codelineno-16-14" name="__codelineno-16-14" href="#__codelineno-16-14"></a>        <span class="n">scenario_name</span><span class="o">=</span><span class="s2">&quot;base&quot;</span>
-</span><span id="__span-16-15"><a id="__codelineno-16-15" name="__codelineno-16-15" href="#__codelineno-16-15"></a>    <span class="p">)</span>
-</span><span id="__span-16-16"><a id="__codelineno-16-16" name="__codelineno-16-16" href="#__codelineno-16-16"></a>    <span class="c1"># All get year=2030, scenario_name=&quot;base&quot;</span>
-</span><span id="__span-16-17"><a id="__codelineno-16-17" name="__codelineno-16-17" href="#__codelineno-16-17"></a>    <span class="c1"># households also gets role=&quot;primary_unit&quot;</span>
+</span><span id="__span-16-2"><a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>    <span class="k">with</span> <span class="n">sc</span><span class="o">.</span><span class="n">trace</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;export_outputs&quot;</span><span class="p">):</span>
+</span><span id="__span-16-3"><a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a>        <span class="c1"># Log multiple files at once with explicit keys</span>
+</span><span id="__span-16-4"><a id="__codelineno-16-4" name="__codelineno-16-4" href="#__codelineno-16-4"></a>        <span class="n">outputs</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">log_artifacts</span><span class="p">(</span>
+</span><span id="__span-16-5"><a id="__codelineno-16-5" name="__codelineno-16-5" href="#__codelineno-16-5"></a>            <span class="p">{</span>
+</span><span id="__span-16-6"><a id="__codelineno-16-6" name="__codelineno-16-6" href="#__codelineno-16-6"></a>                <span class="s2">&quot;persons&quot;</span><span class="p">:</span> <span class="s2">&quot;results/persons.parquet&quot;</span><span class="p">,</span>
+</span><span id="__span-16-7"><a id="__codelineno-16-7" name="__codelineno-16-7" href="#__codelineno-16-7"></a>                <span class="s2">&quot;households&quot;</span><span class="p">:</span> <span class="s2">&quot;results/households.parquet&quot;</span><span class="p">,</span>
+</span><span id="__span-16-8"><a id="__codelineno-16-8" name="__codelineno-16-8" href="#__codelineno-16-8"></a>                <span class="s2">&quot;jobs&quot;</span><span class="p">:</span> <span class="s2">&quot;results/jobs.parquet&quot;</span>
+</span><span id="__span-16-9"><a id="__codelineno-16-9" name="__codelineno-16-9" href="#__codelineno-16-9"></a>            <span class="p">},</span>
+</span><span id="__span-16-10"><a id="__codelineno-16-10" name="__codelineno-16-10" href="#__codelineno-16-10"></a>            <span class="n">metadata_by_key</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-16-11"><a id="__codelineno-16-11" name="__codelineno-16-11" href="#__codelineno-16-11"></a>                <span class="s2">&quot;households&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;primary_unit&quot;</span><span class="p">},</span>
+</span><span id="__span-16-12"><a id="__codelineno-16-12" name="__codelineno-16-12" href="#__codelineno-16-12"></a>                <span class="s2">&quot;jobs&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;employment_proxy&quot;</span><span class="p">}</span>
+</span><span id="__span-16-13"><a id="__codelineno-16-13" name="__codelineno-16-13" href="#__codelineno-16-13"></a>            <span class="p">},</span>
+</span><span id="__span-16-14"><a id="__codelineno-16-14" name="__codelineno-16-14" href="#__codelineno-16-14"></a>            <span class="n">year</span><span class="o">=</span><span class="mi">2030</span><span class="p">,</span>
+</span><span id="__span-16-15"><a id="__codelineno-16-15" name="__codelineno-16-15" href="#__codelineno-16-15"></a>            <span class="n">scenario_name</span><span class="o">=</span><span class="s2">&quot;base&quot;</span>
+</span><span id="__span-16-16"><a id="__codelineno-16-16" name="__codelineno-16-16" href="#__codelineno-16-16"></a>        <span class="p">)</span>
+</span><span id="__span-16-17"><a id="__codelineno-16-17" name="__codelineno-16-17" href="#__codelineno-16-17"></a>        <span class="c1"># All get year=2030, scenario_name=&quot;base&quot;</span>
+</span><span id="__span-16-18"><a id="__codelineno-16-18" name="__codelineno-16-18" href="#__codelineno-16-18"></a>        <span class="c1"># households also gets role=&quot;primary_unit&quot;</span>
 </span></code></pre></div></p>
 <h3 id="example-parameter-sweep-in-a-scenario">Example: Parameter Sweep in a Scenario<a class="headerlink" href="#example-parameter-sweep-in-a-scenario" title="Permanent link">&para;</a></h3>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-17-1"><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="k">with</span> <span class="n">use_tracker</span><span class="p">(</span><span class="n">tracker</span><span class="p">):</span>
@@ -3111,9 +3123,9 @@ function parameters so you don't need to call <code>coupler.require(...)</code> 
 </span><span id="__span-17-13"><a id="__codelineno-17-13" name="__codelineno-17-13" href="#__codelineno-17-13"></a>                <span class="n">name</span><span class="o">=</span><span class="s2">&quot;analyze&quot;</span><span class="p">,</span>
 </span><span id="__span-17-14"><a id="__codelineno-17-14" name="__codelineno-17-14" href="#__codelineno-17-14"></a>                <span class="n">run_id</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;threshold_</span><span class="si">{</span><span class="n">threshold</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
 </span><span id="__span-17-15"><a id="__codelineno-17-15" name="__codelineno-17-15" href="#__codelineno-17-15"></a>                <span class="n">threshold</span><span class="o">=</span><span class="n">threshold</span><span class="p">,</span>
-</span><span id="__span-17-16"><a id="__codelineno-17-16" name="__codelineno-17-16" href="#__codelineno-17-16"></a>                <span class="n">inputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;shared_data&quot;</span><span class="p">],</span>
+</span><span id="__span-17-16"><a id="__codelineno-17-16" name="__codelineno-17-16" href="#__codelineno-17-16"></a>                <span class="n">inputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;data&quot;</span><span class="p">],</span>
 </span><span id="__span-17-17"><a id="__codelineno-17-17" name="__codelineno-17-17" href="#__codelineno-17-17"></a>            <span class="p">):</span>
-</span><span id="__span-17-18"><a id="__codelineno-17-18" name="__codelineno-17-18" href="#__codelineno-17-18"></a>                <span class="n">df</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">load_df</span><span class="p">(</span><span class="n">coupler</span><span class="o">.</span><span class="n">require</span><span class="p">(</span><span class="s2">&quot;shared_data&quot;</span><span class="p">))</span>
+</span><span id="__span-17-18"><a id="__codelineno-17-18" name="__codelineno-17-18" href="#__codelineno-17-18"></a>                <span class="n">df</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">load_df</span><span class="p">(</span><span class="n">coupler</span><span class="o">.</span><span class="n">require</span><span class="p">(</span><span class="s2">&quot;data&quot;</span><span class="p">))</span>
 </span><span id="__span-17-19"><a id="__codelineno-17-19" name="__codelineno-17-19" href="#__codelineno-17-19"></a>                <span class="n">filtered</span> <span class="o">=</span> <span class="n">df</span><span class="p">[</span><span class="n">df</span><span class="p">[</span><span class="s2">&quot;value&quot;</span><span class="p">]</span> <span class="o">&gt;</span> <span class="n">threshold</span><span class="p">]</span>
 </span><span id="__span-17-20"><a id="__codelineno-17-20" name="__codelineno-17-20" href="#__codelineno-17-20"></a>                <span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span><span class="n">filtered</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;filtered&quot;</span><span class="p">)</span>
 </span></code></pre></div>
@@ -3186,6 +3198,9 @@ If you prefer the same API as `consist.run`, you can use the container executor:
 <li><strong><code>outputs-all</code></strong>: Copy all cached outputs into a target directory</li>
 <li><strong><code>inputs-missing</code></strong>: When a cache miss occurs, backfill missing inputs from prior runs before executing</li>
 </ul>
+<p><strong>Note:</strong> <code>outputs-requested</code> requires <code>output_paths=...</code> so Consist knows where to write the files.
+<code>inputs-missing</code> only works for inputs that are tracked artifacts (not raw paths), so Consist can find
+the prior run's files or reconstruct ingested tables.</p>
 <p>Set per-run via <code>cache_hydration=...</code> or for scenario steps via <code>step_cache_hydration=...</code>:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-20-1"><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="k">with</span> <span class="n">use_tracker</span><span class="p">(</span><span class="n">tracker</span><span class="p">):</span>
 </span><span id="__span-20-2"><a id="__codelineno-20-2" name="__codelineno-20-2" href="#__codelineno-20-2"></a>    <span class="k">with</span> <span class="n">consist</span><span class="o">.</span><span class="n">scenario</span><span class="p">(</span><span class="s2">&quot;baseline&quot;</span><span class="p">,</span> <span class="n">step_cache_hydration</span><span class="o">=</span><span class="s2">&quot;inputs-missing&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">sc</span><span class="p">:</span>
@@ -3238,19 +3253,20 @@ If you prefer the same API as `consist.run`, you can use the container executor:
 <h4 id="using-sctrace-always-runs">Using <code>sc.trace()</code> (Always Runs)<a class="headerlink" href="#using-sctrace-always-runs" title="Permanent link">&para;</a></h4>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-22-1"><a id="__codelineno-22-1" name="__codelineno-22-1" href="#__codelineno-22-1"></a><span class="k">with</span> <span class="n">use_tracker</span><span class="p">(</span><span class="n">tracker</span><span class="p">):</span>
 </span><span id="__span-22-2"><a id="__codelineno-22-2" name="__codelineno-22-2" href="#__codelineno-22-2"></a>    <span class="k">with</span> <span class="n">consist</span><span class="o">.</span><span class="n">scenario</span><span class="p">(</span><span class="s2">&quot;baseline&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">sc</span><span class="p">:</span>
-</span><span id="__span-22-3"><a id="__codelineno-22-3" name="__codelineno-22-3" href="#__codelineno-22-3"></a>        <span class="c1"># This block executes every time, even on cache hits</span>
-</span><span id="__span-22-4"><a id="__codelineno-22-4" name="__codelineno-22-4" href="#__codelineno-22-4"></a>        <span class="k">with</span> <span class="n">sc</span><span class="o">.</span><span class="n">trace</span><span class="p">(</span>
-</span><span id="__span-22-5"><a id="__codelineno-22-5" name="__codelineno-22-5" href="#__codelineno-22-5"></a>            <span class="n">name</span><span class="o">=</span><span class="s2">&quot;prepare_land_use&quot;</span><span class="p">,</span>
-</span><span id="__span-22-6"><a id="__codelineno-22-6" name="__codelineno-22-6" href="#__codelineno-22-6"></a>            <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;geojson&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;land_use.geojson&quot;</span><span class="p">)},</span>
-</span><span id="__span-22-7"><a id="__codelineno-22-7" name="__codelineno-22-7" href="#__codelineno-22-7"></a>            <span class="n">year</span><span class="o">=</span><span class="mi">2030</span>
-</span><span id="__span-22-8"><a id="__codelineno-22-8" name="__codelineno-22-8" href="#__codelineno-22-8"></a>        <span class="p">):</span>
-</span><span id="__span-22-9"><a id="__codelineno-22-9" name="__codelineno-22-9" href="#__codelineno-22-9"></a>            <span class="c1"># This code ALWAYS runs—useful if you log, print status, etc.</span>
-</span><span id="__span-22-10"><a id="__codelineno-22-10" name="__codelineno-22-10" href="#__codelineno-22-10"></a>            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Processing land use for year </span><span class="si">{</span><span class="n">year</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
-</span><span id="__span-22-11"><a id="__codelineno-22-11" name="__codelineno-22-11" href="#__codelineno-22-11"></a>            <span class="n">zones</span> <span class="o">=</span> <span class="n">load_zones</span><span class="p">(</span><span class="s2">&quot;land_use.geojson&quot;</span><span class="p">)</span>
-</span><span id="__span-22-12"><a id="__codelineno-22-12" name="__codelineno-22-12" href="#__codelineno-22-12"></a>
-</span><span id="__span-22-13"><a id="__codelineno-22-13" name="__codelineno-22-13" href="#__codelineno-22-13"></a>            <span class="c1"># But Consist returns cached output if it exists</span>
-</span><span id="__span-22-14"><a id="__codelineno-22-14" name="__codelineno-22-14" href="#__codelineno-22-14"></a>            <span class="n">df_zones</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">(</span><span class="n">zones</span><span class="p">)</span>
-</span><span id="__span-22-15"><a id="__codelineno-22-15" name="__codelineno-22-15" href="#__codelineno-22-15"></a>            <span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span><span class="n">df_zones</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;zones&quot;</span><span class="p">)</span>
+</span><span id="__span-22-3"><a id="__codelineno-22-3" name="__codelineno-22-3" href="#__codelineno-22-3"></a>        <span class="n">year</span> <span class="o">=</span> <span class="mi">2030</span>
+</span><span id="__span-22-4"><a id="__codelineno-22-4" name="__codelineno-22-4" href="#__codelineno-22-4"></a>        <span class="c1"># This block executes every time, even on cache hits</span>
+</span><span id="__span-22-5"><a id="__codelineno-22-5" name="__codelineno-22-5" href="#__codelineno-22-5"></a>        <span class="k">with</span> <span class="n">sc</span><span class="o">.</span><span class="n">trace</span><span class="p">(</span>
+</span><span id="__span-22-6"><a id="__codelineno-22-6" name="__codelineno-22-6" href="#__codelineno-22-6"></a>            <span class="n">name</span><span class="o">=</span><span class="s2">&quot;prepare_land_use&quot;</span><span class="p">,</span>
+</span><span id="__span-22-7"><a id="__codelineno-22-7" name="__codelineno-22-7" href="#__codelineno-22-7"></a>            <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;geojson&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;land_use.geojson&quot;</span><span class="p">)},</span>
+</span><span id="__span-22-8"><a id="__codelineno-22-8" name="__codelineno-22-8" href="#__codelineno-22-8"></a>            <span class="n">year</span><span class="o">=</span><span class="n">year</span>
+</span><span id="__span-22-9"><a id="__codelineno-22-9" name="__codelineno-22-9" href="#__codelineno-22-9"></a>        <span class="p">):</span>
+</span><span id="__span-22-10"><a id="__codelineno-22-10" name="__codelineno-22-10" href="#__codelineno-22-10"></a>            <span class="c1"># This code ALWAYS runs—useful if you log, print status, etc.</span>
+</span><span id="__span-22-11"><a id="__codelineno-22-11" name="__codelineno-22-11" href="#__codelineno-22-11"></a>            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Processing land use for year </span><span class="si">{</span><span class="n">year</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</span><span id="__span-22-12"><a id="__codelineno-22-12" name="__codelineno-22-12" href="#__codelineno-22-12"></a>            <span class="n">zones</span> <span class="o">=</span> <span class="n">load_zones</span><span class="p">(</span><span class="s2">&quot;land_use.geojson&quot;</span><span class="p">)</span>
+</span><span id="__span-22-13"><a id="__codelineno-22-13" name="__codelineno-22-13" href="#__codelineno-22-13"></a>
+</span><span id="__span-22-14"><a id="__codelineno-22-14" name="__codelineno-22-14" href="#__codelineno-22-14"></a>            <span class="c1"># But Consist returns cached output if it exists</span>
+</span><span id="__span-22-15"><a id="__codelineno-22-15" name="__codelineno-22-15" href="#__codelineno-22-15"></a>            <span class="n">df_zones</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">(</span><span class="n">zones</span><span class="p">)</span>
+</span><span id="__span-22-16"><a id="__codelineno-22-16" name="__codelineno-22-16" href="#__codelineno-22-16"></a>            <span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span><span class="n">df_zones</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;zones&quot;</span><span class="p">)</span>
 </span></code></pre></div>
 <h4 id="using-scrun-skips-on-cache-hit">Using <code>sc.run()</code> (Skips on Cache Hit)<a class="headerlink" href="#using-scrun-skips-on-cache-hit" title="Permanent link">&para;</a></h4>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-23-1"><a id="__codelineno-23-1" name="__codelineno-23-1" href="#__codelineno-23-1"></a><span class="k">with</span> <span class="n">use_tracker</span><span class="p">(</span><span class="n">tracker</span><span class="p">):</span>
@@ -3338,7 +3354,7 @@ If your function writes files, log them with the injected context (and read inpu
 </details>
 
 <h3 id="query-facets-with-pivot_facets">Query Facets with <code>pivot_facets</code><a class="headerlink" href="#query-facets-with-pivot_facets" title="Permanent link">&para;</a></h3>
-<p>Log small, queryable config values (facets) and pivot them into a wide table for analysis:</p>
+<p>Log small, queryable config values (facets) and pivot them into a wide table for analysis. This is a simple way to compare many runs side‑by‑side (for example, a sensitivity analysis across parameters):</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-25-1"><a id="__codelineno-25-1" name="__codelineno-25-1" href="#__codelineno-25-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sqlmodel</span><span class="w"> </span><span class="kn">import</span> <span class="n">select</span>
 </span><span id="__span-25-2"><a id="__codelineno-25-2" name="__codelineno-25-2" href="#__codelineno-25-2"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
 </span><span id="__span-25-3"><a id="__codelineno-25-3" name="__codelineno-25-3" href="#__codelineno-25-3"></a>
@@ -3354,7 +3370,7 @@ If your function writes files, log them with the injected context (and read inpu
 </span><span id="__span-25-13"><a id="__codelineno-25-13" name="__codelineno-25-13" href="#__codelineno-25-13"></a>    <span class="n">tracker</span><span class="o">=</span><span class="n">tracker</span><span class="p">,</span>
 </span><span id="__span-25-14"><a id="__codelineno-25-14" name="__codelineno-25-14" href="#__codelineno-25-14"></a><span class="p">)</span>
 </span><span id="__span-25-15"><a id="__codelineno-25-15" name="__codelineno-25-15" href="#__codelineno-25-15"></a>
-</span><span id="__span-25-16"><a id="__codelineno-25-16" name="__codelineno-25-16" href="#__codelineno-25-16"></a><span class="c1"># Result: DataFrame with columns [run_id, alpha, beta, mode] for comparison</span>
+</span><span id="__span-25-16"><a id="__codelineno-25-16" name="__codelineno-25-16" href="#__codelineno-25-16"></a><span class="c1"># Result: list of rows with columns [run_id, alpha, beta, mode] for comparison</span>
 </span></code></pre></div>
 <p>See <a href="../concepts/#the-config-vs-facet-distinction">Concepts</a> for when to use <code>config</code> vs <code>facet</code>.</p>
 <hr />
@@ -3425,7 +3441,7 @@ If your function writes files, log them with the injected context (and read inpu
 <p>Views automatically include <code>consist_scenario_id</code>, <code>consist_year</code>, and other metadata columns for filtering and grouping.
 For more on ingestion and hybrid views, see <a href="../ingestion-and-hybrid-views/">Ingestion &amp; Hybrid Views</a>.</p>
 <h3 id="generating-schemas-from-captured-data">Generating Schemas from Captured Data<a class="headerlink" href="#generating-schemas-from-captured-data" title="Permanent link">&para;</a></h3>
-<p>If you ingest tabular data into DuckDB, Consist can capture the observed schema and export an <strong>editable SQLModel stub</strong> so you can curate PK/FK constraints and then register the model for views.</p>
+<p>If you ingest tabular data into DuckDB, Consist can capture the observed schema and export an <strong>editable SQLModel stub</strong> so you can curate PK/FK constraints and then register the model for views. This is useful when you want a stable, documented schema for downstream analysis or audits.</p>
 <p>You can also opt into lightweight file schema capture when logging CSV/Parquet artifacts by passing <code>profile_file_schema=True</code> (and optionally <code>file_schema_sample_rows=</code>) to <code>log_artifact</code>. These captured schemas are stored in the provenance DB and remain available even if the original files move or are deleted.
 If you already have a content hash (e.g., after copying or moving a file), pass <code>content_hash=</code> to <code>log_artifact</code> to reuse it without re-hashing the file. For safety, Consist will not overwrite an existing, different hash unless you pass <code>force_hash_override=True</code>. To verify the hash against disk, use <code>validate_content_hash=True</code>.</p>
 <p>See <code>docs/schema-export.md</code> for the full workflow (CLI + Python) and column-name/<code>__tablename__</code> guidelines.

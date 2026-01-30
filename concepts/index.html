@@ -2087,7 +2087,7 @@ On cache hits, Consist returns output artifact metadata without copying files; l
 </table>
 <h2 id="how-inputs-and-outputs-are-treated">How inputs and outputs are treated<a class="headerlink" href="#how-inputs-and-outputs-are-treated" title="Permanent link">&para;</a></h2>
 <ul>
-<li><strong>Inputs</strong> are files or values that influence computation. File inputs are hashed by content to ensure the signature reflects the actual data.</li>
+<li><strong>Inputs</strong> are files or values that influence computation. File inputs are hashed by content or metadata depending on the hashing strategy (<code>full</code> vs <code>fast</code>).</li>
 <li><strong>Outputs</strong> are named artifacts you declare when you call <code>consist.run(...)</code> (or <code>tracker.run(...)</code>). Consist stores their paths and provenance metadata for later lookup and querying.</li>
 </ul>
 <p>To keep outputs portable, write them under <code>tracker.run_dir</code> or a mounted <code>outputs://</code> root. That keeps artifact paths relative and consistent across machines.</p>
@@ -2120,8 +2120,8 @@ On cache hits, Consist returns output artifact metadata without copying files; l
 <h2 id="when-to-use-each-pattern">When to use each pattern<a class="headerlink" href="#when-to-use-each-pattern" title="Permanent link">&para;</a></h2>
 <ul>
 <li><code>consist.run(...)</code> (or <code>tracker.run(...)</code>) for standalone steps or when calling library functions.</li>
-<li><code>scenario.trace(...)</code> for inline code blocks within a workflow.</li>
-<li><code>scenario.run(...)</code> when you want cache-skip behavior (the function does not execute on cache hit).</li>
+<li><code>sc.trace(...)</code> for inline code blocks within a workflow.</li>
+<li><code>sc.run(...)</code> when you want cache-skip behavior (the function does not execute on cache hit).</li>
 </ul>
 <p>If you are unsure, start with <code>consist.run(...)</code> inside a <code>use_tracker(...)</code> scope. It is the simplest pattern and works well for most first-time use cases.</p>
 

@@ -2693,28 +2693,28 @@
 <p><strong>Extending a scenario in a new workspace:</strong> You cached results in <code>/workspace/2024</code>, now you want to continue analysis in <code>/workspace/2025</code>. Use <code>cache_hydration="inputs-missing"</code> to automatically copy input files your executing steps need.</p>
 </li>
 <li>
-<p><strong>Preparing outputs for external tools:</strong> Some tools expect files to exist locally. Use <code>cache_hydration="outputs-requested"</code> with <code>materialize_cached_output_paths</code> to copy specific cached outputs you need.</p>
+<p><strong>Preparing outputs for external tools:</strong> Some tools expect files to exist locally. Use <code>cache_hydration="outputs-requested"</code> with <code>materialize_cached_output_paths</code> to copy specific cached outputs you need. If you're using <code>consist.run(...)</code> or <code>sc.run(...)</code>, use <code>output_paths={...}</code> instead.</p>
 </li>
 <li>
 <p><strong>Ensuring full reproducibility locally:</strong> You want all results locally accessible without remote mounts. Use <code>cache_hydration="outputs-all"</code> to copy all cached outputs into a local directory.</p>
 </li>
 </ol>
 <h3 id="example-climate-data-workflow">Example: Climate Data Workflow<a class="headerlink" href="#example-climate-data-workflow" title="Permanent link">&para;</a></h3>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1"># First run: simulate climate for years 2020-2030, takes 24 hours</span>
-</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
-</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>    <span class="s2">&quot;climate_baseline&quot;</span><span class="p">,</span>
-</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>    <span class="n">scenario_id</span><span class="o">=</span><span class="s2">&quot;baseline&quot;</span><span class="p">,</span>
-</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;climate_sim&quot;</span><span class="p">,</span>
-</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    <span class="n">year</span><span class="o">=</span><span class="mi">2030</span><span class="p">,</span>
-</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    <span class="n">cache_mode</span><span class="o">=</span><span class="s2">&quot;overwrite&quot;</span>
-</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="p">):</span>
-</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    <span class="n">results</span> <span class="o">=</span> <span class="n">run_climate_model</span><span class="p">()</span>  <span class="c1"># 50GB output</span>
-</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="n">results</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;precip&quot;</span><span class="p">)</span>
-</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>
-</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="c1"># Later: analysis that only needs metadata about the result</span>
-</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
-</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>    <span class="s2">&quot;analyze_trends&quot;</span><span class="p">,</span>
-</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>    <span class="n">scenario_id</span><span class="o">=</span><span class="s2">&quot;baseline&quot;</span><span class="p">,</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="c1"># First run: simulate climate for years 2020-2030, takes 24 hours</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>    <span class="s2">&quot;climate_baseline&quot;</span><span class="p">,</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;climate_sim&quot;</span><span class="p">,</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    <span class="n">year</span><span class="o">=</span><span class="mi">2030</span><span class="p">,</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    <span class="n">cache_mode</span><span class="o">=</span><span class="s2">&quot;overwrite&quot;</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="p">):</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="n">results</span> <span class="o">=</span> <span class="n">run_climate_model</span><span class="p">()</span>  <span class="c1"># 50GB output</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="n">results</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;precip&quot;</span><span class="p">)</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="c1"># Later: analysis that only needs metadata about the result</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>    <span class="s2">&quot;analyze_trends&quot;</span><span class="p">,</span>
 </span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;analysis&quot;</span><span class="p">,</span>
 </span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">[</span><span class="n">cached_precip_artifact</span><span class="p">],</span>
 </span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;metadata&quot;</span><span class="p">,</span>  <span class="c1"># Default: no copying</span>
@@ -2729,16 +2729,15 @@
 </span><span id="__span-0-27"><a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a><span class="c1"># Later: need to ensure files exist locally for external tool</span>
 </span><span id="__span-0-28"><a id="__codelineno-0-28" name="__codelineno-0-28" href="#__codelineno-0-28"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
 </span><span id="__span-0-29"><a id="__codelineno-0-29" name="__codelineno-0-29" href="#__codelineno-0-29"></a>    <span class="s2">&quot;export_for_visualization&quot;</span><span class="p">,</span>
-</span><span id="__span-0-30"><a id="__codelineno-0-30" name="__codelineno-0-30" href="#__codelineno-0-30"></a>    <span class="n">scenario_id</span><span class="o">=</span><span class="s2">&quot;baseline&quot;</span><span class="p">,</span>
-</span><span id="__span-0-31"><a id="__codelineno-0-31" name="__codelineno-0-31" href="#__codelineno-0-31"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;export&quot;</span><span class="p">,</span>
-</span><span id="__span-0-32"><a id="__codelineno-0-32" name="__codelineno-0-32" href="#__codelineno-0-32"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;outputs-requested&quot;</span><span class="p">,</span>
-</span><span id="__span-0-33"><a id="__codelineno-0-33" name="__codelineno-0-33" href="#__codelineno-0-33"></a>    <span class="n">materialize_cached_output_paths</span><span class="o">=</span><span class="p">{</span>
-</span><span id="__span-0-34"><a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a>        <span class="s2">&quot;precip&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;./local_outputs/precip.parquet&quot;</span><span class="p">)</span>
-</span><span id="__span-0-35"><a id="__codelineno-0-35" name="__codelineno-0-35" href="#__codelineno-0-35"></a>    <span class="p">}</span>
-</span><span id="__span-0-36"><a id="__codelineno-0-36" name="__codelineno-0-36" href="#__codelineno-0-36"></a><span class="p">):</span>
-</span><span id="__span-0-37"><a id="__codelineno-0-37" name="__codelineno-0-37" href="#__codelineno-0-37"></a>    <span class="c1"># Consist copies the cached precip.parquet into ./local_outputs/</span>
-</span><span id="__span-0-38"><a id="__codelineno-0-38" name="__codelineno-0-38" href="#__codelineno-0-38"></a>    <span class="c1"># Now your external tool can see real files</span>
-</span><span id="__span-0-39"><a id="__codelineno-0-39" name="__codelineno-0-39" href="#__codelineno-0-39"></a>    <span class="n">subprocess</span><span class="o">.</span><span class="n">run</span><span class="p">([</span><span class="s2">&quot;qgis&quot;</span><span class="p">,</span> <span class="s2">&quot;export_for_visualization.py&quot;</span><span class="p">])</span>
+</span><span id="__span-0-30"><a id="__codelineno-0-30" name="__codelineno-0-30" href="#__codelineno-0-30"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;export&quot;</span><span class="p">,</span>
+</span><span id="__span-0-31"><a id="__codelineno-0-31" name="__codelineno-0-31" href="#__codelineno-0-31"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;outputs-requested&quot;</span><span class="p">,</span>
+</span><span id="__span-0-32"><a id="__codelineno-0-32" name="__codelineno-0-32" href="#__codelineno-0-32"></a>    <span class="n">materialize_cached_output_paths</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-0-33"><a id="__codelineno-0-33" name="__codelineno-0-33" href="#__codelineno-0-33"></a>        <span class="s2">&quot;precip&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;./local_outputs/precip.parquet&quot;</span><span class="p">)</span>
+</span><span id="__span-0-34"><a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a>    <span class="p">}</span>
+</span><span id="__span-0-35"><a id="__codelineno-0-35" name="__codelineno-0-35" href="#__codelineno-0-35"></a><span class="p">):</span>
+</span><span id="__span-0-36"><a id="__codelineno-0-36" name="__codelineno-0-36" href="#__codelineno-0-36"></a>    <span class="c1"># Consist copies the cached precip.parquet into ./local_outputs/</span>
+</span><span id="__span-0-37"><a id="__codelineno-0-37" name="__codelineno-0-37" href="#__codelineno-0-37"></a>    <span class="c1"># Now your external tool can see real files</span>
+</span><span id="__span-0-38"><a id="__codelineno-0-38" name="__codelineno-0-38" href="#__codelineno-0-38"></a>    <span class="n">subprocess</span><span class="o">.</span><span class="n">run</span><span class="p">([</span><span class="s2">&quot;qgis&quot;</span><span class="p">,</span> <span class="s2">&quot;export_for_visualization.py&quot;</span><span class="p">])</span>
 </span></code></pre></div>
 <h3 id="default-behavior-metadata-only-hydration">Default Behavior: Metadata-Only Hydration<a class="headerlink" href="#default-behavior-metadata-only-hydration" title="Permanent link">&para;</a></h3>
 <p>By default, <code>cache_hydration="metadata"</code>:
@@ -2881,7 +2880,7 @@ how schema validation works, and how DB fallback behaves when files are missing.
 - By default, <strong>skips</strong> filesystem checks for cached outputs for speed.
   - Pass <code>validate_cached_outputs="eager"</code> if you want to require that output files exist (or are ingested).
 - <strong>Hydrates artifact objects</strong> for the cached outputs into the current run context.
-  - Paths are resolved on demand (e.g., <code>cached_output()</code>).
+  - Paths are resolved on demand (e.g., <code>artifact.path</code>).
   - <code>Artifact.path</code> lazily resolves via the active tracker; no filesystem checks happen until you access it.</p>
 <p>On a cache hit, Consist does <strong>not</strong>:
 - Copy files into a new run directory.
@@ -2941,9 +2940,18 @@ by copying bytes from the cached artifact’s resolved path to a destination you
 </span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="p">):</span>
 </span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>    <span class="o">...</span>
 </span></code></pre></div>
+<p>Equivalent with <code>consist.run(...)</code>:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="n">result</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>    <span class="n">fn</span><span class="o">=</span><span class="n">step</span><span class="p">,</span>
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;outputs-requested&quot;</span><span class="p">,</span>
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>    <span class="n">output_paths</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;features&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;outputs/features.csv&quot;</span><span class="p">)},</span>
+</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="p">)</span>
+</span></code></pre></div>
 <p>Defaults remain unchanged: <code>cache_hydration="metadata"</code> (artifact hydration only).</p>
+<p>Note: for <code>consist.run(...)</code> or <code>sc.run(...)</code>, use <code>output_paths={...}</code> with
+<code>cache_hydration="outputs-requested"</code> to specify where requested outputs should be copied.</p>
 <p>Validation rules (error cases):
-- <code>outputs-requested</code> requires <code>materialize_cached_output_paths</code> and rejects <code>materialize_cached_outputs_dir</code>.
+- <code>outputs-requested</code> requires <code>materialize_cached_output_paths</code> (or <code>output_paths</code> for <code>consist.run(...)</code>) and rejects <code>materialize_cached_outputs_dir</code>.
 - <code>outputs-all</code> requires <code>materialize_cached_outputs_dir</code> and rejects <code>materialize_cached_output_paths</code>.
 - <code>metadata</code>/<code>inputs-missing</code> reject both materialization args.</p>
 <p>Operational notes:
@@ -2984,7 +2992,7 @@ cache hits.</p>
 <td>Materialize a few outputs on cache hits</td>
 <td><code>outputs-requested</code></td>
 <td>On cache hits, for requested outputs</td>
-<td>Requires <code>materialize_cached_output_paths</code>.</td>
+<td>Requires <code>materialize_cached_output_paths</code> (or <code>output_paths</code> for <code>consist.run(...)</code>).</td>
 </tr>
 <tr>
 <td>Make all cached outputs exist locally</td>
@@ -3040,7 +3048,7 @@ The main knobs are:</p>
 <li><code>outputs-all</code>: on cache hits, copy all cached outputs into a target directory.</li>
 <li>Scenario default: pass <code>step_cache_hydration="inputs-missing"</code> to <code>consist.scenario(...)</code>
   to apply a default policy to all steps unless overridden.</li>
-<li><code>materialize_cached_output_paths</code>: required for <code>outputs-requested</code>.</li>
+<li><code>materialize_cached_output_paths</code>: required for <code>outputs-requested</code> (or <code>output_paths</code> for <code>consist.run(...)</code>).</li>
 <li><code>materialize_cached_outputs_dir</code>: required for <code>outputs-all</code>.</li>
 </ul>
 <p>For large iterative workflows, most cache-hit time is spent on:</p>
@@ -3055,11 +3063,11 @@ The main knobs are:</p>
 <li><code>CONSIST_CACHE_DEBUG=1</code> logs cache hit/miss details and signatures.</li>
 </ul>
 <p>Example output with <code>CONSIST_CACHE_TIMING=1</code>:</p>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>[cache_timing] signature_prefetch=2.1ms input_hashing=145.8ms cache_lookup=3.4ms validate=0.6ms hydration=0.2ms
+<div class="language-text highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>[cache_timing] signature_prefetch=2.1ms input_hashing=145.8ms cache_lookup=3.4ms validate=0.6ms hydration=0.2ms
 </span></code></pre></div>
 <p>Interpretation: input hashing dominates, so consider ingesting large tabular inputs or passing Consist-produced artifacts instead of raw files.</p>
 <p>Example output with <code>CONSIST_CACHE_DEBUG=1</code>:</p>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>[cache_debug] hit=True signature=7e9c1c inputs=3 outputs=2 hydration=metadata
+<div class="language-text highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>[cache_debug] hit=True signature=7e9c1c inputs=3 outputs=2 hydration=metadata
 </span></code></pre></div>
 <p>Interpretation: the cache hit returned metadata only; if downstream tools need files, select an outputs hydration mode.</p>
 <p>If you need strict safety for missing outputs, use <code>validate_cached_outputs="eager"</code>,
@@ -3071,31 +3079,31 @@ standalone DuckDB file</strong>, use a dedicated "bundle" run that logs inputs a
 and ingests them. Sharing the DB file is enough to reproduce inputs without shipping
 the original raw files.</p>
 <h3 id="bundle-creation-producer">Bundle creation (producer)<a class="headerlink" href="#bundle-creation-producer" title="Permanent link">&para;</a></h3>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span><span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;bundle_build&quot;</span><span class="p">,</span> <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;inputs.duckdb&quot;</span><span class="p">)</span>
-</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>
-</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;inputs_bundle_v1&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;input_bundle&quot;</span><span class="p">,</span> <span class="n">cache_mode</span><span class="o">=</span><span class="s2">&quot;overwrite&quot;</span><span class="p">):</span>
-</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>    <span class="n">households</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="s2">&quot;households.csv&quot;</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;households&quot;</span><span class="p">,</span> <span class="n">direction</span><span class="o">=</span><span class="s2">&quot;output&quot;</span><span class="p">)</span>
-</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>    <span class="n">persons</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="s2">&quot;persons.csv&quot;</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;persons&quot;</span><span class="p">,</span> <span class="n">direction</span><span class="o">=</span><span class="s2">&quot;output&quot;</span><span class="p">)</span>
-</span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">ingest</span><span class="p">(</span><span class="n">households</span><span class="p">)</span>
-</span><span id="__span-8-7"><a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">ingest</span><span class="p">(</span><span class="n">persons</span><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span><span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;bundle_build&quot;</span><span class="p">,</span> <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;inputs.duckdb&quot;</span><span class="p">)</span>
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>
+</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;inputs_bundle_v1&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;input_bundle&quot;</span><span class="p">,</span> <span class="n">cache_mode</span><span class="o">=</span><span class="s2">&quot;overwrite&quot;</span><span class="p">):</span>
+</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>    <span class="n">households</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="s2">&quot;households.csv&quot;</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;households&quot;</span><span class="p">,</span> <span class="n">direction</span><span class="o">=</span><span class="s2">&quot;output&quot;</span><span class="p">)</span>
+</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>    <span class="n">persons</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="s2">&quot;persons.csv&quot;</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;persons&quot;</span><span class="p">,</span> <span class="n">direction</span><span class="o">=</span><span class="s2">&quot;output&quot;</span><span class="p">)</span>
+</span><span id="__span-9-6"><a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">ingest</span><span class="p">(</span><span class="n">households</span><span class="p">)</span>
+</span><span id="__span-9-7"><a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">ingest</span><span class="p">(</span><span class="n">persons</span><span class="p">)</span>
 </span></code></pre></div>
 <p>Packaging steps:
 1. Run the bundle creation code once.
 2. Share the resulting DuckDB file (<code>inputs.duckdb</code>) with collaborators.
 3. Collaborators only need the DB file; they do <strong>not</strong> need the original CSV files.</p>
 <h3 id="bundle-consumption-consumer">Bundle consumption (consumer)<a class="headerlink" href="#bundle-consumption-consumer" title="Permanent link">&para;</a></h3>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span><span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;runs&quot;</span><span class="p">,</span> <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;inputs.duckdb&quot;</span><span class="p">)</span>
-</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>
-</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="n">bundle_outputs</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">load_input_bundle</span><span class="p">(</span><span class="s2">&quot;inputs_bundle_v1&quot;</span><span class="p">)</span>
-</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="n">inputs</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">bundle_outputs</span><span class="o">.</span><span class="n">values</span><span class="p">())</span>
-</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>
-</span><span id="__span-9-6"><a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
-</span><span id="__span-9-7"><a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a>    <span class="s2">&quot;simulate&quot;</span><span class="p">,</span>
-</span><span id="__span-9-8"><a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;simulate&quot;</span><span class="p">,</span>
-</span><span id="__span-9-9"><a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a>    <span class="n">inputs</span><span class="o">=</span><span class="n">inputs</span><span class="p">,</span>
-</span><span id="__span-9-10"><a id="__codelineno-9-10" name="__codelineno-9-10" href="#__codelineno-9-10"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;inputs-missing&quot;</span><span class="p">,</span>
-</span><span id="__span-9-11"><a id="__codelineno-9-11" name="__codelineno-9-11" href="#__codelineno-9-11"></a><span class="p">):</span>
-</span><span id="__span-9-12"><a id="__codelineno-9-12" name="__codelineno-9-12" href="#__codelineno-9-12"></a>    <span class="o">...</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span><span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;runs&quot;</span><span class="p">,</span> <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;inputs.duckdb&quot;</span><span class="p">)</span>
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="n">bundle_outputs</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">load_input_bundle</span><span class="p">(</span><span class="s2">&quot;inputs_bundle_v1&quot;</span><span class="p">)</span>
+</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="n">inputs</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">bundle_outputs</span><span class="o">.</span><span class="n">values</span><span class="p">())</span>
+</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a>
+</span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
+</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a>    <span class="s2">&quot;simulate&quot;</span><span class="p">,</span>
+</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;simulate&quot;</span><span class="p">,</span>
+</span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a>    <span class="n">inputs</span><span class="o">=</span><span class="n">inputs</span><span class="p">,</span>
+</span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;inputs-missing&quot;</span><span class="p">,</span>
+</span><span id="__span-10-11"><a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a><span class="p">):</span>
+</span><span id="__span-10-12"><a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a>    <span class="o">...</span>
 </span></code></pre></div>
 <p>Notes:
 - The bundle is identified <strong>only by run_id</strong>; no hard-coded hashes are needed.
@@ -3104,23 +3112,23 @@ the original raw files.</p>
 <h3 id="multi-model-workflows-from-one-bundle">Multi-model workflows from one bundle<a class="headerlink" href="#multi-model-workflows-from-one-bundle" title="Permanent link">&para;</a></h3>
 <p>Bundles can contain inputs for multiple downstream steps. Each run selects only the
 inputs it needs:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="n">bundle_outputs</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">load_input_bundle</span><span class="p">(</span><span class="s2">&quot;inputs_bundle_v1&quot;</span><span class="p">)</span>
-</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>
-</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
-</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a>    <span class="s2">&quot;model_a&quot;</span><span class="p">,</span>
-</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;model_a&quot;</span><span class="p">,</span>
-</span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">[</span><span class="n">bundle_outputs</span><span class="p">[</span><span class="s2">&quot;input_a&quot;</span><span class="p">]],</span>
-</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;inputs-missing&quot;</span><span class="p">,</span>
-</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a><span class="p">):</span>
-</span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a>    <span class="o">...</span>
-</span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a>
-</span><span id="__span-10-11"><a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
-</span><span id="__span-10-12"><a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a>    <span class="s2">&quot;model_b&quot;</span><span class="p">,</span>
-</span><span id="__span-10-13"><a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;model_b&quot;</span><span class="p">,</span>
-</span><span id="__span-10-14"><a id="__codelineno-10-14" name="__codelineno-10-14" href="#__codelineno-10-14"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">[</span><span class="n">bundle_outputs</span><span class="p">[</span><span class="s2">&quot;input_b&quot;</span><span class="p">]],</span>
-</span><span id="__span-10-15"><a id="__codelineno-10-15" name="__codelineno-10-15" href="#__codelineno-10-15"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;inputs-missing&quot;</span><span class="p">,</span>
-</span><span id="__span-10-16"><a id="__codelineno-10-16" name="__codelineno-10-16" href="#__codelineno-10-16"></a><span class="p">):</span>
-</span><span id="__span-10-17"><a id="__codelineno-10-17" name="__codelineno-10-17" href="#__codelineno-10-17"></a>    <span class="o">...</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="n">bundle_outputs</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">load_input_bundle</span><span class="p">(</span><span class="s2">&quot;inputs_bundle_v1&quot;</span><span class="p">)</span>
+</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>
+</span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
+</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>    <span class="s2">&quot;model_a&quot;</span><span class="p">,</span>
+</span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;model_a&quot;</span><span class="p">,</span>
+</span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">[</span><span class="n">bundle_outputs</span><span class="p">[</span><span class="s2">&quot;input_a&quot;</span><span class="p">]],</span>
+</span><span id="__span-11-7"><a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;inputs-missing&quot;</span><span class="p">,</span>
+</span><span id="__span-11-8"><a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a><span class="p">):</span>
+</span><span id="__span-11-9"><a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a>    <span class="o">...</span>
+</span><span id="__span-11-10"><a id="__codelineno-11-10" name="__codelineno-11-10" href="#__codelineno-11-10"></a>
+</span><span id="__span-11-11"><a id="__codelineno-11-11" name="__codelineno-11-11" href="#__codelineno-11-11"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
+</span><span id="__span-11-12"><a id="__codelineno-11-12" name="__codelineno-11-12" href="#__codelineno-11-12"></a>    <span class="s2">&quot;model_b&quot;</span><span class="p">,</span>
+</span><span id="__span-11-13"><a id="__codelineno-11-13" name="__codelineno-11-13" href="#__codelineno-11-13"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;model_b&quot;</span><span class="p">,</span>
+</span><span id="__span-11-14"><a id="__codelineno-11-14" name="__codelineno-11-14" href="#__codelineno-11-14"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">[</span><span class="n">bundle_outputs</span><span class="p">[</span><span class="s2">&quot;input_b&quot;</span><span class="p">]],</span>
+</span><span id="__span-11-15"><a id="__codelineno-11-15" name="__codelineno-11-15" href="#__codelineno-11-15"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;inputs-missing&quot;</span><span class="p">,</span>
+</span><span id="__span-11-16"><a id="__codelineno-11-16" name="__codelineno-11-16" href="#__codelineno-11-16"></a><span class="p">):</span>
+</span><span id="__span-11-17"><a id="__codelineno-11-17" name="__codelineno-11-17" href="#__codelineno-11-17"></a>    <span class="o">...</span>
 </span></code></pre></div>
 
 

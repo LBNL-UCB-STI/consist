@@ -2041,9 +2041,9 @@
 <h2 id="the-basic-idea">The Basic Idea<a class="headerlink" href="#the-basic-idea" title="Permanent link">&para;</a></h2>
 <p>Consist computes a fingerprint (signature) from three components:</p>
 <ol>
-<li><strong>Your function's code</strong> – Git commit hash + local modifications</li>
+<li><strong>Your function's code</strong> – Git commit hash + tracked local Python modifications</li>
 <li><strong>Configuration</strong> – The <code>config</code> dict you pass to <code>consist.run()</code></li>
-<li><strong>Input files</strong> – SHA256 hashes of files in the <code>inputs</code> dict</li>
+<li><strong>Input files</strong> – Content or metadata hashes of files in the <code>inputs</code> dict (depends on <code>hashing_strategy</code>)</li>
 </ol>
 <p>If you run the same function with the same code, config, and inputs, the signature is identical. When Consist sees an identical signature, it returns the cached result from a previous run instead of re-executing.</p>
 <h2 id="example">Example<a class="headerlink" href="#example" title="Permanent link">&para;</a></h2>
