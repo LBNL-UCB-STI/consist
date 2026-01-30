@@ -33,6 +33,8 @@ def test_config_hashing_sensitivity():
         extra_args={},
     )
     config1 = base_def.to_hashable_config()
+    assert "environment" not in config1
+    assert "environment_hash" in config1
 
     # Case 1: Change Command
     base_cmd = base_def.model_copy(update={"command": ["run", "--fast"]})

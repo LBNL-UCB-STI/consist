@@ -181,7 +181,11 @@ def _apply_inferred_mounts(tracker: Tracker, mounts: Mapping[str, str]) -> None:
     tracker.mounts = tracker.fs.mounts
 
 
-def _ensure_tracker_mounts_for_artifact(tracker: Tracker, artifact: "Artifact") -> None:
+def _ensure_tracker_mounts_for_artifact(
+    tracker: Tracker, artifact: "Artifact", *, trust_db: bool
+) -> None:
+    if not trust_db:
+        return
     from consist.tools.mount_diagnostics import parse_mount_uri
 
     parsed = parse_mount_uri(artifact.container_uri)
@@ -918,6 +922,11 @@ def preview(
         "provenance.duckdb", help="Path to the Consist DuckDB database."
     ),
     n_rows: int = typer.Option(5, "--rows", "-n", help="Number of rows to display."),
+    trust_db: bool = typer.Option(
+        False,
+        "--trust-db",
+        help="Allow mount inference from database metadata for artifact resolution.",
+    ),
 ) -> None:
     """Shows a small preview of an artifact (tabular or array-like when supported)."""
     tracker = get_tracker(db_path)
@@ -928,7 +937,7 @@ def preview(
         console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
         raise typer.Exit(1)
 
-    _ensure_tracker_mounts_for_artifact(tracker, artifact)
+    _ensure_tracker_mounts_for_artifact(tracker, artifact, trust_db=trust_db)
 
     try:
         import consist
@@ -1085,9 +1094,10 @@ class ConsistShell(cmd.Cmd):
     intro = "Welcome to Consist Shell. Type help or ? to list commands.\n"
     prompt = "(consist) "
 
-    def __init__(self, tracker: Tracker):
+    def __init__(self, tracker: Tracker, *, trust_db: bool = False):
         super().__init__()
         self.tracker = tracker
+        self.trust_db = trust_db
 
     def do_runs(self, arg: str) -> None:
         """List recent runs. Usage: runs [--limit N] [--model NAME] [--status STATUS] [--tag TAG]"""
@@ -1184,7 +1194,9 @@ class ConsistShell(cmd.Cmd):
                 console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
                 return
 
-            _ensure_tracker_mounts_for_artifact(self.tracker, artifact)
+            _ensure_tracker_mounts_for_artifact(
+                self.tracker, artifact, trust_db=self.trust_db
+            )
 
             try:
                 import consist
@@ -1289,7 +1301,9 @@ class ConsistShell(cmd.Cmd):
                 console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
                 return
 
-            _ensure_tracker_mounts_for_artifact(self.tracker, artifact)
+            _ensure_tracker_mounts_for_artifact(
+                self.tracker, artifact, trust_db=self.trust_db
+            )
 
             if self.tracker.db and artifact.id:
                 fetched = self.tracker.db.get_artifact_schema_for_artifact(
@@ -1530,6 +1544,11 @@ def shell(
     db_path: str = typer.Option(
         "provenance.duckdb", help="Path to the Consist DuckDB database."
     ),
+    trust_db: bool = typer.Option(
+        False,
+        "--trust-db",
+        help="Allow mount inference from database metadata for artifact resolution.",
+    ),
 ) -> None:
     """
     Start an interactive shell for exploring the provenance database.
@@ -1537,7 +1556,7 @@ def shell(
     """
     tracker = get_tracker(db_path)
     console.print(f"[green]✓ Loaded database: {db_path}[/green]")
-    ConsistShell(tracker).cmdloop()
+    ConsistShell(tracker, trust_db=trust_db).cmdloop()
 
 
 if __name__ == "__main__":

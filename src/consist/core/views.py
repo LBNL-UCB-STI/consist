@@ -36,6 +36,16 @@ def _safe_duckdb_path_literal(path_str: str) -> str:
     return f"'{escaped}'"
 
 
+def _safe_duckdb_string_literal(value: Optional[str]) -> str:
+    """
+    Return a SQL-safe string literal for DuckDB, escaping single quotes.
+    """
+    if value is None:
+        return "NULL"
+    escaped = str(value).replace("'", "''")
+    return f"'{escaped}'"
+
+
 def create_view_model(model: Type[T], name: Optional[str] = None) -> Type[T]:
     """
     Creates a dynamic SQLModel class that maps to a Consist Hybrid View.
@@ -462,15 +472,15 @@ class ViewFactory:
                 path_list.append(safe_path)
 
                 # Handle None/NULL for scenario
-                scenario_val = f"'{item['scenario']}'" if item["scenario"] else "NULL"
+                scenario_val = _safe_duckdb_string_literal(item.get("scenario"))
                 year_val = f"{item['year']}" if item["year"] is not None else "NULL"
                 iter_val = f"{item['iter']}" if item["iter"] is not None else "NULL"
 
                 # Row format: (path, run_id, art_id, year, iter, scenario)
                 row = (
                     safe_path,
-                    f"'{item['run_id']}'",
-                    f"'{item['art_id']}'",
+                    _safe_duckdb_string_literal(item.get("run_id")),
+                    _safe_duckdb_string_literal(item.get("art_id")),
                     year_val,
                     iter_val,
                     scenario_val,

@@ -11,7 +11,7 @@ dependencies, and output artifacts.
 Key functionalities include:
 -   **Container Execution with Provenance**: Wraps container execution
     within a Consist `start_run` context, ensuring that container image
-    identity, commands, environment, and file I/O are fully tracked.
+    identity, commands, environment hash, and file I/O are tracked.
 -   **Backend Agnosticism**: Supports different container runtimes
     (Docker, Singularity/Apptainer) via a unified interface.
 -   **Automated Input/Output Logging**: Automatically logs host-side
@@ -33,7 +33,10 @@ from sqlmodel import Session, select
 from consist.core.tracker import Tracker
 from consist.core.materialize import materialize_artifacts
 from consist.models.artifact import Artifact
-from consist.integrations.containers.models import ContainerDefinition
+from consist.integrations.containers.models import (
+    ContainerDefinition,
+    _hash_environment,
+)
 from consist.integrations.containers.backends import DockerBackend, SingularityBackend
 from consist.models.run import RunArtifactLink
 from consist.types import ArtifactRef
@@ -138,12 +141,11 @@ def _build_container_manifest(
     directories and are already covered by step-level inputs/outputs.
     """
     container_mounts = sorted(set(volumes.values()))
-    env_items = sorted(environment.items())
     return {
         "image": image,
         "image_digest": image_digest,
         "command": command,
-        "environment": env_items,
+        "environment_hash": _hash_environment(environment),
         "working_dir": working_dir,
         "backend": backend_type,
         "container_mounts": container_mounts,
@@ -164,12 +166,22 @@ def _container_allowed_roots(tracker: Tracker) -> list[Path]:
     return [Path(r).resolve() for r in roots]
 
 
-def _validate_host_path(host_path: Union[str, Path], allowed_roots: list[Path]) -> Path:
+def _validate_host_path(
+    host_path: Union[str, Path],
+    allowed_roots: list[Path],
+    *,
+    strict_mounts: bool,
+) -> Path:
     path_obj = Path(host_path)
     if not path_obj.is_absolute() and allowed_roots:
         path_obj = allowed_roots[0] / path_obj
     resolved = path_obj.resolve()
     if not allowed_roots:
+        if strict_mounts:
+            raise ValueError(
+                "Container host paths require configured tracker mounts when "
+                "strict_mounts=True."
+            )
         return resolved
     for root in allowed_roots:
         try:
@@ -181,6 +193,20 @@ def _validate_host_path(host_path: Union[str, Path], allowed_roots: list[Path]) 
     raise ValueError(
         f"Host path {resolved} is outside allowed roots: {allowed_display}"
     )
+
+
+def _ensure_output_within_run_dir(path: Path, tracker: Tracker) -> None:
+    if getattr(tracker, "allow_external_paths", False):
+        return
+    base_dir = tracker.run_dir.resolve()
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(base_dir)
+    except ValueError as exc:
+        raise ValueError(
+            f"Container output path {resolved} is outside run_dir {base_dir}. "
+            "Set allow_external_paths=True or CONSIST_ALLOW_EXTERNAL_PATHS=1 to override."
+        ) from exc
 
 
 def _coerce_container_command(command: Union[str, List[str]]) -> List[str]:
@@ -371,6 +397,7 @@ def run_container(
     backend_type: str = "docker",
     pull_latest: bool = False,
     lineage_mode: Literal["full", "none"] = "full",
+    strict_mounts: bool = True,
 ) -> ContainerResult:
     """
     Executes a containerized step with optional provenance tracking and caching via Consist.
@@ -397,8 +424,9 @@ def run_container(
     volumes : Dict[str, str]
         A dictionary mapping host paths to container paths for volume mounts.
         Example: `{"/host/path": "/container/path"}`.
-        Host paths are resolved and validated against tracker mounts when present;
-        relative paths are resolved against the first mount root.
+        Host paths are resolved and validated against tracker mounts. When
+        strict_mounts is False, any absolute host path is permitted.
+        Relative paths are resolved against the first mount root.
     inputs : List[ArtifactRef]
         A list of paths (str/Path) or `Artifact` objects on the host machine that serve
         as inputs to the containerized process. These are logged as Consist inputs.
@@ -406,11 +434,13 @@ def run_container(
         A list of paths on the host machine that are expected to be generated or
         modified by the containerized process. These paths will be scanned and
         logged as Consist output artifacts.
-        Host paths are validated against tracker mounts when present.
+        Host paths are validated against tracker mounts and must remain within
+        run_dir unless allow_external_paths is enabled.
     outputs : Dict[str, str]
         Alternatively, pass a mapping of logical output keys to host paths.
         The artifact will be logged with the provided key instead of the filename.
-        Host paths are validated against tracker mounts when present.
+        Host paths are validated against tracker mounts and must remain within
+        run_dir unless allow_external_paths is enabled.
     environment : Optional[Dict[str, str]], optional
         A dictionary of environment variables to set inside the container. Defaults to empty.
     working_dir : Optional[str], optional
@@ -424,6 +454,9 @@ def run_container(
     lineage_mode : Literal["full", "none"], default "full"
         "full" performs Consist provenance tracking, caching, and output scanning.
         "none" skips Consist logging/caching and does not scan outputs.
+    strict_mounts : bool, default True
+        If True, require tracker mounts to be configured and constrain container
+        host paths to those roots. Set to False to allow any absolute host path.
 
     Returns
     -------
@@ -455,7 +488,9 @@ def run_container(
     allowed_roots = _container_allowed_roots(tracker)
     validated_volumes: Dict[str, str] = {}
     for host_path, container_path in volumes.items():
-        validated_host = _validate_host_path(host_path, allowed_roots)
+        validated_host = _validate_host_path(
+            host_path, allowed_roots, strict_mounts=strict_mounts
+        )
         validated_volumes[str(validated_host)] = container_path
     volumes = validated_volumes
 
@@ -463,12 +498,19 @@ def run_container(
     output_specs: List[tuple[str, str]] = []
     if isinstance(outputs, dict):
         for logical_key, host_path in outputs.items():
-            validated_host = _validate_host_path(host_path, allowed_roots)
+            validated_host = _validate_host_path(
+                host_path, allowed_roots, strict_mounts=strict_mounts
+            )
+            _ensure_output_within_run_dir(validated_host, tracker)
             output_specs.append((str(logical_key), str(validated_host)))
     else:
-        output_specs = [
-            (Path(o).name, str(_validate_host_path(o, allowed_roots))) for o in outputs
-        ]
+        output_specs = []
+        for output_path in outputs:
+            validated_host = _validate_host_path(
+                output_path, allowed_roots, strict_mounts=strict_mounts
+            )
+            _ensure_output_within_run_dir(validated_host, tracker)
+            output_specs.append((Path(output_path).name, str(validated_host)))
 
     outputs_str = [p for _, p in output_specs]
 

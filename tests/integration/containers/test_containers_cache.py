@@ -24,13 +24,18 @@ def test_container_cache_reuse_and_miss_for_new_outputs(
         exec_counter["count"] += 1
         return True
 
+    def fake_init(self, pull_latest: bool = False):
+        self.pull_latest = pull_latest
+        self.client = None
+
+    monkeypatch.setattr(DockerBackend, "__init__", fake_init, raising=False)
     monkeypatch.setattr(
         DockerBackend, "resolve_image_digest", fake_resolve, raising=False
     )
     monkeypatch.setattr(DockerBackend, "run", fake_run, raising=False)
 
-    base_out = tmp_path / "out_table.txt"
-    extra_out = tmp_path / "out_extra.txt"
+    base_out = tracker.run_dir / "out_table.txt"
+    extra_out = tracker.run_dir / "out_extra.txt"
 
     # Ensure files exist so artifact logging succeeds
     base_out.write_text("hello")
@@ -49,6 +54,7 @@ def test_container_cache_reuse_and_miss_for_new_outputs(
         working_dir=None,
         backend_type="docker",
         pull_latest=False,
+        strict_mounts=False,
     )
     assert exec_counter["count"] == 1
     assert result1.cache_hit is False
@@ -66,6 +72,7 @@ def test_container_cache_reuse_and_miss_for_new_outputs(
         working_dir=None,
         backend_type="docker",
         pull_latest=False,
+        strict_mounts=False,
     )
     assert exec_counter["count"] == 1  # no increment on cache hit
     assert result2.cache_hit is True
@@ -88,6 +95,7 @@ def test_container_cache_reuse_and_miss_for_new_outputs(
         working_dir=None,
         backend_type="docker",
         pull_latest=False,
+        strict_mounts=False,
     )
     assert exec_counter["count"] == 2
     assert result3.cache_hit is False
