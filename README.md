@@ -25,23 +25,21 @@ pip install consist
 ## Quick Example
 
 ```python
+import consist
 from consist import Tracker
 import pandas as pd
 
 # Initialize tracker: run_dir stores outputs, db_path stores metadata
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
-def clean_data(raw_path):
-    df = pd.read_csv(raw_path)
-    df = df[df["value"] > 0.5]
-    out_path = tracker.run_dir / "cleaned.parquet"
-    df.to_parquet(out_path)
-    return {"cleaned": out_path}
+def clean_data(raw: pd.DataFrame, threshold: float = 0.5) -> pd.DataFrame:
+    df = raw[raw["value"] > threshold]
+    return df
 
 # First run: executes function, records inputs/config/outputs
 result = tracker.run(
     fn=clean_data,
-    inputs={"raw_path": "raw.csv"},  # Files to hash (part of cache key)
+    inputs={"raw": "raw.csv"},       # Files to hash (part of cache key)
     config={"threshold": 0.5},        # Config to hash (part of cache key)
     outputs=["cleaned"],               # Output artifact names
 )
@@ -55,9 +53,14 @@ result = tracker.run(
 )
 
 # Artifact: file with provenance metadata attached
-artifact = result["cleaned"]
-artifact.path   # -> PosixPath('./runs/<run_id>/cleaned.parquet')
+artifact = result.outputs["cleaned"]
+artifact.path   # -> PosixPath('.../runs/outputs/.../cleaned.parquet')
+
+# Load the data back as a DataFrame
+cleaned_df = consist.load_df(artifact)
 ```
+
+Note: when `inputs` is a mapping, Consist auto-loads common tabular formats (CSV/Parquet) into pandas by default.
 
 **Key insight**: Consist computes a fingerprint from your code version, config, and input files. If you re-run with the same fingerprint, cached results return instantly—no re-execution, no data movement. Change anything upstream? Only affected downstream steps re-execute.
 

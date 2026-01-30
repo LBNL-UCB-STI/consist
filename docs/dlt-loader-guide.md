@@ -9,7 +9,7 @@ The DLT (Data Load Tool) integration enables robust, schema-validated ingestion 
 `dlt` is an open-source library for extracting and loading data. Consist uses it to:
 
 - **Ingest diverse formats** (Parquet, CSV, JSON, Python objects) into DuckDB
-- **Auto-detect and enforce schemas** with optional strict validation
+- **Auto-detect and enforce schemas** (schema enforcement when provided)
 - **Handle data quality issues** (type mismatches, missing values, duplicates)
 - **Inject Consist provenance columns** (`consist_run_id`, `consist_artifact_id`, `consist_year`, etc.)
 - **Scale efficiently** with streaming and batching
@@ -47,9 +47,15 @@ The DLT (Data Load Tool) integration enables robust, schema-validated ingestion 
 
 **Example:**
 ```python
+import consist
+from sqlmodel import select
+
 # DLT ingestion → can query across all runs with SQL
-df = tracker.views.Persons.select("consist_run_id", "age")
-# Returns: all persons from all runs, with run context
+VPerson = tracker.views.Person
+rows = consist.run_query(
+    select(VPerson.consist_run_id, VPerson.age),
+    tracker=tracker,
+)
 ```
 
 ### Use Direct Logging for:
@@ -77,7 +83,8 @@ df = tracker.views.Persons.select("consist_run_id", "age")
 **Example:**
 ```python
 # Direct logging → no schema, just store the file
-consist.log_artifact(result_path, key="my_result")
+with tracker.start_run("log_result", model="demo"):
+    consist.log_artifact(result_path, key="my_result")
 ```
 
 ### Decision Tree
@@ -87,7 +94,7 @@ Do you want to query this data across multiple runs in SQL?
 ├─ YES → Use DLT (register a schema)
 ├─ NO  → Do you trust the data format/types?
 │        ├─ YES → Use direct logging (tracker.log_artifact)
-│        └─ NO  → Use DLT with strict validation
+│        └─ NO  → Use DLT with a schema
 ```
 
 ---
@@ -134,20 +141,22 @@ df = pd.DataFrame({
     "name": ["Alice", "Bob", "Carol"],
 })
 
-# Log with schema (dlt ingestion)
-tracker.log_dataframe(df, key="persons", schema=Person)
+# Log with schema (DLT ingestion)
+with tracker.start_run("ingest_people", model="demo"):
+    tracker.log_dataframe(df, key="persons", schema=Person)
 ```
 
 ### Step 4: Query Across Runs
 
 ```python
-from sqlmodel import select, func
+from sqlmodel import Session, select, func
 
-# Compute an aggregate over a single run_id.
+# Compute an aggregate over a single run_id (via the hybrid view).
+VPerson = tracker.views.Person
 with Session(tracker.engine) as session:
     avg_age = session.exec(
         # Filter to one Consist run and take an average over the ingested rows.
-        select(func.avg(Person.age)).where(Person.consist_run_id == "run_123")
+        select(func.avg(VPerson.age)).where(VPerson.consist_run_id == "run_123")
     ).first()
     print(f"Average age in run_123: {avg_age}")
 ```
@@ -228,86 +237,68 @@ class Trip(SQLModel, table=True):
 import consist
 
 df = pd.read_csv("results.csv")
-consist.log_dataframe(
-    df,
-    key="results",
-    schema=MySchema,  # Validate against schema
-)
+with tracker.start_run("log_results", model="demo"):
+    consist.log_dataframe(
+        df,
+        key="results",
+        schema=MySchema,  # Validate against schema
+    )
 ```
 
 ### Parquet File
 
 ```python
-consist.log_artifact(
-    Path("results.parquet"),
-    key="raw_results",
-    schema=MySchema,  # Optional: validate on ingest
-)
+with tracker.start_run("log_parquet", model="demo"):
+    tracker.log_artifact(
+        Path("results.parquet"),
+        key="raw_results",
+        schema=MySchema,  # Schema is stored; call tracker.ingest(...) to ingest
+    )
 ```
 
 ### CSV File
 
 ```python
-consist.log_artifact(
-    Path("results.csv"),
-    key="csv_results",
-    schema=MySchema,
-)
+with tracker.start_run("log_csv", model="demo"):
+    tracker.log_artifact(
+        Path("results.csv"),
+        key="csv_results",
+        schema=MySchema,
+    )
 ```
 
 ### Zarr / NetCDF (Matrix Data)
 
 ```python
 # Zarr metadata is ingested as catalog (not raw data)
-consist.log_artifact(
-    Path("simulation_output.zarr"),
-    key="gridded_results",
-    driver="zarr",
-)
-# Creates: consist.views.zarr_catalog with metadata
+with tracker.start_run("log_zarr", model="demo"):
+    tracker.log_artifact(
+        Path("simulation_output.zarr"),
+        key="gridded_results",
+        driver="zarr",
+    )
 ```
 
 ---
 
 ## Data Quality & Error Handling
 
-### Strict Mode (Fail on Issues)
+### Schema Enforcement (Fail on Issues)
 
-If data doesn't match schema exactly, fail fast:
-
-```python
-tracker.log_dataframe(
-    df,
-    key="strict_results",
-    schema=MySchema,
-    strict=True,  # Raise if schema violated
-)
-```
-
-**Will raise if:**
-- Column missing or extra
-- Type mismatch (e.g., string in int column)
-- Null in non-optional field
-- Primary key violation (duplicates)
-
-### Lenient Mode (Best-Effort)
-
-Try to load data, logging warnings for issues:
+When you provide a schema, Consist enforces the column set and types. Extra
+columns raise a `ValueError`, and type mismatches are surfaced during ingestion.
 
 ```python
-tracker.log_dataframe(
-    df,
-    key="lenient_results",
-    schema=MySchema,
-    strict=False,  # Default: warn and continue
-)
+with tracker.start_run("strict_ingest", model="demo"):
+    tracker.log_dataframe(
+        df,
+        key="strict_results",
+        schema=MySchema,
+    )
 ```
 
-**Will warn on:**
-- Type coercion (e.g., "123" → 123)
-- Null in non-optional field (filled with default or NULL)
-- Extra columns (ignored)
-- Missing columns (filled with NULL)
+If you want best-effort ingestion (no strict schema), omit the schema and let
+DLT infer the structure.
 
 ### Type Coercion
 
@@ -343,11 +334,12 @@ class Trip(SQLModel, table=True):
     arrival_hour: Optional[int]
 ```
 
-Missing values in Optional fields → NULL in DB. Missing in required fields → error or default depending on `strict`.
+Missing values in Optional fields → NULL in DB. Missing in required fields → error or default depending on the schema and ingestion behavior.
 
 ### Duplicate Handling
 
-Primary keys must be unique:
+Primary keys are not enforced automatically in all cases. If you need
+uniqueness, deduplicate before ingestion:
 
 ```python
 class Household(SQLModel, table=True):
@@ -360,8 +352,6 @@ df = pd.DataFrame({
     "size": [4, 3, 5],
 })
 
-# strict=True → raises PrimaryKeyViolationError
-# strict=False → last value wins or error
 ```
 
 To handle duplicates, deduplicate before ingestion:
@@ -382,22 +372,23 @@ Consist automatically injects system columns during ingestion:
 |---|---|---|
 | `consist_run_id` | str | ID of the run that created this data |
 | `consist_artifact_id` | str | Artifact ID of the source file |
-| `consist_scenario_id` | str | Scenario ID (if run is part of scenario) |
+| `consist_scenario_id` | str | Scenario ID (available in hybrid views) |
 | `consist_year` | int | Year (if provided to run context) |
 | `consist_iteration` | int | Iteration count (if provided) |
 
 ### Example Query
 
 ```python
-from sqlmodel import Session, select
+from sqlmodel import Session, select, func
 
+VPerson = tracker.views.Person
 with Session(tracker.engine) as session:
     # Count persons per run
     results = session.exec(
         select(
-            Person.consist_run_id,
-            func.count(Person.person_id).label("count")
-        ).group_by(Person.consist_run_id)
+            VPerson.consist_run_id,
+            func.count(VPerson.person_id).label("count")
+        ).group_by(VPerson.consist_run_id)
     ).all()
 
     for run_id, count in results:
@@ -410,9 +401,9 @@ with Session(tracker.engine) as session:
 # Get persons from a specific scenario year
 with Session(tracker.engine) as session:
     persons_2030 = session.exec(
-        select(Person).where(
-            Person.consist_year == 2030,
-            Person.consist_scenario_id == "baseline"
+        select(VPerson).where(
+            VPerson.consist_year == 2030,
+            VPerson.consist_scenario_id == "baseline"
         )
     ).all()
 ```
@@ -497,7 +488,8 @@ for i, chunk in enumerate(pd.read_csv("large_file.csv", chunksize=chunk_size)):
     )
 ```
 
-DuckDB automatically unions these into a single table:
+DuckDB automatically unions these into a single table **when the schema/table
+name is the same** (for example, when you pass `schema=MySchema` each time):
 
 ```python
 # Query all chunks together
@@ -550,7 +542,7 @@ After ingestion, create indexes for frequently queried columns:
 # Manual index (in DuckDB):
 with tracker.engine.begin() as conn:
     conn.exec_driver_sql(
-        "CREATE INDEX idx_person_run ON person(consist_run_id)"
+        "CREATE INDEX idx_person_run ON global_tables.person(consist_run_id)"
     )
 ```
 
@@ -567,12 +559,7 @@ If your pipeline generates duplicate records, deduplicate before ingestion:
 df = df.drop_duplicates(subset=["id"])
 ```
 
-Or use Consist's deduplication (if enabled):
-
-```python
-# Mark as dedupable (currently manual):
-# consist.log_dataframe(df, key="data", dedupe_on_hash=True)
-```
+Consist does not currently deduplicate automatically.
 
 ---
 
@@ -620,9 +607,9 @@ df = df.drop_duplicates(subset=["id"])
 ImportError: No module named 'dlt'
 ```
 
-**Fix:** Install DLT:
+**Fix:** Install the ingest extras:
 ```bash
-pip install dlt
+pip install "consist[ingest]"
 ```
 
 ### Null in Non-Optional Field
@@ -631,7 +618,7 @@ pip install dlt
 Warning: Null value in non-optional field 'age'
 ```
 
-**Fix (strict mode):** Ensure no nulls:
+**Fix (with schema enforcement):** Ensure no nulls:
 ```python
 df = df.dropna(subset=["age"])
 

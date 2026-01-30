@@ -1,6 +1,9 @@
 # Usage Guide
 
-Consist provides flexible patterns for tracking provenance in scientific workflows. This guide walks you through the main usage patterns, from simple single-step runs to complex multi-year simulations.
+Consist provides flexible patterns for tracking provenance in scientific workflows. This guide walks you through the main usage patterns, from simple single-step runs to complex multi-year simulations. Each section is written to help:
+- **Developers** integrating Consist into a simulation tool
+- **Practitioners** running tools and wanting clearer inputs/outputs
+- **Researchers** managing multi-stage pipelines and reproducibility
 
 **New to Consist?** Start with the [quickstart notebook](examples.md#quickstart), then work through the examples below in order.
 
@@ -8,7 +11,7 @@ Consist provides flexible patterns for tracking provenance in scientific workflo
 
 ## Choosing Your Pattern
 
-Choose based on what you're building:
+Choose based on what you're building and how much structure you need:
 
 | Your Workflow                                               | Pattern                         | Why                                                                                                                         |
 |-------------------------------------------------------------|---------------------------------|-----------------------------------------------------------------------------------------------------------------------------|
@@ -72,7 +75,7 @@ If you run it again with the same inputs and config, you should get a cache hit 
 <details>
 <summary>Alternative: keep raw file paths (no auto-load)</summary>
 
-Use this when your function needs a `Path` and manages I/O directly.
+Use this when your function needs a `Path` and manages I/O directly (common for legacy tools or file-based APIs).
 
 ```python
 def clean_data(raw_file: Path, _consist_ctx) -> None:
@@ -147,6 +150,8 @@ with use_tracker(tracker):
         fn=run_legacy_model,
         inputs={"upstream": Path("input.csv")},
         depends_on=[Path("config.yaml"), Path("parameters.json")],  # Hash these files too
+        load_inputs=False,
+        runtime_kwargs={"upstream": Path("input.csv")},  # Pass raw paths at runtime
         inject_context=True,
     )
 ```
@@ -167,8 +172,10 @@ with use_tracker(tracker):
 
     result = consist.run(
         fn=run_legacy_model,
-        inputs={"upstream": Path("input.csv")},  # auto-loaded into the upstream arg
+        inputs={"upstream": Path("input.csv")},  # hashed input
         depends_on=[Path("config.yaml")],
+        load_inputs=False,
+        runtime_kwargs={"upstream": Path("input.csv")},
         capture_dir=Path("outputs"),
         capture_pattern="*.csv",
     )
@@ -179,8 +186,9 @@ with use_tracker(tracker):
 <summary>How input mappings become function arguments</summary>
 
 When `inputs` is a mapping, Consist matches keys to function parameters and auto-loads
-those artifacts (for example, a CSV becomes a DataFrame) into the call. This is why
-`inputs={"upstream": ...}` is passed as the `upstream` argument above.
+those artifacts (for example, a CSV becomes a DataFrame) into the call by default.
+If you keep `load_inputs=True`, `inputs={"upstream": ...}` becomes the `upstream`
+argument automatically.
 
 If you want raw paths instead of auto-loaded data, set `load_inputs=False` and pass
 paths explicitly via `runtime_kwargs`.
@@ -208,7 +216,10 @@ Use `scenario()` when you have multiple interdependent steps that share state or
 
 ### Understanding the Coupler
 
-The **coupler** is your scenario-scoped artifact registry. When you log an artifact with a key, it's automatically stored in the coupler, making data flow between steps explicit and traceable.
+The **coupler** is your scenario-scoped artifact registry. When you log an artifact with a key, it's automatically stored in the coupler, making data flow between steps explicit and traceable. This is especially useful when:
+- You need clean handoffs between tools (developer workflows)
+- You want a clear list of outputs by name (practitioner workflows)
+- You want auditable step-to-step lineage (research workflows)
 
 **Etymology**: A coupler (like the library name "consist" from railroad terminology) is the mechanism that links train cars together. In Consist, the coupler links your workflow steps by storing and threading their outputs.
 
@@ -295,12 +306,12 @@ sc.run(
 ```
 Use this when the artifact is already in the coupler from a prior step. With `load_inputs=True`, each key becomes a function parameter with the loaded data. For example, `inputs=["preprocessed"]` means your function receives a `preprocessed` parameter with the loaded DataFrame.
 
-**Note**: If you have existing code using `input_keys=`, it continues to work identically. Both `inputs=` and `input_keys=` are supported and stable long-term. The `inputs=` parameter is simply the newer, preferred name.
+**Note**: If you have existing code using `input_keys=`, it continues to work for backward compatibility. `inputs=` is the preferred name for new code.
 
 <details>
 <summary>Alternative: inline steps with sc.trace</summary>
 
-Use this when you want inline code blocks (they always execute, even on cache hits).
+Use this when you want inline code blocks (they always execute, even on cache hits). This can be useful for lightweight validation or logging.
 
 ```python
 with use_tracker(tracker):
@@ -478,22 +489,23 @@ for year in [2020, 2030, 2040]:
 **Bulk logging with metadata:**
 ```python
 with consist.scenario("outputs") as sc:
-    # Log multiple files at once with explicit keys
-    outputs = sc.log_artifacts(
-        {
-            "persons": "results/persons.parquet",
-            "households": "results/households.parquet",
-            "jobs": "results/jobs.parquet"
-        },
-        metadata_by_key={
-            "households": {"role": "primary_unit"},
-            "jobs": {"role": "employment_proxy"}
-        },
-        year=2030,
-        scenario_name="base"
-    )
-    # All get year=2030, scenario_name="base"
-    # households also gets role="primary_unit"
+    with sc.trace(name="export_outputs"):
+        # Log multiple files at once with explicit keys
+        outputs = consist.log_artifacts(
+            {
+                "persons": "results/persons.parquet",
+                "households": "results/households.parquet",
+                "jobs": "results/jobs.parquet"
+            },
+            metadata_by_key={
+                "households": {"role": "primary_unit"},
+                "jobs": {"role": "employment_proxy"}
+            },
+            year=2030,
+            scenario_name="base"
+        )
+        # All get year=2030, scenario_name="base"
+        # households also gets role="primary_unit"
 ```
 
 ### Example: Parameter Sweep in a Scenario
@@ -514,9 +526,9 @@ with use_tracker(tracker):
                 name="analyze",
                 run_id=f"threshold_{threshold}",
                 threshold=threshold,
-                inputs=["shared_data"],
+                inputs=["data"],
             ):
-                df = consist.load_df(coupler.require("shared_data"))
+                df = consist.load_df(coupler.require("data"))
                 filtered = df[df["value"] > threshold]
                 consist.log_dataframe(filtered, key="filtered")
 ```
@@ -604,6 +616,10 @@ By default, Consist returns metadata-only cache hits (no file copies). You can o
 - **`outputs-all`**: Copy all cached outputs into a target directory
 - **`inputs-missing`**: When a cache miss occurs, backfill missing inputs from prior runs before executing
 
+**Note:** `outputs-requested` requires `output_paths=...` so Consist knows where to write the files.
+`inputs-missing` only works for inputs that are tracked artifacts (not raw paths), so Consist can find
+the prior run's files or reconstruct ingested tables.
+
 Set per-run via `cache_hydration=...` or for scenario steps via `step_cache_hydration=...`:
 
 ```python
@@ -669,11 +685,12 @@ Here's a realistic example showing the difference:
 ```python
 with use_tracker(tracker):
     with consist.scenario("baseline") as sc:
+        year = 2030
         # This block executes every time, even on cache hits
         with sc.trace(
             name="prepare_land_use",
             inputs={"geojson": Path("land_use.geojson")},
-            year=2030
+            year=year
         ):
             # This code ALWAYS runs—useful if you log, print status, etc.
             print(f"Processing land use for year {year}")
@@ -757,7 +774,7 @@ with use_tracker(tracker):
 
 ### Query Facets with `pivot_facets`
 
-Log small, queryable config values (facets) and pivot them into a wide table for analysis:
+Log small, queryable config values (facets) and pivot them into a wide table for analysis. This is a simple way to compare many runs side‑by‑side (for example, a sensitivity analysis across parameters):
 
 ```python
 from sqlmodel import select
@@ -775,7 +792,7 @@ rows = consist.run_query(
     tracker=tracker,
 )
 
-# Result: DataFrame with columns [run_id, alpha, beta, mode] for comparison
+# Result: list of rows with columns [run_id, alpha, beta, mode] for comparison
 ```
 
 See [Concepts](concepts.md#the-config-vs-facet-distinction) for when to use `config` vs `facet`.
@@ -862,7 +879,7 @@ For more on ingestion and hybrid views, see [Ingestion & Hybrid Views](ingestion
 
 ### Generating Schemas from Captured Data
 
-If you ingest tabular data into DuckDB, Consist can capture the observed schema and export an **editable SQLModel stub** so you can curate PK/FK constraints and then register the model for views.
+If you ingest tabular data into DuckDB, Consist can capture the observed schema and export an **editable SQLModel stub** so you can curate PK/FK constraints and then register the model for views. This is useful when you want a stable, documented schema for downstream analysis or audits.
 
 You can also opt into lightweight file schema capture when logging CSV/Parquet artifacts by passing `profile_file_schema=True` (and optionally `file_schema_sample_rows=`) to `log_artifact`. These captured schemas are stored in the provenance DB and remain available even if the original files move or are deleted.
 If you already have a content hash (e.g., after copying or moving a file), pass `content_hash=` to `log_artifact` to reuse it without re-hashing the file. For safety, Consist will not overwrite an existing, different hash unless you pass `force_hash_override=True`. To verify the hash against disk, use `validate_content_hash=True`.

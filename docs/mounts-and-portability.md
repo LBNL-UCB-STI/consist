@@ -63,10 +63,15 @@ tracker = Tracker(
 )
 ```
 
-When Alice runs a simulation and logs an output:
+When Alice runs a simulation and logs an output (inside a run context):
 
 ```python
-consist.log_artifact(Path("/home/alice/activitysim_outputs/results.parquet"), key="results")
+with tracker.start_run("asim_baseline", model="activitysim"):
+    consist.log_artifact(
+        Path("/home/alice/activitysim_outputs/results.parquet"),
+        key="results",
+        direction="output",
+    )
 ```
 
 Consist detects the mount and stores a portable URI:
@@ -123,7 +128,7 @@ This keeps provenance portable and lets each user remap mounts on their machine.
 Paths under the run directory are stored relative to the active run:
 
 ```
-./outputs/model.csv
+./outputs/<run_id>/model.csv
 ```
 
 Internally this is treated as a workspace URI and resolved using the run's

@@ -77,10 +77,15 @@ result = consist.run(
 Or materialize manually:
 
 ```python
+from pathlib import Path
+
 result = consist.run(...)
 if result.cache_hit:
     from consist.core.materialize import materialize_artifacts
-    artifacts_to_load = [(artifact, artifact.path) for artifact in result.outputs.values()]
+    artifacts_to_load = [
+        (artifact, Path(tracker.run_dir) / "rehydrated" / artifact.path.name)
+        for artifact in result.outputs.values()
+    ]
     materialize_artifacts(tracker, artifacts_to_load)
 ```
 
@@ -97,12 +102,13 @@ if result.cache_hit:
 Debug the signature:
 
 ```python
-import json
-from consist.core.identity import IdentityManager
+from pathlib import Path
 
 identity = tracker.identity
-code_hash = identity.code_hash()
-config_hash = identity.compute_json_hash({"param": value})
+code_hash = identity.get_code_version()
+# If you want to match Consist's exact run hash, include model/year/iteration:
+# config_hash = identity.compute_run_config_hash(config={"param": value}, model="my_model", year=2030)
+config_hash = identity.compute_config_hash({"param": value})
 input_hash = identity.compute_file_checksum(Path("input.csv"))
 
 print(f"Code: {code_hash}")
@@ -119,7 +125,7 @@ for run in prior_runs:
 - **Code changed:** Check git status, function definitions
 - **Config changed:** Check parameter types (0 vs 0.0, "0" vs 0)
 - **Input file changed:** Check file modification time, content hash
-- **Python version changed:** Code hash includes Python version (can invalidate cache)
+- **Run fields changed:** `model`, `year`, or `iteration` are folded into the config hash
 - **Dependencies changed:** Installed package versions can affect behavior
 
 ---
@@ -139,9 +145,12 @@ This clears all run history and cache. Next run will re-execute everything.
 To keep history but force re-execution:
 
 ```python
-tracker.begin_run(..., cache_mode="overwrite")
-result = consist.run(...)
-tracker.end_run()
+result = consist.run(
+    fn=your_fn,
+    inputs={...},
+    outputs=[...],
+    cache_mode="overwrite",
+)
 ```
 
 ---
@@ -231,8 +240,9 @@ artifact_uri = "outputs://key/result.csv"
 df = pd.read_csv(artifact_uri)  # Fails
 
 # DO:
-artifact = consist.log_artifact(result_path, key="key")
-df = pd.read_csv(artifact.path)  # Use .path property
+with tracker.start_run("resolve_uri", model="example"):
+    artifact = tracker.log_artifact(result_path, key="key", direction="output")
+    df = pd.read_csv(artifact.path)  # Use .path property
 ```
 
 Or resolve URI explicitly:
@@ -265,7 +275,8 @@ output_file = Path(tracker.run_dir) / "results.csv"  # Absolute
 Or use artifact URIs:
 
 ```python
-consist.log_artifact(result, key="output")
+with tracker.start_run("log_output", model="example"):
+    tracker.log_artifact(result, key="output", direction="output")
 # Later, access via:
 artifact = tracker.get_artifacts_for_run("run_id").outputs["output"]
 print(artifact.path)  # Absolute path
@@ -286,7 +297,7 @@ print(artifact.path)  # Absolute path
 Convert DataFrame types before ingestion:
 
 ```python
-from consist.models.artifact import MySchema
+from your_pkg.models import MySchema
 
 # Check types
 print(df.dtypes)
@@ -298,7 +309,8 @@ df = df.astype({
     "name": "object",
 })
 
-consist.log_dataframe(df, key="data", schema=MySchema)
+with tracker.start_run("ingest_data", model="example"):
+    tracker.log_dataframe(df, key="data", schema=MySchema)
 ```
 
 Or use Pandas casting:
@@ -354,7 +366,8 @@ df = df.drop_duplicates(subset=["id"], keep="last")
 # Or remove all duplicates
 df = df[~df.duplicated(subset=["id"], keep=False)]
 
-consist.log_dataframe(df, key="data", schema=MySchema)
+with tracker.start_run("ingest_deduped", model="example"):
+    tracker.log_dataframe(df, key="data", schema=MySchema)
 ```
 
 ---
@@ -378,7 +391,8 @@ consist.log_dataframe(df, key="data", schema=MySchema)
 
 2. **Ingest with schema:**
    ```python
-   consist.log_dataframe(df, key="persons", schema=Person)
+with tracker.start_run("ingest_persons", model="example"):
+    tracker.log_dataframe(df, key="persons", schema=Person)
    ```
 
 3. **Verify schema exists:**
@@ -594,7 +608,8 @@ consist.log_dataframe(df, key="data", schema=MySchema)
 3. **Use selective ingestion:**
    ```python
    # Don't ingest everything, just what you need
-   consist.log_dataframe(df.head(1000), key="sample")  # Sample instead of all
+with tracker.start_run("sample_ingest", model="example"):
+    tracker.log_dataframe(df.head(1000), key="sample")  # Sample instead of all
    ```
 
 ---
@@ -618,7 +633,7 @@ This prints detailed provenance tracking, signature computation, and cache decis
 ```python
 run = tracker.get_run("run_id")
 print(f"Signature: {run.signature}")
-print(f"Code hash: {run.config_hash}")
+print(f"Code hash: {run.git_hash}")
 print(f"Meta: {run.meta}")
 ```
 
@@ -637,10 +652,11 @@ print(conn.query("SELECT * FROM artifact LIMIT 5").df())
 ```python
 from pathlib import Path
 
-artifact = consist.log_artifact(Path("input.csv"))
-print(f"Path: {artifact.path}")
-print(f"Hash: {artifact.hash}")
-print(f"Size: {artifact.path.stat().st_size}")
+with tracker.start_run("hash_input", model="example"):
+    artifact = tracker.log_artifact(Path("input.csv"), key="input", direction="input")
+    print(f"Path: {artifact.path}")
+    print(f"Hash: {artifact.hash}")
+    print(f"Size: {artifact.path.stat().st_size}")
 ```
 
 ---
@@ -656,7 +672,7 @@ If you hit an issue not covered here:
 
 2. **Inspect database:**
    ```bash
-   sqlite3 provenance.duckdb ".schema"
+   duckdb provenance.duckdb ".schema"
    ```
 
 3. **File an issue** on GitHub with:

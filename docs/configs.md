@@ -112,7 +112,7 @@ Digests are recorded in:
 
 Normally, you pass configuration two ways:
 
-1. **Via `config=`** — Stored in the database, queryable, but large configs (5MB+) bloat the DB and become expensive to search.
+1. **Via `config=`** — Stored in the JSON run snapshot and hashed into identity, but not queryable by default.
 2. **Not tracked** — Smaller footprint, but changes to external files don't invalidate the cache, risking incorrect cache hits.
 
 `hash_inputs` is the middle ground: **Hash the files so cache keys change when they do, but don't store the content.**
@@ -129,6 +129,7 @@ Instead, hash the config directory:
 ```python
 import consist
 from pathlib import Path
+from consist import use_tracker
 
 asim_config_dir = Path("./configs/activitysim")
 
@@ -159,7 +160,7 @@ with use_tracker(tracker):
 
 | Approach | Space | Queryable | Cache Behavior |
 |---|---|---|---|
-| `config={"yaml": large_dict}` | Bloated DB | Yes, but slow | Cache respects changes |
+| `config={"yaml": large_dict}` | JSON snapshot only | No (by default) | Cache respects changes |
 | `hash_inputs=[path]` | Minimal | No | Cache respects changes |
 | Ignore files | Minimal | N/A | Cache miss if files change (BAD) |
 
@@ -259,7 +260,7 @@ with use_tracker(tracker):
         name="activitysim",
         config={"scenario": "baseline"},
         config_plan=plan,
-        cache_mode="auto",
+        cache_mode="reuse",
     )
 ```
 
