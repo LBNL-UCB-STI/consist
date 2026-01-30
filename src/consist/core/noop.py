@@ -27,11 +27,13 @@ class NoopArtifact:
 
     key: str
     path: Path
-    uri: str
+    container_uri: str
     meta: Dict[str, Any] = field(default_factory=dict)
     driver: str = "file"
     run_id: Optional[str] = None
     id: Optional[str] = None
+    table_path: Optional[str] = None
+    array_path: Optional[str] = None
 
     def get_path(self) -> Path:
         return self.path
@@ -93,7 +95,7 @@ class NoopCoupler:
         Set an artifact, accepting both Artifact objects and artifact-like values.
 
         This method is useful when integrating with optional dependencies where you may
-        receive either real Artifacts or artifact-like objects with .path/.uri properties.
+        receive either real Artifacts or artifact-like objects with .path/.container_uri properties.
 
         All forms are stored in the coupler and can be retrieved with get() or require().
         """
@@ -151,8 +153,8 @@ class NoopCoupler:
             return Path(artifact.get_path())
         if hasattr(artifact, "path"):
             return Path(artifact.path)
-        if hasattr(artifact, "uri"):
-            return Path(artifact.uri)
+        if hasattr(artifact, "container_uri"):
+            return Path(artifact.container_uri)
         return None
 
     def declare_outputs(
@@ -450,7 +452,7 @@ def _build_noop_artifact(
             return NoopArtifact(
                 key=key,
                 path=path,
-                uri=str(path),
+                container_uri=str(path),
                 meta=dict(meta or {}),
             )
         except Exception:
@@ -459,7 +461,7 @@ def _build_noop_artifact(
     return NoopArtifact(
         key=key,
         path=path,
-        uri=str(path),
+        container_uri=str(path),
         meta=dict(meta or {}),
     )
 

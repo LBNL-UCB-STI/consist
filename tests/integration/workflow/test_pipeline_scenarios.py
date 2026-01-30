@@ -174,7 +174,7 @@ def mock_model_step(
                 f"Step {step_name}: Cached run missing outputs!"
             )
             output_artifact = t.current_consist.outputs[0]
-            return t.resolve_uri(output_artifact.uri)
+            return t.resolve_uri(output_artifact.container_uri)
         else:
             ctx.log_execution(step_name)
             df = pd.DataFrame({"id": [1], "val": [step_name], "param": [str(config)]})

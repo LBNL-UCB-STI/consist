@@ -4,25 +4,29 @@ Consist automatically records what code, configuration, and input data produced 
 
 ---
 
-## Getting Started (Start Here!)
+## Getting Started
 
 **New to Consist?** Follow this path:
 
-1. **[Install & Quickstart](getting-started/installation.md)** (5 min)
-   - Install Consist from source and run a small first example
-   - Creates your first run and provenance database
+### 1. **[Install & Quickstart](getting-started/installation.md)**
 
-2. **[Concepts](concepts.md)** (5 min read)
-   - Learn the mental model: Runs, Artifacts, Scenarios, and how caching works
-   - Start here to understand core ideas
+   * Install Consist from source and run a small first example
+   * Creates your first run and provenance database
 
-3. **[Usage Guide](usage-guide.md)** (20 min read)
-   - Build your first multi-step workflow
-   - Learn patterns for runs, scenarios, and cross-run querying
+### 2. **[Concepts](concepts.md)**
 
-4. **[Example Notebooks](examples.md)**
-   - Run the quickstart notebook to see caching in action
-   - Follow other examples for your domain (parameter sweeps, iterative workflows, multi-scenario analysis)
+   * Learn the mental model: Runs, Artifacts, Scenarios, and how caching works
+   * Start here to understand core ideas
+
+### 3. **[Usage Guide](usage-guide.md)**
+
+   * Build your first multi-step workflow
+   * Learn patterns for runs, scenarios, and cross-run querying
+
+### 4. **[Example Notebooks](examples.md)**
+
+   * Run the quickstart notebook to see caching in action
+   * Follow other examples for your domain (parameter sweeps, iterative workflows, multi-scenario analysis)
 
 ---
 

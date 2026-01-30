@@ -58,7 +58,7 @@ class Coupler:
         This method is useful when integrating with optional dependencies (like noop mode)
         where you may receive either:
         - A real Artifact (when tracking is enabled)
-        - An artifact-like object with .path and .uri properties (noop mode)
+        - An artifact-like object with .path and .container_uri properties (noop mode)
         - A Path or string (fallback)
 
         All three forms are stored in the coupler and can be retrieved with get() or require().
@@ -69,7 +69,7 @@ class Coupler:
             The coupler key (e.g., "persons", "skims"). Must follow artifact-key rules.
         value : Artifact or artifact-like or Path or str
             The value to store. Can be a real Artifact, artifact-like object with
-            .path/.uri properties, a Path, or a string path.
+            .path/.container_uri properties, a Path, or a string path.
 
         Returns
         -------
@@ -160,7 +160,7 @@ class Coupler:
             raise RuntimeError(
                 f"Cannot resolve path for {key!r}: no tracker attached to Coupler."
             )
-        return Path(self.tracker.resolve_uri(artifact.uri))
+        return Path(self.tracker.resolve_uri(artifact.container_uri))
 
     def declare_outputs(
         self,

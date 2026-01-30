@@ -3,8 +3,10 @@ from unittest.mock import patch
 from typing import List, Dict, Optional, Union
 
 from sqlmodel import Session, select
+import pandas as pd
 
 from consist.core.tracker import Tracker
+from consist.api import load_df
 from consist.models.artifact import Artifact
 from consist.models.run import RunArtifactLink
 from consist.integrations.containers.api import run_container
@@ -155,7 +157,7 @@ def test_pipeline_chaining(tracker: Tracker):
 
         # Verify Identity
         assert input_artifact.key == "my_data"
-        assert input_artifact.uri == generated_artifact.uri
+        assert input_artifact.container_uri == generated_artifact.container_uri
 
     # --- Phase 3: Verification (Database) ---
     with Session(tracker.engine) as session:
@@ -328,3 +330,81 @@ def test_container_chaining_with_caching(tracker: Tracker):
 
         # Count SHOULD increase
         assert mock_backend.run_count == 2
+
+
+def test_cross_tracker_input_hash_ignores_container_uri(tmp_path: Path):
+    """
+    Ensure cache reuse when an upstream artifact is moved and consumed by a different
+    tracker, as long as provenance (run_id) is preserved.
+    """
+    db_path = str(tmp_path / "provenance.db")
+    run_dir_a = tmp_path / "runs_a"
+    run_dir_b = tmp_path / "runs_b"
+    tracker_a = Tracker(run_dir=run_dir_a, db_path=db_path)
+    tracker_b = Tracker(run_dir=run_dir_b, db_path=db_path)
+
+    # Producer run (Tracker A)
+    with tracker_a.start_run("producer", model="producer"):
+        source_path = tracker_a.run_dir / "data.csv"
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_text("a,b\n1,2")
+        produced = tracker_a.log_artifact(
+            str(source_path), key="shared_data", direction="output"
+        )
+
+    # Move the artifact to a different workspace location (Tracker B)
+    moved_path = tracker_b.run_dir / "moved" / "data.csv"
+    moved_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.rename(moved_path)
+
+    moved_artifact = Artifact(
+        key=produced.key,
+        container_uri=tracker_b.fs.virtualize_path(str(moved_path)),
+        driver=produced.driver,
+        run_id=produced.run_id,
+        hash=produced.hash,
+        table_path=produced.table_path,
+        array_path=produced.array_path,
+    )
+
+    # First consumer run: establish cache entry using original artifact
+    with tracker_a.start_run("consumer_a", model="analysis", inputs=[produced]):
+        out_path = tracker_a.run_dir / "out.csv"
+        out_path.write_text("x,y\n10,20")
+        tracker_a.log_artifact(str(out_path), key="out", direction="output")
+
+    # Second consumer run: should be a cache hit even though container_uri changed
+    with tracker_b.start_run("consumer_b", model="analysis", inputs=[moved_artifact]):
+        assert tracker_b.is_cached
+
+
+def test_cross_tracker_ghost_mode_after_ingest(tmp_path: Path):
+    """
+    Demonstrate ghost mode across trackers: ingest data, delete file, and load
+    from the DB in a separate tracker/run.
+    """
+    db_path = str(tmp_path / "provenance.db")
+    run_dir_a = tmp_path / "runs_a"
+    run_dir_b = tmp_path / "runs_b"
+    tracker_a = Tracker(run_dir=run_dir_a, db_path=db_path)
+    tracker_b = Tracker(run_dir=run_dir_b, db_path=db_path)
+
+    df = pd.DataFrame({"id": [1, 2, 3], "val": ["a", "b", "c"]})
+    file_path = tracker_a.run_dir / "data.parquet"
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(file_path)
+
+    with tracker_a.start_run("producer", model="producer"):
+        artifact = tracker_a.log_artifact(file_path, key="ghost_table")
+
+    with tracker_a.start_run("ingest", model="ingester", inputs=[artifact]):
+        tracker_a.ingest(artifact, df)
+
+    file_path.unlink()
+    assert not file_path.exists()
+
+    with tracker_b.start_run("consumer", model="consumer", inputs=[artifact]):
+        ghost_df = load_df(artifact, tracker=tracker_b, db_fallback="always")
+
+    assert len(ghost_df) == 3
+    assert ghost_df.iloc[0]["val"] == "a"

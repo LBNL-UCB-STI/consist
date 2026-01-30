@@ -57,8 +57,8 @@ def test_cache_validation_policy_eager_vs_lazy(tracker) -> None:
         assert t.is_cached
         cached = t.cached_output("out")
         assert cached is not None
-        assert cached.uri
-        assert not Path(t.resolve_uri(cached.uri)).exists()
+        assert cached.container_uri
+        assert not Path(t.resolve_uri(cached.container_uri)).exists()
 
     run_lazy = tracker.get_run("run_lazy_check")
     assert run_lazy is not None

@@ -35,7 +35,7 @@ def test_schema_command_uses_db_profile_when_available(tmp_path: Path, capsys) -
     artifact = Artifact(
         id=artifact_id,
         key="test_artifact",
-        uri="inputs://data.csv",
+        container_uri="inputs://data.csv",
         driver="csv",
         hash="abc",
         meta={"schema_id": schema_id},

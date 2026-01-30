@@ -285,7 +285,9 @@ def hydrate_cache_hit_outputs(
                             )
                         original_run_dir = run_dir_cache.get(run_id)
                     source = Path(
-                        tracker.fs.resolve_historical_path(art.uri, original_run_dir)
+                        tracker.fs.resolve_historical_path(
+                            art.container_uri, original_run_dir
+                        )
                     )
                     items.append((art, source, Path(dest)))
                 requested_keys = set(destinations.keys())
@@ -316,7 +318,9 @@ def hydrate_cache_hit_outputs(
                             )
                         original_run_dir = run_dir_cache.get(run_id)
                     source = Path(
-                        tracker.fs.resolve_historical_path(art.uri, original_run_dir)
+                        tracker.fs.resolve_historical_path(
+                            art.container_uri, original_run_dir
+                        )
                     )
                     items.append((art, source, out_dir / source.name))
 
@@ -384,7 +388,7 @@ def validate_cached_run_outputs(
     run_artifacts = tracker.get_artifacts_for_run(run.id)
 
     for art in run_artifacts.outputs.values():
-        resolved_path = tracker.resolve_uri(art.uri)
+        resolved_path = tracker.resolve_uri(art.container_uri)
         if not Path(resolved_path).exists() and not art.meta.get("is_ingested", False):
             from consist.tools.mount_diagnostics import (
                 build_mount_resolution_hint,
@@ -392,7 +396,7 @@ def validate_cached_run_outputs(
             )
 
             hint = build_mount_resolution_hint(
-                art.uri, artifact_meta=art.meta, mounts=tracker.mounts
+                art.container_uri, artifact_meta=art.meta, mounts=tracker.mounts
             )
             help_text = (
                 "\n"
@@ -401,7 +405,9 @@ def validate_cached_run_outputs(
                 else f"\nResolved path: {resolved_path}"
             )
             logging.warning(
-                "⚠️ Cache Validation Failed. Missing: %s%s", art.uri, help_text
+                "⚠️ Cache Validation Failed. Missing: %s%s",
+                art.container_uri,
+                help_text,
             )
             return False
     return True
@@ -441,7 +447,7 @@ def materialize_missing_inputs(
         if not artifact.run_id:
             continue
 
-        destination = Path(tracker.resolve_uri(artifact.uri))
+        destination = Path(tracker.resolve_uri(artifact.container_uri))
         if destination.exists():
             continue
 
@@ -457,7 +463,7 @@ def materialize_missing_inputs(
             continue
 
         source = Path(
-            tracker.fs.resolve_historical_path(artifact.uri, original_run_dir)
+            tracker.fs.resolve_historical_path(artifact.container_uri, original_run_dir)
         )
         if source.exists():
             items.append((artifact, source, destination))

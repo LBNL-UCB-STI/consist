@@ -79,7 +79,7 @@ with tracker.start_run(
     print(f"Result came from run {cached_precip_artifact.run_id}")
 
     # If you need the actual bytes, you explicitly load them:
-    df = consist.load(cached_precip_artifact)  # Loads from original location
+    df = consist.load_df(cached_precip_artifact)  # Loads from original location
 
 # Later: need to ensure files exist locally for external tool
 with tracker.start_run(
@@ -101,10 +101,10 @@ with tracker.start_run(
 By default, `cache_hydration="metadata"`:
 - Fast: no filesystem operations
 - Efficient: no disk duplication
-- Requires explicit `consist.load()` when you need bytes
+- Requires explicit `consist.load_df()` or `consist.load()` when you need bytes
 
 This is the right default for scientific workflows because:
-- You often analyze cached results programmatically (via `consist.load()`)
+- You often analyze cached results programmatically (via `consist.load_df()` or `consist.load()`)
 - Large simulations benefit from avoiding disk copies
 - Provenance and signature verification don't need bytes on disk
 
@@ -112,7 +112,7 @@ This is the right default for scientific workflows because:
 
 | Your Need | Use This | Tradeoff |
 |-----------|----------|----------|
-| Run parameter sweeps on cached simulation | `metadata` (default) | No disk copy; must load data via `consist.load()` |
+| Run parameter sweeps on cached simulation | `metadata` (default) | No disk copy; must load data via `consist.load_df()`/`consist.load()` |
 | Extend analysis in a new workspace | `inputs-missing` | Copies only missing input files; fast on cache hits |
 | Run external tool that needs local files | `outputs-requested` | Copy only what you ask for; must list outputs explicitly |
 | Ensure all cached data is accessible locally | `outputs-all` | Copies everything; uses disk space but guarantees file paths exist |
@@ -142,7 +142,7 @@ If you already know the content hash (for example, after copying or moving a fil
 
 ### Portability and path resolution
 
-An artifact has a portable `artifact.uri` and a runtime-resolved `artifact.path`.
+An artifact has a portable `artifact.container_uri` and a runtime-resolved `artifact.path`.
 - `tracker.resolve_uri(uri)` translates a portable URI into a host filesystem path using mounts.
 - On cache hits, Consist performs **artifact hydration**: it attaches cached output `Artifact`
   objects to the active run context so downstream code can reference them.
@@ -173,7 +173,7 @@ with use_tracker(tracker):
         # `scenario.coupler.require(...)` in the `inputs=[...]` list.
         with scenario.trace("transform", inputs=["raw"]):
             raw_art = scenario.coupler.require("raw")
-            df = consist.load(raw_art, tracker=tracker)
+            df = consist.load_df(raw_art, tracker=tracker)
 ```
 
 Notes:
@@ -263,8 +263,13 @@ On a cache hit, Consist does **not**:
 - Guarantee that `artifact.path` exists on disk without an explicit load/materialization step.
 
 If you need bytes, you typically:
-- call `consist.load(...)` for tabular artifacts (disk first; see Ingestion & Hybrid Views for DB fallback), or
+- call `consist.load_df(...)` (or `consist.load(...)` for Relations) for tabular artifacts (disk first; see Ingestion & Hybrid Views for DB fallback), or
 - implement explicit file copy/materialization for non-tabular artifacts.
+
+If you want to work with a DuckDB Relation directly, use `consist.load_relation(...)` as a
+context manager to ensure the underlying DuckDB connection is closed. If you keep Relations
+alive in memory, Consist will warn once the active relation count crosses the
+`CONSIST_RELATION_WARN_THRESHOLD` (default 100).
 
 ### Cache misses that depend on cached inputs
 

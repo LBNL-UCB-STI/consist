@@ -27,6 +27,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Mapping, Tuple, Literal, cast
 
+import duckdb
 import pandas as pd
 import typer
 from rich.console import Console
@@ -183,7 +184,7 @@ def _apply_inferred_mounts(tracker: Tracker, mounts: Mapping[str, str]) -> None:
 def _ensure_tracker_mounts_for_artifact(tracker: Tracker, artifact: "Artifact") -> None:
     from consist.tools.mount_diagnostics import parse_mount_uri
 
-    parsed = parse_mount_uri(artifact.uri)
+    parsed = parse_mount_uri(artifact.container_uri)
     if parsed is None:
         return
 
@@ -403,7 +404,7 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> None:
         table.add_row(
             "[blue]Input[/blue]",
             artifact.key,
-            artifact.uri,
+            artifact.container_uri,
             artifact.driver,
             artifact.hash[:12] if artifact.hash else "N/A",
         )
@@ -415,7 +416,7 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> None:
         table.add_row(
             "[green]Output[/green]",
             artifact.key,
-            artifact.uri,
+            artifact.container_uri,
             artifact.driver,
             artifact.hash[:12] if artifact.hash else "N/A",
         )
@@ -525,7 +526,7 @@ def _iter_artifact_rows(
             sa_select(
                 col(Artifact.id),
                 col(Artifact.key),
-                col(Artifact.uri),
+                col(Artifact.container_uri),
                 col(Artifact.run_id),
                 col(Artifact.created_at),
             )
@@ -941,14 +942,14 @@ def preview(
             artifact, tracker=tracker, db_fallback="always", **load_kwargs
         )
     except FileNotFoundError:
-        abs_path = tracker.resolve_uri(artifact.uri)
+        abs_path = tracker.resolve_uri(artifact.container_uri)
         from consist.tools.mount_diagnostics import (
             build_mount_resolution_hint,
             format_missing_artifact_mount_help,
         )
 
         hint = build_mount_resolution_hint(
-            artifact.uri, artifact_meta=artifact.meta, mounts=tracker.mounts
+            artifact.container_uri, artifact_meta=artifact.meta, mounts=tracker.mounts
         )
         help_text = (
             format_missing_artifact_mount_help(hint, resolved_path=abs_path)
@@ -956,7 +957,7 @@ def preview(
             else f"Resolved path: {abs_path}\nThe artifact may have been deleted, moved, or your mounts are misconfigured."
         )
         console.print(
-            f"[red]Artifact file not found at: {artifact.uri}[/red]\n{help_text}"
+            f"[red]Artifact file not found at: {artifact.container_uri}[/red]\n{help_text}"
         )
         raise typer.Exit(1)
     except ImportError as e:
@@ -987,8 +988,14 @@ def preview(
 
     console.print(f"Preview: {artifact_key} [dim]({artifact.driver})[/dim]")
 
-    if isinstance(data, pd.DataFrame):
+    if isinstance(data, duckdb.DuckDBPyRelation):
+        df = data.limit(n_rows).df()
+    elif isinstance(data, pd.DataFrame):
         df = data.head(n_rows)
+    else:
+        df = None
+
+    if df is not None:
         table = Table()
 
         # Use pandas types to set column styles
@@ -1189,14 +1196,14 @@ class ConsistShell(cmd.Cmd):
                     artifact, tracker=self.tracker, db_fallback="always", **load_kwargs
                 )
             except FileNotFoundError:
-                abs_path = self.tracker.resolve_uri(artifact.uri)
+                abs_path = self.tracker.resolve_uri(artifact.container_uri)
                 from consist.tools.mount_diagnostics import (
                     build_mount_resolution_hint,
                     format_missing_artifact_mount_help,
                 )
 
                 hint = build_mount_resolution_hint(
-                    artifact.uri,
+                    artifact.container_uri,
                     artifact_meta=artifact.meta,
                     mounts=self.tracker.mounts,
                 )
@@ -1206,7 +1213,7 @@ class ConsistShell(cmd.Cmd):
                     else f"Resolved path: {abs_path}\nThe artifact may have been deleted, moved, or your mounts are misconfigured."
                 )
                 console.print(
-                    f"[red]Artifact file not found at: {artifact.uri}[/red]\n{help_text}"
+                    f"[red]Artifact file not found at: {artifact.container_uri}[/red]\n{help_text}"
                 )
                 return
             except ImportError as e:
@@ -1225,8 +1232,14 @@ class ConsistShell(cmd.Cmd):
 
             console.print(f"Preview: {artifact_key} [dim]({artifact.driver})[/dim]")
 
-            if isinstance(data, pd.DataFrame):
+            if isinstance(data, duckdb.DuckDBPyRelation):
+                df = consist.to_df(data.limit(n_rows), close=True)
+            elif isinstance(data, pd.DataFrame):
                 df = data.head(n_rows)
+            else:
+                df = None
+
+            if df is not None:
                 table = Table()
                 for col_name in df.columns:
                     style = "cyan"
@@ -1297,14 +1310,14 @@ class ConsistShell(cmd.Cmd):
                     artifact, tracker=self.tracker, db_fallback="always"
                 )
             except FileNotFoundError:
-                abs_path = self.tracker.resolve_uri(artifact.uri)
+                abs_path = self.tracker.resolve_uri(artifact.container_uri)
                 from consist.tools.mount_diagnostics import (
                     build_mount_resolution_hint,
                     format_missing_artifact_mount_help,
                 )
 
                 hint = build_mount_resolution_hint(
-                    artifact.uri,
+                    artifact.container_uri,
                     artifact_meta=artifact.meta,
                     mounts=self.tracker.mounts,
                 )
@@ -1314,7 +1327,7 @@ class ConsistShell(cmd.Cmd):
                     else f"Resolved path: {abs_path}\nThe artifact may have been deleted, moved, or your mounts are misconfigured."
                 )
                 console.print(
-                    f"[red]Artifact file not found at: {artifact.uri}[/red]\n{help_text}"
+                    f"[red]Artifact file not found at: {artifact.container_uri}[/red]\n{help_text}"
                 )
                 return
             except ImportError as e:
@@ -1333,16 +1346,30 @@ class ConsistShell(cmd.Cmd):
 
             console.print(f"Schema: {artifact_key} [dim]({artifact.driver})[/dim]")
 
-            if isinstance(data, pd.DataFrame):
+            if isinstance(data, duckdb.DuckDBPyRelation):
+                df = data.limit(1).df()
+            elif isinstance(data, pd.DataFrame):
+                df = data
+            else:
+                df = None
+
+            if df is not None:
                 table = Table()
                 table.add_column("Column", style="cyan")
                 table.add_column("Dtype", style="magenta")
-                for col_name, dtype in data.dtypes.items():
+                for col_name, dtype in df.dtypes.items():
                     table.add_row(str(col_name), str(dtype))
                 console.print(table)
-                console.print(
-                    f"[dim]{int(data.shape[0])} rows × {int(data.shape[1])} columns[/dim]"
-                )
+                if isinstance(data, duckdb.DuckDBPyRelation):
+                    row = data.count("*").fetchone()
+                    count = row[0] if row is not None else 0
+                    console.print(
+                        f"[dim]{int(count)} rows × {int(len(df.columns))} columns[/dim]"
+                    )
+                else:
+                    console.print(
+                        f"[dim]{int(df.shape[0])} rows × {int(df.shape[1])} columns[/dim]"
+                    )
                 return
 
             xr = _optional_xarray()

@@ -125,7 +125,7 @@ class MatrixViewFactory:
         # 1. Query Metadata
         query = (
             select(
-                Artifact.uri,
+                Artifact.container_uri,
                 col(Run.id).label("run_id"),
                 Run.year,
                 Run.iteration,
@@ -150,8 +150,8 @@ class MatrixViewFactory:
         datasets = []
         for _, row in df.iterrows():
             try:
-                uri = row["uri"]
-                path = self.tracker.resolve_uri(uri)
+                container_uri = row["container_uri"]
+                path = self.tracker.resolve_uri(container_uri)
 
                 ds = xr.open_zarr(path, consolidated=False)
                 if variables:
@@ -167,7 +167,9 @@ class MatrixViewFactory:
 
                 datasets.append(ds)
             except Exception as e:
-                logging.warning(f"[Consist Warning] Failed to load matrix {uri}: {e}")
+                logging.warning(
+                    f"[Consist Warning] Failed to load matrix {container_uri}: {e}"
+                )
                 continue
 
         if not datasets:

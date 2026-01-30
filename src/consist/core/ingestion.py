@@ -85,7 +85,7 @@ def resolve_ingest_data(
     """
     if data is not None:
         return data
-    return tracker.resolve_uri(artifact.uri)
+    return tracker.resolve_uri(artifact.container_uri)
 
 
 def ingest_artifact(

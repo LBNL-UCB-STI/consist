@@ -172,7 +172,9 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     assert raw_artifact is not None
     outputs = tracker.get_run_outputs(transform_run_id)
     assert "features" in outputs
-    loaded_features = tracker.load_run_output(transform_run_id, "features")
+    loaded_features = consist.to_df(
+        tracker.load_run_output(transform_run_id, "features")
+    )
     assert "value_doubled" in loaded_features.columns
 
     # Ensure parent linkage captured by scenario header
@@ -306,7 +308,7 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
     def train_model(_consist_ctx: RunContext) -> Path:
         execution_counts["train_model"] += 1
 
-        df = _consist_ctx.load("prepared_data")
+        df = consist.to_df(_consist_ctx.load("prepared_data"))
 
         train_attempts["count"] += 1
         if train_attempts["count"] == 1:
@@ -323,7 +325,7 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
 
         model_artifact = _consist_ctx.inputs["model"]
         model_payload = json.loads(Path(model_artifact.path).read_text())
-        df = _consist_ctx.load("prepared_data")
+        df = consist.to_df(_consist_ctx.load("prepared_data"))
 
         report_path.write_text(
             json.dumps(
@@ -389,7 +391,7 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
         runtime_kwargs={"rows": 8},
     )
     prepared_artifact_2 = prepared_result_2.outputs["prepared_data"]
-    assert prepared_artifact_2.uri == prepared_artifact.uri
+    assert prepared_artifact_2.container_uri == prepared_artifact.container_uri
 
     model_result: RunResult = tracker.run(
         fn=train_model,

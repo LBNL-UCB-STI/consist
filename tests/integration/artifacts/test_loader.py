@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import pandas as pd
 from consist.core.tracker import Tracker
-from consist.api import load
+from consist.api import load, load_df
 from consist.models.artifact import Artifact
 
 HAS_ZARR = find_spec("xarray") is not None and find_spec("zarr") is not None
@@ -33,8 +33,8 @@ def test_loader_priority_and_ghost_mode(tracker: Tracker):
        is created, and `consist.load()` is called for it.
 
     What's checked:
-    -   **Phase 1**: `consist.load()` successfully loads the DataFrame from the physical file.
-    -   **Phase 3**: After the file is deleted, `consist.load()` successfully retrieves the
+    -   **Phase 1**: `consist.load_df()` successfully loads the DataFrame from the physical file.
+    -   **Phase 3**: After the file is deleted, `consist.load_df()` successfully retrieves the
         data from the DuckDB, demonstrating "Ghost Mode".
     -   **Phase 4**: `consist.load()` raises a `FileNotFoundError` for the non-existent artifact.
     """
@@ -50,7 +50,7 @@ def test_loader_priority_and_ghost_mode(tracker: Tracker):
 
     # TEST 1: Load from Disk
     # Should work immediately
-    loaded_df = load(artifact, tracker=tracker)
+    loaded_df = load_df(artifact, tracker=tracker)
     pd.testing.assert_frame_equal(df, loaded_df)
 
     # --- Phase 2: Ingestion (Hot Data) ---
@@ -78,7 +78,7 @@ def test_loader_priority_and_ghost_mode(tracker: Tracker):
 
     # TEST 2: Load from DB (Ghost Mode)
     # The loader should detect file is missing, check metadata, find it's ingested, and query DB.
-    ghost_df = load(fresh_artifact, tracker=tracker, db_fallback="always")
+    ghost_df = load_df(fresh_artifact, tracker=tracker, db_fallback="always")
 
     # Note: DB roundtrip might change column types (e.g. object -> string),
     # so we may need loose comparison or type casting.
@@ -91,10 +91,10 @@ def test_loader_priority_and_ghost_mode(tracker: Tracker):
     # Create a fake artifact that exists nowhere
     fake_artifact = Artifact(
         key="fake",
-        uri="inputs://fake.csv",
+        container_uri="inputs://fake.csv",
         driver="csv",
-        abs_path=str(tracker.run_dir / "fake.csv"),
     )
+    fake_artifact.abs_path = str(tracker.run_dir / "fake.csv")
 
     with pytest.raises(FileNotFoundError):
         load(fake_artifact, tracker=tracker)
@@ -138,7 +138,7 @@ def test_loader_db_fallback_policy_paths(tracker: Tracker):
     assert not file_path.exists()
 
     # 1) "always": recovery succeeds even without an active run.
-    df_always = load(ingested_artifact, tracker=tracker, db_fallback="always")
+    df_always = load_df(ingested_artifact, tracker=tracker, db_fallback="always")
     assert len(df_always) == 3
     assert df_always.iloc[0]["val"] == "a"
 
@@ -151,7 +151,7 @@ def test_loader_db_fallback_policy_paths(tracker: Tracker):
         inputs=[ingested_artifact],
         cache_mode="overwrite",
     ):
-        df_inputs_only_ok = load(ingested_artifact, tracker=tracker)
+        df_inputs_only_ok = load_df(ingested_artifact, tracker=tracker)
         assert len(df_inputs_only_ok) == 3
 
     # 3) "inputs-only": recovery is blocked when artifact is not declared as an input.
@@ -179,6 +179,37 @@ def test_loader_db_fallback_policy_paths(tracker: Tracker):
             load(cold_artifact, tracker=tracker)
 
 
+def test_loader_db_fallback_uses_dlt_table_name(tracker: Tracker):
+    import duckdb
+    from uuid import uuid4
+
+    table_name = "My Table"
+    artifact_id = uuid4()
+
+    conn = duckdb.connect(tracker.db_path)
+    conn.sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+    conn.sql(f'DROP TABLE IF EXISTS global_tables."{table_name}"')
+    conn.sql(
+        f'CREATE TABLE global_tables."{table_name}" (consist_artifact_id VARCHAR, value INTEGER)'
+    )
+    conn.sql(
+        f'INSERT INTO global_tables."{table_name}" VALUES (?, ?)',
+        params=[str(artifact_id), 42],
+    )
+    conn.close()
+
+    artifact = Artifact(
+        id=artifact_id,
+        key="fallback_key",
+        container_uri=str(tracker.run_dir / "missing.csv"),
+        driver="csv",
+        meta={"is_ingested": True, "dlt_table_name": table_name},
+    )
+
+    df = load_df(artifact, tracker=tracker, db_fallback="always")
+    assert df["value"].tolist() == [42]
+
+
 def test_loader_drivers(run_dir: Path):
     """
     Verifies that `consist.load()` correctly dispatches to the appropriate
@@ -201,7 +232,7 @@ def test_loader_drivers(run_dir: Path):
     What's checked:
     -   **CSV Test**:
         - The logged artifact's driver is correctly identified as "csv".
-        - `consist.load()` returns a Pandas DataFrame.
+        - `consist.load_df()` returns a Pandas DataFrame.
         - The loaded DataFrame has the correct number of rows and column values.
     -   **Zarr Test**:
         - The logged artifact's driver is correctly identified as "zarr".
@@ -222,7 +253,7 @@ def test_loader_drivers(run_dir: Path):
 
     assert art_csv.driver == "csv"
 
-    loaded_csv = load(art_csv, tracker=tracker)
+    loaded_csv = load_df(art_csv, tracker=tracker)
     assert isinstance(loaded_csv, pd.DataFrame)
     assert len(loaded_csv) == 2
     assert loaded_csv.iloc[0]["col1"] == 10
@@ -265,7 +296,7 @@ def test_loader_json_and_h5_table(run_dir: Path):
     with tracker.start_run("run_json", model="model_A"):
         art_json = tracker.log_artifact(json_path, key="json_payload", driver="json")
 
-    loaded_json = load(art_json, tracker=tracker)
+    loaded_json = load_df(art_json, tracker=tracker)
     assert isinstance(loaded_json, pd.DataFrame)
     assert loaded_json["col"].tolist() == [1, 2, 3]
 
@@ -279,7 +310,7 @@ def test_loader_json_and_h5_table(run_dir: Path):
             h5_path, key="h5_payload", driver="h5_table", table_path="table"
         )
 
-    loaded_h5 = load(art_h5, tracker=tracker)
+    loaded_h5 = load_df(art_h5, tracker=tracker)
     assert isinstance(loaded_h5, pd.DataFrame)
     assert loaded_h5["value"].tolist() == [10, 20]
 
@@ -315,13 +346,13 @@ def test_loader_type_guard_dispatch(run_dir: Path):
         art_json = tracker.log_artifact(json_path, key="json_guard", driver="json")
 
     assert is_dataframe_artifact(art_csv)
-    loaded_csv = load(art_csv, tracker=tracker)
+    loaded_csv = load_df(art_csv, tracker=tracker)
     assert isinstance(loaded_csv, pd.DataFrame)
     assert loaded_csv["col"].tolist() == [1, 2]
 
     assert is_json_artifact(art_json)
-    loaded_json = load(art_json, tracker=tracker)
-    assert isinstance(loaded_json, (pd.DataFrame, pd.Series))
+    loaded_json = load_df(art_json, tracker=tracker)
+    assert isinstance(loaded_json, pd.DataFrame)
 
     if HAS_ZARR:
         import xarray as xr

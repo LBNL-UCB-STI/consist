@@ -149,8 +149,45 @@ artifact was ingested, DB fallback can recover data depending on the policy:
 Example:
 
 ```python
-df = consist.load(artifact, tracker=tracker, db_fallback="always")
+df = consist.load_df(artifact, tracker=tracker, db_fallback="always")
 ```
+
+---
+
+## Loader kwargs for tabular artifacts
+
+`consist.load(...)` validates loader kwargs for tabular drivers and will raise a
+`ValueError` if you pass unsupported options.
+
+Supported kwargs by driver:
+- **parquet**: `columns`
+- **csv**: `columns`, `delimiter`, `header` (alias: `sep` -> `delimiter`)
+- **json**: `orient`, `dtype`, `convert_axes`, `convert_dates`, `precise_float`,
+  `date_unit`, `encoding`, `lines`, `compression`, `typ`
+- **h5_table**: `columns`, `where`, `start`, `stop`
+
+Use `consist.load_relation(...)` if you want a DuckDB Relation and will manage its
+lifecycle explicitly. Use `consist.load_df(...)` for a DataFrame and automatic cleanup.
+
+---
+
+## HDF5 native support roadmap
+
+Today, `h5_table` uses a staging bridge (`pandas.read_hdf(...)` + `conn.from_df(...)`).
+Native HDF5 support will replace that staging step with DuckDB's HDF5 extension so
+DuckDB can query HDF5 tables directly.
+
+Still needed for native HDF5:
+- Switch `h5_table` loading to `hdf5_read(...)` in DuckDB once the extension is stable.
+- Validate behavior and version pinning for the DuckDB HDF5 extension.
+- Handle PyTables/object dtype edge cases (or document explicit fallbacks).
+- Update schema capture to run `DESCRIBE` on the native relation path.
+- Add performance/regression testing for large HDF5 tables.
+
+What native HDF5 enables:
+- Zero-copy, streaming reads from HDF5 into DuckDB (no pandas materialization).
+- Lower memory usage and faster queries for large HDF5 tables.
+- Consistent relation-first SQL workflows across Parquet/CSV/HDF5.
 
 ---
 

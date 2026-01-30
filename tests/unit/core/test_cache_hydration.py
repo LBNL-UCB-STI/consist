@@ -252,7 +252,7 @@ def test_cache_hydration_policies_end_to_end(
     # Inputs-missing should raise for ingested artifacts with unsupported drivers.
     bad_artifact = Artifact(
         key="unsupported",
-        uri="./outputs/unsupported.txt",
+        container_uri="./outputs/unsupported.txt",
         driver="txt",
         run_id=cached_a.run_id,
         meta={"is_ingested": True},
@@ -351,13 +351,13 @@ def test_build_materialize_items_and_materialize_from_sources(tmp_path: Path) ->
 
     artifact = Artifact(
         key="alpha",
-        uri="./source.txt",
+        container_uri="./source.txt",
         driver="txt",
         meta={},
     )
     missing_artifact = Artifact(
         key="missing",
-        uri="./missing.txt",
+        container_uri="./missing.txt",
         driver="txt",
         meta={},
     )
@@ -597,7 +597,7 @@ def test_hydrate_cache_hit_outputs_records_materialized_outputs_meta(
 
     artifact = Artifact(
         key="a",
-        uri="./outputs/a.csv",
+        container_uri="./outputs/a.csv",
         driver="csv",
         run_id="cached",
         meta={},

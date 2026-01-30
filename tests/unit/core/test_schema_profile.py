@@ -336,7 +336,7 @@ def test_get_artifact_schema_for_artifact_prefers_user_provided(tracker):
     artifact = Artifact(
         id=artifact_id,
         key="artifact_pref",
-        uri="inputs://artifact.csv",
+        container_uri="inputs://artifact.csv",
         driver="csv",
         hash="abc",
     )
@@ -431,7 +431,7 @@ def test_get_artifact_schema_for_artifact_respects_prefer_source(tracker):
     artifact = Artifact(
         id=artifact_id,
         key="artifact_pref_no_user",
-        uri="inputs://artifact_no_user.csv",
+        container_uri="inputs://artifact_no_user.csv",
         driver="csv",
         hash="def",
     )

@@ -102,8 +102,8 @@ class TestInputHashing:
         """
         im = IdentityManager()
 
-        art1 = Artifact(key="a1", uri="x", driver="x", run_id="run_123")
-        art2 = Artifact(key="a2", uri="y", driver="y", run_id="run_456")
+        art1 = Artifact(key="a1", container_uri="x", driver="x", run_id="run_123")
+        art2 = Artifact(key="a2", container_uri="y", driver="y", run_id="run_456")
 
         hash_a = im.compute_input_hash([art1, art2])
         hash_b = im.compute_input_hash([art2, art1])
@@ -111,7 +111,7 @@ class TestInputHashing:
         assert hash_a == hash_b
 
         # Changing source run_id should change hash
-        art3 = Artifact(key="a1", uri="x", driver="x", run_id="run_999")
+        art3 = Artifact(key="a1", container_uri="x", driver="x", run_id="run_999")
         hash_c = im.compute_input_hash([art3, art2])
         assert hash_a != hash_c
 
@@ -127,7 +127,7 @@ class TestInputHashing:
 
         try:
             art = Artifact(
-                key="raw", uri="inputs://file.txt", driver="txt", run_id=None
+                key="raw", container_uri="inputs://file.txt", driver="txt", run_id=None
             )
 
             def resolver(uri: str) -> str:
@@ -138,7 +138,7 @@ class TestInputHashing:
             # Expected: SHA256 of "hello world"
             expected_file_hash = hashlib.sha256(b"hello world").hexdigest()
             expected_composite = hashlib.sha256(
-                f"file:{expected_file_hash}".encode()
+                f"driver:txt|container_uri:inputs://file.txt|file:{expected_file_hash}".encode()
             ).hexdigest()
 
             assert hash_val == expected_composite
@@ -146,6 +146,64 @@ class TestInputHashing:
         finally:
             if os.path.exists(fname):
                 os.remove(fname)
+
+    def test_table_path_affects_identity(self):
+        im = IdentityManager()
+        art_a = Artifact(
+            key="a",
+            container_uri="inputs://file.h5",
+            driver="h5_table",
+            run_id="run_shared",
+            table_path="/tables/a",
+        )
+        art_b = Artifact(
+            key="b",
+            container_uri="inputs://file.h5",
+            driver="h5_table",
+            run_id="run_shared",
+            table_path="/tables/b",
+        )
+        hash_a = im.compute_input_hash([art_a])
+        hash_b = im.compute_input_hash([art_b])
+        assert hash_a != hash_b
+
+    def test_array_path_affects_identity(self):
+        im = IdentityManager()
+        art_a = Artifact(
+            key="a",
+            container_uri="inputs://array.zarr",
+            driver="zarr",
+            run_id="run_shared",
+            array_path="/group/a",
+        )
+        art_b = Artifact(
+            key="b",
+            container_uri="inputs://array.zarr",
+            driver="zarr",
+            run_id="run_shared",
+            array_path="/group/b",
+        )
+        hash_a = im.compute_input_hash([art_a])
+        hash_b = im.compute_input_hash([art_b])
+        assert hash_a != hash_b
+
+    def test_run_id_inputs_ignore_container_uri(self):
+        im = IdentityManager()
+        art_a = Artifact(
+            key="output_a",
+            container_uri="inputs://a.parquet",
+            driver="parquet",
+            run_id="run_shared",
+        )
+        art_b = Artifact(
+            key="output_a",
+            container_uri="workspace://a.parquet",
+            driver="parquet",
+            run_id="run_shared",
+        )
+        hash_a = im.compute_input_hash([art_a])
+        hash_b = im.compute_input_hash([art_b])
+        assert hash_a == hash_b
 
     def test_fast_vs_full_hashing(self):
         """
@@ -156,7 +214,9 @@ class TestInputHashing:
             fname = f.name
 
         try:
-            art = Artifact(key="raw", uri="inputs://x", driver="x", run_id=None)
+            art = Artifact(
+                key="raw", container_uri="inputs://x", driver="x", run_id=None
+            )
 
             def resolver(uri: str) -> str:
                 return fname

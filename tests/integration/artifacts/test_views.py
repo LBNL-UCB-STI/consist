@@ -305,9 +305,9 @@ def test_view_with_mounts(mounted_tracker):
     # Verify internal storage is virtualized
     with tracker.engine.connect() as conn:
         # We query the artifact table directly to prove it stored the virtualization
-        uris = pd.read_sql("SELECT uri FROM artifact WHERE key='mounted_data'", conn)[
-            "uri"
-        ].tolist()
+        uris = pd.read_sql(
+            "SELECT container_uri FROM artifact WHERE key='mounted_data'", conn
+        )["container_uri"].tolist()
         assert uris[0] == "inputs://mounted.parquet"
 
     # Create View (This tests if ViewFactory correctly resolves inputs:// back to absolute)

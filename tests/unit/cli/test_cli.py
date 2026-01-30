@@ -44,7 +44,7 @@ def mock_data(tmp_path):
     art1 = Artifact(
         id=uuid.uuid4(),
         key="raw_data",
-        uri=str(csv_path),
+        container_uri=str(csv_path),
         driver="csv",
         run_id="run1",
         hash="abc",
@@ -63,14 +63,14 @@ def mock_data(tmp_path):
     art2 = Artifact(
         id=uuid.uuid4(),
         key="params",
-        uri="config/params.json",
+        container_uri="config/params.json",
         driver="json",
         hash="def",
     )
     art3 = Artifact(
         id=uuid.uuid4(),
         key="processed_data",
-        uri="data/processed.parquet",
+        container_uri="data/processed.parquet",
         driver="parquet",
         run_id="run2",
         hash="ghi",
@@ -91,7 +91,7 @@ def mock_data(tmp_path):
     art4 = Artifact(
         id=uuid.uuid4(),
         key="more_raw_data",
-        uri="data/more_raw.csv",
+        container_uri="data/more_raw.csv",
         driver="csv",
         run_id="run3",
         hash="jkl",
@@ -505,7 +505,7 @@ def test_validate_paginates_artifacts(tmp_path, monkeypatch):
         Artifact(
             id=uuid.uuid4(),
             key="present",
-            uri=str(present_path),
+            container_uri=str(present_path),
             driver="txt",
             run_id="run_a",
             hash="hash_present",
@@ -514,7 +514,7 @@ def test_validate_paginates_artifacts(tmp_path, monkeypatch):
         Artifact(
             id=uuid.uuid4(),
             key="missing",
-            uri=str(missing_path),
+            container_uri=str(missing_path),
             driver="txt",
             run_id="run_b",
             hash="hash_missing",
@@ -523,7 +523,7 @@ def test_validate_paginates_artifacts(tmp_path, monkeypatch):
         Artifact(
             id=uuid.uuid4(),
             key="present_2",
-            uri=str(present_path_2),
+            container_uri=str(present_path_2),
             driver="txt",
             run_id="run_c",
             hash="hash_present_2",

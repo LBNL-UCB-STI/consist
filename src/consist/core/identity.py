@@ -378,7 +378,16 @@ class IdentityManager:
         for artifact in inputs:
             if artifact.run_id:
                 # Scenario A: Consist-produced artifact (Provenance Link)
-                sig_parts = []
+                sig_parts = [
+                    f"driver:{getattr(artifact, 'driver', None)}",
+                    f"key:{getattr(artifact, 'key', None)}",
+                ]
+                table_path = getattr(artifact, "table_path", None)
+                array_path = getattr(artifact, "array_path", None)
+                if table_path:
+                    sig_parts.append(f"table_path:{table_path}")
+                if array_path:
+                    sig_parts.append(f"array_path:{array_path}")
                 tmp = None
                 if signature_lookup:
                     tmp = signature_lookup(artifact.run_id)
@@ -399,12 +408,23 @@ class IdentityManager:
                 # We must compute the checksum of the physical file.
                 if not path_resolver:
                     raise ValueError(
-                        f"Cannot hash raw artifact '{artifact.uri}' without a path_resolver."
+                        f"Cannot hash raw artifact '{artifact.container_uri}' without a path_resolver."
                     )
 
-                abs_path = path_resolver(artifact.uri)
+                abs_path = path_resolver(artifact.container_uri)
                 file_hash = self._compute_file_checksum(abs_path)
-                sig = f"file:{file_hash}"
+                sig_parts = [
+                    f"driver:{getattr(artifact, 'driver', None)}",
+                    f"container_uri:{artifact.container_uri}",
+                ]
+                table_path = getattr(artifact, "table_path", None)
+                array_path = getattr(artifact, "array_path", None)
+                if table_path:
+                    sig_parts.append(f"table_path:{table_path}")
+                if array_path:
+                    sig_parts.append(f"array_path:{array_path}")
+                sig_parts.append(f"file:{file_hash}")
+                sig = "|".join(sig_parts)
 
             signatures.append(sig)
 

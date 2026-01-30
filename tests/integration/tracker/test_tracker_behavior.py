@@ -91,7 +91,7 @@ def test_ingest_outside_of_run_context(tracker):
     - The call raises a `RuntimeError` with a message indicating that `ingest`
       cannot be called outside an active run context.
     """
-    dummy_artifact = Artifact(key="dummy", uri="dummy.csv", driver="csv")
+    dummy_artifact = Artifact(key="dummy", container_uri="dummy.csv", driver="csv")
 
     with pytest.raises(
         RuntimeError,
@@ -166,7 +166,7 @@ def test_tracker_db_write_failure_tolerated(tracker, monkeypatch, caplog, run_di
     assert len(json_data["outputs"]) == 1
     logged_artifact = json_data["outputs"][0]
     assert logged_artifact["key"] == test_artifact_key
-    assert logged_artifact["uri"].endswith(
+    assert logged_artifact["container_uri"].endswith(
         "output.parquet"
     )  # Check for virtualized path
 

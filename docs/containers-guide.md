@@ -408,8 +408,8 @@ with use_tracker(tracker):
         # Step 3: Analysis (Python)
         with sc.trace(name="analysis"):
             # Load previous results
-            preprocessed = consist.load(sc.coupler.require("preprocessed_data"))
-            model_output = consist.load(sc.coupler.require("model_outputs"))
+            preprocessed = consist.load_df(sc.coupler.require("preprocessed_data"))
+            model_output = consist.load_df(sc.coupler.require("model_outputs"))
             # ... analysis code ...
 ```
 

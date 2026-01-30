@@ -1,6 +1,5 @@
 import json
 from pathlib import Path
-from typing import cast
 from unittest.mock import patch
 
 import pandas as pd
@@ -161,8 +160,8 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     df_cleaned = pd.read_csv(cleaned_artifact.path)
     assert len(df_cleaned) < len(df_raw), "Cleaning should remove some rows"
 
-    # Alternatively, use consist.load() which now works without explicit tracker
-    df_cleaned_loaded = consist.load(cleaned_artifact)
+    # Alternatively, use consist.load_df() which now works without explicit tracker
+    df_cleaned_loaded = consist.load_df(cleaned_artifact)
     assert len(df_cleaned_loaded) == len(df_cleaned)
 
     # Chain tasks: pass artifact directly to next task
@@ -262,7 +261,10 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     )
 
     # Should get the same artifact back (cache hit)
-    assert cleaned_result_2.outputs["cleaned"].uri == cleaned_artifact.uri
+    assert (
+        cleaned_result_2.outputs["cleaned"].container_uri
+        == cleaned_artifact.container_uri
+    )
 
     # Check cache hit metadata
     runs = consist.run_query(
@@ -437,7 +439,5 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     )
 
     # Verify the cleaned data is different
-    df_cleaned_modified = cast(
-        pd.DataFrame, consist.load(cleaned_modified_result.outputs["cleaned"])
-    )
+    df_cleaned_modified = consist.load_df(cleaned_modified_result.outputs["cleaned"])
     assert not df_cleaned_modified.equals(df_cleaned)

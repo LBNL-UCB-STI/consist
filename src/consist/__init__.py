@@ -22,6 +22,11 @@ from consist.core.indexing import (
 # API
 from consist.api import (
     load,
+    load_df,
+    load_relation,
+    active_relation_count,
+    RelationConnectionLeakWarning,
+    to_df,
     run,
     trace,
     start_run,
@@ -104,6 +109,11 @@ __all__ = [
     "index_by_field",
     # Functional helpers
     "load",
+    "load_df",
+    "load_relation",
+    "active_relation_count",
+    "RelationConnectionLeakWarning",
+    "to_df",
     "run",
     "trace",
     "start_run",

@@ -13,7 +13,7 @@ class MountResolutionHint:
     Attributes
     ----------
     scheme : str
-        The URI scheme extracted from ``artifact.uri`` (e.g., ``"inputs"``).
+        The URI scheme extracted from ``artifact.container_uri`` (e.g., ``"inputs"``).
     rel_path : str
         The path portion after ``scheme://``.
     configured_root : Optional[str]

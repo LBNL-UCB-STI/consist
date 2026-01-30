@@ -421,7 +421,7 @@ class ViewFactory:
             if artifact.meta and artifact.meta.get("is_ingested"):
                 continue
 
-            abs_path = self.tracker.resolve_uri(artifact.uri)
+            abs_path = self.tracker.resolve_uri(artifact.container_uri)
             if not os.path.exists(abs_path):
                 # Skip missing files to prevent View runtime errors
                 logging.warning(

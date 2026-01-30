@@ -14,7 +14,7 @@ from consist.models.run import Run
 
 def test_openlineage_dataset_name_suffixes():
     run = Run(id="r1", model_name="step", meta={}, tags=[])
-    artifact = Artifact(key="trips", uri="inputs://trips.csv", driver="csv")
+    artifact = Artifact(key="trips", container_uri="inputs://trips.csv", driver="csv")
     artifact.meta = {"year": 2026, "iteration": 1}
 
     assert _dataset_name_from_artifact(artifact, run) == "trips_2026_iteration_1"
@@ -28,7 +28,7 @@ def test_openlineage_jsonl_written(tmp_path: Path):
         tags=[],
         started_at=datetime.now(timezone.utc),
     )
-    artifact = Artifact(key="trips", uri="inputs://trips.csv", driver="csv")
+    artifact = Artifact(key="trips", container_uri="inputs://trips.csv", driver="csv")
     artifact.meta = {"year": 2025}
 
     emitter = OpenLineageEmitter(
@@ -59,7 +59,7 @@ def test_openlineage_schema_facet_from_meta(tmp_path: Path):
         tags=[],
         started_at=datetime.now(timezone.utc),
     )
-    artifact = Artifact(key="trips", uri="inputs://trips.csv", driver="csv")
+    artifact = Artifact(key="trips", container_uri="inputs://trips.csv", driver="csv")
     artifact.hash = "hash123"
     artifact.meta = {
         "schema_profile": {"fields": [{"name": "id", "logical_type": "bigint"}]}

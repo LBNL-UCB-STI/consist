@@ -8,7 +8,6 @@ import logging
 import os
 import time
 import uuid
-import weakref
 import warnings
 from pathlib import Path
 from typing import (
@@ -72,6 +71,7 @@ from consist.core.netcdf_views import NetCdfMetadataView
 from consist.core.openmatrix_views import OpenMatrixMetadataView
 from consist.core.spatial_views import SpatialMetadataView
 from consist.core.queries import RunQueryService
+from consist.core.settings import ConsistSettings
 from consist.core.validation import (
     validate_config_structure,
     validate_run_meta,
@@ -79,10 +79,16 @@ from consist.core.validation import (
 )
 from consist.core.workflow import OutputCapture, RunContext, ScenarioContext
 from consist.core.input_utils import coerce_input_map
-from consist.models.artifact import Artifact
+from consist.models.artifact import Artifact, get_tracker_ref, set_tracker_ref
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.models.run import ConsistRecord, Run, RunArtifacts, RunResult
-from consist.types import ArtifactRef, FacetLike, HasFacetSchemaVersion, HashInputs
+from consist.types import (
+    ArtifactRef,
+    DriverType,
+    FacetLike,
+    HasFacetSchemaVersion,
+    HashInputs,
+)
 
 if TYPE_CHECKING:
     from consist.core.coupler import Coupler
@@ -199,7 +205,7 @@ def _preview_run_artifact_dir(
 
 def _resolve_output_path(tracker: "Tracker", ref: ArtifactRef, base_dir: Path) -> Path:
     if isinstance(ref, Artifact):
-        raw = ref.path or tracker.resolve_uri(ref.uri)
+        raw = ref.path or tracker.resolve_uri(ref.container_uri)
         return Path(raw)
     ref_str = str(ref)
     if isinstance(ref, str) and "://" in ref_str:
@@ -301,6 +307,7 @@ class Tracker:
         self.identity = IdentityManager(
             project_root=project_root, hashing_strategy=hashing_strategy
         )
+        self.settings = ConsistSettings.from_env()
 
         self.db = None
         if self.db_path:
@@ -1074,11 +1081,11 @@ class Tracker:
                         "[Consist][cache] miss: cached run %s failed validation.",
                         cached_run.id,
                     )
-                logging.info("🔄 [Consist] Cache Miss. Running...")
+                logging.debug("🔄 [Consist] Cache Miss. Running...")
         elif cache_mode == "overwrite":
-            logging.warning("⚠️ [Consist] Cache lookup skipped (Mode: Overwrite).")
+            logging.debug("⚠️ [Consist] Cache lookup skipped (Mode: Overwrite).")
         elif cache_mode == "readonly":
-            logging.info("👁️ [Consist] Read-only mode.")
+            logging.debug("👁️ [Consist] Read-only mode.")
 
         if not self.current_consist.cached_run:
             materialize_missing_inputs(
@@ -1676,9 +1683,14 @@ class Tracker:
                                 param_name,
                             )
                         artifact = input_artifacts_by_key[param_name]
-                        if getattr(artifact, "_tracker", None) is None:
-                            artifact._tracker = weakref.ref(self)
-                        call_kwargs[param_name] = self.load(artifact)
+                        if get_tracker_ref(artifact) is None:
+                            set_tracker_ref(artifact, self)
+                        if artifact.driver in DriverType.tabular_drivers():
+                            from consist.api import load_df
+
+                            call_kwargs[param_name] = load_df(artifact, tracker=self)
+                        else:
+                            call_kwargs[param_name] = self.load(artifact)
                         continue
                 if param_name in config_dict:
                     call_kwargs[param_name] = config_dict[param_name]
@@ -2540,13 +2552,15 @@ class Tracker:
         direction: str = "output",
         schema: Optional[Type[SQLModel]] = None,
         driver: Optional[str] = None,
+        table_path: Optional[str] = None,
+        array_path: Optional[str] = None,
         content_hash: Optional[str] = None,
         force_hash_override: bool = False,
         validate_content_hash: bool = False,
         reuse_if_unchanged: bool = False,
         reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
-        profile_file_schema: bool | Literal["if_changed"] = False,
-        file_schema_sample_rows: Optional[int] = 1000,
+        profile_file_schema: bool | Literal["if_changed"] | None = None,
+        file_schema_sample_rows: Optional[int] = None,
         **meta: Any,
     ) -> Artifact:
         """
@@ -2583,6 +2597,10 @@ class Tracker:
         driver : Optional[str], optional
             Explicitly specify the driver (e.g., 'h5_table').
             If None, the driver is inferred from the file extension.
+        table_path : Optional[str], optional
+            Optional table path inside a container (e.g., HDF5).
+        array_path : Optional[str], optional
+            Optional array path inside a container (e.g., Zarr group).
         content_hash : Optional[str], optional
             Precomputed content hash to use for the artifact instead of hashing
             the path on disk.
@@ -2599,7 +2617,7 @@ class Tracker:
         profile_file_schema : bool, default False
             If True, profile a lightweight schema for file-based tabular artifacts.
             Use "if_changed" to skip profiling when a matching content hash already has a schema.
-        file_schema_sample_rows : Optional[int], default 1000
+        file_schema_sample_rows : Optional[int], default None
             Maximum rows to sample when profiling file-based schemas.
         **meta : Any
             Additional key-value pairs to store in the artifact's flexible `meta` field.
@@ -2652,6 +2670,8 @@ class Tracker:
             direction,
             schema,
             driver,
+            table_path=table_path,
+            array_path=array_path,
             content_hash=content_hash,
             force_hash_override=force_hash_override,
             validate_content_hash=validate_content_hash,
@@ -2693,7 +2713,7 @@ class Tracker:
                 artifact_obj.meta[k] = v
 
         # TRACKER HANDLES STATE & PERSISTENCE
-        artifact_obj._tracker = weakref.ref(self)
+        set_tracker_ref(artifact_obj, self)
         if direction == "input":
             self.current_consist.inputs.append(artifact_obj)
         else:
@@ -2704,7 +2724,16 @@ class Tracker:
         self._flush_json()
         self._sync_artifact_to_db(artifact_obj, direction)
 
-        profile_mode = profile_file_schema
+        profile_mode = (
+            self.settings.schema_profile_enabled
+            if profile_file_schema is None
+            else profile_file_schema
+        )
+        sample_rows = (
+            self.settings.schema_sample_rows
+            if file_schema_sample_rows is None
+            else file_schema_sample_rows
+        )
         if (
             profile_mode
             and artifact_obj.is_tabular
@@ -2716,7 +2745,7 @@ class Tracker:
                 ):
                     return artifact_obj
                 resolved_path = artifact_obj.abs_path or self.resolve_uri(
-                    artifact_obj.uri
+                    artifact_obj.container_uri
                 )
                 if resolved_path:
                     driver = artifact_obj.driver
@@ -2727,14 +2756,14 @@ class Tracker:
                         run=self.current_consist.run,
                         resolved_path=str(resolved_path),
                         driver=cast(Literal["csv", "parquet", "h5_table"], driver),
-                        sample_rows=file_schema_sample_rows,
+                        sample_rows=sample_rows,
                         source="file",
                         reuse_if_unchanged=profile_mode == "if_changed",
                     )
             except FileNotFoundError:
                 logging.warning(
                     "[Consist] File schema capture skipped; file not found: %s",
-                    artifact_obj.uri,
+                    artifact_obj.container_uri,
                 )
 
         # Store user-provided schema if one was given.
@@ -3053,7 +3082,7 @@ class Tracker:
         Returns
         -------
         Any
-            The loaded data object (e.g., DataFrame, xarray.Dataset, etc.).
+            The loaded data object (e.g., DuckDB Relation, xarray.Dataset, etc.).
         """
         from consist.api import load as api_load
 
@@ -4101,11 +4130,17 @@ class Tracker:
         if self.db:
             artifact = self.db.get_artifact(key_or_id)
             if artifact is not None:
-                artifact._tracker = weakref.ref(self)
+                set_tracker_ref(artifact, self)
             return artifact
         return None
 
-    def get_artifact_by_uri(self, uri: str) -> Optional[Artifact]:
+    def get_artifact_by_uri(
+        self,
+        uri: str,
+        *,
+        table_path: Optional[str] = None,
+        array_path: Optional[str] = None,
+    ) -> Optional[Artifact]:
         """
         Find an artifact by its URI.
 
@@ -4116,6 +4151,10 @@ class Tracker:
         ----------
         uri : str
             The portable URI to search for (e.g., "inputs://households.csv").
+        table_path : Optional[str]
+            Optional table path to match.
+        array_path : Optional[str]
+            Optional array path to match.
 
         Returns
         -------
@@ -4125,14 +4164,21 @@ class Tracker:
         # 1. Check In-Memory Context (Current Run)
         if self.current_consist:
             for art in self.current_consist.inputs + self.current_consist.outputs:
-                if art.uri == uri:
-                    return art
+                if art.container_uri != uri:
+                    continue
+                if table_path is not None and art.table_path != table_path:
+                    continue
+                if array_path is not None and art.array_path != array_path:
+                    continue
+                return art
 
         # 2. Check Database
         if self.db:
-            artifact = self.db.get_artifact_by_uri(uri)
+            artifact = self.db.get_artifact_by_uri(
+                uri, table_path=table_path, array_path=array_path
+            )
             if artifact is not None:
-                artifact._tracker = weakref.ref(self)
+                set_tracker_ref(artifact, self)
             return artifact
 
         return None
@@ -4174,7 +4220,7 @@ class Tracker:
             creator=creator_id, consumer=consumer_id, key=key, limit=limit
         )
         for artifact in artifacts:
-            artifact._tracker = weakref.ref(self)
+            set_tracker_ref(artifact, self)
         return artifacts
 
     # --- Config Facet Query Helpers ---
@@ -4440,12 +4486,12 @@ class Tracker:
             workspace.
         """
         if not run:
-            return Path(self.resolve_uri(artifact.uri))
+            return Path(self.resolve_uri(artifact.container_uri))
 
         old_dir = run.meta.get("_physical_run_dir")
 
         # Delegate the path math to the FS service
-        path_str = self.fs.resolve_historical_path(artifact.uri, old_dir)
+        path_str = self.fs.resolve_historical_path(artifact.container_uri, old_dir)
         return Path(path_str)
 
     def get_run(self, run_id: str) -> Optional[Run]:
@@ -4569,7 +4615,7 @@ class Tracker:
 
         artifacts = RunArtifacts(inputs=inputs, outputs=outputs)
         for artifact in itertools.chain(inputs.values(), outputs.values()):
-            artifact._tracker = weakref.ref(self)
+            set_tracker_ref(artifact, self)
         if run_id != current_run_id:
             self._run_artifacts_cache[run_id] = artifacts
             if len(self._run_artifacts_cache) > self._run_artifacts_cache_max_entries:
@@ -5212,8 +5258,8 @@ class Tracker:
         if artifact:
             if not artifact.abs_path:
                 try:
-                    artifact.abs_path = self.resolve_uri(artifact.uri)
+                    artifact.abs_path = self.resolve_uri(artifact.container_uri)
                 except Exception:
                     pass
-            artifact._tracker = weakref.ref(self)
+            set_tracker_ref(artifact, self)
         return artifact

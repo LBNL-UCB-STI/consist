@@ -81,13 +81,11 @@ def run_simulation_scenario(
 
         def run(self, image, command, volumes, env, working_dir):
             self.run_count += 1
-            df_in = consist.load(
+            df_in = consist.load_df(
                 self.source_artifact,
                 tracker=self.tracker,
                 db_fallback="always",
             )
-            if not isinstance(df_in, pd.DataFrame):
-                raise TypeError("Expected DataFrame from consist.load()")
             df_out = df_in.copy()
             df_out["number_of_trips"] = rng.poisson(
                 lam=self.base_trips, size=len(df_out)
@@ -165,7 +163,7 @@ def run_simulation_scenario(
                     coupler.require("persons")
                 else:
                     prev_person_art = coupler.get("persons")
-                    df_adv = df_seed if idx == 0 else consist.load(prev_person_art)
+                    df_adv = df_seed if idx == 0 else consist.load_df(prev_person_art)
                     if idx != 0:
                         delta = advance_delta_by_year.get(year, 1)
                         df_adv = advance_people(df_adv, delta=delta)
@@ -313,7 +311,7 @@ def test_pilates_header_pattern(tmp_path: Path):
     assert runs_by_year[2030].id == target_run.id
 
     # Q4: Snapshot Retrieval
-    df = tracker.load_run_output(target_run.id, "persons")
+    df = consist.to_df(tracker.load_run_output(target_run.id, "persons"))
     assert len(df) == 300
 
 
@@ -380,7 +378,7 @@ def test_pilates_header_pattern_api(tmp_path: Path):
     )
     assert runs_by_year[2035].id == target_run.id
 
-    df = tracker.load_run_output(target_run.id, "persons")
+    df = consist.to_df(tracker.load_run_output(target_run.id, "persons"))
     assert len(df) == n_per
 
 
@@ -591,7 +589,7 @@ def test_pilates_cache_replay_with_ingested_outputs(tmp_path):
     # Outputs should be linked and readable
     outputs = tracker2.get_run_outputs(replay_run.id)
     persons_art = outputs.get("persons") or next(iter(outputs.values()))
-    df = consist.load(persons_art, tracker=tracker2)
+    df = consist.load_df(persons_art, tracker=tracker2)
     assert len(df) == 300
 
     # Hydration should materialize the file in the new run_dir
