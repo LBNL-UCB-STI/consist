@@ -48,17 +48,18 @@ You'll want to materialize cached outputs (copy bytes to your current run) in a 
 
 1. **Extending a scenario in a new workspace:** You cached results in `/workspace/2024`, now you want to continue analysis in `/workspace/2025`. Use `cache_hydration="inputs-missing"` to automatically copy input files your executing steps need.
 
-2. **Preparing outputs for external tools:** Some tools expect files to exist locally. Use `cache_hydration="outputs-requested"` with `materialize_cached_output_paths` to copy specific cached outputs you need.
+2. **Preparing outputs for external tools:** Some tools expect files to exist locally. Use `cache_hydration="outputs-requested"` with `materialize_cached_output_paths` to copy specific cached outputs you need. If you're using `consist.run(...)` or `sc.run(...)`, use `output_paths={...}` instead.
 
 3. **Ensuring full reproducibility locally:** You want all results locally accessible without remote mounts. Use `cache_hydration="outputs-all"` to copy all cached outputs into a local directory.
 
 ### Example: Climate Data Workflow
 
 ```python
+from pathlib import Path
+
 # First run: simulate climate for years 2020-2030, takes 24 hours
 with tracker.start_run(
     "climate_baseline",
-    scenario_id="baseline",
     model="climate_sim",
     year=2030,
     cache_mode="overwrite"
@@ -69,7 +70,6 @@ with tracker.start_run(
 # Later: analysis that only needs metadata about the result
 with tracker.start_run(
     "analyze_trends",
-    scenario_id="baseline",
     model="analysis",
     inputs=[cached_precip_artifact],
     cache_hydration="metadata",  # Default: no copying
@@ -84,7 +84,6 @@ with tracker.start_run(
 # Later: need to ensure files exist locally for external tool
 with tracker.start_run(
     "export_for_visualization",
-    scenario_id="baseline",
     model="export",
     cache_hydration="outputs-requested",
     materialize_cached_output_paths={
@@ -254,7 +253,7 @@ On a cache hit, Consist:
 - By default, **skips** filesystem checks for cached outputs for speed.
   - Pass `validate_cached_outputs="eager"` if you want to require that output files exist (or are ingested).
 - **Hydrates artifact objects** for the cached outputs into the current run context.
-  - Paths are resolved on demand (e.g., `cached_output()`).
+  - Paths are resolved on demand (e.g., `artifact.path`).
   - `Artifact.path` lazily resolves via the active tracker; no filesystem checks happen until you access it.
 
 On a cache hit, Consist does **not**:
@@ -335,10 +334,23 @@ with tracker.start_run(
     ...
 ```
 
+Equivalent with `consist.run(...)`:
+
+```python
+result = consist.run(
+    fn=step,
+    cache_hydration="outputs-requested",
+    output_paths={"features": Path("outputs/features.csv")},
+)
+```
+
 Defaults remain unchanged: `cache_hydration="metadata"` (artifact hydration only).
 
+Note: for `consist.run(...)` or `sc.run(...)`, use `output_paths={...}` with
+`cache_hydration="outputs-requested"` to specify where requested outputs should be copied.
+
 Validation rules (error cases):
-- `outputs-requested` requires `materialize_cached_output_paths` and rejects `materialize_cached_outputs_dir`.
+- `outputs-requested` requires `materialize_cached_output_paths` (or `output_paths` for `consist.run(...)`) and rejects `materialize_cached_outputs_dir`.
 - `outputs-all` requires `materialize_cached_outputs_dir` and rejects `materialize_cached_output_paths`.
 - `metadata`/`inputs-missing` reject both materialization args.
 
@@ -364,7 +376,7 @@ cache hits.
 | --- | --- | --- | --- |
 | Fast cache hits, metadata only | `metadata` | Never | Default; paths may not exist in new run dirs. |
 | Extend a scenario in a new `run_dir` | `inputs-missing` | On cache misses, for missing inputs only | Ensures executing steps can read cached inputs. |
-| Materialize a few outputs on cache hits | `outputs-requested` | On cache hits, for requested outputs | Requires `materialize_cached_output_paths`. |
+| Materialize a few outputs on cache hits | `outputs-requested` | On cache hits, for requested outputs | Requires `materialize_cached_output_paths` (or `output_paths` for `consist.run(...)`). |
 | Make all cached outputs exist locally | `outputs-all` | On cache hits, for all outputs | Requires `materialize_cached_outputs_dir`. |
 
 Most users should stick with the default `metadata` mode. Use the other modes only when downstream tools require the actual files to exist on disk.
@@ -421,7 +433,7 @@ The main knobs are:
   - `outputs-all`: on cache hits, copy all cached outputs into a target directory.
 - Scenario default: pass `step_cache_hydration="inputs-missing"` to `consist.scenario(...)`
   to apply a default policy to all steps unless overridden.
-- `materialize_cached_output_paths`: required for `outputs-requested`.
+- `materialize_cached_output_paths`: required for `outputs-requested` (or `output_paths` for `consist.run(...)`).
 - `materialize_cached_outputs_dir`: required for `outputs-all`.
 
 For large iterative workflows, most cache-hit time is spent on:

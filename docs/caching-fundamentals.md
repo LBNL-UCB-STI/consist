@@ -6,9 +6,9 @@ Consist uses intelligent caching to skip redundant computation. This page explai
 
 Consist computes a fingerprint (signature) from three components:
 
-1. **Your function's code** – Git commit hash + local modifications
+1. **Your function's code** – Git commit hash + tracked local Python modifications
 2. **Configuration** – The `config` dict you pass to `consist.run()`
-3. **Input files** – SHA256 hashes of files in the `inputs` dict
+3. **Input files** – Content or metadata hashes of files in the `inputs` dict (depends on `hashing_strategy`)
 
 If you run the same function with the same code, config, and inputs, the signature is identical. When Consist sees an identical signature, it returns the cached result from a previous run instead of re-executing.
 

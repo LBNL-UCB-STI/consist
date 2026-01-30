@@ -1,3 +1,8 @@
+---
+hide:
+  - navigation
+---
+
 # Consist
 
 Consist automatically records what code, configuration, and input data produced each result in your simulation pipeline. It uses this to avoid redundant computation, lets you query results across runs, and traces lineage from any output back to its sources.

@@ -8,17 +8,11 @@ Consist identifies runs using a three-part signature:
 SHA256(code_hash | config_hash | input_hash)
 ```
 
-**Code hash**: Derived from your Git commit SHA by default. Uncommitted changes append `-dirty-<timestamp>` to invalidate cache. For `@task` decorators, you can hash at different granularities:
-
-| Strategy | Scope | Use Case |
-|----------|-------|----------|
-| Git SHA (global) | Entire repository | Production runs requiring full reproducibility |
-| Module (default) | Single `.py` file | Development; captures helpers in the same file |
-| Source (atomic) | Function body only | Pure functions; ignores comments and unrelated changes |
+**Code hash**: Derived from your Git commit SHA by default. If your repo has tracked Python changes, Consist appends a stable `-dirty-<hash>` suffix based on the diff (untracked files are ignored so artifacts don't invalidate caches). If Git isn't available, Consist falls back to `unknown_code_version`.
 
 **Config hash**: Canonical representation of configuration, normalized for dictionary ordering and numeric type variations. Pydantic models are serialized deterministically.
 
-**Input hash**: For Consist-produced artifacts, this references the *signature of the producing run* (Merkle linking). For raw files, Consist hashes file contents or metadata depending on the hashing strategy (`full` vs `fast`).
+**Input hash**: For Consist-produced artifacts, this references the *signature of the producing run* (Merkle linking) and the artifact hash when available. For raw files, Consist hashes file contents or metadata depending on the hashing strategy (`full` vs `fast`).
 
 This Merkle DAG structure means:
 - Changing a parameter invalidates only downstream runs that depend on it
@@ -35,11 +29,11 @@ This Merkle DAG structure means:
 
 ### Ghost Mode
 
-Consist enables "Ghost Mode" — the ability to delete intermediate files while preserving provenance and recoverability. As long as the provenance database records the lineage and content hashes, Consist can:
+Consist enables "Ghost Mode" — the ability to delete intermediate files while preserving provenance and recoverability. As long as the provenance database records lineage and content hashes, Consist can:
 
 - Verify that a cached result is valid (signature matches)
 - Identify which upstream run produced a missing artifact
-- Re-execute only the necessary steps to regenerate data
+- Re-execute only the necessary steps to regenerate data (when strict cache validation is enabled)
 
 **When You Need This**
 
@@ -52,11 +46,10 @@ Year 2021: Compute temperature fields → Store (500GB) → Use as input for 202
 Year 2050: Final results published
 ```
 
-Once you've published results (2030–2050), you can safely delete 2020–2029 intermediate files. The provenance database still tracks what those files contained (via content hashes). If you later need to re-run 2031, Consist automatically:
-1. Detects that 2030's output is missing from disk
-2. Checks if 2030's signature matches a cached computation
-3. Re-runs 2030 (which depends on 2029, which depends on 2028, etc.)
-4. Materializes only the files needed for the downstream run
+Once you've published results (2030–2050), you can safely delete 2020–2029 intermediate files. The provenance database still tracks what those files contained (via content hashes). If you later need to re-run 2031, Consist can:
+1. Detect that 2030's output is missing from disk (via cache validation)
+2. Re-run only the missing upstream steps
+3. Materialize just the files needed for the downstream run
 
 **How It Works**
 
@@ -66,24 +59,27 @@ When you log an artifact in Consist, three pieces of information are persisted:
 - **URI and metadata** — Stored as provenance
 - **Actual file** — On disk (optional in Ghost Mode)
 
-On cache hits, if a file is missing from disk:
+On cache hits, if a file is missing from disk, you have two recovery paths:
+- **Re-execute** (recommended for non-ingested outputs) by enabling strict cache validation
+- **DB recovery** (for ingested tabular outputs) via `consist.load_df(..., db_fallback="always")`
+
+Example: recover a missing, ingested tabular artifact from DuckDB:
 ```python
-# Run 2030 tries to load output from 2029 (now deleted)
-with tracker.start_run("2030"):
-    upstream_data = consist.log_artifact("year_2029_temps.parquet")
-    # Ghost Mode: URI and hash exist in DB, file is missing
-    # Consist checks the signature and re-runs 2029 if needed
-    df = upstream_data.load()  # Transparently materializes from re-run
+with tracker.start_run("2030", model="climate"):
+    artifact = tracker.log_artifact(
+        "year_2029_temps.parquet", key="temps", direction="input"
+    )
+    df = consist.load_df(artifact, db_fallback="always")
 ```
 
-The re-execution respects the same cache key (code + config + inputs), so if inputs haven't changed, no additional computation is triggered—Consist reuses the prior computation and materializes its output on-demand.
+Re-execution respects the same cache key (code + config + inputs), so if inputs haven't changed, Consist reuses the prior computation and materializes its output on-demand.
 
 **Best Practices**
 
 - Use Ghost Mode for intermediate outputs in long-running studies, not critical published results.
 - Keep the provenance database (`provenance.duckdb`) on reliable storage; it's the source of truth for recovery.
 - Archive deleted files alongside the database for offline recovery if needed.
-- Test recovery workflows (intentional deletion + re-run) before relying on Ghost Mode in production.
+- Test recovery workflows (intentional deletion + re-run or DB recovery) before relying on Ghost Mode in production.
 
 ---
 
@@ -98,8 +94,7 @@ Consist uses two core entities with a many-to-many relationship:
 | `RunArtifactLink` | Connects runs to their input and output artifacts with direction metadata |
 
 Key fields for workflow tracking:
-- `Run.parent_run_id` — Links scenario steps to their parent scenario
-- `Run.scenario_id` — Denormalized for easy filtering
+- `Run.parent_run_id` — Links scenario steps to their parent scenario; used as the scenario identifier in views (see `consist_scenario_id`)
 - `Run.year` — Simulation year for time-series workflows
 - `Run.tags` — String labels for filtering (stored as JSON array)
 - `Artifact.hash` — SHA256 content hash for deduplication and verification

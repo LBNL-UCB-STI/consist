@@ -77,7 +77,9 @@ class RunContext:
             value is derived from the active run and respects any per-run
             artifact directory overrides.
         """
-        return self._tracker.run_artifact_dir()
+        path = self._tracker.run_artifact_dir()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def log_artifact(self, *args: Any, **kwargs: Any) -> Artifact:
         """

@@ -66,6 +66,21 @@ def test_tracker_run_cache_hit_skips_callable(tracker):
     assert second.cache_hit is True
 
 
+def test_run_context_run_dir_is_created(tracker):
+    def step(ctx):
+        out_path = ctx.run_dir / "out.txt"
+        out_path.write_text("ok\n")
+        return out_path
+
+    result = tracker.run(
+        fn=step,
+        outputs=["out"],
+        inject_context="ctx",
+    )
+
+    assert result.outputs["out"].path.exists()
+
+
 def test_start_run_overwrite_updates_cache_index(tracker, tmp_path):
     input_path = tmp_path / "input.txt"
     input_path.write_text("payload")
