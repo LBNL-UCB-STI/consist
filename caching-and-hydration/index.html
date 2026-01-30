@@ -25,7 +25,7 @@
       
       
       <link rel="icon" href="../assets/images/favicon.png">
-      <meta name="generator" content="zensical-0.0.19">
+      <meta name="generator" content="zensical-0.0.20">
     
     
       
@@ -2724,7 +2724,7 @@
 </span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Result came from run </span><span class="si">{</span><span class="n">cached_precip_artifact</span><span class="o">.</span><span class="n">run_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
 </span><span id="__span-0-23"><a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a>
 </span><span id="__span-0-24"><a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a>    <span class="c1"># If you need the actual bytes, you explicitly load them:</span>
-</span><span id="__span-0-25"><a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a>    <span class="n">df</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">cached_precip_artifact</span><span class="p">)</span>  <span class="c1"># Loads from original location</span>
+</span><span id="__span-0-25"><a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a>    <span class="n">df</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">load_df</span><span class="p">(</span><span class="n">cached_precip_artifact</span><span class="p">)</span>  <span class="c1"># Loads from original location</span>
 </span><span id="__span-0-26"><a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a>
 </span><span id="__span-0-27"><a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a><span class="c1"># Later: need to ensure files exist locally for external tool</span>
 </span><span id="__span-0-28"><a id="__codelineno-0-28" name="__codelineno-0-28" href="#__codelineno-0-28"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
@@ -2744,9 +2744,9 @@
 <p>By default, <code>cache_hydration="metadata"</code>:
 - Fast: no filesystem operations
 - Efficient: no disk duplication
-- Requires explicit <code>consist.load()</code> when you need bytes</p>
+- Requires explicit <code>consist.load_df()</code> or <code>consist.load()</code> when you need bytes</p>
 <p>This is the right default for scientific workflows because:
-- You often analyze cached results programmatically (via <code>consist.load()</code>)
+- You often analyze cached results programmatically (via <code>consist.load_df()</code> or <code>consist.load()</code>)
 - Large simulations benefit from avoiding disk copies
 - Provenance and signature verification don't need bytes on disk</p>
 <h3 id="practical-decision-table">Practical Decision Table<a class="headerlink" href="#practical-decision-table" title="Permanent link">&para;</a></h3>
@@ -2762,7 +2762,7 @@
 <tr>
 <td>Run parameter sweeps on cached simulation</td>
 <td><code>metadata</code> (default)</td>
-<td>No disk copy; must load data via <code>consist.load()</code></td>
+<td>No disk copy; must load data via <code>consist.load_df()</code>/<code>consist.load()</code></td>
 </tr>
 <tr>
 <td>Extend analysis in a new workspace</td>
@@ -2798,7 +2798,7 @@
 <p>For Consist-produced artifacts, inputs are typically hashed by linking to the producing run’s signature (Merkle-style). For raw files (no <code>run_id</code>), Consist hashes file contents/metadata depending on configuration.
 If you already know the content hash (for example, after copying or moving a file), you can pass <code>content_hash=</code> to <code>log_artifact</code> to reuse it and skip hashing the path on disk. To avoid accidentally mutating existing provenance, Consist ignores mismatched overrides unless <code>force_hash_override=True</code>. Use <code>validate_content_hash=True</code> to verify the override against on-disk data.</p>
 <h3 id="portability-and-path-resolution">Portability and path resolution<a class="headerlink" href="#portability-and-path-resolution" title="Permanent link">&para;</a></h3>
-<p>An artifact has a portable <code>artifact.uri</code> and a runtime-resolved <code>artifact.path</code>.
+<p>An artifact has a portable <code>artifact.container_uri</code> and a runtime-resolved <code>artifact.path</code>.
 - <code>tracker.resolve_uri(uri)</code> translates a portable URI into a host filesystem path using mounts.
 - On cache hits, Consist performs <strong>artifact hydration</strong>: it attaches cached output <code>Artifact</code>
   objects to the active run context so downstream code can reference them.</p>
@@ -2822,7 +2822,7 @@ If you already know the content hash (for example, after copying or moving a fil
 </span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>        <span class="c1"># `scenario.coupler.require(...)` in the `inputs=[...]` list.</span>
 </span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>        <span class="k">with</span> <span class="n">scenario</span><span class="o">.</span><span class="n">trace</span><span class="p">(</span><span class="s2">&quot;transform&quot;</span><span class="p">,</span> <span class="n">inputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;raw&quot;</span><span class="p">]):</span>
 </span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a>            <span class="n">raw_art</span> <span class="o">=</span> <span class="n">scenario</span><span class="o">.</span><span class="n">coupler</span><span class="o">.</span><span class="n">require</span><span class="p">(</span><span class="s2">&quot;raw&quot;</span><span class="p">)</span>
-</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>            <span class="n">df</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">raw_art</span><span class="p">,</span> <span class="n">tracker</span><span class="o">=</span><span class="n">tracker</span><span class="p">)</span>
+</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>            <span class="n">df</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">load_df</span><span class="p">(</span><span class="n">raw_art</span><span class="p">,</span> <span class="n">tracker</span><span class="o">=</span><span class="n">tracker</span><span class="p">)</span>
 </span></code></pre></div>
 <p>Notes:
 - Prefer <code>scenario.coupler.require("raw")</code> over <code>get("raw")</code> in tests and templates; it fails loudly if a predecessor didn’t set the key.
@@ -2888,8 +2888,12 @@ how schema validation works, and how DB fallback behaves when files are missing.
 - Recreate missing files from DuckDB automatically.
 - Guarantee that <code>artifact.path</code> exists on disk without an explicit load/materialization step.</p>
 <p>If you need bytes, you typically:
-- call <code>consist.load(...)</code> for tabular artifacts (disk first; see Ingestion &amp; Hybrid Views for DB fallback), or
+- call <code>consist.load_df(...)</code> (or <code>consist.load(...)</code> for Relations) for tabular artifacts (disk first; see Ingestion &amp; Hybrid Views for DB fallback), or
 - implement explicit file copy/materialization for non-tabular artifacts.</p>
+<p>If you want to work with a DuckDB Relation directly, use <code>consist.load_relation(...)</code> as a
+context manager to ensure the underlying DuckDB connection is closed. If you keep Relations
+alive in memory, Consist will warn once the active relation count crosses the
+<code>CONSIST_RELATION_WARN_THRESHOLD</code> (default 100).</p>
 <h3 id="cache-misses-that-depend-on-cached-inputs">Cache misses that depend on cached inputs<a class="headerlink" href="#cache-misses-that-depend-on-cached-inputs" title="Permanent link">&para;</a></h3>
 <p>If a run is <strong>not</strong> a cache hit but its inputs include artifacts produced by cached runs,
 those input artifacts are still referenced by <strong>portable URIs</strong> (e.g., <code>./outputs/foo.parquet</code>).

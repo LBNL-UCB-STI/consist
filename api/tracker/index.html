@@ -25,7 +25,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="zensical-0.0.19">
+      <meta name="generator" content="zensical-0.0.20">
     
     
       
@@ -6374,7 +6374,7 @@ the current run. Existing keys will be updated, and new keys will be added.</p>
 
 
 <h2 id="consist.core.tracker.Tracker.log_artifact" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">log_artifact</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">direction</span><span class="o">=</span><span class="s1">&#39;output&#39;</span><span class="p">,</span> <span class="n">schema</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">driver</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">content_hash</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">force_hash_override</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">validate_content_hash</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">reuse_if_unchanged</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">reuse_scope</span><span class="o">=</span><span class="s1">&#39;same_uri&#39;</span><span class="p">,</span> <span class="n">profile_file_schema</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">file_schema_sample_rows</span><span class="o">=</span><span class="mi">1000</span><span class="p">,</span> <span class="o">**</span><span class="n">meta</span><span class="p">)</span></code>
+            <code class="highlight language-python"><span class="n">log_artifact</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">direction</span><span class="o">=</span><span class="s1">&#39;output&#39;</span><span class="p">,</span> <span class="n">schema</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">driver</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">table_path</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">array_path</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">content_hash</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">force_hash_override</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">validate_content_hash</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">reuse_if_unchanged</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">reuse_scope</span><span class="o">=</span><span class="s1">&#39;same_uri&#39;</span><span class="p">,</span> <span class="n">profile_file_schema</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">file_schema_sample_rows</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">meta</span><span class="p">)</span></code>
 
 <a href="#consist.core.tracker.Tracker.log_artifact" class="headerlink" title="Permanent link">&para;</a></h2>
 
@@ -6500,6 +6500,38 @@ If None, the driver is inferred from the file extension.</p>
           </tr>
           <tr class="doc-section-item">
             <td>
+                <code>table_path</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Optional table path inside a container (e.g., HDF5).</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>array_path</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Optional array path inside a container (e.g., Zarr group).</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
                 <code>content_hash</code>
             </td>
             <td>
@@ -6611,7 +6643,7 @@ Use "if_changed" to skip profiling when a matching content hash already has a sc
               </div>
             </td>
             <td>
-                  <code>1000</code>
+                  <code>None</code>
             </td>
           </tr>
           <tr class="doc-section-item">
@@ -7515,7 +7547,7 @@ uses the artifact driver to select the appropriate loader.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>The loaded data object (e.g., DataFrame, xarray.Dataset, etc.).</p>
+                <p>The loaded data object (e.g., DuckDB Relation, xarray.Dataset, etc.).</p>
               </div>
             </td>
           </tr>
@@ -12915,7 +12947,7 @@ directly to <code>inputs=[...]</code> on a new run.</p>
 
 
 <h2 id="consist.core.tracker.Tracker.get_artifact_by_uri" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">get_artifact_by_uri</span><span class="p">(</span><span class="n">uri</span><span class="p">)</span></code>
+            <code class="highlight language-python"><span class="n">get_artifact_by_uri</span><span class="p">(</span><span class="n">uri</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">table_path</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">array_path</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
 
 <a href="#consist.core.tracker.Tracker.get_artifact_by_uri" class="headerlink" title="Permanent link">&para;</a></h2>
 
@@ -12952,6 +12984,38 @@ or for retrieving artifact metadata by path.</p>
             </td>
             <td>
                 <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>table_path</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Optional table path to match.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>array_path</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Optional array path to match.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
             </td>
           </tr>
       </tbody>
