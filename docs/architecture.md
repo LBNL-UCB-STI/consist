@@ -140,20 +140,18 @@ For detailed usage, see [Configuration, Identity, and Facets](configs.md).
 
 Consist maintains two synchronized records for resilience:
 
-```
-┌──────────────────┐
-│     Tracker      │
-└────────┬─────────┘
-         │
-    ┌────┴────┬────────────┐
-    ▼         ▼            ▼
-┌────────┐ ┌──────────┐ ┌──────────┐
-│  JSON  │ │  DuckDB  │ │  Events  │
-│Snapshot│ │ Database │ │ Manager  │
-└────────┘ └──────────┘ └──────────┘
+```mermaid
+graph TD
+    Tracker[Tracker] --> Context[Active Run Context]
+    Context --> Memo[In-Memory Model]
+    Memo --> Snapshot[consist.json Snapshot]
+    Memo --> DB[(DuckDB Database)]
+    Snapshot --- Source[Source of Truth]
+    DB --- Query[Query Engine]
 ```
 
 **Write order (safety guarantee):**
+
 1. Update in-memory model
 2. Flush to `consist.json` (atomic write) ← **Source of truth**
 3. Attempt DB sync (catch errors, log warning, never crash)

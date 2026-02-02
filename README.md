@@ -26,6 +26,8 @@ pip install consist
 
 **Requires Python 3.11+**
 
+> [!WARNING]
+> This library is still in beta. It has been tested and is very close to being ready, but it still may contain bugs that require breaking the API. Do not rely just on consist for archiving data without other backups until the full v0.1 version has been released
 ---
 
 ## Quick Example

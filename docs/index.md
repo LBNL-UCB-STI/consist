@@ -111,6 +111,7 @@ Choose your path:
 - [Config Adapters](integrations/config_adapters.md) – Building adapters for external tools
 - [CLI Reference](cli-reference.md) – All command-line tools
 - [Troubleshooting](troubleshooting.md) – Common issues and solutions
+- [FAQ](faq.md) – Frequently asked questions
 - [API Reference](api/index.md) – Complete function and class documentation
 
 ---
@@ -127,6 +128,17 @@ Choose your path:
 | Understand config vs. facets | [Config Management](concepts/config-management.md) |
 | Share a reproducible study | [Mounts & Portability](mounts-and-portability.md) |
 | Integrate with ActivitySim/BEAM/MATSim | [Config Adapters](integrations/config_adapters.md) or [Containers](containers-guide.md) |
+
+---
+
+## Built on Open Standards
+
+Consist relies on modern, high-performance data engineering tools:
+
+- **[DuckDB](https://duckdb.org/)**: The "SQLite for Analytics" powers our lightning-fast provenance queries and data virtualization.
+- **[SQLModel](https://sqlmodel.tiangolo.com/)**: Combines SQLAlchemy and Pydantic for robust, type-safe data modeling and schema validation.
+- **[DLT (Data Load Tool)](https://dlthub.com/)**: Handles robust, schema-aware data ingestion from diverse sources into your provenance database.
+- **[Apache Parquet & Zarr](https://parquet.apache.org/)**: Industry-standard formats for efficient, compressed storage of tabular and multi-dimensional scientific data.
 
 ---
 

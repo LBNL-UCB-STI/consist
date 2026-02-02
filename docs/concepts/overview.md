@@ -20,8 +20,14 @@ This section establishes the mental model for Consist before covering API detail
 
 Consist computes a signature from code version, config, and input artifact hashes:
 
-```text
-signature = SHA256(code_version || config || input_hashes)
+```mermaid
+graph LR
+    Code[Code Version] --> Hash[SHA256 Signature]
+    Config[Configuration] --> Hash
+    Inputs[Input Artifacts] --> Hash
+    Hash --> Lookup{Cache Lookup}
+    Lookup -->|Hit| Return[Return Cached Outputs]
+    Lookup -->|Miss| Execute[Execute & Record New Run]
 ```
 
 Same signature → return cached outputs. Different signature → execute and record new lineage.
@@ -36,9 +42,19 @@ On cache hits, Consist returns output artifact metadata without copying files. L
 
 **Provenance**: The complete history of a result—code version, configuration, input data, and compute environment. Consist records provenance automatically for every run.
 
-Provenance answers three questions: *Can I re-run this exactly?* (reproducibility), *Which config produced this figure?* (accountability), and *Why did this change?* (debugging).
-
 **Lineage**: The dependency chain showing which run created an artifact, which inputs that run consumed, and which runs produced those inputs.
+
+```mermaid
+graph TD
+    Raw[Raw Data] --> Step1[Run: Clean]
+    Config1[Threshold=0.5] --> Step1
+    Step1 --> Art1[Artifact: Cleaned]
+    Art1 --> Step2[Run: Analyze]
+    Config2[GroupByKey=category] --> Step2
+    Step2 --> Art2[Artifact: Summary]
+```
+
+Provenance answers three questions: *Can I re-run this exactly?* (reproducibility), *Which config produced this figure?* (accountability), and *Why did this change?* (debugging).
 
 **Example**: You published a land-use forecast. A reviewer asks which scenario produced Figure 3. Run `consist show <run_id>` to see the code version (commit SHA), config parameters, input parcel data, and execution timestamp.
 
