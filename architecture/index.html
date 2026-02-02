@@ -2625,7 +2625,7 @@ For a focused guide, see <a href="../mounts-and-portability/">Mounts &amp; Porta
 <hr />
 <h2 id="container-integration">Container Integration<a class="headerlink" href="#container-integration" title="Permanent link">&para;</a></h2>
 <p>Containers are treated as pure functions where the image digest becomes part of the cache signature:</p>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>Signature = SHA256(image_digest | command | env | mount_hashes | input_signatures)
+<div class="language-text highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>Signature = SHA256(image_digest | command | env_hash | mount_hashes | input_signatures)
 </span></code></pre></div>
 <p>On cache hit:
 1. Verify outputs exist (or are in ghost mode)

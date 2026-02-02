@@ -2805,6 +2805,8 @@ DuckDB connection open until you close them.</p>
 </span></code></pre></div></p>
 </li>
 </ol>
+<p>If Consist errors about host paths not living under configured mounts, either add the
+mount in your <code>Tracker</code> or pass <code>strict_mounts=False</code> to <code>run_container()</code>.</p>
 <hr />
 <h3 id="uri-resolution-failed">"URI resolution failed"<a class="headerlink" href="#uri-resolution-failed" title="Permanent link">&para;</a></h3>
 <p><strong>Symptom:</strong> Error like <code>Cannot resolve URI: outputs://key/file.csv</code></p>

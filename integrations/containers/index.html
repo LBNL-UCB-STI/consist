@@ -2203,7 +2203,7 @@ dependencies, and output artifacts.</p>
 <p>Key functionalities include:
 -   <strong>Container Execution with Provenance</strong>: Wraps container execution
     within a Consist <code>start_run</code> context, ensuring that container image
-    identity, commands, environment, and file I/O are fully tracked.
+    identity, commands, environment hash, and file I/O are tracked.
 -   <strong>Backend Agnosticism</strong>: Supports different container runtimes
     (Docker, Singularity/Apptainer) via a unified interface.
 -   <strong>Automated Input/Output Logging</strong>: Automatically logs host-side
@@ -2306,7 +2306,7 @@ dependencies, and output artifacts.</p>
 
 
 <h2 id="consist.integrations.containers.api.run_container" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">run_container</span><span class="p">(</span><span class="n">tracker</span><span class="p">,</span> <span class="n">run_id</span><span class="p">,</span> <span class="n">image</span><span class="p">,</span> <span class="n">command</span><span class="p">,</span> <span class="n">volumes</span><span class="p">,</span> <span class="n">inputs</span><span class="p">,</span> <span class="n">outputs</span><span class="p">,</span> <span class="n">environment</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">working_dir</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">backend_type</span><span class="o">=</span><span class="s1">&#39;docker&#39;</span><span class="p">,</span> <span class="n">pull_latest</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">lineage_mode</span><span class="o">=</span><span class="s1">&#39;full&#39;</span><span class="p">)</span></code>
+            <code class="highlight language-python"><span class="n">run_container</span><span class="p">(</span><span class="n">tracker</span><span class="p">,</span> <span class="n">run_id</span><span class="p">,</span> <span class="n">image</span><span class="p">,</span> <span class="n">command</span><span class="p">,</span> <span class="n">volumes</span><span class="p">,</span> <span class="n">inputs</span><span class="p">,</span> <span class="n">outputs</span><span class="p">,</span> <span class="n">environment</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">working_dir</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">backend_type</span><span class="o">=</span><span class="s1">&#39;docker&#39;</span><span class="p">,</span> <span class="n">pull_latest</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">lineage_mode</span><span class="o">=</span><span class="s1">&#39;full&#39;</span><span class="p">,</span> <span class="n">strict_mounts</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span></code>
 
 <a href="#consist.integrations.containers.api.run_container" class="headerlink" title="Permanent link">&para;</a></h2>
 
@@ -2410,8 +2410,9 @@ Commands are validated for non-empty tokens and a maximum length.</p>
               <div class="doc-md-description">
                 <p>A dictionary mapping host paths to container paths for volume mounts.
 Example: <code>{"/host/path": "/container/path"}</code>.
-Host paths are resolved and validated against tracker mounts when present;
-relative paths are resolved against the first mount root.</p>
+Host paths are resolved and validated against tracker mounts. When
+strict_mounts is False, any absolute host path is permitted.
+Relative paths are resolved against the first mount root.</p>
               </div>
             </td>
             <td>
@@ -2447,7 +2448,8 @@ as inputs to the containerized process. These are logged as Consist inputs.</p>
                 <p>A list of paths on the host machine that are expected to be generated or
 modified by the containerized process. These paths will be scanned and
 logged as Consist output artifacts.
-Host paths are validated against tracker mounts when present.</p>
+Host paths are validated against tracker mounts and must remain within
+run_dir unless allow_external_paths is enabled.</p>
               </div>
             </td>
             <td>
@@ -2465,7 +2467,8 @@ Host paths are validated against tracker mounts when present.</p>
               <div class="doc-md-description">
                 <p>Alternatively, pass a mapping of logical output keys to host paths.
 The artifact will be logged with the provided key instead of the filename.
-Host paths are validated against tracker mounts when present.</p>
+Host paths are validated against tracker mounts and must remain within
+run_dir unless allow_external_paths is enabled.</p>
               </div>
             </td>
             <td>
@@ -2553,6 +2556,23 @@ If None, the default working directory of the container image will be used.</p>
             </td>
             <td>
                   <code>&#34;full&#34;</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>strict_mounts</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/functions.html#bool">bool</a></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>If True, require tracker mounts to be configured and constrain container
+host paths to those roots. Set to False to allow any absolute host path.</p>
+              </div>
+            </td>
+            <td>
+                  <code>True</code>
             </td>
           </tr>
       </tbody>
@@ -2719,7 +2739,8 @@ as a list of strings (exec form).</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>A dictionary of environment variables passed to the container.</p>
+                <p>A dictionary of environment variables passed to the container. Values are not
+persisted in run metadata; only a deterministic hash is stored for caching.</p>
               </div>
             </td>
           </tr>

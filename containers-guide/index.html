@@ -2560,7 +2560,7 @@
 <ol>
 <li><strong>Image identity</strong>: Full image digest (resolved from registry if <code>pull_latest=True</code>)</li>
 <li><strong>Command</strong>: The exact command string and arguments</li>
-<li><strong>Environment</strong>: All environment variables passed to the container</li>
+<li><strong>Environment</strong>: A deterministic hash of the environment variables passed to the container</li>
 <li><strong>Volumes</strong>: Container mount paths (but NOT host paths, which are run-specific)</li>
 <li><strong>Input data</strong>: SHA256 hashes of input files</li>
 </ol>
@@ -2742,6 +2742,8 @@
 </span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>    <span class="s2">&quot;./relative&quot;</span><span class="p">:</span> <span class="s2">&quot;/container/relative&quot;</span><span class="p">,</span>        <span class="c1"># Or relative (resolved against cwd)</span>
 </span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="p">}</span>
 </span></code></pre></div>
+<p>By default, Consist only allows host paths that live under configured mounts. If you need
+to allow arbitrary absolute host paths, pass <code>strict_mounts=False</code> to <code>run_container()</code>.</p>
 <p><strong>Important:</strong> Host paths in <code>volumes</code> are <strong>not part of the cache key</strong> (they're run-specific). Only <code>inputs</code> are hashed for the signature. If you want config changes to invalidate cache, pass config files in <code>inputs</code>:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="n">result</span> <span class="o">=</span> <span class="n">run_container</span><span class="p">(</span>
 </span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>    <span class="o">...</span>
@@ -2773,6 +2775,8 @@
 </li>
 </ul>
 <p>Consist scans output directories on the <strong>host</strong> after container exits. Files created inside the container at mounted paths are detected automatically.</p>
+<p>Outputs must live under <code>tracker.run_dir</code> or a configured mount unless
+<code>allow_external_paths=True</code> (or <code>CONSIST_ALLOW_EXTERNAL_PATHS=1</code>) is set on the tracker.</p>
 <p><strong>Warning:</strong> If the container doesn't create files at the expected paths, Consist logs a warning but doesn't fail (use <code>lineage_mode="full"</code> to capture what was created).</p>
 <hr />
 <h2 id="environment-variables-configuration">Environment Variables &amp; Configuration<a class="headerlink" href="#environment-variables-configuration" title="Permanent link">&para;</a></h2>
@@ -2788,6 +2792,9 @@
 </span><span id="__span-12-9"><a id="__codelineno-12-9" name="__codelineno-12-9" href="#__codelineno-12-9"></a><span class="p">)</span>
 </span></code></pre></div>
 <p>These variables are <strong>part of the cache key</strong>. Changing them invalidates the cache.</p>
+<p>Consist does <strong>not</strong> persist raw environment values in run metadata or container
+manifests. It stores a deterministic hash instead. If you need those values for
+reproducibility, include them in config files and add those files to <code>inputs</code>.</p>
 <p>For large configurations, mount config files instead of passing via environment:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="c1"># DON&#39;T do this for large configs:</span>
 </span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a><span class="n">environment</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;CONFIG&quot;</span><span class="p">:</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">huge_config</span><span class="p">)}</span>  <span class="c1"># Bad: unreadable, cache-unfriendly</span>
