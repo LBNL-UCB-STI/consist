@@ -1,3 +1,5 @@
+import hashlib
+import json
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel
 
@@ -21,7 +23,8 @@ class ContainerDefinition(BaseModel):
         The command and its arguments to execute inside the container, represented
         as a list of strings (exec form).
     environment : Dict[str, str]
-        A dictionary of environment variables passed to the container.
+        A dictionary of environment variables passed to the container. Values are not
+        persisted in run metadata; only a deterministic hash is stored for caching.
     backend : str
         The container backend used to execute this container (e.g., "docker", "singularity").
     extra_args : Dict[str, Any]
@@ -61,10 +64,18 @@ class ContainerDefinition(BaseModel):
         cfg = {
             "image_digest": self.image_digest,
             "command": tuple(self.command or ()),
-            "environment": tuple(sorted((self.environment or {}).items())),
+            "environment_hash": _hash_environment(self.environment or {}),
             "volumes": tuple(sorted((self.volumes or {}).items())),
             "working_dir": self.working_dir,
             "backend": self.backend,
             "extra_args": tuple(sorted((self.extra_args or {}).items())),
         }
         return cfg
+
+
+def _hash_environment(environment: Dict[str, str]) -> str:
+    items = sorted(
+        (str(k), "" if v is None else str(v)) for k, v in (environment or {}).items()
+    )
+    payload = json.dumps(items, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

@@ -191,6 +191,7 @@ def test_container_caching_logic(clean_tracker: Tracker, input_file: Path):
             volumes={str(input_file.parent): "/inputs", str(output_dir): "/outputs"},
             inputs=[input_file],
             outputs=[output_dir / "result.txt"],
+            strict_mounts=False,
         )
         assert mock_backend_instance.run_count == 1
         assert result1.cache_hit is False
@@ -205,6 +206,7 @@ def test_container_caching_logic(clean_tracker: Tracker, input_file: Path):
             volumes={str(input_file.parent): "/inputs", str(output_dir): "/outputs"},
             inputs=[input_file],
             outputs=[output_dir / "result.txt"],
+            strict_mounts=False,
         )
         assert mock_backend_instance.run_count == 1
         assert result2.cache_hit is True
@@ -218,6 +220,7 @@ def test_container_caching_logic(clean_tracker: Tracker, input_file: Path):
             volumes={str(input_file.parent): "/inputs", str(output_dir): "/outputs"},
             inputs=[input_file],
             outputs=[output_dir / "result.txt"],
+            strict_mounts=False,
         )
         assert mock_backend_instance.run_count == 2
         assert result3.cache_hit is False
@@ -259,6 +262,7 @@ def test_nested_container_execution(clean_tracker: Tracker, input_file: Path):
                 inputs=[input_file],
                 outputs=[expected_output_file],
                 backend_type="docker",
+                strict_mounts=False,
             )
 
             assert result.cache_hit is False
@@ -323,6 +327,7 @@ def test_singularity_mocked_execution(clean_tracker: Tracker, input_file: Path):
             inputs=[input_file],
             outputs=[],
             backend_type="singularity",
+            strict_mounts=False,
         )
 
         assert mock_sub.called
@@ -358,6 +363,7 @@ def test_no_lineage_mode_executes_without_tracking(
             inputs=[input_file],
             outputs=[expected_output_file],
             lineage_mode="none",
+            strict_mounts=False,
         )
 
     assert mock_backend_instance.run_count == 1
@@ -434,6 +440,7 @@ def test_granular_cache_invalidation(
             outputs=[output_dir / "res.txt"],
             environment={"A": "1"},
             backend_type="docker",
+            strict_mounts=False,
         )
 
         # 1. BASE RUN
@@ -537,6 +544,8 @@ def test_docker_real_execution(clean_tracker: Tracker, tmp_path: Path):
 
     volumes = {str(host_in_dir): "/data/in", str(host_out_dir): "/data/out"}
 
+    clean_tracker.allow_external_paths = True
+
     # Run 1
     result = run_container(
         tracker=clean_tracker,
@@ -548,12 +557,14 @@ def test_docker_real_execution(clean_tracker: Tracker, tmp_path: Path):
         outputs=[host_out_dir / "output.txt"],
         backend_type="docker",
         pull_latest=True,
+        strict_mounts=False,
     )
     assert result.cache_hit is False
     assert (host_out_dir / "output.txt").read_text().strip() == "hello world"
 
     # Run 2 (Cache Hit)
     tracker2 = Tracker(run_dir=clean_tracker.run_dir, db_path=clean_tracker.db_path)
+    tracker2.allow_external_paths = True
     result_2 = run_container(
         tracker=tracker2,
         run_id="docker_real_2",
@@ -563,5 +574,6 @@ def test_docker_real_execution(clean_tracker: Tracker, tmp_path: Path):
         inputs=[host_in_dir / "input.txt"],
         outputs=[host_out_dir / "output.txt"],
         backend_type="docker",
+        strict_mounts=False,
     )
     assert result_2.cache_hit is True

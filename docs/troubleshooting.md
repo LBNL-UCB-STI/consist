@@ -222,6 +222,9 @@ result = consist.run(
    docker run -it -v ./data:/inputs my-image ls -la /inputs
    ```
 
+If Consist errors about host paths not living under configured mounts, either add the
+mount in your `Tracker` or pass `strict_mounts=False` to `run_container()`.
+
 ---
 
 ### "URI resolution failed"

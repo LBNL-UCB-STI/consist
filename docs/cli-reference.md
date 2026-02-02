@@ -100,6 +100,7 @@ Preview tabular artifacts (CSV, Parquet) without loading full data.
 ```bash
 consist preview <artifact_key>
 consist preview <artifact_key> --rows 10
+consist preview <artifact_key> --trust-db  # Allow mount inference from DB metadata
 ```
 
 ### consist validate
@@ -117,6 +118,7 @@ Start an interactive session for exploring provenance.
 
 ```bash
 consist shell
+consist shell --trust-db  # Allow mount inference from DB metadata
 ```
 
 Inside the shell:

@@ -331,7 +331,7 @@ ds = tracker.matrix.load("skim_matrices", variables=["travel_time"])
 Containers are treated as pure functions where the image digest becomes part of the cache signature:
 
 ```
-Signature = SHA256(image_digest | command | env | mount_hashes | input_signatures)
+Signature = SHA256(image_digest | command | env_hash | mount_hashes | input_signatures)
 ```
 
 On cache hit:

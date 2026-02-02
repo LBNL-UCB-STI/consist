@@ -280,6 +280,7 @@ def test_container_chaining_with_caching(tracker: Tracker):
             inputs=[],
             outputs=[expected_output_file],
             backend_type="docker",
+            strict_mounts=False,
         )
 
         assert mock_backend.run_count == 1
@@ -310,6 +311,7 @@ def test_container_chaining_with_caching(tracker: Tracker):
             inputs=[],
             outputs=[expected_output_file],
             backend_type="docker",
+            strict_mounts=False,
         )
 
         # Count should NOT increase
@@ -326,6 +328,7 @@ def test_container_chaining_with_caching(tracker: Tracker):
             inputs=[],
             outputs=[expected_output_file],
             backend_type="docker",
+            strict_mounts=False,
         )
 
         # Count SHOULD increase

@@ -590,7 +590,7 @@ def test_shell_command_invokes_cmdloop():
         m_tracker.return_value = tracker
         result = runner.invoke(app, ["shell", "--db-path", "mock.db"])
         assert result.exit_code == 0
-        m_shell.assert_called_once_with(tracker)
+        m_shell.assert_called_once_with(tracker, trust_db=False)
         m_shell.return_value.cmdloop.assert_called_once()
 
 
