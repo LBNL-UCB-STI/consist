@@ -1,6 +1,6 @@
 # Glossary
 
-This page defines key terms used in Consist documentation.
+This page defines key terms used in Consist documentation. For a conceptual introduction with dependency ordering, see [Core Concepts Overview](concepts/overview.md).
 
 ---
 
@@ -14,7 +14,7 @@ Artifacts record:
 - A content hash (SHA256) for integrity checking
 - Optional ingestion status (whether it was stored in DuckDB)
 
-**Research example**: When you publish results (a transportation demand forecast, climate projections, or zoning capacity map), each output file is an Artifact. You can ask "who created this file?" (`consist lineage traffic_volumes`), verify it hasn't been corrupted, and trace it back to the exact code version and config that produced it.
+**Research example**: When you publish results (a transportation demand forecast, grid load projections, or zoning capacity map), each output file is an Artifact. You can ask "who created this file?" (`consist lineage traffic_volumes`), verify it hasn't been corrupted, and trace it back to the exact code version and config that produced it.
 
 **See also**: Run, Provenance, Ingestion
 
@@ -240,16 +240,16 @@ from consist import use_tracker
 
 with use_tracker(tracker):
     result = consist.run(
-        fn=clean_data,
-        inputs={"raw_path": "raw.csv"},
-        config={"threshold": 0.5},
-        outputs=["cleaned"],
+        fn=prepare_load_shapes,
+        inputs={"raw_path": "hourly_demand.csv"},
+        config={"peak_shave_threshold": 0.95},
+        outputs=["processed_load"],
     )
 ```
 
 This creates a Run with one input artifact, one config dict, and one output artifact.
 
-**Research example**: In climate modeling, each year's downscaling (e.g., 2030 temperature downscaling) is a separate Run. The provenance database stores 20 runs (2031-2050) all under one scenario, linked by data flow (year 2030's output feeds year 2031's input). You can query: "which runs used GCM model X?" or "what was the total compute time across all 2050 runs?" or "trace 2050's data back to the original global model."
+**Research example**: In grid dispatch modeling, each scenario's annual simulation (e.g., 2035 high-renewables dispatch) is a separate Run. The provenance database stores 8 runs (4 load growth levels × 2 renewable targets) all under one planning study, linked by data flow (the baseline network topology feeds all scenario runs). You can query: "which runs used the updated solar capacity factors?" or "what was the total compute time across all high-load scenarios?" or "trace this reliability violation back to the original load forecast assumptions."
 
 **See also**: Artifact, Scenario
 

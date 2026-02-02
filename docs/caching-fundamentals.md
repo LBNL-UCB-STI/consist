@@ -71,7 +71,7 @@ When there's a cache hit, Consist returns:
 
 - **Artifact metadata** – Information about what run created the output, with what config
 - **File paths** – Where the output was stored
-- **Optionally, file bytes** – Depend on your cache hydration policy (see [Caching & Hydration](caching-and-hydration.md) for advanced options)
+- **Optionally, file bytes** – Depend on your cache hydration policy (see [Caching & Hydration](concepts/caching-and-hydration.md) for advanced options)
 
 Important: A cache hit returns **metadata about the result**, not necessarily a copy of the files.
 
@@ -83,7 +83,7 @@ Not necessarily. A cache hit returns artifact metadata (provenance). Whether fil
 - File paths are preserved (you can access the original file)
 - Bytes are not copied (saves disk space)
 
-See [Caching & Hydration](caching-and-hydration.md) if you need to force file copying.
+See [Caching & Hydration](concepts/caching-and-hydration.md) if you need to force file copying.
 
 ## When Caching Saves Time
 
@@ -111,18 +111,18 @@ After reviewing results, the coefficients are adjusted slightly and the model re
 - With caching: Step 1–2 are cache hits (data unchanged), only step 3 re-executes = 45 + 20 (cached) + (10 × 5 iterations) = 115 minutes
 - **Time saved: 69% reduction; frees analyst time for interpretation**
 
-**Example 3: Climate Change Multi-Scenario Ensemble**
+**Example 3: Grid Dispatch Multi-Scenario Ensemble**
 
-Climate researchers downscale global circulation models (GCMs) for regional impact studies. A baseline scenario and 8 future scenarios (4 emissions pathways × 2 time horizons) all share the same preprocessing pipeline.
+Grid planners evaluate resource adequacy under uncertainty. A baseline scenario and 8 future scenarios (4 load growth levels × 2 renewable penetration targets) all share the same network preprocessing pipeline.
 
-- Baseline preprocessing (temperature interpolation, bias correction): 2 hours
-- Each scenario-specific downscaling: 15 minutes
-- Without caching: 9 × (2 hours + 15 min) = 20.25 hours
-- With caching: Preprocessing once (2 hours), then 8 scenario runs hit cache on preprocessing = 2 hours + (8 × 15 min) = 3 hours
-- **Time saved: 85% reduction; enables rapid ensemble exploration for stakeholder analysis**
+- Baseline preprocessing (load shape development, transmission topology, renewable capacity factors): 3 hours
+- Each scenario-specific dispatch simulation: 20 minutes
+- Without caching: 9 × (3 hours + 20 min) = 29.85 hours
+- With caching: Preprocessing once (3 hours), then 8 scenario runs hit cache on preprocessing = 3 hours + (8 × 20 min) = 5.67 hours
+- **Time saved: 81% reduction; enables rapid scenario exploration for integrated resource planning**
 
 ## Next Steps
 
-- See [Caching & Hydration](caching-and-hydration.md) for advanced policies (when/how to copy files, handling large datasets)
+- See [Caching & Hydration](concepts/caching-and-hydration.md) for advanced policies (when/how to copy files, handling large datasets)
 - See [Configuration & Facets](configs.md) to learn when to use `config` vs `facet`
 - See [Usage Guide](usage-guide.md) for multi-step workflow patterns

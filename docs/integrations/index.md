@@ -1,34 +1,41 @@
 # Integrations
 
-These integrations extend Consist's capabilities for container execution, data ingestion, and configuration management.
+These integrations extend Consist for container execution, data ingestion, and configuration management.
 
-## Core Integrations
+## When to Use Each Integration
 
-### [Container Integration](../containers-guide.md)
+| Integration | Use when |
+|-------------|----------|
+| **Container** | Wrapping existing tools (ActivitySim, SUMO, BEAM) without source modification |
+| **DLT Loader** | Cross-run SQL queries on 100K+ row datasets with schema validation |
+| **Config Adapters** | Tracking file-based configs (YAML/HOCON hierarchies) with queryable parameters |
+
+---
+
+## Container Integration
 
 Execute Docker and Singularity containers with provenance tracking.
 
-- Run ActivitySim, SUMO, BEAM, and other existing tools
 - Image digest-based caching for reproducibility
-- Covers volume mounting, output handling, and debugging
+- Volume mounting and output capture
 - [Full guide](../containers-guide.md) | [API reference](containers.md)
 
-### [DLT Loader](../dlt-loader-guide.md)
+---
+
+## DLT Loader
 
 Schema-validated data ingestion with DuckDB.
 
-- Ingest Parquet, CSV, DataFrames with type enforcement
-- Automatic provenance column injection
+- Automatic provenance column injection (`consist_run_id`, etc.)
 - Cross-run SQL queries with registered schemas
 - [Full guide](../dlt-loader-guide.md) | [API reference](dlt_loader.md)
 
-### [Config Adapters](config_adapters.md)
+---
+
+## Config Adapters
 
 Model-specific configuration discovery and tracking.
 
-- ActivitySim: Track and query calibration parameters across runs
-- Automatic discovery of YAML hierarchies and CSV references
+- Automatic discovery of YAML/HOCON hierarchies
 - Queryable configuration tables for sensitivity analysis
-- [Full guide](config_adapters.md)
-- [ActivitySim adapter](config_adapters_activitysim.md)
-- [BEAM adapter](config_adapters_beam.md)
+- [Full guide](config_adapters.md) | [ActivitySim](config_adapters_activitysim.md) | [BEAM](config_adapters_beam.md)

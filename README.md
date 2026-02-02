@@ -1,6 +1,12 @@
-# Consist
+<p align="center">
+  <img src="docs/assets/logo.png" alt="Consist" width="320">
+</p>
 
-[![CI](https://github.com/LBNL-UCB-STI/consist/actions/workflows/ci.yml/badge.svg)](https://github.com/LBNL-UCB-STI/consist/actions/workflows/ci.yml)
+<p align="center">
+  <a href="https://github.com/LBNL-UCB-STI/consist/actions/workflows/ci.yml">
+    <img src="https://github.com/LBNL-UCB-STI/consist/actions/workflows/ci.yml/badge.svg" alt="CI">
+  </a>
+</p>
 
 Consist automatically records what code, configuration, and input data produced each output in your pipeline. This makes it possible to skip redundant computation, answer "which configuration made Figure 3?", and query results across runs in SQL.
 
@@ -230,12 +236,12 @@ Protocols are available at `consist.protocols`:
 - Need help? Check [Troubleshooting](docs/troubleshooting.md) for common issues and solutions
 
 **I'm a researcher building simulation workflows:**
-- See [Concepts](docs/concepts.md) for mental models
-- Then [Ingestion & Hybrid Views](docs/ingestion-and-hybrid-views.md) for SQL-native analytics
+- See [Concepts](docs/concepts/overview.md) for mental models
+- Then [Data Materialization](docs/concepts/data-materialization.md) for SQL-native analytics
 - See [DLT Loader Guide](docs/dlt-loader-guide.md) for schema-validated data ingestion
 
 **I want to understand how it works:**
-- [Concepts](docs/concepts.md) explains the mental model
+- [Concepts](docs/concepts/overview.md) explains the mental model
 - [Architecture](docs/architecture.md) goes deeper into caching and lineage tracking
 
 **I'm debugging an issue:**

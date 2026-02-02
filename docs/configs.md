@@ -81,10 +81,12 @@ Behavior notes:
 - If `facet_schema_version` is not provided and the config model exposes
   `facet_schema_version`, Consist records that value automatically.
 
-Guardrails:
+**Guardrails** (enforced silently; no error raised):
 
-- Facets larger than 16 KB (canonical JSON) are not persisted.
-- Facets that would produce more than 500 KV rows are not indexed.
+| Limit | Behavior when exceeded |
+|-------|----------------------|
+| Facet > 16 KB (canonical JSON) | Facet not persisted; run continues |
+| Facet > 500 KV rows | Facet not indexed; run continues |
 
 ## Hash-Only Inputs (`hash_inputs`)
 
@@ -191,12 +193,13 @@ Examples:
 
 ```python
 tracker.find_runs_by_facet_kv(
-    key="beam.memory_gb",
-    op=">=",
-    value_num=180,
     namespace="beam",
+    key="memory_gb",
+    value_num=180,
 )
 ```
+
+For range queries, filter results in Python or use direct SQL on the `run_config_kv` table.
 
 You can also fetch facets directly:
 
