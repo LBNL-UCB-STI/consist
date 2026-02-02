@@ -2,14 +2,10 @@
 
 Consist's core loop: declare inputs → compute signature → check cache → load or execute.
 
+!!! info "Terminology"
+    **Hydration** recovers metadata and provenance about a prior run's outputs without copying file bytes. **Materialization** ensures file bytes exist on disk (copying them from their original location). A cache hit always hydrates; it only materializes if you request it via a specific hydration policy.
+
 This page covers patterns for making caching reliable, keeping pipelines portable, and choosing when artifacts should be hydrated or materialized.
-
----
-
-!!! warning "Design Facts"
-    **Hydration ≠ file copying.** On cache hits, Consist returns artifact metadata without copying bytes. Files stay in their original location.
-
-    **Step bodies execute on cache hits.** Consist does not skip Python blocks. Use `consist.run(...)` or `ScenarioContext.run(...)` for function-shaped steps that skip execution on cache hits.
 
 ---
 

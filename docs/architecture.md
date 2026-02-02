@@ -14,6 +14,17 @@ signature = SHA256(code_hash || config_hash || input_hash)
 | **Config hash** | Canonical JSON of config dict | Normalized for key order and numeric types; Pydantic models serialize deterministically |
 | **Input hash** | SHA256 of input content | For Consist artifacts, uses the producing run's signature (Merkle linking); for raw files, hashes bytes or metadata per `hashing_strategy` |
 
+### What Changes Break Cache Hits?
+
+| What Changed | Cache Hit? | Why |
+|---|---|---|
+| Input file content | ❌ No | File hash changes → signature changes |
+| Config value | ❌ No | Config hash changes → signature changes |
+| Function code | ❌ No | Code hash changes → signature changes |
+| `runtime_kwargs` | ✅ Yes | runtime_kwargs are NOT hashed; don't affect signature |
+| Output file names | ✅ Yes | Output names don't affect signature |
+| Comments in code | Depends | Committed comment changes affect the code hash; uncommitted changes mark the repo dirty and break cache. |
+
 **Merkle DAG structure**: Each run's signature incorporates the signatures of its input artifacts' producing runs. This forms a directed acyclic graph where:
 
 - Changing a parameter invalidates only downstream runs that depend on it

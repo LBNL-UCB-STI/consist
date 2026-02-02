@@ -836,6 +836,35 @@ See [Concepts](concepts.md#the-config-vs-facet-distinction) for when to use `con
 
 ---
 
+## Motivation: When Caching Saves Time
+
+Caching is most valuable in workflows with many runs and expensive computation. Here are realistic scenarios from scientific domains:
+
+**Example 1: Land-Use Model Sensitivity Analysis**
+
+A sensitivity sweep tests 40 parameter combinations (toll levels, parking costs, transit subsidies).
+- Each ActivitySim run: 30 minutes
+- Without caching: 40 runs × 30 min = 20 hours
+- With caching: Base population synthesis (30 min, once) + 39 parameter tweaks with cache hits (5 min each) = 3.75 hours
+- **Time saved: 81% reduction in modeling time**
+
+**Example 2: ActivitySim Calibration Iteration**
+
+Mode choice coefficients need iterative calibration against observed transit ridership.
+- Without caching: Repeat all 3 steps = 75 minutes per iteration × 5 iterations = 375 minutes total
+- With caching: Step 1–2 are cache hits, only step 3 re-executes = 115 minutes
+- **Time saved: 69% reduction; frees analyst time for interpretation**
+
+**Example 3: Grid Dispatch Multi-Scenario Ensemble**
+
+A baseline scenario and 8 future scenarios all share the same network preprocessing pipeline.
+- Preprocessing: 3 hours; Each scenario dispatch: 20 minutes
+- Without caching: 9 × (3 hours + 20 min) = 29.85 hours
+- With caching: Preprocessing once (3 hours), then 8 scenario runs hit cache on preprocessing = 5.67 hours
+- **Time saved: 81% reduction; enables rapid scenario exploration**
+
+---
+
 ## Querying Results
 
 ### Finding Runs

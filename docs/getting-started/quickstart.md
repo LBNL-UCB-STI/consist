@@ -4,7 +4,7 @@ This example demonstrates Consist's core capability: caching a function so that 
 
 ## Create a Cached Run
 
-Save the following as `quickstart.py`:
+Save the following as `quickstart.py`. This example uses `consist.run()`, which is the simplest way to track one-off functions. For building reusable pipeline libraries, you may prefer the `@tracker.define_step` decorator shown in the next tutorial.
 
 ``` python
 from pathlib import Path
@@ -18,7 +18,7 @@ def process_data(value: int) -> dict:
     return {"squared": value ** 2}
 
 with consist.use_tracker(tracker):  # (3)!
-    result = tracker.run(
+    result = consist.run(
         fn=process_data,
         name="square",
         config={"value": 5},
