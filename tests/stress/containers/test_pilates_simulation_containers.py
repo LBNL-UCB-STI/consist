@@ -28,6 +28,15 @@ class Person(SQLModel, table=True):
     number_of_trips: int
 
 
+def make_tracker(run_dir: Path, db_path: str) -> Tracker:
+    return Tracker(
+        run_dir=run_dir,
+        db_path=db_path,
+        schemas=[Household, Person],
+        mounts={"runs": str(run_dir)},
+    )
+
+
 # --- 2. Simulation Helper ---
 def run_simulation_scenario(
     tracker,
@@ -227,7 +236,7 @@ def run_simulation_scenario(
 def test_pilates_header_pattern(tmp_path: Path):
     run_dir = tmp_path / "runs"
     db_path = str(tmp_path / "provenance.duckdb")
-    tracker = Tracker(run_dir=run_dir, db_path=db_path, schemas=[Household, Person])
+    tracker = make_tracker(run_dir, db_path)
     tracker.identity.hashing_strategy = "fast"
 
     years = [2020, 2030]
@@ -397,7 +406,7 @@ def test_pilates_caching_scenarios(tmp_path):
     """
     run_dir = tmp_path / "runs_cache"
     db_path = str(tmp_path / "provenance_cache.duckdb")
-    tracker = Tracker(run_dir=run_dir, db_path=db_path, schemas=[Household, Person])
+    tracker = make_tracker(run_dir, db_path)
     # Use content-based hashing for stable cache keys across scenarios
     tracker.identity.hashing_strategy = "full"
 
@@ -463,11 +472,7 @@ def test_pilates_cache_hydrates_across_run_dirs(tmp_path):
     years = [2020, 2030]
 
     # First tracker writes the baseline scenario
-    tracker1 = Tracker(
-        run_dir=tmp_path / "runs_a",
-        db_path=db_path,
-        schemas=[Household, Person],
-    )
+    tracker1 = make_tracker(tmp_path / "runs_a", db_path)
     tracker1.identity.hashing_strategy = "full"
     with patch.object(
         tracker1.identity, "get_code_version", return_value="stable_git_hash"
@@ -482,11 +487,7 @@ def test_pilates_cache_hydrates_across_run_dirs(tmp_path):
         )
 
     # Second tracker in a new run_dir replays the same work and should hydrate
-    tracker2 = Tracker(
-        run_dir=tmp_path / "runs_b",
-        db_path=db_path,
-        schemas=[Household, Person],
-    )
+    tracker2 = make_tracker(tmp_path / "runs_b", db_path)
     tracker2.identity.hashing_strategy = "full"
     with patch.object(
         tracker2.identity, "get_code_version", return_value="stable_git_hash"
@@ -518,11 +519,7 @@ def test_pilates_cache_miss_on_code_change(tmp_path):
     db_path = str(tmp_path / "provenance_code.duckdb")
     years = [2020]
 
-    tracker = Tracker(
-        run_dir=tmp_path / "runs_code",
-        db_path=db_path,
-        schemas=[Household, Person],
-    )
+    tracker = make_tracker(tmp_path / "runs_code", db_path)
     tracker.identity.hashing_strategy = "full"
 
     with patch.object(tracker.identity, "get_code_version", return_value="git_sha_1"):
@@ -543,11 +540,7 @@ def test_pilates_cache_replay_with_ingested_outputs(tmp_path):
     db_path = str(tmp_path / "provenance_ingest.duckdb")
     years = [2020]
 
-    tracker1 = Tracker(
-        run_dir=tmp_path / "runs_ingest_a",
-        db_path=db_path,
-        schemas=[Household, Person],
-    )
+    tracker1 = make_tracker(tmp_path / "runs_ingest_a", db_path)
     tracker1.identity.hashing_strategy = "full"
     with patch.object(
         tracker1.identity, "get_code_version", return_value="stable_git_hash"
@@ -561,11 +554,7 @@ def test_pilates_cache_replay_with_ingested_outputs(tmp_path):
             validate_cached_outputs="eager",
         )
 
-    tracker2 = Tracker(
-        run_dir=tmp_path / "runs_ingest_b",
-        db_path=db_path,
-        schemas=[Household, Person],
-    )
+    tracker2 = make_tracker(tmp_path / "runs_ingest_b", db_path)
     tracker2.identity.hashing_strategy = "full"
     with patch.object(
         tracker2.identity, "get_code_version", return_value="stable_git_hash"

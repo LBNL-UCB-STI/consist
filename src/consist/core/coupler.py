@@ -27,18 +27,18 @@ class Coupler:
         self.tracker = tracker
         self._artifacts: Dict[str, Artifact] = {}
         self._declared_outputs: Dict[str, DeclaredOutput] = {}
-        self._warn_undocumented = False
-        self._undocumented_keys: set[str] = set()
+        self._warn_undefined = False
+        self._undefined_keys: set[str] = set()
         self._output_descriptions: Dict[str, str] = {}
 
-    def _maybe_warn_undocumented(self, key: str) -> None:
-        if not self._warn_undocumented:
+    def _maybe_warn_undefined(self, key: str) -> None:
+        if not self._warn_undefined:
             return
-        if key in self._declared_outputs or key in self._undocumented_keys:
+        if key in self._declared_outputs or key in self._undefined_keys:
             return
-        self._undocumented_keys.add(key)
+        self._undefined_keys.add(key)
         warnings.warn(
-            f"Setting undocumented coupler key '{key}'. "
+            f"Setting undefined coupler key '{key}'. "
             f"Declared outputs: {sorted(self._declared_outputs)}",
             UserWarning,
             stacklevel=2,
@@ -47,7 +47,7 @@ class Coupler:
     def set(self, key: str, artifact: Artifact) -> Artifact:
         """Store an artifact under a validated key."""
         validate_artifact_key(key)
-        self._maybe_warn_undocumented(key)
+        self._maybe_warn_undefined(key)
         self._artifacts[key] = artifact
         return artifact
 
@@ -92,7 +92,7 @@ class Coupler:
         ```
         """
         validate_artifact_key(key)
-        self._maybe_warn_undocumented(key)
+        self._maybe_warn_undefined(key)
         self._artifacts[key] = value
         return value
 
@@ -166,7 +166,7 @@ class Coupler:
         self,
         *names: str,
         required: bool | Mapping[str, bool] = False,
-        warn_undocumented: bool = False,
+        warn_undefined: bool = False,
         description: Optional[Mapping[str, str]] = None,
     ) -> None:
         """
@@ -183,7 +183,7 @@ class Coupler:
         required : bool or Mapping[str, bool], default False
             If bool: applies to all declared outputs.
             If Mapping: per-key required status (e.g., {"persons": True, "jobs": False}).
-        warn_undocumented : bool, default False
+        warn_undefined : bool, default False
             Warn when setting keys that were not declared.
         description : Mapping[str, str], optional
             Human-readable descriptions of outputs for documentation.
@@ -228,8 +228,8 @@ class Coupler:
         """
         if not names:
             return
-        if warn_undocumented:
-            self._warn_undocumented = True
+        if warn_undefined:
+            self._warn_undefined = True
         if isinstance(required, Mapping):
             required_map = {str(k): bool(v) for k, v in required.items()}
             default_required = False
@@ -276,16 +276,16 @@ class Coupler:
         self,
         *names: str,
         required: bool | Mapping[str, bool] = True,
-        warn_undocumented: bool = False,
+        warn_undefined: bool = False,
         description: Optional[Mapping[str, str]] = None,
     ) -> None:
         """
-        Declare required outputs with optional undocumented key warnings.
+        Declare required outputs with optional undefined key warnings.
         """
         self.declare_outputs(
             *names,
             required=required,
-            warn_undocumented=warn_undocumented,
+            warn_undefined=warn_undefined,
             description=description,
         )
 

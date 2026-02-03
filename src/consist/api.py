@@ -111,11 +111,13 @@ class ArtifactLike(Protocol):
 
     id: Any
     key: str
-    driver: str
     container_uri: str
     table_path: Optional[str]
     array_path: Optional[str]
     meta: Dict[str, Any]
+
+    @property
+    def driver(self) -> str: ...
 
     @property
     def path(self) -> Path: ...
@@ -124,49 +126,57 @@ class ArtifactLike(Protocol):
 class DataFrameArtifact(ArtifactLike, Protocol):
     """Artifact that loads as DuckDB Relation."""
 
-    driver: Literal["parquet", "csv", "h5_table"]
+    @property
+    def driver(self) -> Literal["parquet", "csv", "h5_table"]: ...
 
 
 class TabularArtifact(ArtifactLike, Protocol):
     """Artifact that loads as tabular data (DuckDB Relation)."""
 
-    driver: Literal["parquet", "csv", "h5_table", "json"]
+    @property
+    def driver(self) -> Literal["parquet", "csv", "h5_table", "json"]: ...
 
 
 class JsonArtifact(ArtifactLike, Protocol):
     """Artifact that loads as DuckDB Relation from JSON."""
 
-    driver: Literal["json"]
+    @property
+    def driver(self) -> Literal["json"]: ...
 
 
 class ZarrArtifact(ArtifactLike, Protocol):
     """Artifact that loads as xarray.Dataset."""
 
-    driver: Literal["zarr"]
+    @property
+    def driver(self) -> Literal["zarr"]: ...
 
 
 class HdfStoreArtifact(ArtifactLike, Protocol):
     """Artifact that loads as pandas HDFStore."""
 
-    driver: Literal["h5", "hdf5"]
+    @property
+    def driver(self) -> Literal["h5", "hdf5"]: ...
 
 
 class NetCdfArtifact(ArtifactLike, Protocol):
     """Artifact that loads as xarray.Dataset (NetCDF format)."""
 
-    driver: Literal["netcdf"]
+    @property
+    def driver(self) -> Literal["netcdf"]: ...
 
 
 class OpenMatrixArtifact(ArtifactLike, Protocol):
     """Artifact that loads as xarray.Dataset (OpenMatrix format)."""
 
-    driver: Literal["openmatrix"]
+    @property
+    def driver(self) -> Literal["openmatrix"]: ...
 
 
 class SpatialArtifact(ArtifactLike, Protocol):
     """Artifact that loads as GeoDataFrame (spatial formats)."""
 
-    driver: Literal["geojson", "shapefile", "geopackage"]
+    @property
+    def driver(self) -> Literal["geojson", "shapefile", "geopackage"]: ...
 
 
 def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
@@ -304,24 +314,30 @@ def scenario(
     **kwargs: Any,
 ):
     """
-    Proxy for ``Tracker.scenario`` to avoid importing the tracker directly.
+    Context manager for grouping multiple execution steps into a semantic scenario.
+
+    A scenario creates a parent "header" run that aggregates metadata, lineage,
+    and artifacts from all nested steps. This enables multi-stage simulations
+    to be tracked as a single unit while maintaining fine-grained provenance
+    for each internal component.
 
     Parameters
     ----------
     name : str
-        Name of the scenario (used for the header run ID).
+        Unique identifier or name for the scenario header.
     tracker : Optional[Tracker], optional
-        Tracker instance to use; defaults to the active global tracker.
+        The Tracker instance to use for persistence. Defaults to the active
+        global tracker.
     enabled : bool, default True
-        If False, returns a noop scenario context that executes without provenance
-        tracking while preserving Coupler/RunResult ergonomics.
+        If False, returns a no-op context that executes functions without
+        recording provenance, preserving the Scenario API ergonomics for debugging.
     **kwargs : Any
-        Additional arguments forwarded to ``Tracker.scenario``.
+        Additional metadata (e.g., tags, config) forwarded to the header run.
 
     Yields
     ------
     ScenarioContext
-        Scenario context manager.
+        An active scenario context with an internal Coupler for artifact chaining.
     """
     if not enabled:
         yield NoopScenarioContext(name, **kwargs)
@@ -413,8 +429,10 @@ def start_run(
 
     Example
     -------
-    >>> with consist.start_run("run_123", "my_model"):
-    ...     consist.log_artifact("data.csv", "input_data")
+    ```python
+    with consist.start_run("run_123", "my_model"):
+        consist.log_artifact("data.csv", "input_data")
+    ```
     """
     tr = _resolve_tracker(tracker)
     with tr.start_run(run_id=run_id, model=model, **kwargs) as active:
@@ -429,27 +447,32 @@ def run(
     **kwargs: Any,
 ) -> RunResult:
     """
-    Execute a function as a tracked Consist run.
+    Execute a computational task as a tracked and cached Consist run.
 
-    This is a high-level entrypoint that wraps a function call in a Consist run.
-    It automatically handles run start/end and result capturing.
+    This high-level entrypoint encapsulates the execution of a callable within
+    a managed provenance context. It automates the lifecycle of the run,
+    including signature computation for cache identity, artifact capture,
+    and result persistence.
 
     Parameters
     ----------
     fn : Optional[Callable]
-        The function to execute.
+        The computational function to execute.
     name : Optional[str]
-        A semantic name for the run. Defaults to the function name.
+        A semantic identifier for the run. If omitted, the function's
+        `__name__` is utilized as the default.
     tracker : Optional[Tracker]
-        The tracker instance to use.
+        The Tracker instance responsible for provenance and caching.
+        If None, the active global tracker is resolved.
     **kwargs : Any
-        Additional arguments passed to `Tracker.run`, such as `inputs`, `tags`,
-        or `runtime_kwargs`.
+        Arguments forwarded to `Tracker.run`, including `inputs`, `config`,
+        `tags`, and `runtime_kwargs`.
 
     Returns
     -------
     RunResult
-        An object containing the function's return value and the recorded `Run` record.
+        A container holding the function's return value and the
+        immutable `Run` record.
     """
     tr = _resolve_tracker(tracker)
     return tr.run(fn=fn, name=name, **kwargs)

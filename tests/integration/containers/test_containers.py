@@ -374,6 +374,49 @@ def test_no_lineage_mode_executes_without_tracking(
     assert result.image_digest is not None
 
 
+def test_run_container_strict_mounts_requires_mounts(tmp_path: Path):
+    run_dir = tmp_path / "runs"
+    db_path = str(tmp_path / "provenance.duckdb")
+    tracker_no_mounts = Tracker(run_dir=run_dir, db_path=db_path)
+
+    output_dir = run_dir / "out_dir"
+    output_file = output_dir / "result.txt"
+
+    mock_backend = MockBackend()
+    with patch(
+        "consist.integrations.containers.api.DockerBackend",
+        return_value=mock_backend,
+    ):
+        with pytest.raises(ValueError, match="require configured tracker mounts"):
+            run_container(
+                tracker=tracker_no_mounts,
+                run_id="strict_no_mounts",
+                image="img:v1",
+                command=["run"],
+                volumes={str(output_dir): "/out"},
+                inputs=[],
+                outputs=[output_file],
+            )
+
+        tracker_with_mounts = Tracker(
+            run_dir=run_dir,
+            db_path=db_path,
+            mounts={"runs": str(run_dir)},
+        )
+        result = run_container(
+            tracker=tracker_with_mounts,
+            run_id="strict_with_mounts",
+            image="img:v1",
+            command=["run"],
+            volumes={str(output_dir): "/out"},
+            inputs=[],
+            outputs=[output_file],
+        )
+
+    assert result.cache_hit is False
+    assert output_file.exists()
+
+
 # --- Granular Hashing Tests ---
 
 

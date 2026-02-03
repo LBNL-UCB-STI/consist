@@ -104,33 +104,33 @@ def test_coupler_collect_by_keys_updates_coupler() -> None:
     assert collected == {"2024_a": outputs["a"]}
 
 
-def test_coupler_warns_on_undocumented_key() -> None:
+def test_coupler_warns_on_undefined_key() -> None:
     coupler = Coupler()
-    coupler.require_outputs("known", warn_undocumented=True)
+    coupler.require_outputs("known", warn_undefined=True)
 
-    with pytest.warns(UserWarning, match="undocumented"):
+    with pytest.warns(UserWarning, match="undefined"):
         coupler.set("unknown", _artifact(key="unknown"))
 
 
-def test_coupler_update_warns_on_undocumented_key() -> None:
+def test_coupler_update_warns_on_undefined_key() -> None:
     coupler = Coupler()
-    coupler.require_outputs("known", warn_undocumented=True)
+    coupler.require_outputs("known", warn_undefined=True)
 
-    with pytest.warns(UserWarning, match="undocumented"):
+    with pytest.warns(UserWarning, match="undefined"):
         coupler.update({"unknown": _artifact(key="unknown")})
 
 
-def test_coupler_set_from_artifact_warns_on_undocumented_key() -> None:
+def test_coupler_set_from_artifact_warns_on_undefined_key() -> None:
     coupler = Coupler()
-    coupler.require_outputs("known", warn_undocumented=True)
+    coupler.require_outputs("known", warn_undefined=True)
 
-    with pytest.warns(UserWarning, match="undocumented"):
+    with pytest.warns(UserWarning, match="undefined"):
         coupler.set_from_artifact("unknown", _artifact(key="unknown"))
 
 
 def test_coupler_warns_only_once_per_key() -> None:
     coupler = Coupler()
-    coupler.require_outputs("known", warn_undocumented=True)
+    coupler.require_outputs("known", warn_undefined=True)
     art = _artifact(key="unknown")
 
     with warnings.catch_warnings(record=True) as captured:

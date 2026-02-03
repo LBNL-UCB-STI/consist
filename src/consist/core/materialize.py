@@ -61,30 +61,30 @@ def materialize_artifacts(
     on_missing: Literal["warn", "raise"] = "warn",
 ) -> dict[str, str]:
     """
-    Copy cached artifact bytes onto the filesystem at caller-specified destinations.
+    Synchronize cached artifact bytes to specific filesystem destinations.
 
-    This is intentionally *copy-only* materialization:
-    - If the artifact's resolved source path exists, it is copied to the destination.
-    - If it does not exist, behavior depends on `on_missing`.
-    - If the destination already exists, it is left untouched.
-    - Destination paths cannot be symlinks and will not be overwritten if the type differs.
-
-    This function does not attempt database-backed reconstruction. Higher-level code
-    can decide when to call `consist.load(...)` or enable DB recovery.
+    This function performs physical materialization by copying the resolved source
+    data of cached artifacts to the requested locations. It ensures atomic
+    file writes and safe directory recursion. If the destination already contains
+    matching data, the operation is bypassed to prevent redundant I/O.
 
     Parameters
     ----------
     tracker : Tracker
-        Tracker used to resolve portable artifact URIs to host filesystem paths.
+        The active Tracker instance used to resolve virtualized artifact URIs
+        to physical host filesystem paths.
     items : Sequence[tuple[Artifact, Path]]
-        A list of `(artifact, destination_path)` pairs to materialize.
+        A collection of (Artifact, Path) pairs defining the source artifacts
+        and their respective target destinations.
     on_missing : {"warn", "raise"}, default "warn"
-        What to do when a resolved source path does not exist.
+        The error handling policy for cases where the resolved source path
+        is absent from the filesystem.
 
     Returns
     -------
     dict[str, str]
-        Map of `artifact.key -> destination_path` for successfully materialized items.
+        A mapping of artifact keys to their successfully materialized
+        absolute filesystem paths.
     """
     materialized: dict[str, str] = {}
 
@@ -155,18 +155,30 @@ def materialize_artifacts_from_sources(
     on_missing: Literal["warn", "raise"] = "warn",
 ) -> dict[str, str]:
     """
-    Copy artifact bytes from explicit source paths to caller-specified destinations.
+    Rehydrate artifacts from explicit source paths to specified destinations.
 
-    This is useful for rehydrating cached inputs from historical run directories
-    when the current run directory is different from the original producer.
-    Existing destination paths are left untouched.
-    Destination paths cannot be symlinks and will not be overwritten if the type differs.
+    This specialized materialization utility is typically employed during
+    cross-run hydration (e.g., 'inputs-missing' mode) where the original
+    on-disk source is located in a historical run directory. It enforces
+    directory containment security via the `allowed_base` parameter.
 
     Parameters
     ----------
+    items : Sequence[tuple[Artifact, Path, Path]]
+        A collection of (Artifact, SourcePath, DestinationPath) triples
+        defining the explicit rehydration mapping.
     allowed_base : Path | None
-        Base directory that destination paths must remain within. When None,
-        no base containment check is performed.
+        A security boundary for the materialization. If provided, all
+        destination paths must reside within this directory tree.
+    on_missing : {"warn", "raise"}, default "warn"
+        The error handling policy for cases where the explicit source path
+        is absent from the filesystem.
+
+    Returns
+    -------
+    dict[str, str]
+        A mapping of artifact keys to their successfully materialized
+        absolute filesystem paths.
     """
     materialized: dict[str, str] = {}
     allowed_base_path = Path(allowed_base).resolve() if allowed_base else None
@@ -238,10 +250,24 @@ def build_materialize_items_for_keys(
     destinations_by_key: dict[str, Path],
 ) -> list[tuple[Artifact, Path]]:
     """
-    Convenience helper to construct `(artifact, destination)` pairs by artifact key.
+    Construct materialization mappings by correlating artifacts with target keys.
 
-    Any keys not present in `outputs` are ignored (caller decides whether to treat
-    this as an error).
+    This helper facilitates the preparation of materialization payloads by
+    matching a collection of candidate artifacts against a set of desired
+    destination keys.
+
+    Parameters
+    ----------
+    outputs : Iterable[Artifact]
+        The collection of candidate artifacts available for materialization.
+    destinations_by_key : dict[str, Path]
+        A mapping of artifact keys to their intended target filesystem paths.
+
+    Returns
+    -------
+    list[tuple[Artifact, Path]]
+        A list of (Artifact, Path) pairs ready for the `materialize_artifacts`
+        utility.
     """
     outputs_by_key = {a.key: a for a in outputs}
     items: list[tuple[Artifact, Path]] = []
@@ -259,12 +285,36 @@ def materialize_ingested_artifact_from_db(
     destination: Path,
 ) -> str:
     """
-    Reconstruct a CSV/Parquet artifact from DuckDB and write it to disk.
+    Reconstruct an ingested artifact from the analytical database.
 
-    This is intended for `cache_hydration="inputs-missing"` when the original
-    on-disk source is missing but the artifact is ingested (`is_ingested=True`).
+    This recovery mechanism is utilized when a cached artifact is required but
+    its physical materialization has been purged from the filesystem. If the
+    artifact was previously ingested, its data is exported from DuckDB to
+    the specified destination.
 
-    Supported drivers: csv, parquet. All other drivers raise ValueError.
+    Parameters
+    ----------
+    artifact : Artifact
+        The metadata record of the artifact to be reconstructed.
+    tracker : Tracker
+        The active Tracker instance containing the analytical engine and
+        database connection.
+    destination : Path
+        The target filesystem path where the reconstructed data will be
+        materialized.
+
+    Returns
+    -------
+    str
+        The absolute filesystem path of the reconstructed artifact.
+
+    Raises
+    ------
+    RuntimeError
+        If the database engine is unavailable or the source table cannot be resolved.
+    ValueError
+        If the artifact is not marked as ingested or uses an unsupported
+        materialization driver.
     """
     if not tracker or not tracker.engine:
         raise RuntimeError(

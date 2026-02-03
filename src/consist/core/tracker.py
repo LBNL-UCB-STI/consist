@@ -251,44 +251,52 @@ class Tracker:
         openlineage_namespace: Optional[str] = None,
     ):
         """
-        Initialize a Consist Tracker.
+        Orchestrate provenance tracking and intelligent caching for simulation workflows.
 
-        Sets up the directory for run logs, configures path virtualization mounts,
-        and optionally initializes the DuckDB database connection.
+        The Tracker serves as the primary entry point for managing the lifecycle of
+        scientific runs. It implements a dual-write persistence strategy, recording
+        fine-grained lineage to both a portable JSON snapshot and an analytical
+        DuckDB database.
+
+        Through path virtualization and Merkle-based identity hashing, the Tracker
+        enables computational reproducibility and ensures that redundant simulation
+        steps can be safely bypassed via cache hydration.
 
         Parameters
         ----------
         run_dir : Path
-            Root directory where run logs (e.g., `consist.json`) and run outputs are written.
+            The root directory for all workflow outputs. Consist will manage
+            run-specific subdirectories and JSON provenance logs under this path.
         db_path : Optional[str | os.PathLike[str]], default None
-            Path to the DuckDB database. If provided, Consist dual-writes provenance to DB
-            in addition to JSON. If None, DB-backed features are disabled.
+            Filesystem path to the DuckDB provenance database. If provided, enables
+            SQL-native analysis and high-performance cache lookups.
         mounts : Optional[Dict[str, str]], default None
-            Mapping of URI schemes to absolute filesystem roots for path virtualization,
-            e.g. `{"inputs": "/abs/inputs", "outputs": "/abs/outputs"}`.
+            A mapping of URI schemes (e.g., 'inputs://') to absolute filesystem roots.
+            This facilitates environment-independent path resolution and portability.
         project_root : str, default "."
-            Project root for identity hashing (e.g., Git discovery and relative file hashing).
+            The root directory used for Git-based code versioning and relative
+            path resolution during identity hashing.
         hashing_strategy : str, default "full"
-            Hashing strategy for file inputs (`"full"` content hash, or `"fast"` metadata-based).
+            The method used to compute artifact identity. 'full' performs a
+            complete SHA256 content hash, while 'fast' leverages filesystem metadata.
         schemas : Optional[List[Type[SQLModel]]], default None
-            Optional SQLModel table definitions to register as hybrid views.
+            SQLModel definitions to be automatically registered as hybrid views
+            within the DuckDB instance for immediate querying.
         access_mode : AccessMode, default "standard"
-            Database access policy:
-            - `"standard"`: Full read/write (runs, artifacts, ingestion).
-            - `"analysis"`: Read-oriented; blocks creating new provenance nodes but allows
-              ingest/backfill and view/query helpers.
-            - `"read_only"`: No permanent DB writes.
+            Policy for database interactions. 'standard' allows full writes;
+            'analysis' permits ingestion but prevents new run recording;
+            'read_only' prohibits all modifications.
         run_subdir_fn : Optional[Callable[[Run], str]], default None
-            Optional callable that returns a relative subdirectory name for a run.
-            When provided, this takes precedence over the default pattern.
+            Custom logic to determine the relative subdirectory for run artifacts.
+            Accepts a Run instance and returns a string path.
         allow_external_paths : Optional[bool], default None
-            Allow artifact directories and cached-output materialization to write
-            outside `run_dir`. Defaults to CONSIST_ALLOW_EXTERNAL_PATHS when unset.
+            If True, permits artifacts to be logged or materialized outside the
+            configured `run_dir`.
         openlineage_enabled : bool, default False
-            Emit OpenLineage events to JSONL alongside `consist.json`.
+            If True, emits OpenLineage-compliant events to a local JSONL log
+            for integration with external metadata catalogs.
         openlineage_namespace : Optional[str], default None
-            Namespace for OpenLineage jobs and datasets. Defaults to the project
-            root directory name.
+            The namespace identifier for OpenLineage datasets and jobs.
         """
         # 1. Initialize FileSystem Service
         # (This handles the mkdir and path resolution internally now)
@@ -603,13 +611,22 @@ class Tracker:
         Examples
         --------
         Export file schema (original raw file dtypes):
-        >>> tracker.export_schema_sqlmodel(artifact_id=art.id)
+
+        ```python
+        tracker.export_schema_sqlmodel(artifact_id=art.id)
+        ```
 
         Export ingested table schema (after dlt normalization):
-        >>> tracker.export_schema_sqlmodel(artifact_id=art.id, prefer_source="duckdb")
+
+        ```python
+        tracker.export_schema_sqlmodel(artifact_id=art.id, prefer_source="duckdb")
+        ```
 
         Export a specific schema directly by ID:
-        >>> tracker.export_schema_sqlmodel(schema_id="abc123xyz")
+
+        ```python
+        tracker.export_schema_sqlmodel(schema_id="abc123xyz")
+        ```
         """
         if not self.db:
             raise ValueError("Schema export requires a configured database (db_path).")
@@ -1152,10 +1169,12 @@ class Tracker:
 
         Example
         -------
-        >>> with tracker.start_run("run_1", "my_model", config={"p": 1}):
-        ...     tracker.log_artifact("data.csv", "input")
-        ...     # ... execution ...
-        ...     tracker.log_artifact("results.parquet", "output")
+        ```python
+         with tracker.start_run("run_1", "my_model", config={"p": 1}):
+             tracker.log_artifact("data.csv", "input")
+             # ... execution ...
+             tracker.log_artifact("results.parquet", "output")
+        ```
         """
         self.begin_run(run_id=run_id, model=model, **kwargs)
         try:
@@ -1323,25 +1342,29 @@ class Tracker:
 
         Examples
         --------
-        Simple data processing:
+        Execute a basic data processing step:
 
-        >>> def clean_data(raw: pd.DataFrame) -> pd.DataFrame:
-        ...     return raw[raw['value'] > 0.5]
-        >>>
-        >>> result = tracker.run(
-        ...     fn=clean_data,
-        ...     inputs={"raw": Path("raw.csv")},
-        ...     outputs=["cleaned"],
-        ... )
+        ```python
+        def clean_data(raw: pd.DataFrame) -> pd.DataFrame:
+            return raw[raw['value'] > 0.5]
 
-        With config for cache distinction:
+        result = tracker.run(
+            fn=clean_data,
+            inputs={"raw": Path("raw.csv")},
+            outputs=["cleaned"],
+        )
+        ```
 
-        >>> result = tracker.run(
-        ...     fn=clean_data,
-        ...     inputs={"raw": Path("raw.csv")},
-        ...     config={"threshold": 0.5},
-        ...     outputs=["cleaned"],
-        ... )
+        Configure identity hashing for granular cache control:
+
+        ```python
+        result = tracker.run(
+            fn=clean_data,
+            inputs={"raw": Path("raw.csv")},
+            config={"threshold": 0.5},
+            outputs=["cleaned"],
+        )
+        ```
 
         See Also
         --------
@@ -2001,21 +2024,25 @@ class Tracker:
         --------
         Simple inline tracing with file capture:
 
-        >>> with tracker.trace(
-        ...     "my_analysis",
-        ...     output_paths={"results": "./results.csv"}
-        ... ):
-        ...     df = pd.read_csv("raw.csv")
-        ...     df["value"] = df["value"] * 2
-        ...     df.to_csv("./results.csv", index=False)
+        ```python
+        with tracker.trace(
+            "my_analysis",
+            output_paths={"results": "./results.csv"}
+        ):
+            df = pd.read_csv("raw.csv")
+            df["value"] = df["value"] * 2
+            df.to_csv("./results.csv", index=False)
+        ```
 
-        Multi-year simulation:
+        Multi-year simulation loop:
 
-        >>> with tracker.scenario("baseline") as sc:
-        ...     for year in [2020, 2030, 2040]:
-        ...         with sc.trace(name="simulate", year=year):
-        ...             results = run_model(year)
-        ...             tracker.log_artifact(results, key="output")
+        ```python
+        with tracker.scenario("baseline") as sc:
+            for year in [2020, 2030, 2040]:
+                with sc.trace(name="simulate", year=year):
+                    results = run_model(year)
+                    tracker.log_artifact(results, key="output")
+        ```
 
         See Also
         --------
@@ -3416,25 +3443,35 @@ class Tracker:
 
         Examples
         --------
-        Auto-detected schema workflow (register schemas at tracker init):
+        Register a schema and associate it with a logged artifact:
 
-        >>> tracker = Tracker(..., schemas=[MyDataSchema])
-        >>> art = tracker.log_artifact(file.csv, schema=MyDataSchema)
-        >>> tracker.ingest(art, data=df)  # Automatically looks up and uses MyDataSchema
+        ```python
+        tracker = Tracker(..., schemas=[MyDataSchema])
+        art = tracker.log_artifact(file.csv, schema=MyDataSchema)
 
-        Cross-session workflow (schemas persist in metadata):
+        # Automatically looks up and uses MyDataSchema for ingestion
+        tracker.ingest(art, data=df)
+        ```
 
-        >>> # Session 1:
-        >>> tracker = Tracker(..., schemas=[MyDataSchema])
-        >>> art = tracker.log_artifact(file.csv, schema=MyDataSchema)
-        >>> # Session 2:
-        >>> tracker2 = Tracker(..., schemas=[MyDataSchema])
-        >>> art2 = tracker2.get_artifact("mydata")
-        >>> tracker2.ingest(art2, data=df)  # Looks up MyDataSchema by artifact's schema_name
+        Schemas are persisted by name, allowing lookup across different Python sessions:
 
-        Override auto-detection (explicit schema always wins):
+        ```python
+        # Session 1:
+        tracker = Tracker(..., schemas=[MyDataSchema])
+        art = tracker.log_artifact(file.csv, schema=MyDataSchema)
 
-        >>> tracker.ingest(art, data=df, schema=DifferentSchema)  # Uses DifferentSchema
+        # Session 2:
+        tracker2 = Tracker(..., schemas=[MyDataSchema])
+        art2 = tracker2.get_artifact("mydata")
+        # Looks up MyDataSchema by artifact's schema_name ("MyDataSchema")
+        tracker2.ingest(art2, data=df)
+        ```
+
+        Explicitly override the default schema during ingestion:
+
+        ```python
+        tracker.ingest(art, data=df, schema=DifferentSchema)
+        ```
         """
         self._ensure_write_data()
 
