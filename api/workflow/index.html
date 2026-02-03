@@ -3150,7 +3150,7 @@ This reflects only scenario-level inputs, not step inputs.</p>
 
 
 <h2 id="consist.core.workflow.ScenarioContext.declare_outputs" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">declare_outputs</span><span class="p">(</span><span class="o">*</span><span class="n">names</span><span class="p">,</span> <span class="n">required</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">warn_undocumented</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+            <code class="highlight language-python"><span class="n">declare_outputs</span><span class="p">(</span><span class="o">*</span><span class="n">names</span><span class="p">,</span> <span class="n">required</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">warn_undefined</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
 
 <a href="#consist.core.workflow.ScenarioContext.declare_outputs" class="headerlink" title="Permanent link">&para;</a></h2>
 
@@ -3206,7 +3206,7 @@ overrides.</p>
           </tr>
           <tr class="doc-section-item">
             <td>
-                <code>warn_undocumented</code>
+                <code>warn_undefined</code>
             </td>
             <td>
                   <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/functions.html#bool">bool</a></code>
@@ -3248,7 +3248,7 @@ overrides.</p>
 
 
 <h2 id="consist.core.workflow.ScenarioContext.require_outputs" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">require_outputs</span><span class="p">(</span><span class="o">*</span><span class="n">names</span><span class="p">,</span> <span class="n">required</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">warn_undocumented</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+            <code class="highlight language-python"><span class="n">require_outputs</span><span class="p">(</span><span class="o">*</span><span class="n">names</span><span class="p">,</span> <span class="n">required</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">warn_undefined</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
 
 <a href="#consist.core.workflow.ScenarioContext.require_outputs" class="headerlink" title="Permanent link">&para;</a></h2>
 
@@ -3306,7 +3306,7 @@ overrides.</p>
           </tr>
           <tr class="doc-section-item">
             <td>
-                <code>warn_undocumented</code>
+                <code>warn_undefined</code>
             </td>
             <td>
                   <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/functions.html#bool">bool</a></code>
@@ -4503,7 +4503,7 @@ where you may receive either:
 
 
 <h2 id="consist.core.coupler.Coupler.declare_outputs" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">declare_outputs</span><span class="p">(</span><span class="o">*</span><span class="n">names</span><span class="p">,</span> <span class="n">required</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">warn_undocumented</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+            <code class="highlight language-python"><span class="n">declare_outputs</span><span class="p">(</span><span class="o">*</span><span class="n">names</span><span class="p">,</span> <span class="n">required</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">warn_undefined</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
 
 <a href="#consist.core.coupler.Coupler.declare_outputs" class="headerlink" title="Permanent link">&para;</a></h2>
 
@@ -4562,7 +4562,7 @@ If Mapping: per-key required status (e.g., {"persons": True, "jobs": False}).</p
           </tr>
           <tr class="doc-section-item">
             <td>
-                <code>warn_undocumented</code>
+                <code>warn_undefined</code>
             </td>
             <td>
                   <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/functions.html#bool">bool</a></code>
@@ -4704,14 +4704,14 @@ Use validate_all_schema_keys_set() to check schema-based validation.</p>
 
 
 <h2 id="consist.core.coupler.Coupler.require_outputs" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">require_outputs</span><span class="p">(</span><span class="o">*</span><span class="n">names</span><span class="p">,</span> <span class="n">required</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">warn_undocumented</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+            <code class="highlight language-python"><span class="n">require_outputs</span><span class="p">(</span><span class="o">*</span><span class="n">names</span><span class="p">,</span> <span class="n">required</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">warn_undefined</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
 
 <a href="#consist.core.coupler.Coupler.require_outputs" class="headerlink" title="Permanent link">&para;</a></h2>
 
 
     <div class="doc doc-contents ">
 
-        <p>Declare required outputs with optional undocumented key warnings.</p>
+        <p>Declare required outputs with optional undefined key warnings.</p>
 
 
     </div>

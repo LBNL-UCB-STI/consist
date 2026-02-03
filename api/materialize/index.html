@@ -2162,14 +2162,11 @@
 
     <div class="doc doc-contents ">
 
-        <p>Copy cached artifact bytes onto the filesystem at caller-specified destinations.</p>
-<p>This is intentionally <em>copy-only</em> materialization:
-- If the artifact's resolved source path exists, it is copied to the destination.
-- If it does not exist, behavior depends on <code>on_missing</code>.
-- If the destination already exists, it is left untouched.
-- Destination paths cannot be symlinks and will not be overwritten if the type differs.</p>
-<p>This function does not attempt database-backed reconstruction. Higher-level code
-can decide when to call <code>consist.load(...)</code> or enable DB recovery.</p>
+        <p>Synchronize cached artifact bytes to specific filesystem destinations.</p>
+<p>This function performs physical materialization by copying the resolved source
+data of cached artifacts to the requested locations. It ensures atomic
+file writes and safe directory recursion. If the destination already contains
+matching data, the operation is bypassed to prevent redundant I/O.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
@@ -2192,7 +2189,8 @@ can decide when to call <code>consist.load(...)</code> or enable DB recovery.</p
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Tracker used to resolve portable artifact URIs to host filesystem paths.</p>
+                <p>The active Tracker instance used to resolve virtualized artifact URIs
+to physical host filesystem paths.</p>
               </div>
             </td>
             <td>
@@ -2208,7 +2206,8 @@ can decide when to call <code>consist.load(...)</code> or enable DB recovery.</p
             </td>
             <td>
               <div class="doc-md-description">
-                <p>A list of <code>(artifact, destination_path)</code> pairs to materialize.</p>
+                <p>A collection of (Artifact, Path) pairs defining the source artifacts
+and their respective target destinations.</p>
               </div>
             </td>
             <td>
@@ -2224,7 +2223,8 @@ can decide when to call <code>consist.load(...)</code> or enable DB recovery.</p
             </td>
             <td>
               <div class="doc-md-description">
-                <p>What to do when a resolved source path does not exist.</p>
+                <p>The error handling policy for cases where the resolved source path
+is absent from the filesystem.</p>
               </div>
             </td>
             <td>
@@ -2250,7 +2250,8 @@ can decide when to call <code>consist.load(...)</code> or enable DB recovery.</p
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Map of <code>artifact.key -&gt; destination_path</code> for successfully materialized items.</p>
+                <p>A mapping of artifact keys to their successfully materialized
+absolute filesystem paths.</p>
               </div>
             </td>
           </tr>
@@ -2273,11 +2274,11 @@ can decide when to call <code>consist.load(...)</code> or enable DB recovery.</p
 
     <div class="doc doc-contents ">
 
-        <p>Copy artifact bytes from explicit source paths to caller-specified destinations.</p>
-<p>This is useful for rehydrating cached inputs from historical run directories
-when the current run directory is different from the original producer.
-Existing destination paths are left untouched.
-Destination paths cannot be symlinks and will not be overwritten if the type differs.</p>
+        <p>Rehydrate artifacts from explicit source paths to specified destinations.</p>
+<p>This specialized materialization utility is typically employed during
+cross-run hydration (e.g., 'inputs-missing' mode) where the original
+on-disk source is located in a historical run directory. It enforces
+directory containment security via the <code>allowed_base</code> parameter.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
@@ -2293,6 +2294,23 @@ Destination paths cannot be symlinks and will not be overwritten if the type dif
       <tbody>
           <tr class="doc-section-item">
             <td>
+                <code>items</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Sequence" href="https://docs.python.org/3/library/typing.html#typing.Sequence">Sequence</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#tuple">tuple</a>[<span title="consist.models.artifact.Artifact">Artifact</span>, <a class="autorefs autorefs-external" title="pathlib.Path" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path">Path</a>, <a class="autorefs autorefs-external" title="pathlib.Path" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path">Path</a>]]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>A collection of (Artifact, SourcePath, DestinationPath) triples
+defining the explicit rehydration mapping.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
                 <code>allowed_base</code>
             </td>
             <td>
@@ -2300,12 +2318,53 @@ Destination paths cannot be symlinks and will not be overwritten if the type dif
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Base directory that destination paths must remain within. When None,
-no base containment check is performed.</p>
+                <p>A security boundary for the materialization. If provided, all
+destination paths must reside within this directory tree.</p>
               </div>
             </td>
             <td>
                 <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>on_missing</code>
+            </td>
+            <td>
+                  <code>(&#39;warn&#39;, &#39;raise&#39;)</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>The error handling policy for cases where the explicit source path
+is absent from the filesystem.</p>
+              </div>
+            </td>
+            <td>
+                  <code>&#34;warn&#34;</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    <p><span class="doc-section-title">Returns:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#dict">dict</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>, <a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>A mapping of artifact keys to their successfully materialized
+absolute filesystem paths.</p>
+              </div>
             </td>
           </tr>
       </tbody>
@@ -2327,9 +2386,81 @@ no base containment check is performed.</p>
 
     <div class="doc doc-contents ">
 
-        <p>Convenience helper to construct <code>(artifact, destination)</code> pairs by artifact key.</p>
-<p>Any keys not present in <code>outputs</code> are ignored (caller decides whether to treat
-this as an error).</p>
+        <p>Construct materialization mappings by correlating artifacts with target keys.</p>
+<p>This helper facilitates the preparation of materialization payloads by
+matching a collection of candidate artifacts against a set of desired
+destination keys.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>outputs</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Iterable" href="https://docs.python.org/3/library/typing.html#typing.Iterable">Iterable</a>[<span title="consist.models.artifact.Artifact">Artifact</span>]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>The collection of candidate artifacts available for materialization.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>destinations_by_key</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#dict">dict</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>, <a class="autorefs autorefs-external" title="pathlib.Path" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path">Path</a>]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>A mapping of artifact keys to their intended target filesystem paths.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    <p><span class="doc-section-title">Returns:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#list">list</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#tuple">tuple</a>[<span title="consist.models.artifact.Artifact">Artifact</span>, <a class="autorefs autorefs-external" title="pathlib.Path" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path">Path</a>]]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>A list of (Artifact, Path) pairs ready for the <code>materialize_artifacts</code>
+utility.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
 
 
     </div>
@@ -2347,10 +2478,133 @@ this as an error).</p>
 
     <div class="doc doc-contents ">
 
-        <p>Reconstruct a CSV/Parquet artifact from DuckDB and write it to disk.</p>
-<p>This is intended for <code>cache_hydration="inputs-missing"</code> when the original
-on-disk source is missing but the artifact is ingested (<code>is_ingested=True</code>).</p>
-<p>Supported drivers: csv, parquet. All other drivers raise ValueError.</p>
+        <p>Reconstruct an ingested artifact from the analytical database.</p>
+<p>This recovery mechanism is utilized when a cached artifact is required but
+its physical materialization has been purged from the filesystem. If the
+artifact was previously ingested, its data is exported from DuckDB to
+the specified destination.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>artifact</code>
+            </td>
+            <td>
+                  <code><span title="consist.models.artifact.Artifact">Artifact</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>The metadata record of the artifact to be reconstructed.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>tracker</code>
+            </td>
+            <td>
+                  <code><span title="consist.core.tracker.Tracker">Tracker</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>The active Tracker instance containing the analytical engine and
+database connection.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>destination</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="pathlib.Path" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path">Path</a></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>The target filesystem path where the reconstructed data will be
+materialized.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    <p><span class="doc-section-title">Returns:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>The absolute filesystem path of the reconstructed artifact.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+<p><span class="doc-section-title">Raises:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/exceptions.html#RuntimeError">RuntimeError</a></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>If the database engine is unavailable or the source table cannot be resolved.</p>
+              </div>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/exceptions.html#ValueError">ValueError</a></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>If the artifact is not marked as ingested or uses an unsupported
+materialization driver.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
 
 
     </div>

@@ -3211,9 +3211,11 @@ by logging functions like consist.log_artifact().</p>
 
     <div class="doc doc-contents ">
 
-        <p>Execute a function as a tracked Consist run.</p>
-<p>This is a high-level entrypoint that wraps a function call in a Consist run.
-It automatically handles run start/end and result capturing.</p>
+        <p>Execute a computational task as a tracked and cached Consist run.</p>
+<p>This high-level entrypoint encapsulates the execution of a callable within
+a managed provenance context. It automates the lifecycle of the run,
+including signature computation for cache identity, artifact capture,
+and result persistence.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
@@ -3236,7 +3238,7 @@ It automatically handles run start/end and result capturing.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>The function to execute.</p>
+                <p>The computational function to execute.</p>
               </div>
             </td>
             <td>
@@ -3252,7 +3254,8 @@ It automatically handles run start/end and result capturing.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>A semantic name for the run. Defaults to the function name.</p>
+                <p>A semantic identifier for the run. If omitted, the function's
+<code>__name__</code> is utilized as the default.</p>
               </div>
             </td>
             <td>
@@ -3268,7 +3271,8 @@ It automatically handles run start/end and result capturing.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>The tracker instance to use.</p>
+                <p>The Tracker instance responsible for provenance and caching.
+If None, the active global tracker is resolved.</p>
               </div>
             </td>
             <td>
@@ -3284,8 +3288,8 @@ It automatically handles run start/end and result capturing.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Additional arguments passed to <code>Tracker.run</code>, such as <code>inputs</code>, <code>tags</code>,
-or <code>runtime_kwargs</code>.</p>
+                <p>Arguments forwarded to <code>Tracker.run</code>, including <code>inputs</code>, <code>config</code>,
+<code>tags</code>, and <code>runtime_kwargs</code>.</p>
               </div>
             </td>
             <td>
@@ -3311,7 +3315,8 @@ or <code>runtime_kwargs</code>.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>An object containing the function's return value and the recorded <code>Run</code> record.</p>
+                <p>A container holding the function's return value and the
+immutable <code>Run</code> record.</p>
               </div>
             </td>
           </tr>
@@ -3549,14 +3554,9 @@ All artifacts logged within this context will be associated with this run.</p>
 
 <details class="example" open>
   <summary>Example</summary>
-  <blockquote>
-<blockquote>
-<blockquote>
-<p>with consist.start_run("run_123", "my_model"):
-...     consist.log_artifact("data.csv", "input_data")</p>
-</blockquote>
-</blockquote>
-</blockquote>
+  <div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="k">with</span> <span class="n">consist</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;run_123&quot;</span><span class="p">,</span> <span class="s2">&quot;my_model&quot;</span><span class="p">):</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>    <span class="n">consist</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="s2">&quot;data.csv&quot;</span><span class="p">,</span> <span class="s2">&quot;input_data&quot;</span><span class="p">)</span>
+</span></code></pre></div>
 </details>
 
     </div>
@@ -3594,7 +3594,11 @@ function. <code>Tracker.run</code> and <code>ScenarioContext.run</code> read thi
 
     <div class="doc doc-contents ">
 
-        <p>Proxy for <code>Tracker.scenario</code> to avoid importing the tracker directly.</p>
+        <p>Context manager for grouping multiple execution steps into a semantic scenario.</p>
+<p>A scenario creates a parent "header" run that aggregates metadata, lineage,
+and artifacts from all nested steps. This enables multi-stage simulations
+to be tracked as a single unit while maintaining fine-grained provenance
+for each internal component.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
@@ -3617,7 +3621,7 @@ function. <code>Tracker.run</code> and <code>ScenarioContext.run</code> read thi
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Name of the scenario (used for the header run ID).</p>
+                <p>Unique identifier or name for the scenario header.</p>
               </div>
             </td>
             <td>
@@ -3633,7 +3637,8 @@ function. <code>Tracker.run</code> and <code>ScenarioContext.run</code> read thi
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Tracker instance to use; defaults to the active global tracker.</p>
+                <p>The Tracker instance to use for persistence. Defaults to the active
+global tracker.</p>
               </div>
             </td>
             <td>
@@ -3649,8 +3654,8 @@ function. <code>Tracker.run</code> and <code>ScenarioContext.run</code> read thi
             </td>
             <td>
               <div class="doc-md-description">
-                <p>If False, returns a noop scenario context that executes without provenance
-tracking while preserving Coupler/RunResult ergonomics.</p>
+                <p>If False, returns a no-op context that executes functions without
+recording provenance, preserving the Scenario API ergonomics for debugging.</p>
               </div>
             </td>
             <td>
@@ -3666,7 +3671,7 @@ tracking while preserving Coupler/RunResult ergonomics.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Additional arguments forwarded to <code>Tracker.scenario</code>.</p>
+                <p>Additional metadata (e.g., tags, config) forwarded to the header run.</p>
               </div>
             </td>
             <td>
@@ -3692,7 +3697,7 @@ tracking while preserving Coupler/RunResult ergonomics.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Scenario context manager.</p>
+                <p>An active scenario context with an internal Coupler for artifact chaining.</p>
               </div>
             </td>
           </tr>
