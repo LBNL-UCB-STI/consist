@@ -12,11 +12,13 @@
         <meta name="author" content="Zach Needell">
       
       
-        <link rel="canonical" href="https://LBNL-UCB-STI.github.io/consist/api/materialize/">
+        <link rel="canonical" href="https://LBNL-UCB-STI.github.io/consist/getting-started/first-workflow/">
       
       
-        <link rel="prev" href="../matrix/">
+        <link rel="prev" href="../quickstart/">
       
+      
+        <link rel="next" href="../../cli-reference/">
       
       
         
@@ -27,7 +29,7 @@
     
     
       
-        <title>Materialization - Consist</title>
+        <title>First Workflow - Consist</title>
       
     
     
@@ -85,7 +87,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#materialization" class="md-skip">
+        <a href="#first-workflow" class="md-skip">
           Skip to content
         </a>
       
@@ -118,7 +120,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Materialization
+              First Workflow
             
           </span>
         </div>
@@ -216,11 +218,13 @@
   
   
   
+    
+  
   
     
     
-      <li class="md-tabs__item">
-        <a href="../../getting-started/installation/" class="md-tabs__link">
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../installation/" class="md-tabs__link">
           
   
   Getting Started
@@ -327,13 +331,11 @@
   
   
   
-    
-  
   
     
     
-      <li class="md-tabs__item md-tabs__item--active">
-        <a href="../" class="md-tabs__link">
+      <li class="md-tabs__item">
+        <a href="../../api/" class="md-tabs__link">
           
   
   API Reference
@@ -407,8 +409,10 @@
       
   
   
+    
   
   
+  
     
     
       
@@ -424,21 +428,22 @@
     
     
       
+        
+        
+      
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
       
         
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
         
           
-        
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
-        
-          
-          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
             
   
   
@@ -456,7 +461,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
           <label class="md-nav__title" for="__nav_2">
             <span class="md-nav__icon md-icon"></span>
             
@@ -474,7 +479,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../getting-started/installation/" class="md-nav__link">
+      <a href="../installation/" class="md-nav__link">
         
   
   
@@ -502,7 +507,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../getting-started/quickstart/" class="md-nav__link">
+      <a href="../quickstart/" class="md-nav__link">
         
   
   
@@ -527,10 +532,37 @@
                 
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="../../getting-started/first-workflow/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    First Workflow
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
         
   
   
@@ -546,6 +578,104 @@
   
 
       </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#create-input-data" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Create Input Data
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#define-the-pipeline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Define the Pipeline
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#run-and-observe-caching" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run and Observe Caching
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#invalidate-with-config-change" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Invalidate with Config Change
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#view-lineage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        View Lineage
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Summary
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#next-steps" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Next Steps
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -1488,8 +1618,6 @@
       
   
   
-    
-  
   
   
     
@@ -1525,23 +1653,22 @@
     
     
       
-        
-        
-      
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--nested">
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_8" checked>
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_8" >
         
           
           <div class="md-nav__link md-nav__container">
-            <a href="../" class="md-nav__link ">
+            <a href="../../api/" class="md-nav__link ">
               
   
   
@@ -1561,13 +1688,13 @@
             </a>
             
               
-              <label class="md-nav__link " for="__nav_8" id="__nav_8_label" tabindex="">
+              <label class="md-nav__link " for="__nav_8" id="__nav_8_label" tabindex="0">
                 <span class="md-nav__icon md-icon"></span>
               </label>
             
           </div>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="true">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
           <label class="md-nav__title" for="__nav_8">
             <span class="md-nav__icon md-icon"></span>
             
@@ -1587,7 +1714,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../public_api/" class="md-nav__link">
+      <a href="../../api/public_api/" class="md-nav__link">
         
   
   
@@ -1615,7 +1742,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../api_helpers/" class="md-nav__link">
+      <a href="../../api/api_helpers/" class="md-nav__link">
         
   
   
@@ -1643,7 +1770,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../tracker/" class="md-nav__link">
+      <a href="../../api/tracker/" class="md-nav__link">
         
   
   
@@ -1671,7 +1798,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../workflow/" class="md-nav__link">
+      <a href="../../api/workflow/" class="md-nav__link">
         
   
   
@@ -1699,7 +1826,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../artifact/" class="md-nav__link">
+      <a href="../../api/artifact/" class="md-nav__link">
         
   
   
@@ -1727,7 +1854,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../run/" class="md-nav__link">
+      <a href="../../api/run/" class="md-nav__link">
         
   
   
@@ -1755,7 +1882,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../indexing/" class="md-nav__link">
+      <a href="../../api/indexing/" class="md-nav__link">
         
   
   
@@ -1783,7 +1910,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../identity/" class="md-nav__link">
+      <a href="../../api/identity/" class="md-nav__link">
         
   
   
@@ -1811,7 +1938,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../views/" class="md-nav__link">
+      <a href="../../api/views/" class="md-nav__link">
         
   
   
@@ -1839,7 +1966,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../matrix/" class="md-nav__link">
+      <a href="../../api/matrix/" class="md-nav__link">
         
   
   
@@ -1864,37 +1991,10 @@
                 
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Materialization
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../../api/materialize/" class="md-nav__link">
         
   
   
@@ -1910,71 +2010,6 @@
   
 
       </a>
-      
-        
-
-
-<nav class="md-nav md-nav--secondary" aria-label="On this page">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      On this page
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#consist.core.materialize.materialize_artifacts" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        materialize_artifacts
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.core.materialize.materialize_artifacts_from_sources" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        materialize_artifacts_from_sources
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.core.materialize.build_materialize_items_for_keys" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        build_materialize_items_for_keys
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.core.materialize.materialize_ingested_artifact_from_db" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        materialize_ingested_artifact_from_db
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -2015,10 +2050,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#consist.core.materialize.materialize_artifacts" class="md-nav__link">
+  <a href="#create-input-data" class="md-nav__link">
     <span class="md-ellipsis">
       
-        materialize_artifacts
+        Create Input Data
       
     </span>
   </a>
@@ -2026,10 +2061,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#consist.core.materialize.materialize_artifacts_from_sources" class="md-nav__link">
+  <a href="#define-the-pipeline" class="md-nav__link">
     <span class="md-ellipsis">
       
-        materialize_artifacts_from_sources
+        Define the Pipeline
       
     </span>
   </a>
@@ -2037,10 +2072,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#consist.core.materialize.build_materialize_items_for_keys" class="md-nav__link">
+  <a href="#run-and-observe-caching" class="md-nav__link">
     <span class="md-ellipsis">
       
-        build_materialize_items_for_keys
+        Run and Observe Caching
       
     </span>
   </a>
@@ -2048,10 +2083,43 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#consist.core.materialize.materialize_ingested_artifact_from_db" class="md-nav__link">
+  <a href="#invalidate-with-config-change" class="md-nav__link">
     <span class="md-ellipsis">
       
-        materialize_ingested_artifact_from_db
+        Invalidate with Config Change
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#view-lineage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        View Lineage
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Summary
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#next-steps" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Next Steps
       
     </span>
   </a>
@@ -2101,10 +2169,10 @@
     
     
       <li class="md-path__item">
-        <a href="../" class="md-path__link">
+        <a href="../installation/" class="md-path__link">
           
   <span class="md-ellipsis">
-    API Reference
+    Getting Started
   </span>
 
         </a>
@@ -2121,249 +2189,134 @@
                 
                   
 
-<h1 id="materialization">Materialization<a class="headerlink" href="#materialization" title="Permanent link">&para;</a></h1>
-
-
-<div class="doc doc-object doc-module">
-
-
-
-
-    <div class="doc doc-contents first">
-
-
-
-
-
-
-
-
-
-
-<div class="doc doc-children">
-
-
-
-
-
-
-
-
-
-
-<div class="doc doc-object doc-function">
-
-
-<h2 id="consist.core.materialize.materialize_artifacts" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">materialize_artifacts</span><span class="p">(</span><span class="n">tracker</span><span class="p">,</span> <span class="n">items</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">on_missing</span><span class="o">=</span><span class="s1">&#39;warn&#39;</span><span class="p">)</span></code>
-
-<a href="#consist.core.materialize.materialize_artifacts" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Copy cached artifact bytes onto the filesystem at caller-specified destinations.</p>
-<p>This is intentionally <em>copy-only</em> materialization:
-- If the artifact's resolved source path exists, it is copied to the destination.
-- If it does not exist, behavior depends on <code>on_missing</code>.
-- If the destination already exists, it is left untouched.
-- Destination paths cannot be symlinks and will not be overwritten if the type differs.</p>
-<p>This function does not attempt database-backed reconstruction. Higher-level code
-can decide when to call <code>consist.load(...)</code> or enable DB recovery.</p>
-
-
-<p><span class="doc-section-title">Parameters:</span></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Name</th>
-          <th>Type</th>
-          <th>Description</th>
-          <th>Default</th>
-        </tr>
-      </thead>
-      <tbody>
-          <tr class="doc-section-item">
-            <td>
-                <code>tracker</code>
-            </td>
-            <td>
-                  <code><span title="consist.core.tracker.Tracker">Tracker</span></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Tracker used to resolve portable artifact URIs to host filesystem paths.</p>
-              </div>
-            </td>
-            <td>
-                <em>required</em>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>items</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Sequence" href="https://docs.python.org/3/library/typing.html#typing.Sequence">Sequence</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#tuple">tuple</a>[<span title="consist.models.artifact.Artifact">Artifact</span>, <a class="autorefs autorefs-external" title="pathlib.Path" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path">Path</a>]]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>A list of <code>(artifact, destination_path)</code> pairs to materialize.</p>
-              </div>
-            </td>
-            <td>
-                <em>required</em>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>on_missing</code>
-            </td>
-            <td>
-                  <code>(&#39;warn&#39;, &#39;raise&#39;)</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>What to do when a resolved source path does not exist.</p>
-              </div>
-            </td>
-            <td>
-                  <code>&#34;warn&#34;</code>
-            </td>
-          </tr>
-      </tbody>
-    </table>
-
-
-    <p><span class="doc-section-title">Returns:</span></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Type</th>
-          <th>Description</th>
-        </tr>
-      </thead>
-      <tbody>
-          <tr class="doc-section-item">
-            <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#dict">dict</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>, <a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Map of <code>artifact.key -&gt; destination_path</code> for successfully materialized items.</p>
-              </div>
-            </td>
-          </tr>
-      </tbody>
-    </table>
-
-
-    </div>
-
-</div>
-
-<div class="doc doc-object doc-function">
-
-
-<h2 id="consist.core.materialize.materialize_artifacts_from_sources" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">materialize_artifacts_from_sources</span><span class="p">(</span><span class="n">items</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">allowed_base</span><span class="p">,</span> <span class="n">on_missing</span><span class="o">=</span><span class="s1">&#39;warn&#39;</span><span class="p">)</span></code>
-
-<a href="#consist.core.materialize.materialize_artifacts_from_sources" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Copy artifact bytes from explicit source paths to caller-specified destinations.</p>
-<p>This is useful for rehydrating cached inputs from historical run directories
-when the current run directory is different from the original producer.
-Existing destination paths are left untouched.
-Destination paths cannot be symlinks and will not be overwritten if the type differs.</p>
-
-
-<p><span class="doc-section-title">Parameters:</span></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Name</th>
-          <th>Type</th>
-          <th>Description</th>
-          <th>Default</th>
-        </tr>
-      </thead>
-      <tbody>
-          <tr class="doc-section-item">
-            <td>
-                <code>allowed_base</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="pathlib.Path" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path">Path</a> | None</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Base directory that destination paths must remain within. When None,
-no base containment check is performed.</p>
-              </div>
-            </td>
-            <td>
-                <em>required</em>
-            </td>
-          </tr>
-      </tbody>
-    </table>
-
-
-    </div>
-
-</div>
-
-<div class="doc doc-object doc-function">
-
-
-<h2 id="consist.core.materialize.build_materialize_items_for_keys" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">build_materialize_items_for_keys</span><span class="p">(</span><span class="n">outputs</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">destinations_by_key</span><span class="p">)</span></code>
-
-<a href="#consist.core.materialize.build_materialize_items_for_keys" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Convenience helper to construct <code>(artifact, destination)</code> pairs by artifact key.</p>
-<p>Any keys not present in <code>outputs</code> are ignored (caller decides whether to treat
-this as an error).</p>
-
-
-    </div>
-
-</div>
-
-<div class="doc doc-object doc-function">
-
-
-<h2 id="consist.core.materialize.materialize_ingested_artifact_from_db" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">materialize_ingested_artifact_from_db</span><span class="p">(</span><span class="o">*</span><span class="p">,</span> <span class="n">artifact</span><span class="p">,</span> <span class="n">tracker</span><span class="p">,</span> <span class="n">destination</span><span class="p">)</span></code>
-
-<a href="#consist.core.materialize.materialize_ingested_artifact_from_db" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Reconstruct a CSV/Parquet artifact from DuckDB and write it to disk.</p>
-<p>This is intended for <code>cache_hydration="inputs-missing"</code> when the original
-on-disk source is missing but the artifact is ingested (<code>is_ingested=True</code>).</p>
-<p>Supported drivers: csv, parquet. All other drivers raise ValueError.</p>
-
-
-    </div>
-
-</div>
-
-
-
-  </div>
-
-    </div>
-
-</div>
+<h1 id="first-workflow">First Workflow<a class="headerlink" href="#first-workflow" title="Permanent link">&para;</a></h1>
+<p>This tutorial builds a two-step data pipeline demonstrating artifact passing, cache invalidation, and lineage tracking. Each step is a separate cached run; changing config or code in one step invalidates only that step and its dependents.</p>
+<h2 id="create-input-data">Create Input Data<a class="headerlink" href="#create-input-data" title="Permanent link">&para;</a></h2>
+<p>Save this as <code>setup_data.py</code> and run it once:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="kn">import</span><span class="w"> </span><span class="nn">pandas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pd</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;./data&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="n">df</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">({</span><span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">5</span><span class="p">],</span> <span class="s2">&quot;value&quot;</span><span class="p">:</span> <span class="p">[</span><span class="mi">10</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">30</span><span class="p">,</span> <span class="mi">40</span><span class="p">,</span> <span class="mi">50</span><span class="p">]})</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="n">df</span><span class="o">.</span><span class="n">to_csv</span><span class="p">(</span><span class="s2">&quot;./data/raw.csv&quot;</span><span class="p">,</span> <span class="n">index</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+</span></code></pre></div>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>python<span class="w"> </span>setup_data.py
+</span></code></pre></div>
+<h2 id="define-the-pipeline">Define the Pipeline<a class="headerlink" href="#define-the-pipeline" title="Permanent link">&para;</a></h2>
+<p>Save the following as <code>workflow.py</code>:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="kn">import</span><span class="w"> </span><span class="nn">pandas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pd</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">Tracker</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span><span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;./runs&quot;</span><span class="p">,</span> <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">)</span>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="nd">@tracker</span><span class="o">.</span><span class="n">define_step</span><span class="p">(</span><span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;cleaned&quot;</span><span class="p">])</span>  <span class="c1"># (1)!</span>
+</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="k">def</span><span class="w"> </span><span class="nf">clean_data</span><span class="p">(</span><span class="n">raw_path</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span> <span class="n">threshold</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Remove rows below threshold and write cleaned output.&quot;&quot;&quot;</span>
+</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>    <span class="n">df</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="n">raw_path</span><span class="p">)</span>
+</span><span id="__span-2-13"><a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a>    <span class="n">df_clean</span> <span class="o">=</span> <span class="n">df</span><span class="p">[</span><span class="n">df</span><span class="p">[</span><span class="s2">&quot;value&quot;</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="n">threshold</span><span class="p">]</span>
+</span><span id="__span-2-14"><a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>
+</span><span id="__span-2-15"><a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a>    <span class="n">out_path</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">run_dir</span> <span class="o">/</span> <span class="s2">&quot;cleaned.parquet&quot;</span>  <span class="c1"># (2)!</span>
+</span><span id="__span-2-16"><a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a>    <span class="n">df_clean</span><span class="o">.</span><span class="n">to_parquet</span><span class="p">(</span><span class="n">out_path</span><span class="p">,</span> <span class="n">index</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+</span><span id="__span-2-17"><a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a>    <span class="k">return</span> <span class="n">out_path</span>  <span class="c1"># (3)!</span>
+</span><span id="__span-2-18"><a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a>
+</span><span id="__span-2-19"><a id="__codelineno-2-19" name="__codelineno-2-19" href="#__codelineno-2-19"></a>
+</span><span id="__span-2-20"><a id="__codelineno-2-20" name="__codelineno-2-20" href="#__codelineno-2-20"></a><span class="nd">@tracker</span><span class="o">.</span><span class="n">define_step</span><span class="p">(</span><span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;summary&quot;</span><span class="p">])</span>
+</span><span id="__span-2-21"><a id="__codelineno-2-21" name="__codelineno-2-21" href="#__codelineno-2-21"></a><span class="k">def</span><span class="w"> </span><span class="nf">summarize</span><span class="p">(</span><span class="n">cleaned_artifact</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>  <span class="c1"># (4)!</span>
+</span><span id="__span-2-22"><a id="__codelineno-2-22" name="__codelineno-2-22" href="#__codelineno-2-22"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Compute summary statistics from cleaned data.&quot;&quot;&quot;</span>
+</span><span id="__span-2-23"><a id="__codelineno-2-23" name="__codelineno-2-23" href="#__codelineno-2-23"></a>    <span class="n">df</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_parquet</span><span class="p">(</span><span class="n">cleaned_artifact</span><span class="o">.</span><span class="n">path</span><span class="p">)</span>
+</span><span id="__span-2-24"><a id="__codelineno-2-24" name="__codelineno-2-24" href="#__codelineno-2-24"></a>    <span class="n">summary</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;mean&quot;</span><span class="p">:</span> <span class="n">df</span><span class="p">[</span><span class="s2">&quot;value&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">mean</span><span class="p">(),</span> <span class="s2">&quot;count&quot;</span><span class="p">:</span> <span class="nb">len</span><span class="p">(</span><span class="n">df</span><span class="p">)}</span>
+</span><span id="__span-2-25"><a id="__codelineno-2-25" name="__codelineno-2-25" href="#__codelineno-2-25"></a>
+</span><span id="__span-2-26"><a id="__codelineno-2-26" name="__codelineno-2-26" href="#__codelineno-2-26"></a>    <span class="n">out_path</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">run_dir</span> <span class="o">/</span> <span class="s2">&quot;summary.json&quot;</span>
+</span><span id="__span-2-27"><a id="__codelineno-2-27" name="__codelineno-2-27" href="#__codelineno-2-27"></a>    <span class="n">pd</span><span class="o">.</span><span class="n">Series</span><span class="p">(</span><span class="n">summary</span><span class="p">)</span><span class="o">.</span><span class="n">to_json</span><span class="p">(</span><span class="n">out_path</span><span class="p">)</span>
+</span><span id="__span-2-28"><a id="__codelineno-2-28" name="__codelineno-2-28" href="#__codelineno-2-28"></a>    <span class="k">return</span> <span class="n">out_path</span>
+</span><span id="__span-2-29"><a id="__codelineno-2-29" name="__codelineno-2-29" href="#__codelineno-2-29"></a>
+</span><span id="__span-2-30"><a id="__codelineno-2-30" name="__codelineno-2-30" href="#__codelineno-2-30"></a>
+</span><span id="__span-2-31"><a id="__codelineno-2-31" name="__codelineno-2-31" href="#__codelineno-2-31"></a><span class="c1"># --- Execute the pipeline ---</span>
+</span><span id="__span-2-32"><a id="__codelineno-2-32" name="__codelineno-2-32" href="#__codelineno-2-32"></a>
+</span><span id="__span-2-33"><a id="__codelineno-2-33" name="__codelineno-2-33" href="#__codelineno-2-33"></a><span class="k">with</span> <span class="n">consist</span><span class="o">.</span><span class="n">use_tracker</span><span class="p">(</span><span class="n">tracker</span><span class="p">):</span>
+</span><span id="__span-2-34"><a id="__codelineno-2-34" name="__codelineno-2-34" href="#__codelineno-2-34"></a>    <span class="c1"># Step 1: Clean</span>
+</span><span id="__span-2-35"><a id="__codelineno-2-35" name="__codelineno-2-35" href="#__codelineno-2-35"></a>    <span class="n">clean_result</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-2-36"><a id="__codelineno-2-36" name="__codelineno-2-36" href="#__codelineno-2-36"></a>        <span class="n">fn</span><span class="o">=</span><span class="n">clean_data</span><span class="p">,</span>
+</span><span id="__span-2-37"><a id="__codelineno-2-37" name="__codelineno-2-37" href="#__codelineno-2-37"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;clean&quot;</span><span class="p">,</span>
+</span><span id="__span-2-38"><a id="__codelineno-2-38" name="__codelineno-2-38" href="#__codelineno-2-38"></a>        <span class="n">config</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;threshold&quot;</span><span class="p">:</span> <span class="mi">15</span><span class="p">},</span>  <span class="c1"># (5)!</span>
+</span><span id="__span-2-39"><a id="__codelineno-2-39" name="__codelineno-2-39" href="#__codelineno-2-39"></a>        <span class="n">inputs</span><span class="o">=</span><span class="p">[</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;./data/raw.csv&quot;</span><span class="p">)],</span>  <span class="c1"># (6)!</span>
+</span><span id="__span-2-40"><a id="__codelineno-2-40" name="__codelineno-2-40" href="#__codelineno-2-40"></a>        <span class="n">runtime_kwargs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;raw_path&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;./data/raw.csv&quot;</span><span class="p">),</span> <span class="s2">&quot;threshold&quot;</span><span class="p">:</span> <span class="mi">15</span><span class="p">},</span>
+</span><span id="__span-2-41"><a id="__codelineno-2-41" name="__codelineno-2-41" href="#__codelineno-2-41"></a>    <span class="p">)</span>
+</span><span id="__span-2-42"><a id="__codelineno-2-42" name="__codelineno-2-42" href="#__codelineno-2-42"></a>    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Clean: </span><span class="si">{</span><span class="n">clean_result</span><span class="o">.</span><span class="n">run</span><span class="o">.</span><span class="n">status</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</span><span id="__span-2-43"><a id="__codelineno-2-43" name="__codelineno-2-43" href="#__codelineno-2-43"></a>
+</span><span id="__span-2-44"><a id="__codelineno-2-44" name="__codelineno-2-44" href="#__codelineno-2-44"></a>    <span class="c1"># Step 2: Summarize (consumes output from Step 1)</span>
+</span><span id="__span-2-45"><a id="__codelineno-2-45" name="__codelineno-2-45" href="#__codelineno-2-45"></a>    <span class="n">cleaned_artifact</span> <span class="o">=</span> <span class="n">clean_result</span><span class="o">.</span><span class="n">outputs</span><span class="p">[</span><span class="s2">&quot;cleaned&quot;</span><span class="p">]</span>  <span class="c1"># (7)!</span>
+</span><span id="__span-2-46"><a id="__codelineno-2-46" name="__codelineno-2-46" href="#__codelineno-2-46"></a>    <span class="n">summary_result</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-2-47"><a id="__codelineno-2-47" name="__codelineno-2-47" href="#__codelineno-2-47"></a>        <span class="n">fn</span><span class="o">=</span><span class="n">summarize</span><span class="p">,</span>
+</span><span id="__span-2-48"><a id="__codelineno-2-48" name="__codelineno-2-48" href="#__codelineno-2-48"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;summarize&quot;</span><span class="p">,</span>
+</span><span id="__span-2-49"><a id="__codelineno-2-49" name="__codelineno-2-49" href="#__codelineno-2-49"></a>        <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;cleaned_artifact&quot;</span><span class="p">:</span> <span class="n">cleaned_artifact</span><span class="p">},</span>  <span class="c1"># (8)!</span>
+</span><span id="__span-2-50"><a id="__codelineno-2-50" name="__codelineno-2-50" href="#__codelineno-2-50"></a>    <span class="p">)</span>
+</span><span id="__span-2-51"><a id="__codelineno-2-51" name="__codelineno-2-51" href="#__codelineno-2-51"></a>    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Summarize: </span><span class="si">{</span><span class="n">summary_result</span><span class="o">.</span><span class="n">run</span><span class="o">.</span><span class="n">status</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</span><span id="__span-2-52"><a id="__codelineno-2-52" name="__codelineno-2-52" href="#__codelineno-2-52"></a>
+</span><span id="__span-2-53"><a id="__codelineno-2-53" name="__codelineno-2-53" href="#__codelineno-2-53"></a>    <span class="c1"># Load final result</span>
+</span><span id="__span-2-54"><a id="__codelineno-2-54" name="__codelineno-2-54" href="#__codelineno-2-54"></a>    <span class="n">final</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_json</span><span class="p">(</span><span class="n">summary_result</span><span class="o">.</span><span class="n">outputs</span><span class="p">[</span><span class="s2">&quot;summary&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">path</span><span class="p">,</span> <span class="n">typ</span><span class="o">=</span><span class="s2">&quot;series&quot;</span><span class="p">)</span>
+</span><span id="__span-2-55"><a id="__codelineno-2-55" name="__codelineno-2-55" href="#__codelineno-2-55"></a>    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Result: </span><span class="si">{</span><span class="n">final</span><span class="o">.</span><span class="n">to_dict</span><span class="p">()</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</span></code></pre></div>
+<ol>
+<li><code>@tracker.define_step</code> declares which output keys this function produces. Consist creates artifacts for each key.</li>
+<li>Write outputs under <code>tracker.run_dir</code>—Consist manages this directory per run.</li>
+<li>Return the output path. Consist registers it as the <code>cleaned</code> artifact.</li>
+<li>Artifact parameters are auto-loaded when input keys match parameter names.</li>
+<li><code>config</code> is hashed into the run's signature. Changing <code>threshold</code> causes a cache miss.</li>
+<li><code>inputs</code> lists files or artifacts whose content hashes are included in the signature.</li>
+<li>Access outputs by key from the result object. Each output is a full <code>Artifact</code> with path, hash, and metadata.</li>
+<li>Passing an artifact as input creates lineage: the summarize run depends on the clean run.</li>
+</ol>
+<h2 id="run-and-observe-caching">Run and Observe Caching<a class="headerlink" href="#run-and-observe-caching" title="Permanent link">&para;</a></h2>
+<p>Execute the pipeline:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>python<span class="w"> </span>workflow.py
+</span></code></pre></div>
+<p>Output:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>Clean: completed
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>Summarize: completed
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>Result: {&#39;mean&#39;: 35.0, &#39;count&#39;: 4}
+</span></code></pre></div>
+<p>Run again without changes:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>python<span class="w"> </span>workflow.py
+</span></code></pre></div>
+<p>Both steps return cached results instantly. The function bodies do not execute.</p>
+<h2 id="invalidate-with-config-change">Invalidate with Config Change<a class="headerlink" href="#invalidate-with-config-change" title="Permanent link">&para;</a></h2>
+<p>Edit <code>workflow.py</code> to change the threshold:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="n">config</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;threshold&quot;</span><span class="p">:</span> <span class="mi">25</span><span class="p">},</span>  <span class="c1"># Changed from 15</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="n">runtime_kwargs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;raw_path&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;./data/raw.csv&quot;</span><span class="p">),</span> <span class="s2">&quot;threshold&quot;</span><span class="p">:</span> <span class="mi">25</span><span class="p">},</span>
+</span></code></pre></div>
+<p>Run again:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>python<span class="w"> </span>workflow.py
+</span></code></pre></div>
+<p>Consist detects the config change and re-executes <code>clean_data</code>. Because its output artifact changes, <code>summarize</code> also re-executes—its input hash differs from the cached version.</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>Clean: completed
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>Summarize: completed
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>Result: {&#39;mean&#39;: 40.0, &#39;count&#39;: 3}
+</span></code></pre></div>
+<p>This is the Merkle DAG at work: changes propagate downstream automatically.</p>
+<h2 id="view-lineage">View Lineage<a class="headerlink" href="#view-lineage" title="Permanent link">&para;</a></h2>
+<p>Query the provenance database:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>python<span class="w"> </span>-m<span class="w"> </span>consist.cli<span class="w"> </span>runs<span class="w"> </span>--db-path<span class="w"> </span>./runs/provenance.duckdb<span class="w"> </span>--limit<span class="w"> </span><span class="m">10</span>
+</span></code></pre></div>
+<p>Each run shows its inputs, outputs, config hash, and status. Artifacts link to their producing runs, forming a complete lineage graph.</p>
+<h2 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h2>
+<p>This workflow demonstrated:</p>
+<ul>
+<li><strong>Step definition</strong> with <code>@tracker.define_step</code> declaring outputs</li>
+<li><strong>Artifact passing</strong> where one step's output becomes another's input</li>
+<li><strong>Cache invalidation</strong> triggered by config changes</li>
+<li><strong>Lineage tracking</strong> linking runs through their artifacts</li>
+</ul>
+<h2 id="next-steps">Next Steps<a class="headerlink" href="#next-steps" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong><a href="../../concepts/overview/">Core Concepts</a></strong> — Mental model for runs, artifacts, and signatures</li>
+<li><strong><a href="../../concepts/config-management/">Config Management</a></strong> — Control which parameters affect caching</li>
+<li><strong><a href="../../concepts/caching-and-hydration/">Caching &amp; Hydration</a></strong> — Advanced cache strategies and data recovery</li>
+<li><strong><a href="../../concepts/data-materialization/">Data Materialization</a></strong> — Ingest artifacts for SQL analysis</li>
+</ul>
 
 
 
@@ -2403,7 +2356,7 @@ on-disk source is missing but the artifact is ingested (<code>is_ingested=True</
       <nav class="md-footer__inner md-grid" aria-label="Footer" >
         
           
-          <a href="../matrix/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Matrix Views">
+          <a href="../quickstart/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Quickstart">
             <div class="md-footer__button md-icon">
               
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></svg>
@@ -2413,11 +2366,27 @@ on-disk source is missing but the artifact is ingested (<code>is_ingested=True</
                 Previous
               </span>
               <div class="md-ellipsis">
-                Matrix Views
+                Quickstart
               </div>
             </div>
           </a>
         
+        
+          
+          <a href="../../cli-reference/" class="md-footer__link md-footer__link--next" aria-label="Next: Command Line Interface">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Command Line Interface
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </div>
+          </a>
         
       </nav>
     

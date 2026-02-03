@@ -12,11 +12,13 @@
         <meta name="author" content="Zach Needell">
       
       
-        <link rel="canonical" href="https://LBNL-UCB-STI.github.io/consist/api/materialize/">
+        <link rel="canonical" href="https://LBNL-UCB-STI.github.io/consist/concepts/data-materialization/">
       
       
-        <link rel="prev" href="../matrix/">
+        <link rel="prev" href="../caching-and-hydration/">
       
+      
+        <link rel="next" href="../../usage-guide/">
       
       
         
@@ -27,7 +29,7 @@
     
     
       
-        <title>Materialization - Consist</title>
+        <title>Data Virtualization & Materialization Strategy - Consist</title>
       
     
     
@@ -85,7 +87,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#materialization" class="md-skip">
+        <a href="#data-virtualization-materialization-strategy" class="md-skip">
           Skip to content
         </a>
       
@@ -118,7 +120,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Materialization
+              Data Virtualization &amp; Materialization Strategy
             
           </span>
         </div>
@@ -235,11 +237,13 @@
   
   
   
+    
+  
   
     
     
-      <li class="md-tabs__item">
-        <a href="../../concepts/overview/" class="md-tabs__link">
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../overview/" class="md-tabs__link">
           
   
   Concepts
@@ -327,13 +331,11 @@
   
   
   
-    
-  
   
     
     
-      <li class="md-tabs__item md-tabs__item--active">
-        <a href="../" class="md-tabs__link">
+      <li class="md-tabs__item">
+        <a href="../../api/" class="md-tabs__link">
           
   
   API Reference
@@ -590,8 +592,10 @@
       
   
   
+    
   
   
+  
     
     
       
@@ -607,21 +611,22 @@
     
     
       
+        
+        
+      
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
       
         
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
         
           
-        
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
-        
-          
-          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
             
   
   
@@ -639,7 +644,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
           <label class="md-nav__title" for="__nav_3">
             <span class="md-nav__icon md-icon"></span>
             
@@ -657,7 +662,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../concepts/overview/" class="md-nav__link">
+      <a href="../overview/" class="md-nav__link">
         
   
   
@@ -685,7 +690,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../concepts/config-management/" class="md-nav__link">
+      <a href="../config-management/" class="md-nav__link">
         
   
   
@@ -713,7 +718,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../concepts/caching-and-hydration/" class="md-nav__link">
+      <a href="../caching-and-hydration/" class="md-nav__link">
         
   
   
@@ -738,10 +743,37 @@
                 
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="../../concepts/data-materialization/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data Virtualization &amp; Materialization Strategy
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
         
   
   
@@ -757,6 +789,181 @@
   
 
       </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#why-the-distinction-matters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why the Distinction Matters
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#two-storage-modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two Storage Modes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-to-ingest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When to Ingest
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-to-stay-cold" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When to Stay Cold
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ingesting-artifacts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ingesting Artifacts
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#strict-schema-ingestion" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Strict Schema Ingestion
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#provenance-columns" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Provenance Columns
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#hybrid-views" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Hybrid Views
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#loading-behavior-database-fallback" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Loading Behavior &amp; Database Fallback
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#loader-kwargs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Loader Kwargs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#schema-export-workflow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Schema Export Workflow
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#hdf5-native-support-roadmap" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        HDF5 Native Support Roadmap
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#decision-summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Decision Summary
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See Also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -1488,8 +1695,6 @@
       
   
   
-    
-  
   
   
     
@@ -1525,23 +1730,22 @@
     
     
       
-        
-        
-      
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--nested">
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_8" checked>
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_8" >
         
           
           <div class="md-nav__link md-nav__container">
-            <a href="../" class="md-nav__link ">
+            <a href="../../api/" class="md-nav__link ">
               
   
   
@@ -1561,13 +1765,13 @@
             </a>
             
               
-              <label class="md-nav__link " for="__nav_8" id="__nav_8_label" tabindex="">
+              <label class="md-nav__link " for="__nav_8" id="__nav_8_label" tabindex="0">
                 <span class="md-nav__icon md-icon"></span>
               </label>
             
           </div>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="true">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
           <label class="md-nav__title" for="__nav_8">
             <span class="md-nav__icon md-icon"></span>
             
@@ -1587,7 +1791,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../public_api/" class="md-nav__link">
+      <a href="../../api/public_api/" class="md-nav__link">
         
   
   
@@ -1615,7 +1819,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../api_helpers/" class="md-nav__link">
+      <a href="../../api/api_helpers/" class="md-nav__link">
         
   
   
@@ -1643,7 +1847,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../tracker/" class="md-nav__link">
+      <a href="../../api/tracker/" class="md-nav__link">
         
   
   
@@ -1671,7 +1875,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../workflow/" class="md-nav__link">
+      <a href="../../api/workflow/" class="md-nav__link">
         
   
   
@@ -1699,7 +1903,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../artifact/" class="md-nav__link">
+      <a href="../../api/artifact/" class="md-nav__link">
         
   
   
@@ -1727,7 +1931,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../run/" class="md-nav__link">
+      <a href="../../api/run/" class="md-nav__link">
         
   
   
@@ -1755,7 +1959,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../indexing/" class="md-nav__link">
+      <a href="../../api/indexing/" class="md-nav__link">
         
   
   
@@ -1783,7 +1987,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../identity/" class="md-nav__link">
+      <a href="../../api/identity/" class="md-nav__link">
         
   
   
@@ -1811,7 +2015,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../views/" class="md-nav__link">
+      <a href="../../api/views/" class="md-nav__link">
         
   
   
@@ -1839,7 +2043,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../matrix/" class="md-nav__link">
+      <a href="../../api/matrix/" class="md-nav__link">
         
   
   
@@ -1864,37 +2068,10 @@
                 
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Materialization
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../../api/materialize/" class="md-nav__link">
         
   
   
@@ -1910,71 +2087,6 @@
   
 
       </a>
-      
-        
-
-
-<nav class="md-nav md-nav--secondary" aria-label="On this page">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      On this page
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#consist.core.materialize.materialize_artifacts" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        materialize_artifacts
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.core.materialize.materialize_artifacts_from_sources" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        materialize_artifacts_from_sources
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.core.materialize.build_materialize_items_for_keys" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        build_materialize_items_for_keys
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.core.materialize.materialize_ingested_artifact_from_db" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        materialize_ingested_artifact_from_db
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -2015,10 +2127,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#consist.core.materialize.materialize_artifacts" class="md-nav__link">
+  <a href="#why-the-distinction-matters" class="md-nav__link">
     <span class="md-ellipsis">
       
-        materialize_artifacts
+        Why the Distinction Matters
       
     </span>
   </a>
@@ -2026,10 +2138,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#consist.core.materialize.materialize_artifacts_from_sources" class="md-nav__link">
+  <a href="#two-storage-modes" class="md-nav__link">
     <span class="md-ellipsis">
       
-        materialize_artifacts_from_sources
+        Two Storage Modes
       
     </span>
   </a>
@@ -2037,10 +2149,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#consist.core.materialize.build_materialize_items_for_keys" class="md-nav__link">
+  <a href="#when-to-ingest" class="md-nav__link">
     <span class="md-ellipsis">
       
-        build_materialize_items_for_keys
+        When to Ingest
       
     </span>
   </a>
@@ -2048,10 +2160,120 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#consist.core.materialize.materialize_ingested_artifact_from_db" class="md-nav__link">
+  <a href="#when-to-stay-cold" class="md-nav__link">
     <span class="md-ellipsis">
       
-        materialize_ingested_artifact_from_db
+        When to Stay Cold
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ingesting-artifacts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ingesting Artifacts
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#strict-schema-ingestion" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Strict Schema Ingestion
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#provenance-columns" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Provenance Columns
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#hybrid-views" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Hybrid Views
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#loading-behavior-database-fallback" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Loading Behavior &amp; Database Fallback
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#loader-kwargs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Loader Kwargs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#schema-export-workflow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Schema Export Workflow
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#hdf5-native-support-roadmap" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        HDF5 Native Support Roadmap
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#decision-summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Decision Summary
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See Also
       
     </span>
   </a>
@@ -2101,10 +2323,10 @@
     
     
       <li class="md-path__item">
-        <a href="../" class="md-path__link">
+        <a href="../overview/" class="md-path__link">
           
   <span class="md-ellipsis">
-    API Reference
+    Concepts
   </span>
 
         </a>
@@ -2121,249 +2343,236 @@
                 
                   
 
-<h1 id="materialization">Materialization<a class="headerlink" href="#materialization" title="Permanent link">&para;</a></h1>
-
-
-<div class="doc doc-object doc-module">
-
-
-
-
-    <div class="doc doc-contents first">
-
-
-
-
-
-
-
-
-
-
-<div class="doc doc-children">
-
-
-
-
-
-
-
-
-
-
-<div class="doc doc-object doc-function">
-
-
-<h2 id="consist.core.materialize.materialize_artifacts" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">materialize_artifacts</span><span class="p">(</span><span class="n">tracker</span><span class="p">,</span> <span class="n">items</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">on_missing</span><span class="o">=</span><span class="s1">&#39;warn&#39;</span><span class="p">)</span></code>
-
-<a href="#consist.core.materialize.materialize_artifacts" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Copy cached artifact bytes onto the filesystem at caller-specified destinations.</p>
-<p>This is intentionally <em>copy-only</em> materialization:
-- If the artifact's resolved source path exists, it is copied to the destination.
-- If it does not exist, behavior depends on <code>on_missing</code>.
-- If the destination already exists, it is left untouched.
-- Destination paths cannot be symlinks and will not be overwritten if the type differs.</p>
-<p>This function does not attempt database-backed reconstruction. Higher-level code
-can decide when to call <code>consist.load(...)</code> or enable DB recovery.</p>
-
-
-<p><span class="doc-section-title">Parameters:</span></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Name</th>
-          <th>Type</th>
-          <th>Description</th>
-          <th>Default</th>
-        </tr>
-      </thead>
-      <tbody>
-          <tr class="doc-section-item">
-            <td>
-                <code>tracker</code>
-            </td>
-            <td>
-                  <code><span title="consist.core.tracker.Tracker">Tracker</span></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Tracker used to resolve portable artifact URIs to host filesystem paths.</p>
-              </div>
-            </td>
-            <td>
-                <em>required</em>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>items</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Sequence" href="https://docs.python.org/3/library/typing.html#typing.Sequence">Sequence</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#tuple">tuple</a>[<span title="consist.models.artifact.Artifact">Artifact</span>, <a class="autorefs autorefs-external" title="pathlib.Path" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path">Path</a>]]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>A list of <code>(artifact, destination_path)</code> pairs to materialize.</p>
-              </div>
-            </td>
-            <td>
-                <em>required</em>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>on_missing</code>
-            </td>
-            <td>
-                  <code>(&#39;warn&#39;, &#39;raise&#39;)</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>What to do when a resolved source path does not exist.</p>
-              </div>
-            </td>
-            <td>
-                  <code>&#34;warn&#34;</code>
-            </td>
-          </tr>
-      </tbody>
-    </table>
-
-
-    <p><span class="doc-section-title">Returns:</span></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Type</th>
-          <th>Description</th>
-        </tr>
-      </thead>
-      <tbody>
-          <tr class="doc-section-item">
-            <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#dict">dict</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>, <a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Map of <code>artifact.key -&gt; destination_path</code> for successfully materialized items.</p>
-              </div>
-            </td>
-          </tr>
-      </tbody>
-    </table>
-
-
-    </div>
-
-</div>
-
-<div class="doc doc-object doc-function">
-
-
-<h2 id="consist.core.materialize.materialize_artifacts_from_sources" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">materialize_artifacts_from_sources</span><span class="p">(</span><span class="n">items</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">allowed_base</span><span class="p">,</span> <span class="n">on_missing</span><span class="o">=</span><span class="s1">&#39;warn&#39;</span><span class="p">)</span></code>
-
-<a href="#consist.core.materialize.materialize_artifacts_from_sources" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Copy artifact bytes from explicit source paths to caller-specified destinations.</p>
-<p>This is useful for rehydrating cached inputs from historical run directories
-when the current run directory is different from the original producer.
-Existing destination paths are left untouched.
-Destination paths cannot be symlinks and will not be overwritten if the type differs.</p>
-
-
-<p><span class="doc-section-title">Parameters:</span></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Name</th>
-          <th>Type</th>
-          <th>Description</th>
-          <th>Default</th>
-        </tr>
-      </thead>
-      <tbody>
-          <tr class="doc-section-item">
-            <td>
-                <code>allowed_base</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="pathlib.Path" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path">Path</a> | None</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Base directory that destination paths must remain within. When None,
-no base containment check is performed.</p>
-              </div>
-            </td>
-            <td>
-                <em>required</em>
-            </td>
-          </tr>
-      </tbody>
-    </table>
-
-
-    </div>
-
-</div>
-
-<div class="doc doc-object doc-function">
-
-
-<h2 id="consist.core.materialize.build_materialize_items_for_keys" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">build_materialize_items_for_keys</span><span class="p">(</span><span class="n">outputs</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">destinations_by_key</span><span class="p">)</span></code>
-
-<a href="#consist.core.materialize.build_materialize_items_for_keys" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Convenience helper to construct <code>(artifact, destination)</code> pairs by artifact key.</p>
-<p>Any keys not present in <code>outputs</code> are ignored (caller decides whether to treat
-this as an error).</p>
-
-
-    </div>
-
-</div>
-
-<div class="doc doc-object doc-function">
-
-
-<h2 id="consist.core.materialize.materialize_ingested_artifact_from_db" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">materialize_ingested_artifact_from_db</span><span class="p">(</span><span class="o">*</span><span class="p">,</span> <span class="n">artifact</span><span class="p">,</span> <span class="n">tracker</span><span class="p">,</span> <span class="n">destination</span><span class="p">)</span></code>
-
-<a href="#consist.core.materialize.materialize_ingested_artifact_from_db" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Reconstruct a CSV/Parquet artifact from DuckDB and write it to disk.</p>
-<p>This is intended for <code>cache_hydration="inputs-missing"</code> when the original
-on-disk source is missing but the artifact is ingested (<code>is_ingested=True</code>).</p>
-<p>Supported drivers: csv, parquet. All other drivers raise ValueError.</p>
-
-
-    </div>
-
-</div>
-
-
-
-  </div>
-
-    </div>
-
-</div>
+<h1 id="data-virtualization-materialization-strategy">Data Virtualization &amp; Materialization Strategy<a class="headerlink" href="#data-virtualization-materialization-strategy" title="Permanent link">&para;</a></h1>
+<p>This guide explains when to keep data on disk (virtualize) versus ingesting it into DuckDB (materialize).</p>
+<hr />
+<h2 id="why-the-distinction-matters">Why the Distinction Matters<a class="headerlink" href="#why-the-distinction-matters" title="Permanent link">&para;</a></h2>
+<p>Simulation workflows produce many artifacts across runs. Comparing results requires querying across runs—but ingesting every output doubles your database size. The cold/hot distinction lets you choose: keep storage efficient for artifacts you rarely query, enable SQL analysis for artifacts you compare frequently.</p>
+<p>The tradeoff: ingested data is queryable and recoverable; cold data requires keeping original files but adds no database overhead.</p>
+<hr />
+<h2 id="two-storage-modes">Two Storage Modes<a class="headerlink" href="#two-storage-modes" title="Permanent link">&para;</a></h2>
+<p><strong>Cold Data</strong>: Files remain on disk. Provenance metadata is tracked but data is not queryable via SQL until ingested. Load on demand with <code>consist.load_df(artifact)</code>. Minimal database size.</p>
+<p><strong>Hot Data</strong>: Ingested into DuckDB. Queryable via SQL, indexed alongside provenance, and recoverable if original files are deleted. Trades disk space for query performance.</p>
+<hr />
+<h2 id="when-to-ingest">When to Ingest<a class="headerlink" href="#when-to-ingest" title="Permanent link">&para;</a></h2>
+<p>Ingest when you need:</p>
+<ul>
+<li>SQL-native analytics over many runs</li>
+<li>Schema tracking and exportable SQLModel stubs</li>
+<li>Recovery of tabular data if files are missing</li>
+<li>Cross-run comparisons via unified SQL views</li>
+</ul>
+<p>Ingest key tabular outputs you compare across runs:</p>
+<ul>
+<li><strong>Transportation</strong>: Trip tables, skim matrices, mode choice summaries</li>
+<li><strong>Electric grid</strong>: Aggregated metrics (monthly averages, distribution-level summaries)</li>
+<li><strong>Urban planning</strong>: Parcel or zoning summaries, development capacity estimates</li>
+</ul>
+<p>Ingestion is appropriate for outputs where (1) you need SQL queries across runs, and (2) the storage cost is acceptable—ingestion approximately doubles storage for that artifact. For a 500MB output compared across 100 runs, ingestion adds ~50GB to the database.</p>
+<hr />
+<h2 id="when-to-stay-cold">When to Stay Cold<a class="headerlink" href="#when-to-stay-cold" title="Permanent link">&para;</a></h2>
+<p>Keep data as cold files when:</p>
+<ul>
+<li>Storage duplication is unacceptable (multi-GB rasters, video files, binary blobs)</li>
+<li>Data already lives in an external system</li>
+<li>No cross-run SQL analysis is needed</li>
+</ul>
+<p>Cold data lives only on disk; provenance metadata is tracked but data is not queryable via SQL or included in hybrid views until ingested.</p>
+<hr />
+<h2 id="ingesting-artifacts">Ingesting Artifacts<a class="headerlink" href="#ingesting-artifacts" title="Permanent link">&para;</a></h2>
+<p>Install the optional DLT dependency:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;consist[ingest]&quot;</span>
+</span></code></pre></div>
+<p>Basic usage:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">Tracker</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span><span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;./runs&quot;</span><span class="p">,</span> <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">)</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;ingest_example&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;demo&quot;</span><span class="p">):</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>    <span class="n">artifact</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="s2">&quot;data/people.csv&quot;</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;people&quot;</span><span class="p">,</span> <span class="n">driver</span><span class="o">=</span><span class="s2">&quot;csv&quot;</span><span class="p">)</span>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">ingest</span><span class="p">(</span><span class="n">artifact</span><span class="p">)</span>
+</span></code></pre></div>
+<p>Ingest explicit data payloads (dicts, DataFrames, generators):</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;ingest_inline&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;demo&quot;</span><span class="p">):</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>    <span class="n">artifact</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="s2">&quot;inputs/people.json&quot;</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;people&quot;</span><span class="p">)</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">ingest</span><span class="p">(</span><span class="n">artifact</span><span class="p">,</span> <span class="n">data</span><span class="o">=</span><span class="p">[{</span><span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span> <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;A&quot;</span><span class="p">}])</span>
+</span></code></pre></div>
+<hr />
+<h2 id="strict-schema-ingestion">Strict Schema Ingestion<a class="headerlink" href="#strict-schema-ingestion" title="Permanent link">&para;</a></h2>
+<p>Provide a SQLModel schema to validate data:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sqlmodel</span><span class="w"> </span><span class="kn">import</span> <span class="n">SQLModel</span><span class="p">,</span> <span class="n">Field</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="k">class</span><span class="w"> </span><span class="nc">Person</span><span class="p">(</span><span class="n">SQLModel</span><span class="p">,</span> <span class="n">table</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>    <span class="n">__tablename__</span> <span class="o">=</span> <span class="s2">&quot;people&quot;</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>    <span class="nb">id</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">primary_key</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>
+</span><span id="__span-3-8"><a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;strict_ingest&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;demo&quot;</span><span class="p">):</span>
+</span><span id="__span-3-9"><a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>    <span class="n">artifact</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="s2">&quot;data/people.csv&quot;</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;people&quot;</span><span class="p">,</span> <span class="n">schema</span><span class="o">=</span><span class="n">Person</span><span class="p">)</span>
+</span><span id="__span-3-10"><a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">ingest</span><span class="p">(</span><span class="n">artifact</span><span class="p">,</span> <span class="n">schema</span><span class="o">=</span><span class="n">Person</span><span class="p">)</span>
+</span></code></pre></div>
+<p>Strict mode rejects incompatible data rather than silently coercing it.</p>
+<hr />
+<h2 id="provenance-columns">Provenance Columns<a class="headerlink" href="#provenance-columns" title="Permanent link">&para;</a></h2>
+<p>Ingested tables include system columns:</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>consist_run_id</code></td>
+<td>Run that created this row</td>
+</tr>
+<tr>
+<td><code>consist_artifact_id</code></td>
+<td>Source artifact</td>
+</tr>
+<tr>
+<td><code>consist_year</code>, <code>consist_iteration</code></td>
+<td>Scenario dimensions (optional)</td>
+</tr>
+</tbody>
+</table>
+<p>These enable joins across runs and filtering by scenario or year in hybrid views.</p>
+<hr />
+<h2 id="hybrid-views">Hybrid Views<a class="headerlink" href="#hybrid-views" title="Permanent link">&para;</a></h2>
+<p>Hybrid views are SQL views that union hot data (ingested into DuckDB) with cold data (read from files on disk). Query both as one logical table without requiring all data in the database.</p>
+<p>Register a SQLModel schema to activate a view:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sqlmodel</span><span class="w"> </span><span class="kn">import</span> <span class="n">SQLModel</span><span class="p">,</span> <span class="n">Field</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="k">class</span><span class="w"> </span><span class="nc">Person</span><span class="p">(</span><span class="n">SQLModel</span><span class="p">,</span> <span class="n">table</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>    <span class="n">__tablename__</span> <span class="o">=</span> <span class="s2">&quot;people&quot;</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>    <span class="n">person_id</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">primary_key</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>    <span class="n">age</span><span class="p">:</span> <span class="nb">int</span>
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>
+</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span>
+</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>    <span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;./runs&quot;</span><span class="p">,</span>
+</span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a>    <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">,</span>
+</span><span id="__span-4-11"><a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a>    <span class="n">schemas</span><span class="o">=</span><span class="p">[</span><span class="n">Person</span><span class="p">],</span>
+</span><span id="__span-4-12"><a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a><span class="p">)</span>
+</span><span id="__span-4-13"><a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a>
+</span><span id="__span-4-14"><a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a><span class="n">VPerson</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">views</span><span class="o">.</span><span class="n">Person</span>
+</span></code></pre></div>
+<p>Once registered, you can query across all runs (both ingested and cold data):</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sqlmodel</span><span class="w"> </span><span class="kn">import</span> <span class="n">select</span><span class="p">,</span> <span class="n">func</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="n">query</span> <span class="o">=</span> <span class="p">(</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>    <span class="n">select</span><span class="p">(</span><span class="n">VPerson</span><span class="o">.</span><span class="n">consist_year</span><span class="p">,</span> <span class="n">func</span><span class="o">.</span><span class="n">avg</span><span class="p">(</span><span class="n">VPerson</span><span class="o">.</span><span class="n">age</span><span class="p">)</span><span class="o">.</span><span class="n">label</span><span class="p">(</span><span class="s2">&quot;avg_age&quot;</span><span class="p">))</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>    <span class="o">.</span><span class="n">group_by</span><span class="p">(</span><span class="n">VPerson</span><span class="o">.</span><span class="n">consist_year</span><span class="p">)</span>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="p">)</span>
+</span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a><span class="n">rows</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">run_query</span><span class="p">(</span><span class="n">query</span><span class="p">,</span> <span class="n">tracker</span><span class="o">=</span><span class="n">tracker</span><span class="p">)</span>
+</span></code></pre></div>
+<hr />
+<h2 id="loading-behavior-database-fallback">Loading Behavior &amp; Database Fallback<a class="headerlink" href="#loading-behavior-database-fallback" title="Permanent link">&para;</a></h2>
+<p><code>consist.load(...)</code> reads from the filesystem. If files are missing and the artifact was ingested, database fallback recovers data:</p>
+<table>
+<thead>
+<tr>
+<th>Policy</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>inputs-only</code> (default)</td>
+<td>Recover inside active run for declared inputs only</td>
+</tr>
+<tr>
+<td><code>always</code></td>
+<td>Recover whenever artifact is ingested</td>
+</tr>
+<tr>
+<td><code>never</code></td>
+<td>Disable recovery</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="n">df</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">load_df</span><span class="p">(</span><span class="n">artifact</span><span class="p">,</span> <span class="n">tracker</span><span class="o">=</span><span class="n">tracker</span><span class="p">,</span> <span class="n">db_fallback</span><span class="o">=</span><span class="s2">&quot;always&quot;</span><span class="p">)</span>
+</span></code></pre></div>
+<hr />
+<h2 id="loader-kwargs">Loader Kwargs<a class="headerlink" href="#loader-kwargs" title="Permanent link">&para;</a></h2>
+<p><code>consist.load(...)</code> validates loader kwargs and raises <code>ValueError</code> for unsupported options.</p>
+<table>
+<thead>
+<tr>
+<th>Driver</th>
+<th>Supported kwargs</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>parquet</code></td>
+<td><code>columns</code></td>
+</tr>
+<tr>
+<td><code>csv</code></td>
+<td><code>columns</code>, <code>delimiter</code>, <code>header</code> (alias: <code>sep</code>)</td>
+</tr>
+<tr>
+<td><code>json</code></td>
+<td><code>orient</code>, <code>dtype</code>, <code>convert_axes</code>, <code>convert_dates</code>, <code>precise_float</code>, <code>date_unit</code>, <code>encoding</code>, <code>lines</code>, <code>compression</code>, <code>typ</code></td>
+</tr>
+<tr>
+<td><code>h5_table</code></td>
+<td><code>columns</code>, <code>where</code>, <code>start</code>, <code>stop</code></td>
+</tr>
+</tbody>
+</table>
+<p>Use <code>consist.load_relation(...)</code> to manage DuckDB Relation lifecycle explicitly. Use <code>consist.load_df(...)</code> for DataFrame with automatic cleanup.</p>
+<hr />
+<h2 id="schema-export-workflow">Schema Export Workflow<a class="headerlink" href="#schema-export-workflow" title="Permanent link">&para;</a></h2>
+<p>For curated schemas with explicit PK/FK constraints: ingest tabular data, run schema export to generate a SQLModel stub, then edit and register the stub for views. See <a href="../../schema-export/">schema-export.md</a> for details.</p>
+<hr />
+<h2 id="hdf5-native-support-roadmap">HDF5 Native Support Roadmap<a class="headerlink" href="#hdf5-native-support-roadmap" title="Permanent link">&para;</a></h2>
+<p>Currently <code>h5_table</code> uses a staging bridge (<code>pandas.read_hdf(...)</code> + <code>conn.from_df(...)</code>). Native HDF5 support will replace this with DuckDB's HDF5 extension for direct queries.</p>
+<p><strong>Remaining work</strong>: switch <code>h5_table</code> to <code>hdf5_read(...)</code> once stable, validate extension version pinning, handle PyTables/object dtype edge cases, update schema capture for native relation path, add performance testing.</p>
+<p><strong>Benefits</strong>: zero-copy streaming reads, lower memory usage, consistent SQL workflows across Parquet/CSV/HDF5.</p>
+<hr />
+<h2 id="decision-summary">Decision Summary<a class="headerlink" href="#decision-summary" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Need</th>
+<th>Approach</th>
+<th>When</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Query results across runs in SQL</td>
+<td>Ingest</td>
+<td>Cross-run comparisons, storage cost acceptable</td>
+</tr>
+<tr>
+<td>Minimize database size</td>
+<td>Stay cold</td>
+<td>Large files, no cross-run SQL analysis</td>
+</tr>
+<tr>
+<td>Query ingested and raw files together</td>
+<td>Hybrid views</td>
+<td>Mixed—some runs ingested, some not</td>
+</tr>
+<tr>
+<td>Recover data if files deleted</td>
+<td>Ingest</td>
+<td>Need resilience to file deletion</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="see-also">See Also<a class="headerlink" href="#see-also" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong><a href="../caching-and-hydration/">Caching &amp; Hydration</a></strong> — How materialization interacts with caching</li>
+<li><strong><a href="../../dlt-loader-guide/">DLT Loader Guide</a></strong> — Detailed ingestion patterns using DLT</li>
+<li><strong><a href="../../schema-export/">Schema Export</a></strong> — Generate and manage schemas for ingested data</li>
+</ul>
 
 
 
@@ -2403,7 +2612,7 @@ on-disk source is missing but the artifact is ingested (<code>is_ingested=True</
       <nav class="md-footer__inner md-grid" aria-label="Footer" >
         
           
-          <a href="../matrix/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Matrix Views">
+          <a href="../caching-and-hydration/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Caching and Artifact Hydration Patterns">
             <div class="md-footer__button md-icon">
               
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></svg>
@@ -2413,11 +2622,27 @@ on-disk source is missing but the artifact is ingested (<code>is_ingested=True</
                 Previous
               </span>
               <div class="md-ellipsis">
-                Matrix Views
+                Caching and Artifact Hydration Patterns
               </div>
             </div>
           </a>
         
+        
+          
+          <a href="../../usage-guide/" class="md-footer__link md-footer__link--next" aria-label="Next: Usage Guide">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Usage Guide
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </div>
+          </a>
         
       </nav>
     

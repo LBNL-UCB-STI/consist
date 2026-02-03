@@ -12,11 +12,13 @@
         <meta name="author" content="Zach Needell">
       
       
-        <link rel="canonical" href="https://LBNL-UCB-STI.github.io/consist/api/materialize/">
+        <link rel="canonical" href="https://LBNL-UCB-STI.github.io/consist/concepts/overview/">
       
       
-        <link rel="prev" href="../matrix/">
+        <link rel="prev" href="../../cli-reference/">
       
+      
+        <link rel="next" href="../config-management/">
       
       
         
@@ -27,7 +29,7 @@
     
     
       
-        <title>Materialization - Consist</title>
+        <title>Core Concepts Overview - Consist</title>
       
     
     
@@ -85,7 +87,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#materialization" class="md-skip">
+        <a href="#core-concepts-overview" class="md-skip">
           Skip to content
         </a>
       
@@ -118,7 +120,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Materialization
+              Core Concepts Overview
             
           </span>
         </div>
@@ -235,11 +237,13 @@
   
   
   
+    
+  
   
     
     
-      <li class="md-tabs__item">
-        <a href="../../concepts/overview/" class="md-tabs__link">
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="./" class="md-tabs__link">
           
   
   Concepts
@@ -327,13 +331,11 @@
   
   
   
-    
-  
   
     
     
-      <li class="md-tabs__item md-tabs__item--active">
-        <a href="../" class="md-tabs__link">
+      <li class="md-tabs__item">
+        <a href="../../api/" class="md-tabs__link">
           
   
   API Reference
@@ -590,8 +592,10 @@
       
   
   
+    
   
   
+  
     
     
       
@@ -607,21 +611,22 @@
     
     
       
+        
+        
+      
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
       
         
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
         
           
-        
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
-        
-          
-          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
             
   
   
@@ -639,7 +644,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
           <label class="md-nav__title" for="__nav_3">
             <span class="md-nav__icon md-icon"></span>
             
@@ -654,10 +659,37 @@
                 
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="../../concepts/overview/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Core Concepts Overview
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
         
   
   
@@ -673,6 +705,193 @@
   
 
       </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#core-abstractions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Core Abstractions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-caching-works" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How Caching Works
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#provenance-lineage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Provenance &amp; Lineage
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#key-terms-dependency-ordered" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Key Terms (Dependency-Ordered)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Key Terms (Dependency-Ordered)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#identity-caching-foundation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Identity &amp; Caching Foundation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#configuration-querying" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration &amp; Querying
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cache-behavior" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cache Behavior
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#data-storage-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Data Storage &amp; Recovery
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#data-virtualization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Data Virtualization
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#data-types" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Data Types
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#integrations-extensions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Integrations &amp; Extensions
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-inputs-and-outputs-are-treated" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How Inputs and Outputs Are Treated
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="How Inputs and Outputs Are Treated">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#input-mappings-and-auto-loading" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Input mappings and auto-loading
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#next-steps" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Next Steps
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -685,7 +904,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../concepts/config-management/" class="md-nav__link">
+      <a href="../config-management/" class="md-nav__link">
         
   
   
@@ -713,7 +932,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../concepts/caching-and-hydration/" class="md-nav__link">
+      <a href="../caching-and-hydration/" class="md-nav__link">
         
   
   
@@ -741,7 +960,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../concepts/data-materialization/" class="md-nav__link">
+      <a href="../data-materialization/" class="md-nav__link">
         
   
   
@@ -1488,8 +1707,6 @@
       
   
   
-    
-  
   
   
     
@@ -1525,23 +1742,22 @@
     
     
       
-        
-        
-      
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--nested">
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_8" checked>
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_8" >
         
           
           <div class="md-nav__link md-nav__container">
-            <a href="../" class="md-nav__link ">
+            <a href="../../api/" class="md-nav__link ">
               
   
   
@@ -1561,13 +1777,13 @@
             </a>
             
               
-              <label class="md-nav__link " for="__nav_8" id="__nav_8_label" tabindex="">
+              <label class="md-nav__link " for="__nav_8" id="__nav_8_label" tabindex="0">
                 <span class="md-nav__icon md-icon"></span>
               </label>
             
           </div>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="true">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
           <label class="md-nav__title" for="__nav_8">
             <span class="md-nav__icon md-icon"></span>
             
@@ -1587,7 +1803,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../public_api/" class="md-nav__link">
+      <a href="../../api/public_api/" class="md-nav__link">
         
   
   
@@ -1615,7 +1831,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../api_helpers/" class="md-nav__link">
+      <a href="../../api/api_helpers/" class="md-nav__link">
         
   
   
@@ -1643,7 +1859,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../tracker/" class="md-nav__link">
+      <a href="../../api/tracker/" class="md-nav__link">
         
   
   
@@ -1671,7 +1887,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../workflow/" class="md-nav__link">
+      <a href="../../api/workflow/" class="md-nav__link">
         
   
   
@@ -1699,7 +1915,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../artifact/" class="md-nav__link">
+      <a href="../../api/artifact/" class="md-nav__link">
         
   
   
@@ -1727,7 +1943,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../run/" class="md-nav__link">
+      <a href="../../api/run/" class="md-nav__link">
         
   
   
@@ -1755,7 +1971,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../indexing/" class="md-nav__link">
+      <a href="../../api/indexing/" class="md-nav__link">
         
   
   
@@ -1783,7 +1999,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../identity/" class="md-nav__link">
+      <a href="../../api/identity/" class="md-nav__link">
         
   
   
@@ -1811,7 +2027,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../views/" class="md-nav__link">
+      <a href="../../api/views/" class="md-nav__link">
         
   
   
@@ -1839,7 +2055,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../matrix/" class="md-nav__link">
+      <a href="../../api/matrix/" class="md-nav__link">
         
   
   
@@ -1864,37 +2080,10 @@
                 
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Materialization
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../../api/materialize/" class="md-nav__link">
         
   
   
@@ -1910,71 +2099,6 @@
   
 
       </a>
-      
-        
-
-
-<nav class="md-nav md-nav--secondary" aria-label="On this page">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      On this page
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#consist.core.materialize.materialize_artifacts" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        materialize_artifacts
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.core.materialize.materialize_artifacts_from_sources" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        materialize_artifacts_from_sources
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.core.materialize.build_materialize_items_for_keys" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        build_materialize_items_for_keys
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.core.materialize.materialize_ingested_artifact_from_db" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        materialize_ingested_artifact_from_db
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -2015,10 +2139,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#consist.core.materialize.materialize_artifacts" class="md-nav__link">
+  <a href="#core-abstractions" class="md-nav__link">
     <span class="md-ellipsis">
       
-        materialize_artifacts
+        Core Abstractions
       
     </span>
   </a>
@@ -2026,10 +2150,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#consist.core.materialize.materialize_artifacts_from_sources" class="md-nav__link">
+  <a href="#how-caching-works" class="md-nav__link">
     <span class="md-ellipsis">
       
-        materialize_artifacts_from_sources
+        How Caching Works
       
     </span>
   </a>
@@ -2037,10 +2161,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#consist.core.materialize.build_materialize_items_for_keys" class="md-nav__link">
+  <a href="#provenance-lineage" class="md-nav__link">
     <span class="md-ellipsis">
       
-        build_materialize_items_for_keys
+        Provenance &amp; Lineage
       
     </span>
   </a>
@@ -2048,10 +2172,132 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#consist.core.materialize.materialize_ingested_artifact_from_db" class="md-nav__link">
+  <a href="#key-terms-dependency-ordered" class="md-nav__link">
     <span class="md-ellipsis">
       
-        materialize_ingested_artifact_from_db
+        Key Terms (Dependency-Ordered)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Key Terms (Dependency-Ordered)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#identity-caching-foundation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Identity &amp; Caching Foundation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#configuration-querying" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration &amp; Querying
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cache-behavior" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cache Behavior
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#data-storage-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Data Storage &amp; Recovery
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#data-virtualization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Data Virtualization
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#data-types" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Data Types
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#integrations-extensions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Integrations &amp; Extensions
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-inputs-and-outputs-are-treated" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How Inputs and Outputs Are Treated
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="How Inputs and Outputs Are Treated">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#input-mappings-and-auto-loading" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Input mappings and auto-loading
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#next-steps" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Next Steps
       
     </span>
   </a>
@@ -2101,10 +2347,10 @@
     
     
       <li class="md-path__item">
-        <a href="../" class="md-path__link">
+        <a href="./" class="md-path__link">
           
   <span class="md-ellipsis">
-    API Reference
+    Concepts
   </span>
 
         </a>
@@ -2121,249 +2367,108 @@
                 
                   
 
-<h1 id="materialization">Materialization<a class="headerlink" href="#materialization" title="Permanent link">&para;</a></h1>
-
-
-<div class="doc doc-object doc-module">
-
-
-
-
-    <div class="doc doc-contents first">
-
-
-
-
-
-
-
-
-
-
-<div class="doc doc-children">
-
-
-
-
-
-
-
-
-
-
-<div class="doc doc-object doc-function">
-
-
-<h2 id="consist.core.materialize.materialize_artifacts" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">materialize_artifacts</span><span class="p">(</span><span class="n">tracker</span><span class="p">,</span> <span class="n">items</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">on_missing</span><span class="o">=</span><span class="s1">&#39;warn&#39;</span><span class="p">)</span></code>
-
-<a href="#consist.core.materialize.materialize_artifacts" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Copy cached artifact bytes onto the filesystem at caller-specified destinations.</p>
-<p>This is intentionally <em>copy-only</em> materialization:
-- If the artifact's resolved source path exists, it is copied to the destination.
-- If it does not exist, behavior depends on <code>on_missing</code>.
-- If the destination already exists, it is left untouched.
-- Destination paths cannot be symlinks and will not be overwritten if the type differs.</p>
-<p>This function does not attempt database-backed reconstruction. Higher-level code
-can decide when to call <code>consist.load(...)</code> or enable DB recovery.</p>
-
-
-<p><span class="doc-section-title">Parameters:</span></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Name</th>
-          <th>Type</th>
-          <th>Description</th>
-          <th>Default</th>
-        </tr>
-      </thead>
-      <tbody>
-          <tr class="doc-section-item">
-            <td>
-                <code>tracker</code>
-            </td>
-            <td>
-                  <code><span title="consist.core.tracker.Tracker">Tracker</span></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Tracker used to resolve portable artifact URIs to host filesystem paths.</p>
-              </div>
-            </td>
-            <td>
-                <em>required</em>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>items</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Sequence" href="https://docs.python.org/3/library/typing.html#typing.Sequence">Sequence</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#tuple">tuple</a>[<span title="consist.models.artifact.Artifact">Artifact</span>, <a class="autorefs autorefs-external" title="pathlib.Path" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path">Path</a>]]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>A list of <code>(artifact, destination_path)</code> pairs to materialize.</p>
-              </div>
-            </td>
-            <td>
-                <em>required</em>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>on_missing</code>
-            </td>
-            <td>
-                  <code>(&#39;warn&#39;, &#39;raise&#39;)</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>What to do when a resolved source path does not exist.</p>
-              </div>
-            </td>
-            <td>
-                  <code>&#34;warn&#34;</code>
-            </td>
-          </tr>
-      </tbody>
-    </table>
-
-
-    <p><span class="doc-section-title">Returns:</span></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Type</th>
-          <th>Description</th>
-        </tr>
-      </thead>
-      <tbody>
-          <tr class="doc-section-item">
-            <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#dict">dict</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>, <a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Map of <code>artifact.key -&gt; destination_path</code> for successfully materialized items.</p>
-              </div>
-            </td>
-          </tr>
-      </tbody>
-    </table>
-
-
-    </div>
-
-</div>
-
-<div class="doc doc-object doc-function">
-
-
-<h2 id="consist.core.materialize.materialize_artifacts_from_sources" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">materialize_artifacts_from_sources</span><span class="p">(</span><span class="n">items</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">allowed_base</span><span class="p">,</span> <span class="n">on_missing</span><span class="o">=</span><span class="s1">&#39;warn&#39;</span><span class="p">)</span></code>
-
-<a href="#consist.core.materialize.materialize_artifacts_from_sources" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Copy artifact bytes from explicit source paths to caller-specified destinations.</p>
-<p>This is useful for rehydrating cached inputs from historical run directories
-when the current run directory is different from the original producer.
-Existing destination paths are left untouched.
-Destination paths cannot be symlinks and will not be overwritten if the type differs.</p>
-
-
-<p><span class="doc-section-title">Parameters:</span></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Name</th>
-          <th>Type</th>
-          <th>Description</th>
-          <th>Default</th>
-        </tr>
-      </thead>
-      <tbody>
-          <tr class="doc-section-item">
-            <td>
-                <code>allowed_base</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="pathlib.Path" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path">Path</a> | None</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Base directory that destination paths must remain within. When None,
-no base containment check is performed.</p>
-              </div>
-            </td>
-            <td>
-                <em>required</em>
-            </td>
-          </tr>
-      </tbody>
-    </table>
-
-
-    </div>
-
-</div>
-
-<div class="doc doc-object doc-function">
-
-
-<h2 id="consist.core.materialize.build_materialize_items_for_keys" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">build_materialize_items_for_keys</span><span class="p">(</span><span class="n">outputs</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">destinations_by_key</span><span class="p">)</span></code>
-
-<a href="#consist.core.materialize.build_materialize_items_for_keys" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Convenience helper to construct <code>(artifact, destination)</code> pairs by artifact key.</p>
-<p>Any keys not present in <code>outputs</code> are ignored (caller decides whether to treat
-this as an error).</p>
-
-
-    </div>
-
-</div>
-
-<div class="doc doc-object doc-function">
-
-
-<h2 id="consist.core.materialize.materialize_ingested_artifact_from_db" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">materialize_ingested_artifact_from_db</span><span class="p">(</span><span class="o">*</span><span class="p">,</span> <span class="n">artifact</span><span class="p">,</span> <span class="n">tracker</span><span class="p">,</span> <span class="n">destination</span><span class="p">)</span></code>
-
-<a href="#consist.core.materialize.materialize_ingested_artifact_from_db" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Reconstruct a CSV/Parquet artifact from DuckDB and write it to disk.</p>
-<p>This is intended for <code>cache_hydration="inputs-missing"</code> when the original
-on-disk source is missing but the artifact is ingested (<code>is_ingested=True</code>).</p>
-<p>Supported drivers: csv, parquet. All other drivers raise ValueError.</p>
-
-
-    </div>
-
-</div>
-
-
-
-  </div>
-
-    </div>
-
-</div>
+<h1 id="core-concepts-overview">Core Concepts Overview<a class="headerlink" href="#core-concepts-overview" title="Permanent link">&para;</a></h1>
+<p>This section establishes the mental model for Consist before covering API details.</p>
+<hr />
+<h2 id="core-abstractions">Core Abstractions<a class="headerlink" href="#core-abstractions" title="Permanent link">&para;</a></h2>
+<p><strong>Artifact</strong>: A file with provenance metadata—its path, format, content hash (SHA256), producing run, and ingestion status.</p>
+<p><strong>Run</strong>: A single execution with tracked inputs, configuration, outputs, status, and timing. Each run has a signature computed from code, config, and inputs that enables cache reuse.</p>
+<p><strong>Scenario</strong>: A parent run grouping related child runs for multi-variant studies or iterative workflows.</p>
+<p><strong>Coupler</strong>: A helper that passes artifacts between steps in a scenario, linking lineage automatically.</p>
+<hr />
+<h2 id="how-caching-works">How Caching Works<a class="headerlink" href="#how-caching-works" title="Permanent link">&para;</a></h2>
+<p>Consist computes a signature from code version, config, and input artifact hashes:</p>
+<pre class="mermaid"><code>graph LR
+    Code[Code Version] --&gt; Hash[SHA256 Signature]
+    Config[Configuration] --&gt; Hash
+    Inputs[Input Artifacts] --&gt; Hash
+    Hash --&gt; Lookup{Cache Lookup}
+    Lookup --&gt;|Hit| Return[Return Cached Outputs]
+    Lookup --&gt;|Miss| Execute[Execute &amp; Record New Run]</code></pre>
+<p>Same signature → return cached outputs. Different signature → execute and record new lineage.</p>
+<p>On cache hits, Consist returns output artifact metadata without copying files. Load or hydrate outputs when you need bytes.</p>
+<p><strong>Example</strong>: In a parameter sweep testing 20 demand elasticity values, the first run executes preprocessing and the demand model. Runs 2–20 cache-hit on preprocessing (same inputs, same code) but cache-miss on the demand model (different elasticity). Consist skips 19 preprocessing executions.</p>
+<hr />
+<h2 id="provenance-lineage">Provenance &amp; Lineage<a class="headerlink" href="#provenance-lineage" title="Permanent link">&para;</a></h2>
+<p><strong>Provenance</strong>: The complete history of a result—code version, configuration, input data, and compute environment. Consist records provenance automatically for every run.</p>
+<p><strong>Lineage</strong>: The dependency chain showing which run created an artifact, which inputs that run consumed, and which runs produced those inputs.</p>
+<pre class="mermaid"><code>graph TD
+    Raw[Raw Data] --&gt; Step1[Run: Clean]
+    Config1[Threshold=0.5] --&gt; Step1
+    Step1 --&gt; Art1[Artifact: Cleaned]
+    Art1 --&gt; Step2[Run: Analyze]
+    Config2[GroupByKey=category] --&gt; Step2
+    Step2 --&gt; Art2[Artifact: Summary]</code></pre>
+<p>Provenance answers three questions: <em>Can I re-run this exactly?</em> (reproducibility), <em>Which config produced this figure?</em> (accountability), and <em>Why did this change?</em> (debugging).</p>
+<p><strong>Example</strong>: You published a land-use forecast. A reviewer asks which scenario produced Figure 3. Run <code>consist show &lt;run_id&gt;</code> to see the code version (commit SHA), config parameters, input parcel data, and execution timestamp.</p>
+<hr />
+<h2 id="key-terms-dependency-ordered">Key Terms (Dependency-Ordered)<a class="headerlink" href="#key-terms-dependency-ordered" title="Permanent link">&para;</a></h2>
+<h3 id="identity-caching-foundation">Identity &amp; Caching Foundation<a class="headerlink" href="#identity-caching-foundation" title="Permanent link">&para;</a></h3>
+<p><strong>Signature</strong>: A fingerprint of a run computed by hashing code version, configuration, and input data.</p>
+<p><strong>Canonical Hashing</strong>: Converting configuration data into a deterministic fingerprint regardless of field order or number formatting—<code>{"a": 1, "b": 2}</code> and <code>{"b": 2, "a": 1}</code> produce the same hash.</p>
+<p><strong>Merkle DAG</strong>: A graph structure where each step's inputs link to previous steps' outputs, creating an immutable lineage record that enables cache validation and data recovery.</p>
+<h3 id="configuration-querying">Configuration &amp; Querying<a class="headerlink" href="#configuration-querying" title="Permanent link">&para;</a></h3>
+<p><strong>Config</strong>: Parameters that affect computation and are included in the cache signature; changing config triggers re-execution.</p>
+<p><strong>Identity Config</strong>: The subset of configuration parameters that affect a run's cache signature.</p>
+<p><strong>Facet</strong>: A queryable subset of configuration (e.g., <code>{"year": 2030, "scenario": "baseline"}</code>) indexed in DuckDB for filtering runs without affecting caching.</p>
+<h3 id="cache-behavior">Cache Behavior<a class="headerlink" href="#cache-behavior" title="Permanent link">&para;</a></h3>
+<p><strong>Cache Hit</strong>: Consist finds a previous run with identical signature and returns cached artifact metadata.</p>
+<p><strong>Cache Miss</strong>: No matching cached result exists; the function executes and outputs are recorded as new artifacts.</p>
+<p><strong>Hydration</strong>: Recovering metadata and location information about a previous run's output without copying file bytes. Hydration ≠ copying files.</p>
+<h3 id="data-storage-recovery">Data Storage &amp; Recovery<a class="headerlink" href="#data-storage-recovery" title="Permanent link">&para;</a></h3>
+<p><strong>Ingestion</strong>: Loading artifact data into DuckDB for SQL-native analysis.</p>
+<p><strong>Materialization</strong>: Copying artifact bytes into DuckDB so data is recoverable if original files are deleted.</p>
+<p><strong>Ghost Mode</strong>: Recovering artifacts from DuckDB when physical files no longer exist.</p>
+<h3 id="data-virtualization">Data Virtualization<a class="headerlink" href="#data-virtualization" title="Permanent link">&para;</a></h3>
+<p><strong>Virtualization</strong>: Querying multiple artifacts as a single table without loading all data into memory.</p>
+<p><strong>Hybrid View</strong>: A SQL view combining hot data (ingested into DuckDB) with cold data (read from files on-the-fly).</p>
+<h3 id="data-types">Data Types<a class="headerlink" href="#data-types" title="Permanent link">&para;</a></h3>
+<p><strong>Cold Data</strong>: File-based data on disk; provenance is tracked but data is not queryable via SQL until ingested.</p>
+<p><strong>Hot Data</strong>: Data ingested into DuckDB for SQL queries, schema tracking, and optional recovery.</p>
+<h3 id="integrations-extensions">Integrations &amp; Extensions<a class="headerlink" href="#integrations-extensions" title="Permanent link">&para;</a></h3>
+<p><strong>DLT (Data Load Tool)</strong>: A Python library for loading data into warehouses; Consist uses DLT to ingest artifacts with provenance columns.</p>
+<p><strong>Coupler</strong>: A pattern for multi-step workflows that passes artifacts between steps and links lineage through scenario trees.</p>
+<p><strong>Trace</strong>: The execution path through a multi-step workflow showing which runs executed, which cache-hit, and which artifacts were passed.</p>
+<hr />
+<h2 id="how-inputs-and-outputs-are-treated">How Inputs and Outputs Are Treated<a class="headerlink" href="#how-inputs-and-outputs-are-treated" title="Permanent link">&para;</a></h2>
+<p><strong>Inputs</strong> are files or values that influence computation. File inputs are hashed by content or metadata depending on the hashing strategy (<code>full</code> vs <code>fast</code>).</p>
+<p><strong>Outputs</strong> are named artifacts declared via <code>consist.run(...)</code> or <code>tracker.run(...)</code>. Consist stores their paths and provenance metadata for lookup and querying.</p>
+<p>Write outputs under <code>tracker.run_dir</code> or a mounted <code>outputs://</code> root. This keeps artifact paths relative and portable across machines.</p>
+<h3 id="input-mappings-and-auto-loading">Input mappings and auto-loading<a class="headerlink" href="#input-mappings-and-auto-loading" title="Permanent link">&para;</a></h3>
+<p>Inputs can be passed as a list (hash-only) or a mapping (hash + parameter injection). When using a mapping, Consist matches input keys to function parameters and auto-loads artifacts by default. To pass raw paths instead, set <code>load_inputs=False</code> and provide paths via <code>runtime_kwargs</code>.</p>
+<p>Concrete example:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">pandas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pd</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="k">def</span><span class="w"> </span><span class="nf">summarize_trips</span><span class="p">(</span><span class="n">trips_df</span><span class="p">):</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>    <span class="k">return</span> <span class="n">trips_df</span><span class="p">[</span><span class="s2">&quot;distance_miles&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="n">result</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>  <span class="c1"># (1)!</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    <span class="n">fn</span><span class="o">=</span><span class="n">summarize_trips</span><span class="p">,</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;trips_df&quot;</span><span class="p">:</span> <span class="n">trips_artifact</span><span class="p">},</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="p">)</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="k">def</span><span class="w"> </span><span class="nf">summarize_trips_from_path</span><span class="p">(</span><span class="n">trips_path</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>    <span class="n">df</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_parquet</span><span class="p">(</span><span class="n">trips_path</span><span class="p">)</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>    <span class="k">return</span> <span class="n">df</span><span class="p">[</span><span class="s2">&quot;distance_miles&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="n">result</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>  <span class="c1"># (2)!</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>    <span class="n">fn</span><span class="o">=</span><span class="n">summarize_trips_from_path</span><span class="p">,</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;trips_path&quot;</span><span class="p">:</span> <span class="n">trips_artifact</span><span class="p">},</span>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>    <span class="n">load_inputs</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a>    <span class="n">runtime_kwargs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;trips_path&quot;</span><span class="p">:</span> <span class="n">trips_artifact</span><span class="o">.</span><span class="n">path</span><span class="p">},</span>
+</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a><span class="p">)</span>
+</span></code></pre></div>
+<ol>
+<li>Auto-loading: mapping keys match function params, so Consist loads the DataFrame.</li>
+<li>No auto-loading: you get the raw path and load it yourself.</li>
+</ol>
+<hr />
+<h2 id="next-steps">Next Steps<a class="headerlink" href="#next-steps" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong><a href="../config-management/">Config Management</a></strong> — Understand the config vs. facet distinction and when to use each</li>
+<li><strong><a href="../caching-and-hydration/">Caching &amp; Hydration</a></strong> — Caching patterns and data recovery strategies</li>
+<li><strong><a href="../data-materialization/">Data Materialization</a></strong> — When to ingest data and use hybrid views</li>
+</ul>
 
 
 
@@ -2403,7 +2508,7 @@ on-disk source is missing but the artifact is ingested (<code>is_ingested=True</
       <nav class="md-footer__inner md-grid" aria-label="Footer" >
         
           
-          <a href="../matrix/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Matrix Views">
+          <a href="../../cli-reference/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Command Line Interface">
             <div class="md-footer__button md-icon">
               
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></svg>
@@ -2413,11 +2518,27 @@ on-disk source is missing but the artifact is ingested (<code>is_ingested=True</
                 Previous
               </span>
               <div class="md-ellipsis">
-                Matrix Views
+                Command Line Interface
               </div>
             </div>
           </a>
         
+        
+          
+          <a href="../config-management/" class="md-footer__link md-footer__link--next" aria-label="Next: Config Management: Caching vs. Filtering">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Config Management: Caching vs. Filtering
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </div>
+          </a>
         
       </nav>
     

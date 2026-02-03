@@ -7,25 +7,31 @@
         <loc>https://LBNL-UCB-STI.github.io/consist/getting-started/installation/</loc>
       </url>
       <url>
-        <loc>https://LBNL-UCB-STI.github.io/consist/concepts/</loc>
+        <loc>https://LBNL-UCB-STI.github.io/consist/getting-started/quickstart/</loc>
       </url>
       <url>
-        <loc>https://LBNL-UCB-STI.github.io/consist/usage-guide/</loc>
-      </url>
-      <url>
-        <loc>https://LBNL-UCB-STI.github.io/consist/caching-fundamentals/</loc>
-      </url>
-      <url>
-        <loc>https://LBNL-UCB-STI.github.io/consist/examples/</loc>
+        <loc>https://LBNL-UCB-STI.github.io/consist/getting-started/first-workflow/</loc>
       </url>
       <url>
         <loc>https://LBNL-UCB-STI.github.io/consist/cli-reference/</loc>
       </url>
       <url>
-        <loc>https://LBNL-UCB-STI.github.io/consist/configs/</loc>
+        <loc>https://LBNL-UCB-STI.github.io/consist/concepts/overview/</loc>
       </url>
       <url>
-        <loc>https://LBNL-UCB-STI.github.io/consist/caching-and-hydration/</loc>
+        <loc>https://LBNL-UCB-STI.github.io/consist/concepts/config-management/</loc>
+      </url>
+      <url>
+        <loc>https://LBNL-UCB-STI.github.io/consist/concepts/caching-and-hydration/</loc>
+      </url>
+      <url>
+        <loc>https://LBNL-UCB-STI.github.io/consist/concepts/data-materialization/</loc>
+      </url>
+      <url>
+        <loc>https://LBNL-UCB-STI.github.io/consist/usage-guide/</loc>
+      </url>
+      <url>
+        <loc>https://LBNL-UCB-STI.github.io/consist/configs/</loc>
       </url>
       <url>
         <loc>https://LBNL-UCB-STI.github.io/consist/dlt-loader-guide/</loc>
@@ -35,9 +41,6 @@
       </url>
       <url>
         <loc>https://LBNL-UCB-STI.github.io/consist/mounts-and-portability/</loc>
-      </url>
-      <url>
-        <loc>https://LBNL-UCB-STI.github.io/consist/ingestion-and-hybrid-views/</loc>
       </url>
       <url>
         <loc>https://LBNL-UCB-STI.github.io/consist/schema-export/</loc>
@@ -55,10 +58,13 @@
         <loc>https://LBNL-UCB-STI.github.io/consist/integrations/config_adapters/</loc>
       </url>
       <url>
+        <loc>https://LBNL-UCB-STI.github.io/consist/integrations/config_adapters_beam/</loc>
+      </url>
+      <url>
         <loc>https://LBNL-UCB-STI.github.io/consist/integrations/config_adapters_activitysim/</loc>
       </url>
       <url>
-        <loc>https://LBNL-UCB-STI.github.io/consist/integrations/config_adapters_beam/</loc>
+        <loc>https://LBNL-UCB-STI.github.io/consist/examples/</loc>
       </url>
       <url>
         <loc>https://LBNL-UCB-STI.github.io/consist/troubleshooting/</loc>

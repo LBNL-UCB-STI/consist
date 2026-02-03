@@ -12,32 +12,36 @@
         <meta name="author" content="Zach Needell">
       
       
-        <link rel="canonical" href="https://LBNL-UCB-STI.github.io/consist/concepts/">
+        <link rel="canonical" href="https://LBNL-UCB-STI.github.io/consist/concepts/config-management/">
       
       
+        <link rel="prev" href="../overview/">
+      
+      
+        <link rel="next" href="../caching-and-hydration/">
       
       
         
       
       
-      <link rel="icon" href="../assets/logo.png">
+      <link rel="icon" href="../../assets/logo.png">
       <meta name="generator" content="zensical-0.0.20">
     
     
       
-        <title>Moved - Consist</title>
+        <title>Config Management: Caching vs. Filtering - Consist</title>
       
     
     
       
         
       
-      <link rel="stylesheet" href="../assets/stylesheets/modern/main.d4922b3c.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/modern/main.d4922b3c.min.css">
       
         
           
         
-        <link rel="stylesheet" href="../assets/stylesheets/modern/palette.dfe2e883.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/modern/palette.dfe2e883.min.css">
       
       
 
@@ -56,9 +60,9 @@
       
     
     
-      <link rel="stylesheet" href="../stylesheets/extra.css">
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
     
-    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,a=__md_scope)=>JSON.parse(t.getItem(a.pathname+"."+e)),__md_set=(e,t,a=localStorage,_=__md_scope)=>{try{a.setItem(_.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,a=__md_scope)=>JSON.parse(t.getItem(a.pathname+"."+e)),__md_set=(e,t,a=localStorage,_=__md_scope)=>{try{a.setItem(_.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
     
       
 
@@ -83,7 +87,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#moved" class="md-skip">
+        <a href="#config-management-caching-vs-filtering" class="md-skip">
           Skip to content
         </a>
       
@@ -97,9 +101,9 @@
 
 <header class="md-header" data-md-component="header">
   <nav class="md-header__inner md-grid" aria-label="Header">
-    <a href=".." title="Consist" class="md-header__button md-logo" aria-label="Consist" data-md-component="logo">
+    <a href="../.." title="Consist" class="md-header__button md-logo" aria-label="Consist" data-md-component="logo">
       
-  <img src="../assets/logo-square-dark.png" alt="logo">
+  <img src="../../assets/logo-square-dark.png" alt="logo">
 
     </a>
     <label class="md-header__button md-icon" for="__drawer">
@@ -116,7 +120,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Moved
+              Config Management: Caching vs. Filtering
             
           </span>
         </div>
@@ -200,7 +204,7 @@
   
   
     <li class="md-tabs__item">
-      <a href=".." class="md-tabs__link">
+      <a href="../.." class="md-tabs__link">
         
   
   Home
@@ -218,7 +222,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../getting-started/installation/" class="md-tabs__link">
+        <a href="../../getting-started/installation/" class="md-tabs__link">
           
   
   Getting Started
@@ -233,11 +237,13 @@
   
   
   
+    
+  
   
     
     
-      <li class="md-tabs__item">
-        <a href="overview/" class="md-tabs__link">
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../overview/" class="md-tabs__link">
           
   
   Concepts
@@ -256,7 +262,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../usage-guide/" class="md-tabs__link">
+        <a href="../../usage-guide/" class="md-tabs__link">
           
   
   Guides
@@ -275,7 +281,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../integrations/" class="md-tabs__link">
+        <a href="../../integrations/" class="md-tabs__link">
           
   
   Integrations
@@ -292,7 +298,7 @@
   
   
     <li class="md-tabs__item">
-      <a href="../examples/" class="md-tabs__link">
+      <a href="../../examples/" class="md-tabs__link">
         
   
   Examples
@@ -310,7 +316,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../troubleshooting/" class="md-tabs__link">
+        <a href="../../troubleshooting/" class="md-tabs__link">
           
   
   Support & Reference
@@ -329,7 +335,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../api/" class="md-tabs__link">
+        <a href="../../api/" class="md-tabs__link">
           
   
   API Reference
@@ -351,9 +357,7 @@
           
             
               
-                
-              
-              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" hidden>
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
                 <div class="md-sidebar__scrollwrap">
                   <div class="md-sidebar__inner">
                     
@@ -364,9 +368,9 @@
 
 <nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
   <label class="md-nav__title" for="__drawer">
-    <a href=".." title="Consist" class="md-nav__button md-logo" aria-label="Consist" data-md-component="logo">
+    <a href="../.." title="Consist" class="md-nav__button md-logo" aria-label="Consist" data-md-component="logo">
       
-  <img src="../assets/logo-square-dark.png" alt="logo">
+  <img src="../../assets/logo-square-dark.png" alt="logo">
 
     </a>
     Consist
@@ -381,7 +385,7 @@
   
   
     <li class="md-nav__item">
-      <a href=".." class="md-nav__link">
+      <a href="../.." class="md-nav__link">
         
   
   
@@ -472,7 +476,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../getting-started/installation/" class="md-nav__link">
+      <a href="../../getting-started/installation/" class="md-nav__link">
         
   
   
@@ -500,7 +504,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../getting-started/quickstart/" class="md-nav__link">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
         
   
   
@@ -528,7 +532,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../getting-started/first-workflow/" class="md-nav__link">
+      <a href="../../getting-started/first-workflow/" class="md-nav__link">
         
   
   
@@ -556,7 +560,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../cli-reference/" class="md-nav__link">
+      <a href="../../cli-reference/" class="md-nav__link">
         
   
   
@@ -588,8 +592,10 @@
       
   
   
+    
   
   
+  
     
     
       
@@ -605,21 +611,22 @@
     
     
       
+        
+        
+      
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
       
         
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
         
           
-        
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
-        
-          
-          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
             
   
   
@@ -637,7 +644,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
           <label class="md-nav__title" for="__nav_3">
             <span class="md-nav__icon md-icon"></span>
             
@@ -655,7 +662,7 @@
   
   
     <li class="md-nav__item">
-      <a href="overview/" class="md-nav__link">
+      <a href="../overview/" class="md-nav__link">
         
   
   
@@ -680,10 +687,37 @@
                 
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="config-management/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Config Management: Caching vs. Filtering
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
         
   
   
@@ -699,6 +733,143 @@
   
 
       </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#decision-tree" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Decision Tree
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reference-table" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reference Table
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-distinction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Distinction
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#practical-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Practical Example
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#config-hashing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Config Hashing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#config-adapters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Config Adapters
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Config Adapters">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#when-to-use-each-adapter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When to Use Each Adapter
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#canonicalize_confignative_config-dict" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        canonicalize_config(native_config) -&gt; dict
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#prepare_confignative_config-scenario_id-year-dict" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        prepare_config(native_config, scenario_id, year) -&gt; dict
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See Also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -711,7 +882,7 @@
   
   
     <li class="md-nav__item">
-      <a href="caching-and-hydration/" class="md-nav__link">
+      <a href="../caching-and-hydration/" class="md-nav__link">
         
   
   
@@ -739,7 +910,7 @@
   
   
     <li class="md-nav__item">
-      <a href="data-materialization/" class="md-nav__link">
+      <a href="../data-materialization/" class="md-nav__link">
         
   
   
@@ -842,7 +1013,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../usage-guide/" class="md-nav__link">
+      <a href="../../usage-guide/" class="md-nav__link">
         
   
   
@@ -870,7 +1041,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../configs/" class="md-nav__link">
+      <a href="../../configs/" class="md-nav__link">
         
   
   
@@ -898,7 +1069,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../dlt-loader-guide/" class="md-nav__link">
+      <a href="../../dlt-loader-guide/" class="md-nav__link">
         
   
   
@@ -926,7 +1097,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../containers-guide/" class="md-nav__link">
+      <a href="../../containers-guide/" class="md-nav__link">
         
   
   
@@ -954,7 +1125,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../mounts-and-portability/" class="md-nav__link">
+      <a href="../../mounts-and-portability/" class="md-nav__link">
         
   
   
@@ -982,7 +1153,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../schema-export/" class="md-nav__link">
+      <a href="../../schema-export/" class="md-nav__link">
         
   
   
@@ -1048,7 +1219,7 @@
         
           
           <div class="md-nav__link md-nav__container">
-            <a href="../integrations/" class="md-nav__link ">
+            <a href="../../integrations/" class="md-nav__link ">
               
   
   
@@ -1092,7 +1263,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../integrations/containers/" class="md-nav__link">
+      <a href="../../integrations/containers/" class="md-nav__link">
         
   
   
@@ -1120,7 +1291,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../integrations/dlt_loader/" class="md-nav__link">
+      <a href="../../integrations/dlt_loader/" class="md-nav__link">
         
   
   
@@ -1210,7 +1381,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../integrations/config_adapters/" class="md-nav__link">
+      <a href="../../integrations/config_adapters/" class="md-nav__link">
         
   
   
@@ -1238,7 +1409,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../integrations/config_adapters_beam/" class="md-nav__link">
+      <a href="../../integrations/config_adapters_beam/" class="md-nav__link">
         
   
   
@@ -1266,7 +1437,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../integrations/config_adapters_activitysim/" class="md-nav__link">
+      <a href="../../integrations/config_adapters_activitysim/" class="md-nav__link">
         
   
   
@@ -1309,7 +1480,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../examples/" class="md-nav__link">
+      <a href="../../examples/" class="md-nav__link">
         
   
   
@@ -1398,7 +1569,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../troubleshooting/" class="md-nav__link">
+      <a href="../../troubleshooting/" class="md-nav__link">
         
   
   
@@ -1426,7 +1597,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../glossary/" class="md-nav__link">
+      <a href="../../glossary/" class="md-nav__link">
         
   
   
@@ -1454,7 +1625,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../architecture/" class="md-nav__link">
+      <a href="../../architecture/" class="md-nav__link">
         
   
   
@@ -1536,7 +1707,7 @@
         
           
           <div class="md-nav__link md-nav__container">
-            <a href="../api/" class="md-nav__link ">
+            <a href="../../api/" class="md-nav__link ">
               
   
   
@@ -1582,7 +1753,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/public_api/" class="md-nav__link">
+      <a href="../../api/public_api/" class="md-nav__link">
         
   
   
@@ -1610,7 +1781,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/api_helpers/" class="md-nav__link">
+      <a href="../../api/api_helpers/" class="md-nav__link">
         
   
   
@@ -1638,7 +1809,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/tracker/" class="md-nav__link">
+      <a href="../../api/tracker/" class="md-nav__link">
         
   
   
@@ -1666,7 +1837,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/workflow/" class="md-nav__link">
+      <a href="../../api/workflow/" class="md-nav__link">
         
   
   
@@ -1694,7 +1865,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/artifact/" class="md-nav__link">
+      <a href="../../api/artifact/" class="md-nav__link">
         
   
   
@@ -1722,7 +1893,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/run/" class="md-nav__link">
+      <a href="../../api/run/" class="md-nav__link">
         
   
   
@@ -1750,7 +1921,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/indexing/" class="md-nav__link">
+      <a href="../../api/indexing/" class="md-nav__link">
         
   
   
@@ -1778,7 +1949,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/identity/" class="md-nav__link">
+      <a href="../../api/identity/" class="md-nav__link">
         
   
   
@@ -1806,7 +1977,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/views/" class="md-nav__link">
+      <a href="../../api/views/" class="md-nav__link">
         
   
   
@@ -1834,7 +2005,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/matrix/" class="md-nav__link">
+      <a href="../../api/matrix/" class="md-nav__link">
         
   
   
@@ -1862,7 +2033,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/materialize/" class="md-nav__link">
+      <a href="../../api/materialize/" class="md-nav__link">
         
   
   
@@ -1898,8 +2069,6 @@
             
             
               
-                
-              
               <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
                 <div class="md-sidebar__scrollwrap">
                   <div class="md-sidebar__inner">
@@ -1913,6 +2082,130 @@
     
   
   
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#decision-tree" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Decision Tree
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reference-table" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reference Table
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-distinction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Distinction
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#practical-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Practical Example
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#config-hashing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Config Hashing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#config-adapters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Config Adapters
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Config Adapters">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#when-to-use-each-adapter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When to Use Each Adapter
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#canonicalize_confignative_config-dict" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        canonicalize_config(native_config) -&gt; dict
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#prepare_confignative_config-scenario_id-year-dict" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        prepare_config(native_config, scenario_id, year) -&gt; dict
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See Also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
 </nav>
                   </div>
                 </div>
@@ -1924,23 +2217,179 @@
               
                 
 
+
+
   
 
 
+  <nav class="md-path" aria-label="Navigation" >
+    <ol class="md-path__list">
+      
+        
+  
+  
+    <li class="md-path__item">
+      <a href="../.." class="md-path__link">
+        
+  <span class="md-ellipsis">
+    Home
+  </span>
 
+      </a>
+    </li>
   
 
+      
+      
+        
+  
+  
+    
+    
+      <li class="md-path__item">
+        <a href="../overview/" class="md-path__link">
+          
+  <span class="md-ellipsis">
+    Concepts
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ol>
+  </nav>
 
               
               <article class="md-content__inner md-typeset">
                 
                   
 
-<h1 id="moved">Moved<a class="headerlink" href="#moved" title="Permanent link">&para;</a></h1>
-<p>This page has been reorganized. See <a href="../concepts/overview/">Core Concepts</a> for the new location.</p>
-<p><a href="../concepts/overview/">Redirect</a></p>
+<h1 id="config-management-caching-vs-filtering">Config Management: Caching vs. Filtering<a class="headerlink" href="#config-management-caching-vs-filtering" title="Permanent link">&para;</a></h1>
+<p>When configuring a run, decide whether each parameter should trigger re-execution on change or be searchable for later filtering—or both.</p>
+<hr />
+<h2 id="decision-tree">Decision Tree<a class="headerlink" href="#decision-tree" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Should changing this parameter re-run my model?</strong> → <code>config</code></li>
+<li><strong>Do I need to search/filter by this value later?</strong> → <code>facet</code></li>
+<li><strong>Both?</strong> → Use both. A value can appear in config (cache invalidation) and facet (queryable).</li>
+</ul>
+<hr />
+<h2 id="reference-table">Reference Table<a class="headerlink" href="#reference-table" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Affects Cache?</th>
+<th>Queryable?</th>
+<th>Use For</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>config=</code></td>
+<td>Yes</td>
+<td>No (by default)</td>
+<td>Parameters that change behavior</td>
+</tr>
+<tr>
+<td><code>facet=</code></td>
+<td>No</td>
+<td>Yes (indexed)</td>
+<td>Metadata for filtering/grouping</td>
+</tr>
+<tr>
+<td><code>facet_from=</code></td>
+<td>—</td>
+<td>Yes</td>
+<td>Extract keys from config for queries</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="the-distinction">The Distinction<a class="headerlink" href="#the-distinction" title="Permanent link">&para;</a></h2>
+<p><strong>Config</strong> affects reproducibility: Consist hashes config values into the run signature. If config changes, the signature changes, and cached results do not apply—the run re-executes.</p>
+<p><strong>Facet</strong> enables filtering: Facets are indexed in DuckDB without affecting caching. Query "all runs where year=2030 and scenario='baseline'" without storing entire configs.</p>
+<hr />
+<h2 id="practical-example">Practical Example<a class="headerlink" href="#practical-example" title="Permanent link">&para;</a></h2>
+<p>Store a 100KB ActivitySim config file as <code>config=...</code> (hashes into signature; changes trigger re-runs). Extract small, queryable pieces as facets:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="n">consist</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>    <span class="n">fn</span><span class="o">=</span><span class="n">my_model</span><span class="p">,</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>    <span class="n">config</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;full_config_path&quot;</span><span class="p">:</span> <span class="s2">&quot;activitysim_config.yaml&quot;</span><span class="p">},</span>  <span class="c1"># (1)!</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>    <span class="n">facet</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;year&quot;</span><span class="p">:</span> <span class="mi">2030</span><span class="p">,</span> <span class="s2">&quot;mode_choice_coefficient&quot;</span><span class="p">:</span> <span class="mf">0.5</span><span class="p">},</span>   <span class="c1"># (2)!</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="o">...</span><span class="p">},</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="o">...</span><span class="p">]</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="p">)</span>
+</span></code></pre></div>
+<ol>
+<li>Hashed; changes invalidate cache.</li>
+<li>Queryable; doesn't affect cache.</li>
+</ol>
+<p>This approach enables:</p>
+<ol>
+<li>Queries like <code>mode_choice_coefficient &gt; 0.4</code> without bloating the database with raw config files</li>
+<li>Cache misses when the full config file changes (reproducibility)</li>
+<li>Post-hoc filtering by year or coefficient</li>
+</ol>
+<p><strong>Example</strong>: Running demand models for 10 years (2020–2050) × 3 scenarios (baseline, transit-friendly, congestion pricing). Set <code>facet={"year": 2030, "scenario": "transit-friendly"}</code> for each run. Query <code>facet_year=2040</code> to retrieve all 2040 runs instantly—no manual search through 500 directories.</p>
+<hr />
+<h2 id="config-hashing">Config Hashing<a class="headerlink" href="#config-hashing" title="Permanent link">&para;</a></h2>
+<p>Consist uses <strong>canonical hashing</strong>: converting dictionaries (and YAML/JSON) into a deterministic fingerprint regardless of field order or number formatting. Both <code>{"a": 1, "b": 2}</code> and <code>{"b": 2, "a": 1}</code> produce the same hash, so cache remains stable when config dicts are built in different orders.</p>
+<hr />
+<h2 id="config-adapters">Config Adapters<a class="headerlink" href="#config-adapters" title="Permanent link">&para;</a></h2>
+<p>Building an integration for ActivitySim, MATSim, or similar tools requires a <strong>config adapter</strong>—a function that transforms the tool's native config into a Consist-compatible format.</p>
+<h3 id="when-to-use-each-adapter">When to Use Each Adapter<a class="headerlink" href="#when-to-use-each-adapter" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Adapter</th>
+<th>Purpose</th>
+<th>Required?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>canonicalize_config()</code></td>
+<td>Transform native config into a deterministic dict for hashing. Exclude irrelevant fields (logging, caches).</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td><code>prepare_config()</code></td>
+<td>Merge scenario parameters into native config for execution. Apply templating or defaults.</td>
+<td>No</td>
+</tr>
+</tbody>
+</table>
+<p>If you need only one, implement <code>canonicalize_config()</code>—it is the minimum requirement for caching.</p>
+<h3 id="canonicalize_confignative_config-dict"><code>canonicalize_config(native_config) -&gt; dict</code><a class="headerlink" href="#canonicalize_confignative_config-dict" title="Permanent link">&para;</a></h3>
+<p>Returns a stable representation for cache signatures:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="k">def</span><span class="w"> </span><span class="nf">canonicalize_config</span><span class="p">(</span><span class="n">activitysim_config_dict</span><span class="p">):</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>    <span class="k">return</span> <span class="p">{</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>        <span class="s2">&quot;year&quot;</span><span class="p">:</span> <span class="n">activitysim_config_dict</span><span class="p">[</span><span class="s2">&quot;year&quot;</span><span class="p">],</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>        <span class="s2">&quot;scenario&quot;</span><span class="p">:</span> <span class="n">activitysim_config_dict</span><span class="p">[</span><span class="s2">&quot;scenario&quot;</span><span class="p">],</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>        <span class="s2">&quot;mode_choice_coefficients&quot;</span><span class="p">:</span> <span class="n">activitysim_config_dict</span><span class="p">[</span><span class="s2">&quot;coefficients&quot;</span><span class="p">],</span>  <span class="c1"># (1)!</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>    <span class="p">}</span>
+</span></code></pre></div>
+<ol>
+<li>Return only the fields that affect model behavior.</li>
+</ol>
+<h3 id="prepare_confignative_config-scenario_id-year-dict"><code>prepare_config(native_config, scenario_id, year) -&gt; dict</code><a class="headerlink" href="#prepare_confignative_config-scenario_id-year-dict" title="Permanent link">&para;</a></h3>
+<p>Returns the full config the tool needs at runtime:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">def</span><span class="w"> </span><span class="nf">prepare_config</span><span class="p">(</span><span class="n">base_config</span><span class="p">,</span> <span class="n">scenario_id</span><span class="p">,</span> <span class="n">year</span><span class="p">):</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>    <span class="n">config</span> <span class="o">=</span> <span class="n">base_config</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>    <span class="n">config</span><span class="p">[</span><span class="s2">&quot;scenario_id&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">scenario_id</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>    <span class="n">config</span><span class="p">[</span><span class="s2">&quot;year&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">year</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>    <span class="k">return</span> <span class="n">config</span>
+</span></code></pre></div>
+<hr />
+<h2 id="see-also">See Also<a class="headerlink" href="#see-also" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong><a href="../caching-and-hydration/">Caching &amp; Hydration</a></strong> — How config changes affect cache behavior</li>
+<li><strong><a href="../../integrations/config_adapters/">Config Adapters</a></strong> — Detailed integration guide for adapters</li>
+</ul>
 
-  
 
 
 
@@ -1950,13 +2399,7 @@
 
 
 
-  
-  
 
-
-
-
-  
 
 
 
@@ -1980,6 +2423,44 @@
       
         <footer class="md-footer">
   
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../overview/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Core Concepts Overview">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Core Concepts Overview
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../caching-and-hydration/" class="md-footer__link md-footer__link--next" aria-label="Next: Caching and Artifact Hydration Patterns">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Caching and Artifact Hydration Patterns
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </div>
+          </a>
+        
+      </nav>
     
   
   <div class="md-footer-meta md-typeset">
@@ -2029,10 +2510,10 @@
       
       
       
-      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":["announce.dismiss","content.action.view","content.code.annotate","content.code.copy","content.code.select","content.footnote.tooltips","content.tabs.link","content.tooltips","navigation.expand","navigation.footer","navigation.indexes","navigation.path","navigation.sections","navigation.tabs","navigation.top","navigation.tracking","search.highlight","toc.follow"],"search":"../assets/javascripts/workers/search.e2d2d235.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+      <script id="__config" type="application/json">{"annotate":null,"base":"../..","features":["announce.dismiss","content.action.view","content.code.annotate","content.code.copy","content.code.select","content.footnote.tooltips","content.tabs.link","content.tooltips","navigation.expand","navigation.footer","navigation.indexes","navigation.path","navigation.sections","navigation.tabs","navigation.top","navigation.tracking","search.highlight","toc.follow"],"search":"../../assets/javascripts/workers/search.e2d2d235.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
     
     
-      <script src="../assets/javascripts/bundle.8ffeb9c9.min.js"></script>
+      <script src="../../assets/javascripts/bundle.8ffeb9c9.min.js"></script>
       
     
   </body>

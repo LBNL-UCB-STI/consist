@@ -15,16 +15,16 @@
         <link rel="canonical" href="https://LBNL-UCB-STI.github.io/consist/examples/">
       
       
-        <link rel="prev" href="../caching-fundamentals/">
+        <link rel="prev" href="../integrations/config_adapters_activitysim/">
       
       
-        <link rel="next" href="../cli-reference/">
+        <link rel="next" href="../troubleshooting/">
       
       
         
       
       
-      <link rel="icon" href="../assets/images/favicon.png">
+      <link rel="icon" href="../assets/logo.png">
       <meta name="generator" content="zensical-0.0.20">
     
     
@@ -103,8 +103,7 @@
   <nav class="md-header__inner md-grid" aria-label="Header">
     <a href=".." title="Consist" class="md-header__button md-logo" aria-label="Consist" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M1 7v10h1a2 2 0 1 0 4 0h12a2 2 0 1 0 4 0h1V7zm15 9h-2v-5h-4v5H8V9h8z"/></svg>
+  <img src="../assets/logo-square-dark.png" alt="logo">
 
     </a>
     <label class="md-header__button md-icon" for="__drawer">
@@ -219,12 +218,10 @@
   
   
   
-    
-  
   
     
     
-      <li class="md-tabs__item md-tabs__item--active">
+      <li class="md-tabs__item">
         <a href="../getting-started/installation/" class="md-tabs__link">
           
   
@@ -244,10 +241,29 @@
     
     
       <li class="md-tabs__item">
-        <a href="../configs/" class="md-tabs__link">
+        <a href="../concepts/overview/" class="md-tabs__link">
           
   
-  Core Topics
+  Concepts
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../usage-guide/" class="md-tabs__link">
+          
+  
+  Guides
 
         </a>
       </li>
@@ -271,6 +287,24 @@
         </a>
       </li>
     
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    <li class="md-tabs__item md-tabs__item--active">
+      <a href="./" class="md-tabs__link">
+        
+  
+  Examples
+
+      </a>
+    </li>
   
 
       
@@ -336,8 +370,7 @@
   <label class="md-nav__title" for="__drawer">
     <a href=".." title="Consist" class="md-nav__button md-logo" aria-label="Consist" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M1 7v10h1a2 2 0 1 0 4 0h12a2 2 0 1 0 4 0h1V7zm15 9h-2v-5h-4v5H8V9h8z"/></svg>
+  <img src="../assets/logo-square-dark.png" alt="logo">
 
     </a>
     Consist
@@ -376,16 +409,10 @@
       
   
   
-    
   
   
-  
     
     
-      
-        
-      
-        
       
         
       
@@ -399,22 +426,21 @@
     
     
       
-        
-        
-      
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--nested">
       
         
-        
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
         
           
-          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
             
   
   
@@ -432,7 +458,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
           <label class="md-nav__title" for="__nav_2">
             <span class="md-nav__icon md-icon"></span>
             
@@ -457,7 +483,7 @@
   <span class="md-ellipsis">
     
   
-    Installation and Quickstart
+    Installation
   
 
     
@@ -478,14 +504,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../concepts/" class="md-nav__link">
+      <a href="../getting-started/quickstart/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Concepts
+    Quickstart
   
 
     
@@ -506,14 +532,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../usage-guide/" class="md-nav__link">
+      <a href="../getting-started/first-workflow/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Usage Guide
+    First Workflow
   
 
     
@@ -522,143 +548,6 @@
   
 
       </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../caching-fundamentals/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    How Caching Works
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-    
-  
-  
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Examples
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Examples
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-      
-        
-
-
-<nav class="md-nav md-nav--secondary" aria-label="On this page">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      On this page
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#quickstart" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Quickstart
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#tutorial-series" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Tutorial series
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#notes" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Notes
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -716,12 +605,6 @@
       
         
       
-        
-      
-        
-      
-        
-      
     
     
     
@@ -747,7 +630,7 @@
   <span class="md-ellipsis">
     
   
-    Core Topics
+    Concepts
   
 
     
@@ -763,7 +646,7 @@
             <span class="md-nav__icon md-icon"></span>
             
   
-    Core Topics
+    Concepts
   
 
           </label>
@@ -776,14 +659,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../configs/" class="md-nav__link">
+      <a href="../concepts/overview/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Configuration, Identity, and Facets
+    Core Concepts Overview
   
 
     
@@ -804,7 +687,35 @@
   
   
     <li class="md-nav__item">
-      <a href="../caching-and-hydration/" class="md-nav__link">
+      <a href="../concepts/config-management/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Config Management: Caching vs. Filtering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/caching-and-hydration/" class="md-nav__link">
         
   
   
@@ -812,6 +723,165 @@
     
   
     Caching and Artifact Hydration Patterns
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/data-materialization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data Virtualization &amp; Materialization Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../usage-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Usage Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration, Identity, and Facets
   
 
     
@@ -916,34 +986,6 @@
   
   
     <li class="md-nav__item">
-      <a href="../ingestion-and-hybrid-views/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Ingestion &amp; Hybrid Views
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
       <a href="../schema-export/" class="md-nav__link">
         
   
@@ -1006,7 +1048,7 @@
         
           
         
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
         
           
           <div class="md-nav__link md-nav__container">
@@ -1028,14 +1070,14 @@
             </a>
             
               
-              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="0">
+              <label class="md-nav__link " for="__nav_5" id="__nav_5_label" tabindex="0">
                 <span class="md-nav__icon md-icon"></span>
               </label>
             
           </div>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_4">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1133,10 +1175,10 @@
         
           
         
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4_4" >
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5_4" >
         
           
-          <label class="md-nav__link" for="__nav_4_4" id="__nav_4_4_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_5_4" id="__nav_5_4_label" tabindex="0">
             
   
   
@@ -1154,8 +1196,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_4_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_4_4">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_4">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1200,7 +1242,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../integrations/config_adapters_activitysim/" class="md-nav__link">
+      <a href="../integrations/config_adapters_beam/" class="md-nav__link">
         
   
   
@@ -1228,14 +1270,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../integrations/config_adapters_beam/" class="md-nav__link">
+      <a href="../integrations/config_adapters_activitysim/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Activitysim
+    ActivitySim
   
 
     
@@ -1259,6 +1301,114 @@
             
           </ul>
         </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#quickstart" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quickstart
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tutorial-series" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tutorial Series
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prerequisites" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prerequisites
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
       
     </li>
   
@@ -1294,10 +1444,10 @@
         
           
         
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
         
           
-          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
             
   
   
@@ -1315,8 +1465,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_5">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1467,7 +1617,7 @@
         
           
         
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_8" >
         
           
           <div class="md-nav__link md-nav__container">
@@ -1491,14 +1641,14 @@
             </a>
             
               
-              <label class="md-nav__link " for="__nav_6" id="__nav_6_label" tabindex="0">
+              <label class="md-nav__link " for="__nav_8" id="__nav_8_label" tabindex="0">
                 <span class="md-nav__icon md-icon"></span>
               </label>
             
           </div>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_6">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -1867,7 +2017,7 @@
   <a href="#tutorial-series" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Tutorial series
+        Tutorial Series
       
     </span>
   </a>
@@ -1875,10 +2025,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#notes" class="md-nav__link">
+  <a href="#prerequisites" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Notes
+        Prerequisites
       
     </span>
   </a>
@@ -1903,84 +2053,99 @@
   
 
 
-  <nav class="md-path" aria-label="Navigation" >
-    <ol class="md-path__list">
-      
-        
-  
-  
-    <li class="md-path__item">
-      <a href=".." class="md-path__link">
-        
-  <span class="md-ellipsis">
-    Home
-  </span>
-
-      </a>
-    </li>
-  
-
-      
-      
-        
-  
-  
-    
-    
-      <li class="md-path__item">
-        <a href="../getting-started/installation/" class="md-path__link">
-          
-  <span class="md-ellipsis">
-    Getting Started
-  </span>
-
-        </a>
-      </li>
-    
-  
-
-      
-    </ol>
-  </nav>
-
               
               <article class="md-content__inner md-typeset">
                 
                   
 
 <h1 id="examples">Examples<a class="headerlink" href="#examples" title="Permanent link">&para;</a></h1>
-<p>Start with the quickstart notebook, then move into the two tutorial flows.
-Each notebook is runnable top-to-bottom and writes its outputs under
-<code>examples/runs/</code>.</p>
+<p>Each notebook is runnable top-to-bottom and writes outputs under <code>examples/runs/</code>.</p>
 <h2 id="quickstart">Quickstart<a class="headerlink" href="#quickstart" title="Permanent link">&para;</a></h2>
-<p><strong>Quickstart</strong>: <a href="../../examples/00_quickstart.ipynb">00_quickstart.ipynb</a></p>
-<ul>
-<li>Shortest "happy path" walkthrough.</li>
-<li>Basic runs, artifacts, and simple queries.</li>
-</ul>
-<h2 id="tutorial-series">Tutorial series<a class="headerlink" href="#tutorial-series" title="Permanent link">&para;</a></h2>
-<p><strong>Parameter sweep</strong>: <a href="../../examples/01_parameter_sweep_monte_carlo.ipynb">01_parameter_sweep_monte_carlo.ipynb</a></p>
-<ul>
-<li>Parameter sweep with provenance.</li>
-<li>Schema export to SQLModel stubs.</li>
-<li>Typed, cross-run analysis via views.</li>
-</ul>
-<p><strong>Iterative workflow</strong>: <a href="../../examples/02_iterative_workflows.ipynb">02_iterative_workflows.ipynb</a></p>
-<ul>
-<li>Scenario workflows with feedback loops.</li>
-<li>Provenance queries across iterations.</li>
-</ul>
-<p><strong>Transportation workflow (detailed)</strong>: <a href="../../examples/03_transportation_demand_modeling.ipynb">03_transportation_demand_modeling.ipynb</a></p>
-<ul>
-<li>End-to-end modeling pipeline example.</li>
-<li>Scenario comparison with cached steps.</li>
-</ul>
-<h2 id="notes">Notes<a class="headerlink" href="#notes" title="Permanent link">&para;</a></h2>
-<ul>
-<li>For an overview of notebook structure and helper modules, see
-  <a href="../../examples/">examples/README.md</a>.</li>
-<li>The notebooks require <code>pip install -e ".[dev]"</code> and Jupyter.</li>
-</ul>
+<p><strong><a href="../../examples/00_quickstart.ipynb">00_quickstart.ipynb</a></strong></p>
+<table>
+<thead>
+<tr>
+<th>Learning outcome</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Create a tracked run</td>
+</tr>
+<tr>
+<td>Log artifacts</td>
+</tr>
+<tr>
+<td>Query run history</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="tutorial-series">Tutorial Series<a class="headerlink" href="#tutorial-series" title="Permanent link">&para;</a></h2>
+<p><strong><a href="../../examples/01_parameter_sweep_monte_carlo.ipynb">01_parameter_sweep_monte_carlo.ipynb</a></strong></p>
+<table>
+<thead>
+<tr>
+<th>Learning outcome</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Run parameter sweeps with provenance</td>
+</tr>
+<tr>
+<td>Export schemas to SQLModel stubs</td>
+</tr>
+<tr>
+<td>Query across runs with typed views</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<p><strong><a href="../../examples/02_iterative_workflows.ipynb">02_iterative_workflows.ipynb</a></strong></p>
+<table>
+<thead>
+<tr>
+<th>Learning outcome</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Build scenario workflows with feedback loops</td>
+</tr>
+<tr>
+<td>Query provenance across iterations</td>
+</tr>
+<tr>
+<td>Use couplers to pass artifacts between steps</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<p><strong><a href="../../examples/03_transportation_demand_modeling.ipynb">03_transportation_demand_modeling.ipynb</a></strong></p>
+<table>
+<thead>
+<tr>
+<th>Learning outcome</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Build end-to-end modeling pipelines</td>
+</tr>
+<tr>
+<td>Compare scenarios with cached intermediate steps</td>
+</tr>
+<tr>
+<td>Trace lineage through multi-step workflows</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="prerequisites">Prerequisites<a class="headerlink" href="#prerequisites" title="Permanent link">&para;</a></h2>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span><span class="s2">&quot;.[dev]&quot;</span>
+</span></code></pre></div>
+<p>For notebook structure and helper modules, see <a href="../../examples/">examples/README.md</a>.</p>
 
 
 
@@ -2020,7 +2185,7 @@ Each notebook is runnable top-to-bottom and writes its outputs under
       <nav class="md-footer__inner md-grid" aria-label="Footer" >
         
           
-          <a href="../caching-fundamentals/" class="md-footer__link md-footer__link--prev" aria-label="Previous: How Caching Works">
+          <a href="../integrations/config_adapters_activitysim/" class="md-footer__link md-footer__link--prev" aria-label="Previous: ActivitySim">
             <div class="md-footer__button md-icon">
               
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></svg>
@@ -2030,20 +2195,20 @@ Each notebook is runnable top-to-bottom and writes its outputs under
                 Previous
               </span>
               <div class="md-ellipsis">
-                How Caching Works
+                ActivitySim
               </div>
             </div>
           </a>
         
         
           
-          <a href="../cli-reference/" class="md-footer__link md-footer__link--next" aria-label="Next: Command Line Interface">
+          <a href="../troubleshooting/" class="md-footer__link md-footer__link--next" aria-label="Next: Troubleshooting Guide">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                Command Line Interface
+                Troubleshooting Guide
               </div>
             </div>
             <div class="md-footer__button md-icon">
