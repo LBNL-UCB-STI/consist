@@ -429,8 +429,10 @@ def start_run(
 
     Example
     -------
-    >>> with consist.start_run("run_123", "my_model"):
-    ...     consist.log_artifact("data.csv", "input_data")
+    ```python
+    with consist.start_run("run_123", "my_model"):
+        consist.log_artifact("data.csv", "input_data")
+    ```
     """
     tr = _resolve_tracker(tracker)
     with tr.start_run(run_id=run_id, model=model, **kwargs) as active:
