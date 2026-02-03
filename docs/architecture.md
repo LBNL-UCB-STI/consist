@@ -5,19 +5,33 @@
 Consist identifies runs using a three-part signature:
 
 ```
-SHA256(code_hash | config_hash | input_hash)
+signature = SHA256(code_hash || config_hash || input_hash)
 ```
 
-**Code hash**: Derived from your Git commit SHA by default. If your repo has tracked Python changes, Consist appends a stable `-dirty-<hash>` suffix based on the diff (untracked files are ignored so artifacts don't invalidate caches). If Git isn't available, Consist falls back to `unknown_code_version`.
+| Component | Source | Notes |
+|-----------|--------|-------|
+| **Code hash** | Git commit SHA | Appends `-dirty-<hash>` if tracked files are modified; falls back to `unknown_code_version` without Git |
+| **Config hash** | Canonical JSON of config dict | Normalized for key order and numeric types; Pydantic models serialize deterministically |
+| **Input hash** | SHA256 of input content | For Consist artifacts, uses the producing run's signature (Merkle linking); for raw files, hashes bytes or metadata per `hashing_strategy` |
 
-**Config hash**: Canonical representation of configuration, normalized for dictionary ordering and numeric type variations. Pydantic models are serialized deterministically.
+### What Changes Break Cache Hits?
 
-**Input hash**: For Consist-produced artifacts, this references the *signature of the producing run* (Merkle linking) and the artifact hash when available. For raw files, Consist hashes file contents or metadata depending on the hashing strategy (`full` vs `fast`).
+| What Changed | Cache Hit? | Why |
+|---|---|---|
+| Input file content | ❌ No | File hash changes → signature changes |
+| Config value | ❌ No | Config hash changes → signature changes |
+| Function code | ❌ No | Code hash changes → signature changes |
+| `runtime_kwargs` | ✅ Yes | runtime_kwargs are NOT hashed; don't affect signature |
+| Output file names | ✅ Yes | Output names don't affect signature |
+| Comments in code | Depends | Committed comment changes affect the code hash; uncommitted changes mark the repo dirty and break cache. |
 
-This Merkle DAG structure means:
+**Merkle DAG structure**: Each run's signature incorporates the signatures of its input artifacts' producing runs. This forms a directed acyclic graph where:
+
 - Changing a parameter invalidates only downstream runs that depend on it
 - Identical inputs produce cache hits across machines (given the same code version)
 - Provenance validity depends on the lineage graph, not file existence
+
+For detailed terminology, see [Core Concepts](concepts/overview.md).
 
 ### Cache Modes
 
@@ -37,17 +51,17 @@ Consist enables "Ghost Mode" — the ability to delete intermediate files while 
 
 **When You Need This**
 
-Long-running research workflows accumulate massive intermediate datasets that you want to keep for lineage but eventually need to reclaim space. Consider a 30-year climate simulation:
+Long-running research workflows accumulate massive intermediate datasets that you want to keep for lineage but eventually need to reclaim space. Consider a 20-year grid planning study with annual dispatch simulations:
 
 ```
-Year 2020: Compute temperature fields → Store (500GB) → Use as input for 2021
-Year 2021: Compute temperature fields → Store (500GB) → Use as input for 2022
-... (31 years × 500GB = 15.5TB)
-Year 2050: Final results published
+Year 2025: Compute hourly dispatch → Store (200GB) → Use as input for 2026 capacity expansion
+Year 2026: Compute hourly dispatch → Store (200GB) → Use as input for 2027 capacity expansion
+... (20 years × 200GB = 4TB)
+Year 2045: Final resource plan published
 ```
 
-Once you've published results (2030–2050), you can safely delete 2020–2029 intermediate files. The provenance database still tracks what those files contained (via content hashes). If you later need to re-run 2031, Consist can:
-1. Detect that 2030's output is missing from disk (via cache validation)
+Once you've published results (2035–2045), you can safely delete 2025–2034 intermediate files. The provenance database still tracks what those files contained (via content hashes). If you later need to re-run 2036, Consist can:
+1. Detect that 2035's output is missing from disk (via cache validation)
 2. Re-run only the missing upstream steps
 3. Materialize just the files needed for the downstream run
 
@@ -65,12 +79,14 @@ On cache hits, if a file is missing from disk, you have two recovery paths:
 
 Example: recover a missing, ingested tabular artifact from DuckDB:
 ```python
-with tracker.start_run("2030", model="climate"):
+with tracker.start_run("2036_dispatch", model="grid_sim"):
     artifact = tracker.log_artifact(
-        "year_2029_temps.parquet", key="temps", direction="input"
+        "year_2035_dispatch.parquet", key="dispatch", direction="input"
     )
-    df = consist.load_df(artifact, db_fallback="always")
+    df = consist.load_df(artifact, db_fallback="always")  # (1)!
 ```
+
+1. Retrieves the 2035 dispatch data from DuckDB even though the original Parquet file was deleted. Requires the artifact to have been ingested during the original run.
 
 Re-execution respects the same cache key (code + config + inputs), so if inputs haven't changed, Consist reuses the prior computation and materializes its output on-demand.
 
@@ -99,119 +115,24 @@ Key fields for workflow tracking:
 - `Run.tags` — String labels for filtering (stored as JSON array)
 - `Artifact.hash` — SHA256 content hash for deduplication and verification
 
-### Configuration Management: Tracking Large, Complex Configs
+### Configuration Management
 
-Scientific simulations often involve complex, large configuration files: ActivitySim YAML and csv spanning 5MB, BEAM routing configs, climate model parameter trees. Consist provides strategies to make these configurations part of your provenance without storing them as bulky database fields.
+Consist provides three strategies for tracking configuration:
 
-#### Why This Matters: Configuration as Provenance
+| Strategy | Use case | Stored in DB | Affects cache |
+|----------|----------|--------------|---------------|
+| **Identity config** (`config=`) | Standard parameters | JSON snapshot only | Yes |
+| **Facet** (`facet=`) | Queryable subset | DuckDB table | No |
+| **Hash-only inputs** (`hash_inputs=`) | Large config files (10MB+) | Hash only | Yes |
 
-Configuration is critical for reproducibility: the same code + different config = different results. Consist must:
-- Track config as part of the cache key (so changing parameters invalidates cache)
-- Make config searchable (so you can find "all runs with alpha=0.5")
-- Avoid bloating the provenance database with massive YAML files
+Most workflows combine all three: identity config for full parameters, facet for filtering, and hash-only for large external files.
 
-The challenge: A 50MB ActivitySim config file is too large to store as a queryable blob, but you can't just ignore it.
+For detailed usage, see [Configuration, Identity, and Facets](configs.md).
 
-#### Three Configuration Strategies
+**Database tables**:
 
-Consist separates configuration into three patterns. Choose based on your workflow:
-
-**Strategy 1: Identity Config (For Cache Keys, Not Queries)**
-
-Use this when configuration is important for caching but doesn't need to be queryable in the database.
-
-```python
-from pydantic import BaseModel
-
-class SimulationConfig(BaseModel):
-    alpha: float = 0.5
-    beta: float = 1.0
-
-tracker.start_run(
-    "run_001",
-    config=SimulationConfig(alpha=0.5, beta=1.0)
-)
-```
-
-Consist hashes the config deterministically and includes it in the run signature. Changes to alpha or beta invalidate the cache. Use when: Config is part of the cache key but you don't need to filter by it.
-
-**Strategy 2: Facet (Queryable Configuration)**
-
-Use this when you want to search and filter runs by configuration values.
-
-```python
-tracker.start_run(
-    "run_001",
-    config=SimulationConfig(alpha=0.5, beta=1.0),
-    facet={"alpha": 0.5, "beta": 1.0, "scenario": "baseline"}
-)
-```
-
-Consist stores the facet as a small JSON snapshot in DuckDB and deduplicates identical facets. You can query: "Find all runs where alpha > 0.4 and scenario='baseline'". Use when: You're running parameter sweeps and want to find results by parameter value.
-
-**Strategy 3: Hash-Only Attachments (For Large Files, No Database Storage)**
-
-Use this when configuration files are too large to query and don't need to be stored.
-
-```python
-tracker.start_run(
-    "run_001",
-    hash_inputs=[
-        Path("./activitysim_config"),  # 50MB directory
-        Path("./beam_config.hocon"),   # 30MB config file
-    ]
-)
-```
-
-Consist computes a fingerprint (SHA256 hash) of the config files. This fingerprint becomes part of the run signature (changing config invalidates cache). The actual config content is not stored. Use when: Configuration files are 10MB+ or you don't need to query by config values.
-
-#### Combining Strategies: The Typical Pattern
-
-Most real workflows use all three:
-
-```python
-import consist
-from pydantic import BaseModel
-
-class SimConfig(BaseModel):
-    year: int
-    scenario: str
-    demand_elasticity: float
-
-# Start run with all three
-result = tracker.start_run(
-    "baseline_2030",
-    config=SimConfig(
-        year=2030,
-        scenario="baseline",
-        demand_elasticity=0.8
-    ),
-    facet={
-        # Queryable fields: year and scenario
-        "year": 2030,
-        "scenario": "baseline",
-    },
-    hash_inputs=[
-        # Large external configs hashed for cache key but not stored
-        Path("./activitysim"),
-        Path("./network_config.yaml")
-    ]
-)
-```
-
-Result:
-- Cache key includes: config hash + ActivitySim hash + network hash
-- Database stores only the small facet (year, scenario)
-- You can query by year/scenario; ActivitySim changes tracked via fingerprints
-
-#### Database Tables
-
-Consist uses these tables for configuration tracking:
-
-- `config_facet`: Deduplicated facet JSON keyed by a canonical hash, namespaced by run model
-- `run_config_kv`: Flattened, typed key/value index for facet filtering
-
-Note: Use `Run.year` (a first-class indexed column) for time-series filtering rather than duplicating year in the facet.
+- `config_facet`: Deduplicated facet JSON, namespaced by model
+- `run_config_kv`: Flattened key/value index for facet filtering
 
 ---
 
@@ -219,20 +140,18 @@ Note: Use `Run.year` (a first-class indexed column) for time-series filtering ra
 
 Consist maintains two synchronized records for resilience:
 
-```
-┌──────────────────┐
-│     Tracker      │
-└────────┬─────────┘
-         │
-    ┌────┴────┬────────────┐
-    ▼         ▼            ▼
-┌────────┐ ┌──────────┐ ┌──────────┐
-│  JSON  │ │  DuckDB  │ │  Events  │
-│Snapshot│ │ Database │ │ Manager  │
-└────────┘ └──────────┘ └──────────┘
+```mermaid
+graph TD
+    Tracker[Tracker] --> Context[Active Run Context]
+    Context --> Memo[In-Memory Model]
+    Memo --> Snapshot[consist.json Snapshot]
+    Memo --> DB[(DuckDB Database)]
+    Snapshot --- Source[Source of Truth]
+    DB --- Query[Query Engine]
 ```
 
 **Write order (safety guarantee):**
+
 1. Update in-memory model
 2. Flush to `consist.json` (atomic write) ← **Source of truth**
 3. Attempt DB sync (catch errors, log warning, never crash)
@@ -328,23 +247,18 @@ ds = tracker.matrix.load("skim_matrices", variables=["travel_time"])
 
 ## Container Integration
 
-Containers are treated as pure functions where the image digest becomes part of the cache signature:
+Containers are treated as pure functions. The cache signature includes:
 
 ```
-Signature = SHA256(image_digest | command | env_hash | mount_hashes | input_signatures)
+signature = SHA256(image_digest || command || env_hash || mount_hashes || input_signatures)
 ```
 
-On cache hit:
-1. Verify outputs exist (or are in ghost mode)
-2. Relink artifacts to current run
-3. Hydrate files to requested host paths (copy from cache)
+| Condition | Behavior |
+|-----------|----------|
+| Cache hit | Verify outputs exist, relink artifacts, hydrate files to host paths |
+| Cache miss | Execute container, capture outputs, record image digest |
 
-On cache miss:
-1. Execute container
-2. Capture declared outputs
-3. Record image digest and mount metadata
-
-Backend abstraction supports Docker and Singularity/Apptainer for HPC environments.
+Supported backends: Docker, Singularity/Apptainer. For usage details, see [Container Integration Guide](containers-guide.md).
 
 ---
 
@@ -353,11 +267,16 @@ Backend abstraction supports Docker and Singularity/Apptainer for HPC environmen
 Register callbacks for run lifecycle events:
 
 ```python
-tracker.events.on_run_complete(lambda run: notify_slack(run.id))
+tracker.events.on_run_complete(lambda run, artifacts: notify_slack(run.id))
 tracker.events.on_run_failed(lambda run, error: log_to_sentry(error))
 ```
 
-Events are emitted but failures in hooks don't crash the run—they're logged and the workflow continues.
+| Event | Callback signature |
+|-------|-------------------|
+| `on_run_complete` | `Callable[[Run, List[Artifact]], None]` |
+| `on_run_failed` | `Callable[[Run, Exception], None]` |
+
+Hook failures are logged but do not crash the run.
 
 ---
 

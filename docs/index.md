@@ -2,54 +2,88 @@
 hide:
   - navigation
 ---
+# 
+<p align="center">
+  <img src="assets/logo.png" alt="Consist" width="320" class="logo-light">
+  <img src="assets/logo-dark.png" alt="Consist" width="320" class="logo-dark">
+</p>
 
-# Consist
+<p align="center" class="tagline">
+  Track provenance. Skip redundant computation. Query results across runs.
+</p>
 
-Consist automatically records what code, configuration, and input data produced each result in your simulation pipeline. It uses this to avoid redundant computation, lets you query results across runs, and traces lineage from any output back to its sources.
+---
+
+## What is Consist?
+
+Consist is a Python library for **automatic provenance tracking and intelligent caching** in scientific simulation workflows.
+
+**Problem**: Simulation pipelines are expensive (often 24-48 hour runs), produce massive files, and require exact reproducibility. When you re-run with the same inputs, you waste days recomputing identical results. Without provenance tracking, you can't answer "which configuration produced this forecast?" or "did Figure 3 come from v1.2 or v1.3?"
+
+**Solution**: Consist automatically:
+
+- Tracks **provenance**: what code version, configuration, and inputs produced each result
+- Detects **redundant computation**: reuses results when code + config + inputs match (cache hits)
+- Enables **SQL queries** across runs: ingest results into DuckDB for analytics without loading everything into memory
+- Keeps workflows **portable**: run the same pipeline on different machines and it "just works"
 
 ---
 
 ## Getting Started
 
-**New to Consist?** Follow this path:
+Choose your path:
 
-### 1. **[Install & Quickstart](getting-started/installation.md)**
+**New to provenance tracking?**
 
-   * Install Consist from source and run a small first example
-   * Creates your first run and provenance database
+1. [Install & Quickstart](getting-started/installation.md) — 5 minutes
+2. [Core Concepts](concepts/overview.md) — Mental model
+3. [First Workflow](getting-started/first-workflow.md) — Multi-step pipeline
+4. [Examples](examples.md) — Runnable notebooks
 
-### 2. **[Concepts](concepts.md)**
+**Integrating Consist into a tool (ActivitySim, MATSim, BEAM)?**
 
-   * Learn the mental model: Runs, Artifacts, Scenarios, and how caching works
-   * Start here to understand core ideas
+1. [Core Concepts](concepts/overview.md)
+2. [Architecture](architecture.md) — System design
+3. [Config Adapters](integrations/config_adapters.md) — Write an adapter
+4. [Containers](containers-guide.md) — If tracking Docker/Singularity
 
-### 3. **[Usage Guide](usage-guide.md)**
+**Optimizing performance or debugging cache issues?**
 
-   * Build your first multi-step workflow
-   * Learn patterns for runs, scenarios, and cross-run querying
-
-### 4. **[Example Notebooks](examples.md)**
-
-   * Run the quickstart notebook to see caching in action
-   * Follow other examples for your domain (parameter sweeps, iterative workflows, multi-scenario analysis)
+1. [Caching & Hydration](concepts/caching-and-hydration.md)
+2. [Troubleshooting](troubleshooting.md)
+3. [CLI Reference](cli-reference.md)
 
 ---
 
 ## By User Type
 
-**I develop or maintain simulation tools (ActivitySim, MATSim, etc.):**
-- Start with [Concepts](concepts.md) for mental models
-- Read [Usage Guide](usage-guide.md) for API patterns and integration examples
-- See the [Container Integration Guide](containers-guide.md) for wrapping legacy code
+<div class="grid cards" markdown>
 
-**I'm an MPO official or practitioner:**
-- If you prefer not to write Python, use the [CLI reference](cli-reference.md) to query and compare results from the command line
-- Example: `consist lineage traffic_volumes` shows what produced your result
+-   **Simulation developers**
 
-**I'm building research workflows:**
-- Start with [Concepts](concepts.md)
-- Read [Ingestion & Hybrid Views](ingestion-and-hybrid-views.md) for SQL-native analysis
-- See [Mounts & Portability](mounts-and-portability.md) for reproducible, shareable studies
+    ---
+
+    Building or maintaining tools like ActivitySim, MATSim, BEAM?
+
+    → [Core Concepts](concepts/overview.md) | [Architecture](architecture.md) | [Config Adapters](integrations/config_adapters.md)
+
+-   **Practitioners & MPO staff**
+
+    ---
+
+    Prefer command-line over Python?
+
+    → [CLI Reference](cli-reference.md) — query and compare results without code
+
+-   **Researchers**
+
+    ---
+
+    Building reproducible workflows for publication?
+
+    → [Core Concepts](concepts/overview.md) | [Data Materialization](concepts/data-materialization.md) | [Mounts & Portability](mounts-and-portability.md)
+
+</div>
 
 ---
 
@@ -57,60 +91,57 @@ Consist automatically records what code, configuration, and input data produced 
 
 ### Beginner
 
-- [Concepts](concepts.md) – Mental models and core ideas
-- [Caching Fundamentals](caching-fundamentals.md) – How signature-based caching works
-- [Usage Guide: Basic Runs & Scenarios](usage-guide.md#choosing-your-pattern) – Simple workflows
-- [Example: Quickstart](examples.md#quickstart) – 5-minute first run
+- [Core Concepts](concepts/overview.md) – Mental models and core ideas
+- [Quickstart](getting-started/quickstart.md) – 5-minute first run
+- [First Workflow](getting-started/first-workflow.md) – Build a multi-step pipeline
+- [Example Notebooks](examples.md) – Runnable examples with explanations
 
 ### Intermediate
 
-- [Configuration & Facets](configs.md) – Config hashing and queryable metadata
-- [Caching & Hydration](caching-and-hydration.md) – Caching patterns and data management policies
-- [Ingestion & Hybrid Views](ingestion-and-hybrid-views.md) – SQL queries across runs
-- [DLT Loader Integration](dlt-loader-guide.md) – Schema-validated data ingestion with DuckDB
-- [Mounts & Portability](mounts-and-portability.md) – Reproducible workflows with external data
+- [Config Management](concepts/config-management.md) – Config hashing and queryable metadata (facets)
+- [Caching & Hydration](concepts/caching-and-hydration.md) – Caching patterns and data recovery
+- [Data Materialization Strategy](concepts/data-materialization.md) – When to ingest data and use hybrid views
+- [DLT Loader Integration](dlt-loader-guide.md) – Schema-validated data ingestion
+- [Mounts & Portability](mounts-and-portability.md) – Reproducible workflows across machines
 
-### Advanced / Reference
+### Advanced
 
-- [Architecture](architecture.md) – Implementation details and design decisions
-- [Container Integration](containers-guide.md) – Docker/Singularity with ActivitySim, SUMO, and other tools
+- [Architecture](architecture.md) – System design and implementation details
+- [Container Integration](containers-guide.md) – Docker/Singularity support
+- [Config Adapters](integrations/config_adapters.md) – Building adapters for external tools
 - [CLI Reference](cli-reference.md) – All command-line tools
-- [Troubleshooting](troubleshooting.md) – Common errors, debugging, and solutions
-- [API Overview](api/index.md) – Function and class reference
-
----
-
-## Key Terms
-
-- **Run**: A single execution with tracked inputs, config, and outputs. Runs are the unit of cache reuse and comparison, so keeping them consistent lets you skip expensive recomputation.
-- **Artifact**: A file with provenance metadata attached. Artifacts are the concrete outputs you can trace, load, or hydrate later, which is how Consist keeps results reproducible.
-- **Signature**: Fingerprint of code + config + inputs. Identical signatures lead to a cache hit.
-- **Scenario**: A parent run grouping related child runs
-- **Provenance**: Complete history of where a result came from
-
-See [Glossary](glossary.md) for full definitions of all terms, or [Concepts](concepts.md) for detailed explanations with examples.
+- [Troubleshooting](troubleshooting.md) – Common issues and solutions
+- [FAQ](faq.md) – Frequently asked questions
+- [API Reference](api/index.md) – Complete function and class documentation
 
 ---
 
 ## Common Tasks
 
-**I need to speed up my pipeline:**
-→ [Caching & Hydration](caching-and-hydration.md)
+| I want to... | Go to |
+|--------------|-------|
+| Speed up my pipeline | [Caching & Hydration](concepts/caching-and-hydration.md) |
+| Debug a cache miss | [Troubleshooting](troubleshooting.md) |
+| Find which config produced a result | [`consist lineage`](cli-reference.md#consist-lineage) |
+| Compare results across scenarios | [Data Materialization](concepts/data-materialization.md) |
+| Ingest data for SQL analysis | [Data Materialization](concepts/data-materialization.md) |
+| Understand config vs. facets | [Config Management](concepts/config-management.md) |
+| Share a reproducible study | [Mounts & Portability](mounts-and-portability.md) |
+| Integrate with ActivitySim/BEAM/MATSim | [Config Adapters](integrations/config_adapters.md) or [Containers](containers-guide.md) |
 
-**I want to debug a cache miss or other issue:**
-→ [Troubleshooting](troubleshooting.md)
+---
 
-**I want to know which config produced a result:**
-→ [CLI: `consist lineage`](cli-reference.md#consist-lineage)
+## Built on Open Standards
 
-**I want to compare results across 50 scenarios:**
-→ [Usage Guide: Cross-Run Queries](usage-guide.md#querying-results)
+Consist relies on modern, high-performance data engineering tools:
 
-**I want to ingest data for SQL analysis across runs:**
-→ [DLT Loader Integration](dlt-loader-guide.md)
+- **[DuckDB](https://duckdb.org/)**: The "SQLite for Analytics" powers our lightning-fast provenance queries and data virtualization.
+- **[SQLModel](https://sqlmodel.tiangolo.com/)**: Combines SQLAlchemy and Pydantic for robust, type-safe data modeling and schema validation.
+- **[DLT (Data Load Tool)](https://dlthub.com/)**: Handles robust, schema-aware data ingestion from diverse sources into your provenance database.
+- **[Apache Parquet & Zarr](https://parquet.apache.org/)**: Industry-standard formats for efficient, compressed storage of tabular and multi-dimensional scientific data.
 
-**I want to share my study for reproducibility:**
-→ [Mounts & Portability](mounts-and-portability.md)
+---
 
-**I want to integrate with an existing tool (ActivitySim, SUMO, BEAM):**
-→ [Container Integration Guide](containers-guide.md)
+## Learn More
+
+See [Core Concepts](concepts/overview.md) for a complete mental model, or [Glossary](glossary.md) for quick term definitions.

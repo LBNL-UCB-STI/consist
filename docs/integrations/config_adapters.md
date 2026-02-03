@@ -1,29 +1,17 @@
-
 # Config Adapters
 
-Config adapters provide model-specific interfaces to discover, canonicalize, and
-ingest complex file-based configurations. They enable tracking of calibration-sensitive
-parameters as queryable database tables while preserving full config provenance via artifacts.
+Config adapters provide model-specific interfaces to discover, canonicalize, and ingest complex file-based configurations. They enable tracking of calibration-sensitive parameters as queryable database tables while preserving full config provenance via artifacts.
 
-## Overview
+## Decision Guide
 
-### When to Use Config Adapters
+| Criterion | Use Config Adapters | Use In-Memory Config |
+|-----------|--------------------|--------------------|
+| Config location | Multiple files (YAML, CSV, HOCON) | Python dict or Pydantic model |
+| Config structure | Layered inheritance, file hierarchies | Flat or simple nesting |
+| Queryable parameters | Calibration-sensitive values | Simple facets suffice |
+| File tracking | Need content hashing per file | No file artifacts needed |
 
-Use config adapters when your model configuration:
-
-- Lives in **multiple files** across a directory hierarchy (YAML, CSV, HOCON, etc.)
-- Has **layered inheritance** or cascade logic (e.g., `inherit_settings: true`)
-- Contains **calibration-sensitive parameters** you want to query and compare across runs
-- Needs **content hashing** for provenance and cache identity
-- Should remain **decoupled** from Consist core (no hard dependency on your model's libraries)
-
-### When to Use In-Memory Configs Instead
-
-Use the standard [config API](../configs.md) if:
-
-- Configuration fits in a Python dict or Pydantic model
-- You don't need to track file-based config artifacts
-- A simple facet extraction suffices for your use case
+For in-memory configuration, see [Configuration, Identity, and Facets](../configs.md).
 
 ### Architecture
 

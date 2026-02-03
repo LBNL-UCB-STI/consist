@@ -1,6 +1,6 @@
 # Glossary
 
-This page defines key terms used in Consist documentation.
+This page defines key terms used in Consist documentation. For a conceptual introduction with dependency ordering, see [Core Concepts Overview](concepts/overview.md).
 
 ---
 
@@ -14,7 +14,7 @@ Artifacts record:
 - A content hash (SHA256) for integrity checking
 - Optional ingestion status (whether it was stored in DuckDB)
 
-**Research example**: When you publish results (a transportation demand forecast, climate projections, or zoning capacity map), each output file is an Artifact. You can ask "who created this file?" (`consist lineage traffic_volumes`), verify it hasn't been corrupted, and trace it back to the exact code version and config that produced it.
+**Research example**: When you publish results, each output file is an Artifact. You can trace any file back to the exact code version and config that produced it using the CLI. See [Usage Guide](usage-guide.md) for more.
 
 **See also**: Run, Provenance, Ingestion
 
@@ -26,7 +26,7 @@ When Consist skips execution because it finds a previous run with an identical s
 
 **Example**: You run a function with config `{"threshold": 0.5}` on input `data.csv`, then re-run with the exact same config and input. Second execution is a cache hit—no computation happens.
 
-**Research example**: In a parameter sweep (testing 20 demand elasticity values), the first run re-executes your demand model. Runs 2-20 are all cache hits for preprocessing (same input data, same code) but misses for the demand model (different elasticity). Consist skips 19 preprocessing steps, saving hours.
+**Research example**: In a parameter sweep, Consist skips preprocessing steps that haven't changed, saving hours of compute time. See [Usage Guide](usage-guide.md#motivation-when-caching-saves-time) for realistic time-saving scenarios.
 
 **Opposite**: Cache miss (run must execute)
 
@@ -71,7 +71,7 @@ with use_tracker(tracker):
 
 Changing config invalidates cache and triggers re-execution. Config is hashed (not stored as-is) to allow large nested dictionaries.
 
-**Research example**: Your config might be a 50MB ActivitySim parameter file. Consist hashes it into the cache key, so if a colleague changes a mode choice coefficient, Consist automatically knows to re-run your demand model (cache miss). Without this, you'd have to manually remember which config changes require re-running which steps.
+**Research example**: If a colleague changes a mode choice coefficient in a 50MB parameter file, Consist detects the change and automatically knows to re-run the affected demand model.
 
 **See also**: Facet, Signature
 
@@ -121,7 +121,7 @@ with use_tracker(tracker):
 df = tracker.find_runs(facet_year=2030)
 ```
 
-**Research example**: You're running demand models for 10 years (2020-2050) × 3 scenarios (baseline, transit-friendly, congestion pricing). You set `facet={"year": 2030, "scenario": "transit-friendly"}` for each run. Later, your colleague asks "show me all 2040 sensitivity tests." You query `facet_year=2040` and get 50 runs instantly—no manual searching through 500 run directories.
+**Research example**: In a multi-year study, you can set `facet={"year": 2030, "scenario": "transit-friendly"}`. This allows you to instantly find all 2030 sensitivity tests without searching through directories.
 
 **See also**: Config, Signature
 
@@ -129,9 +129,7 @@ df = tracker.find_runs(facet_year=2030)
 
 ## Ghost Mode
 
-Consist's ability to recover artifacts that exist only in the provenance database (DuckDB), not as physical files. If you delete the original file but it was ingested, you can still load it via `consist.load(artifact)` (returns a DuckDB Relation) or `consist.load_df(artifact)`.
-
-**Use case**: Re-running a pipeline against archived input data. If inputs were previously ingested, Consist recovers them from the database instead of requiring the original files.
+The ability to recover artifacts that exist only in the provenance database, not as physical files. If an artifact was ingested, Consist can recover the data from DuckDB even if the original file was deleted. See [Architecture: Ghost Mode](architecture.md#ghost-mode) for details.
 
 **See also**: Ingestion, Materialization
 
@@ -218,7 +216,7 @@ Complete history of where a result came from: code version, configuration, input
 
 **Why it matters**: Reproducibility ("Can I re-run this exactly?"), Accountability ("Which config made this figure?"), Debugging ("Why did this change?")
 
-**Research example**: You published a land-use forecast that shows 10% job growth in downtown. A policy maker asks "is that Figure 3a or Figure 3b from the report?" You run `consist show <run_id>` and instantly see: code version (commit SHA), exact config parameters (zoning policy, density cap), which parcel survey data, and when it ran. You can reproduce it exactly or change one parameter and show the difference. Without provenance, you'd spend hours reconstructing assumptions.
+**Research example**: If a policy maker asks which assumptions led to a specific forecast, you can use provenance to identify the exact code version, zoning policy, and parcel data used. You can then reproduce it exactly or change one parameter to show the impact.
 
 **See also**: Artifact, Lineage, Signature
 
@@ -240,16 +238,16 @@ from consist import use_tracker
 
 with use_tracker(tracker):
     result = consist.run(
-        fn=clean_data,
-        inputs={"raw_path": "raw.csv"},
-        config={"threshold": 0.5},
-        outputs=["cleaned"],
+        fn=prepare_load_shapes,
+        inputs={"raw_path": "hourly_demand.csv"},
+        config={"peak_shave_threshold": 0.95},
+        outputs=["processed_load"],
     )
 ```
 
 This creates a Run with one input artifact, one config dict, and one output artifact.
 
-**Research example**: In climate modeling, each year's downscaling (e.g., 2030 temperature downscaling) is a separate Run. The provenance database stores 20 runs (2031-2050) all under one scenario, linked by data flow (year 2030's output feeds year 2031's input). You can query: "which runs used GCM model X?" or "what was the total compute time across all 2050 runs?" or "trace 2050's data back to the original global model."
+**Research example**: In grid modeling, each annual simulation is a Run. You can query "what was the total compute time across all high-load scenarios?" or trace a reliability violation back to original forecast assumptions.
 
 **See also**: Artifact, Scenario
 

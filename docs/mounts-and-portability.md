@@ -131,14 +131,16 @@ Paths under the run directory are stored relative to the active run:
 ./outputs/<run_id>/model.csv
 ```
 
-Internally this is treated as a workspace URI and resolved using the run's
-`_physical_run_dir` metadata. That field records the absolute run directory used
-when the run executed.
+Consist resolves these using the run's `_physical_run_dir` metadata field, which records the absolute run directory at execution time.
 
-Implications:
-- Cache hits can hydrate artifacts even when the current run directory differs.
-- Moving or deleting the original run directory will break byte-level access,
-  but metadata-only cache hits still work.
+| Scenario | Behavior |
+|----------|----------|
+| Current run directory matches original | Files accessible |
+| Run directory moved | Metadata-only cache hits work; file access fails |
+| Run directory deleted | Metadata-only cache hits work; file access fails |
+
+!!! note "`_physical_run_dir`"
+    Stored in `run.meta["_physical_run_dir"]`. Used for historical path resolution when hydrating artifacts from prior runs.
 
 ---
 

@@ -1,36 +1,55 @@
 # Examples
 
-Start with the quickstart notebook, then move into the two tutorial flows.
-Each notebook is runnable top-to-bottom and writes its outputs under
-`examples/runs/`.
+Each notebook is runnable top-to-bottom and writes outputs under `examples/runs/`.
 
 ## Quickstart
 
-**Quickstart**: [00_quickstart.ipynb](../examples/00_quickstart.ipynb)
+**[00_quickstart.ipynb](../examples/00_quickstart.ipynb)**
 
-- Shortest "happy path" walkthrough.
-- Basic runs, artifacts, and simple queries.
+| Learning outcome |
+|-----------------|
+| Create a tracked run |
+| Log artifacts |
+| Query run history |
 
-## Tutorial series
+---
 
-**Parameter sweep**: [01_parameter_sweep_monte_carlo.ipynb](../examples/01_parameter_sweep_monte_carlo.ipynb)
+## Tutorial Series
 
-- Parameter sweep with provenance.
-- Schema export to SQLModel stubs.
-- Typed, cross-run analysis via views.
+**[01_parameter_sweep_monte_carlo.ipynb](../examples/01_parameter_sweep_monte_carlo.ipynb)**
 
-**Iterative workflow**: [02_iterative_workflows.ipynb](../examples/02_iterative_workflows.ipynb)
+| Learning outcome |
+|-----------------|
+| Run parameter sweeps with provenance |
+| Export schemas to SQLModel stubs |
+| Query across runs with typed views |
 
-- Scenario workflows with feedback loops.
-- Provenance queries across iterations.
+---
 
-**Transportation workflow (detailed)**: [03_transportation_demand_modeling.ipynb](../examples/03_transportation_demand_modeling.ipynb)
+**[02_iterative_workflows.ipynb](../examples/02_iterative_workflows.ipynb)**
 
-- End-to-end modeling pipeline example.
-- Scenario comparison with cached steps.
+| Learning outcome |
+|-----------------|
+| Build scenario workflows with feedback loops |
+| Query provenance across iterations |
+| Use couplers to pass artifacts between steps |
 
-## Notes
+---
 
-- For an overview of notebook structure and helper modules, see
-  [examples/README.md](../examples/README.md).
-- The notebooks require `pip install -e ".[dev]"` and Jupyter.
+**[03_transportation_demand_modeling.ipynb](../examples/03_transportation_demand_modeling.ipynb)**
+
+| Learning outcome |
+|-----------------|
+| Build end-to-end modeling pipelines |
+| Compare scenarios with cached intermediate steps |
+| Trace lineage through multi-step workflows |
+
+---
+
+## Prerequisites
+
+```bash
+pip install -e ".[dev]"
+```
+
+For notebook structure and helper modules, see [examples/README.md](../examples/README.md).

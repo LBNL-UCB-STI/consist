@@ -1,42 +1,43 @@
 # Container Integration Guide
 
-Consist can execute containerized tools and models (Docker, Singularity) while automatically tracking provenance, inputs, outputs, and caching based on image digest and parameters.
+Consist executes containerized tools (Docker, Singularity) with automatic provenance tracking and caching based on **image digest** and parameters.
 
-This guide covers when and how to use containers, with practical examples for ActivitySim, SUMO, and other tools.
+!!! note "Image Digest"
+    An image digest is the SHA256 hash of a container image's content (e.g., `sha256:a1b2c3...`). Unlike tags (`:latest`, `:v1.0`), digests are immutable—the same digest always refers to the same image bytes.
 
 ---
 
-## Why Containers?
+## When to Use Containers
 
-Containers are ideal when:
-
-- **Wrapping existing tools** (ActivitySim, SUMO, BEAM, R scripts, legacy code) without modifying source
-- **Tool has complex dependencies** that are easier to package than to install
-- **Tool is non-deterministic or black-box** (you can't inspect its internal caching)
-- **Tool expects specific file paths** or directory structures
-- **Tool is in a different language** (Python, R, Java, compiled binary)
-- **Tool is already containerized** and you want to integrate it into a Consist workflow
-
-**Not ideal for:**
-- Simple Python functions (use `consist.run()` instead)
-- Workflows where you want fine-grained step caching (use `scenario()` + `consist.run()`)
-- Development/debugging (container startup adds latency during iteration, but can be fine for lightweight images)
+| Use case | Recommendation |
+|----------|----------------|
+| Wrapping existing tools (ActivitySim, SUMO, BEAM, R scripts) | Container |
+| Complex dependencies easier to package than install | Container |
+| Black-box or non-deterministic tools | Container |
+| Tool expects specific file paths | Container |
+| Simple Python functions | `consist.run()` |
+| Fine-grained step caching | `scenario()` + `consist.run()` |
+| Development/debugging with fast iteration | Native execution |
 
 ---
 
 ## How Caching Works
 
-When you execute a container, Consist computes a **container signature** from:
+Consist computes a container signature from:
 
-1. **Image identity**: Full image digest (resolved from registry if `pull_latest=True`)
-2. **Command**: The exact command string and arguments
-3. **Environment**: A deterministic hash of the environment variables passed to the container
-4. **Volumes**: Container mount paths (but NOT host paths, which are run-specific)
-5. **Input data**: SHA256 hashes of input files
+| Component | Included in signature | Notes |
+|-----------|----------------------|-------|
+| Image digest | Yes | Resolved from registry if `pull_latest=True` |
+| Command | Yes | Exact command string and arguments |
+| Environment variables | Yes | Deterministic hash |
+| Container mount paths | Yes | e.g., `/inputs`, `/outputs` |
+| Host paths | **No** | Run-specific; not part of cache key |
+| Input file content | Yes | SHA256 hashes |
 
-If all these match a prior run, Consist returns cached outputs **without executing the container**.
+If all components match a prior run, Consist returns cached outputs without executing the container.
 
-**Key insight**: Changing the image tag (e.g., `my-model:v1` → `my-model:v2`) invalidates the cache. If you use `my-model:latest`, consider setting `pull_latest=True` to refresh the digest from the registry and ensure cache invalidation when the tag updates (use it when `latest` is truly mutable).
+!!! warning "Host paths are not cached"
+    Volume host paths (e.g., `./data:/inputs`) are excluded from the cache key because they vary between runs. To ensure config changes invalidate cache, pass config files via `inputs=`.
 
 ---
 
@@ -251,7 +252,7 @@ volumes = {
 By default, Consist only allows host paths that live under configured mounts. If you need
 to allow arbitrary absolute host paths, pass `strict_mounts=False` to `run_container()`.
 
-**Important:** Host paths in `volumes` are **not part of the cache key** (they're run-specific). Only `inputs` are hashed for the signature. If you want config changes to invalidate cache, pass config files in `inputs`:
+To ensure config changes invalidate the cache, pass config files via `inputs`:
 
 ```python
 result = run_container(
@@ -260,7 +261,7 @@ result = run_container(
         "./config_dir": "/configs",
         "./data": "/data",
     },
-    inputs=[Path("./config_dir/settings.yaml"), Path("./data/input.csv")],  # These are hashed
+    inputs=[Path("./config_dir/settings.yaml"), Path("./data/input.csv")],
     ...
 )
 ```

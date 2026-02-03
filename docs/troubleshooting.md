@@ -1,6 +1,10 @@
 # Troubleshooting Guide
 
-This guide covers common errors, their root causes, and solutions.
+This guide organizes issues by symptom. For concept definitions, see [Core Concepts](concepts/overview.md). For topic-specific guides, see:
+
+- [Container Integration](containers-guide.md#error-handling)
+- [DLT Loader](dlt-loader-guide.md#common-errors)
+- [Mounts & Portability](mounts-and-portability.md#troubleshooting)
 
 ---
 

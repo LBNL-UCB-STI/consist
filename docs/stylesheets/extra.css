@@ -180,3 +180,29 @@
 [data-md-color-scheme="slate"] {
   --md-hue: 10;
 }
+
+/* Light mode: show light logo, hide dark */
+[data-md-color-scheme="default"] .logo-dark {
+  display: none;
+}
+
+/* Dark mode: show dark logo, hide light */
+[data-md-color-scheme="slate"] .logo-light {
+  display: none;
+}
+
+/* Tagline styling */
+.tagline {
+  font-size: 1.1em;
+  margin-top: -0.5em;
+}
+
+/* Light mode */
+[data-md-color-scheme="default"] .tagline {
+  color: #555;
+}
+
+/* Dark mode */
+[data-md-color-scheme="slate"] .tagline {
+  color: #ffffff;
+}

@@ -1,16 +1,33 @@
-# Installation and Quickstart
-
-Consist is not on PyPI yet. For now, install from source. When the first public
-release is published, this page will include the PyPI command as well.
+# Installation
 
 ## Prerequisites
 
 - Python 3.11 or newer
-- git
-- Optional: Docker or Singularity for container workflows
-- Optional: Jupyter for running the example notebooks
+- Git (for source installation and code version tracking)
 
-## Install from source
+## Install from PyPI
+
+```bash
+pip install consist
+```
+
+### Optional Extras
+
+Install with DLT for data ingestion into DuckDB:
+
+```bash
+pip install "consist[ingest]"
+```
+
+Install with example notebook dependencies:
+
+```bash
+pip install "consist[examples]"
+```
+
+## Install from Source
+
+Clone the repository and install in editable mode:
 
 ```bash
 git clone https://github.com/LBNL-UCB-STI/consist.git
@@ -18,63 +35,22 @@ cd consist
 pip install -e .
 ```
 
-Optional extras:
-
-- Ingestion (DLT): `pip install -e ".[ingest]"`
-- Notebooks: `pip install -e ".[examples]"`
-
-## Install from PyPI
-
-**NOT WORKING, DELETE WHEN PUBLIC:** Consist is not published to PyPI yet.
+For development with ingestion support:
 
 ```bash
-pip install consist
+pip install -e ".[ingest]"
 ```
 
-Optional extras:
+## Verify Installation
 
-- Ingestion (DLT): `pip install "consist[ingest]"`
-- Notebooks: `pip install "consist[examples]"`
+Confirm Consist is installed correctly:
 
-## 5-minute quickstart
-
-This creates a small CSV, runs a tracked transformation, and loads the cached
-result.
-
-```python
-from pathlib import Path
-
-import pandas as pd
-import consist
-from consist import Tracker, use_tracker
-
-# 1) Create a tracker (database + run directory)
-tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
-
-# 2) Prepare a tiny input file
-Path("raw.csv").write_text("category,value\nA,1\nA,2\nB,3\n")
-
-# 3) Define a function to run
-def summarize(raw: pd.DataFrame) -> pd.DataFrame:
-    return raw.groupby("category")["value"].sum().reset_index()
-
-# 4) Run with Consist
-with use_tracker(tracker):
-    result = consist.run(
-        fn=summarize,
-        inputs={"raw": Path("raw.csv")},
-        outputs=["summary"],
-    )
-
-# 5) Load the output
-summary = consist.load_df(result.outputs["summary"])
-print(summary)
+```bash
+python -c "import consist; print(consist.__file__)"
 ```
 
-Run the same script again and you should see a cache hit (no re-execution).
+This prints the path to the installed package.
 
-## Next steps
+## Next Steps
 
-- Read the [Concepts](../concepts.md) overview for the mental model.
-- Follow the [Usage Guide](../usage-guide.md) for scenarios, couplers, and workflows.
-- Explore the [Example Notebooks](../examples.md) if you prefer a guided walkthrough.
+Proceed to the [Quickstart](quickstart.md) to run your first cached workflow.
