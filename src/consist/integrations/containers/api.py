@@ -195,8 +195,10 @@ def _validate_host_path(
     )
 
 
-def _ensure_output_within_run_dir(path: Path, tracker: Tracker) -> None:
-    if getattr(tracker, "allow_external_paths", False):
+def _ensure_output_within_run_dir(
+    path: Path, tracker: Tracker, *, strict_mounts: bool
+) -> None:
+    if getattr(tracker, "allow_external_paths", False) or (not strict_mounts):
         return
     base_dir = tracker.run_dir.resolve()
     resolved = path.resolve()
@@ -501,7 +503,9 @@ def run_container(
             validated_host = _validate_host_path(
                 host_path, allowed_roots, strict_mounts=strict_mounts
             )
-            _ensure_output_within_run_dir(validated_host, tracker)
+            _ensure_output_within_run_dir(
+                validated_host, tracker, strict_mounts=strict_mounts
+            )
             output_specs.append((str(logical_key), str(validated_host)))
     else:
         output_specs = []
@@ -509,7 +513,9 @@ def run_container(
             validated_host = _validate_host_path(
                 output_path, allowed_roots, strict_mounts=strict_mounts
             )
-            _ensure_output_within_run_dir(validated_host, tracker)
+            _ensure_output_within_run_dir(
+                validated_host, tracker, strict_mounts=strict_mounts
+            )
             output_specs.append((Path(output_path).name, str(validated_host)))
 
     outputs_str = [p for _, p in output_specs]
