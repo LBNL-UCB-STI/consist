@@ -5,7 +5,6 @@ hide:
 # 
 <p align="center">
   <img src="assets/logo.png" alt="Consist" width="320" class="logo-light">
-  <img src="assets/logo-dark.png" alt="Consist" width="320" class="logo-dark">
 </p>
 
 <p align="center" class="tagline">
