@@ -67,18 +67,18 @@ class NoopCoupler:
     def __init__(self) -> None:
         self._artifacts: Dict[str, Any] = {}
         self._declared_outputs: Dict[str, DeclaredOutput] = {}
-        self._warn_undocumented = False
-        self._undocumented_keys: set[str] = set()
+        self._warn_undefined = False
+        self._undefined_keys: set[str] = set()
         self._output_descriptions: Dict[str, str] = {}
 
-    def _maybe_warn_undocumented(self, key: str) -> None:
-        if not self._warn_undocumented:
+    def _maybe_warn_undefined(self, key: str) -> None:
+        if not self._warn_undefined:
             return
-        if key in self._declared_outputs or key in self._undocumented_keys:
+        if key in self._declared_outputs or key in self._undefined_keys:
             return
-        self._undocumented_keys.add(key)
+        self._undefined_keys.add(key)
         warnings.warn(
-            f"Setting undocumented coupler key '{key}'. "
+            f"Setting undefined coupler key '{key}'. "
             f"Declared outputs: {sorted(self._declared_outputs)}",
             UserWarning,
             stacklevel=2,
@@ -86,7 +86,7 @@ class NoopCoupler:
 
     def set(self, key: str, artifact: Any) -> Any:
         validate_artifact_key(key)
-        self._maybe_warn_undocumented(key)
+        self._maybe_warn_undefined(key)
         self._artifacts[key] = artifact
         return artifact
 
@@ -99,7 +99,7 @@ class NoopCoupler:
 
         All forms are stored in the coupler and can be retrieved with get() or require().
         """
-        self._maybe_warn_undocumented(key)
+        self._maybe_warn_undefined(key)
         self._artifacts[key] = value
         return value
 
@@ -161,14 +161,14 @@ class NoopCoupler:
         self,
         *names: str,
         required: bool | Mapping[str, bool] = False,
-        warn_undocumented: bool = False,
+        warn_undefined: bool = False,
         description: Optional[Mapping[str, str]] = None,
     ) -> None:
         # NOTE: Keep in sync with Coupler.declare_outputs.
         if not names:
             return
-        if warn_undocumented:
-            self._warn_undocumented = True
+        if warn_undefined:
+            self._warn_undefined = True
         if isinstance(required, Mapping):
             required_map = {str(k): bool(v) for k, v in required.items()}
             default_required = False
@@ -204,13 +204,13 @@ class NoopCoupler:
         self,
         *names: str,
         required: bool | Mapping[str, bool] = True,
-        warn_undocumented: bool = False,
+        warn_undefined: bool = False,
         description: Optional[Mapping[str, str]] = None,
     ) -> None:
         self.declare_outputs(
             *names,
             required=required,
-            warn_undocumented=warn_undocumented,
+            warn_undefined=warn_undefined,
             description=description,
         )
 
@@ -317,13 +317,13 @@ class NoopScenarioContext:
         self,
         *names: str,
         required: bool | Mapping[str, bool] = False,
-        warn_undocumented: bool = False,
+        warn_undefined: bool = False,
         description: Optional[Mapping[str, str]] = None,
     ) -> None:
         self.coupler.declare_outputs(
             *names,
             required=required,
-            warn_undocumented=warn_undocumented,
+            warn_undefined=warn_undefined,
             description=description,
         )
 
@@ -331,13 +331,13 @@ class NoopScenarioContext:
         self,
         *names: str,
         required: bool | Mapping[str, bool] = True,
-        warn_undocumented: bool = False,
+        warn_undefined: bool = False,
         description: Optional[Mapping[str, str]] = None,
     ) -> None:
         self.coupler.require_outputs(
             *names,
             required=required,
-            warn_undocumented=warn_undocumented,
+            warn_undefined=warn_undefined,
             description=description,
         )
 

@@ -445,7 +445,7 @@ with use_tracker(tracker):
 sc.require_outputs(
     "zarr_skims",
     "synthetic_population",
-    warn_undocumented=True,  # (1)!
+    warn_undefined=True,  # (1)!
     description={
         "zarr_skims": "Zone-to-zone travel times in Zarr format",
         "synthetic_population": "Synthetic population with activity schedules",

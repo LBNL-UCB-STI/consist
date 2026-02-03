@@ -403,7 +403,7 @@ class ScenarioContext:
         self,
         *names: str,
         required: bool | Mapping[str, bool] = False,
-        warn_undocumented: bool = False,
+        warn_undefined: bool = False,
         description: Optional[Mapping[str, str]] = None,
     ) -> None:
         """
@@ -416,7 +416,7 @@ class ScenarioContext:
         required : bool | Mapping[str, bool], default False
             Whether declared outputs are required. A mapping allows per-key
             overrides.
-        warn_undocumented : bool, default False
+        warn_undefined : bool, default False
             If True, warn when outputs are logged that were not declared.
         description : Optional[Mapping[str, str]], optional
             Human-readable descriptions for declared outputs.
@@ -424,7 +424,7 @@ class ScenarioContext:
         self.coupler.declare_outputs(
             *names,
             required=required,
-            warn_undocumented=warn_undocumented,
+            warn_undefined=warn_undefined,
             description=description,
         )
 
@@ -432,7 +432,7 @@ class ScenarioContext:
         self,
         *names: str,
         required: bool | Mapping[str, bool] = True,
-        warn_undocumented: bool = False,
+        warn_undefined: bool = False,
         description: Optional[Mapping[str, str]] = None,
     ) -> None:
         """
@@ -448,7 +448,7 @@ class ScenarioContext:
         required : bool | Mapping[str, bool], default True
             Whether required outputs are enforced. A mapping allows per-key
             overrides.
-        warn_undocumented : bool, default False
+        warn_undefined : bool, default False
             If True, warn when outputs are logged that were not declared.
         description : Optional[Mapping[str, str]], optional
             Human-readable descriptions for required outputs.
@@ -456,7 +456,7 @@ class ScenarioContext:
         self.coupler.require_outputs(
             *names,
             required=required,
-            warn_undocumented=warn_undocumented,
+            warn_undefined=warn_undefined,
             description=description,
         )
 

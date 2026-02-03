@@ -102,10 +102,12 @@ def _hash_h5_dataset(
 
 class ArtifactManager:
     """
-    Handles creation and discovery of Consist ``Artifact`` objects within a run.
+    Manage the lifecycle, virtualization, and identity hashing of Consist Artifacts.
 
-    The manager virtualizes paths, computes hashes, ties artifacts to existing
-    provenance records, and provides helpers for discovering nested HDF5 tables.
+    The ArtifactManager is responsible for transforming raw filesystem paths into
+    virtualized, portable URIs and computing deterministic content hashes. It
+    ensures that artifacts are correctly linked to runs and provides specialized
+    handling for complex containers like HDF5 and Zarr.
     """
 
     def __init__(self, tracker: "Tracker"):
@@ -129,46 +131,56 @@ class ArtifactManager:
         **meta: Any,
     ) -> Artifact:
         """
-        Construct or reuse an ``Artifact`` instance for the given path.
+        Instantiate or resolve a tracked Artifact for a given filesystem path.
+
+        This method performs path virtualization against configured mounts and
+        generates a unique identity for the data. If an identical artifact (by URI
+        and hash) exists in the provenance database, it may be reused to maintain
+        graph integrity.
 
         Parameters
         ----------
         path : ArtifactRef
-            File system path or an existing ``Artifact`` reference to log.
+            The filesystem path (string or Path object) or an existing Artifact
+            to be registered.
         run_id : Optional[str], optional
-            Identifier of the run that produced the artifact.
+            The unique identifier of the run producing this artifact. If None,
+            the artifact is treated as an exogenous input.
         key : Optional[str], optional
-            Logical name for the artifact; required when ``path`` is a string.
-            Must follow artifact-key rules (no empty key, no ``..``/``//``, length <= 256).
+            A semantic identifier for the artifact (e.g., 'household_survey').
+            Required if `path` is a string.
         direction : str, default "output"
-            Whether the artifact is treated as an "input" or "output" of the run.
+            The relationship of the artifact to the run: "input" or "output".
         schema : Optional[Type[SQLModel]], optional
-            Schema class to record in ``meta["schema_name"]`` and ``meta["has_strict_schema"]``.
+            A SQLModel class used to enforce structure and enable hybrid views.
         driver : Optional[str], optional
-            Explicit driver identifier (e.g., ``"h5_table"``); inferred from suffix if omitted.
+            The format handler (e.g., 'parquet', 'csv', 'zarr'). If omitted,
+            the driver is inferred from the file extension.
         table_path : Optional[str], optional
-            Optional path inside a container for tabular artifacts.
+            Internal path for tabular datasets within a container (e.g., HDF5).
         array_path : Optional[str], optional
-            Optional path inside a container for array artifacts.
+            Internal path for multi-dimensional arrays within a container.
+        content_hash : Optional[str], optional
+            A precomputed SHA256 hash. If provided, Consist skips the
+            expensive file hashing step unless validation is requested.
+        force_hash_override : bool, default False
+            If True, permits overwriting an existing artifact's hash with a
+            new value.
+        validate_content_hash : bool, default False
+            If True, re-computes the hash from disk to ensure it matches
+            the provided `content_hash`.
         reuse_if_unchanged : bool, default False
-            If True and logging an output, reuse a prior artifact row when the content hash matches.
+            If True, attempts to link to a previously recorded artifact record
+            if the content hash is identical.
         reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
-            Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
-            while "any_uri" allows reuse across different URIs with the same hash.
+            The breadth of the search for reusable artifacts.
         **meta : Any
-            Additional metadata key/value pairs to attach to the artifact.
+            Flexible metadata payload stored within the artifact record.
 
         Returns
         -------
         Artifact
-            The persisted or reused artifact object carrying virtualized URI information.
-
-        Raises
-        ------
-        ValueError
-            If ``path`` is a string and ``key`` is not provided.
-        TypeError
-            If ``key`` is not a string when provided.
+            A hydrated Artifact instance ready for persistence or chaining.
         """
         if "table_path" in meta:
             meta.pop("table_path")
