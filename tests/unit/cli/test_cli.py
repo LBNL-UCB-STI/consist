@@ -13,7 +13,8 @@ from sqlmodel import SQLModel, Session, create_engine
 from typer.testing import CliRunner
 
 from consist import Tracker
-from consist.cli import ConsistShell, app
+from consist.cli import ConsistShell, app, _tracker_session
+from consist.core.persistence import DatabaseManager
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifactLink
 
@@ -152,7 +153,28 @@ def test_runs_no_db():
     with patch("pathlib.Path.exists", return_value=False):
         result = runner.invoke(app, ["runs", "--db-path", "nonexistent.db"])
         assert result.exit_code != 0
-        assert "Database not found at" in result.stdout
+    assert "Database not found at" in result.stdout
+
+
+def test_tracker_session_uses_db_session_scope(tmp_path):
+    db = DatabaseManager(str(tmp_path / "cli_session.db"))
+    tracker = MagicMock()
+    tracker.engine = create_engine("duckdb:///:memory:")
+    tracker.db = db
+
+    with patch.object(db, "session_scope", wraps=db.session_scope) as session_scope:
+        with _tracker_session(tracker) as session:
+            assert session is not None
+        assert session_scope.call_count == 1
+
+
+def test_tracker_session_falls_back_to_engine(mock_db_session):
+    tracker = MagicMock()
+    tracker.engine = mock_db_session.get_bind()
+    tracker.db = None
+
+    with _tracker_session(tracker) as session:
+        assert session.get_bind() == mock_db_session.get_bind()
 
 
 def test_runs_with_db(mock_db_session):

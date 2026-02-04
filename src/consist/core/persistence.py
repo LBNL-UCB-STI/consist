@@ -4,7 +4,19 @@ import logging
 import re
 import uuid
 import json
-from typing import Optional, List, Callable, Any, Dict, Tuple, TYPE_CHECKING, Literal
+import contextvars
+from contextlib import contextmanager
+from typing import (
+    Optional,
+    List,
+    Callable,
+    Any,
+    Dict,
+    Tuple,
+    TYPE_CHECKING,
+    Literal,
+    Iterator,
+)
 
 import pandas as pd
 from sqlalchemy.exc import OperationalError, DatabaseError
@@ -72,6 +84,9 @@ class DatabaseManager:
         self.db_path = db_path
         # Using NullPool ensures the file lock is released when the session closes
         self.engine = create_engine(f"duckdb:///{db_path}", poolclass=NullPool)
+        self._session_ctx: contextvars.ContextVar[Session | None] = (
+            contextvars.ContextVar("consist_session", default=None)
+        )
         self._init_schema()
 
     def _init_schema(self):
@@ -166,7 +181,7 @@ class DatabaseManager:
         """
 
         def _backfill():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 schema = session.get(ArtifactSchema, schema_id)
                 if schema is None:
                     return
@@ -270,13 +285,33 @@ class DatabaseManager:
                     raise e
         raise ConcurrentModificationError(f"Concurrency problem in {operation_name}")
 
+    @contextmanager
+    def session_scope(self) -> Iterator[Session]:
+        """
+        Provide a Session, reusing a shared session within a command when present.
+
+        This keeps CLI commands to a single DuckDB connection while preserving
+        existing behavior for library usage.
+        """
+        session = self._session_ctx.get()
+        if session is not None:
+            yield session
+            return
+        session = Session(self.engine)
+        token = self._session_ctx.set(session)
+        try:
+            yield session
+        finally:
+            session.close()
+            self._session_ctx.reset(token)
+
     # --- Write Operations ---
 
     def update_artifact_meta(self, artifact: Artifact, updates: Dict[str, Any]) -> None:
         """Updates artifact metadata safely with retries."""
 
         def _update():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 # Merge ensures we are attached to this session
                 db_art = session.merge(artifact)
                 # Ensure meta is a dict (handle potential None)
@@ -298,7 +333,7 @@ class DatabaseManager:
         """Upserts a Run object."""
 
         def _do_sync():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 # Use merge for a simple upsert. DuckDB's MERGE semantics via SQLModel
                 # handle inserts and updates in one call and avoid stale state issues.
                 logging.debug(
@@ -321,7 +356,7 @@ class DatabaseManager:
         """Updates a run's meta field with a partial dict."""
 
         def _update():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 db_run = session.get(Run, run_id)
                 if not db_run:
                     return
@@ -340,7 +375,7 @@ class DatabaseManager:
         """Sets the signature field for a run."""
 
         def _update():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 db_run = session.get(Run, run_id)
                 if not db_run:
                     return
@@ -360,7 +395,7 @@ class DatabaseManager:
         """Upserts a ConfigFacet (deduped by facet.id)."""
 
         def _upsert():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 session.merge(facet)
                 session.commit()
 
@@ -375,7 +410,7 @@ class DatabaseManager:
             return
 
         def _insert():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 # Ensure idempotency for repeated runs with identical run_id/facet_id/namespace.
                 combos = {
                     (row.run_id, row.facet_id, row.namespace)
@@ -414,7 +449,7 @@ class DatabaseManager:
         """
 
         def _upsert():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 session.merge(schema)
                 # Idempotency: schema profiling may run multiple times for the same
                 # schema_id (hash). Replace the normalized field rows in one shot.
@@ -447,7 +482,7 @@ class DatabaseManager:
         """Insert a new schema observation row."""
 
         def _insert():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 session.add(observation)
                 session.commit()
 
@@ -467,7 +502,7 @@ class DatabaseManager:
         self, *, schema_id: str
     ) -> List[ArtifactSchemaRelation]:
         def _query() -> List[ArtifactSchemaRelation]:
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 return list(
                     session.exec(
                         select(ArtifactSchemaRelation).where(
@@ -496,7 +531,7 @@ class DatabaseManager:
         """
 
         def _apply() -> int:
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 rows = session.exec(
                     select(ArtifactSchemaRelation, ArtifactSchema).where(
                         ArtifactSchemaRelation.schema_id == ArtifactSchema.id
@@ -561,7 +596,7 @@ class DatabaseManager:
         """
 
         def _do_link():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 existing = session.exec(
                     select(RunArtifactLink)
                     .where(RunArtifactLink.run_id == run_id)
@@ -609,7 +644,7 @@ class DatabaseManager:
             return
 
         def _do_link():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 existing = session.exec(
                     select(RunArtifactLink)
                     .where(RunArtifactLink.run_id == run_id)
@@ -676,7 +711,7 @@ class DatabaseManager:
             return
 
         def _do_sync():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 session.merge(run)
 
                 existing = session.exec(
@@ -722,7 +757,7 @@ class DatabaseManager:
         """Upserts an Artifact and links it to the Run."""
 
         def _do_sync():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 # Merge artifact (create or update)
                 session.merge(artifact)
                 session.commit()
@@ -771,7 +806,7 @@ class DatabaseManager:
         """
 
         def _query():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 statement = select(Artifact).where(Artifact.container_uri == uri)
                 if not include_inputs:
                     statement = statement.where(
@@ -821,7 +856,7 @@ class DatabaseManager:
         """
 
         def _query():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 statement = select(Artifact).where(Artifact.hash == content_hash)
                 if not include_inputs:
                     statement = statement.where(
@@ -851,7 +886,7 @@ class DatabaseManager:
         """
 
         def _query() -> Optional[ArtifactSchemaObservation]:
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 observations = session.exec(
                     select(ArtifactSchemaObservation)
                     .join(
@@ -895,7 +930,7 @@ class DatabaseManager:
 
     def get_run(self, run_id: str) -> Optional[Run]:
         def _query():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 return session.get(Run, run_id)
 
         return self.execute_with_retry(_query)
@@ -910,7 +945,7 @@ class DatabaseManager:
             return {}
 
         def _query():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 rows = session.exec(
                     select(Run.id, Run.signature).where(col(Run.id).in_(run_ids))
                 ).all()
@@ -925,7 +960,7 @@ class DatabaseManager:
         self, config_hash: str, input_hash: str, git_hash: str
     ) -> Optional[Run]:
         def _query():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 statement = (
                     select(Run)
                     .where(Run.status == "completed")
@@ -947,7 +982,7 @@ class DatabaseManager:
         """Find a completed run by its composite signature."""
 
         def _query():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 statement = (
                     select(Run)
                     .where(Run.status == "completed")
@@ -967,7 +1002,7 @@ class DatabaseManager:
 
     def get_artifact(self, key_or_id: str | uuid.UUID) -> Optional[Artifact]:
         def _query():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 try:
                     # Try UUID lookup first
                     uuid_obj = uuid.UUID(str(key_or_id))
@@ -990,7 +1025,7 @@ class DatabaseManager:
         self, *, schema_id: str, backfill_ordinals: bool = True
     ) -> Optional[Tuple[ArtifactSchema, List[ArtifactSchemaField]]]:
         def _query():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 schema = session.get(ArtifactSchema, schema_id)
                 if schema is None:
                     return None
@@ -1076,7 +1111,7 @@ class DatabaseManager:
             Query all schema observations for this artifact and apply preference logic
             to select the best schema_id.
             """
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 # Fetch all observations for this artifact, most recent first.
                 # We order by observed_at DESC so that if the same source has multiple
                 # observations, we get the most recent one.
@@ -1131,7 +1166,7 @@ class DatabaseManager:
 
     def get_artifacts_for_run(self, run_id: str) -> List[Tuple[Artifact, str]]:
         def _query():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 return session.exec(
                     select(Artifact, RunArtifactLink.direction)
                     .join(
@@ -1155,7 +1190,7 @@ class DatabaseManager:
         limit: int = 100,
     ) -> List[Artifact]:
         def _query():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 statement = select(Artifact).distinct()
 
                 if creator:
@@ -1207,7 +1242,7 @@ class DatabaseManager:
         name: Optional[str] = None,
     ) -> List[Run]:
         def _query():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 statement = select(Run).order_by(col(Run.created_at).desc())
 
                 if status:
@@ -1287,7 +1322,7 @@ class DatabaseManager:
         """
 
         def _query():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 statement = select(Artifact).where(Artifact.container_uri == uri)
                 # If run_id is specified, filter to only that run
                 if run_id is not None:
@@ -1307,7 +1342,7 @@ class DatabaseManager:
 
     def get_config_facet(self, facet_id: str) -> Optional[ConfigFacet]:
         def _query():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 facet = session.get(ConfigFacet, facet_id)
                 if facet is not None:
                     _ = facet.facet_json
@@ -1327,7 +1362,7 @@ class DatabaseManager:
         limit: int = 100,
     ) -> List[ConfigFacet]:
         def _query():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 statement = select(ConfigFacet).order_by(
                     col(ConfigFacet.created_at).desc()
                 )
@@ -1365,7 +1400,7 @@ class DatabaseManager:
         """
 
         def _query():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 statement = select(RunConfigKV).where(RunConfigKV.run_id == run_id)
                 if namespace:
                     statement = statement.where(RunConfigKV.namespace == namespace)
@@ -1402,7 +1437,7 @@ class DatabaseManager:
         """
 
         def _query():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 statement = (
                     select(Run)
                     .join(RunConfigKV, RunConfigKV.run_id == Run.id)  # ty: ignore[invalid-argument-type]
@@ -1454,7 +1489,7 @@ class DatabaseManager:
             return {}
 
         def _query():
-            with Session(self.engine) as session:
+            with self.session_scope() as session:
                 statement = select(RunConfigKV).where(
                     col(RunConfigKV.run_id).in_(run_ids)
                 )
