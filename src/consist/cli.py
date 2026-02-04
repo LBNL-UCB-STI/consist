@@ -21,6 +21,7 @@ if __package__ is None and __spec__ is None:
         sys.path.insert(0, package_root)
 
 import cmd
+from contextlib import contextmanager
 import shlex
 import json
 import uuid
@@ -38,6 +39,7 @@ from sqlalchemy import and_, or_, select as sa_select
 from sqlmodel import Session, col, select
 
 from consist import Tracker
+from consist.core.persistence import DatabaseManager
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.tools import queries
 
@@ -128,6 +130,17 @@ def get_tracker(db_path: Optional[str] = None) -> Tracker:
         )
         raise typer.Exit(1)
     return Tracker(run_dir=Path("."), db_path=resolved_path)
+
+
+@contextmanager
+def _tracker_session(tracker: Tracker) -> Iterable[Session]:
+    db = getattr(tracker, "db", None)
+    if not isinstance(db, DatabaseManager):
+        with Session(tracker.engine) as session:
+            yield session
+        return
+    with db.session_scope() as session:
+        yield session
 
 
 def _render_schema_profile(
@@ -353,7 +366,7 @@ def _render_runs_table(
     status: Optional[str] = None,
 ) -> None:
     """Shared logic for displaying runs."""
-    with Session(tracker.engine) as session:
+    with _tracker_session(tracker) as session:
         results = queries.get_runs(
             session, limit=limit, model_name=model_name, tags=tags, status=status
         )
@@ -559,7 +572,7 @@ def _iter_artifact_rows(
 
 def _render_scenarios(tracker: Tracker, limit: int = 20) -> None:
     """Shared logic for displaying scenario overview (scenarios are parent runs)."""
-    with Session(tracker.engine) as session:
+    with _tracker_session(tracker) as session:
         from consist.models.run import Run
         from sqlmodel import func
 
@@ -618,7 +631,7 @@ def search(
         )
     escaped_query = _escape_like_pattern(query)
 
-    with Session(tracker.engine) as session:
+    with _tracker_session(tracker) as session:
         from consist.models.run import Run
         from sqlmodel import select, or_, col
 
@@ -676,7 +689,7 @@ def validate(
     """Check that artifacts referenced in DB actually exist on disk."""
     tracker = get_tracker(db_path)
 
-    with Session(tracker.engine) as session:
+    with _tracker_session(tracker) as session:
         missing = []
         batch_size = 1000
         if env_batch_size := os.getenv("CONSIST_VALIDATE_BATCH_SIZE"):
@@ -735,7 +748,7 @@ def scenario(
     """Show all runs in a scenario."""
     tracker = get_tracker(db_path)
 
-    with Session(tracker.engine) as session:
+    with _tracker_session(tracker) as session:
         from consist.models.run import Run
 
         query = (
@@ -793,7 +806,7 @@ def runs(
     """
     tracker = get_tracker(db_path)
     if json_output:
-        with Session(tracker.engine) as session:
+        with _tracker_session(tracker) as session:
             results = queries.get_runs(
                 session, limit=limit, model_name=model_name, tags=tag, status=status
             )
@@ -905,7 +918,7 @@ def summary(
 ) -> None:
     """Displays a high-level summary of the provenance database."""
     tracker = get_tracker(db_path)
-    with Session(tracker.engine) as session:
+    with _tracker_session(tracker) as session:
         summary_data = queries.get_summary(session)
 
     _render_summary(summary_data)
@@ -1467,7 +1480,7 @@ class ConsistShell(cmd.Cmd):
     def do_summary(self, arg: str) -> None:
         """Display database summary. Usage: summary"""
         try:
-            with Session(self.tracker.engine) as session:
+            with _tracker_session(self.tracker) as session:
                 summary_data = queries.get_summary(session)
             _render_summary(summary_data)
         except Exception as exc:
