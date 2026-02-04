@@ -31,6 +31,7 @@ classifiers = [
 
 [project.scripts]
 consist = "consist.cli:app"
+consist-profile = "consist.cli_profile:main"
 
 [project.optional-dependencies]
 # Optional runtime integrations (install as needed).
