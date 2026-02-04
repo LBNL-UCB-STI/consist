@@ -6,7 +6,17 @@ import uuid
 import json
 import contextvars
 from contextlib import contextmanager
-from typing import Optional, List, Callable, Any, Dict, Tuple, TYPE_CHECKING, Literal, Iterator
+from typing import (
+    Optional,
+    List,
+    Callable,
+    Any,
+    Dict,
+    Tuple,
+    TYPE_CHECKING,
+    Literal,
+    Iterator,
+)
 
 import pandas as pd
 from sqlalchemy.exc import OperationalError, DatabaseError
@@ -74,8 +84,8 @@ class DatabaseManager:
         self.db_path = db_path
         # Using NullPool ensures the file lock is released when the session closes
         self.engine = create_engine(f"duckdb:///{db_path}", poolclass=NullPool)
-        self._session_ctx: contextvars.ContextVar[Session | None] = contextvars.ContextVar(
-            "consist_session", default=None
+        self._session_ctx: contextvars.ContextVar[Session | None] = (
+            contextvars.ContextVar("consist_session", default=None)
         )
         self._init_schema()
 

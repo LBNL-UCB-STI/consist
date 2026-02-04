@@ -26,7 +26,18 @@ import shlex
 import json
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Mapping, Tuple, Literal, cast
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Mapping,
+    Tuple,
+    Literal,
+    cast,
+)
 
 import duckdb
 import pandas as pd
@@ -133,7 +144,7 @@ def get_tracker(db_path: Optional[str] = None) -> Tracker:
 
 
 @contextmanager
-def _tracker_session(tracker: Tracker) -> Iterable[Session]:
+def _tracker_session(tracker: Tracker) -> Iterator[Session]:
     db = getattr(tracker, "db", None)
     if not isinstance(db, DatabaseManager):
         with Session(tracker.engine) as session:
