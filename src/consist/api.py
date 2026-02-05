@@ -810,6 +810,11 @@ def log_artifacts(
         Explicitly specify driver for all artifacts. If None, inferred from file extension.
     metadata_by_key : Optional[Mapping[str, Dict[str, Any]]], optional
         Per-key metadata overrides applied on top of shared metadata.
+    reuse_if_unchanged : bool, default False
+        If True, reuse an existing logged artifact when the input path has not changed.
+    reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
+        Control reuse lookup scope. "same_uri" only reuses when the URI matches,
+        while "any_uri" allows reuse across different URIs with the same content hash.
     enabled : bool, default True
         If False, returns noop artifact objects without requiring an active run.
     **shared_meta : Any
@@ -1810,9 +1815,6 @@ def load(
         If `None`, the function attempts to use the active global tracker context.
         Explicitly passing a `tracker` is recommended for clarity or when
         no global context is available.
-    **kwargs : Any
-        Additional keyword arguments to pass to the underlying data loader function
-        (e.g., `pd.read_parquet`, `pd.read_csv`, `xr.open_zarr`, `pd.read_sql`).
     db_fallback : str, default "inputs-only"
         Controls when the loader is allowed to fall back to DuckDB ("Ghost Mode") when
         the file is missing but the artifact is marked as ingested.
@@ -1822,6 +1824,9 @@ def load(
         - "always": allow DB fallback whenever `artifact.meta["is_ingested"]` is true and
           a tracker with a DB connection is available.
         - "never": disable DB fallback entirely.
+    **kwargs : Any
+        Additional keyword arguments to pass to the underlying data loader function
+        (e.g., `pd.read_parquet`, `pd.read_csv`, `xr.open_zarr`, `pd.read_sql`).
 
     Returns
     -------

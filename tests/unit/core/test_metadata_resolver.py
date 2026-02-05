@@ -6,7 +6,6 @@ on these guarantees to keep execution logic consistent.
 
 from __future__ import annotations
 
-from typing import Any
 
 import pytest
 

@@ -292,6 +292,9 @@ def profile_file_schema(
         HDF5 table path when profiling ``h5_table`` artifacts.
     source : str, default "file"
         Source label for the schema observation.
+    view_name : Optional[str], optional
+        Optional DuckDB view name used for profiling queries. Defaults to a
+        randomly generated name when omitted.
 
     Returns
     -------

@@ -284,6 +284,8 @@ class ActivitySimConfigAdapter:
             Identity helper used to hash config directories.
         strict : bool, default False
             If True, raise when `settings.yaml` is missing.
+        options : Optional[ConfigAdapterOptions], optional
+            Adapter override options (e.g., strict mode).
 
         Returns
         -------
@@ -361,6 +363,8 @@ class ActivitySimConfigAdapter:
             If True, raise on missing referenced files.
         plan_only : bool, default False
             If True, return specs without run-scoped artifacts or row materialization.
+        options : Optional[ConfigAdapterOptions], optional
+            Adapter override options (e.g., strict mode, heuristic scanning, bundling).
 
         Returns
         -------

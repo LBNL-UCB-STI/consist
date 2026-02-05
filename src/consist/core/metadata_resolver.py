@@ -148,7 +148,9 @@ class MetadataResolver:
             optional_input_keys, step_def.optional_input_keys
         )
         resolved_cache_mode = _resolve_meta(cache_mode, step_def.cache_mode)
-        resolved_cache_hydration = _resolve_meta(cache_hydration, step_def.cache_hydration)
+        resolved_cache_hydration = _resolve_meta(
+            cache_hydration, step_def.cache_hydration
+        )
         resolved_cache_version = _resolve_meta(cache_version, step_def.cache_version)
         resolved_validate_cached_outputs = _resolve_meta(
             validate_cached_outputs, step_def.validate_cached_outputs

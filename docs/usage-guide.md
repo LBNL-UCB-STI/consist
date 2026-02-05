@@ -368,52 +368,11 @@ with use_tracker(tracker):
 ```
 </details>
 
-### Decorator Defaults and Name Templates
+### Decorator Defaults, Templates, and Schema Introspection
 
-You can move repeated step configuration into `@define_step`. Any callable values are
-resolved at runtime with a `StepContext` (e.g., `year`, `iteration`, `phase`, or `runtime_kwargs`).
-
-```python
-@tracker.define_step(
-    outputs=["analysis"],
-    cache_hydration="outputs-all",
-    name_template="{func_name}__y{year}__i{iteration}",
-)
-def analyze(population: pd.DataFrame, config: dict) -> pd.DataFrame:
-    return run_model(config["year"], population)
-
-with use_tracker(tracker):
-    with consist.scenario("baseline") as sc:
-        sc.run(
-            fn=analyze,
-            inputs=["population"],
-            load_inputs=True,
-            config={"year": 2030},
-            year=2030,
-            iteration=1,
-        )
-```
-
-To invalidate caches globally, bump `Tracker(cache_epoch=...)`. For a single step,
-set `cache_version=` in the decorator (or pass it explicitly to `run()`).
-
-### Schema Introspection for Couplers
-
-Use `collect_step_schema` to derive a schema from decorated steps:
-
-```python
-from consist.utils import collect_step_schema
-
-schema = collect_step_schema(
-    steps=[preprocess, analyze],
-    settings=settings,
-    extra_keys={"init/raw": "Initialization data"},
-)
-coupler.declare_outputs(*schema.keys(), description=schema)
-```
-
-If your outputs are dynamic, provide `schema_outputs=[...]` in `@define_step` so
-schema building stays deterministic.
+For the full guide to `@define_step` defaults, callable metadata, name templates,
+schema introspection, and cache invalidation helpers, see
+**[Decorators & Metadata](concepts/decorators-and-metadata.md)**.
 
 ### Passing Data Between Steps with the Coupler
 

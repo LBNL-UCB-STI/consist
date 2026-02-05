@@ -117,6 +117,30 @@ This default suits scientific workflows: large simulations benefit from avoiding
 
 Every run's **signature** is derived from code hash, config hash, and input hash. If Consist finds a completed run with the same signature and valid outputs, the new run is a **cache hit** and reuses prior outputs.
 
+#### Intentional Cache Invalidation
+
+Sometimes you need to invalidate caches globally or for a specific step (e.g., after a schema change or a bug fix that didn't change the config signature).
+
+- **Global Invalidation**: Increment `Tracker(cache_epoch=N)`. This bumps the version for every run in that tracker.
+- **Scenario Invalidation**: Use `tracker.scenario(..., cache_epoch=N)`.
+- **Step Invalidation**: Use `@define_step(cache_version=N)`.
+
+The `cache_epoch` and `cache_version` are folded into the run's identity hash, so a bump guarantees a cache miss.
+
+For decorator defaults, callable metadata, and name templates, see
+**[Decorators & Metadata](decorators-and-metadata.md)**.
+
+```python
+tracker = Tracker(run_dir="runs", cache_epoch=2)
+
+@define_step(cache_version=3)
+def simulate(...) -> None:
+    ...
+
+with tracker.scenario("baseline", cache_epoch=4) as sc:
+    sc.run(simulate, ...)
+```
+
 | `cache_mode` | Behavior |
 |--------------|----------|
 | `reuse` (default) | Reuse matching completed runs |
