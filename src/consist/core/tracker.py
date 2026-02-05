@@ -72,8 +72,7 @@ from consist.core.openmatrix_views import OpenMatrixMetadataView
 from consist.core.spatial_views import SpatialMetadataView
 from consist.core.queries import RunQueryService
 from consist.core.settings import ConsistSettings
-from consist.core.decorators import StepDefinition
-from consist.core.step_context import StepContext, format_step_name, resolve_metadata
+from consist.core.metadata_resolver import MetadataResolver
 from consist.core.validation import (
     validate_config_structure,
     validate_run_meta,
@@ -1411,94 +1410,58 @@ class Tracker:
             if fn is None:
                 raise ValueError("Tracker.run requires a callable fn.")
 
-        func_name = getattr(fn, "__name__", None) if fn is not None else None
-        step_def: Optional[StepDefinition] = None
-        if executor == "python" and fn is not None:
-            step_def = getattr(fn, "__consist_step__", StepDefinition())
+        resolver = MetadataResolver(
+            default_name_template=None,
+            allow_template=executor == "python",
+            apply_step_defaults=executor == "python",
+        )
+        resolved = resolver.resolve(
+            fn=fn,
+            name=name,
+            model=model,
+            description=description,
+            inputs=inputs,
+            input_keys=input_keys,
+            optional_input_keys=optional_input_keys,
+            tags=tags,
+            facet_from=facet_from,
+            facet_schema_version=facet_schema_version,
+            hash_inputs=hash_inputs,
+            year=year,
+            iteration=iteration,
+            phase=phase,
+            stage=stage,
+            settings=self.settings,
+            workspace=self.run_dir,
+            state=self.current_consist,
+            runtime_kwargs=runtime_kwargs,
+            outputs=outputs,
+            output_paths=output_paths,
+            cache_mode=cache_mode,
+            cache_hydration=cache_hydration,
+            cache_version=cache_version,
+            validate_cached_outputs=validate_cached_outputs,
+            load_inputs=load_inputs,
+            missing_name_error="Tracker.run requires a run name.",
+        )
 
-        ctx: StepContext | None = None
-        if fn is not None:
-            ctx = StepContext(
-                func_name=func_name or "",
-                model=model,
-                year=year,
-                iteration=iteration,
-                phase=phase,
-                stage=stage,
-                settings=self.settings,
-                workspace=self.run_dir,
-                state=self.current_consist,
-                runtime_kwargs=runtime_kwargs,
-            )
-
-        resolved_model = model
-        if step_def is not None and model is None:
-            if ctx is None:
-                raise RuntimeError("Step context unavailable for metadata resolution.")
-            resolved_model = resolve_metadata(step_def.model, ctx)
-        if ctx is not None:
-            ctx.model = resolved_model
-
-        name_template = None
-        if step_def is not None and step_def.name_template is not None:
-            if ctx is None:
-                raise RuntimeError("Step context unavailable for metadata resolution.")
-            name_template = resolve_metadata(step_def.name_template, ctx)
-
-        if name is not None:
-            resolved_name = name
-        elif name_template and executor == "python":
-            if ctx is None:
-                raise RuntimeError("Step context unavailable for name formatting.")
-            resolved_name = format_step_name(str(name_template), ctx)
-        else:
-            resolved_name = func_name
-
-        if resolved_name is None:
-            raise ValueError("Tracker.run requires a run name.")
-
-        if resolved_model is None:
-            resolved_model = resolved_name
-        if ctx is not None:
-            ctx.model = resolved_model
-
-        def _resolve_meta(explicit: Any, def_value: Any) -> Any:
-            if explicit is not None:
-                return explicit
-            if step_def is None or def_value is None or ctx is None:
-                return def_value
-            return resolve_metadata(def_value, ctx)
-
-        if executor == "python":
-            if step_def is None:
-                step_def = StepDefinition()
-            description = _resolve_meta(description, step_def.description)
-            tags = _resolve_meta(tags, step_def.tags)
-            if tags is not None:
-                tags = list(tags)
-            outputs = _resolve_meta(outputs, step_def.outputs)
-            if outputs is not None:
-                outputs = list(outputs)
-            output_paths = _resolve_meta(output_paths, step_def.output_paths)
-            inputs = _resolve_meta(inputs, step_def.inputs)
-            input_keys = _resolve_meta(input_keys, step_def.input_keys)
-            optional_input_keys = _resolve_meta(
-                optional_input_keys, step_def.optional_input_keys
-            )
-            cache_mode = _resolve_meta(cache_mode, step_def.cache_mode)
-            cache_hydration = _resolve_meta(cache_hydration, step_def.cache_hydration)
-            cache_version = _resolve_meta(cache_version, step_def.cache_version)
-            validate_cached_outputs = _resolve_meta(
-                validate_cached_outputs, step_def.validate_cached_outputs
-            )
-            load_inputs = _resolve_meta(load_inputs, step_def.load_inputs)
-            hash_inputs = _resolve_meta(hash_inputs, step_def.hash_inputs)
-            facet_from = _resolve_meta(facet_from, step_def.facet_from)
-            if facet_from is not None:
-                facet_from = list(facet_from)
-            facet_schema_version = _resolve_meta(
-                facet_schema_version, step_def.facet_schema_version
-            )
+        resolved_name = resolved.name
+        resolved_model = resolved.model
+        description = resolved.description
+        tags = resolved.tags
+        outputs = resolved.outputs
+        output_paths = resolved.output_paths
+        inputs = resolved.inputs
+        input_keys = resolved.input_keys
+        optional_input_keys = resolved.optional_input_keys
+        cache_mode = resolved.cache_mode
+        cache_hydration = resolved.cache_hydration
+        cache_version = resolved.cache_version
+        validate_cached_outputs = resolved.validate_cached_outputs
+        load_inputs = resolved.load_inputs
+        hash_inputs = resolved.hash_inputs
+        facet_from = resolved.facet_from
+        facet_schema_version = resolved.facet_schema_version
 
         if cache_mode is None:
             cache_mode = "reuse"

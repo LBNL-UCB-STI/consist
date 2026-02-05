@@ -19,9 +19,8 @@ from consist import Artifact
 from consist.models.run import ConsistRecord, RunResult
 from typing import TYPE_CHECKING
 from consist.core.coupler import Coupler
-from consist.core.decorators import StepDefinition
 from consist.core.input_utils import coerce_input_map
-from consist.core.step_context import StepContext, format_step_name, resolve_metadata
+from consist.core.metadata_resolver import MetadataResolver
 from consist.types import ArtifactRef, FacetLike, HashInputs
 from pathlib import Path
 
@@ -649,78 +648,64 @@ class ScenarioContext:
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
 
-        step_def: Optional[StepDefinition] = (
-            getattr(fn, "__consist_step__", StepDefinition())
-            if fn is not None
-            else None
-        )
         func_name = getattr(fn, "__name__", None) if fn is not None else None
+        if fn is not None and func_name is None and name is None:
+            raise ValueError("ScenarioContext.run requires a run name.")
+        if fn is None and name is None:
+            raise ValueError("ScenarioContext.run requires name when fn is None.")
 
-        ctx: StepContext | None = None
-        if fn is not None:
-            if func_name is None and name is None:
-                raise ValueError("ScenarioContext.run requires a run name.")
-            ctx = StepContext(
-                func_name=func_name or "",
-                model=model,
-                year=year,
-                iteration=iteration,
-                phase=phase,
-                stage=stage,
-                settings=self.tracker.settings,
-                workspace=self.tracker.run_dir,
-                state=self._header_record,
-                runtime_kwargs=runtime_kwargs,
-            )
+        resolver = MetadataResolver(
+            default_name_template=self.name_template,
+            allow_template=True,
+            apply_step_defaults=True,
+        )
+        resolved = resolver.resolve(
+            fn=fn,
+            name=name,
+            model=model,
+            description=description,
+            inputs=inputs,
+            input_keys=input_keys,
+            optional_input_keys=optional_input_keys,
+            tags=tags,
+            facet_from=facet_from,
+            facet_schema_version=facet_schema_version,
+            hash_inputs=hash_inputs,
+            year=year,
+            iteration=iteration,
+            phase=phase,
+            stage=stage,
+            settings=self.tracker.settings,
+            workspace=self.tracker.run_dir,
+            state=self._header_record,
+            runtime_kwargs=runtime_kwargs,
+            outputs=outputs,
+            output_paths=output_paths,
+            cache_mode=cache_mode,
+            cache_hydration=cache_hydration,
+            cache_version=cache_version,
+            validate_cached_outputs=validate_cached_outputs,
+            load_inputs=load_inputs,
+            missing_name_error="ScenarioContext.run requires a run name.",
+        )
 
-        if fn is None:
-            if name is None:
-                raise ValueError("ScenarioContext.run requires name when fn is None.")
-            resolved_name = name
-            resolved_model = model or resolved_name
-        else:
-            resolved_model = model
-            if step_def is not None and model is None:
-                if ctx is None:
-                    raise RuntimeError(
-                        "Step context unavailable for metadata resolution."
-                    )
-                resolved_model = resolve_metadata(step_def.model, ctx)
-            if ctx is not None:
-                ctx.model = resolved_model
-
-            name_template = None
-            if step_def is not None and step_def.name_template is not None:
-                if ctx is None:
-                    raise RuntimeError(
-                        "Step context unavailable for metadata resolution."
-                    )
-                name_template = resolve_metadata(step_def.name_template, ctx)
-            elif self.name_template is not None:
-                name_template = self.name_template
-
-            if name is not None:
-                resolved_name = name
-            elif name_template:
-                if ctx is None:
-                    raise RuntimeError("Step context unavailable for name formatting.")
-                resolved_name = format_step_name(str(name_template), ctx)
-            else:
-                resolved_name = func_name
-
-            if resolved_name is None:
-                raise ValueError("ScenarioContext.run requires a run name.")
-            if resolved_model is None:
-                resolved_model = resolved_name
-            if ctx is not None:
-                ctx.model = resolved_model
-
-        def _resolve_meta(explicit: Any, def_value: Any) -> Any:
-            if explicit is not None:
-                return explicit
-            if step_def is None or def_value is None or ctx is None:
-                return def_value
-            return resolve_metadata(def_value, ctx)
+        resolved_name = resolved.name
+        resolved_model = resolved.model
+        resolved_description = resolved.description
+        resolved_tags = resolved.tags
+        resolved_outputs = resolved.outputs
+        resolved_output_paths = resolved.output_paths
+        resolved_inputs = resolved.inputs
+        resolved_input_keys = resolved.input_keys
+        resolved_optional_input_keys = resolved.optional_input_keys
+        resolved_facet_from = resolved.facet_from
+        resolved_facet_schema_version = resolved.facet_schema_version
+        resolved_hash_inputs = resolved.hash_inputs
+        resolved_cache_mode = resolved.cache_mode
+        resolved_cache_hydration = resolved.cache_hydration
+        resolved_cache_version = resolved.cache_version
+        resolved_validate_cached_outputs = resolved.validate_cached_outputs
+        resolved_load_inputs = resolved.load_inputs
 
         if run_id is None:
             run_id = f"{self.run_id}_{resolved_name}_{uuid.uuid4().hex[:8]}"
@@ -729,41 +714,6 @@ class ScenarioContext:
 
         self._first_step_started = True
         self._last_step_name = resolved_name
-
-        if step_def is None:
-            step_def = StepDefinition()
-        resolved_description = _resolve_meta(description, step_def.description)
-        resolved_tags = _resolve_meta(tags, step_def.tags)
-        if resolved_tags is not None:
-            resolved_tags = list(resolved_tags)
-
-        resolved_outputs = _resolve_meta(outputs, step_def.outputs)
-        if resolved_outputs is not None:
-            resolved_outputs = list(resolved_outputs)
-
-        resolved_output_paths = _resolve_meta(output_paths, step_def.output_paths)
-        resolved_inputs = _resolve_meta(inputs, step_def.inputs)
-        resolved_input_keys = _resolve_meta(input_keys, step_def.input_keys)
-        resolved_optional_input_keys = _resolve_meta(
-            optional_input_keys, step_def.optional_input_keys
-        )
-        resolved_facet_from = _resolve_meta(facet_from, step_def.facet_from)
-        if resolved_facet_from is not None:
-            resolved_facet_from = list(resolved_facet_from)
-        resolved_facet_schema_version = _resolve_meta(
-            facet_schema_version, step_def.facet_schema_version
-        )
-
-        resolved_hash_inputs = _resolve_meta(hash_inputs, step_def.hash_inputs)
-        resolved_cache_mode = _resolve_meta(cache_mode, step_def.cache_mode)
-        resolved_cache_hydration = _resolve_meta(
-            cache_hydration, step_def.cache_hydration
-        )
-        resolved_cache_version = _resolve_meta(cache_version, step_def.cache_version)
-        resolved_validate_cached_outputs = _resolve_meta(
-            validate_cached_outputs, step_def.validate_cached_outputs
-        )
-        resolved_load_inputs = _resolve_meta(load_inputs, step_def.load_inputs)
 
         if resolved_cache_mode is None:
             resolved_cache_mode = "reuse"
