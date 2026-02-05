@@ -98,13 +98,17 @@ def test_ingest_artifact_strict_dicts(tracker, engine):
     # 2. Verify in DB
     with Session(engine) as session:
         # Note: dlt creates tables in 'global_tables' schema by default
-        stmt = select(
-            _mock_table.c.id,
-            _mock_table.c.val,
-            _mock_table.c.consist_run_id,
-            _mock_table.c.consist_year,
-            _mock_table.c.consist_iteration,
-        ).select_from(_mock_table).order_by(_mock_table.c.id)
+        stmt = (
+            select(
+                _mock_table.c.id,
+                _mock_table.c.val,
+                _mock_table.c.consist_run_id,
+                _mock_table.c.consist_year,
+                _mock_table.c.consist_iteration,
+            )
+            .select_from(_mock_table)
+            .order_by(_mock_table.c.id)
+        )
         result = session.exec(cast(Any, stmt)).all()
 
         assert len(result) == 2

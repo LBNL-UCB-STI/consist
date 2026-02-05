@@ -252,6 +252,24 @@ The **coupler** is your scenario-scoped artifact registry. When you log an artif
 - Declaring inputs to `sc.run()`: `inputs=["population"]`
 - Validating that outputs were produced: `sc.require_outputs(...)`
 
+**Optional: artifact key registries** help keep keys consistent across large workflows.
+
+``` python
+from consist.utils import ArtifactKeyRegistry
+
+class Keys(ArtifactKeyRegistry):
+    RAW = "raw"
+    PREPROCESSED = "preprocessed"
+    ANALYSIS = "analysis"
+
+# Use keys in calls
+sc.run(fn=preprocess, inputs={Keys.RAW: "raw.csv"}, outputs=[Keys.PREPROCESSED])
+sc.run(fn=analyze, inputs=[Keys.PREPROCESSED], load_inputs=True, outputs=[Keys.ANALYSIS])
+
+# Validate ad-hoc key lists when needed
+Keys.validate([Keys.RAW, Keys.PREPROCESSED])
+```
+
 **Live-sync (automatic):** When you log an artifact, it's immediately available in the coupler—you don't need to manually call `coupler.set()`.
 
 **For optional-Consist workflows:** If you're using Consist in optional mode (with fallback to Path objects or artifact-like objects), use `coupler.set_from_artifact(key, value)` instead of `coupler.set()`. It handles both real Artifacts and artifact-like objects (Paths, strings, noop artifacts) transparently.
