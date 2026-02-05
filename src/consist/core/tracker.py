@@ -72,6 +72,8 @@ from consist.core.openmatrix_views import OpenMatrixMetadataView
 from consist.core.spatial_views import SpatialMetadataView
 from consist.core.queries import RunQueryService
 from consist.core.settings import ConsistSettings
+from consist.core.decorators import StepDefinition
+from consist.core.step_context import StepContext, format_step_name, resolve_metadata
 from consist.core.validation import (
     validate_config_structure,
     validate_run_meta,
@@ -243,6 +245,7 @@ class Tracker:
         mounts: Optional[Dict[str, str]] = None,
         project_root: str = ".",
         hashing_strategy: str = "full",
+        cache_epoch: int = 1,
         schemas: Optional[List[Type[SQLModel]]] = None,
         access_mode: AccessMode = "standard",
         run_subdir_fn: Optional[Callable[[Run], str]] = None,
@@ -279,6 +282,9 @@ class Tracker:
         hashing_strategy : str, default "full"
             The method used to compute artifact identity. 'full' performs a
             complete SHA256 content hash, while 'fast' leverages filesystem metadata.
+        cache_epoch : int, default 1
+            Global cache version for this tracker. Increment to invalidate all
+            previously cached runs without modifying code or config.
         schemas : Optional[List[Type[SQLModel]]], default None
             SQLModel definitions to be automatically registered as hybrid views
             within the DuckDB instance for immediate querying.
@@ -307,6 +313,7 @@ class Tracker:
 
         self.access_mode = access_mode
         self._run_subdir_fn = run_subdir_fn
+        self._cache_epoch = cache_epoch
         if allow_external_paths is None:
             allow_external_paths = _env_bool("CONSIST_ALLOW_EXTERNAL_PATHS", False)
         self.allow_external_paths = bool(allow_external_paths)
@@ -892,6 +899,8 @@ class Tracker:
         # should not silently cache-hit a different year).
         year = kwargs.pop("year", None)
         iteration = kwargs.pop("iteration", None)
+        cache_epoch = kwargs.pop("cache_epoch", None)
+        cache_version = kwargs.pop("cache_version", None)
         parent_run_id = kwargs.pop("parent_run_id", None)
 
         if artifact_dir is not None:
@@ -927,11 +936,20 @@ class Tracker:
         # Important: keep the stored config snapshot as user-provided config, but include
         # selected Run fields in the identity hash to avoid accidental cache hits.
         config_hash = self.identity.compute_run_config_hash(
-            config=config_dict, model=model, year=year, iteration=iteration
+            config=config_dict,
+            model=model,
+            year=year,
+            iteration=iteration,
+            cache_epoch=cache_epoch,
+            cache_version=cache_version,
         )
         git_hash = self.identity.get_code_version()
 
         kwargs["_physical_run_dir"] = str(self.run_dir)
+        if cache_epoch is not None:
+            kwargs["cache_epoch"] = cache_epoch
+        if cache_version is not None:
+            kwargs["cache_version"] = cache_version
         if kwargs:
             validate_run_meta(kwargs)
 
@@ -1210,14 +1228,18 @@ class Tracker:
         hash_inputs: HashInputs = None,
         year: Optional[int] = None,
         iteration: Optional[int] = None,
+        phase: Optional[str] = None,
+        stage: Optional[str] = None,
         parent_run_id: Optional[str] = None,
         outputs: Optional[List[str]] = None,
         output_paths: Optional[Mapping[str, ArtifactRef]] = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
-        cache_mode: str = "reuse",
+        cache_mode: Optional[str] = None,
         cache_hydration: Optional[str] = None,
-        validate_cached_outputs: str = "lazy",
+        cache_version: Optional[int] = None,
+        cache_epoch: Optional[int] = None,
+        validate_cached_outputs: Optional[str] = None,
         load_inputs: Optional[bool] = None,
         executor: str = "python",
         container: Optional[Mapping[str, Any]] = None,
@@ -1389,33 +1411,107 @@ class Tracker:
             if fn is None:
                 raise ValueError("Tracker.run requires a callable fn.")
 
-        if executor == "container":
-            resolved_name = name or getattr(fn, "__name__", None)
-            if resolved_name is None:
-                raise ValueError("executor='container' requires a run name.")
+        func_name = getattr(fn, "__name__", None) if fn is not None else None
+        step_def: Optional[StepDefinition] = None
+        if executor == "python" and fn is not None:
+            step_def = getattr(fn, "__consist_step__", StepDefinition())
+
+        ctx: StepContext | None = None
+        if fn is not None:
+            ctx = StepContext(
+                func_name=func_name or "",
+                model=model,
+                year=year,
+                iteration=iteration,
+                phase=phase,
+                stage=stage,
+                settings=self.settings,
+                workspace=self.run_dir,
+                state=self.current_consist,
+                runtime_kwargs=runtime_kwargs,
+            )
+
+        resolved_model = model
+        if step_def is not None and model is None:
+            if ctx is None:
+                raise RuntimeError("Step context unavailable for metadata resolution.")
+            resolved_model = resolve_metadata(step_def.model, ctx)
+        if ctx is not None:
+            ctx.model = resolved_model
+
+        name_template = None
+        if step_def is not None and step_def.name_template is not None:
+            if ctx is None:
+                raise RuntimeError("Step context unavailable for metadata resolution.")
+            name_template = resolve_metadata(step_def.name_template, ctx)
+
+        if name is not None:
+            resolved_name = name
+        elif name_template and executor == "python":
+            if ctx is None:
+                raise RuntimeError("Step context unavailable for name formatting.")
+            resolved_name = format_step_name(str(name_template), ctx)
         else:
-            resolved_name = name or getattr(fn, "__name__", None)
-            if resolved_name is None:
-                raise ValueError("Tracker.run requires a run name.")
-        resolved_model = model or resolved_name
+            resolved_name = func_name
+
+        if resolved_name is None:
+            raise ValueError("Tracker.run requires a run name.")
+
+        if resolved_model is None:
+            resolved_model = resolved_name
+        if ctx is not None:
+            ctx.model = resolved_model
+
+        def _resolve_meta(explicit: Any, def_value: Any) -> Any:
+            if explicit is not None:
+                return explicit
+            if step_def is None or def_value is None or ctx is None:
+                return def_value
+            return resolve_metadata(def_value, ctx)
 
         if executor == "python":
-            step_def = getattr(fn, "__consist_step__", None)
-            if step_def is not None:
-                if outputs is None and step_def.outputs is not None:
-                    outputs = list(step_def.outputs)
-                if tags is None and step_def.tags is not None:
-                    tags = list(step_def.tags)
-                if description is None and step_def.description is not None:
-                    description = step_def.description
+            if step_def is None:
+                step_def = StepDefinition()
+            description = _resolve_meta(description, step_def.description)
+            tags = _resolve_meta(tags, step_def.tags)
+            if tags is not None:
+                tags = list(tags)
+            outputs = _resolve_meta(outputs, step_def.outputs)
+            if outputs is not None:
+                outputs = list(outputs)
+            output_paths = _resolve_meta(output_paths, step_def.output_paths)
+            inputs = _resolve_meta(inputs, step_def.inputs)
+            input_keys = _resolve_meta(input_keys, step_def.input_keys)
+            optional_input_keys = _resolve_meta(
+                optional_input_keys, step_def.optional_input_keys
+            )
+            cache_mode = _resolve_meta(cache_mode, step_def.cache_mode)
+            cache_hydration = _resolve_meta(cache_hydration, step_def.cache_hydration)
+            cache_version = _resolve_meta(cache_version, step_def.cache_version)
+            validate_cached_outputs = _resolve_meta(
+                validate_cached_outputs, step_def.validate_cached_outputs
+            )
+            load_inputs = _resolve_meta(load_inputs, step_def.load_inputs)
+            hash_inputs = _resolve_meta(hash_inputs, step_def.hash_inputs)
+            facet_from = _resolve_meta(facet_from, step_def.facet_from)
+            if facet_from is not None:
+                facet_from = list(facet_from)
+            facet_schema_version = _resolve_meta(
+                facet_schema_version, step_def.facet_schema_version
+            )
 
-            if load_inputs is None:
-                load_inputs = isinstance(inputs, Mapping)
-            if load_inputs and inputs is not None and not isinstance(inputs, Mapping):
-                raise ValueError("load_inputs=True requires inputs to be a dict.")
+        if cache_mode is None:
+            cache_mode = "reuse"
+        if validate_cached_outputs is None:
+            validate_cached_outputs = "lazy"
 
-            if cache_hydration is None and load_inputs:
-                cache_hydration = "inputs-missing"
+        if load_inputs is None:
+            load_inputs = isinstance(inputs, Mapping)
+        if load_inputs and inputs is not None and not isinstance(inputs, Mapping):
+            raise ValueError("load_inputs=True requires inputs to be a dict.")
+
+        if cache_hydration is None and load_inputs:
+            cache_hydration = "inputs-missing"
 
         if input_keys is not None or optional_input_keys is not None:
             warnings.warn(
@@ -1480,6 +1576,8 @@ class Tracker:
             )
             cache_mode = "overwrite"
 
+        resolved_cache_epoch = self._cache_epoch if cache_epoch is None else cache_epoch
+
         config_for_run = config
         if config_plan is not None:
             if config is None:
@@ -1514,7 +1612,14 @@ class Tracker:
             "iteration": iteration,
             "parent_run_id": parent_run_id,
             "validate_cached_outputs": validate_cached_outputs,
+            "cache_epoch": resolved_cache_epoch,
         }
+        if cache_version is not None:
+            start_kwargs["cache_version"] = cache_version
+        if phase is not None:
+            start_kwargs["phase"] = phase
+        if stage is not None:
+            start_kwargs["stage"] = stage
         if facet_schema_version is not None:
             start_kwargs["facet_schema_version"] = facet_schema_version
         if facet_index is not None:
@@ -2143,6 +2248,7 @@ class Tracker:
             "iteration": iteration,
             "parent_run_id": parent_run_id,
             "validate_cached_outputs": validate_cached_outputs,
+            "cache_epoch": self._cache_epoch,
         }
         if facet_schema_version is not None:
             start_kwargs["facet_schema_version"] = facet_schema_version
@@ -2215,6 +2321,8 @@ class Tracker:
         tags: Optional[List[str]] = None,
         model: str = "scenario",
         step_cache_hydration: Optional[str] = None,
+        name_template: Optional[str] = None,
+        cache_epoch: Optional[int] = None,
         coupler: Optional["Coupler"] = None,
         require_outputs: Optional[Iterable[str]] = None,
         **kwargs: Any,
@@ -2243,6 +2351,11 @@ class Tracker:
         step_cache_hydration : Optional[str], optional
             Default cache hydration policy for all scenario steps unless overridden
             in a specific `scenario.trace(...)` or `scenario.run(...)`.
+        name_template : Optional[str], optional
+            Optional step name template applied when scenario.run() is called without
+            an explicit name and no step-level template is provided.
+        cache_epoch : Optional[int], optional
+            Scenario-level cache epoch override for all steps in this scenario.
         coupler : Optional[Coupler], optional
             Optional Coupler instance to use for the scenario.
         require_outputs : Optional[Iterable[str]], optional
@@ -2271,6 +2384,8 @@ class Tracker:
             tags,
             model,
             step_cache_hydration=step_cache_hydration,
+            name_template=name_template,
+            cache_epoch=cache_epoch,
             coupler=coupler,
             require_outputs=require_outputs,
             **kwargs,

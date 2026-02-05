@@ -307,19 +307,27 @@ class IdentityManager:
         model: str,
         year: Any = None,
         iteration: Any = None,
+        cache_epoch: Optional[int] = None,
+        cache_version: Optional[int] = None,
     ) -> str:
         """
         Compute a config hash for a run, mixing in identity-relevant run fields.
 
         Tracker persists `config` for human inspection, but caching identity needs to
-        include some run context fields that are frequently semantically relevant.
+        include some run context fields that are frequently semantically relevant,
+        such as `year`, `iteration`, and cache versioning.
         """
         payload = dict(config)
-        payload["__consist_run_fields__"] = {
+        run_fields = {
             "model": model,
             "year": year,
             "iteration": iteration,
         }
+        if cache_epoch is not None:
+            run_fields["cache_epoch"] = cache_epoch
+        if cache_version is not None:
+            run_fields["cache_version"] = cache_version
+        payload["__consist_run_fields__"] = run_fields
         return self.compute_config_hash(payload)
 
     # --- Component 3: Input Identity ---

@@ -559,7 +559,7 @@ def test_validate_paginates_artifacts(tmp_path, monkeypatch):
 
     tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
     assert tracker.db is not None
-    tracker.db.engine = cast(Engine, engine)
+    tracker.db.engine = engine
 
     monkeypatch.setenv("CONSIST_VALIDATE_BATCH_SIZE", "2")
 

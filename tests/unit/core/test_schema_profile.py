@@ -12,7 +12,7 @@ import json
 import uuid
 from typing import Optional
 
-from sqlalchemy import text
+from sqlalchemy import column, table
 from sqlmodel import Field, SQLModel, Session, select
 
 from consist.models.artifact import Artifact
@@ -275,10 +275,24 @@ def test_schema_links_view_returns_relations(tracker, sample_csv):
             t.db._ensure_schema_links_view()
 
         with Session(t.engine) as session:
-            stmt = text(
-                "SELECT from_table, from_field, to_table, to_field "
-                "FROM consist_schema_links WHERE schema_id = :schema_id"
-            ).bindparams(schema_id=schema_id)
+            links = table(
+                "consist_schema_links",
+                column("from_table"),
+                column("from_field"),
+                column("to_table"),
+                column("to_field"),
+                column("schema_id"),
+            )
+            stmt = (
+                select(
+                    links.c.from_table,
+                    links.c.from_field,
+                    links.c.to_table,
+                    links.c.to_field,
+                )
+                .where(links.c.schema_id == schema_id)
+                .select_from(links)
+            )
             rows = session.exec(stmt).all()
             assert len(rows) == 1
             from_table, from_field, to_table, to_field = rows[0]
