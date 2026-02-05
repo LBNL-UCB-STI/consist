@@ -1,5 +1,15 @@
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, List, Mapping, Optional, TypeVar, Union
+from typing import (
+    Any,
+    Callable,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    TypeVar,
+    Union,
+    Dict,
+)
 
 from consist.core.step_context import StepContext
 
@@ -25,6 +35,11 @@ class StepDefinition:
     inputs: Optional[MetaValue[Union[Mapping[str, Any], Iterable[Any]]]] = None
     input_keys: Optional[MetaValue[Union[Iterable[str], str]]] = None
     optional_input_keys: Optional[MetaValue[Union[Iterable[str], str]]] = None
+
+    # Config & facets
+    config: Optional[MetaValue[Dict[str, Any]]] = None
+    facet: Optional[MetaValue[Any]] = None
+    facet_index: Optional[MetaValue[bool]] = None
 
     # Caching
     cache_mode: Optional[MetaValue[str]] = None
@@ -55,6 +70,9 @@ def define_step(
     inputs: Optional[MetaValue[Union[Mapping[str, Any], Iterable[Any]]]] = None,
     input_keys: Optional[MetaValue[Union[Iterable[str], str]]] = None,
     optional_input_keys: Optional[MetaValue[Union[Iterable[str], str]]] = None,
+    config: Optional[MetaValue[Dict[str, Any]]] = None,
+    facet: Optional[MetaValue[Any]] = None,
+    facet_index: Optional[MetaValue[bool]] = None,
     cache_mode: Optional[MetaValue[str]] = None,
     cache_hydration: Optional[MetaValue[str]] = None,
     cache_version: Optional[MetaValue[int]] = None,
@@ -88,6 +106,9 @@ def define_step(
                 inputs=inputs,
                 input_keys=input_keys,
                 optional_input_keys=optional_input_keys,
+                config=config,
+                facet=facet,
+                facet_index=facet_index,
                 cache_mode=cache_mode,
                 cache_hydration=cache_hydration,
                 cache_version=cache_version,

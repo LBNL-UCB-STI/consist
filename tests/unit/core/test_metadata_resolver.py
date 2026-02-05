@@ -24,12 +24,15 @@ def test_resolver_precedence_overrides_decorator_defaults() -> None:
         name=None,
         model=None,
         description=None,
+        config={"explicit": True},
         inputs=None,
         input_keys=None,
         optional_input_keys=None,
         tags=["explicit"],
+        facet={"explicit": True},
         facet_from=None,
         facet_schema_version=None,
+        facet_index=True,
         hash_inputs=None,
         year=None,
         iteration=None,
@@ -52,6 +55,9 @@ def test_resolver_precedence_overrides_decorator_defaults() -> None:
     assert resolved.outputs == ["explicit"]
     assert resolved.tags == ["explicit"]
     assert resolved.cache_mode == "overwrite"
+    assert resolved.config == {"explicit": True}
+    assert resolved.facet == {"explicit": True}
+    assert resolved.facet_index is True
 
 
 def test_resolver_name_template_precedence_and_fallback() -> None:
@@ -65,12 +71,15 @@ def test_resolver_name_template_precedence_and_fallback() -> None:
         name=None,
         model=None,
         description=None,
+        config=None,
         inputs=None,
         input_keys=None,
         optional_input_keys=None,
         tags=None,
+        facet=None,
         facet_from=None,
         facet_schema_version=None,
+        facet_index=None,
         hash_inputs=None,
         year=2030,
         iteration=None,
@@ -97,12 +106,15 @@ def test_resolver_name_template_precedence_and_fallback() -> None:
         name=None,
         model=None,
         description=None,
+        config=None,
         inputs=None,
         input_keys=None,
         optional_input_keys=None,
         tags=None,
+        facet=None,
         facet_from=None,
         facet_schema_version=None,
+        facet_index=None,
         hash_inputs=None,
         year=None,
         iteration=None,
@@ -135,12 +147,15 @@ def test_resolver_disables_step_defaults_and_templates() -> None:
         name=None,
         model=None,
         description=None,
+        config=None,
         inputs=None,
         input_keys=None,
         optional_input_keys=None,
         tags=None,
+        facet=None,
         facet_from=None,
         facet_schema_version=None,
+        facet_index=None,
         hash_inputs=None,
         year=None,
         iteration=None,
@@ -175,12 +190,15 @@ def test_resolver_raises_missing_name() -> None:
             name=None,
             model=None,
             description=None,
+            config=None,
             inputs=None,
             input_keys=None,
             optional_input_keys=None,
             tags=None,
+            facet=None,
             facet_from=None,
             facet_schema_version=None,
+            facet_index=None,
             hash_inputs=None,
             year=None,
             iteration=None,
@@ -215,12 +233,15 @@ def test_resolver_callable_metadata() -> None:
         name=None,
         model=None,
         description=None,
+        config=None,
         inputs=None,
         input_keys=None,
         optional_input_keys=None,
         tags=None,
+        facet=None,
         facet_from=None,
         facet_schema_version=None,
+        facet_index=None,
         hash_inputs=None,
         year=2040,
         iteration=None,
@@ -242,3 +263,51 @@ def test_resolver_callable_metadata() -> None:
 
     assert resolved.model == "step_model"
     assert resolved.outputs == ["out_2040"]
+
+
+def test_resolver_decorator_config_and_facet_defaults() -> None:
+    @define_step(
+        config=lambda ctx: {"year": ctx.year},
+        facet=lambda ctx: {"scenario": ctx.runtime_kwargs.get("scenario")},
+        facet_index=True,
+    )
+    def step() -> None:
+        return None
+
+    resolver = MetadataResolver()
+    resolved = resolver.resolve(
+        fn=step,
+        name=None,
+        model=None,
+        description=None,
+        config=None,
+        inputs=None,
+        input_keys=None,
+        optional_input_keys=None,
+        tags=None,
+        facet=None,
+        facet_from=None,
+        facet_schema_version=None,
+        facet_index=None,
+        hash_inputs=None,
+        year=2030,
+        iteration=None,
+        phase=None,
+        stage=None,
+        settings=None,
+        workspace=None,
+        state=None,
+        runtime_kwargs={"scenario": "baseline"},
+        outputs=None,
+        output_paths=None,
+        cache_mode=None,
+        cache_hydration=None,
+        cache_version=None,
+        validate_cached_outputs=None,
+        load_inputs=None,
+        missing_name_error="missing",
+    )
+
+    assert resolved.config == {"year": 2030}
+    assert resolved.facet == {"scenario": "baseline"}
+    assert resolved.facet_index is True

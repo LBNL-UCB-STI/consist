@@ -14,7 +14,10 @@ class ResolvedStepMetadata:
     name: str
     model: str
     description: Optional[str]
+    config: Optional[Dict[str, Any]]
     tags: Optional[List[str]]
+    facet: Optional[Any]
+    facet_index: Optional[bool]
     outputs: Optional[List[str]]
     output_paths: Optional[Mapping[str, Any]]
     inputs: Optional[Union[Mapping[str, Any], Iterable[Any]]]
@@ -49,12 +52,15 @@ class MetadataResolver:
         name: Optional[str],
         model: Optional[str],
         description: Optional[str],
+        config: Optional[Dict[str, Any]],
         inputs: Optional[Union[Mapping[str, Any], Iterable[Any]]],
         input_keys: Optional[Union[Iterable[str], str]],
         optional_input_keys: Optional[Union[Iterable[str], str]],
         tags: Optional[List[str]],
+        facet: Optional[Any],
         facet_from: Optional[List[str]],
         facet_schema_version: Optional[Union[str, int]],
+        facet_index: Optional[bool],
         hash_inputs: HashInputs,
         year: Optional[int],
         iteration: Optional[int],
@@ -135,9 +141,12 @@ class MetadataResolver:
             return resolve_metadata(def_value, ctx)
 
         resolved_description = _resolve_meta(description, step_def.description)
+        resolved_config = _resolve_meta(config, step_def.config)
         resolved_tags = _resolve_meta(tags, step_def.tags)
         if resolved_tags is not None:
             resolved_tags = list(resolved_tags)
+        resolved_facet = _resolve_meta(facet, step_def.facet)
+        resolved_facet_index = _resolve_meta(facet_index, step_def.facet_index)
         resolved_outputs = _resolve_meta(outputs, step_def.outputs)
         if resolved_outputs is not None:
             resolved_outputs = list(resolved_outputs)
@@ -168,7 +177,10 @@ class MetadataResolver:
             name=resolved_name,
             model=resolved_model,
             description=resolved_description,
+            config=resolved_config,
             tags=resolved_tags,
+            facet=resolved_facet,
+            facet_index=resolved_facet_index,
             outputs=resolved_outputs,
             output_paths=resolved_output_paths,
             inputs=resolved_inputs,

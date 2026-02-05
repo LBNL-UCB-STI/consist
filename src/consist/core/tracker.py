@@ -1420,12 +1420,15 @@ class Tracker:
             name=name,
             model=model,
             description=description,
+            config=config,
             inputs=inputs,
             input_keys=input_keys,
             optional_input_keys=optional_input_keys,
             tags=tags,
+            facet=facet,
             facet_from=facet_from,
             facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
             hash_inputs=hash_inputs,
             year=year,
             iteration=iteration,
@@ -1448,7 +1451,10 @@ class Tracker:
         resolved_name = resolved.name
         resolved_model = resolved.model
         description = resolved.description
+        config = resolved.config
         tags = resolved.tags
+        facet = resolved.facet
+        facet_index = resolved.facet_index
         outputs = resolved.outputs
         output_paths = resolved.output_paths
         inputs = resolved.inputs
