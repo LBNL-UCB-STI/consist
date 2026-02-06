@@ -665,6 +665,7 @@ class ScenarioContext:
             model=model,
             description=description,
             config=config,
+            config_plan=config_plan,
             inputs=inputs,
             input_keys=input_keys,
             optional_input_keys=optional_input_keys,
@@ -696,6 +697,7 @@ class ScenarioContext:
         resolved_model = resolved.model
         resolved_description = resolved.description
         resolved_config = resolved.config
+        resolved_config_plan = resolved.config_plan
         resolved_tags = resolved.tags
         resolved_facet = resolved.facet
         resolved_facet_index = resolved.facet_index
@@ -753,7 +755,7 @@ class ScenarioContext:
             model=resolved_model,
             description=resolved_description,
             config=resolved_config,
-            config_plan=config_plan,
+            config_plan=resolved_config_plan,
             config_plan_ingest=config_plan_ingest,
             config_plan_profile_schema=config_plan_profile_schema,
             inputs=resolved_inputs,

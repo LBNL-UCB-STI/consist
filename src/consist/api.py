@@ -57,6 +57,8 @@ from consist.types import ArtifactRef, DriverType
 if TYPE_CHECKING:
     import geopandas
     import xarray
+    from consist.core.config_canonicalization import ConfigPlan
+    from consist.core.step_context import StepContext
 
 # Import loaders for specific formats
 xr: Optional[ModuleType]
@@ -289,6 +291,12 @@ def define_step(
     inputs: Optional[Union[Mapping[str, Any], Iterable[Any]]] = None,
     input_keys: Optional[Union[Iterable[str], str]] = None,
     optional_input_keys: Optional[Union[Iterable[str], str]] = None,
+    config: Optional[Dict[str, Any]] = None,
+    config_plan: Optional[
+        Union["ConfigPlan", Callable[["StepContext"], "ConfigPlan"]]
+    ] = None,
+    facet: Optional[Any] = None,
+    facet_index: Optional[bool] = None,
     cache_mode: Optional[str] = None,
     cache_hydration: Optional[str] = None,
     cache_version: Optional[int] = None,
@@ -317,6 +325,10 @@ def define_step(
         inputs=inputs,
         input_keys=input_keys,
         optional_input_keys=optional_input_keys,
+        config=config,
+        config_plan=config_plan,
+        facet=facet,
+        facet_index=facet_index,
         cache_mode=cache_mode,
         cache_hydration=cache_hydration,
         cache_version=cache_version,

@@ -9,8 +9,26 @@ from __future__ import annotations
 
 import pytest
 
+from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
 from consist.core.decorators import define_step
 from consist.core.metadata_resolver import MetadataResolver
+
+
+def _dummy_config_plan(*, adapter_version: str, content_hash: str) -> ConfigPlan:
+    canonical = CanonicalConfig(
+        root_dirs=[],
+        primary_config=None,
+        config_files=[],
+        external_files=[],
+        content_hash=content_hash,
+    )
+    return ConfigPlan(
+        adapter_name="dummy",
+        adapter_version=adapter_version,
+        canonical=canonical,
+        artifacts=[],
+        ingestables=[],
+    )
 
 
 def test_resolver_precedence_overrides_decorator_defaults() -> None:
@@ -25,6 +43,7 @@ def test_resolver_precedence_overrides_decorator_defaults() -> None:
         model=None,
         description=None,
         config={"explicit": True},
+        config_plan=None,
         inputs=None,
         input_keys=None,
         optional_input_keys=None,
@@ -72,6 +91,7 @@ def test_resolver_name_template_precedence_and_fallback() -> None:
         model=None,
         description=None,
         config=None,
+        config_plan=None,
         inputs=None,
         input_keys=None,
         optional_input_keys=None,
@@ -107,6 +127,7 @@ def test_resolver_name_template_precedence_and_fallback() -> None:
         model=None,
         description=None,
         config=None,
+        config_plan=None,
         inputs=None,
         input_keys=None,
         optional_input_keys=None,
@@ -148,6 +169,7 @@ def test_resolver_disables_step_defaults_and_templates() -> None:
         model=None,
         description=None,
         config=None,
+        config_plan=None,
         inputs=None,
         input_keys=None,
         optional_input_keys=None,
@@ -191,6 +213,7 @@ def test_resolver_raises_missing_name() -> None:
             model=None,
             description=None,
             config=None,
+            config_plan=None,
             inputs=None,
             input_keys=None,
             optional_input_keys=None,
@@ -234,6 +257,7 @@ def test_resolver_callable_metadata() -> None:
         model=None,
         description=None,
         config=None,
+        config_plan=None,
         inputs=None,
         input_keys=None,
         optional_input_keys=None,
@@ -281,6 +305,7 @@ def test_resolver_decorator_config_and_facet_defaults() -> None:
         model=None,
         description=None,
         config=None,
+        config_plan=None,
         inputs=None,
         input_keys=None,
         optional_input_keys=None,
@@ -330,6 +355,7 @@ def test_resolver_populates_runtime_fields_from_runtime_kwargs() -> None:
         model=None,
         description=None,
         config=None,
+        config_plan=None,
         inputs=None,
         input_keys=None,
         optional_input_keys=None,
@@ -362,3 +388,139 @@ def test_resolver_populates_runtime_fields_from_runtime_kwargs() -> None:
 
     assert resolved.config == {"scenario": "baseline"}
     assert resolved.hash_inputs == "full"
+
+
+def test_resolver_decorator_config_plan_defaults() -> None:
+    @define_step(
+        config_plan=_dummy_config_plan(adapter_version="1.0", content_hash="h1")
+    )
+    def step() -> None:
+        return None
+
+    resolver = MetadataResolver()
+    resolved = resolver.resolve(
+        fn=step,
+        name=None,
+        model=None,
+        description=None,
+        config=None,
+        config_plan=None,
+        inputs=None,
+        input_keys=None,
+        optional_input_keys=None,
+        tags=None,
+        facet=None,
+        facet_from=None,
+        facet_schema_version=None,
+        facet_index=None,
+        hash_inputs=None,
+        year=None,
+        iteration=None,
+        phase=None,
+        stage=None,
+        consist_settings=None,
+        consist_workspace=None,
+        consist_state=None,
+        runtime_kwargs=None,
+        outputs=None,
+        output_paths=None,
+        cache_mode=None,
+        cache_hydration=None,
+        cache_version=None,
+        validate_cached_outputs=None,
+        load_inputs=None,
+        missing_name_error="missing",
+    )
+
+    assert resolved.config_plan is not None
+    assert resolved.config_plan.adapter_version == "1.0"
+    assert resolved.config_plan.identity_hash == "h1"
+
+
+def test_resolver_config_plan_callable_and_explicit_override() -> None:
+    @define_step(
+        config_plan=lambda ctx: _dummy_config_plan(
+            adapter_version=str(ctx.year),
+            content_hash=f"hash_{ctx.year}",
+        )
+    )
+    def step() -> None:
+        return None
+
+    explicit_plan = _dummy_config_plan(
+        adapter_version="explicit",
+        content_hash="h_exp",
+    )
+    resolver = MetadataResolver()
+
+    resolved_default = resolver.resolve(
+        fn=step,
+        name=None,
+        model=None,
+        description=None,
+        config=None,
+        config_plan=None,
+        inputs=None,
+        input_keys=None,
+        optional_input_keys=None,
+        tags=None,
+        facet=None,
+        facet_from=None,
+        facet_schema_version=None,
+        facet_index=None,
+        hash_inputs=None,
+        year=2030,
+        iteration=None,
+        phase=None,
+        stage=None,
+        consist_settings=None,
+        consist_workspace=None,
+        consist_state=None,
+        runtime_kwargs=None,
+        outputs=None,
+        output_paths=None,
+        cache_mode=None,
+        cache_hydration=None,
+        cache_version=None,
+        validate_cached_outputs=None,
+        load_inputs=None,
+        missing_name_error="missing",
+    )
+    assert resolved_default.config_plan is not None
+    assert resolved_default.config_plan.adapter_version == "2030"
+    assert resolved_default.config_plan.identity_hash == "hash_2030"
+
+    resolved_override = resolver.resolve(
+        fn=step,
+        name=None,
+        model=None,
+        description=None,
+        config=None,
+        config_plan=explicit_plan,
+        inputs=None,
+        input_keys=None,
+        optional_input_keys=None,
+        tags=None,
+        facet=None,
+        facet_from=None,
+        facet_schema_version=None,
+        facet_index=None,
+        hash_inputs=None,
+        year=2030,
+        iteration=None,
+        phase=None,
+        stage=None,
+        consist_settings=None,
+        consist_workspace=None,
+        consist_state=None,
+        runtime_kwargs=None,
+        outputs=None,
+        output_paths=None,
+        cache_mode=None,
+        cache_hydration=None,
+        cache_version=None,
+        validate_cached_outputs=None,
+        load_inputs=None,
+        missing_name_error="missing",
+    )
+    assert resolved_override.config_plan is explicit_plan

@@ -118,6 +118,19 @@ def load_inputs(...):
     ...
 ```
 
+Declarative `config_plan` with a built-in resolver helper:
+
+```python
+@define_step(
+    config_plan=tracker.prepare_config_resolver(
+        adapter=activitysim_adapter,
+        config_dirs_from="settings.config_dirs",
+    ),
+)
+def run_model(...):
+    ...
+```
+
 Migration note:
 
 - Replace workflow-facing `ctx.settings` with `ctx.runtime_settings`

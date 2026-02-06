@@ -93,6 +93,7 @@ from consist.types import (
 
 if TYPE_CHECKING:
     from consist.core.coupler import Coupler
+    from consist.core.step_context import StepContext
 
 UTC = timezone.utc
 
@@ -1421,6 +1422,7 @@ class Tracker:
             model=model,
             description=description,
             config=config,
+            config_plan=config_plan,
             inputs=inputs,
             input_keys=input_keys,
             optional_input_keys=optional_input_keys,
@@ -1452,6 +1454,7 @@ class Tracker:
         resolved_model = resolved.model
         description = resolved.description
         config = resolved.config
+        config_plan = resolved.config_plan
         tags = resolved.tags
         facet = resolved.facet
         facet_index = resolved.facet_index
@@ -3830,6 +3833,99 @@ class Tracker:
             diagnostics = validate_config_plan(plan)
             return replace(plan, diagnostics=diagnostics)
         return plan
+
+    def prepare_config_resolver(
+        self,
+        adapter: ConfigAdapter,
+        *,
+        config_dirs: Optional[Iterable[Union[str, Path]]] = None,
+        config_dirs_from: Optional[
+            Union[
+                str,
+                Callable[["StepContext"], Iterable[Union[str, Path]]],
+            ]
+        ] = None,
+        strict: bool = False,
+        options: Optional[ConfigAdapterOptions] = None,
+        validate_only: bool = False,
+        facet_spec: Optional[Dict[str, Any]] = None,
+        facet_schema_name: Optional[str] = None,
+        facet_schema_version: Optional[Union[str, int]] = None,
+        facet_index: Optional[bool] = None,
+    ) -> Callable[["StepContext"], ConfigPlan]:
+        """
+        Build a StepContext resolver for use with `@define_step(config_plan=...)`.
+
+        Exactly one config-directory source must be provided:
+        - `config_dirs`: static iterable of directories.
+        - `config_dirs_from`: runtime source (dot-path string or callable).
+
+        The returned callable is metadata-safe (pre-run) and delegates to
+        `prepare_config(...)`.
+        """
+        if (config_dirs is None) == (config_dirs_from is None):
+            raise ValueError(
+                "prepare_config_resolver requires exactly one of "
+                "config_dirs= or config_dirs_from=."
+            )
+
+        static_dirs = tuple(config_dirs) if config_dirs is not None else None
+
+        def _resolve_runtime_path(ctx: "StepContext", path: str) -> object:
+            parts = [part for part in path.split(".") if part]
+            if not parts:
+                raise ValueError(
+                    "config_dirs_from path must be non-empty (e.g., "
+                    "'settings.config_dirs')."
+                )
+            value: object = ctx.require_runtime(parts[0])
+            for part in parts[1:]:
+                if isinstance(value, MappingABC):
+                    mapping_value = cast(Mapping[str, object], value)
+                    if part not in mapping_value:
+                        raise ValueError(
+                            f"Missing runtime mapping key {part!r} while resolving "
+                            f"config_dirs_from={path!r}."
+                        )
+                    value = mapping_value[part]
+                    continue
+                if not hasattr(value, part):
+                    raise ValueError(
+                        f"Missing runtime attribute {part!r} while resolving "
+                        f"config_dirs_from={path!r}."
+                    )
+                value = getattr(value, part)
+            return value
+
+        def _resolve_dirs(ctx: "StepContext") -> Iterable[Union[str, Path]]:
+            if static_dirs is not None:
+                return static_dirs
+            source = config_dirs_from
+            if callable(source):
+                candidate = source(ctx)
+            else:
+                candidate = _resolve_runtime_path(ctx, cast(str, source))
+            if isinstance(candidate, (str, Path)):
+                raise ValueError(
+                    "Resolved config_dirs must be an iterable of paths, not a single "
+                    f"value: {candidate!r}."
+                )
+            return cast(Iterable[Union[str, Path]], candidate)
+
+        def _resolver(ctx: "StepContext") -> ConfigPlan:
+            return self.prepare_config(
+                adapter=adapter,
+                config_dirs=_resolve_dirs(ctx),
+                strict=strict,
+                options=options,
+                validate_only=validate_only,
+                facet_spec=facet_spec,
+                facet_schema_name=facet_schema_name,
+                facet_schema_version=facet_schema_version,
+                facet_index=facet_index,
+            )
+
+        return _resolver
 
     def apply_config_plan(
         self,

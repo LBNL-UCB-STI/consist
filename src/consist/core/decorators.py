@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import (
     Any,
     Callable,
+    TYPE_CHECKING,
     Iterable,
     List,
     Mapping,
@@ -12,6 +13,9 @@ from typing import (
 )
 
 from consist.core.step_context import StepContext
+
+if TYPE_CHECKING:
+    from consist.core.config_canonicalization import ConfigPlan
 
 T = TypeVar("T")
 MetaValue = Union[T, Callable[[StepContext], T]]
@@ -38,6 +42,7 @@ class StepDefinition:
 
     # Config & facets
     config: Optional[MetaValue[Dict[str, Any]]] = None
+    config_plan: Optional[MetaValue["ConfigPlan"]] = None
     facet: Optional[MetaValue[Any]] = None
     facet_index: Optional[MetaValue[bool]] = None
 
@@ -71,6 +76,7 @@ def define_step(
     input_keys: Optional[MetaValue[Union[Iterable[str], str]]] = None,
     optional_input_keys: Optional[MetaValue[Union[Iterable[str], str]]] = None,
     config: Optional[MetaValue[Dict[str, Any]]] = None,
+    config_plan: Optional[MetaValue["ConfigPlan"]] = None,
     facet: Optional[MetaValue[Any]] = None,
     facet_index: Optional[MetaValue[bool]] = None,
     cache_mode: Optional[MetaValue[str]] = None,
@@ -107,6 +113,7 @@ def define_step(
                 input_keys=input_keys,
                 optional_input_keys=optional_input_keys,
                 config=config,
+                config_plan=config_plan,
                 facet=facet,
                 facet_index=facet_index,
                 cache_mode=cache_mode,

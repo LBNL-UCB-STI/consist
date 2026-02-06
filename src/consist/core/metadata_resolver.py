@@ -2,11 +2,24 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Union, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Union,
+    cast,
+)
 
 from consist.core.decorators import StepDefinition
 from consist.core.step_context import StepContext, format_step_name, resolve_metadata
 from consist.types import HashInputs
+
+if TYPE_CHECKING:
+    from consist.core.config_canonicalization import ConfigPlan
 
 
 @dataclass(frozen=True)
@@ -15,6 +28,7 @@ class ResolvedStepMetadata:
     model: str
     description: Optional[str]
     config: Optional[Dict[str, Any]]
+    config_plan: Optional["ConfigPlan"]
     tags: Optional[List[str]]
     facet: Optional[Any]
     facet_index: Optional[bool]
@@ -53,6 +67,7 @@ class MetadataResolver:
         model: Optional[str],
         description: Optional[str],
         config: Optional[Dict[str, Any]],
+        config_plan: Optional["ConfigPlan"],
         inputs: Optional[Union[Mapping[str, Any], Iterable[Any]]],
         input_keys: Optional[Union[Iterable[str], str]],
         optional_input_keys: Optional[Union[Iterable[str], str]],
@@ -146,6 +161,7 @@ class MetadataResolver:
 
         resolved_description = _resolve_meta(description, step_def.description)
         resolved_config = _resolve_meta(config, step_def.config)
+        resolved_config_plan = _resolve_meta(config_plan, step_def.config_plan)
         resolved_tags = _resolve_meta(tags, step_def.tags)
         if resolved_tags is not None:
             resolved_tags = list(resolved_tags)
@@ -182,6 +198,7 @@ class MetadataResolver:
             model=resolved_model,
             description=resolved_description,
             config=resolved_config,
+            config_plan=resolved_config_plan,
             tags=resolved_tags,
             facet=resolved_facet,
             facet_index=resolved_facet_index,
