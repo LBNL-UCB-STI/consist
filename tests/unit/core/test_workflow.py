@@ -7,13 +7,15 @@ from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
 from consist.core.tracker import Tracker
 
 
-def _dummy_config_plan(*, adapter_version: str) -> ConfigPlan:
+def _dummy_config_plan(
+    *, adapter_version: str, content_hash: str = "plan_hash"
+) -> ConfigPlan:
     canonical = CanonicalConfig(
         root_dirs=[],
         primary_config=None,
         config_files=[],
         external_files=[],
-        content_hash="plan_hash",
+        content_hash=content_hash,
     )
     return ConfigPlan(
         adapter_name="dummy",
@@ -310,3 +312,20 @@ def test_scenario_run_with_config_plan(tracker: Tracker):
         record = tracker.last_run
         assert record is not None
         assert record.config["__consist_config_plan__"]["adapter_version"] == "3.1"
+
+
+def test_scenario_run_uses_decorator_config_plan_default(tracker: Tracker) -> None:
+    @tracker.define_step(
+        config_plan=lambda ctx: _dummy_config_plan(
+            adapter_version=str(ctx.year),
+            content_hash=f"hash_{ctx.year}",
+        )
+    )
+    def step() -> None:
+        return None
+
+    with tracker.scenario("scen_plan_default") as sc:
+        sc.run(fn=step, year=2042, cache_mode="overwrite")
+        record = tracker.last_run
+        assert record is not None
+        assert record.config["__consist_config_plan__"]["adapter_version"] == "2042"

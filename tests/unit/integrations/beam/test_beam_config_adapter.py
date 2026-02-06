@@ -1,7 +1,7 @@
 import logging
 from pathlib import Path
 
-from sqlalchemy import text
+from sqlalchemy import func, select
 from sqlmodel import Session, SQLModel
 
 from consist.integrations.beam import BeamConfigAdapter, BeamConfigOverrides
@@ -22,7 +22,7 @@ def test_beam_models_register_tables(tracker):
             ],
         )
     with Session(tracker.engine) as session:
-        session.exec(text("SELECT count(*) FROM global_tables.beam_config_cache"))
+        session.exec(select(func.count()).select_from(BeamConfigCache))
 
 
 def test_beam_discover_includes_and_hash(tracker, tmp_path: Path):

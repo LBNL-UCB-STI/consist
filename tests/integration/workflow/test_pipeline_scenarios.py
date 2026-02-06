@@ -126,6 +126,7 @@ def mock_model_step(
 
     Parameters
     ----------
+    validate_cached_outputs
     tracker : Tracker
         The Consist `Tracker` instance managing the pipeline's provenance.
     ctx : PipelineContext

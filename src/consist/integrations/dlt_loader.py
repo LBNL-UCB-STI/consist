@@ -584,9 +584,9 @@ def ingest_artifact(
 
     # 2. Configure dlt Pipeline
     if schema_model and hasattr(schema_model, "__tablename__"):
-        desired_table_name = schema_model.__tablename__
+        desired_table_name = str(schema_model.__tablename__)
     else:
-        desired_table_name = artifact.key
+        desired_table_name = str(artifact.key)
 
     pipeline_uid = uuid.uuid4().hex[:8]
     pipeline = dlt.pipeline(
@@ -695,7 +695,7 @@ def ingest_artifact(
     info = pipeline.run(resource)
 
     real_table_name = pipeline.default_schema.naming.normalize_table_identifier(
-        desired_table_name
+        str(desired_table_name)
     )
     return info, real_table_name
 

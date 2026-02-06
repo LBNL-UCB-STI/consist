@@ -55,8 +55,6 @@ This approach enables:
 
 **Example**: Running demand models for 10 years (2020–2050) × 3 scenarios (baseline, transit-friendly, congestion pricing). Set `facet={"year": 2030, "scenario": "transit-friendly"}` for each run. Query `facet_year=2040` to retrieve all 2040 runs instantly—no manual search through 500 directories.
 
----
-
 ## Config Hashing
 
 Consist uses **canonical hashing**: converting dictionaries (and YAML/JSON) into a deterministic fingerprint regardless of field order or number formatting. Both `{"a": 1, "b": 2}` and `{"b": 2, "a": 1}` produce the same hash, so cache remains stable when config dicts are built in different orders.

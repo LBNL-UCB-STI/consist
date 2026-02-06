@@ -1,7 +1,8 @@
 # tests/integration/test_dlt_loader.py
 import pytest
-from typing import Optional
-from sqlmodel import SQLModel, Field, Session, text
+from typing import Any, Optional, cast
+from sqlalchemy import Column, Integer, MetaData, String, Table, select
+from sqlmodel import SQLModel, Field, Session
 import pandas as pd
 from dlt.pipeline.exceptions import PipelineStepFailed
 
@@ -27,6 +28,26 @@ class MockTable(SQLModel, table=True):
     __tablename__ = "mock_data"
     id: Optional[int] = Field(default=None, primary_key=True)
     val: str
+
+
+_metadata = MetaData()
+_mock_table = Table(
+    "mock_data",
+    _metadata,
+    Column("id", Integer),
+    Column("val", String),
+    Column("consist_run_id", String),
+    Column("consist_year", Integer),
+    Column("consist_iteration", Integer),
+    schema="global_tables",
+)
+_info_tables = Table(
+    "tables",
+    _metadata,
+    Column("table_schema", String),
+    Column("table_name", String),
+    schema="information_schema",
+)
 
 
 def test_ingest_artifact_strict_dicts(tracker, engine):
@@ -77,9 +98,18 @@ def test_ingest_artifact_strict_dicts(tracker, engine):
     # 2. Verify in DB
     with Session(engine) as session:
         # Note: dlt creates tables in 'global_tables' schema by default
-        result = session.exec(
-            text("SELECT * FROM global_tables.mock_data ORDER BY id")
-        ).fetchall()
+        stmt = (
+            select(
+                _mock_table.c.id,
+                _mock_table.c.val,
+                _mock_table.c.consist_run_id,
+                _mock_table.c.consist_year,
+                _mock_table.c.consist_iteration,
+            )
+            .select_from(_mock_table)
+            .order_by(_mock_table.c.id)
+        )
+        result = session.exec(cast(Any, stmt)).all()
 
         assert len(result) == 2
         row = result[0]
@@ -131,11 +161,19 @@ def test_ingest_vectorized_pandas(tracker, engine):
     with Session(engine) as session:
         # Check that data was appended to the SAME table (mock_data)
         # dlt handles merging schemas if compatible
-        result = session.exec(
-            text(
-                "SELECT * FROM global_tables.mock_data WHERE consist_run_id='run_pandas' ORDER BY id"
+        stmt = (
+            select(
+                _mock_table.c.id,
+                _mock_table.c.val,
+                _mock_table.c.consist_run_id,
+                _mock_table.c.consist_year,
+                _mock_table.c.consist_iteration,
             )
-        ).fetchall()
+            .select_from(_mock_table)
+            .where(_mock_table.c.consist_run_id == "run_pandas")
+            .order_by(_mock_table.c.id)
+        )
+        result = session.exec(cast(Any, stmt)).all()
 
         assert len(result) == 3
         assert result[0].val == "X"
@@ -191,11 +229,19 @@ def test_ingest_streaming_parquet(tracker, engine, tmp_path):
         tracker.ingest(artifact=artifact, schema=MockTable)
 
     with Session(engine) as session:
-        result = session.exec(
-            text(
-                "SELECT * FROM global_tables.mock_data WHERE consist_run_id='run_stream' ORDER BY id"
+        stmt = (
+            select(
+                _mock_table.c.id,
+                _mock_table.c.val,
+                _mock_table.c.consist_run_id,
+                _mock_table.c.consist_year,
+                _mock_table.c.consist_iteration,
             )
-        ).fetchall()
+            .select_from(_mock_table)
+            .where(_mock_table.c.consist_run_id == "run_stream")
+            .order_by(_mock_table.c.id)
+        )
+        result = session.exec(cast(Any, stmt)).all()
 
         assert len(result) == 2
         assert result[0].id == 100
@@ -321,12 +367,11 @@ def test_ingest_with_invalid_data_in_strict_mode(tracker, engine):
 
     # Verify that NO data was ingested because the transaction failed
     with Session(engine) as session:
-        result = session.exec(
-            text(
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema = 'global_tables' AND table_name = 'strict_person'"
-            )
-        ).first()
+        stmt = select(_info_tables.c.table_name).where(
+            _info_tables.c.table_schema == "global_tables",
+            _info_tables.c.table_name == "strict_person",
+        )
+        result = session.exec(cast(Any, stmt)).first()
         assert result is None, "Table 'strict_person' should not have been created."
 
 

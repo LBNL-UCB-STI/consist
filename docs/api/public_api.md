@@ -25,6 +25,13 @@ more verbose, lower-level, or easier to misuse.
   - `run_dir`, `inputs`, `load`, `log_artifact`, `log_artifacts`, `log_input`, `log_output`, `log_meta`, `capture_outputs`
 - [`Coupler`](workflow.md#consist.core.coupler.Coupler) (available at `scenario.coupler`)
 
+Scenario defaults like `name_template` and `cache_epoch` are configured via `consist.scenario(...)` and flow into `ScenarioContext.run(...)`.
+
+### Utilities and Introspection
+
+- [`collect_step_schema`](../schema-export.md#introspection) (Extract outputs for Coupler schemas)
+- [`ArtifactKeyRegistry`](../usage-guide.md#artifact-key-registries) (Manage consistent artifact keys)
+
 ### Artifact logging and loading
 
 - [`consist.log_artifact`](api_helpers.md#consist.api.log_artifact)

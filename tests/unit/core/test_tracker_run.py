@@ -5,6 +5,8 @@ import logging
 import pandas as pd
 import pytest
 
+from consist.core.tracker import Tracker
+
 
 def test_tracker_run_load_inputs_requires_mapping(tracker, sample_csv):
     input_path = sample_csv("inputs.csv", rows=2)
@@ -144,3 +146,55 @@ def test_tracker_run_inject_context_requires_param(tracker):
 
     with pytest.raises(ValueError, match="inject_context requested"):
         tracker.run(fn=step, inject_context=True)
+
+
+def test_cache_epoch_affects_config_hash(tmp_path):
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "out.txt").write_text("ok")
+
+    tracker_a = Tracker(run_dir=tmp_path / "epoch_a", cache_epoch=1)
+    tracker_a.run(
+        fn=step,
+        output_paths={"out": "out.txt"},
+        inject_context="ctx",
+        cache_mode="overwrite",
+    )
+    hash_a = tracker_a.last_run.run.config_hash
+
+    tracker_b = Tracker(run_dir=tmp_path / "epoch_b", cache_epoch=2)
+    tracker_b.run(
+        fn=step,
+        output_paths={"out": "out.txt"},
+        inject_context="ctx",
+        cache_mode="overwrite",
+    )
+    hash_b = tracker_b.last_run.run.config_hash
+
+    assert hash_a != hash_b
+
+
+def test_cache_version_affects_config_hash(tracker):
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "out.txt").write_text("ok")
+
+    tracker.run(
+        fn=step,
+        output_paths={"out": "out.txt"},
+        inject_context="ctx",
+        cache_version=1,
+        cache_mode="overwrite",
+    )
+    hash_v1 = tracker.last_run.run.config_hash
+
+    tracker.run(
+        fn=step,
+        output_paths={"out": "out.txt"},
+        inject_context="ctx",
+        cache_version=2,
+        cache_mode="overwrite",
+    )
+    hash_v2 = tracker.last_run.run.config_hash
+
+    assert hash_v1 != hash_v2

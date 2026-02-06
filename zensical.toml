@@ -52,7 +52,7 @@ Copyright &copy; 2026 The Regents of the University of California, through Lawre
 nav = [
   { "Home" = "index.md" },
   { "Getting Started" = ["getting-started/installation.md", "getting-started/quickstart.md", "getting-started/first-workflow.md", { "Command Line Interface" = "cli-reference.md"}] },
-  { "Concepts" = ["concepts/overview.md", "concepts/config-management.md", "concepts/caching-and-hydration.md", "concepts/data-materialization.md"] },
+  { "Concepts" = ["concepts/overview.md", "concepts/config-management.md", "concepts/decorators-and-metadata.md", "concepts/caching-and-hydration.md", "concepts/data-materialization.md"] },
   { "Guides" = ["usage-guide.md", "configs.md", "dlt-loader-guide.md", "containers-guide.md", "mounts-and-portability.md", "schema-export.md"] },
   { "Integrations" = ["integrations/index.md", "integrations/containers.md", "integrations/dlt_loader.md", { "Config Adapters" = [{ "Overview" = "integrations/config_adapters.md" }, { "BEAM" = "integrations/config_adapters_beam.md" }, { "ActivitySim" = "integrations/config_adapters_activitysim.md" }] }] },
   { "Examples" = "examples.md" },

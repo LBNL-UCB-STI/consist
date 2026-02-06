@@ -72,6 +72,7 @@ from consist.core.openmatrix_views import OpenMatrixMetadataView
 from consist.core.spatial_views import SpatialMetadataView
 from consist.core.queries import RunQueryService
 from consist.core.settings import ConsistSettings
+from consist.core.metadata_resolver import MetadataResolver
 from consist.core.validation import (
     validate_config_structure,
     validate_run_meta,
@@ -92,6 +93,7 @@ from consist.types import (
 
 if TYPE_CHECKING:
     from consist.core.coupler import Coupler
+    from consist.core.step_context import StepContext
 
 UTC = timezone.utc
 
@@ -243,6 +245,7 @@ class Tracker:
         mounts: Optional[Dict[str, str]] = None,
         project_root: str = ".",
         hashing_strategy: str = "full",
+        cache_epoch: int = 1,
         schemas: Optional[List[Type[SQLModel]]] = None,
         access_mode: AccessMode = "standard",
         run_subdir_fn: Optional[Callable[[Run], str]] = None,
@@ -279,6 +282,9 @@ class Tracker:
         hashing_strategy : str, default "full"
             The method used to compute artifact identity. 'full' performs a
             complete SHA256 content hash, while 'fast' leverages filesystem metadata.
+        cache_epoch : int, default 1
+            Global cache version for this tracker. Increment to invalidate all
+            previously cached runs without modifying code or config.
         schemas : Optional[List[Type[SQLModel]]], default None
             SQLModel definitions to be automatically registered as hybrid views
             within the DuckDB instance for immediate querying.
@@ -307,6 +313,7 @@ class Tracker:
 
         self.access_mode = access_mode
         self._run_subdir_fn = run_subdir_fn
+        self._cache_epoch = cache_epoch
         if allow_external_paths is None:
             allow_external_paths = _env_bool("CONSIST_ALLOW_EXTERNAL_PATHS", False)
         self.allow_external_paths = bool(allow_external_paths)
@@ -892,6 +899,8 @@ class Tracker:
         # should not silently cache-hit a different year).
         year = kwargs.pop("year", None)
         iteration = kwargs.pop("iteration", None)
+        cache_epoch = kwargs.pop("cache_epoch", None)
+        cache_version = kwargs.pop("cache_version", None)
         parent_run_id = kwargs.pop("parent_run_id", None)
 
         if artifact_dir is not None:
@@ -927,11 +936,20 @@ class Tracker:
         # Important: keep the stored config snapshot as user-provided config, but include
         # selected Run fields in the identity hash to avoid accidental cache hits.
         config_hash = self.identity.compute_run_config_hash(
-            config=config_dict, model=model, year=year, iteration=iteration
+            config=config_dict,
+            model=model,
+            year=year,
+            iteration=iteration,
+            cache_epoch=cache_epoch,
+            cache_version=cache_version,
         )
         git_hash = self.identity.get_code_version()
 
         kwargs["_physical_run_dir"] = str(self.run_dir)
+        if cache_epoch is not None:
+            kwargs["cache_epoch"] = cache_epoch
+        if cache_version is not None:
+            kwargs["cache_version"] = cache_version
         if kwargs:
             validate_run_meta(kwargs)
 
@@ -1210,14 +1228,18 @@ class Tracker:
         hash_inputs: HashInputs = None,
         year: Optional[int] = None,
         iteration: Optional[int] = None,
+        phase: Optional[str] = None,
+        stage: Optional[str] = None,
         parent_run_id: Optional[str] = None,
         outputs: Optional[List[str]] = None,
         output_paths: Optional[Mapping[str, ArtifactRef]] = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
-        cache_mode: str = "reuse",
+        cache_mode: Optional[str] = None,
         cache_hydration: Optional[str] = None,
-        validate_cached_outputs: str = "lazy",
+        cache_version: Optional[int] = None,
+        cache_epoch: Optional[int] = None,
+        validate_cached_outputs: Optional[str] = None,
         load_inputs: Optional[bool] = None,
         executor: str = "python",
         container: Optional[Mapping[str, Any]] = None,
@@ -1389,33 +1411,79 @@ class Tracker:
             if fn is None:
                 raise ValueError("Tracker.run requires a callable fn.")
 
-        if executor == "container":
-            resolved_name = name or getattr(fn, "__name__", None)
-            if resolved_name is None:
-                raise ValueError("executor='container' requires a run name.")
-        else:
-            resolved_name = name or getattr(fn, "__name__", None)
-            if resolved_name is None:
-                raise ValueError("Tracker.run requires a run name.")
-        resolved_model = model or resolved_name
+        resolver = MetadataResolver(
+            default_name_template=None,
+            allow_template=executor == "python",
+            apply_step_defaults=executor == "python",
+        )
+        resolved = resolver.resolve(
+            fn=fn,
+            name=name,
+            model=model,
+            description=description,
+            config=config,
+            config_plan=config_plan,
+            inputs=inputs,
+            input_keys=input_keys,
+            optional_input_keys=optional_input_keys,
+            tags=tags,
+            facet=facet,
+            facet_from=facet_from,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
+            hash_inputs=hash_inputs,
+            year=year,
+            iteration=iteration,
+            phase=phase,
+            stage=stage,
+            consist_settings=self.settings,
+            consist_workspace=self.run_dir,
+            consist_state=self.current_consist,
+            runtime_kwargs=runtime_kwargs,
+            outputs=outputs,
+            output_paths=output_paths,
+            cache_mode=cache_mode,
+            cache_hydration=cache_hydration,
+            cache_version=cache_version,
+            validate_cached_outputs=validate_cached_outputs,
+            load_inputs=load_inputs,
+            missing_name_error="Tracker.run requires a run name.",
+        )
 
-        if executor == "python":
-            step_def = getattr(fn, "__consist_step__", None)
-            if step_def is not None:
-                if outputs is None and step_def.outputs is not None:
-                    outputs = list(step_def.outputs)
-                if tags is None and step_def.tags is not None:
-                    tags = list(step_def.tags)
-                if description is None and step_def.description is not None:
-                    description = step_def.description
+        resolved_name = resolved.name
+        resolved_model = resolved.model
+        description = resolved.description
+        config = resolved.config
+        config_plan = resolved.config_plan
+        tags = resolved.tags
+        facet = resolved.facet
+        facet_index = resolved.facet_index
+        outputs = resolved.outputs
+        output_paths = resolved.output_paths
+        inputs = resolved.inputs
+        input_keys = resolved.input_keys
+        optional_input_keys = resolved.optional_input_keys
+        cache_mode = resolved.cache_mode
+        cache_hydration = resolved.cache_hydration
+        cache_version = resolved.cache_version
+        validate_cached_outputs = resolved.validate_cached_outputs
+        load_inputs = resolved.load_inputs
+        hash_inputs = resolved.hash_inputs
+        facet_from = resolved.facet_from
+        facet_schema_version = resolved.facet_schema_version
 
-            if load_inputs is None:
-                load_inputs = isinstance(inputs, Mapping)
-            if load_inputs and inputs is not None and not isinstance(inputs, Mapping):
-                raise ValueError("load_inputs=True requires inputs to be a dict.")
+        if cache_mode is None:
+            cache_mode = "reuse"
+        if validate_cached_outputs is None:
+            validate_cached_outputs = "lazy"
 
-            if cache_hydration is None and load_inputs:
-                cache_hydration = "inputs-missing"
+        if load_inputs is None:
+            load_inputs = isinstance(inputs, Mapping)
+        if load_inputs and inputs is not None and not isinstance(inputs, Mapping):
+            raise ValueError("load_inputs=True requires inputs to be a dict.")
+
+        if cache_hydration is None and load_inputs:
+            cache_hydration = "inputs-missing"
 
         if input_keys is not None or optional_input_keys is not None:
             warnings.warn(
@@ -1480,6 +1548,8 @@ class Tracker:
             )
             cache_mode = "overwrite"
 
+        resolved_cache_epoch = self._cache_epoch if cache_epoch is None else cache_epoch
+
         config_for_run = config
         if config_plan is not None:
             if config is None:
@@ -1514,7 +1584,14 @@ class Tracker:
             "iteration": iteration,
             "parent_run_id": parent_run_id,
             "validate_cached_outputs": validate_cached_outputs,
+            "cache_epoch": resolved_cache_epoch,
         }
+        if cache_version is not None:
+            start_kwargs["cache_version"] = cache_version
+        if phase is not None:
+            start_kwargs["phase"] = phase
+        if stage is not None:
+            start_kwargs["stage"] = stage
         if facet_schema_version is not None:
             start_kwargs["facet_schema_version"] = facet_schema_version
         if facet_index is not None:
@@ -2143,6 +2220,7 @@ class Tracker:
             "iteration": iteration,
             "parent_run_id": parent_run_id,
             "validate_cached_outputs": validate_cached_outputs,
+            "cache_epoch": self._cache_epoch,
         }
         if facet_schema_version is not None:
             start_kwargs["facet_schema_version"] = facet_schema_version
@@ -2215,6 +2293,8 @@ class Tracker:
         tags: Optional[List[str]] = None,
         model: str = "scenario",
         step_cache_hydration: Optional[str] = None,
+        name_template: Optional[str] = None,
+        cache_epoch: Optional[int] = None,
         coupler: Optional["Coupler"] = None,
         require_outputs: Optional[Iterable[str]] = None,
         **kwargs: Any,
@@ -2243,6 +2323,11 @@ class Tracker:
         step_cache_hydration : Optional[str], optional
             Default cache hydration policy for all scenario steps unless overridden
             in a specific `scenario.trace(...)` or `scenario.run(...)`.
+        name_template : Optional[str], optional
+            Optional step name template applied when scenario.run() is called without
+            an explicit name and no step-level template is provided.
+        cache_epoch : Optional[int], optional
+            Scenario-level cache epoch override for all steps in this scenario.
         coupler : Optional[Coupler], optional
             Optional Coupler instance to use for the scenario.
         require_outputs : Optional[Iterable[str]], optional
@@ -2271,6 +2356,8 @@ class Tracker:
             tags,
             model,
             step_cache_hydration=step_cache_hydration,
+            name_template=name_template,
+            cache_epoch=cache_epoch,
             coupler=coupler,
             require_outputs=require_outputs,
             **kwargs,
@@ -3746,6 +3833,99 @@ class Tracker:
             diagnostics = validate_config_plan(plan)
             return replace(plan, diagnostics=diagnostics)
         return plan
+
+    def prepare_config_resolver(
+        self,
+        adapter: ConfigAdapter,
+        *,
+        config_dirs: Optional[Iterable[Union[str, Path]]] = None,
+        config_dirs_from: Optional[
+            Union[
+                str,
+                Callable[["StepContext"], Iterable[Union[str, Path]]],
+            ]
+        ] = None,
+        strict: bool = False,
+        options: Optional[ConfigAdapterOptions] = None,
+        validate_only: bool = False,
+        facet_spec: Optional[Dict[str, Any]] = None,
+        facet_schema_name: Optional[str] = None,
+        facet_schema_version: Optional[Union[str, int]] = None,
+        facet_index: Optional[bool] = None,
+    ) -> Callable[["StepContext"], ConfigPlan]:
+        """
+        Build a StepContext resolver for use with `@define_step(config_plan=...)`.
+
+        Exactly one config-directory source must be provided:
+        - `config_dirs`: static iterable of directories.
+        - `config_dirs_from`: runtime source (dot-path string or callable).
+
+        The returned callable is metadata-safe (pre-run) and delegates to
+        `prepare_config(...)`.
+        """
+        if (config_dirs is None) == (config_dirs_from is None):
+            raise ValueError(
+                "prepare_config_resolver requires exactly one of "
+                "config_dirs= or config_dirs_from=."
+            )
+
+        static_dirs = tuple(config_dirs) if config_dirs is not None else None
+
+        def _resolve_runtime_path(ctx: "StepContext", path: str) -> object:
+            parts = [part for part in path.split(".") if part]
+            if not parts:
+                raise ValueError(
+                    "config_dirs_from path must be non-empty (e.g., "
+                    "'settings.config_dirs')."
+                )
+            value: object = ctx.require_runtime(parts[0])
+            for part in parts[1:]:
+                if isinstance(value, MappingABC):
+                    mapping_value = cast(Mapping[str, object], value)
+                    if part not in mapping_value:
+                        raise ValueError(
+                            f"Missing runtime mapping key {part!r} while resolving "
+                            f"config_dirs_from={path!r}."
+                        )
+                    value = mapping_value[part]
+                    continue
+                if not hasattr(value, part):
+                    raise ValueError(
+                        f"Missing runtime attribute {part!r} while resolving "
+                        f"config_dirs_from={path!r}."
+                    )
+                value = getattr(value, part)
+            return value
+
+        def _resolve_dirs(ctx: "StepContext") -> Iterable[Union[str, Path]]:
+            if static_dirs is not None:
+                return static_dirs
+            source = config_dirs_from
+            if callable(source):
+                candidate = source(ctx)
+            else:
+                candidate = _resolve_runtime_path(ctx, cast(str, source))
+            if isinstance(candidate, (str, Path)):
+                raise ValueError(
+                    "Resolved config_dirs must be an iterable of paths, not a single "
+                    f"value: {candidate!r}."
+                )
+            return cast(Iterable[Union[str, Path]], candidate)
+
+        def _resolver(ctx: "StepContext") -> ConfigPlan:
+            return self.prepare_config(
+                adapter=adapter,
+                config_dirs=_resolve_dirs(ctx),
+                strict=strict,
+                options=options,
+                validate_only=validate_only,
+                facet_spec=facet_spec,
+                facet_schema_name=facet_schema_name,
+                facet_schema_version=facet_schema_version,
+                facet_index=facet_index,
+            )
+
+        return _resolver
 
     def apply_config_plan(
         self,

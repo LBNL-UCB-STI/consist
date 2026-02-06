@@ -57,6 +57,8 @@ from consist.types import ArtifactRef, DriverType
 if TYPE_CHECKING:
     import geopandas
     import xarray
+    from consist.core.config_canonicalization import ConfigPlan
+    from consist.core.step_context import StepContext
 
 # Import loaders for specific formats
 xr: Optional[ModuleType]
@@ -281,17 +283,64 @@ def set_current_tracker(tracker: Optional["Tracker"]) -> Optional["Tracker"]:
 
 def define_step(
     *,
+    model: Optional[str] = None,
+    name_template: Optional[str] = None,
     outputs: Optional[list[str]] = None,
+    schema_outputs: Optional[list[str]] = None,
+    output_paths: Optional[Mapping[str, Any]] = None,
+    inputs: Optional[Union[Mapping[str, Any], Iterable[Any]]] = None,
+    input_keys: Optional[Union[Iterable[str], str]] = None,
+    optional_input_keys: Optional[Union[Iterable[str], str]] = None,
+    config: Optional[Dict[str, Any]] = None,
+    config_plan: Optional[
+        Union["ConfigPlan", Callable[["StepContext"], "ConfigPlan"]]
+    ] = None,
+    facet: Optional[Any] = None,
+    facet_index: Optional[bool] = None,
+    cache_mode: Optional[str] = None,
+    cache_hydration: Optional[str] = None,
+    cache_version: Optional[int] = None,
+    validate_cached_outputs: Optional[str] = None,
+    load_inputs: Optional[bool] = None,
+    hash_inputs: Optional[Any] = None,
     tags: Optional[list[str]] = None,
+    facet_from: Optional[list[str]] = None,
+    facet_schema_version: Optional[Union[str, int]] = None,
     description: Optional[str] = None,
+    **extra: Any,
 ):
     """
     Attach metadata to a function without changing execution behavior.
 
     This decorator lets you attach defaults such as ``outputs`` or ``tags`` to a
     function. ``Tracker.run`` and ``ScenarioContext.run`` read this metadata.
+    Callable values are resolved at runtime with a StepContext.
     """
-    return define_step_decorator(outputs=outputs, tags=tags, description=description)
+    return define_step_decorator(
+        model=model,
+        name_template=name_template,
+        outputs=outputs,
+        schema_outputs=schema_outputs,
+        output_paths=output_paths,
+        inputs=inputs,
+        input_keys=input_keys,
+        optional_input_keys=optional_input_keys,
+        config=config,
+        config_plan=config_plan,
+        facet=facet,
+        facet_index=facet_index,
+        cache_mode=cache_mode,
+        cache_hydration=cache_hydration,
+        cache_version=cache_version,
+        validate_cached_outputs=validate_cached_outputs,
+        load_inputs=load_inputs,
+        hash_inputs=hash_inputs,
+        tags=tags,
+        facet_from=facet_from,
+        facet_schema_version=facet_schema_version,
+        description=description,
+        **extra,
+    )
 
 
 def require_runtime_kwargs(*names: str) -> Callable[[Callable[..., Any]], Callable]:
@@ -773,6 +822,11 @@ def log_artifacts(
         Explicitly specify driver for all artifacts. If None, inferred from file extension.
     metadata_by_key : Optional[Mapping[str, Dict[str, Any]]], optional
         Per-key metadata overrides applied on top of shared metadata.
+    reuse_if_unchanged : bool, default False
+        If True, reuse an existing logged artifact when the input path has not changed.
+    reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
+        Control reuse lookup scope. "same_uri" only reuses when the URI matches,
+        while "any_uri" allows reuse across different URIs with the same content hash.
     enabled : bool, default True
         If False, returns noop artifact objects without requiring an active run.
     **shared_meta : Any
@@ -1773,9 +1827,6 @@ def load(
         If `None`, the function attempts to use the active global tracker context.
         Explicitly passing a `tracker` is recommended for clarity or when
         no global context is available.
-    **kwargs : Any
-        Additional keyword arguments to pass to the underlying data loader function
-        (e.g., `pd.read_parquet`, `pd.read_csv`, `xr.open_zarr`, `pd.read_sql`).
     db_fallback : str, default "inputs-only"
         Controls when the loader is allowed to fall back to DuckDB ("Ghost Mode") when
         the file is missing but the artifact is marked as ingested.
@@ -1785,6 +1836,9 @@ def load(
         - "always": allow DB fallback whenever `artifact.meta["is_ingested"]` is true and
           a tracker with a DB connection is available.
         - "never": disable DB fallback entirely.
+    **kwargs : Any
+        Additional keyword arguments to pass to the underlying data loader function
+        (e.g., `pd.read_parquet`, `pd.read_csv`, `xr.open_zarr`, `pd.read_sql`).
 
     Returns
     -------
