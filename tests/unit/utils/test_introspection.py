@@ -22,7 +22,7 @@ def test_collect_step_schema_static_outputs() -> None:
 
 
 def test_collect_step_schema_callable_outputs_with_settings() -> None:
-    @define_step(outputs=lambda ctx: [f"out_{ctx.settings['suffix']}"])
+    @define_step(outputs=lambda ctx: [f"out_{ctx.runtime_settings['suffix']}"])
     def step_dynamic() -> None:
         return None
 
@@ -31,7 +31,7 @@ def test_collect_step_schema_callable_outputs_with_settings() -> None:
 
 
 def test_collect_step_schema_warns_when_unresolvable() -> None:
-    @define_step(outputs=lambda ctx: [f"out_{ctx.settings['suffix']}"])
+    @define_step(outputs=lambda ctx: [f"out_{ctx.runtime_settings['suffix']}"])
     def step_dynamic() -> None:
         return None
 

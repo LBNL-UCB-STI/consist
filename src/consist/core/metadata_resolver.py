@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Union, cast
 
 from consist.core.decorators import StepDefinition
 from consist.core.step_context import StepContext, format_step_name, resolve_metadata
@@ -66,9 +66,9 @@ class MetadataResolver:
         iteration: Optional[int],
         phase: Optional[str],
         stage: Optional[str],
-        settings: Optional[Any],
-        workspace: Optional[Path],
-        state: Optional[Any],
+        consist_settings: Optional[Any],
+        consist_workspace: Optional[Path],
+        consist_state: Optional[Any],
         runtime_kwargs: Optional[Dict[str, Any]],
         outputs: Optional[List[str]],
         output_paths: Optional[Mapping[str, Any]],
@@ -86,6 +86,7 @@ class MetadataResolver:
 
         ctx: StepContext | None = None
         if fn is not None:
+            runtime_map = runtime_kwargs or {}
             ctx = StepContext(
                 func_name=func_name or "",
                 model=model,
@@ -93,15 +94,18 @@ class MetadataResolver:
                 iteration=iteration,
                 phase=phase,
                 stage=stage,
-                settings=settings,
-                workspace=workspace,
-                state=state,
-                runtime_kwargs=runtime_kwargs,
+                consist_settings=consist_settings,
+                consist_workspace=consist_workspace,
+                consist_state=consist_state,
+                runtime_settings=runtime_map.get("settings"),
+                runtime_workspace=runtime_map.get("workspace"),
+                runtime_state=runtime_map.get("state"),
+                runtime_kwargs=runtime_map,
             )
 
         resolved_model = model
         if self._apply_step_defaults and model is None and ctx is not None:
-            resolved_model = resolve_metadata(step_def.model, ctx)
+            resolved_model = cast(Optional[str], resolve_metadata(step_def.model, ctx))
         if ctx is not None:
             ctx.model = resolved_model
 

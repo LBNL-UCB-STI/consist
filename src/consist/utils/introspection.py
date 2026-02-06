@@ -61,7 +61,11 @@ def collect_step_schema(
         if callable(outputs_value):
             if settings is not None:
                 try:
-                    ctx = StepContext(func_name=step_name, settings=settings)
+                    ctx = StepContext(
+                        func_name=step_name,
+                        runtime_settings=settings,
+                        runtime_kwargs={"settings": settings},
+                    )
                     outputs = _normalize_outputs(resolve_metadata(outputs_value, ctx))
                 except Exception as exc:
                     if warn_unresolvable:
@@ -89,7 +93,11 @@ def collect_step_schema(
         description_value = getattr(defn, "description", None)
         if callable(description_value) and settings is not None:
             try:
-                ctx = StepContext(func_name=step_name, settings=settings)
+                ctx = StepContext(
+                    func_name=step_name,
+                    runtime_settings=settings,
+                    runtime_kwargs={"settings": settings},
+                )
                 description_value = resolve_metadata(description_value, ctx)
             except Exception:
                 description_value = None

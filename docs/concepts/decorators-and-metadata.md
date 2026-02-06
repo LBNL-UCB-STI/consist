@@ -53,7 +53,76 @@ Callable metadata can use:
 
 - `year`, `iteration`, `phase`, `stage`
 - `model`, `func_name`
-- `settings` or `runtime_kwargs`
+- `runtime_settings`, `runtime_workspace`, `runtime_state`
+- `runtime_kwargs` for raw runtime access
+- `consist_settings`, `consist_workspace`, `consist_state` for Consist internals
+
+---
+
+## StepContext Runtime Contract
+
+`StepContext` now separates workflow runtime objects from Consist internal objects.
+For workflow/business metadata, prefer `runtime_*` fields.
+
+- Runtime fields: `runtime_settings`, `runtime_workspace`, `runtime_state`
+- Internal fields: `consist_settings`, `consist_workspace`, `consist_state`
+- Raw runtime map: `runtime_kwargs`
+- Helpers: `ctx.get_runtime("name")`, `ctx.require_runtime("name")`
+
+Deprecated compatibility aliases still exist:
+
+- `ctx.settings`
+- `ctx.workspace`
+- `ctx.state`
+
+These aliases emit `DeprecationWarning` and resolve with runtime-first precedence.
+
+---
+
+## Metadata Precedence
+
+For metadata resolved by `tracker.run(...)` and `scenario.run(...)`:
+
+- Explicit run arg
+- Decorator value (static or callable)
+- Existing runtime default behavior
+
+This precedence applies consistently across `Tracker.run(...)` and `ScenarioContext.run(...)`.
+
+---
+
+## Runtime Callable Examples
+
+Runtime-aware `config`:
+
+```python
+@define_step(
+    config=lambda ctx: {
+        "scenario": ctx.require_runtime("settings")["scenario_name"],
+        "year": ctx.year,
+    }
+)
+def simulate(...):
+    ...
+```
+
+Runtime-aware `hash_inputs`:
+
+```python
+@define_step(
+    hash_inputs=lambda ctx: "full"
+    if ctx.get_runtime("settings", {}).get("strict_hashing")
+    else "fast"
+)
+def load_inputs(...):
+    ...
+```
+
+Migration note:
+
+- Replace workflow-facing `ctx.settings` with `ctx.runtime_settings`
+- Replace workflow-facing `ctx.workspace` with `ctx.runtime_workspace`
+- Replace workflow-facing `ctx.state` with `ctx.runtime_state`
 
 ---
 

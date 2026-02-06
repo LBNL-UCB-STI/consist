@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Callable, Mapping, Optional, TypeVar, cast, overload
+import warnings
+
+_DefaultT = TypeVar("_DefaultT")
+_ResolvedT = TypeVar("_ResolvedT")
 
 
 @dataclass
@@ -20,27 +24,117 @@ class StepContext:
     iteration: Optional[int] = None
     phase: Optional[str] = None
     stage: Optional[str] = None
-    settings: Optional[Any] = None
-    workspace: Optional[Path] = None
-    state: Optional[Any] = None
-    runtime_kwargs: Optional[Dict[str, Any]] = None
+    consist_settings: Optional[object] = None
+    consist_workspace: Optional[Path] = None
+    consist_state: Optional[object] = None
+    runtime_settings: Optional[object] = None
+    runtime_workspace: Optional[object] = None
+    runtime_state: Optional[object] = None
+    runtime_kwargs: Mapping[str, object] = field(default_factory=dict)
 
-    def __getitem__(self, key: str) -> Any:
+    @property
+    def settings(self) -> Optional[object]:
+        """
+        Deprecated compatibility alias.
+
+        Prefer ``runtime_settings`` for workflow/runtime config and
+        ``consist_settings`` for Consist internal settings.
+        """
+        warnings.warn(
+            "StepContext.settings is deprecated; use StepContext.runtime_settings "
+            "or StepContext.consist_settings.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if self.runtime_settings is not None:
+            return self.runtime_settings
+        return self.consist_settings
+
+    @property
+    def workspace(self) -> Optional[object]:
+        """
+        Deprecated compatibility alias.
+
+        Prefer ``runtime_workspace`` for workflow/runtime workspace and
+        ``consist_workspace`` for Consist internal workspace.
+        """
+        warnings.warn(
+            "StepContext.workspace is deprecated; use StepContext.runtime_workspace "
+            "or StepContext.consist_workspace.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if self.runtime_workspace is not None:
+            return self.runtime_workspace
+        return self.consist_workspace
+
+    @property
+    def state(self) -> Optional[object]:
+        """
+        Deprecated compatibility alias.
+
+        Prefer ``runtime_state`` for workflow/runtime state and
+        ``consist_state`` for Consist internal state.
+        """
+        warnings.warn(
+            "StepContext.state is deprecated; use StepContext.runtime_state "
+            "or StepContext.consist_state.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if self.runtime_state is not None:
+            return self.runtime_state
+        return self.consist_state
+
+    def __getitem__(self, key: str) -> Optional[object]:
         """Allow dict-style access for convenience."""
-        value = getattr(self, key, None)
-        if value is not None:
-            return value
-        if self.runtime_kwargs and key in self.runtime_kwargs:
-            return self.runtime_kwargs[key]
-        return None
+        runtime_value = self.get_runtime(key, default=None)
+        if runtime_value is not None:
+            return runtime_value
+        return cast(Optional[object], getattr(self, key, None))
 
-    def get(self, key: str, default: Any = None) -> Any:
+    def get(
+        self, key: str, default: _DefaultT | None = None
+    ) -> object | _DefaultT | None:
         """Dict-style get with default."""
-        value = self[key]
+        value = self.get_runtime(key, default=None)
+        if value is None:
+            value = cast(Optional[object], getattr(self, key, None))
         return default if value is None else value
 
+    def get_runtime(
+        self, name: str, default: _DefaultT | None = None
+    ) -> object | _DefaultT | None:
+        """Fetch workflow runtime values with explicit precedence."""
+        runtime_attr = getattr(self, f"runtime_{name}", None)
+        if runtime_attr is not None:
+            return cast(object, runtime_attr)
+        if name in self.runtime_kwargs:
+            return self.runtime_kwargs[name]
+        return default
 
-def resolve_metadata(value: Any, ctx: StepContext) -> Any:
+    def require_runtime(self, name: str) -> object:
+        """Fetch a required runtime value or raise a clear error."""
+        sentinel = object()
+        value = self.get_runtime(name, default=sentinel)
+        if value is sentinel:
+            raise ValueError(
+                f"Missing runtime value {name!r} in StepContext runtime fields/kwargs."
+            )
+        return value
+
+
+@overload
+def resolve_metadata(
+    value: Callable[[StepContext], _ResolvedT], ctx: StepContext
+) -> _ResolvedT: ...
+
+
+@overload
+def resolve_metadata(value: _ResolvedT, ctx: StepContext) -> _ResolvedT: ...
+
+
+def resolve_metadata(value: object, ctx: StepContext) -> object:
     """
     Resolve potentially-callable metadata value.
 
@@ -48,7 +142,7 @@ def resolve_metadata(value: Any, ctx: StepContext) -> Any:
     Otherwise return value unchanged.
     """
     if callable(value) and not isinstance(value, type):
-        return value(ctx)
+        return cast(Callable[[StepContext], object], value)(ctx)
     return value
 
 
