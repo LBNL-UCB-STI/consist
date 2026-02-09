@@ -272,6 +272,16 @@ Keys.validate([Keys.RAW, Keys.PREPROCESSED])
 
 **Live-sync (automatic):** When you log an artifact, it's immediately available in the coupler—you don't need to manually call `coupler.set()`.
 
+**Optional: Namespace keys with a scoped view:** For larger workflows, you can
+scope reads/writes while keeping fully-qualified keys globally accessible.
+
+```python
+beam = sc.coupler.view("beam")
+beam.set("plans_in", artifact)            # writes key "beam/plans_in"
+beam.require("plans_in")                  # namespace-local access
+sc.coupler.require("beam/plans_in")       # global access still works
+```
+
 **For optional-Consist workflows:** If you're using Consist in optional mode (with fallback to Path objects or artifact-like objects), use `coupler.set_from_artifact(key, value)` instead of `coupler.set()`. It handles both real Artifacts and artifact-like objects (Paths, strings, noop artifacts) transparently.
 
 ### Simple Example: Two-Step Workflow

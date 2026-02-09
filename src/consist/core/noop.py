@@ -9,7 +9,7 @@ import warnings
 from typing import Any, Dict, Iterator, Mapping, Optional, Sequence, Union
 import uuid
 
-from consist.core.coupler import DeclaredOutput
+from consist.core.coupler import CouplerView, DeclaredOutput
 from consist.core.validation import validate_artifact_key
 from consist.protocols import TrackerLike
 
@@ -135,6 +135,15 @@ class NoopCoupler:
 
     def values(self) -> Sequence[Any]:
         return list(self._artifacts.values())
+
+    def view(self, namespace: str) -> CouplerView:
+        """
+        Return a namespace-scoped coupler view.
+
+        Noop mode uses the same namespacing behavior as real couplers so
+        workflow code can remain identical across enabled/disabled tracking.
+        """
+        return CouplerView(self, namespace)
 
     def __contains__(self, key: object) -> bool:
         return key in self._artifacts
