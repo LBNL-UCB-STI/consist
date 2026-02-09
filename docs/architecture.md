@@ -133,6 +133,25 @@ For detailed usage, see [Configuration, Identity, and Facets](configs.md).
 
 - `config_facet`: Deduplicated facet JSON, namespaced by model
 - `run_config_kv`: Flattened key/value index for facet filtering
+- `artifact_facet`: Deduplicated artifact-level facet JSON
+- `artifact_kv`: Flattened scalar key/value index for artifact facet filtering
+
+### Shared Facet Processing Core
+
+Run facets and artifact facets use a shared internal processing pipeline
+implemented in `src/consist/core/facet_common.py`.
+
+Shared steps:
+
+- normalize facet payloads (dict/Pydantic) into JSON-safe maps
+- infer facet schema names from Pydantic models
+- canonicalize JSON and compute stable facet IDs (SHA256)
+- flatten nested keys with escaped dot notation (`.` -> `\.`)
+- encode typed leaf values (`str`, `int`, `float`, `bool`, `null`, optional `json`)
+
+Entity-specific managers (`ConfigFacetManager` and `ArtifactFacetManager`) remain
+separate to preserve different persistence and query semantics while reusing the
+same core flattening/hash logic.
 
 ---
 

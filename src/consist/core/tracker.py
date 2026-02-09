@@ -34,6 +34,7 @@ from pydantic import BaseModel
 from sqlmodel import SQLModel, Session
 
 from consist.core.artifact_schemas import ArtifactSchemaManager
+from consist.core.artifact_facets import ArtifactFacetManager
 from consist.core.artifacts import ArtifactManager
 from consist.core.cache import (
     ActiveRunCacheOptions,
@@ -331,6 +332,7 @@ class Tracker:
 
         self.artifacts = ArtifactManager(self)
         self.config_facets = ConfigFacetManager(db=self.db, identity=self.identity)
+        self.artifact_facets = ArtifactFacetManager(db=self.db, identity=self.identity)
         self.artifact_schemas = ArtifactSchemaManager(self)
         self.queries = RunQueryService(self)
         self.lineage = LineageService(self)
@@ -372,6 +374,9 @@ class Tracker:
         self._run_artifacts_cache_max_entries: int = 1024
 
         self._runs_by_id: Dict[str, Run] = {}
+        self._artifact_facet_parsers: list[
+            tuple[str, Callable[[str], Optional[FacetLike]]]
+        ] = []
         openlineage_emitter = None
         if openlineage_enabled:
             from consist.core.openlineage import OpenLineageEmitter, OpenLineageOptions
@@ -715,6 +720,43 @@ class Tracker:
         if isinstance(obj, Mapping):
             return dict(obj)
         raise ValueError(f"Tracker {label} must be a mapping or Pydantic model.")
+
+    def register_artifact_facet_parser(
+        self, prefix: str, parser_fn: Callable[[str], Optional[FacetLike]]
+    ) -> None:
+        """
+        Register a key-prefix parser for deriving artifact facets.
+
+        Parsers are evaluated in descending prefix-length order when
+        ``log_artifact(..., facet=None)`` is used.
+        """
+        if not isinstance(prefix, str) or not prefix:
+            raise ValueError("prefix must be a non-empty string.")
+        self._artifact_facet_parsers = [
+            (p, fn) for p, fn in self._artifact_facet_parsers if p != prefix
+        ]
+        self._artifact_facet_parsers.append((prefix, parser_fn))
+        self._artifact_facet_parsers.sort(key=lambda row: len(row[0]), reverse=True)
+
+    def _parse_artifact_facet_from_registered_parsers(
+        self, key: str
+    ) -> Optional[FacetLike]:
+        for prefix, parser_fn in self._artifact_facet_parsers:
+            if not key.startswith(prefix):
+                continue
+            try:
+                parsed = parser_fn(key)
+            except Exception as exc:
+                logging.warning(
+                    "[Consist] Artifact facet parser failed for key=%s prefix=%s: %s",
+                    key,
+                    prefix,
+                    exc,
+                )
+                continue
+            if parsed is not None:
+                return parsed
+        return None
 
     def _allow_external_paths_for_run(self, run: Optional[Run]) -> bool:
         if run and isinstance(run.meta, dict) and "allow_external_paths" in run.meta:
@@ -2675,6 +2717,9 @@ class Tracker:
         reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
         profile_file_schema: bool | Literal["if_changed"] | None = None,
         file_schema_sample_rows: Optional[int] = None,
+        facet: Optional[FacetLike] = None,
+        facet_schema_version: Optional[Union[str, int]] = None,
+        facet_index: bool = False,
         **meta: Any,
     ) -> Artifact:
         """
@@ -2733,6 +2778,12 @@ class Tracker:
             Use "if_changed" to skip profiling when a matching content hash already has a schema.
         file_schema_sample_rows : Optional[int], default None
             Maximum rows to sample when profiling file-based schemas.
+        facet : Optional[FacetLike], optional
+            Optional artifact-level facet payload (dict or Pydantic model).
+        facet_schema_version : Optional[Union[str, int]], optional
+            Optional schema version for artifact facet compatibility.
+        facet_index : bool, default False
+            If True, flatten scalar facet fields into ``artifact_kv`` for fast queries.
         **meta : Any
             Additional key-value pairs to store in the artifact's flexible `meta` field.
 
@@ -2794,6 +2845,17 @@ class Tracker:
             **meta,
         )
 
+        resolved_artifact_facet: Optional[Dict[str, Any]] = None
+        artifact_facet_payload: Optional[FacetLike] = facet
+        if artifact_facet_payload is None and artifact_obj.key:
+            artifact_facet_payload = self._parse_artifact_facet_from_registered_parsers(
+                artifact_obj.key
+            )
+        if artifact_facet_payload is not None:
+            resolved_artifact_facet = self.artifact_facets.resolve_facet_dict(
+                artifact_facet_payload
+            )
+
         # Artifact contract clarification:
         # - If the caller passes an existing Artifact reference, `artifact.run_id` is treated as the
         #   producing run id (and is not overwritten), but we warn when the caller attempts to log it
@@ -2837,6 +2899,23 @@ class Tracker:
 
         self._flush_json()
         self._sync_artifact_to_db(artifact_obj, direction)
+
+        if resolved_artifact_facet is not None:
+            schema_version = facet_schema_version
+            if schema_version is None and isinstance(
+                artifact_facet_payload, HasFacetSchemaVersion
+            ):
+                schema_version = artifact_facet_payload.facet_schema_version
+            self.artifact_facets.persist_facet(
+                artifact=artifact_obj,
+                namespace=self.current_consist.run.model_name,
+                facet_dict=resolved_artifact_facet,
+                schema_name=self.artifact_facets.infer_schema_name(
+                    artifact_facet_payload
+                ),
+                schema_version=schema_version,
+                index_kv=facet_index,
+            )
 
         profile_mode = (
             self.settings.schema_profile_enabled
@@ -2997,6 +3076,9 @@ class Tracker:
         direction: str = "output",
         driver: Optional[str] = None,
         metadata_by_key: Optional[Mapping[str, Dict[str, Any]]] = None,
+        facets_by_key: Optional[Mapping[str, FacetLike]] = None,
+        facet_schema_versions_by_key: Optional[Mapping[str, Union[str, int]]] = None,
+        facet_index: bool = False,
         reuse_if_unchanged: bool = False,
         reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
         **shared_meta: Any,
@@ -3019,6 +3101,12 @@ class Tracker:
             from each file's extension individually.
         metadata_by_key : Optional[Mapping[str, Dict[str, Any]]], optional
             Per-key metadata overrides applied on top of shared metadata.
+        facets_by_key : Optional[Mapping[str, FacetLike]], optional
+            Per-key artifact facet payloads.
+        facet_schema_versions_by_key : Optional[Mapping[str, Union[str, int]]], optional
+            Optional per-key schema versions for artifact facet payloads.
+        facet_index : bool, default False
+            Whether to index scalar artifact facet values in ``artifact_kv``.
         **shared_meta : Any
             Metadata key-value pairs to apply to ALL logged artifacts.
             Useful for tagging a batch of related files.
@@ -3061,6 +3149,21 @@ class Tracker:
                 raise ValueError(
                     f"metadata_by_key contains keys not present in outputs: {extras}"
                 )
+        if facets_by_key:
+            extra_keys = set(facets_by_key).difference(outputs)
+            if extra_keys:
+                extras = ", ".join(sorted(str(key) for key in extra_keys))
+                raise ValueError(
+                    f"facets_by_key contains keys not present in outputs: {extras}"
+                )
+        if facet_schema_versions_by_key:
+            extra_keys = set(facet_schema_versions_by_key).difference(outputs)
+            if extra_keys:
+                extras = ", ".join(sorted(str(key) for key in extra_keys))
+                raise ValueError(
+                    "facet_schema_versions_by_key contains keys not present in "
+                    f"outputs: {extras}"
+                )
 
         keys = list(outputs.keys())
         for key in keys:
@@ -3076,11 +3179,20 @@ class Tracker:
             meta = dict(base_meta)
             if metadata_by_key and key in metadata_by_key:
                 meta.update(metadata_by_key[key])
+            facet = facets_by_key.get(key) if facets_by_key else None
+            facet_schema_version = (
+                facet_schema_versions_by_key.get(key)
+                if facet_schema_versions_by_key
+                else None
+            )
             logged[key] = self.log_artifact(
                 value,
                 key=key,
                 direction=direction,
                 driver=driver,
+                facet=facet,
+                facet_schema_version=facet_schema_version,
+                facet_index=facet_index,
                 reuse_if_unchanged=reuse_if_unchanged,
                 reuse_scope=reuse_scope,
                 **meta,
@@ -3094,6 +3206,9 @@ class Tracker:
         content_hash: Optional[str] = None,
         force_hash_override: bool = False,
         validate_content_hash: bool = False,
+        facet: Optional[FacetLike] = None,
+        facet_schema_version: Optional[Union[str, int]] = None,
+        facet_index: bool = False,
         **meta: Any,
     ) -> Artifact:
         """
@@ -3113,6 +3228,12 @@ class Tracker:
             `content_hash`. By default, mismatched overrides are ignored with a warning.
         validate_content_hash : bool, default False
             If True, verify `content_hash` against the on-disk data and raise on mismatch.
+        facet : Optional[FacetLike], optional
+            Optional artifact-level facet payload for this input artifact.
+        facet_schema_version : Optional[Union[str, int]], optional
+            Optional facet schema version.
+        facet_index : bool, default False
+            Whether to index scalar facet fields for querying.
         **meta : Any
             Additional key-value pairs to store in the artifact's `meta` field.
 
@@ -3128,6 +3249,9 @@ class Tracker:
             content_hash=content_hash,
             force_hash_override=force_hash_override,
             validate_content_hash=validate_content_hash,
+            facet=facet,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
             **meta,
         )
 
@@ -3140,6 +3264,9 @@ class Tracker:
         validate_content_hash: bool = False,
         reuse_if_unchanged: bool = False,
         reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
+        facet: Optional[FacetLike] = None,
+        facet_schema_version: Optional[Union[str, int]] = None,
+        facet_index: bool = False,
         **meta: Any,
     ) -> Artifact:
         """
@@ -3159,6 +3286,12 @@ class Tracker:
             `content_hash`. By default, mismatched overrides are ignored with a warning.
         validate_content_hash : bool, default False
             If True, verify `content_hash` against the on-disk data and raise on mismatch.
+        facet : Optional[FacetLike], optional
+            Optional artifact-level facet payload for this output artifact.
+        facet_schema_version : Optional[Union[str, int]], optional
+            Optional facet schema version.
+        facet_index : bool, default False
+            Whether to index scalar facet fields for querying.
         **meta : Any
             Additional key-value pairs to store in the artifact's `meta` field.
 
@@ -3176,6 +3309,9 @@ class Tracker:
             validate_content_hash=validate_content_hash,
             reuse_if_unchanged=reuse_if_unchanged,
             reuse_scope=reuse_scope,
+            facet=facet,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
             **meta,
         )
 
@@ -4439,6 +4575,124 @@ class Tracker:
         for artifact in artifacts:
             set_tracker_ref(artifact, self)
         return artifacts
+
+    @staticmethod
+    def _parse_artifact_param_value(raw: str) -> tuple[str, Any]:
+        value = raw.strip()
+        lowered = value.lower()
+        if lowered == "true":
+            return "bool", True
+        if lowered == "false":
+            return "bool", False
+        if lowered == "null":
+            return "null", None
+        try:
+            if "." not in value and "e" not in lowered:
+                return "num", int(value)
+            return "num", float(value)
+        except ValueError:
+            return "str", value
+
+    def _parse_artifact_param_expression(self, expression: str) -> Dict[str, Any]:
+        raw = expression.strip()
+        operator = None
+        for candidate in (">=", "<=", "="):
+            idx = raw.find(candidate)
+            if idx > 0:
+                operator = candidate
+                lhs = raw[:idx].strip()
+                rhs = raw[idx + len(candidate) :].strip()
+                break
+
+        if operator is None:
+            raise ValueError(
+                f"Invalid artifact facet predicate {expression!r}. "
+                "Expected <key>=<value>, <key>>=<value>, or <key><=<value>."
+            )
+        if not lhs:
+            raise ValueError(
+                f"Artifact facet predicate is missing a key: {expression!r}"
+            )
+        if rhs == "":
+            raise ValueError(
+                f"Artifact facet predicate is missing a value: {expression!r}"
+            )
+
+        namespace = None
+        key_path = lhs
+        if "." in lhs:
+            maybe_namespace, remainder = lhs.split(".", 1)
+            if maybe_namespace and remainder:
+                namespace = maybe_namespace
+                key_path = remainder
+
+        value_kind, value = self._parse_artifact_param_value(rhs)
+        if operator in {">=", "<="} and value_kind != "num":
+            raise ValueError(
+                f"Artifact facet predicate {expression!r} uses {operator} with a "
+                "non-numeric value."
+            )
+
+        return {
+            "namespace": namespace,
+            "key_path": key_path,
+            "op": operator,
+            "kind": value_kind,
+            "value": value,
+        }
+
+    def find_artifacts_by_params(
+        self,
+        *,
+        params: Optional[Iterable[str]] = None,
+        namespace: Optional[str] = None,
+        key_prefix: Optional[str] = None,
+        artifact_family_prefix: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Artifact]:
+        """
+        Find artifacts by indexed facet predicates and optional prefix filters.
+        """
+        if not self.db:
+            return []
+
+        predicates = (
+            [self._parse_artifact_param_expression(param) for param in params]
+            if params
+            else []
+        )
+
+        artifacts = self.db.find_artifacts_by_facet_params(
+            predicates=predicates,
+            namespace=namespace,
+            key_prefix=key_prefix,
+            artifact_family_prefix=artifact_family_prefix,
+            limit=limit,
+        )
+        for artifact in artifacts:
+            set_tracker_ref(artifact, self)
+        return artifacts
+
+    def get_artifact_kv(
+        self,
+        artifact: Union[Artifact, uuid.UUID],
+        *,
+        namespace: Optional[str] = None,
+        prefix: Optional[str] = None,
+        limit: int = 10_000,
+    ):
+        """
+        Retrieve flattened artifact facet KV rows for an artifact.
+        """
+        if not self.db:
+            return []
+        artifact_id = artifact.id if isinstance(artifact, Artifact) else artifact
+        return self.db.get_artifact_kv(
+            artifact_id=artifact_id,
+            namespace=namespace,
+            prefix=prefix,
+            limit=limit,
+        )
 
     # --- Config Facet Query Helpers ---
 

@@ -6,10 +6,10 @@ from pathlib import Path
 import inspect
 import logging
 import warnings
-from typing import Any, Dict, Iterator, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterator, Mapping, Optional, Sequence, Union
 import uuid
 
-from consist.core.coupler import DeclaredOutput
+from consist.core.coupler import CouplerView, DeclaredOutput
 from consist.core.validation import validate_artifact_key
 from consist.protocols import TrackerLike
 
@@ -136,6 +136,15 @@ class NoopCoupler:
     def values(self) -> Sequence[Any]:
         return list(self._artifacts.values())
 
+    def view(self, namespace: str) -> CouplerView:
+        """
+        Return a namespace-scoped coupler view.
+
+        Noop mode uses the same namespacing behavior as real couplers so
+        workflow code can remain identical across enabled/disabled tracking.
+        """
+        return CouplerView(self, namespace)
+
     def __contains__(self, key: object) -> bool:
         return key in self._artifacts
 
@@ -253,6 +262,9 @@ class NoopRunContext:
         validate_content_hash: bool = False,
         reuse_if_unchanged: bool = False,
         reuse_scope: str = "same_uri",
+        facet: Optional[Any] = None,
+        facet_schema_version: Optional[Union[str, int]] = None,
+        facet_index: bool = False,
         **meta: Any,
     ) -> NoopArtifact:
         _ = content_hash
@@ -260,6 +272,9 @@ class NoopRunContext:
         _ = validate_content_hash
         _ = reuse_if_unchanged
         _ = reuse_scope
+        _ = facet
+        _ = facet_schema_version
+        _ = facet_index
         if key is None:
             if isinstance(path, NoopArtifact):
                 key = path.key
@@ -280,11 +295,27 @@ class NoopRunContext:
         return self.log_artifact(path, key=key, **meta)
 
     def log_artifacts(
-        self, outputs: Mapping[str, Any], **meta: Any
+        self,
+        outputs: Mapping[str, Any],
+        facets_by_key: Optional[Mapping[str, Any]] = None,
+        facet_schema_versions_by_key: Optional[Mapping[str, Union[str, int]]] = None,
+        facet_index: bool = False,
+        **meta: Any,
     ) -> Dict[str, NoopArtifact]:
+        _ = facet_index
         artifacts: Dict[str, NoopArtifact] = {}
         for key, value in outputs.items():
-            artifacts[key] = self.log_artifact(value, key=key, **meta)
+            artifacts[key] = self.log_artifact(
+                value,
+                key=key,
+                facet=facets_by_key.get(key) if facets_by_key else None,
+                facet_schema_version=(
+                    facet_schema_versions_by_key.get(key)
+                    if facet_schema_versions_by_key
+                    else None
+                ),
+                **meta,
+            )
         return artifacts
 
 

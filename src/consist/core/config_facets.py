@@ -1,9 +1,14 @@
-import hashlib
 import logging
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel
 
+from consist.core.facet_common import (
+    canonical_facet_json_and_id,
+    flatten_facet_values,
+    infer_schema_name_from_facet,
+    normalize_facet_like,
+)
 from consist.core.identity import IdentityManager
 from consist.core.persistence import DatabaseManager
 from consist.models.config_facet import ConfigFacet
@@ -44,8 +49,9 @@ class ConfigFacetManager:
         str
             Name of the schema to persist (derived from Pydantic class or dict fallback).
         """
-        if isinstance(facet, BaseModel):
-            return facet.__class__.__name__
+        inferred = infer_schema_name_from_facet(facet)
+        if inferred is not None:
+            return inferred
         if raw_config_model is not None:
             return raw_config_model.__class__.__name__
         return "dict"
@@ -78,14 +84,7 @@ class ConfigFacetManager:
             JSON-serializable dictionary representing the facet, or ``None`` if unavailable.
         """
         if facet is not None:
-            if isinstance(facet, BaseModel):
-                normalized = (
-                    facet.model_dump(mode="json")
-                    if hasattr(facet, "model_dump")
-                    else facet.model_dump()
-                )
-                return self._identity.normalize_json(normalized)
-            return self._identity.normalize_json(facet)
+            return normalize_facet_like(identity=self._identity, facet=facet)
 
         if raw_config_model is not None and isinstance(
             raw_config_model, HasConsistFacet
@@ -101,14 +100,7 @@ class ConfigFacetManager:
                 )
                 extracted = None
             if extracted is not None:
-                if isinstance(extracted, BaseModel):
-                    normalized = (
-                        extracted.model_dump(mode="json")
-                        if hasattr(extracted, "model_dump")
-                        else extracted.model_dump()
-                    )
-                    return self._identity.normalize_json(normalized)
-                return self._identity.normalize_json(extracted)
+                return normalize_facet_like(identity=self._identity, facet=extracted)
 
         return None
 
@@ -149,16 +141,18 @@ class ConfigFacetManager:
         if not self._db:
             return
 
-        canonical = self._identity.canonical_json_str(facet_dict)
-        if len(canonical.encode("utf-8")) > max_facet_bytes:
+        canonical, facet_id = canonical_facet_json_and_id(
+            identity=self._identity,
+            facet_dict=facet_dict,
+        )
+        canonical_bytes = len(canonical.encode("utf-8"))
+        if canonical_bytes > max_facet_bytes:
             logging.info(
                 "[Consist] Skipping facet persistence for run %s (facet too large: %d bytes).",
                 run.id,
-                len(canonical.encode("utf-8")),
+                canonical_bytes,
             )
             return
-
-        facet_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
         self._db.upsert_config_facet(
             ConfigFacet(
@@ -223,74 +217,22 @@ class ConfigFacetManager:
         List[RunConfigKV]
             Flattened key/value metadata rows.
         """
+        flattened = flatten_facet_values(
+            facet_dict=facet_dict, include_json_leaves=True
+        )
         rows: List[RunConfigKV] = []
-
-        def walk(prefix: str, value: Any) -> None:
-            if isinstance(value, dict):
-                for k, v in value.items():
-                    key_part = str(k).replace(".", "\\.")
-                    new_prefix = f"{prefix}.{key_part}" if prefix else key_part
-                    walk(new_prefix, v)
-                return
-
-            if value is None:
-                rows.append(
-                    RunConfigKV(
-                        run_id=run_id,
-                        facet_id=facet_id,
-                        namespace=namespace,
-                        key=prefix,
-                        value_type="null",
-                    )
-                )
-                return
-            if isinstance(value, bool):
-                rows.append(
-                    RunConfigKV(
-                        run_id=run_id,
-                        facet_id=facet_id,
-                        namespace=namespace,
-                        key=prefix,
-                        value_type="bool",
-                        value_bool=value,
-                    )
-                )
-                return
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                rows.append(
-                    RunConfigKV(
-                        run_id=run_id,
-                        facet_id=facet_id,
-                        namespace=namespace,
-                        key=prefix,
-                        value_type="float" if isinstance(value, float) else "int",
-                        value_num=float(value),
-                    )
-                )
-                return
-            if isinstance(value, str):
-                rows.append(
-                    RunConfigKV(
-                        run_id=run_id,
-                        facet_id=facet_id,
-                        namespace=namespace,
-                        key=prefix,
-                        value_type="str",
-                        value_str=value,
-                    )
-                )
-                return
-
+        for row in flattened:
             rows.append(
                 RunConfigKV(
                     run_id=run_id,
                     facet_id=facet_id,
                     namespace=namespace,
-                    key=prefix,
-                    value_type="json",
-                    value_json=value,
+                    key=row.key_path,
+                    value_type=row.value_type,
+                    value_str=row.value_str,
+                    value_num=row.value_num,
+                    value_bool=row.value_bool,
+                    value_json=row.value_json,
                 )
             )
-
-        walk("", facet_dict)
-        return [r for r in rows if r.key]
+        return rows

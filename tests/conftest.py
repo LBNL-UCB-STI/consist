@@ -15,6 +15,8 @@ from consist.core.identity import IdentityManager
 # Import specific models
 from consist.models.run import Run, RunArtifactLink
 from consist.models.artifact import Artifact
+from consist.models.artifact_facet import ArtifactFacet
+from consist.models.artifact_kv import ArtifactKV
 from consist.models.artifact_schema import (
     ArtifactSchema,
     ArtifactSchemaField,
@@ -125,6 +127,8 @@ def tracker(request, run_dir: Path, tmp_path: Path) -> Iterator[Tracker]:
         getattr(RunArtifactLink, "__table__"),
         getattr(ConfigFacet, "__table__"),
         getattr(RunConfigKV, "__table__"),
+        getattr(ArtifactFacet, "__table__"),
+        getattr(ArtifactKV, "__table__"),
         getattr(ArtifactSchema, "__table__"),
         getattr(ArtifactSchemaField, "__table__"),
         getattr(ArtifactSchemaObservation, "__table__"),

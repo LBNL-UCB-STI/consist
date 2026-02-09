@@ -2,7 +2,7 @@
 Reusable database queries for inspecting Consist provenance data.
 """
 
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, Iterable, List, Optional
 from sqlmodel import Session, select, func, col
 import duckdb
 import pandas as pd
@@ -97,3 +97,66 @@ def get_artifact_preview(
         return None
 
     return None
+
+
+def find_artifacts_by_params(
+    tracker: Tracker,
+    *,
+    params: Optional[Iterable[str]] = None,
+    namespace: Optional[str] = None,
+    key_prefix: Optional[str] = None,
+    artifact_family_prefix: Optional[str] = None,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    """
+    Query artifacts by indexed facet predicates and optional prefix filters.
+
+    Parameters
+    ----------
+    tracker : Tracker
+        Active tracker with a configured database.
+    params : Optional[Iterable[str]], optional
+        Predicate expressions of the form ``key=value``, ``key>=value``,
+        or ``key<=value``. A dotted prefix can be used as namespace
+        (e.g., ``beam.phys_sim_iteration=2``).
+    namespace : Optional[str], optional
+        Default namespace filter when predicates do not specify one.
+    key_prefix : Optional[str], optional
+        Prefix filter on ``artifact.key``.
+    artifact_family_prefix : Optional[str], optional
+        Prefix filter on indexed ``artifact_family`` facet values.
+    limit : int, default 100
+        Maximum number of results.
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        Result rows containing artifact metadata and persisted facet metadata.
+    """
+    artifacts = tracker.find_artifacts_by_params(
+        params=list(params or []),
+        namespace=namespace,
+        key_prefix=key_prefix,
+        artifact_family_prefix=artifact_family_prefix,
+        limit=limit,
+    )
+
+    rows: List[Dict[str, Any]] = []
+    for artifact in artifacts:
+        meta = artifact.meta or {}
+        rows.append(
+            {
+                "artifact": artifact,
+                "id": artifact.id,
+                "key": artifact.key,
+                "container_uri": artifact.container_uri,
+                "driver": artifact.driver,
+                "run_id": artifact.run_id,
+                "facet_id": meta.get("artifact_facet_id"),
+                "facet_namespace": meta.get("artifact_facet_namespace"),
+                "facet_schema": meta.get("artifact_facet_schema"),
+                "facet_schema_version": meta.get("artifact_facet_schema_version"),
+                "meta": meta,
+            }
+        )
+    return rows

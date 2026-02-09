@@ -295,6 +295,36 @@ def test_artifacts_with_db(mock_db_session, tmp_path):
         assert "processed_data" in result.stdout
 
 
+def test_artifacts_query_mode_with_param(cli_runner, tracker, sample_csv):
+    with tracker.start_run("run_query_artifacts", "beam"):
+        tracker.log_output(
+            sample_csv("facet_output.csv"),
+            key="facet_output",
+            facet={
+                "artifact_family": "linkstats_unmodified_phys_sim_iter_parquet",
+                "phys_sim_iteration": 2,
+            },
+            facet_schema_version="1",
+            facet_index=True,
+        )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "artifacts",
+            "--param",
+            "beam.phys_sim_iteration=2",
+            "--family-prefix",
+            "linkstats_unmodified",
+        ],
+        env={"COLUMNS": "200"},
+    )
+    assert result.exit_code == 0
+    assert "Artifact Query Results" in result.stdout
+    assert "facet_output" in result.stdout
+    assert "1" in result.stdout
+
+
 def test_lineage_with_db(mock_db_session, tmp_path):
     with (
         patch("pathlib.Path.exists", return_value=True),

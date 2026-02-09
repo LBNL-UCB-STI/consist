@@ -27,3 +27,13 @@ def test_noop_scenario_trace_context() -> None:
             artifact = ctx.log_output("file.txt", key="out")
             assert artifact.key == "out"
             assert artifact.get_path().name == "file.txt"
+
+
+def test_noop_scenario_coupler_view_namespaces_keys() -> None:
+    with consist.scenario("noop_namespace", enabled=False) as sc:
+        beam = sc.coupler.view("beam")
+        artifact = beam.set("plans", "plans.csv")
+
+        assert artifact == "plans.csv"
+        assert beam.require("plans") == "plans.csv"
+        assert sc.coupler.require("beam/plans") == "plans.csv"

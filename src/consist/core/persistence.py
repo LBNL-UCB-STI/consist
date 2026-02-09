@@ -26,6 +26,8 @@ from sqlalchemy.pool import NullPool
 from sqlmodel import create_engine, Session, select, SQLModel, col, delete
 
 from consist.models.artifact import Artifact
+from consist.models.artifact_facet import ArtifactFacet
+from consist.models.artifact_kv import ArtifactKV
 from consist.models.artifact_schema import (
     ArtifactSchema,
     ArtifactSchemaField,
@@ -101,6 +103,8 @@ class DatabaseManager:
                     getattr(RunArtifactLink, "__table__"),
                     getattr(ConfigFacet, "__table__"),
                     getattr(RunConfigKV, "__table__"),
+                    getattr(ArtifactFacet, "__table__"),
+                    getattr(ArtifactKV, "__table__"),
                     getattr(ArtifactSchema, "__table__"),
                     getattr(ArtifactSchemaField, "__table__"),
                     getattr(ArtifactSchemaObservation, "__table__"),
@@ -404,6 +408,40 @@ class DatabaseManager:
         except Exception as e:
             logging.warning(f"Failed to upsert config facet {facet.id}: {e}")
 
+    def upsert_artifact_facet(self, facet: ArtifactFacet) -> None:
+        """Upserts an ArtifactFacet (deduped by facet.id)."""
+
+        def _upsert():
+            with self.session_scope() as session:
+                existing = session.get(ArtifactFacet, facet.id)
+                if existing is None:
+                    session.add(facet)
+                else:
+                    if (
+                        existing.namespace is None
+                        and isinstance(facet.namespace, str)
+                        and facet.namespace
+                    ):
+                        existing.namespace = facet.namespace
+                    if (
+                        existing.schema_name is None
+                        and isinstance(facet.schema_name, str)
+                        and facet.schema_name
+                    ):
+                        existing.schema_name = facet.schema_name
+                    if (
+                        existing.schema_version is None
+                        and facet.schema_version is not None
+                    ):
+                        existing.schema_version = facet.schema_version
+                    session.add(existing)
+                session.commit()
+
+        try:
+            self.execute_with_retry(_upsert, operation_name="upsert_artifact_facet")
+        except Exception as e:
+            logging.warning(f"Failed to upsert artifact facet {facet.id}: {e}")
+
     def insert_run_config_kv_bulk(self, rows: List[RunConfigKV]) -> None:
         """Bulk inserts RunConfigKV rows."""
         if not rows:
@@ -432,6 +470,36 @@ class DatabaseManager:
             self.execute_with_retry(_insert, operation_name="insert_run_config_kv_bulk")
         except Exception as e:
             logging.warning(f"Failed to insert run config kv rows: {e}")
+
+    def insert_artifact_kv_bulk(self, rows: List[ArtifactKV]) -> None:
+        """Bulk inserts ArtifactKV rows."""
+        if not rows:
+            return
+
+        def _insert():
+            with self.session_scope() as session:
+                combos = {
+                    (row.artifact_id, row.facet_id, row.namespace)
+                    for row in rows
+                    if row.artifact_id and row.facet_id
+                }
+                for artifact_id, facet_id, namespace in combos:
+                    filters = [
+                        col(ArtifactKV.artifact_id) == artifact_id,
+                        col(ArtifactKV.facet_id) == facet_id,
+                    ]
+                    if namespace is None:
+                        filters.append(col(ArtifactKV.namespace).is_(None))
+                    else:
+                        filters.append(col(ArtifactKV.namespace) == namespace)
+                    session.exec(delete(ArtifactKV).where(*filters))
+                session.add_all(rows)
+                session.commit()
+
+        try:
+            self.execute_with_retry(_insert, operation_name="insert_artifact_kv_bulk")
+        except Exception as e:
+            logging.warning(f"Failed to insert artifact kv rows: {e}")
 
     def upsert_artifact_schema(
         self,
@@ -1414,6 +1482,144 @@ class DatabaseManager:
         try:
             return self.execute_with_retry(_query)
         except Exception:
+            return []
+
+    def get_artifact_kv(
+        self,
+        artifact_id: uuid.UUID,
+        *,
+        namespace: Optional[str] = None,
+        prefix: Optional[str] = None,
+        limit: int = 10_000,
+    ) -> List[ArtifactKV]:
+        """
+        Return flattened artifact facet key/value rows for an artifact.
+        """
+
+        def _query():
+            with self.session_scope() as session:
+                statement = select(ArtifactKV).where(
+                    ArtifactKV.artifact_id == artifact_id
+                )
+                if namespace is not None:
+                    statement = statement.where(ArtifactKV.namespace == namespace)
+                if prefix:
+                    statement = statement.where(
+                        col(ArtifactKV.key_path).like(f"{prefix}%")
+                    )
+                results = session.exec(statement.limit(limit)).all()
+                for row in results:
+                    session.expunge(row)
+                return results
+
+        try:
+            return self.execute_with_retry(_query)
+        except Exception:
+            return []
+
+    def find_artifacts_by_facet_params(
+        self,
+        *,
+        predicates: List[Dict[str, Any]],
+        namespace: Optional[str] = None,
+        key_prefix: Optional[str] = None,
+        artifact_family_prefix: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Artifact]:
+        """
+        Find artifacts using one or more flattened facet predicates.
+        """
+
+        def _query():
+            with self.session_scope() as session:
+                statement = select(Artifact).distinct()
+
+                if key_prefix:
+                    statement = statement.where(
+                        col(Artifact.key).like(f"{key_prefix}%")
+                    )
+
+                if artifact_family_prefix:
+                    family_kv = aliased(ArtifactKV)
+                    statement = statement.join(
+                        family_kv,
+                        col(Artifact.id) == col(family_kv.artifact_id),
+                    )
+                    statement = statement.where(family_kv.key_path == "artifact_family")
+                    if namespace is not None:
+                        statement = statement.where(family_kv.namespace == namespace)
+                    statement = statement.where(family_kv.value_type == "str")
+                    statement = statement.where(
+                        col(family_kv.value_str).like(f"{artifact_family_prefix}%")
+                    )
+
+                for predicate in predicates:
+                    kv = aliased(ArtifactKV)
+                    statement = statement.join(
+                        kv,
+                        col(Artifact.id) == col(kv.artifact_id),
+                    )
+
+                    statement = statement.where(kv.key_path == predicate["key_path"])
+
+                    predicate_namespace = predicate.get("namespace")
+                    effective_namespace = (
+                        predicate_namespace
+                        if predicate_namespace is not None
+                        else namespace
+                    )
+                    if effective_namespace is not None:
+                        statement = statement.where(kv.namespace == effective_namespace)
+
+                    operator = predicate["op"]
+                    value_kind = predicate["kind"]
+                    value = predicate["value"]
+
+                    if operator == "=":
+                        if value_kind == "str":
+                            statement = statement.where(kv.value_type == "str")
+                            statement = statement.where(kv.value_str == value)
+                        elif value_kind == "bool":
+                            statement = statement.where(kv.value_type == "bool")
+                            statement = statement.where(kv.value_bool == value)
+                        elif value_kind == "null":
+                            statement = statement.where(kv.value_type == "null")
+                        else:
+                            statement = statement.where(
+                                col(kv.value_type).in_(["int", "float"])
+                            )
+                            statement = statement.where(
+                                col(kv.value_num) == float(value)
+                            )
+                    else:
+                        statement = statement.where(
+                            col(kv.value_type).in_(["int", "float"])
+                        )
+                        if operator == ">=":
+                            statement = statement.where(
+                                col(kv.value_num) >= float(value)
+                            )
+                        else:
+                            statement = statement.where(
+                                col(kv.value_num) <= float(value)
+                            )
+
+                results = session.exec(
+                    statement.order_by(col(Artifact.created_at).desc()).limit(limit)
+                ).all()
+
+                for artifact in results:
+                    _ = artifact.meta
+                    session.expunge(artifact)
+
+                return results
+
+        try:
+            return self.execute_with_retry(
+                _query, operation_name="find_artifacts_by_facet_params"
+            )
+        except Exception as e:
+            logging.warning("Failed to find artifacts by facet params: %s", e)
             return []
 
     def find_runs_by_facet_kv(
