@@ -186,6 +186,8 @@ Facet persistence creates two tables:
 
 - `config_facet`: deduplicated facet JSON blobs
 - `run_config_kv`: flattened key/value index for filtering
+- `artifact_facet`: deduplicated artifact-level facet JSON blobs
+- `artifact_kv`: flattened scalar key/value index for artifact filtering
 
 Flattened keys use dot-notation, with dots in raw keys escaped as `\.`.
 
@@ -206,6 +208,20 @@ You can also fetch facets directly:
 ```python
 facet = tracker.get_config_facet(facet_id)
 ```
+
+### Implementation Note: Shared Facet Core
+
+Run facet and artifact facet pipelines share a common internal module:
+`src/consist/core/facet_common.py`.
+
+This module centralizes:
+
+- normalization of facet payloads
+- canonical hash/id generation
+- dotted-key flattening and typing rules
+
+Manager classes (`ConfigFacetManager`, `ArtifactFacetManager`) stay focused on
+entity-specific persistence/query behavior.
 
 ## Model-Specific Config Adapters
 

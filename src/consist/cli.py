@@ -452,6 +452,29 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> None:
     console.print(table)
 
 
+def _render_artifact_query_table(results: List[Dict[str, Any]]) -> None:
+    """Render artifact search results from facet-param queries."""
+    table = Table(title="Artifact Query Results")
+    table.add_column("Key", style="green", overflow="fold")
+    table.add_column("Run", style="cyan", overflow="fold")
+    table.add_column("Driver")
+    table.add_column("Facet Namespace", style="yellow")
+    table.add_column("Facet Schema Version", style="magenta")
+    table.add_column("URI", style="dim")
+
+    for row in results:
+        table.add_row(
+            str(row.get("key") or ""),
+            str(row.get("run_id") or "-"),
+            str(row.get("driver") or "-"),
+            str(row.get("facet_namespace") or "-"),
+            str(row.get("facet_schema_version") or "-"),
+            str(row.get("container_uri") or ""),
+        )
+
+    console.print(table)
+
+
 def _render_run_details(run: "Run") -> None:
     """Shared logic for displaying run details, config, and metadata."""
     info = Table.grid(padding=(0, 2))
@@ -845,19 +868,82 @@ def runs(
 
 @app.command()
 def artifacts(
-    run_id: str = typer.Argument(..., help="The ID of the run to inspect."),
+    run_id: Optional[str] = typer.Argument(
+        None,
+        help="Run ID to inspect. Omit when using --param/--key-prefix/--family-prefix.",
+    ),
+    param: Optional[List[str]] = typer.Option(
+        None,
+        "--param",
+        help=(
+            "Artifact facet predicate (repeatable): key=value, key>=value, key<=value. "
+            "Example: --param beam.phys_sim_iteration=2"
+        ),
+    ),
+    namespace: Optional[str] = typer.Option(
+        None,
+        "--namespace",
+        help="Default facet namespace when predicates omit one.",
+    ),
+    key_prefix: Optional[str] = typer.Option(
+        None,
+        "--key-prefix",
+        help="Filter by artifact key prefix.",
+    ),
+    family_prefix: Optional[str] = typer.Option(
+        None,
+        "--family-prefix",
+        help="Filter by artifact_family facet prefix.",
+    ),
+    limit: int = typer.Option(
+        100,
+        "--limit",
+        help="Maximum number of artifact query results.",
+    ),
     db_path: str = typer.Option(
         "provenance.duckdb", help="Path to the Consist DuckDB database."
     ),
 ) -> None:
-    """Displays the input and output artifacts for a specific run."""
+    """Display run artifacts or query artifacts by indexed facet parameters."""
     tracker = get_tracker(db_path)
-    run = tracker.get_run(run_id)
-    if not run:
-        console.print(f"[red]Run with ID '{run_id}' not found.[/red]")
+    query_mode = bool(param or key_prefix or family_prefix)
+    if not query_mode:
+        if not run_id:
+            console.print(
+                "[red]Provide a run_id or use query options like --param.[/red]"
+            )
+            raise typer.Exit(1)
+        run = tracker.get_run(run_id)
+        if not run:
+            console.print(f"[red]Run with ID '{run_id}' not found.[/red]")
+            raise typer.Exit(1)
+        _render_artifacts_table(tracker, run_id)
+        return
+
+    if run_id is not None:
+        console.print(
+            "[red]run_id cannot be combined with --param/--namespace/--key-prefix/"
+            "--family-prefix.[/red]"
+        )
         raise typer.Exit(1)
 
-    _render_artifacts_table(tracker, run_id)
+    try:
+        results = queries.find_artifacts_by_params(
+            tracker,
+            params=param or [],
+            namespace=namespace,
+            key_prefix=key_prefix,
+            artifact_family_prefix=family_prefix,
+            limit=limit,
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    if not results:
+        console.print("[yellow]No artifacts matched the provided filters.[/yellow]")
+        raise typer.Exit()
+    _render_artifact_query_table(results)
 
 
 def _build_lineage_tree(

@@ -39,6 +39,7 @@ Scenario defaults like `name_template` and `cache_epoch` are configured via `con
 - [`consist.load`](api_helpers.md#consist.api.load)
 - [`consist.capture_outputs`](api_helpers.md#consist.api.capture_outputs)
 - [`consist.get_artifact`](api_helpers.md#consist.api.get_artifact)
+- [`consist.register_artifact_facet_parser`](api_helpers.md#consist.api.register_artifact_facet_parser)
 - [`consist.cached_output`](api_helpers.md#consist.api.cached_output)
 - [`consist.cached_artifacts`](api_helpers.md#consist.api.cached_artifacts)
 - [`consist.log_meta`](api_helpers.md#consist.api.log_meta)
@@ -87,6 +88,7 @@ as needed.
 
 - `find_runs`, `find_run`, `find_latest_run`, `get_latest_run_id`
 - `find_artifacts`, `get_artifact`, `get_artifacts_for_run`
+- `find_artifacts_by_params`, `get_artifact_kv`, `register_artifact_facet_parser`
 - `get_run`, `get_run_config`, `get_run_inputs`, `get_run_outputs`
 - `get_artifact_lineage`, `print_lineage`, `history`
 - `diff_runs`, `get_config_facet`, `get_config_facets`, `get_run_config_kv`
