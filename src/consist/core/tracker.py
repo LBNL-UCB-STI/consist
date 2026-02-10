@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import logging
 import os
 import time
+from types import MappingProxyType
 import uuid
 import warnings
 from pathlib import Path
@@ -288,7 +289,9 @@ class Tracker:
             previously cached runs without modifying code or config.
         schemas : Optional[List[Type[SQLModel]]], default None
             SQLModel definitions to be automatically registered as hybrid views
-            within the DuckDB instance for immediate querying.
+            within the DuckDB instance for immediate querying. These schemas are
+            also registered by class name for runtime lookup via
+            ``get_registered_schema(...)``.
         access_mode : AccessMode, default "standard"
             Policy for database interactions. 'standard' allows full writes;
             'analysis' permits ingestion but prevents new run recording;
@@ -433,6 +436,85 @@ class Tracker:
             The SQLAlchemy engine if a database is configured, otherwise ``None``.
         """
         return self.db.engine if self.db else None
+
+    @property
+    def registered_schemas(self) -> Mapping[str, Type[SQLModel]]:
+        """
+        Return the SQLModel schemas registered on this tracker.
+
+        Registered schemas are the SQLModel classes passed via
+        ``Tracker(..., schemas=[...])`` during initialization. They are stored by
+        class name (for example, ``"LinkstatsRow"``) and used by lookup-based
+        workflows such as schema-aware ingestion.
+
+        Returns
+        -------
+        Mapping[str, Type[SQLModel]]
+            Read-only mapping from schema class name to the corresponding SQLModel
+            class object.
+
+        Notes
+        -----
+        The returned mapping is immutable from the caller perspective.
+
+        Examples
+        --------
+        ```python
+        tracker = Tracker(..., schemas=[MySchema])
+        assert "MySchema" in tracker.registered_schemas
+        ```
+        """
+        return cast(
+            Mapping[str, Type[SQLModel]], MappingProxyType(self._registered_schemas)
+        )
+
+    def get_registered_schema(
+        self,
+        schema_name: str,
+        default: Optional[Type[SQLModel]] = None,
+    ) -> Optional[Type[SQLModel]]:
+        """
+        Resolve a registered SQLModel schema by its class name.
+
+        This is an ergonomic lookup helper for workflows that persist or exchange
+        schema names (for example ``artifact.meta["schema_name"]``) and then need
+        the corresponding SQLModel class at runtime.
+
+        Parameters
+        ----------
+        schema_name : str
+            Registered schema class name to resolve. Matching is exact and
+            case-sensitive.
+        default : Optional[Type[SQLModel]], optional
+            Value returned when ``schema_name`` is not found in the registry.
+            Defaults to ``None``.
+
+        Returns
+        -------
+        Optional[Type[SQLModel]]
+            The registered SQLModel class when found, otherwise ``default``.
+
+        Raises
+        ------
+        TypeError
+            If ``schema_name`` is not a string.
+        ValueError
+            If ``schema_name`` is an empty or whitespace-only string.
+
+        Examples
+        --------
+        ```python
+        tracker = Tracker(..., schemas=[MySchema])
+        schema_cls = tracker.get_registered_schema("MySchema")
+        missing = tracker.get_registered_schema("UnknownSchema")
+        ```
+        """
+        if not isinstance(schema_name, str):
+            raise TypeError("schema_name must be a string.")
+        normalized_schema_name = schema_name.strip()
+        if not normalized_schema_name:
+            raise ValueError("schema_name must be a non-empty string.")
+        return self._registered_schemas.get(normalized_schema_name, default)
 
     @staticmethod
     def _default_run_subdir(run: Run) -> str:
@@ -3708,8 +3790,9 @@ class Tracker:
                 if hasattr(artifact, "meta") and isinstance(artifact.meta, dict)
                 else None
             )
-            if schema_name and schema_name in self._registered_schemas:
-                resolved_schema = self._registered_schemas[schema_name]
+            if isinstance(schema_name, str) and schema_name:
+                resolved_schema = self.get_registered_schema(schema_name)
+            if resolved_schema is not None:
                 logging.debug(
                     "[Consist] Resolved schema '%s' for artifact=%s from registered schemas",
                     schema_name,
@@ -4310,6 +4393,157 @@ class Tracker:
         """
         factory = ViewFactory(self)
         return factory.create_hybrid_view(view_name, concept_key)
+
+    def create_grouped_view(
+        self,
+        view_name: str,
+        *,
+        schema_id: Optional[str] = None,
+        schema: Optional[Type[SQLModel]] = None,
+        namespace: Optional[str] = None,
+        params: Optional[Iterable[str]] = None,
+        drivers: Optional[List[str]] = None,
+        attach_facets: Optional[List[str]] = None,
+        include_system_columns: bool = True,
+        mode: Literal["hybrid", "hot_only", "cold_only"] = "hybrid",
+        if_exists: Literal["replace", "error"] = "replace",
+        missing_files: Literal["warn", "error", "skip_silent"] = "warn",
+        run_id: Optional[str] = None,
+        parent_run_id: Optional[str] = None,
+        model: Optional[str] = None,
+        status: Optional[str] = None,
+        year: Optional[int] = None,
+        iteration: Optional[int] = None,
+        schema_compatible: bool = False,
+    ) -> Any:
+        """
+        Create one analysis view across many artifacts selected by schema/facets.
+
+        Unlike ``create_view(view_name, concept_key)``, which targets one key,
+        this method selects artifacts by ``schema_id`` plus optional facet/run
+        filters and materializes a single view over hot and/or cold data.
+
+        Parameters
+        ----------
+        view_name : str
+            Name of the SQL view to create.
+        schema_id : Optional[str], optional
+            Schema identity used as the primary artifact selector.
+        schema : Optional[Type[SQLModel]], optional
+            SQLModel class selector convenience. When provided, Consist resolves
+            matching stored schema ids from this model definition, first by exact
+            field names and then by compatible subset/superset field-name matching.
+        namespace : Optional[str], optional
+            Default ArtifactKV namespace applied to facet predicates that do not
+            include an explicit namespace.
+        params : Optional[Iterable[str]], optional
+            Facet predicate expressions, each in one of:
+            ``<key>=<value>``, ``<key>>=<value>``, ``<key><=<value>``.
+            A leading namespace is supported, for example
+            ``beam.phys_sim_iteration=2``.
+        drivers : Optional[List[str]], optional
+            Optional artifact-driver filter, e.g. ``["parquet"]``.
+        attach_facets : Optional[List[str]], optional
+            Facet key paths to project into the view as typed ``facet_<key>``
+            columns.
+        include_system_columns : bool, default True
+            Whether to include Consist system columns in the view.
+        mode : {"hybrid", "hot_only", "cold_only"}, default "hybrid"
+            Which storage tier(s) to include in the view.
+        if_exists : {"replace", "error"}, default "replace"
+            Behavior when ``view_name`` already exists.
+        missing_files : {"warn", "error", "skip_silent"}, default "warn"
+            Behavior when a selected cold file is missing.
+        run_id : Optional[str], optional
+            Optional exact run-id filter.
+        parent_run_id : Optional[str], optional
+            Optional parent/scenario run-id filter.
+        model : Optional[str], optional
+            Optional run model-name filter.
+        status : Optional[str], optional
+            Optional run status filter.
+        year : Optional[int], optional
+            Optional run year filter.
+        iteration : Optional[int], optional
+            Optional run iteration filter.
+        schema_compatible : bool, default False
+            If True, allow schema-compatible subset/superset variants by field
+            names in addition to exact ``schema_id`` matches.
+
+        Returns
+        -------
+        Any
+            Backend-specific result from ``ViewFactory.create_grouped_hybrid_view``.
+
+        Raises
+        ------
+        RuntimeError
+            If no database is configured.
+        ValueError
+            If selector or facet predicates are invalid, or view policies are invalid.
+
+        Examples
+        --------
+        ```python
+        tracker.create_grouped_view(
+            "v_linkstats_all",
+            schema_id="abc123...",
+            namespace="beam",
+            params=["artifact_family=linkstats", "year=2018"],
+            attach_facets=["artifact_family", "phys_sim_iteration"],
+            drivers=["parquet"],
+            mode="hybrid",
+        )
+        ```
+        """
+        if not self.db:
+            raise RuntimeError("Database required to create grouped views.")
+        if (schema_id is None) == (schema is None):
+            raise ValueError("Provide exactly one of schema_id or schema.")
+
+        resolved_schema_ids: Optional[List[str]] = None
+        if schema is not None:
+            if not isinstance(schema, type) or not issubclass(schema, SQLModel):
+                raise ValueError("schema must be a SQLModel class.")
+            resolved_schema_ids = self.db.find_schema_ids_for_model(
+                schema_model=schema, compatible=False
+            )
+            if not resolved_schema_ids:
+                resolved_schema_ids = self.db.find_schema_ids_for_model(
+                    schema_model=schema, compatible=True
+                )
+            if not resolved_schema_ids:
+                raise ValueError(
+                    "No stored schema ids matched the provided SQLModel class."
+                )
+
+        predicates = (
+            [self._parse_artifact_param_expression(param) for param in params]
+            if params
+            else []
+        )
+
+        factory = ViewFactory(self)
+        return factory.create_grouped_hybrid_view(
+            view_name=view_name,
+            schema_id=schema_id,
+            schema_ids=resolved_schema_ids,
+            schema_compatible=schema_compatible,
+            predicates=predicates,
+            namespace=namespace,
+            drivers=drivers,
+            attach_facets=attach_facets,
+            include_system_columns=include_system_columns,
+            mode=mode,
+            if_exists=if_exists,
+            missing_files=missing_files,
+            run_id=run_id,
+            parent_run_id=parent_run_id,
+            model=model,
+            status=status,
+            year=year,
+            iteration=iteration,
+        )
 
     def load_matrix(
         self,
