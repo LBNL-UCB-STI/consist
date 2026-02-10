@@ -463,7 +463,7 @@ def views_create(
             iteration=iteration,
             schema_compatible=schema_compatible,
         )
-    except (RuntimeError, ValueError) as exc:
+    except (RuntimeError, ValueError, FileNotFoundError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 

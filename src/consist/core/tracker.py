@@ -3790,8 +3790,10 @@ class Tracker:
                 if hasattr(artifact, "meta") and isinstance(artifact.meta, dict)
                 else None
             )
-            if isinstance(schema_name, str) and schema_name:
-                resolved_schema = self.get_registered_schema(schema_name)
+            if isinstance(schema_name, str):
+                normalized_schema_name = schema_name.strip()
+                if normalized_schema_name:
+                    resolved_schema = self.get_registered_schema(normalized_schema_name)
             if resolved_schema is not None:
                 logging.debug(
                     "[Consist] Resolved schema '%s' for artifact=%s from registered schemas",

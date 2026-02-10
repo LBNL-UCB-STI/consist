@@ -370,6 +370,59 @@ def test_views_create_grouped_command(cli_runner, tracker, tmp_path):
     assert count == 1
 
 
+def test_views_create_grouped_command_missing_file_error(cli_runner, tracker, tmp_path):
+    path = tmp_path / "grouped_cli_missing.parquet"
+    pd.DataFrame({"id": [1], "value": [1.0]}).to_parquet(path)
+
+    with tracker.start_run(
+        "run_grouped_cli_missing",
+        "beam",
+        year=2018,
+        iteration=0,
+        cache_mode="overwrite",
+    ):
+        artifact = tracker.log_artifact(
+            str(path),
+            key="grouped_cli_missing_key",
+            driver="parquet",
+            profile_file_schema=True,
+            facet={
+                "artifact_family": "grouped_cli_missing",
+                "year": 2018,
+                "iteration": 0,
+            },
+            facet_index=True,
+        )
+
+    schema_id = artifact.meta.get("schema_id")
+    assert schema_id is not None
+    path.unlink()
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "views",
+            "create",
+            "v_grouped_cli_missing",
+            "--schema-id",
+            schema_id,
+            "--namespace",
+            "beam",
+            "--param",
+            "artifact_family=grouped_cli_missing",
+            "--driver",
+            "parquet",
+            "--missing-files",
+            "error",
+            "--mode",
+            "cold_only",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "grouped_cli_missing.parquet" in result.stdout
+
+
 def test_lineage_with_db(mock_db_session, tmp_path):
     with (
         patch("pathlib.Path.exists", return_value=True),

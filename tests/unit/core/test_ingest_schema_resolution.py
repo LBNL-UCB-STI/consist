@@ -84,3 +84,30 @@ def test_registered_schema_lookup_api(tmp_path):
         tracker.get_registered_schema(123)
     with pytest.raises(ValueError, match="non-empty string"):
         tracker.get_registered_schema("   ")
+
+
+def test_ingest_ignores_whitespace_schema_name(tmp_path):
+    class MySchema(SQLModel):
+        id: int = Field(primary_key=True)
+        name: str
+
+    tracker = Tracker(
+        run_dir=tmp_path / "runs",
+        db_path=str(tmp_path / "provenance.db"),
+        schemas=[MySchema],
+    )
+
+    artifact = Artifact(
+        id=uuid.uuid4(),
+        key="artifact",
+        container_uri="inputs://data.csv",
+        driver="csv",
+        hash="abc",
+        meta={"schema_name": "   "},
+    )
+
+    with patch(
+        "consist.core.tracker.ingest_artifact", return_value="ok"
+    ) as mock_ingest:
+        tracker.ingest(artifact, data=[{"id": 1, "name": "alpha"}])
+        assert mock_ingest.call_args.kwargs["schema"] is None
