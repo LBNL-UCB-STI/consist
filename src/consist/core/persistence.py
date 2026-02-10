@@ -1888,12 +1888,38 @@ class DatabaseManager:
                     col(Artifact.created_at).asc(), col(Artifact.id).asc()
                 )
                 rows = session.exec(statement.limit(limit)).all()
+
+                # Hydrate required attributes while instances are still bound.
+                seen_run_ids: Set[str] = set()
                 for artifact, run in rows:
                     _ = artifact.meta
+                    run_id_value = getattr(run, "id", None)
+                    if isinstance(run_id_value, str) and run_id_value in seen_run_ids:
+                        continue
                     _ = run.meta
                     _ = run.tags
-                    session.expunge(artifact)
-                    session.expunge(run)
+                    if isinstance(run_id_value, str):
+                        seen_run_ids.add(run_id_value)
+
+                # Detach in a second pass to avoid expunging shared Run instances
+                # mid-iteration when multiple artifacts belong to the same run.
+                seen_artifact_instances: Set[int] = set()
+                for artifact, _ in rows:
+                    artifact_ref = id(artifact)
+                    if artifact_ref in seen_artifact_instances:
+                        continue
+                    seen_artifact_instances.add(artifact_ref)
+                    if artifact in session:
+                        session.expunge(artifact)
+
+                seen_run_instances: Set[int] = set()
+                for _, run in rows:
+                    run_ref = id(run)
+                    if run_ref in seen_run_instances:
+                        continue
+                    seen_run_instances.add(run_ref)
+                    if run in session:
+                        session.expunge(run)
                 return rows
 
         try:

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import logging
 import pytest
 import pandas as pd
 from typing import Optional
@@ -604,3 +605,89 @@ def test_grouped_view_missing_file_policy(tracker, tmp_path):
             mode="cold_only",
             missing_files="error",
         )
+
+
+def test_grouped_view_resolution_handles_shared_run_instance(
+    tracker, tmp_path, caplog
+):
+    df1 = pd.DataFrame({"id": [1], "value": [10.0]})
+    df2 = pd.DataFrame({"id": [2], "value": [20.0]})
+    p1 = tmp_path / "shared_run_a.parquet"
+    p2 = tmp_path / "shared_run_b.parquet"
+    df1.to_parquet(p1)
+    df2.to_parquet(p2)
+
+    with tracker.start_run(
+        "grouped_shared_run", "beam", year=2018, iteration=2, cache_mode="overwrite"
+    ):
+        a1 = tracker.log_artifact(
+            str(p1),
+            key="shared_run_variant_1",
+            driver="parquet",
+            profile_file_schema=True,
+            facet={
+                "artifact_family": "shared_run_group",
+                "year": 2018,
+                "iteration": 2,
+                "beam_sub_iteration": 1,
+            },
+            facet_index=True,
+        )
+        a2 = tracker.log_artifact(
+            str(p2),
+            key="shared_run_variant_2",
+            driver="parquet",
+            profile_file_schema=True,
+            facet={
+                "artifact_family": "shared_run_group",
+                "year": 2018,
+                "iteration": 2,
+                "beam_sub_iteration": 2,
+            },
+            facet_index=True,
+        )
+
+    schema_id = a1.meta.get("schema_id")
+    run_id = a1.run_id
+    assert schema_id is not None
+    assert run_id is not None
+    assert a2.meta.get("schema_id") == schema_id
+    assert a2.run_id == run_id
+    assert tracker.db is not None
+
+    caplog.set_level(logging.WARNING)
+    rows = tracker.db.find_artifacts_for_grouped_view(
+        schema_id=schema_id,
+        run_id=run_id,
+        namespace="beam",
+        predicates=[tracker._parse_artifact_param_expression("artifact_family=shared_run_group")],
+    )
+
+    assert len(rows) == 2
+    assert {str(artifact.id) for artifact, _ in rows} == {str(a1.id), str(a2.id)}
+    assert {run.id for _, run in rows} == {run_id}
+    assert not any(
+        "Failed to resolve grouped-view artifacts" in record.getMessage()
+        for record in caplog.records
+    )
+
+    tracker.create_grouped_view(
+        "v_shared_run_group",
+        schema_id=schema_id,
+        run_id=run_id,
+        namespace="beam",
+        params=["artifact_family=shared_run_group"],
+        attach_facets=["beam_sub_iteration"],
+        mode="cold_only",
+    )
+
+    with tracker.engine.connect() as conn:
+        result = pd.read_sql(
+            "SELECT id, value, facet_beam_sub_iteration "
+            "FROM v_shared_run_group ORDER BY id",
+            conn,
+        )
+    assert len(result) == 2
+    assert result["id"].tolist() == [1, 2]
+    assert result["value"].tolist() == [10.0, 20.0]
+    assert result["facet_beam_sub_iteration"].tolist() == [1, 2]
