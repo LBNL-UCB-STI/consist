@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from typing import (
     Optional,
     List,
+    Sequence,
     Callable,
     Any,
     Dict,
@@ -1632,7 +1633,12 @@ class DatabaseManager:
         return statement
 
     def _resolve_schema_compatible_ids(
-        self, *, session: Session, schema_id: str
+        self,
+        *,
+        session: Session,
+        schema_id: str,
+        all_schemas: Optional[Sequence[ArtifactSchema]] = None,
+        schema_fields_by_id: Optional[Dict[str, Set[str]]] = None,
     ) -> Set[str]:
         """
         Resolve schema IDs compatible with `schema_id` for union-by-name views.
@@ -1641,18 +1647,27 @@ class DatabaseManager:
         - same `summary_json.table_name` (when present on both schemas), and
         - field-name sets are subset/superset of each other.
         """
-        base_schema = session.get(ArtifactSchema, schema_id)
+        schema_rows = (
+            all_schemas
+            if all_schemas is not None
+            else session.exec(select(ArtifactSchema)).all()
+        )
+        schemas_by_id = {
+            sid: row
+            for row in schema_rows
+            if isinstance((sid := getattr(row, "id", None)), str)
+        }
+
+        base_schema = schemas_by_id.get(schema_id)
         if base_schema is None:
             return {schema_id}
 
-        base_fields = {
-            row.name
-            for row in session.exec(
-                select(ArtifactSchemaField).where(
-                    ArtifactSchemaField.schema_id == schema_id
-                )
-            ).all()
-        }
+        field_map = (
+            schema_fields_by_id
+            if schema_fields_by_id is not None
+            else self._load_schema_field_names(session=session)
+        )
+        base_fields = field_map.get(schema_id, set())
         if not base_fields:
             return {schema_id}
 
@@ -1664,8 +1679,7 @@ class DatabaseManager:
         )
 
         compatible: Set[str] = {schema_id}
-        all_schemas = session.exec(select(ArtifactSchema)).all()
-        for candidate in all_schemas:
+        for candidate in schema_rows:
             candidate_id = getattr(candidate, "id", None)
             if not isinstance(candidate_id, str) or candidate_id == schema_id:
                 continue
@@ -1683,14 +1697,7 @@ class DatabaseManager:
             ):
                 continue
 
-            candidate_fields = {
-                row.name
-                for row in session.exec(
-                    select(ArtifactSchemaField).where(
-                        ArtifactSchemaField.schema_id == candidate_id
-                    )
-                ).all()
-            }
+            candidate_fields = field_map.get(candidate_id, set())
             if not candidate_fields:
                 continue
             if base_fields.issubset(candidate_fields) or candidate_fields.issubset(
@@ -1698,6 +1705,31 @@ class DatabaseManager:
             ):
                 compatible.add(candidate_id)
         return compatible
+
+    def _load_schema_field_names(
+        self,
+        *,
+        session: Session,
+        schema_ids: Optional[Set[str]] = None,
+    ) -> Dict[str, Set[str]]:
+        """
+        Load schema field-name sets keyed by schema_id in one query.
+        """
+        statement = select(ArtifactSchemaField)
+        if schema_ids:
+            statement = statement.where(
+                col(ArtifactSchemaField.schema_id).in_(sorted(schema_ids))
+            )
+
+        rows = session.exec(statement).all()
+        fields_by_schema: Dict[str, Set[str]] = {}
+        for row in rows:
+            schema_id = getattr(row, "schema_id", None)
+            field_name = getattr(row, "name", None)
+            if not isinstance(schema_id, str) or not isinstance(field_name, str):
+                continue
+            fields_by_schema.setdefault(schema_id, set()).add(field_name)
+        return fields_by_schema
 
     @staticmethod
     def _schema_model_field_names(schema_model: Type[SQLModel]) -> Set[str]:
@@ -1735,6 +1767,7 @@ class DatabaseManager:
                     return []
 
                 schema_rows = session.exec(select(ArtifactSchema)).all()
+                schema_fields_by_id = self._load_schema_field_names(session=session)
                 matched: List[str] = []
                 for schema_row in schema_rows:
                     schema_id = getattr(schema_row, "id", None)
@@ -1752,14 +1785,7 @@ class DatabaseManager:
                     ) != str(model_table_name):
                         continue
 
-                    candidate_fields = {
-                        row.name
-                        for row in session.exec(
-                            select(ArtifactSchemaField).where(
-                                ArtifactSchemaField.schema_id == schema_id
-                            )
-                        ).all()
-                    }
+                    candidate_fields = schema_fields_by_id.get(schema_id, set())
                     if not candidate_fields:
                         continue
 
@@ -1813,11 +1839,16 @@ class DatabaseManager:
                     base_ids.append(schema_id)
                 base_ids = sorted(set(base_ids))
                 if schema_compatible:
+                    schema_rows = session.exec(select(ArtifactSchema)).all()
+                    schema_fields_by_id = self._load_schema_field_names(session=session)
                     resolved_schema_ids = set()
                     for base_schema_id in base_ids:
                         resolved_schema_ids.update(
                             self._resolve_schema_compatible_ids(
-                                session=session, schema_id=base_schema_id
+                                session=session,
+                                schema_id=base_schema_id,
+                                all_schemas=schema_rows,
+                                schema_fields_by_id=schema_fields_by_id,
                             )
                         )
                 else:
