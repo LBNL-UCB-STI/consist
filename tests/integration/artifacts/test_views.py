@@ -607,9 +607,7 @@ def test_grouped_view_missing_file_policy(tracker, tmp_path):
         )
 
 
-def test_grouped_view_resolution_handles_shared_run_instance(
-    tracker, tmp_path, caplog
-):
+def test_grouped_view_resolution_handles_shared_run_instance(tracker, tmp_path, caplog):
     df1 = pd.DataFrame({"id": [1], "value": [10.0]})
     df2 = pd.DataFrame({"id": [2], "value": [20.0]})
     p1 = tmp_path / "shared_run_a.parquet"
@@ -660,7 +658,9 @@ def test_grouped_view_resolution_handles_shared_run_instance(
         schema_id=schema_id,
         run_id=run_id,
         namespace="beam",
-        predicates=[tracker._parse_artifact_param_expression("artifact_family=shared_run_group")],
+        predicates=[
+            tracker._parse_artifact_param_expression("artifact_family=shared_run_group")
+        ],
     )
 
     assert len(rows) == 2
