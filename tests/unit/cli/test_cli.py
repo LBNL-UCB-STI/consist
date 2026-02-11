@@ -1,6 +1,7 @@
 """TODO: add unit coverage for query/helper utilities when expanded (tools.queries)."""
 
 import json
+import re
 import uuid
 from datetime import datetime
 from typing import cast
@@ -420,7 +421,8 @@ def test_views_create_grouped_command_missing_file_error(cli_runner, tracker, tm
     )
 
     assert result.exit_code == 1
-    assert "grouped_cli_missing.parquet" in result.stdout
+    normalized_stdout = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout).replace("\n", "")
+    assert "grouped_cli_missing.parquet" in normalized_stdout
 
 
 def test_lineage_with_db(mock_db_session, tmp_path):
