@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import logging
 import pytest
 import pandas as pd
 from typing import Optional
@@ -393,3 +394,300 @@ def test_hybrid_view_with_multiple_cold_schema_drift(tracker, tmp_path):
         assert df_result.iloc[1]["consist_run_id"] == run_id1
         assert df_result.iloc[2]["consist_run_id"] == run_id2
         assert df_result.iloc[3]["consist_run_id"] == run_id2
+
+
+def test_grouped_view_selects_cross_key_family_with_facets(tracker, tmp_path):
+    df1 = pd.DataFrame({"id": [1], "value": [10.0]})
+    df2 = pd.DataFrame({"id": [2], "value": [20.0]})
+    p1 = tmp_path / "linkstats_a.parquet"
+    p2 = tmp_path / "linkstats_b.parquet"
+    df1.to_parquet(p1)
+    df2.to_parquet(p2)
+
+    with tracker.start_run(
+        "grouped_a", "beam", year=2018, iteration=0, cache_mode="overwrite"
+    ):
+        a1 = tracker.log_artifact(
+            str(p1),
+            key="linkstats_unmodified_parquet__iter1",
+            driver="parquet",
+            profile_file_schema=True,
+            facet={
+                "artifact_family": "linkstats_unmodified_phys_sim_iter_parquet",
+                "year": 2018,
+                "iteration": 0,
+                "phys_sim_iteration": 9,
+                "beam_sub_iteration": 1,
+            },
+            facet_index=True,
+        )
+
+    with tracker.start_run(
+        "grouped_b", "beam", year=2018, iteration=0, cache_mode="overwrite"
+    ):
+        a2 = tracker.log_artifact(
+            str(p2),
+            key="linkstats_unmodified_phys_sim_iter_parquet_9_2",
+            driver="parquet",
+            profile_file_schema=True,
+            facet={
+                "artifact_family": "linkstats_unmodified_phys_sim_iter_parquet",
+                "year": 2018,
+                "iteration": 0,
+                "phys_sim_iteration": 9,
+                "beam_sub_iteration": 2,
+            },
+            facet_index=True,
+        )
+
+    schema_id = a1.meta.get("schema_id")
+    assert schema_id is not None
+    assert a2.meta.get("schema_id") == schema_id
+
+    tracker.create_grouped_view(
+        "v_linkstats_all",
+        schema_id=schema_id,
+        namespace="beam",
+        params=[
+            "artifact_family=linkstats_unmodified_phys_sim_iter_parquet",
+            "year=2018",
+            "iteration=0",
+        ],
+        drivers=["parquet"],
+        attach_facets=[
+            "artifact_family",
+            "year",
+            "iteration",
+            "phys_sim_iteration",
+            "beam_sub_iteration",
+        ],
+        mode="cold_only",
+    )
+
+    with tracker.engine.connect() as conn:
+        result = pd.read_sql(
+            "SELECT id, value, consist_artifact_id, facet_year, "
+            "facet_iteration, facet_phys_sim_iteration, facet_beam_sub_iteration "
+            "FROM v_linkstats_all ORDER BY id",
+            conn,
+        )
+
+    assert len(result) == 2
+    assert result["id"].tolist() == [1, 2]
+    assert result["value"].tolist() == [10.0, 20.0]
+    assert set(result["facet_year"].tolist()) == {2018}
+    assert set(result["facet_iteration"].tolist()) == {0}
+    assert set(result["facet_phys_sim_iteration"].tolist()) == {9}
+    assert set(result["facet_beam_sub_iteration"].tolist()) == {1, 2}
+    assert set(result["consist_artifact_id"].tolist()) == {str(a1.id), str(a2.id)}
+
+
+def test_grouped_view_hybrid_mode_combines_hot_and_cold(tracker, tmp_path):
+    hot_df = pd.DataFrame({"id": [1], "value": [100.0]})
+    cold_df = pd.DataFrame({"id": [2], "value": [200.0]})
+    hot_path = tmp_path / "hot.parquet"
+    cold_path = tmp_path / "cold.parquet"
+    hot_df.to_parquet(hot_path)
+    cold_df.to_parquet(cold_path)
+
+    with tracker.start_run(
+        "grouped_hot", "beam", year=2018, iteration=1, cache_mode="overwrite"
+    ):
+        hot_artifact = tracker.log_artifact(
+            str(hot_path),
+            key="linkstats_hot_variant",
+            driver="parquet",
+            profile_file_schema=True,
+            facet={
+                "artifact_family": "linkstats_unmodified_phys_sim_iter_parquet",
+                "year": 2018,
+                "iteration": 1,
+                "phys_sim_iteration": 1,
+                "beam_sub_iteration": 0,
+            },
+            facet_index=True,
+        )
+        tracker.ingest(hot_artifact)
+
+    with tracker.start_run(
+        "grouped_cold", "beam", year=2018, iteration=1, cache_mode="overwrite"
+    ):
+        cold_artifact = tracker.log_artifact(
+            str(cold_path),
+            key="linkstats_cold_variant",
+            driver="parquet",
+            profile_file_schema=True,
+            facet={
+                "artifact_family": "linkstats_unmodified_phys_sim_iter_parquet",
+                "year": 2018,
+                "iteration": 1,
+                "phys_sim_iteration": 1,
+                "beam_sub_iteration": 1,
+            },
+            facet_index=True,
+        )
+
+    schema_id = cold_artifact.meta.get("schema_id")
+    assert schema_id is not None
+
+    tracker.create_grouped_view(
+        "v_linkstats_hybrid",
+        schema_id=schema_id,
+        namespace="beam",
+        params=[
+            "artifact_family=linkstats_unmodified_phys_sim_iter_parquet",
+            "year=2018",
+            "iteration=1",
+        ],
+        drivers=["parquet"],
+        attach_facets=["beam_sub_iteration"],
+        mode="hybrid",
+    )
+
+    with tracker.engine.connect() as conn:
+        result = pd.read_sql(
+            "SELECT id, value, consist_artifact_id, facet_beam_sub_iteration "
+            "FROM v_linkstats_hybrid ORDER BY id",
+            conn,
+        )
+
+    assert len(result) == 2
+    assert result["id"].tolist() == [1, 2]
+    assert result["value"].tolist() == [100.0, 200.0]
+    assert set(result["consist_artifact_id"].tolist()) == {
+        str(hot_artifact.id),
+        str(cold_artifact.id),
+    }
+    assert set(result["facet_beam_sub_iteration"].tolist()) == {0, 1}
+
+
+def test_grouped_view_missing_file_policy(tracker, tmp_path):
+    df = pd.DataFrame({"id": [1], "value": [1.0]})
+    path = tmp_path / "missing_me.parquet"
+    df.to_parquet(path)
+
+    with tracker.start_run(
+        "grouped_missing", "beam", year=2020, iteration=0, cache_mode="overwrite"
+    ):
+        artifact = tracker.log_artifact(
+            str(path),
+            key="grouped_missing_key",
+            driver="parquet",
+            profile_file_schema=True,
+            facet={"artifact_family": "missing_group", "year": 2020, "iteration": 0},
+            facet_index=True,
+        )
+
+    schema_id = artifact.meta.get("schema_id")
+    assert schema_id is not None
+    path.unlink()
+
+    tracker.create_grouped_view(
+        "v_missing_warn",
+        schema_id=schema_id,
+        namespace="beam",
+        params=["artifact_family=missing_group"],
+        attach_facets=["year", "iteration"],
+        mode="cold_only",
+        missing_files="warn",
+    )
+
+    with tracker.engine.connect() as conn:
+        count = conn.execute(text("SELECT COUNT(*) FROM v_missing_warn")).scalar()
+    assert count == 0
+
+    with pytest.raises(FileNotFoundError):
+        tracker.create_grouped_view(
+            "v_missing_error",
+            schema_id=schema_id,
+            namespace="beam",
+            params=["artifact_family=missing_group"],
+            mode="cold_only",
+            missing_files="error",
+        )
+
+
+def test_grouped_view_resolution_handles_shared_run_instance(tracker, tmp_path, caplog):
+    df1 = pd.DataFrame({"id": [1], "value": [10.0]})
+    df2 = pd.DataFrame({"id": [2], "value": [20.0]})
+    p1 = tmp_path / "shared_run_a.parquet"
+    p2 = tmp_path / "shared_run_b.parquet"
+    df1.to_parquet(p1)
+    df2.to_parquet(p2)
+
+    with tracker.start_run(
+        "grouped_shared_run", "beam", year=2018, iteration=2, cache_mode="overwrite"
+    ):
+        a1 = tracker.log_artifact(
+            str(p1),
+            key="shared_run_variant_1",
+            driver="parquet",
+            profile_file_schema=True,
+            facet={
+                "artifact_family": "shared_run_group",
+                "year": 2018,
+                "iteration": 2,
+                "beam_sub_iteration": 1,
+            },
+            facet_index=True,
+        )
+        a2 = tracker.log_artifact(
+            str(p2),
+            key="shared_run_variant_2",
+            driver="parquet",
+            profile_file_schema=True,
+            facet={
+                "artifact_family": "shared_run_group",
+                "year": 2018,
+                "iteration": 2,
+                "beam_sub_iteration": 2,
+            },
+            facet_index=True,
+        )
+
+    schema_id = a1.meta.get("schema_id")
+    run_id = a1.run_id
+    assert schema_id is not None
+    assert run_id is not None
+    assert a2.meta.get("schema_id") == schema_id
+    assert a2.run_id == run_id
+    assert tracker.db is not None
+
+    caplog.set_level(logging.WARNING)
+    rows = tracker.db.find_artifacts_for_grouped_view(
+        schema_id=schema_id,
+        run_id=run_id,
+        namespace="beam",
+        predicates=[
+            tracker._parse_artifact_param_expression("artifact_family=shared_run_group")
+        ],
+    )
+
+    assert len(rows) == 2
+    assert {str(artifact.id) for artifact, _ in rows} == {str(a1.id), str(a2.id)}
+    assert {run.id for _, run in rows} == {run_id}
+    assert not any(
+        "Failed to resolve grouped-view artifacts" in record.getMessage()
+        for record in caplog.records
+    )
+
+    tracker.create_grouped_view(
+        "v_shared_run_group",
+        schema_id=schema_id,
+        run_id=run_id,
+        namespace="beam",
+        params=["artifact_family=shared_run_group"],
+        attach_facets=["beam_sub_iteration"],
+        mode="cold_only",
+    )
+
+    with tracker.engine.connect() as conn:
+        result = pd.read_sql(
+            "SELECT id, value, facet_beam_sub_iteration "
+            "FROM v_shared_run_group ORDER BY id",
+            conn,
+        )
+    assert len(result) == 2
+    assert result["id"].tolist() == [1, 2]
+    assert result["value"].tolist() == [10.0, 20.0]
+    assert result["facet_beam_sub_iteration"].tolist() == [1, 2]

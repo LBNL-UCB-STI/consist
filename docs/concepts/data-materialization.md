@@ -152,6 +152,10 @@ query = (
 rows = consist.run_query(query, tracker=tracker)
 ```
 
+For schema/facet-driven cross-key analysis, use
+[Grouped Views](grouped-views.md) to create one view over many artifacts that
+share a schema identity instead of a single `concept_key`.
+
 ---
 
 ## Loading Behavior & Database Fallback

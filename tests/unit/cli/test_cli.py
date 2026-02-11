@@ -1,6 +1,7 @@
 """TODO: add unit coverage for query/helper utilities when expanded (tools.queries)."""
 
 import json
+import re
 import uuid
 from datetime import datetime
 from typing import cast
@@ -9,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 from sqlalchemy.engine import Engine
-from sqlmodel import SQLModel, Session, create_engine
+from sqlmodel import SQLModel, Session, create_engine, text
 from typer.testing import CliRunner
 
 from consist import Tracker
@@ -323,6 +324,105 @@ def test_artifacts_query_mode_with_param(cli_runner, tracker, sample_csv):
     assert "Artifact Query Results" in result.stdout
     assert "facet_output" in result.stdout
     assert "1" in result.stdout
+
+
+def test_views_create_grouped_command(cli_runner, tracker, tmp_path):
+    path = tmp_path / "grouped_cli.parquet"
+    pd.DataFrame({"id": [1], "value": [1.0]}).to_parquet(path)
+
+    with tracker.start_run(
+        "run_grouped_cli", "beam", year=2018, iteration=0, cache_mode="overwrite"
+    ):
+        artifact = tracker.log_artifact(
+            str(path),
+            key="grouped_cli_key",
+            driver="parquet",
+            profile_file_schema=True,
+            facet={"artifact_family": "grouped_cli", "year": 2018, "iteration": 0},
+            facet_index=True,
+        )
+
+    schema_id = artifact.meta.get("schema_id")
+    assert schema_id is not None
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "views",
+            "create",
+            "v_grouped_cli",
+            "--schema-id",
+            schema_id,
+            "--namespace",
+            "beam",
+            "--param",
+            "artifact_family=grouped_cli",
+            "--attach-facet",
+            "year",
+            "--driver",
+            "parquet",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Created grouped view 'v_grouped_cli'" in result.stdout
+
+    with tracker.engine.connect() as conn:
+        count = conn.execute(text("SELECT COUNT(*) FROM v_grouped_cli")).scalar()
+    assert count == 1
+
+
+def test_views_create_grouped_command_missing_file_error(cli_runner, tracker, tmp_path):
+    path = tmp_path / "grouped_cli_missing.parquet"
+    pd.DataFrame({"id": [1], "value": [1.0]}).to_parquet(path)
+
+    with tracker.start_run(
+        "run_grouped_cli_missing",
+        "beam",
+        year=2018,
+        iteration=0,
+        cache_mode="overwrite",
+    ):
+        artifact = tracker.log_artifact(
+            str(path),
+            key="grouped_cli_missing_key",
+            driver="parquet",
+            profile_file_schema=True,
+            facet={
+                "artifact_family": "grouped_cli_missing",
+                "year": 2018,
+                "iteration": 0,
+            },
+            facet_index=True,
+        )
+
+    schema_id = artifact.meta.get("schema_id")
+    assert schema_id is not None
+    path.unlink()
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "views",
+            "create",
+            "v_grouped_cli_missing",
+            "--schema-id",
+            schema_id,
+            "--namespace",
+            "beam",
+            "--param",
+            "artifact_family=grouped_cli_missing",
+            "--driver",
+            "parquet",
+            "--missing-files",
+            "error",
+            "--mode",
+            "cold_only",
+        ],
+    )
+
+    assert result.exit_code == 1
+    normalized_stdout = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout).replace("\n", "")
+    assert "grouped_cli_missing.parquet" in normalized_stdout
 
 
 def test_lineage_with_db(mock_db_session, tmp_path):

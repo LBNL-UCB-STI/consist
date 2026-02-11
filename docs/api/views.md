@@ -20,3 +20,4 @@
       members:
         - create_view_from_model
         - create_hybrid_view
+        - create_grouped_hybrid_view

@@ -70,6 +70,30 @@ Query-mode options:
 - `--family-prefix`: prefix filter on indexed `artifact_family` facet
 - `--limit`: maximum results (default `100`)
 
+### consist views create
+
+Create a grouped hybrid view from schema identity + facet/run filters.
+
+```bash
+consist views create v_linkstats_all \
+  --schema-id <schema_hash> \
+  --namespace beam \
+  --param artifact_family=linkstats_unmodified_phys_sim_iter_parquet \
+  --param year=2018 \
+  --attach-facet artifact_family \
+  --attach-facet year \
+  --attach-facet phys_sim_iteration \
+  --driver parquet
+```
+
+Common options:
+
+- `--mode hybrid|hot_only|cold_only`
+- `--if-exists replace|error`
+- `--missing-files warn|error|skip_silent`
+- `--schema-compatible`
+- run filters: `--run-id`, `--parent-run-id`, `--model`, `--status`, `--year`, `--iteration`
+
 ### consist lineage
 
 Trace the full provenance chain for an artifact.
