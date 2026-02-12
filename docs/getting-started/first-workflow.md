@@ -38,7 +38,7 @@ def clean_data(raw_path: Path, threshold: float) -> Path:
     df = pd.read_csv(raw_path)
     df_clean = df[df["value"] >= threshold]
 
-    out_path = tracker.run_dir / "cleaned.parquet"  # (2)!
+    out_path = consist.output_path("cleaned")  # (2)!
     df_clean.to_parquet(out_path, index=False)
     return out_path  # (3)!
 
@@ -49,7 +49,7 @@ def summarize(cleaned_artifact) -> Path:  # (4)!
     df = pd.read_parquet(cleaned_artifact.path)
     summary = {"mean": df["value"].mean(), "count": len(df)}
 
-    out_path = tracker.run_dir / "summary.json"
+    out_path = consist.output_path("summary", ext="json")
     pd.Series(summary).to_json(out_path)
     return out_path
 
@@ -84,7 +84,7 @@ with consist.use_tracker(tracker):
 ```
 
 1. `@tracker.define_step` declares which output keys this function produces. Consist creates artifacts for each key.
-2. Write outputs under `tracker.run_dir`—Consist manages this directory per run.
+2. Use `consist.output_path(...)` to resolve a managed output path. This honors output policy and `artifact_dir` overrides while avoiding manual path bugs.
 3. Return the output path. Consist registers it as the `cleaned` artifact.
 4. Artifact parameters are auto-loaded when input keys match parameter names.
 5. `config` is hashed into the run's signature. Changing `threshold` causes a cache miss.

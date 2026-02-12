@@ -97,17 +97,21 @@ result = consist.run(
 Legacy run-policy kwargs are no longer supported on `run(...)` APIs. Use
 `cache_options=...`, `output_policy=...`, and `execution_options=...`.
 
+For file outputs, prefer managed helpers: use `consist.output_path(...)` in active runs, or `_consist_ctx.output_path(...)`/`_consist_ctx.output_dir(...)` when context is injected. Then call `_consist_ctx.log_output(...)` (or return the path when auto-output mapping applies).
+
 <details>
 <summary>Alternative: keep raw file paths (no auto-load)</summary>
 
-Use this when your function needs a `Path` and manages I/O directly (common for legacy tools or file-based APIs).
+Use this when your function needs a `Path` and manages I/O directly (common for legacy tools or file-based APIs). Prefer `_consist_ctx.output_path(...)` so paths stay under the managed run output policy and honor `artifact_dir` overrides.
 
 ``` python
 from consist import ExecutionOptions
+from pathlib import Path
+import pandas as pd
 
 def clean_data(raw_file: Path, _consist_ctx) -> None:
     df = pd.read_csv(raw_file)
-    out_path = _consist_ctx.run_dir / "cleaned.parquet"
+    out_path = _consist_ctx.output_path("cleaned")
     df.to_parquet(out_path)
     _consist_ctx.log_output(out_path, key="cleaned")
 
@@ -163,7 +167,7 @@ Each distinct config → separate cache entries. Change the threshold? Only that
 
 ### Wrapping Legacy or Black-Box Tools
 
-If you have existing code that writes files to a directory, use the injected run context to capture outputs:
+If you have existing code that writes files to a directory, use the injected run context to capture outputs. `_consist_ctx.output_dir(...)` avoids manual `mkdir`/path joining and keeps files in the managed artifact location.
 
 ``` python
 from pathlib import Path
@@ -172,8 +176,7 @@ from consist import ExecutionOptions
 def run_legacy_model(upstream, _consist_ctx) -> None:
     import legacy_model
 
-    output_dir = _consist_ctx.run_dir / "legacy_outputs"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = _consist_ctx.output_dir("legacy_outputs")
     with _consist_ctx.capture_outputs(output_dir, pattern="*.csv"):
         legacy_model.run(upstream, output_dir=output_dir)
 
@@ -882,9 +885,10 @@ If your function writes files, log them with the injected context (and read inpu
 
 ```python
 from consist import ExecutionOptions
+from pathlib import Path
 
 def beam_preprocess(data_file, _consist_ctx) -> None:
-    out_path = _consist_ctx.run_dir / "beam_inputs.parquet"
+    out_path = _consist_ctx.output_path("beam_inputs")
     ...
     _consist_ctx.log_output(out_path, key="beam_inputs")
 

@@ -122,7 +122,7 @@ Provenance answers three questions: *Can I re-run this exactly?* (reproducibilit
 
 **Outputs** are named artifacts declared via `consist.run(...)` or `tracker.run(...)`. Consist stores their paths and provenance metadata for lookup and querying.
 
-Write outputs under `tracker.run_dir` or a mounted `outputs://` root. This keeps artifact paths relative and portable across machines.
+Prefer `consist.output_path(...)` / `consist.output_dir(...)` (or injected `RunContext.output_path(...)` / `RunContext.output_dir(...)`) for outputs. These helpers apply managed path policy, honor `artifact_dir` overrides, and reduce manual path bugs while keeping artifacts portable.
 
 ### Input mappings and auto-loading
 
