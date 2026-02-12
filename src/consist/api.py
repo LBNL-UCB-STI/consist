@@ -599,8 +599,7 @@ def _add_run_result_refs(
     for key in keys:
         if not isinstance(key, str):
             raise TypeError(
-                "consist.refs(...) output keys must be strings "
-                f"(got {type(key)})."
+                f"consist.refs(...) output keys must be strings (got {type(key)})."
             )
         _set_ref_mapping_value(
             output_map, key, resolve_run_result_output(run_result, key=key)

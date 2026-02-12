@@ -5442,7 +5442,9 @@ class Tracker:
                     f"Run {run_id!r} has missing output files: {details}"
                 )
 
-        cache_hit = bool(run.meta.get("cache_hit")) if isinstance(run.meta, dict) else False
+        cache_hit = (
+            bool(run.meta.get("cache_hit")) if isinstance(run.meta, dict) else False
+        )
         return RunResult(run=run, outputs=selected_outputs, cache_hit=cache_hit)
 
     def get_run_inputs(self, run_id: str) -> Dict[str, Artifact]:

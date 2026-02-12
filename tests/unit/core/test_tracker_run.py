@@ -219,9 +219,7 @@ def test_consist_refs_builds_and_combines_input_mappings(tracker):
     assert aliased["hh"].key == "households"
     assert aliased["travel_skims"].key == "skims"
 
-    alias_map = consist.refs(
-        people, {"hh": "households", "travel_persons": "persons"}
-    )
+    alias_map = consist.refs(people, {"hh": "households", "travel_persons": "persons"})
     assert alias_map["hh"].key == "households"
     assert alias_map["travel_persons"].key == "persons"
 
