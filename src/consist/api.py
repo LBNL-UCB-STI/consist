@@ -52,7 +52,13 @@ from consist.models.artifact import Artifact, get_tracker_ref
 from consist.models.run import ConsistRecord, Run, RunResult
 from consist.models.run_config_kv import RunConfigKV
 from consist.core.tracker import Tracker
-from consist.types import ArtifactRef, DriverType
+from consist.types import (
+    ArtifactRef,
+    CacheOptions,
+    DriverType,
+    ExecutionOptions,
+    OutputPolicyOptions,
+)
 
 if TYPE_CHECKING:
     import geopandas
@@ -493,6 +499,9 @@ def run(
     name: Optional[str] = None,
     *,
     tracker: Optional["Tracker"] = None,
+    cache_options: Optional[CacheOptions] = None,
+    output_policy: Optional[OutputPolicyOptions] = None,
+    execution_options: Optional[ExecutionOptions] = None,
     **kwargs: Any,
 ) -> RunResult:
     """
@@ -513,9 +522,16 @@ def run(
     tracker : Optional[Tracker]
         The Tracker instance responsible for provenance and caching.
         If None, the active global tracker is resolved.
+    cache_options : Optional[CacheOptions]
+        Grouped cache controls for run execution.
+    output_policy : Optional[OutputPolicyOptions]
+        Grouped output mismatch/missing policy controls.
+    execution_options : Optional[ExecutionOptions]
+        Grouped runtime execution controls.
     **kwargs : Any
         Arguments forwarded to `Tracker.run`, including `inputs`, `config`,
-        `tags`, and `runtime_kwargs`.
+        `tags`, and primitive kwargs. Primitive kwargs override option object
+        fields when both are provided with different values.
 
     Returns
     -------
@@ -524,7 +540,14 @@ def run(
         immutable `Run` record.
     """
     tr = _resolve_tracker(tracker)
-    return tr.run(fn=fn, name=name, **kwargs)
+    return tr.run(
+        fn=fn,
+        name=name,
+        cache_options=cache_options,
+        output_policy=output_policy,
+        execution_options=execution_options,
+        **kwargs,
+    )
 
 
 @contextmanager

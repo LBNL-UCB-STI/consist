@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
+
+from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
 
 
 def test_scenario_run_updates_coupler_and_cache_hit(tracker):
@@ -79,3 +82,49 @@ def test_scenario_trace_updates_coupler_after_exit(tracker):
 
         with sc.trace(name="second", inputs=[alpha]) as t:
             assert sc.coupler.require("alpha").id == alpha.id
+
+
+def test_scenario_run_supports_options_objects(tracker):
+    calls: list[str] = []
+
+    def step(ctx) -> None:
+        calls.append("called")
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        out_path = ctx.run_dir / "out.txt"
+        out_path.write_text(f"calls={len(calls)}\n")
+
+    with tracker.scenario("scen_opts_A") as sc:
+        first = sc.run(
+            fn=step,
+            output_paths={"out": "out.txt"},
+            cache_options=CacheOptions(cache_mode="reuse"),
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        assert first.cache_hit is False
+
+    with tracker.scenario("scen_opts_B") as sc:
+        second = sc.run(
+            fn=step,
+            output_paths={"out": "out.txt"},
+            cache_options=CacheOptions(cache_mode="reuse"),
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        assert second.cache_hit is True
+
+    assert calls == ["called"]
+
+
+def test_scenario_run_warns_on_conflicting_output_policy(tracker):
+    def step() -> None:
+        return None
+
+    with tracker.scenario("scen_opts_conflict") as sc:
+        with pytest.warns(UserWarning, match="output_missing"):
+            with pytest.raises(RuntimeError, match="missing outputs"):
+                sc.run(
+                    fn=step,
+                    name="produce",
+                    outputs=["out"],
+                    output_policy=OutputPolicyOptions(output_missing="warn"),
+                    output_missing="error",
+                )

@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from consist.core.tracker import Tracker
+from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
 
 
 def test_tracker_run_load_inputs_requires_mapping(tracker, sample_csv):
@@ -198,3 +199,43 @@ def test_cache_version_affects_config_hash(tracker):
     hash_v2 = tracker.last_run.run.config_hash
 
     assert hash_v1 != hash_v2
+
+
+def test_tracker_run_warns_on_conflicting_cache_option_and_uses_kwarg(tracker):
+    calls: list[str] = []
+
+    def step(ctx) -> None:
+        calls.append("called")
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "out.txt").write_text("ok")
+
+    with pytest.warns(UserWarning, match="cache_mode"):
+        tracker.run(
+            fn=step,
+            output_paths={"out": "out.txt"},
+            cache_options=CacheOptions(cache_mode="overwrite"),
+            cache_mode="reuse",
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+
+    second = tracker.run(
+        fn=step,
+        output_paths={"out": "out.txt"},
+        cache_mode="reuse",
+        inject_context="ctx",
+    )
+
+    assert second.cache_hit is True
+    assert calls == ["called"]
+
+
+def test_tracker_run_output_policy_options_enforced(tracker):
+    def step() -> None:
+        return None
+
+    with pytest.raises(RuntimeError, match="missing outputs"):
+        tracker.run(
+            fn=step,
+            outputs=["out"],
+            output_policy=OutputPolicyOptions(output_missing="error"),
+        )

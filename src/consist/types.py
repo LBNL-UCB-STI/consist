@@ -10,6 +10,7 @@ These are intentionally minimal and dependency-tolerant:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import (
@@ -41,6 +42,48 @@ ArtifactRef: TypeAlias = Union["Artifact", PathLike]
 
 HashInput: TypeAlias = Union[PathLike, tuple[str, PathLike]]
 HashInputs: TypeAlias = Optional[list[HashInput]]
+
+
+@dataclass(frozen=True, slots=True)
+class CacheOptions:
+    """
+    Grouped cache behavior options for ``run(...)`` APIs.
+
+    All fields are optional so callers can set only the knobs they need.
+    """
+
+    cache_mode: Optional[str] = None
+    cache_hydration: Optional[str] = None
+    cache_version: Optional[int] = None
+    cache_epoch: Optional[int] = None
+    validate_cached_outputs: Optional[str] = None
+
+
+@dataclass(frozen=True, slots=True)
+class OutputPolicyOptions:
+    """
+    Grouped output policy options for ``run(...)`` APIs.
+    """
+
+    output_mismatch: Optional[Literal["warn", "error", "ignore"]] = None
+    output_missing: Optional[Literal["warn", "error", "ignore"]] = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionOptions:
+    """
+    Grouped execution options for ``run(...)`` APIs.
+
+    These are runtime controls and do not affect cache identity unless the
+    corresponding primitive kwargs already do.
+    """
+
+    load_inputs: Optional[bool] = None
+    executor: Optional[Literal["python", "container"]] = None
+    container: Optional[Mapping[str, Any]] = None
+    runtime_kwargs: Optional[Mapping[str, Any]] = None
+    inject_context: Optional[Union[bool, str]] = None
+
 
 # Known artifact drivers used by Consist loaders.
 DriverLiteral: TypeAlias = Literal[

@@ -47,6 +47,7 @@ from consist.core.cache import (
 from consist.core.cache_output_logging import (
     maybe_return_cached_output_or_demote_cache_hit,
 )
+from consist.core.run_options import merge_run_options
 from consist.core.config_canonicalization import (
     ConfigAdapter,
     ConfigAdapterOptions,
@@ -87,10 +88,13 @@ from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.models.run import ConsistRecord, Run, RunArtifacts, RunResult
 from consist.types import (
     ArtifactRef,
+    CacheOptions,
     DriverType,
+    ExecutionOptions,
     FacetLike,
     HasFacetSchemaVersion,
     HashInputs,
+    OutputPolicyOptions,
 )
 
 if TYPE_CHECKING:
@@ -1359,18 +1363,21 @@ class Tracker:
         output_paths: Optional[Mapping[str, ArtifactRef]] = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
+        cache_options: Optional[CacheOptions] = None,
+        output_policy: Optional[OutputPolicyOptions] = None,
+        execution_options: Optional[ExecutionOptions] = None,
         cache_mode: Optional[str] = None,
         cache_hydration: Optional[str] = None,
         cache_version: Optional[int] = None,
         cache_epoch: Optional[int] = None,
         validate_cached_outputs: Optional[str] = None,
         load_inputs: Optional[bool] = None,
-        executor: str = "python",
+        executor: Optional[str] = None,
         container: Optional[Mapping[str, Any]] = None,
-        runtime_kwargs: Optional[Dict[str, Any]] = None,
-        inject_context: bool | str = False,
-        output_mismatch: str = "warn",
-        output_missing: str = "warn",
+        runtime_kwargs: Optional[Mapping[str, Any]] = None,
+        inject_context: bool | str | None = None,
+        output_mismatch: Optional[str] = None,
+        output_missing: Optional[str] = None,
     ) -> RunResult:
         """
         Execute a function-shaped run with caching and output handling.
@@ -1440,9 +1447,17 @@ class Tracker:
             Directory to scan for outputs (legacy tools that write to specific dirs).
         capture_pattern : str, default "*"
             Glob pattern for capturing outputs (used with capture_dir).
+        cache_options : Optional[CacheOptions], optional
+            Grouped cache controls (`cache_mode`, `cache_hydration`, `cache_version`,
+            `cache_epoch`, `validate_cached_outputs`).
+        output_policy : Optional[OutputPolicyOptions], optional
+            Grouped output policies (`output_mismatch`, `output_missing`).
+        execution_options : Optional[ExecutionOptions], optional
+            Grouped execution controls (`load_inputs`, `executor`, `container`,
+            `runtime_kwargs`, `inject_context`).
 
         cache_mode : str, default "reuse"
-            Cache behavior: "reuse" (return cache hit), "overwrite" (always re-execute), or "skip_check".
+            Cache behavior: "reuse" (return cache hit), "overwrite" (always re-execute), or "readonly".
         cache_hydration : Optional[str], optional
             Materialization strategy for cache hits:
             - "outputs-requested": Copy only output_paths to disk
@@ -1458,7 +1473,7 @@ class Tracker:
             Execution backend: "python" (call fn directly) or "container" (use Docker/Singularity).
         container : Optional[Mapping[str, Any]], optional
             Container spec (required if executor='container'). Must contain 'image' and 'command'.
-        runtime_kwargs : Optional[Dict[str, Any]], optional
+        runtime_kwargs : Optional[Mapping[str, Any]], optional
             Additional kwargs to pass to fn at runtime (merged with auto-loaded inputs).
             These values are not part of the cache signature; use them for handles
             or runtime-only dependencies. Consider `consist.require_runtime_kwargs`
@@ -1470,6 +1485,8 @@ class Tracker:
             Behavior when output count doesn't match: "warn", "error", or "ignore".
         output_missing : str, default "warn"
             Behavior when expected outputs are missing: "warn", "error", or "ignore".
+            Direct kwargs take precedence over option object fields. Consist warns
+            only when the same field is provided in both places with different values.
 
         Returns
         -------
@@ -1517,6 +1534,48 @@ class Tracker:
         start_run : Manual run context management (more control)
         trace : Context manager alternative (always executes, even on cache hit)
         """
+        merged_options = merge_run_options(
+            cache_options=cache_options,
+            output_policy=output_policy,
+            execution_options=execution_options,
+            cache_mode=cache_mode,
+            cache_hydration=cache_hydration,
+            cache_version=cache_version,
+            cache_epoch=cache_epoch,
+            validate_cached_outputs=validate_cached_outputs,
+            output_mismatch=output_mismatch,
+            output_missing=output_missing,
+            load_inputs=load_inputs,
+            executor=executor,
+            container=container,
+            runtime_kwargs=runtime_kwargs,
+            inject_context=inject_context,
+            warning_prefix="Tracker.run",
+            warning_stacklevel=3,
+        )
+
+        cache_mode = merged_options.cache_mode
+        cache_hydration = merged_options.cache_hydration
+        cache_version = merged_options.cache_version
+        cache_epoch = merged_options.cache_epoch
+        validate_cached_outputs = merged_options.validate_cached_outputs
+        output_mismatch = merged_options.output_mismatch
+        output_missing = merged_options.output_missing
+        load_inputs = merged_options.load_inputs
+        executor = merged_options.executor
+        container = merged_options.container
+        runtime_kwargs = merged_options.runtime_kwargs
+        inject_context = merged_options.inject_context
+
+        if executor is None:
+            executor = "python"
+        if inject_context is None:
+            inject_context = False
+        if output_mismatch is None:
+            output_mismatch = "warn"
+        if output_missing is None:
+            output_missing = "warn"
+
         if executor not in {"python", "container"}:
             raise ValueError("Tracker.run supports executor='python' or 'container'.")
 
@@ -1534,6 +1593,10 @@ class Tracker:
         else:
             if fn is None:
                 raise ValueError("Tracker.run requires a callable fn.")
+
+        runtime_kwargs_dict: Optional[Dict[str, Any]] = (
+            dict(runtime_kwargs) if runtime_kwargs is not None else None
+        )
 
         resolver = MetadataResolver(
             default_name_template=None,
@@ -1563,7 +1626,7 @@ class Tracker:
             consist_settings=self.settings,
             consist_workspace=self.run_dir,
             consist_state=self.current_consist,
-            runtime_kwargs=runtime_kwargs,
+            runtime_kwargs=runtime_kwargs_dict,
             outputs=outputs,
             output_paths=output_paths,
             cache_mode=cache_mode,

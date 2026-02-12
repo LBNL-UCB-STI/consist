@@ -21,6 +21,7 @@ from consist.models.artifact_schema import (
     ArtifactSchemaObservation,
 )
 from consist.models.run import Run, RunResult
+from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
 
 
 def _write_csv(path: Path, rows: int = 5) -> None:
@@ -478,7 +479,7 @@ def test_scenario_run_skips_callable_on_cache_hit(tracker: Tracker):
     # and should NOT execute `expensive_step()` again.
     with tracker.scenario("run_demo_B") as sc:
         sc.declare_outputs("out", required=True)
-        result: RunResult = sc.run(
+        result = sc.run(
             name="produce",
             fn=expensive_step,
             config={"v": 1},
@@ -490,3 +491,31 @@ def test_scenario_run_skips_callable_on_cache_hit(tracker: Tracker):
 
     assert calls == ["called"]
     assert result.outputs["out"].path.read_text() == "calls=1\n"
+
+
+def test_run_options_objects_end_to_end(tracker: Tracker) -> None:
+    calls: list[str] = []
+
+    def step(ctx: RunContext) -> None:
+        calls.append("called")
+        out_path = ctx.run_dir / "out.txt"
+        out_path.write_text("ok\n")
+
+    first = tracker.run(
+        fn=step,
+        output_paths={"out": "out.txt"},
+        cache_options=CacheOptions(cache_mode="reuse"),
+        output_policy=OutputPolicyOptions(output_missing="error"),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    second = tracker.run(
+        fn=step,
+        output_paths={"out": "out.txt"},
+        cache_options=CacheOptions(cache_mode="reuse"),
+        output_policy=OutputPolicyOptions(output_missing="error"),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert first.cache_hit is False
+    assert second.cache_hit is True
+    assert calls == ["called"]

@@ -78,6 +78,25 @@ print(f"Output: {cleaned_artifact.path}")
 
 If you run it again with the same inputs and config, you should get a cache hit and no re-execution.
 
+Preferred run configuration style (options objects):
+
+``` python
+from consist import CacheOptions, ExecutionOptions, OutputPolicyOptions
+
+result = consist.run(
+    fn=clean_data,
+    inputs={"raw": Path("raw.csv")},
+    config={"threshold": 0.5},
+    outputs=["cleaned"],
+    cache_options=CacheOptions(cache_mode="reuse", cache_hydration="inputs-missing"),
+    output_policy=OutputPolicyOptions(output_missing="error"),
+    execution_options=ExecutionOptions(load_inputs=True),
+)
+```
+
+You can still use legacy primitive kwargs (`cache_mode=...`, `output_missing=...`,
+`load_inputs=...`). When both styles set the same field, primitive kwargs win.
+
 <details>
 <summary>Alternative: keep raw file paths (no auto-load)</summary>
 

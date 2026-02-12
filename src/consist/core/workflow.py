@@ -21,7 +21,15 @@ from typing import TYPE_CHECKING
 from consist.core.coupler import Coupler
 from consist.core.input_utils import coerce_input_map
 from consist.core.metadata_resolver import MetadataResolver
-from consist.types import ArtifactRef, FacetLike, HashInputs
+from consist.core.run_options import merge_run_options
+from consist.types import (
+    ArtifactRef,
+    CacheOptions,
+    ExecutionOptions,
+    FacetLike,
+    HashInputs,
+    OutputPolicyOptions,
+)
 from pathlib import Path
 
 if TYPE_CHECKING:
@@ -625,17 +633,20 @@ class ScenarioContext:
         output_paths: Optional[Mapping[str, ArtifactRef]] = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
+        cache_options: Optional[CacheOptions] = None,
+        output_policy: Optional[OutputPolicyOptions] = None,
+        execution_options: Optional[ExecutionOptions] = None,
         cache_mode: Optional[str] = None,
         cache_hydration: Optional[str] = None,
         cache_version: Optional[int] = None,
         validate_cached_outputs: Optional[str] = None,
         load_inputs: Optional[bool] = None,
-        executor: str = "python",
+        executor: Optional[str] = None,
         container: Optional[Mapping[str, Any]] = None,
-        runtime_kwargs: Optional[Dict[str, Any]] = None,
-        inject_context: bool | str = False,
-        output_mismatch: str = "warn",
-        output_missing: str = "warn",
+        runtime_kwargs: Optional[Mapping[str, Any]] = None,
+        inject_context: bool | str | None = None,
+        output_mismatch: Optional[str] = None,
+        output_missing: Optional[str] = None,
     ) -> RunResult:
         """
         Execute a cached scenario step and update the Coupler with outputs.
@@ -643,7 +654,9 @@ class ScenarioContext:
         This method wraps ``Tracker.run`` while ensuring the scenario header
         is updated with step metadata and artifacts.
         Use ``runtime_kwargs`` for runtime-only inputs and `consist.require_runtime_kwargs`
-        to validate required keys.
+        to validate required keys. You can pass grouped options via
+        ``cache_options``, ``output_policy``, and ``execution_options``.
+        Direct kwargs take precedence over conflicting option-object values.
         """
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
@@ -653,6 +666,51 @@ class ScenarioContext:
             raise ValueError("ScenarioContext.run requires a run name.")
         if fn is None and name is None:
             raise ValueError("ScenarioContext.run requires name when fn is None.")
+
+        merged_options = merge_run_options(
+            cache_options=cache_options,
+            output_policy=output_policy,
+            execution_options=execution_options,
+            cache_mode=cache_mode,
+            cache_hydration=cache_hydration,
+            cache_version=cache_version,
+            validate_cached_outputs=validate_cached_outputs,
+            output_mismatch=output_mismatch,
+            output_missing=output_missing,
+            load_inputs=load_inputs,
+            executor=executor,
+            container=container,
+            runtime_kwargs=runtime_kwargs,
+            inject_context=inject_context,
+            warning_prefix="ScenarioContext.run",
+            warning_stacklevel=3,
+        )
+
+        cache_mode = merged_options.cache_mode
+        cache_hydration = merged_options.cache_hydration
+        cache_version = merged_options.cache_version
+        cache_epoch = merged_options.cache_epoch
+        validate_cached_outputs = merged_options.validate_cached_outputs
+        load_inputs = merged_options.load_inputs
+        executor = merged_options.executor
+        container = merged_options.container
+        runtime_kwargs = merged_options.runtime_kwargs
+        inject_context = merged_options.inject_context
+        output_mismatch = merged_options.output_mismatch
+        output_missing = merged_options.output_missing
+
+        if executor is None:
+            executor = "python"
+        if inject_context is None:
+            inject_context = False
+        if output_mismatch is None:
+            output_mismatch = "warn"
+        if output_missing is None:
+            output_missing = "warn"
+
+        runtime_kwargs_dict: Optional[Dict[str, Any]] = (
+            dict(runtime_kwargs) if runtime_kwargs is not None else None
+        )
 
         resolver = MetadataResolver(
             default_name_template=self.name_template,
@@ -682,7 +740,7 @@ class ScenarioContext:
             consist_settings=self.tracker.settings,
             consist_workspace=self.tracker.run_dir,
             consist_state=self._header_record,
-            runtime_kwargs=runtime_kwargs,
+            runtime_kwargs=runtime_kwargs_dict,
             outputs=outputs,
             output_paths=output_paths,
             cache_mode=cache_mode,
@@ -743,9 +801,13 @@ class ScenarioContext:
         resolved_output_paths = self._resolve_output_paths(resolved_output_paths)
 
         resolved_cache_epoch = (
-            self.cache_epoch
-            if self.cache_epoch is not None
-            else getattr(self.tracker, "_cache_epoch", None)
+            cache_epoch
+            if cache_epoch is not None
+            else (
+                self.cache_epoch
+                if self.cache_epoch is not None
+                else getattr(self.tracker, "_cache_epoch", None)
+            )
         )
 
         result = self.tracker.run(
@@ -785,7 +847,7 @@ class ScenarioContext:
             load_inputs=resolved_load_inputs,
             executor=executor,
             container=container,
-            runtime_kwargs=runtime_kwargs,
+            runtime_kwargs=runtime_kwargs_dict,
             inject_context=inject_context,
             output_mismatch=output_mismatch,
             output_missing=output_missing,

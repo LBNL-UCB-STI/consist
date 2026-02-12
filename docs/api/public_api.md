@@ -9,6 +9,7 @@ more verbose, lower-level, or easier to misuse.
 - [`consist.Tracker`](tracker.md)
 - [`consist.Run`](run.md)
 - [`consist.Artifact`](artifact.md)
+- `consist.CacheOptions`, `consist.OutputPolicyOptions`, `consist.ExecutionOptions`
 
 ### Scenario / workflow helpers
 

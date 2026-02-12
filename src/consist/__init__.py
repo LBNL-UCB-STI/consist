@@ -72,7 +72,10 @@ from consist.api import (
 
 # Types
 from consist.types import (
+    CacheOptions,
     DriverType,
+    ExecutionOptions,
+    OutputPolicyOptions,
 )
 from consist.core.noop import (
     NoopArtifact,
@@ -93,6 +96,9 @@ __all__ = [
     "Artifact",
     # Types
     "DriverType",
+    "CacheOptions",
+    "OutputPolicyOptions",
+    "ExecutionOptions",
     "NoopArtifact",
     "NoopCoupler",
     "NoopRunResult",
