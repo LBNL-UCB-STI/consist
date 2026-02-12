@@ -62,9 +62,11 @@ if TYPE_CHECKING:
 
 app = typer.Typer(rich_markup_mode="markdown")
 schema_app = typer.Typer(rich_markup_mode="markdown")
+views_app = typer.Typer(rich_markup_mode="markdown")
 console = Console()
 
 app.add_typer(schema_app, name="schema")
+app.add_typer(views_app, name="views")
 
 MAX_CLI_LIMIT = 1_000_000
 MAX_PREVIEW_ROWS = 1_000_000
@@ -369,6 +371,105 @@ def schema_apply_fks(
     )
 
 
+@views_app.command("create")
+def views_create(
+    view_name: str = typer.Argument(..., help="Name of the SQL view to create."),
+    schema_id: str = typer.Option(
+        ..., "--schema-id", help="Schema id used to select artifacts."
+    ),
+    namespace: Optional[str] = typer.Option(
+        None, "--namespace", help="Default artifact facet namespace."
+    ),
+    param: Optional[List[str]] = typer.Option(
+        None,
+        "--param",
+        help=(
+            "Facet predicate (repeatable): key=value, key>=value, key<=value. "
+            "Example: --param beam.year=2018"
+        ),
+    ),
+    attach_facet: Optional[List[str]] = typer.Option(
+        None,
+        "--attach-facet",
+        help="Facet key to project as a typed column (repeatable).",
+    ),
+    driver: Optional[List[str]] = typer.Option(
+        None,
+        "--driver",
+        help="Artifact driver filter (repeatable). Example: --driver parquet",
+    ),
+    include_system_columns: bool = typer.Option(
+        True,
+        "--include-system-columns/--no-system-columns",
+        help="Include Consist system columns in the created view.",
+    ),
+    mode: Literal["hybrid", "hot_only", "cold_only"] = typer.Option(
+        "hybrid",
+        "--mode",
+        help="Which storage tier(s) to include.",
+    ),
+    if_exists: Literal["replace", "error"] = typer.Option(
+        "replace",
+        "--if-exists",
+        help="Behavior when the target view already exists.",
+    ),
+    missing_files: Literal["warn", "error", "skip_silent"] = typer.Option(
+        "warn",
+        "--missing-files",
+        help="Behavior when selected cold files are missing.",
+    ),
+    run_id: Optional[str] = typer.Option(None, "--run-id", help="Filter by run id."),
+    parent_run_id: Optional[str] = typer.Option(
+        None, "--parent-run-id", help="Filter by parent/scenario run id."
+    ),
+    model: Optional[str] = typer.Option(
+        None, "--model", help="Filter by run model name."
+    ),
+    status: Optional[str] = typer.Option(
+        None, "--status", help="Filter by run status."
+    ),
+    year: Optional[int] = typer.Option(None, "--year", help="Filter by run year."),
+    iteration: Optional[int] = typer.Option(
+        None, "--iteration", help="Filter by run iteration."
+    ),
+    schema_compatible: bool = typer.Option(
+        False,
+        "--schema-compatible",
+        help="Include subset/superset schema variants by field names.",
+    ),
+    db_path: str = typer.Option(
+        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    ),
+) -> None:
+    """Create a selector-driven grouped hybrid view across many artifacts."""
+    tracker = get_tracker(db_path)
+    try:
+        tracker.create_grouped_view(
+            view_name=view_name,
+            schema_id=schema_id,
+            namespace=namespace,
+            params=param or [],
+            drivers=driver,
+            attach_facets=attach_facet or [],
+            include_system_columns=include_system_columns,
+            mode=mode,
+            if_exists=if_exists,
+            missing_files=missing_files,
+            run_id=run_id,
+            parent_run_id=parent_run_id,
+            model=model,
+            status=status,
+            year=year,
+            iteration=iteration,
+            schema_compatible=schema_compatible,
+        )
+    except (RuntimeError, ValueError, FileNotFoundError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    console.print(f"[green]Created grouped view '{view_name}'.[/green]")
+
+
 def _render_runs_table(
     tracker: Tracker,
     limit: int = 10,
@@ -447,6 +548,29 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> None:
             artifact.container_uri,
             artifact.driver,
             artifact.hash[:12] if artifact.hash else "N/A",
+        )
+
+    console.print(table)
+
+
+def _render_artifact_query_table(results: List[Dict[str, Any]]) -> None:
+    """Render artifact search results from facet-param queries."""
+    table = Table(title="Artifact Query Results")
+    table.add_column("Key", style="green", overflow="fold")
+    table.add_column("Run", style="cyan", overflow="fold")
+    table.add_column("Driver")
+    table.add_column("Facet Namespace", style="yellow")
+    table.add_column("Facet Schema Version", style="magenta")
+    table.add_column("URI", style="dim")
+
+    for row in results:
+        table.add_row(
+            str(row.get("key") or ""),
+            str(row.get("run_id") or "-"),
+            str(row.get("driver") or "-"),
+            str(row.get("facet_namespace") or "-"),
+            str(row.get("facet_schema_version") or "-"),
+            str(row.get("container_uri") or ""),
         )
 
     console.print(table)
@@ -845,19 +969,82 @@ def runs(
 
 @app.command()
 def artifacts(
-    run_id: str = typer.Argument(..., help="The ID of the run to inspect."),
+    run_id: Optional[str] = typer.Argument(
+        None,
+        help="Run ID to inspect. Omit when using --param/--key-prefix/--family-prefix.",
+    ),
+    param: Optional[List[str]] = typer.Option(
+        None,
+        "--param",
+        help=(
+            "Artifact facet predicate (repeatable): key=value, key>=value, key<=value. "
+            "Example: --param beam.phys_sim_iteration=2"
+        ),
+    ),
+    namespace: Optional[str] = typer.Option(
+        None,
+        "--namespace",
+        help="Default facet namespace when predicates omit one.",
+    ),
+    key_prefix: Optional[str] = typer.Option(
+        None,
+        "--key-prefix",
+        help="Filter by artifact key prefix.",
+    ),
+    family_prefix: Optional[str] = typer.Option(
+        None,
+        "--family-prefix",
+        help="Filter by artifact_family facet prefix.",
+    ),
+    limit: int = typer.Option(
+        100,
+        "--limit",
+        help="Maximum number of artifact query results.",
+    ),
     db_path: str = typer.Option(
         "provenance.duckdb", help="Path to the Consist DuckDB database."
     ),
 ) -> None:
-    """Displays the input and output artifacts for a specific run."""
+    """Display run artifacts or query artifacts by indexed facet parameters."""
     tracker = get_tracker(db_path)
-    run = tracker.get_run(run_id)
-    if not run:
-        console.print(f"[red]Run with ID '{run_id}' not found.[/red]")
+    query_mode = bool(param or key_prefix or family_prefix)
+    if not query_mode:
+        if not run_id:
+            console.print(
+                "[red]Provide a run_id or use query options like --param.[/red]"
+            )
+            raise typer.Exit(1)
+        run = tracker.get_run(run_id)
+        if not run:
+            console.print(f"[red]Run with ID '{run_id}' not found.[/red]")
+            raise typer.Exit(1)
+        _render_artifacts_table(tracker, run_id)
+        return
+
+    if run_id is not None:
+        console.print(
+            "[red]run_id cannot be combined with --param/--namespace/--key-prefix/"
+            "--family-prefix.[/red]"
+        )
         raise typer.Exit(1)
 
-    _render_artifacts_table(tracker, run_id)
+    try:
+        results = queries.find_artifacts_by_params(
+            tracker,
+            params=param or [],
+            namespace=namespace,
+            key_prefix=key_prefix,
+            artifact_family_prefix=family_prefix,
+            limit=limit,
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    if not results:
+        console.print("[yellow]No artifacts matched the provided filters.[/yellow]")
+        raise typer.Exit()
+    _render_artifact_query_table(results)
 
 
 def _build_lineage_tree(

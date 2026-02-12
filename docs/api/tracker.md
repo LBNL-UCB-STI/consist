@@ -52,10 +52,13 @@
         - get_run_config_kv
         - get_config_values
         - get_config_value
+        - get_registered_schema
+        - registered_schemas
         - find_runs_by_facet_kv
         # Views and matrices
         - view
         - create_view
+        - create_grouped_view
         - load_matrix
         - export_schema_sqlmodel
         - netcdf_metadata

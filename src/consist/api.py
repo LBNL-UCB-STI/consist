@@ -57,6 +57,8 @@ from consist.types import ArtifactRef, DriverType
 if TYPE_CHECKING:
     import geopandas
     import xarray
+    from consist.core.config_canonicalization import ConfigPlan
+    from consist.core.step_context import StepContext
 
 # Import loaders for specific formats
 xr: Optional[ModuleType]
@@ -281,17 +283,64 @@ def set_current_tracker(tracker: Optional["Tracker"]) -> Optional["Tracker"]:
 
 def define_step(
     *,
+    model: Optional[str] = None,
+    name_template: Optional[str] = None,
     outputs: Optional[list[str]] = None,
+    schema_outputs: Optional[list[str]] = None,
+    output_paths: Optional[Mapping[str, Any]] = None,
+    inputs: Optional[Union[Mapping[str, Any], Iterable[Any]]] = None,
+    input_keys: Optional[Union[Iterable[str], str]] = None,
+    optional_input_keys: Optional[Union[Iterable[str], str]] = None,
+    config: Optional[Dict[str, Any]] = None,
+    config_plan: Optional[
+        Union["ConfigPlan", Callable[["StepContext"], "ConfigPlan"]]
+    ] = None,
+    facet: Optional[Any] = None,
+    facet_index: Optional[bool] = None,
+    cache_mode: Optional[str] = None,
+    cache_hydration: Optional[str] = None,
+    cache_version: Optional[int] = None,
+    validate_cached_outputs: Optional[str] = None,
+    load_inputs: Optional[bool] = None,
+    hash_inputs: Optional[Any] = None,
     tags: Optional[list[str]] = None,
+    facet_from: Optional[list[str]] = None,
+    facet_schema_version: Optional[Union[str, int]] = None,
     description: Optional[str] = None,
+    **extra: Any,
 ):
     """
     Attach metadata to a function without changing execution behavior.
 
     This decorator lets you attach defaults such as ``outputs`` or ``tags`` to a
     function. ``Tracker.run`` and ``ScenarioContext.run`` read this metadata.
+    Callable values are resolved at runtime with a StepContext.
     """
-    return define_step_decorator(outputs=outputs, tags=tags, description=description)
+    return define_step_decorator(
+        model=model,
+        name_template=name_template,
+        outputs=outputs,
+        schema_outputs=schema_outputs,
+        output_paths=output_paths,
+        inputs=inputs,
+        input_keys=input_keys,
+        optional_input_keys=optional_input_keys,
+        config=config,
+        config_plan=config_plan,
+        facet=facet,
+        facet_index=facet_index,
+        cache_mode=cache_mode,
+        cache_hydration=cache_hydration,
+        cache_version=cache_version,
+        validate_cached_outputs=validate_cached_outputs,
+        load_inputs=load_inputs,
+        hash_inputs=hash_inputs,
+        tags=tags,
+        facet_from=facet_from,
+        facet_schema_version=facet_schema_version,
+        description=description,
+        **extra,
+    )
 
 
 def require_runtime_kwargs(*names: str) -> Callable[[Callable[..., Any]], Callable]:
@@ -645,6 +694,21 @@ def get_artifact(
     )
 
 
+def register_artifact_facet_parser(
+    prefix: str,
+    parser_fn: Callable[[str], Optional[Any]],
+    *,
+    tracker: Optional["Tracker"] = None,
+) -> None:
+    """
+    Register a key-prefix parser for deriving artifact facets at log time.
+
+    The parser is invoked when logging an artifact without an explicit ``facet=``.
+    """
+    tr = _resolve_tracker(tracker)
+    tr.register_artifact_facet_parser(prefix, parser_fn)
+
+
 # --- Proxy Functions ---
 
 
@@ -659,6 +723,9 @@ def log_artifact(
     validate_content_hash: bool = False,
     reuse_if_unchanged: bool = False,
     reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
+    facet: Optional[Any] = None,
+    facet_schema_version: Optional[Union[str, int]] = None,
+    facet_index: bool = False,
     *,
     enabled: bool = True,
     **meta,
@@ -699,6 +766,12 @@ def log_artifact(
     reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
         Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
         while "any_uri" allows reuse across different URIs with the same hash.
+    facet : Optional[Any], optional
+        Optional artifact-level facet payload (dict or Pydantic model).
+    facet_schema_version : Optional[Union[str, int]], optional
+        Optional schema version for artifact facet compatibility.
+    facet_index : bool, default False
+        If True, flatten scalar facet values for fast artifact querying.
     enabled : bool, default True
         If False, returns a noop artifact object without requiring an active run.
     **meta : Any
@@ -728,6 +801,9 @@ def log_artifact(
             validate_content_hash=validate_content_hash,
             reuse_if_unchanged=reuse_if_unchanged,
             reuse_scope=reuse_scope,
+            facet=facet,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
             **meta,
         )
     return get_active_tracker().log_artifact(
@@ -741,6 +817,9 @@ def log_artifact(
         validate_content_hash=validate_content_hash,
         reuse_if_unchanged=reuse_if_unchanged,
         reuse_scope=reuse_scope,
+        facet=facet,
+        facet_schema_version=facet_schema_version,
+        facet_index=facet_index,
         **meta,
     )
 
@@ -751,6 +830,9 @@ def log_artifacts(
     direction: str = "output",
     driver: Optional[str] = None,
     metadata_by_key: Optional[Mapping[str, Dict[str, Any]]] = None,
+    facets_by_key: Optional[Mapping[str, Any]] = None,
+    facet_schema_versions_by_key: Optional[Mapping[str, Union[str, int]]] = None,
+    facet_index: bool = False,
     reuse_if_unchanged: bool = False,
     reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
     enabled: bool = True,
@@ -773,6 +855,17 @@ def log_artifacts(
         Explicitly specify driver for all artifacts. If None, inferred from file extension.
     metadata_by_key : Optional[Mapping[str, Dict[str, Any]]], optional
         Per-key metadata overrides applied on top of shared metadata.
+    facets_by_key : Optional[Mapping[str, Any]], optional
+        Per-key artifact facet payloads.
+    facet_schema_versions_by_key : Optional[Mapping[str, Union[str, int]]], optional
+        Optional per-key schema versions for artifact facets.
+    facet_index : bool, default False
+        Whether to index scalar artifact facet fields in ``artifact_kv``.
+    reuse_if_unchanged : bool, default False
+        If True, reuse an existing logged artifact when the input path has not changed.
+    reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
+        Control reuse lookup scope. "same_uri" only reuses when the URI matches,
+        while "any_uri" allows reuse across different URIs with the same content hash.
     enabled : bool, default True
         If False, returns noop artifact objects without requiring an active run.
     **shared_meta : Any
@@ -833,11 +926,20 @@ def log_artifacts(
         for key, ref in outputs.items():
             meta = dict(shared_meta)
             meta.update(per_key_meta.get(key, {}))
+            facet = facets_by_key.get(key) if facets_by_key else None
+            facet_schema_version = (
+                facet_schema_versions_by_key.get(key)
+                if facet_schema_versions_by_key
+                else None
+            )
             artifacts[str(key)] = ctx.log_artifact(
                 ref,
                 key=str(key),
                 direction=direction,
                 driver=driver,
+                facet=facet,
+                facet_schema_version=facet_schema_version,
+                facet_index=facet_index,
                 reuse_if_unchanged=reuse_if_unchanged,
                 reuse_scope=reuse_scope,
                 **meta,
@@ -848,6 +950,9 @@ def log_artifacts(
         direction=direction,
         driver=driver,
         metadata_by_key=metadata_by_key,
+        facets_by_key=facets_by_key,
+        facet_schema_versions_by_key=facet_schema_versions_by_key,
+        facet_index=facet_index,
         reuse_if_unchanged=reuse_if_unchanged,
         reuse_scope=reuse_scope,
         **shared_meta,
@@ -863,6 +968,9 @@ def log_input(
     content_hash: Optional[str] = None,
     force_hash_override: bool = False,
     validate_content_hash: bool = False,
+    facet: Optional[Any] = None,
+    facet_schema_version: Optional[Union[str, int]] = None,
+    facet_index: bool = False,
     enabled: bool = True,
     **meta,
 ) -> ArtifactLike:
@@ -890,6 +998,12 @@ def log_input(
         Overwrite existing hash in the database if different from `content_hash`.
     validate_content_hash : bool, default False
         Re-hash the file on disk to ensure it matches the provided `content_hash`.
+    facet : Optional[Any], optional
+        Optional artifact-level facet payload.
+    facet_schema_version : Optional[Union[str, int]], optional
+        Optional facet schema version.
+    facet_index : bool, default False
+        Whether to index scalar facet fields for querying.
     enabled : bool, default True
         If False, returns a dummy artifact object for disconnected execution.
     **meta : Any
@@ -909,6 +1023,9 @@ def log_input(
         content_hash=content_hash,
         force_hash_override=force_hash_override,
         validate_content_hash=validate_content_hash,
+        facet=facet,
+        facet_schema_version=facet_schema_version,
+        facet_index=facet_index,
         enabled=enabled,
         **meta,
     )
@@ -925,6 +1042,9 @@ def log_output(
     validate_content_hash: bool = False,
     reuse_if_unchanged: bool = False,
     reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
+    facet: Optional[Any] = None,
+    facet_schema_version: Optional[Union[str, int]] = None,
+    facet_index: bool = False,
     enabled: bool = True,
     **meta,
 ) -> ArtifactLike:
@@ -953,6 +1073,12 @@ def log_output(
         reuse that historical artifact record.
     reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
         Whether to restrict reuse to the exact same file path or any path with the same hash.
+    facet : Optional[Any], optional
+        Optional artifact-level facet payload.
+    facet_schema_version : Optional[Union[str, int]], optional
+        Optional facet schema version.
+    facet_index : bool, default False
+        Whether to index scalar facet fields for querying.
     enabled : bool, default True
         If False, returns a dummy artifact object.
     **meta : Any
@@ -974,6 +1100,9 @@ def log_output(
         validate_content_hash=validate_content_hash,
         reuse_if_unchanged=reuse_if_unchanged,
         reuse_scope=reuse_scope,
+        facet=facet,
+        facet_schema_version=facet_schema_version,
+        facet_index=facet_index,
         enabled=enabled,
         **meta,
     )
@@ -1773,9 +1902,6 @@ def load(
         If `None`, the function attempts to use the active global tracker context.
         Explicitly passing a `tracker` is recommended for clarity or when
         no global context is available.
-    **kwargs : Any
-        Additional keyword arguments to pass to the underlying data loader function
-        (e.g., `pd.read_parquet`, `pd.read_csv`, `xr.open_zarr`, `pd.read_sql`).
     db_fallback : str, default "inputs-only"
         Controls when the loader is allowed to fall back to DuckDB ("Ghost Mode") when
         the file is missing but the artifact is marked as ingested.
@@ -1785,6 +1911,9 @@ def load(
         - "always": allow DB fallback whenever `artifact.meta["is_ingested"]` is true and
           a tracker with a DB connection is available.
         - "never": disable DB fallback entirely.
+    **kwargs : Any
+        Additional keyword arguments to pass to the underlying data loader function
+        (e.g., `pd.read_parquet`, `pd.read_csv`, `xr.open_zarr`, `pd.read_sql`).
 
     Returns
     -------

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import logging
 import os
 import time
+from types import MappingProxyType
 import uuid
 import warnings
 from pathlib import Path
@@ -34,6 +35,7 @@ from pydantic import BaseModel
 from sqlmodel import SQLModel, Session
 
 from consist.core.artifact_schemas import ArtifactSchemaManager
+from consist.core.artifact_facets import ArtifactFacetManager
 from consist.core.artifacts import ArtifactManager
 from consist.core.cache import (
     ActiveRunCacheOptions,
@@ -72,6 +74,7 @@ from consist.core.openmatrix_views import OpenMatrixMetadataView
 from consist.core.spatial_views import SpatialMetadataView
 from consist.core.queries import RunQueryService
 from consist.core.settings import ConsistSettings
+from consist.core.metadata_resolver import MetadataResolver
 from consist.core.validation import (
     validate_config_structure,
     validate_run_meta,
@@ -92,6 +95,7 @@ from consist.types import (
 
 if TYPE_CHECKING:
     from consist.core.coupler import Coupler
+    from consist.core.step_context import StepContext
 
 UTC = timezone.utc
 
@@ -243,6 +247,7 @@ class Tracker:
         mounts: Optional[Dict[str, str]] = None,
         project_root: str = ".",
         hashing_strategy: str = "full",
+        cache_epoch: int = 1,
         schemas: Optional[List[Type[SQLModel]]] = None,
         access_mode: AccessMode = "standard",
         run_subdir_fn: Optional[Callable[[Run], str]] = None,
@@ -279,9 +284,14 @@ class Tracker:
         hashing_strategy : str, default "full"
             The method used to compute artifact identity. 'full' performs a
             complete SHA256 content hash, while 'fast' leverages filesystem metadata.
+        cache_epoch : int, default 1
+            Global cache version for this tracker. Increment to invalidate all
+            previously cached runs without modifying code or config.
         schemas : Optional[List[Type[SQLModel]]], default None
             SQLModel definitions to be automatically registered as hybrid views
-            within the DuckDB instance for immediate querying.
+            within the DuckDB instance for immediate querying. These schemas are
+            also registered by class name for runtime lookup via
+            ``get_registered_schema(...)``.
         access_mode : AccessMode, default "standard"
             Policy for database interactions. 'standard' allows full writes;
             'analysis' permits ingestion but prevents new run recording;
@@ -307,6 +317,7 @@ class Tracker:
 
         self.access_mode = access_mode
         self._run_subdir_fn = run_subdir_fn
+        self._cache_epoch = cache_epoch
         if allow_external_paths is None:
             allow_external_paths = _env_bool("CONSIST_ALLOW_EXTERNAL_PATHS", False)
         self.allow_external_paths = bool(allow_external_paths)
@@ -324,6 +335,7 @@ class Tracker:
 
         self.artifacts = ArtifactManager(self)
         self.config_facets = ConfigFacetManager(db=self.db, identity=self.identity)
+        self.artifact_facets = ArtifactFacetManager(db=self.db, identity=self.identity)
         self.artifact_schemas = ArtifactSchemaManager(self)
         self.queries = RunQueryService(self)
         self.lineage = LineageService(self)
@@ -365,6 +377,9 @@ class Tracker:
         self._run_artifacts_cache_max_entries: int = 1024
 
         self._runs_by_id: Dict[str, Run] = {}
+        self._artifact_facet_parsers: list[
+            tuple[str, Callable[[str], Optional[FacetLike]]]
+        ] = []
         openlineage_emitter = None
         if openlineage_enabled:
             from consist.core.openlineage import OpenLineageEmitter, OpenLineageOptions
@@ -421,6 +436,85 @@ class Tracker:
             The SQLAlchemy engine if a database is configured, otherwise ``None``.
         """
         return self.db.engine if self.db else None
+
+    @property
+    def registered_schemas(self) -> Mapping[str, Type[SQLModel]]:
+        """
+        Return the SQLModel schemas registered on this tracker.
+
+        Registered schemas are the SQLModel classes passed via
+        ``Tracker(..., schemas=[...])`` during initialization. They are stored by
+        class name (for example, ``"LinkstatsRow"``) and used by lookup-based
+        workflows such as schema-aware ingestion.
+
+        Returns
+        -------
+        Mapping[str, Type[SQLModel]]
+            Read-only mapping from schema class name to the corresponding SQLModel
+            class object.
+
+        Notes
+        -----
+        The returned mapping is immutable from the caller perspective.
+
+        Examples
+        --------
+        ```python
+        tracker = Tracker(..., schemas=[MySchema])
+        assert "MySchema" in tracker.registered_schemas
+        ```
+        """
+        return cast(
+            Mapping[str, Type[SQLModel]], MappingProxyType(self._registered_schemas)
+        )
+
+    def get_registered_schema(
+        self,
+        schema_name: str,
+        default: Optional[Type[SQLModel]] = None,
+    ) -> Optional[Type[SQLModel]]:
+        """
+        Resolve a registered SQLModel schema by its class name.
+
+        This is an ergonomic lookup helper for workflows that persist or exchange
+        schema names (for example ``artifact.meta["schema_name"]``) and then need
+        the corresponding SQLModel class at runtime.
+
+        Parameters
+        ----------
+        schema_name : str
+            Registered schema class name to resolve. Matching is exact and
+            case-sensitive.
+        default : Optional[Type[SQLModel]], optional
+            Value returned when ``schema_name`` is not found in the registry.
+            Defaults to ``None``.
+
+        Returns
+        -------
+        Optional[Type[SQLModel]]
+            The registered SQLModel class when found, otherwise ``default``.
+
+        Raises
+        ------
+        TypeError
+            If ``schema_name`` is not a string.
+        ValueError
+            If ``schema_name`` is an empty or whitespace-only string.
+
+        Examples
+        --------
+        ```python
+        tracker = Tracker(..., schemas=[MySchema])
+        schema_cls = tracker.get_registered_schema("MySchema")
+        missing = tracker.get_registered_schema("UnknownSchema")
+        ```
+        """
+        if not isinstance(schema_name, str):
+            raise TypeError("schema_name must be a string.")
+        normalized_schema_name = schema_name.strip()
+        if not normalized_schema_name:
+            raise ValueError("schema_name must be a non-empty string.")
+        return self._registered_schemas.get(normalized_schema_name, default)
 
     @staticmethod
     def _default_run_subdir(run: Run) -> str:
@@ -709,6 +803,43 @@ class Tracker:
             return dict(obj)
         raise ValueError(f"Tracker {label} must be a mapping or Pydantic model.")
 
+    def register_artifact_facet_parser(
+        self, prefix: str, parser_fn: Callable[[str], Optional[FacetLike]]
+    ) -> None:
+        """
+        Register a key-prefix parser for deriving artifact facets.
+
+        Parsers are evaluated in descending prefix-length order when
+        ``log_artifact(..., facet=None)`` is used.
+        """
+        if not isinstance(prefix, str) or not prefix:
+            raise ValueError("prefix must be a non-empty string.")
+        self._artifact_facet_parsers = [
+            (p, fn) for p, fn in self._artifact_facet_parsers if p != prefix
+        ]
+        self._artifact_facet_parsers.append((prefix, parser_fn))
+        self._artifact_facet_parsers.sort(key=lambda row: len(row[0]), reverse=True)
+
+    def _parse_artifact_facet_from_registered_parsers(
+        self, key: str
+    ) -> Optional[FacetLike]:
+        for prefix, parser_fn in self._artifact_facet_parsers:
+            if not key.startswith(prefix):
+                continue
+            try:
+                parsed = parser_fn(key)
+            except Exception as exc:
+                logging.warning(
+                    "[Consist] Artifact facet parser failed for key=%s prefix=%s: %s",
+                    key,
+                    prefix,
+                    exc,
+                )
+                continue
+            if parsed is not None:
+                return parsed
+        return None
+
     def _allow_external_paths_for_run(self, run: Optional[Run]) -> bool:
         if run and isinstance(run.meta, dict) and "allow_external_paths" in run.meta:
             return bool(run.meta["allow_external_paths"])
@@ -892,6 +1023,8 @@ class Tracker:
         # should not silently cache-hit a different year).
         year = kwargs.pop("year", None)
         iteration = kwargs.pop("iteration", None)
+        cache_epoch = kwargs.pop("cache_epoch", None)
+        cache_version = kwargs.pop("cache_version", None)
         parent_run_id = kwargs.pop("parent_run_id", None)
 
         if artifact_dir is not None:
@@ -927,11 +1060,20 @@ class Tracker:
         # Important: keep the stored config snapshot as user-provided config, but include
         # selected Run fields in the identity hash to avoid accidental cache hits.
         config_hash = self.identity.compute_run_config_hash(
-            config=config_dict, model=model, year=year, iteration=iteration
+            config=config_dict,
+            model=model,
+            year=year,
+            iteration=iteration,
+            cache_epoch=cache_epoch,
+            cache_version=cache_version,
         )
         git_hash = self.identity.get_code_version()
 
         kwargs["_physical_run_dir"] = str(self.run_dir)
+        if cache_epoch is not None:
+            kwargs["cache_epoch"] = cache_epoch
+        if cache_version is not None:
+            kwargs["cache_version"] = cache_version
         if kwargs:
             validate_run_meta(kwargs)
 
@@ -1210,14 +1352,18 @@ class Tracker:
         hash_inputs: HashInputs = None,
         year: Optional[int] = None,
         iteration: Optional[int] = None,
+        phase: Optional[str] = None,
+        stage: Optional[str] = None,
         parent_run_id: Optional[str] = None,
         outputs: Optional[List[str]] = None,
         output_paths: Optional[Mapping[str, ArtifactRef]] = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
-        cache_mode: str = "reuse",
+        cache_mode: Optional[str] = None,
         cache_hydration: Optional[str] = None,
-        validate_cached_outputs: str = "lazy",
+        cache_version: Optional[int] = None,
+        cache_epoch: Optional[int] = None,
+        validate_cached_outputs: Optional[str] = None,
         load_inputs: Optional[bool] = None,
         executor: str = "python",
         container: Optional[Mapping[str, Any]] = None,
@@ -1389,33 +1535,79 @@ class Tracker:
             if fn is None:
                 raise ValueError("Tracker.run requires a callable fn.")
 
-        if executor == "container":
-            resolved_name = name or getattr(fn, "__name__", None)
-            if resolved_name is None:
-                raise ValueError("executor='container' requires a run name.")
-        else:
-            resolved_name = name or getattr(fn, "__name__", None)
-            if resolved_name is None:
-                raise ValueError("Tracker.run requires a run name.")
-        resolved_model = model or resolved_name
+        resolver = MetadataResolver(
+            default_name_template=None,
+            allow_template=executor == "python",
+            apply_step_defaults=executor == "python",
+        )
+        resolved = resolver.resolve(
+            fn=fn,
+            name=name,
+            model=model,
+            description=description,
+            config=config,
+            config_plan=config_plan,
+            inputs=inputs,
+            input_keys=input_keys,
+            optional_input_keys=optional_input_keys,
+            tags=tags,
+            facet=facet,
+            facet_from=facet_from,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
+            hash_inputs=hash_inputs,
+            year=year,
+            iteration=iteration,
+            phase=phase,
+            stage=stage,
+            consist_settings=self.settings,
+            consist_workspace=self.run_dir,
+            consist_state=self.current_consist,
+            runtime_kwargs=runtime_kwargs,
+            outputs=outputs,
+            output_paths=output_paths,
+            cache_mode=cache_mode,
+            cache_hydration=cache_hydration,
+            cache_version=cache_version,
+            validate_cached_outputs=validate_cached_outputs,
+            load_inputs=load_inputs,
+            missing_name_error="Tracker.run requires a run name.",
+        )
 
-        if executor == "python":
-            step_def = getattr(fn, "__consist_step__", None)
-            if step_def is not None:
-                if outputs is None and step_def.outputs is not None:
-                    outputs = list(step_def.outputs)
-                if tags is None and step_def.tags is not None:
-                    tags = list(step_def.tags)
-                if description is None and step_def.description is not None:
-                    description = step_def.description
+        resolved_name = resolved.name
+        resolved_model = resolved.model
+        description = resolved.description
+        config = resolved.config
+        config_plan = resolved.config_plan
+        tags = resolved.tags
+        facet = resolved.facet
+        facet_index = resolved.facet_index
+        outputs = resolved.outputs
+        output_paths = resolved.output_paths
+        inputs = resolved.inputs
+        input_keys = resolved.input_keys
+        optional_input_keys = resolved.optional_input_keys
+        cache_mode = resolved.cache_mode
+        cache_hydration = resolved.cache_hydration
+        cache_version = resolved.cache_version
+        validate_cached_outputs = resolved.validate_cached_outputs
+        load_inputs = resolved.load_inputs
+        hash_inputs = resolved.hash_inputs
+        facet_from = resolved.facet_from
+        facet_schema_version = resolved.facet_schema_version
 
-            if load_inputs is None:
-                load_inputs = isinstance(inputs, Mapping)
-            if load_inputs and inputs is not None and not isinstance(inputs, Mapping):
-                raise ValueError("load_inputs=True requires inputs to be a dict.")
+        if cache_mode is None:
+            cache_mode = "reuse"
+        if validate_cached_outputs is None:
+            validate_cached_outputs = "lazy"
 
-            if cache_hydration is None and load_inputs:
-                cache_hydration = "inputs-missing"
+        if load_inputs is None:
+            load_inputs = isinstance(inputs, Mapping)
+        if load_inputs and inputs is not None and not isinstance(inputs, Mapping):
+            raise ValueError("load_inputs=True requires inputs to be a dict.")
+
+        if cache_hydration is None and load_inputs:
+            cache_hydration = "inputs-missing"
 
         if input_keys is not None or optional_input_keys is not None:
             warnings.warn(
@@ -1480,6 +1672,8 @@ class Tracker:
             )
             cache_mode = "overwrite"
 
+        resolved_cache_epoch = self._cache_epoch if cache_epoch is None else cache_epoch
+
         config_for_run = config
         if config_plan is not None:
             if config is None:
@@ -1514,7 +1708,14 @@ class Tracker:
             "iteration": iteration,
             "parent_run_id": parent_run_id,
             "validate_cached_outputs": validate_cached_outputs,
+            "cache_epoch": resolved_cache_epoch,
         }
+        if cache_version is not None:
+            start_kwargs["cache_version"] = cache_version
+        if phase is not None:
+            start_kwargs["phase"] = phase
+        if stage is not None:
+            start_kwargs["stage"] = stage
         if facet_schema_version is not None:
             start_kwargs["facet_schema_version"] = facet_schema_version
         if facet_index is not None:
@@ -2143,6 +2344,7 @@ class Tracker:
             "iteration": iteration,
             "parent_run_id": parent_run_id,
             "validate_cached_outputs": validate_cached_outputs,
+            "cache_epoch": self._cache_epoch,
         }
         if facet_schema_version is not None:
             start_kwargs["facet_schema_version"] = facet_schema_version
@@ -2215,6 +2417,8 @@ class Tracker:
         tags: Optional[List[str]] = None,
         model: str = "scenario",
         step_cache_hydration: Optional[str] = None,
+        name_template: Optional[str] = None,
+        cache_epoch: Optional[int] = None,
         coupler: Optional["Coupler"] = None,
         require_outputs: Optional[Iterable[str]] = None,
         **kwargs: Any,
@@ -2243,6 +2447,11 @@ class Tracker:
         step_cache_hydration : Optional[str], optional
             Default cache hydration policy for all scenario steps unless overridden
             in a specific `scenario.trace(...)` or `scenario.run(...)`.
+        name_template : Optional[str], optional
+            Optional step name template applied when scenario.run() is called without
+            an explicit name and no step-level template is provided.
+        cache_epoch : Optional[int], optional
+            Scenario-level cache epoch override for all steps in this scenario.
         coupler : Optional[Coupler], optional
             Optional Coupler instance to use for the scenario.
         require_outputs : Optional[Iterable[str]], optional
@@ -2271,6 +2480,8 @@ class Tracker:
             tags,
             model,
             step_cache_hydration=step_cache_hydration,
+            name_template=name_template,
+            cache_epoch=cache_epoch,
             coupler=coupler,
             require_outputs=require_outputs,
             **kwargs,
@@ -2588,6 +2799,9 @@ class Tracker:
         reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
         profile_file_schema: bool | Literal["if_changed"] | None = None,
         file_schema_sample_rows: Optional[int] = None,
+        facet: Optional[FacetLike] = None,
+        facet_schema_version: Optional[Union[str, int]] = None,
+        facet_index: bool = False,
         **meta: Any,
     ) -> Artifact:
         """
@@ -2646,6 +2860,12 @@ class Tracker:
             Use "if_changed" to skip profiling when a matching content hash already has a schema.
         file_schema_sample_rows : Optional[int], default None
             Maximum rows to sample when profiling file-based schemas.
+        facet : Optional[FacetLike], optional
+            Optional artifact-level facet payload (dict or Pydantic model).
+        facet_schema_version : Optional[Union[str, int]], optional
+            Optional schema version for artifact facet compatibility.
+        facet_index : bool, default False
+            If True, flatten scalar facet fields into ``artifact_kv`` for fast queries.
         **meta : Any
             Additional key-value pairs to store in the artifact's flexible `meta` field.
 
@@ -2707,6 +2927,17 @@ class Tracker:
             **meta,
         )
 
+        resolved_artifact_facet: Optional[Dict[str, Any]] = None
+        artifact_facet_payload: Optional[FacetLike] = facet
+        if artifact_facet_payload is None and artifact_obj.key:
+            artifact_facet_payload = self._parse_artifact_facet_from_registered_parsers(
+                artifact_obj.key
+            )
+        if artifact_facet_payload is not None:
+            resolved_artifact_facet = self.artifact_facets.resolve_facet_dict(
+                artifact_facet_payload
+            )
+
         # Artifact contract clarification:
         # - If the caller passes an existing Artifact reference, `artifact.run_id` is treated as the
         #   producing run id (and is not overwritten), but we warn when the caller attempts to log it
@@ -2750,6 +2981,23 @@ class Tracker:
 
         self._flush_json()
         self._sync_artifact_to_db(artifact_obj, direction)
+
+        if resolved_artifact_facet is not None:
+            schema_version = facet_schema_version
+            if schema_version is None and isinstance(
+                artifact_facet_payload, HasFacetSchemaVersion
+            ):
+                schema_version = artifact_facet_payload.facet_schema_version
+            self.artifact_facets.persist_facet(
+                artifact=artifact_obj,
+                namespace=self.current_consist.run.model_name,
+                facet_dict=resolved_artifact_facet,
+                schema_name=self.artifact_facets.infer_schema_name(
+                    artifact_facet_payload
+                ),
+                schema_version=schema_version,
+                index_kv=facet_index,
+            )
 
         profile_mode = (
             self.settings.schema_profile_enabled
@@ -2910,6 +3158,9 @@ class Tracker:
         direction: str = "output",
         driver: Optional[str] = None,
         metadata_by_key: Optional[Mapping[str, Dict[str, Any]]] = None,
+        facets_by_key: Optional[Mapping[str, FacetLike]] = None,
+        facet_schema_versions_by_key: Optional[Mapping[str, Union[str, int]]] = None,
+        facet_index: bool = False,
         reuse_if_unchanged: bool = False,
         reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
         **shared_meta: Any,
@@ -2932,6 +3183,12 @@ class Tracker:
             from each file's extension individually.
         metadata_by_key : Optional[Mapping[str, Dict[str, Any]]], optional
             Per-key metadata overrides applied on top of shared metadata.
+        facets_by_key : Optional[Mapping[str, FacetLike]], optional
+            Per-key artifact facet payloads.
+        facet_schema_versions_by_key : Optional[Mapping[str, Union[str, int]]], optional
+            Optional per-key schema versions for artifact facet payloads.
+        facet_index : bool, default False
+            Whether to index scalar artifact facet values in ``artifact_kv``.
         **shared_meta : Any
             Metadata key-value pairs to apply to ALL logged artifacts.
             Useful for tagging a batch of related files.
@@ -2974,6 +3231,21 @@ class Tracker:
                 raise ValueError(
                     f"metadata_by_key contains keys not present in outputs: {extras}"
                 )
+        if facets_by_key:
+            extra_keys = set(facets_by_key).difference(outputs)
+            if extra_keys:
+                extras = ", ".join(sorted(str(key) for key in extra_keys))
+                raise ValueError(
+                    f"facets_by_key contains keys not present in outputs: {extras}"
+                )
+        if facet_schema_versions_by_key:
+            extra_keys = set(facet_schema_versions_by_key).difference(outputs)
+            if extra_keys:
+                extras = ", ".join(sorted(str(key) for key in extra_keys))
+                raise ValueError(
+                    "facet_schema_versions_by_key contains keys not present in "
+                    f"outputs: {extras}"
+                )
 
         keys = list(outputs.keys())
         for key in keys:
@@ -2989,11 +3261,20 @@ class Tracker:
             meta = dict(base_meta)
             if metadata_by_key and key in metadata_by_key:
                 meta.update(metadata_by_key[key])
+            facet = facets_by_key.get(key) if facets_by_key else None
+            facet_schema_version = (
+                facet_schema_versions_by_key.get(key)
+                if facet_schema_versions_by_key
+                else None
+            )
             logged[key] = self.log_artifact(
                 value,
                 key=key,
                 direction=direction,
                 driver=driver,
+                facet=facet,
+                facet_schema_version=facet_schema_version,
+                facet_index=facet_index,
                 reuse_if_unchanged=reuse_if_unchanged,
                 reuse_scope=reuse_scope,
                 **meta,
@@ -3007,6 +3288,9 @@ class Tracker:
         content_hash: Optional[str] = None,
         force_hash_override: bool = False,
         validate_content_hash: bool = False,
+        facet: Optional[FacetLike] = None,
+        facet_schema_version: Optional[Union[str, int]] = None,
+        facet_index: bool = False,
         **meta: Any,
     ) -> Artifact:
         """
@@ -3026,6 +3310,12 @@ class Tracker:
             `content_hash`. By default, mismatched overrides are ignored with a warning.
         validate_content_hash : bool, default False
             If True, verify `content_hash` against the on-disk data and raise on mismatch.
+        facet : Optional[FacetLike], optional
+            Optional artifact-level facet payload for this input artifact.
+        facet_schema_version : Optional[Union[str, int]], optional
+            Optional facet schema version.
+        facet_index : bool, default False
+            Whether to index scalar facet fields for querying.
         **meta : Any
             Additional key-value pairs to store in the artifact's `meta` field.
 
@@ -3041,6 +3331,9 @@ class Tracker:
             content_hash=content_hash,
             force_hash_override=force_hash_override,
             validate_content_hash=validate_content_hash,
+            facet=facet,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
             **meta,
         )
 
@@ -3053,6 +3346,9 @@ class Tracker:
         validate_content_hash: bool = False,
         reuse_if_unchanged: bool = False,
         reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
+        facet: Optional[FacetLike] = None,
+        facet_schema_version: Optional[Union[str, int]] = None,
+        facet_index: bool = False,
         **meta: Any,
     ) -> Artifact:
         """
@@ -3072,6 +3368,12 @@ class Tracker:
             `content_hash`. By default, mismatched overrides are ignored with a warning.
         validate_content_hash : bool, default False
             If True, verify `content_hash` against the on-disk data and raise on mismatch.
+        facet : Optional[FacetLike], optional
+            Optional artifact-level facet payload for this output artifact.
+        facet_schema_version : Optional[Union[str, int]], optional
+            Optional facet schema version.
+        facet_index : bool, default False
+            Whether to index scalar facet fields for querying.
         **meta : Any
             Additional key-value pairs to store in the artifact's `meta` field.
 
@@ -3089,6 +3391,9 @@ class Tracker:
             validate_content_hash=validate_content_hash,
             reuse_if_unchanged=reuse_if_unchanged,
             reuse_scope=reuse_scope,
+            facet=facet,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
             **meta,
         )
 
@@ -3485,8 +3790,11 @@ class Tracker:
                 if hasattr(artifact, "meta") and isinstance(artifact.meta, dict)
                 else None
             )
-            if schema_name and schema_name in self._registered_schemas:
-                resolved_schema = self._registered_schemas[schema_name]
+            if isinstance(schema_name, str):
+                normalized_schema_name = schema_name.strip()
+                if normalized_schema_name:
+                    resolved_schema = self.get_registered_schema(normalized_schema_name)
+            if resolved_schema is not None:
                 logging.debug(
                     "[Consist] Resolved schema '%s' for artifact=%s from registered schemas",
                     schema_name,
@@ -3747,6 +4055,99 @@ class Tracker:
             return replace(plan, diagnostics=diagnostics)
         return plan
 
+    def prepare_config_resolver(
+        self,
+        adapter: ConfigAdapter,
+        *,
+        config_dirs: Optional[Iterable[Union[str, Path]]] = None,
+        config_dirs_from: Optional[
+            Union[
+                str,
+                Callable[["StepContext"], Iterable[Union[str, Path]]],
+            ]
+        ] = None,
+        strict: bool = False,
+        options: Optional[ConfigAdapterOptions] = None,
+        validate_only: bool = False,
+        facet_spec: Optional[Dict[str, Any]] = None,
+        facet_schema_name: Optional[str] = None,
+        facet_schema_version: Optional[Union[str, int]] = None,
+        facet_index: Optional[bool] = None,
+    ) -> Callable[["StepContext"], ConfigPlan]:
+        """
+        Build a StepContext resolver for use with `@define_step(config_plan=...)`.
+
+        Exactly one config-directory source must be provided:
+        - `config_dirs`: static iterable of directories.
+        - `config_dirs_from`: runtime source (dot-path string or callable).
+
+        The returned callable is metadata-safe (pre-run) and delegates to
+        `prepare_config(...)`.
+        """
+        if (config_dirs is None) == (config_dirs_from is None):
+            raise ValueError(
+                "prepare_config_resolver requires exactly one of "
+                "config_dirs= or config_dirs_from=."
+            )
+
+        static_dirs = tuple(config_dirs) if config_dirs is not None else None
+
+        def _resolve_runtime_path(ctx: "StepContext", path: str) -> object:
+            parts = [part for part in path.split(".") if part]
+            if not parts:
+                raise ValueError(
+                    "config_dirs_from path must be non-empty (e.g., "
+                    "'settings.config_dirs')."
+                )
+            value: object = ctx.require_runtime(parts[0])
+            for part in parts[1:]:
+                if isinstance(value, MappingABC):
+                    mapping_value = cast(Mapping[str, object], value)
+                    if part not in mapping_value:
+                        raise ValueError(
+                            f"Missing runtime mapping key {part!r} while resolving "
+                            f"config_dirs_from={path!r}."
+                        )
+                    value = mapping_value[part]
+                    continue
+                if not hasattr(value, part):
+                    raise ValueError(
+                        f"Missing runtime attribute {part!r} while resolving "
+                        f"config_dirs_from={path!r}."
+                    )
+                value = getattr(value, part)
+            return value
+
+        def _resolve_dirs(ctx: "StepContext") -> Iterable[Union[str, Path]]:
+            if static_dirs is not None:
+                return static_dirs
+            source = config_dirs_from
+            if callable(source):
+                candidate = source(ctx)
+            else:
+                candidate = _resolve_runtime_path(ctx, cast(str, source))
+            if isinstance(candidate, (str, Path)):
+                raise ValueError(
+                    "Resolved config_dirs must be an iterable of paths, not a single "
+                    f"value: {candidate!r}."
+                )
+            return cast(Iterable[Union[str, Path]], candidate)
+
+        def _resolver(ctx: "StepContext") -> ConfigPlan:
+            return self.prepare_config(
+                adapter=adapter,
+                config_dirs=_resolve_dirs(ctx),
+                strict=strict,
+                options=options,
+                validate_only=validate_only,
+                facet_spec=facet_spec,
+                facet_schema_name=facet_schema_name,
+                facet_schema_version=facet_schema_version,
+                facet_index=facet_index,
+            )
+
+        return _resolver
+
     def apply_config_plan(
         self,
         plan: ConfigPlan,
@@ -3994,6 +4395,157 @@ class Tracker:
         """
         factory = ViewFactory(self)
         return factory.create_hybrid_view(view_name, concept_key)
+
+    def create_grouped_view(
+        self,
+        view_name: str,
+        *,
+        schema_id: Optional[str] = None,
+        schema: Optional[Type[SQLModel]] = None,
+        namespace: Optional[str] = None,
+        params: Optional[Iterable[str]] = None,
+        drivers: Optional[List[str]] = None,
+        attach_facets: Optional[List[str]] = None,
+        include_system_columns: bool = True,
+        mode: Literal["hybrid", "hot_only", "cold_only"] = "hybrid",
+        if_exists: Literal["replace", "error"] = "replace",
+        missing_files: Literal["warn", "error", "skip_silent"] = "warn",
+        run_id: Optional[str] = None,
+        parent_run_id: Optional[str] = None,
+        model: Optional[str] = None,
+        status: Optional[str] = None,
+        year: Optional[int] = None,
+        iteration: Optional[int] = None,
+        schema_compatible: bool = False,
+    ) -> Any:
+        """
+        Create one analysis view across many artifacts selected by schema/facets.
+
+        Unlike ``create_view(view_name, concept_key)``, which targets one key,
+        this method selects artifacts by ``schema_id`` plus optional facet/run
+        filters and materializes a single view over hot and/or cold data.
+
+        Parameters
+        ----------
+        view_name : str
+            Name of the SQL view to create.
+        schema_id : Optional[str], optional
+            Schema identity used as the primary artifact selector.
+        schema : Optional[Type[SQLModel]], optional
+            SQLModel class selector convenience. When provided, Consist resolves
+            matching stored schema ids from this model definition, first by exact
+            field names and then by compatible subset/superset field-name matching.
+        namespace : Optional[str], optional
+            Default ArtifactKV namespace applied to facet predicates that do not
+            include an explicit namespace.
+        params : Optional[Iterable[str]], optional
+            Facet predicate expressions, each in one of:
+            ``<key>=<value>``, ``<key>>=<value>``, ``<key><=<value>``.
+            A leading namespace is supported, for example
+            ``beam.phys_sim_iteration=2``.
+        drivers : Optional[List[str]], optional
+            Optional artifact-driver filter, e.g. ``["parquet"]``.
+        attach_facets : Optional[List[str]], optional
+            Facet key paths to project into the view as typed ``facet_<key>``
+            columns.
+        include_system_columns : bool, default True
+            Whether to include Consist system columns in the view.
+        mode : {"hybrid", "hot_only", "cold_only"}, default "hybrid"
+            Which storage tier(s) to include in the view.
+        if_exists : {"replace", "error"}, default "replace"
+            Behavior when ``view_name`` already exists.
+        missing_files : {"warn", "error", "skip_silent"}, default "warn"
+            Behavior when a selected cold file is missing.
+        run_id : Optional[str], optional
+            Optional exact run-id filter.
+        parent_run_id : Optional[str], optional
+            Optional parent/scenario run-id filter.
+        model : Optional[str], optional
+            Optional run model-name filter.
+        status : Optional[str], optional
+            Optional run status filter.
+        year : Optional[int], optional
+            Optional run year filter.
+        iteration : Optional[int], optional
+            Optional run iteration filter.
+        schema_compatible : bool, default False
+            If True, allow schema-compatible subset/superset variants by field
+            names in addition to exact ``schema_id`` matches.
+
+        Returns
+        -------
+        Any
+            Backend-specific result from ``ViewFactory.create_grouped_hybrid_view``.
+
+        Raises
+        ------
+        RuntimeError
+            If no database is configured.
+        ValueError
+            If selector or facet predicates are invalid, or view policies are invalid.
+
+        Examples
+        --------
+        ```python
+        tracker.create_grouped_view(
+            "v_linkstats_all",
+            schema_id="abc123...",
+            namespace="beam",
+            params=["artifact_family=linkstats", "year=2018"],
+            attach_facets=["artifact_family", "phys_sim_iteration"],
+            drivers=["parquet"],
+            mode="hybrid",
+        )
+        ```
+        """
+        if not self.db:
+            raise RuntimeError("Database required to create grouped views.")
+        if (schema_id is None) == (schema is None):
+            raise ValueError("Provide exactly one of schema_id or schema.")
+
+        resolved_schema_ids: Optional[List[str]] = None
+        if schema is not None:
+            if not isinstance(schema, type) or not issubclass(schema, SQLModel):
+                raise ValueError("schema must be a SQLModel class.")
+            resolved_schema_ids = self.db.find_schema_ids_for_model(
+                schema_model=schema, compatible=False
+            )
+            if not resolved_schema_ids:
+                resolved_schema_ids = self.db.find_schema_ids_for_model(
+                    schema_model=schema, compatible=True
+                )
+            if not resolved_schema_ids:
+                raise ValueError(
+                    "No stored schema ids matched the provided SQLModel class."
+                )
+
+        predicates = (
+            [self._parse_artifact_param_expression(param) for param in params]
+            if params
+            else []
+        )
+
+        factory = ViewFactory(self)
+        return factory.create_grouped_hybrid_view(
+            view_name=view_name,
+            schema_id=schema_id,
+            schema_ids=resolved_schema_ids,
+            schema_compatible=schema_compatible,
+            predicates=predicates,
+            namespace=namespace,
+            drivers=drivers,
+            attach_facets=attach_facets,
+            include_system_columns=include_system_columns,
+            mode=mode,
+            if_exists=if_exists,
+            missing_files=missing_files,
+            run_id=run_id,
+            parent_run_id=parent_run_id,
+            model=model,
+            status=status,
+            year=year,
+            iteration=iteration,
+        )
 
     def load_matrix(
         self,
@@ -4259,6 +4811,124 @@ class Tracker:
         for artifact in artifacts:
             set_tracker_ref(artifact, self)
         return artifacts
+
+    @staticmethod
+    def _parse_artifact_param_value(raw: str) -> tuple[str, Any]:
+        value = raw.strip()
+        lowered = value.lower()
+        if lowered == "true":
+            return "bool", True
+        if lowered == "false":
+            return "bool", False
+        if lowered == "null":
+            return "null", None
+        try:
+            if "." not in value and "e" not in lowered:
+                return "num", int(value)
+            return "num", float(value)
+        except ValueError:
+            return "str", value
+
+    def _parse_artifact_param_expression(self, expression: str) -> Dict[str, Any]:
+        raw = expression.strip()
+        operator = None
+        for candidate in (">=", "<=", "="):
+            idx = raw.find(candidate)
+            if idx > 0:
+                operator = candidate
+                lhs = raw[:idx].strip()
+                rhs = raw[idx + len(candidate) :].strip()
+                break
+
+        if operator is None:
+            raise ValueError(
+                f"Invalid artifact facet predicate {expression!r}. "
+                "Expected <key>=<value>, <key>>=<value>, or <key><=<value>."
+            )
+        if not lhs:
+            raise ValueError(
+                f"Artifact facet predicate is missing a key: {expression!r}"
+            )
+        if rhs == "":
+            raise ValueError(
+                f"Artifact facet predicate is missing a value: {expression!r}"
+            )
+
+        namespace = None
+        key_path = lhs
+        if "." in lhs:
+            maybe_namespace, remainder = lhs.split(".", 1)
+            if maybe_namespace and remainder:
+                namespace = maybe_namespace
+                key_path = remainder
+
+        value_kind, value = self._parse_artifact_param_value(rhs)
+        if operator in {">=", "<="} and value_kind != "num":
+            raise ValueError(
+                f"Artifact facet predicate {expression!r} uses {operator} with a "
+                "non-numeric value."
+            )
+
+        return {
+            "namespace": namespace,
+            "key_path": key_path,
+            "op": operator,
+            "kind": value_kind,
+            "value": value,
+        }
+
+    def find_artifacts_by_params(
+        self,
+        *,
+        params: Optional[Iterable[str]] = None,
+        namespace: Optional[str] = None,
+        key_prefix: Optional[str] = None,
+        artifact_family_prefix: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Artifact]:
+        """
+        Find artifacts by indexed facet predicates and optional prefix filters.
+        """
+        if not self.db:
+            return []
+
+        predicates = (
+            [self._parse_artifact_param_expression(param) for param in params]
+            if params
+            else []
+        )
+
+        artifacts = self.db.find_artifacts_by_facet_params(
+            predicates=predicates,
+            namespace=namespace,
+            key_prefix=key_prefix,
+            artifact_family_prefix=artifact_family_prefix,
+            limit=limit,
+        )
+        for artifact in artifacts:
+            set_tracker_ref(artifact, self)
+        return artifacts
+
+    def get_artifact_kv(
+        self,
+        artifact: Union[Artifact, uuid.UUID],
+        *,
+        namespace: Optional[str] = None,
+        prefix: Optional[str] = None,
+        limit: int = 10_000,
+    ):
+        """
+        Retrieve flattened artifact facet KV rows for an artifact.
+        """
+        if not self.db:
+            return []
+        artifact_id = artifact.id if isinstance(artifact, Artifact) else artifact
+        return self.db.get_artifact_kv(
+            artifact_id=artifact_id,
+            namespace=namespace,
+            prefix=prefix,
+            limit=limit,
+        )
 
     # --- Config Facet Query Helpers ---
 

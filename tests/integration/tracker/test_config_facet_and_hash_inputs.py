@@ -271,6 +271,29 @@ def test_kv_flattening_handles_nested_and_dot_keys(tracker):
     assert "a.b\\.c" in keys
 
 
+def test_kv_flattening_preserves_non_scalar_json_leaves(tracker):
+    """
+    Regression check for shared facet flattening:
+    - Non-scalar leaves (e.g., list) remain indexed as value_type='json'.
+    - Scalar nested leaves still keep their native scalar type columns.
+    """
+    tracker.begin_run(
+        "run_json_leaf_kv",
+        "m",
+        facet={"items": [1, 2, 3], "nested": {"inner": "x"}},
+    )
+    tracker.end_run()
+
+    kv = tracker.get_run_config_kv("run_json_leaf_kv")
+    items_row = next(row for row in kv if row.key == "items")
+    inner_row = next(row for row in kv if row.key == "nested.inner")
+
+    assert items_row.value_type == "json"
+    assert items_row.value_json == [1, 2, 3]
+    assert inner_row.value_type == "str"
+    assert inner_row.value_str == "x"
+
+
 def test_facet_index_false_skips_kv_indexing(tracker):
     """
     Verifies `facet_index=False` behavior:

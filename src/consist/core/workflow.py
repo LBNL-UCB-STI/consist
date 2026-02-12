@@ -20,6 +20,7 @@ from consist.models.run import ConsistRecord, RunResult
 from typing import TYPE_CHECKING
 from consist.core.coupler import Coupler
 from consist.core.input_utils import coerce_input_map
+from consist.core.metadata_resolver import MetadataResolver
 from consist.types import ArtifactRef, FacetLike, HashInputs
 from pathlib import Path
 
@@ -265,6 +266,8 @@ class ScenarioContext:
         tags: Optional[List[str]] = None,
         model: str = "scenario",
         step_cache_hydration: Optional[str] = None,
+        name_template: Optional[str] = None,
+        cache_epoch: Optional[int] = None,
         coupler: Optional[Coupler] = None,
         require_outputs: Optional[Iterable[str]] = None,
         **kwargs: Any,
@@ -276,6 +279,8 @@ class ScenarioContext:
         self.tags = tags or []
         self.kwargs = kwargs
         self.step_cache_hydration = step_cache_hydration
+        self.name_template = name_template
+        self.cache_epoch = cache_epoch
 
         # Internal State
         self._header_record: Optional[ConsistRecord] = None
@@ -613,14 +618,17 @@ class ScenarioContext:
         hash_inputs: HashInputs = None,
         year: Optional[int] = None,
         iteration: Optional[int] = None,
+        phase: Optional[str] = None,
+        stage: Optional[str] = None,
         parent_run_id: Optional[str] = None,
         outputs: Optional[List[str]] = None,
         output_paths: Optional[Mapping[str, ArtifactRef]] = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
-        cache_mode: str = "reuse",
+        cache_mode: Optional[str] = None,
         cache_hydration: Optional[str] = None,
-        validate_cached_outputs: str = "lazy",
+        cache_version: Optional[int] = None,
+        validate_cached_outputs: Optional[str] = None,
         load_inputs: Optional[bool] = None,
         executor: str = "python",
         container: Optional[Mapping[str, Any]] = None,
@@ -640,45 +648,27 @@ class ScenarioContext:
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
 
-        if fn is None:
-            if name is None:
-                raise ValueError("ScenarioContext.run requires name when fn is None.")
-            resolved_name = name
-        else:
-            resolved_name = name or getattr(fn, "__name__", None)
-            if resolved_name is None:
-                raise ValueError("ScenarioContext.run requires a run name.")
-        resolved_model = model or resolved_name
-        if run_id is None:
-            run_id = f"{self.run_id}_{resolved_name}_{uuid.uuid4().hex[:8]}"
-        if parent_run_id is None:
-            parent_run_id = self.run_id
+        func_name = getattr(fn, "__name__", None) if fn is not None else None
+        if fn is not None and func_name is None and name is None:
+            raise ValueError("ScenarioContext.run requires a run name.")
+        if fn is None and name is None:
+            raise ValueError("ScenarioContext.run requires name when fn is None.")
 
-        self._first_step_started = True
-        self._last_step_name = resolved_name
-
-        effective_cache_hydration = cache_hydration or self.step_cache_hydration
-
-        promoted_inputs = self._promote_inputs_for_load(inputs, load_inputs)
-        resolved_inputs = self._resolve_inputs(
-            promoted_inputs, input_keys, optional_input_keys
+        resolver = MetadataResolver(
+            default_name_template=self.name_template,
+            allow_template=True,
+            apply_step_defaults=True,
         )
-        resolved_output_paths = self._resolve_output_paths(output_paths)
-
-        result = self.tracker.run(
+        resolved = resolver.resolve(
             fn=fn,
-            name=resolved_name,
-            run_id=run_id,
-            model=resolved_model,
+            name=name,
+            model=model,
             description=description,
             config=config,
             config_plan=config_plan,
-            config_plan_ingest=config_plan_ingest,
-            config_plan_profile_schema=config_plan_profile_schema,
-            inputs=resolved_inputs,
-            input_keys=None,
-            optional_input_keys=None,
-            depends_on=depends_on,
+            inputs=inputs,
+            input_keys=input_keys,
+            optional_input_keys=optional_input_keys,
             tags=tags,
             facet=facet,
             facet_from=facet_from,
@@ -687,15 +677,112 @@ class ScenarioContext:
             hash_inputs=hash_inputs,
             year=year,
             iteration=iteration,
-            parent_run_id=parent_run_id,
+            phase=phase,
+            stage=stage,
+            consist_settings=self.tracker.settings,
+            consist_workspace=self.tracker.run_dir,
+            consist_state=self._header_record,
+            runtime_kwargs=runtime_kwargs,
             outputs=outputs,
+            output_paths=output_paths,
+            cache_mode=cache_mode,
+            cache_hydration=cache_hydration,
+            cache_version=cache_version,
+            validate_cached_outputs=validate_cached_outputs,
+            load_inputs=load_inputs,
+            missing_name_error="ScenarioContext.run requires a run name.",
+        )
+
+        resolved_name = resolved.name
+        resolved_model = resolved.model
+        resolved_description = resolved.description
+        resolved_config = resolved.config
+        resolved_config_plan = resolved.config_plan
+        resolved_tags = resolved.tags
+        resolved_facet = resolved.facet
+        resolved_facet_index = resolved.facet_index
+        resolved_outputs = resolved.outputs
+        resolved_output_paths = resolved.output_paths
+        resolved_inputs = resolved.inputs
+        resolved_input_keys = resolved.input_keys
+        resolved_optional_input_keys = resolved.optional_input_keys
+        resolved_facet_from = resolved.facet_from
+        resolved_facet_schema_version = resolved.facet_schema_version
+        resolved_hash_inputs = resolved.hash_inputs
+        resolved_cache_mode = resolved.cache_mode
+        resolved_cache_hydration = resolved.cache_hydration
+        resolved_cache_version = resolved.cache_version
+        resolved_validate_cached_outputs = resolved.validate_cached_outputs
+        resolved_load_inputs = resolved.load_inputs
+
+        if run_id is None:
+            run_id = f"{self.run_id}_{resolved_name}_{uuid.uuid4().hex[:8]}"
+        if parent_run_id is None:
+            parent_run_id = self.run_id
+
+        self._first_step_started = True
+        self._last_step_name = resolved_name
+
+        if resolved_cache_mode is None:
+            resolved_cache_mode = "reuse"
+        if resolved_validate_cached_outputs is None:
+            resolved_validate_cached_outputs = "lazy"
+
+        effective_cache_hydration = (
+            resolved_cache_hydration
+            if resolved_cache_hydration is not None
+            else self.step_cache_hydration
+        )
+
+        promoted_inputs = self._promote_inputs_for_load(
+            resolved_inputs, resolved_load_inputs
+        )
+        resolved_inputs = self._resolve_inputs(
+            promoted_inputs, resolved_input_keys, resolved_optional_input_keys
+        )
+        resolved_output_paths = self._resolve_output_paths(resolved_output_paths)
+
+        resolved_cache_epoch = (
+            self.cache_epoch
+            if self.cache_epoch is not None
+            else getattr(self.tracker, "_cache_epoch", None)
+        )
+
+        result = self.tracker.run(
+            fn=fn,
+            name=resolved_name,
+            run_id=run_id,
+            model=resolved_model,
+            description=resolved_description,
+            config=resolved_config,
+            config_plan=resolved_config_plan,
+            config_plan_ingest=config_plan_ingest,
+            config_plan_profile_schema=config_plan_profile_schema,
+            inputs=resolved_inputs,
+            input_keys=None,
+            optional_input_keys=None,
+            depends_on=depends_on,
+            tags=resolved_tags,
+            facet=resolved_facet,
+            facet_from=resolved_facet_from,
+            facet_schema_version=resolved_facet_schema_version,
+            facet_index=resolved_facet_index,
+            hash_inputs=resolved_hash_inputs,
+            year=year,
+            iteration=iteration,
+            phase=phase,
+            stage=stage,
+            parent_run_id=parent_run_id,
+            outputs=resolved_outputs,
             output_paths=resolved_output_paths,
             capture_dir=capture_dir,
             capture_pattern=capture_pattern,
-            cache_mode=cache_mode,
+            cache_mode=resolved_cache_mode,
             cache_hydration=effective_cache_hydration,
-            validate_cached_outputs=validate_cached_outputs,
-            load_inputs=load_inputs,
+            cache_version=resolved_cache_version,
+            cache_epoch=resolved_cache_epoch,
+            validate_cached_outputs=resolved_validate_cached_outputs,
+            load_inputs=resolved_load_inputs,
             executor=executor,
             container=container,
             runtime_kwargs=runtime_kwargs,

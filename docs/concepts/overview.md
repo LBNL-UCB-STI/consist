@@ -163,3 +163,5 @@ result = consist.run(  # (2)!
 - **[Config Management](config-management.md)** — Understand the config vs. facet distinction and when to use each
 - **[Caching & Hydration](caching-and-hydration.md)** — Caching patterns and data recovery strategies
 - **[Data Materialization](data-materialization.md)** — When to ingest data and use hybrid views
+- **[Grouped Views](grouped-views.md)** — Build one view across schema-matched artifacts
+- **[Decorators & Metadata](decorators-and-metadata.md)** — Defaults, templates, and schema introspection

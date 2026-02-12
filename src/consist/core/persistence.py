@@ -9,10 +9,13 @@ from contextlib import contextmanager
 from typing import (
     Optional,
     List,
+    Sequence,
     Callable,
     Any,
     Dict,
     Tuple,
+    Set,
+    Type,
     TYPE_CHECKING,
     Literal,
     Iterator,
@@ -26,6 +29,8 @@ from sqlalchemy.pool import NullPool
 from sqlmodel import create_engine, Session, select, SQLModel, col, delete
 
 from consist.models.artifact import Artifact
+from consist.models.artifact_facet import ArtifactFacet
+from consist.models.artifact_kv import ArtifactKV
 from consist.models.artifact_schema import (
     ArtifactSchema,
     ArtifactSchemaField,
@@ -101,6 +106,8 @@ class DatabaseManager:
                     getattr(RunArtifactLink, "__table__"),
                     getattr(ConfigFacet, "__table__"),
                     getattr(RunConfigKV, "__table__"),
+                    getattr(ArtifactFacet, "__table__"),
+                    getattr(ArtifactKV, "__table__"),
                     getattr(ArtifactSchema, "__table__"),
                     getattr(ArtifactSchemaField, "__table__"),
                     getattr(ArtifactSchemaObservation, "__table__"),
@@ -404,6 +411,40 @@ class DatabaseManager:
         except Exception as e:
             logging.warning(f"Failed to upsert config facet {facet.id}: {e}")
 
+    def upsert_artifact_facet(self, facet: ArtifactFacet) -> None:
+        """Upserts an ArtifactFacet (deduped by facet.id)."""
+
+        def _upsert():
+            with self.session_scope() as session:
+                existing = session.get(ArtifactFacet, facet.id)
+                if existing is None:
+                    session.add(facet)
+                else:
+                    if (
+                        existing.namespace is None
+                        and isinstance(facet.namespace, str)
+                        and facet.namespace
+                    ):
+                        existing.namespace = facet.namespace
+                    if (
+                        existing.schema_name is None
+                        and isinstance(facet.schema_name, str)
+                        and facet.schema_name
+                    ):
+                        existing.schema_name = facet.schema_name
+                    if (
+                        existing.schema_version is None
+                        and facet.schema_version is not None
+                    ):
+                        existing.schema_version = facet.schema_version
+                    session.add(existing)
+                session.commit()
+
+        try:
+            self.execute_with_retry(_upsert, operation_name="upsert_artifact_facet")
+        except Exception as e:
+            logging.warning(f"Failed to upsert artifact facet {facet.id}: {e}")
+
     def insert_run_config_kv_bulk(self, rows: List[RunConfigKV]) -> None:
         """Bulk inserts RunConfigKV rows."""
         if not rows:
@@ -432,6 +473,36 @@ class DatabaseManager:
             self.execute_with_retry(_insert, operation_name="insert_run_config_kv_bulk")
         except Exception as e:
             logging.warning(f"Failed to insert run config kv rows: {e}")
+
+    def insert_artifact_kv_bulk(self, rows: List[ArtifactKV]) -> None:
+        """Bulk inserts ArtifactKV rows."""
+        if not rows:
+            return
+
+        def _insert():
+            with self.session_scope() as session:
+                combos = {
+                    (row.artifact_id, row.facet_id, row.namespace)
+                    for row in rows
+                    if row.artifact_id and row.facet_id
+                }
+                for artifact_id, facet_id, namespace in combos:
+                    filters = [
+                        col(ArtifactKV.artifact_id) == artifact_id,
+                        col(ArtifactKV.facet_id) == facet_id,
+                    ]
+                    if namespace is None:
+                        filters.append(col(ArtifactKV.namespace).is_(None))
+                    else:
+                        filters.append(col(ArtifactKV.namespace) == namespace)
+                    session.exec(delete(ArtifactKV).where(*filters))
+                session.add_all(rows)
+                session.commit()
+
+        try:
+            self.execute_with_retry(_insert, operation_name="insert_artifact_kv_bulk")
+        except Exception as e:
+            logging.warning(f"Failed to insert artifact kv rows: {e}")
 
     def upsert_artifact_schema(
         self,
@@ -1415,6 +1486,513 @@ class DatabaseManager:
             return self.execute_with_retry(_query)
         except Exception:
             return []
+
+    def get_artifact_kv(
+        self,
+        artifact_id: uuid.UUID,
+        *,
+        namespace: Optional[str] = None,
+        prefix: Optional[str] = None,
+        limit: int = 10_000,
+    ) -> List[ArtifactKV]:
+        """
+        Return flattened artifact facet key/value rows for an artifact.
+        """
+
+        def _query():
+            with self.session_scope() as session:
+                statement = select(ArtifactKV).where(
+                    ArtifactKV.artifact_id == artifact_id
+                )
+                if namespace is not None:
+                    statement = statement.where(ArtifactKV.namespace == namespace)
+                if prefix:
+                    statement = statement.where(
+                        col(ArtifactKV.key_path).like(f"{prefix}%")
+                    )
+                results = session.exec(statement.limit(limit)).all()
+                for row in results:
+                    session.expunge(row)
+                return results
+
+        try:
+            return self.execute_with_retry(_query)
+        except Exception:
+            return []
+
+    def find_artifacts_by_facet_params(
+        self,
+        *,
+        predicates: List[Dict[str, Any]],
+        namespace: Optional[str] = None,
+        key_prefix: Optional[str] = None,
+        artifact_family_prefix: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Artifact]:
+        """
+        Find artifacts using one or more flattened facet predicates.
+        """
+
+        def _query():
+            with self.session_scope() as session:
+                statement = select(Artifact).distinct()
+
+                if key_prefix:
+                    statement = statement.where(
+                        col(Artifact.key).like(f"{key_prefix}%")
+                    )
+
+                if artifact_family_prefix:
+                    family_kv = aliased(ArtifactKV)
+                    statement = statement.join(
+                        family_kv,
+                        col(Artifact.id) == col(family_kv.artifact_id),
+                    )
+                    statement = statement.where(family_kv.key_path == "artifact_family")
+                    if namespace is not None:
+                        statement = statement.where(family_kv.namespace == namespace)
+                    statement = statement.where(family_kv.value_type == "str")
+                    statement = statement.where(
+                        col(family_kv.value_str).like(f"{artifact_family_prefix}%")
+                    )
+
+                statement = self._apply_artifact_kv_predicates(
+                    statement=statement,
+                    predicates=predicates,
+                    namespace=namespace,
+                )
+
+                results = session.exec(
+                    statement.order_by(col(Artifact.created_at).desc()).limit(limit)
+                ).all()
+
+                for artifact in results:
+                    _ = artifact.meta
+                    session.expunge(artifact)
+
+                return results
+
+        try:
+            return self.execute_with_retry(
+                _query, operation_name="find_artifacts_by_facet_params"
+            )
+        except Exception as e:
+            logging.warning("Failed to find artifacts by facet params: %s", e)
+            return []
+
+    def _apply_artifact_kv_predicates(
+        self,
+        *,
+        statement: Any,
+        predicates: List[Dict[str, Any]],
+        namespace: Optional[str],
+    ) -> Any:
+        """
+        Apply parsed ArtifactKV predicates to a SQLAlchemy statement.
+        """
+        for predicate in predicates:
+            kv = aliased(ArtifactKV)
+            statement = statement.join(
+                kv,
+                col(Artifact.id) == col(kv.artifact_id),
+            )
+            statement = statement.where(kv.key_path == predicate["key_path"])
+
+            predicate_namespace = predicate.get("namespace")
+            effective_namespace = (
+                predicate_namespace if predicate_namespace is not None else namespace
+            )
+            if effective_namespace is not None:
+                statement = statement.where(kv.namespace == effective_namespace)
+
+            operator = predicate["op"]
+            value_kind = predicate["kind"]
+            value = predicate["value"]
+
+            if operator == "=":
+                if value_kind == "str":
+                    statement = statement.where(kv.value_type == "str")
+                    statement = statement.where(kv.value_str == value)
+                elif value_kind == "bool":
+                    statement = statement.where(kv.value_type == "bool")
+                    statement = statement.where(kv.value_bool == value)
+                elif value_kind == "null":
+                    statement = statement.where(kv.value_type == "null")
+                else:
+                    statement = statement.where(
+                        col(kv.value_type).in_(["int", "float"])
+                    )
+                    statement = statement.where(col(kv.value_num) == float(value))
+            else:
+                statement = statement.where(col(kv.value_type).in_(["int", "float"]))
+                if operator == ">=":
+                    statement = statement.where(col(kv.value_num) >= float(value))
+                else:
+                    statement = statement.where(col(kv.value_num) <= float(value))
+
+        return statement
+
+    def _resolve_schema_compatible_ids(
+        self,
+        *,
+        session: Session,
+        schema_id: str,
+        all_schemas: Optional[Sequence[ArtifactSchema]] = None,
+        schema_fields_by_id: Optional[Dict[str, Set[str]]] = None,
+    ) -> Set[str]:
+        """
+        Resolve schema IDs compatible with `schema_id` for union-by-name views.
+
+        Compatibility is defined conservatively as:
+        - same `summary_json.table_name` (when present on both schemas), and
+        - field-name sets are subset/superset of each other.
+        """
+        schema_rows = (
+            all_schemas
+            if all_schemas is not None
+            else session.exec(select(ArtifactSchema)).all()
+        )
+        schemas_by_id = {
+            sid: row
+            for row in schema_rows
+            if isinstance((sid := getattr(row, "id", None)), str)
+        }
+
+        base_schema = schemas_by_id.get(schema_id)
+        if base_schema is None:
+            return {schema_id}
+
+        field_map = (
+            schema_fields_by_id
+            if schema_fields_by_id is not None
+            else self._load_schema_field_names(session=session)
+        )
+        base_fields = field_map.get(schema_id, set())
+        if not base_fields:
+            return {schema_id}
+
+        base_summary = getattr(base_schema, "summary_json", {}) or {}
+        base_table_name = (
+            base_summary.get("table_name")
+            if isinstance(base_summary.get("table_name"), str)
+            else None
+        )
+
+        compatible: Set[str] = {schema_id}
+        for candidate in schema_rows:
+            candidate_id = getattr(candidate, "id", None)
+            if not isinstance(candidate_id, str) or candidate_id == schema_id:
+                continue
+
+            candidate_summary = getattr(candidate, "summary_json", {}) or {}
+            candidate_table_name = (
+                candidate_summary.get("table_name")
+                if isinstance(candidate_summary.get("table_name"), str)
+                else None
+            )
+            if (
+                base_table_name is not None
+                and candidate_table_name is not None
+                and candidate_table_name != base_table_name
+            ):
+                continue
+
+            candidate_fields = field_map.get(candidate_id, set())
+            if not candidate_fields:
+                continue
+            if base_fields.issubset(candidate_fields) or candidate_fields.issubset(
+                base_fields
+            ):
+                compatible.add(candidate_id)
+        return compatible
+
+    def _load_schema_field_names(
+        self,
+        *,
+        session: Session,
+        schema_ids: Optional[Set[str]] = None,
+    ) -> Dict[str, Set[str]]:
+        """
+        Load schema field-name sets keyed by schema_id in one query.
+        """
+        statement = select(ArtifactSchemaField)
+        if schema_ids:
+            statement = statement.where(
+                col(ArtifactSchemaField.schema_id).in_(sorted(schema_ids))
+            )
+
+        rows = session.exec(statement).all()
+        fields_by_schema: Dict[str, Set[str]] = {}
+        for row in rows:
+            schema_id = getattr(row, "schema_id", None)
+            field_name = getattr(row, "name", None)
+            if not isinstance(schema_id, str) or not isinstance(field_name, str):
+                continue
+            fields_by_schema.setdefault(schema_id, set()).add(field_name)
+        return fields_by_schema
+
+    @staticmethod
+    def _schema_model_field_names(schema_model: Type[SQLModel]) -> Set[str]:
+        field_names: Set[str] = set()
+        for attr_name, field_info in schema_model.model_fields.items():
+            sa_col = getattr(field_info, "sa_column", None)
+            col_name = getattr(sa_col, "name", None) if sa_col is not None else None
+            sql_name = (
+                str(col_name) if isinstance(col_name, str) and col_name else attr_name
+            )
+            if str(sql_name).startswith("consist_"):
+                continue
+            field_names.add(str(sql_name))
+        return field_names
+
+    def find_schema_ids_for_model(
+        self, *, schema_model: Type[SQLModel], compatible: bool = True
+    ) -> List[str]:
+        """
+        Resolve stored schema ids that match a SQLModel class.
+
+        Matching rules:
+        - Candidate schema must have the same table name in summary_json when present.
+        - If `compatible=True`, field-name subset/superset matches are included.
+          If `compatible=False`, exact field-name equality is required.
+        """
+
+        def _query() -> List[str]:
+            with self.session_scope() as session:
+                model_table_name = getattr(
+                    schema_model, "__tablename__", schema_model.__name__
+                )
+                model_fields = self._schema_model_field_names(schema_model)
+                if not model_fields:
+                    return []
+
+                schema_rows = session.exec(select(ArtifactSchema)).all()
+                schema_fields_by_id = self._load_schema_field_names(session=session)
+                matched: List[str] = []
+                for schema_row in schema_rows:
+                    schema_id = getattr(schema_row, "id", None)
+                    if not isinstance(schema_id, str):
+                        continue
+
+                    summary = getattr(schema_row, "summary_json", {}) or {}
+                    candidate_table_name = (
+                        summary.get("table_name")
+                        if isinstance(summary.get("table_name"), str)
+                        else None
+                    )
+                    if candidate_table_name is not None and str(
+                        candidate_table_name
+                    ) != str(model_table_name):
+                        continue
+
+                    candidate_fields = schema_fields_by_id.get(schema_id, set())
+                    if not candidate_fields:
+                        continue
+
+                    if compatible:
+                        if model_fields.issubset(
+                            candidate_fields
+                        ) or candidate_fields.issubset(model_fields):
+                            matched.append(schema_id)
+                    elif candidate_fields == model_fields:
+                        matched.append(schema_id)
+                return sorted(set(matched))
+
+        try:
+            return self.execute_with_retry(
+                _query, operation_name="find_schema_ids_for_model"
+            )
+        except Exception as e:
+            logging.warning("Failed to resolve schema ids for model: %s", e)
+            return []
+
+    def find_artifacts_for_grouped_view(
+        self,
+        *,
+        schema_id: Optional[str] = None,
+        schema_ids: Optional[List[str]] = None,
+        schema_compatible: bool = False,
+        predicates: Optional[List[Dict[str, Any]]] = None,
+        namespace: Optional[str] = None,
+        drivers: Optional[List[str]] = None,
+        run_id: Optional[str] = None,
+        parent_run_id: Optional[str] = None,
+        model: Optional[str] = None,
+        status: Optional[str] = None,
+        year: Optional[int] = None,
+        iteration: Optional[int] = None,
+        limit: int = 1_000_000,
+    ) -> List[Tuple[Artifact, Run]]:
+        """
+        Resolve artifacts for grouped-view materialization.
+        """
+        if schema_id is None and not schema_ids:
+            raise ValueError("Provide schema_id or schema_ids for grouped view lookup.")
+
+        resolved_predicates = predicates or []
+
+        def _query() -> List[Tuple[Artifact, Run]]:
+            with self.session_scope() as session:
+                resolved_schema_ids: Set[str]
+                base_ids = list(schema_ids or [])
+                if schema_id is not None:
+                    base_ids.append(schema_id)
+                base_ids = sorted(set(base_ids))
+                if schema_compatible:
+                    schema_rows = session.exec(select(ArtifactSchema)).all()
+                    schema_fields_by_id = self._load_schema_field_names(session=session)
+                    resolved_schema_ids = set()
+                    for base_schema_id in base_ids:
+                        resolved_schema_ids.update(
+                            self._resolve_schema_compatible_ids(
+                                session=session,
+                                schema_id=base_schema_id,
+                                all_schemas=schema_rows,
+                                schema_fields_by_id=schema_fields_by_id,
+                            )
+                        )
+                else:
+                    resolved_schema_ids = set(base_ids)
+
+                obs = aliased(ArtifactSchemaObservation)
+                statement = (
+                    select(Artifact, Run)
+                    .join(Run, col(Artifact.run_id) == col(Run.id))
+                    .join(obs, col(Artifact.id) == col(obs.artifact_id))
+                    .where(col(obs.schema_id).in_(sorted(resolved_schema_ids)))
+                    .distinct()
+                )
+
+                if drivers:
+                    statement = statement.where(col(Artifact.driver).in_(drivers))
+                if run_id is not None:
+                    statement = statement.where(Run.id == run_id)
+                if parent_run_id is not None:
+                    statement = statement.where(Run.parent_run_id == parent_run_id)
+                if model is not None:
+                    statement = statement.where(Run.model_name == model)
+                if status is not None:
+                    statement = statement.where(Run.status == status)
+                if year is not None:
+                    statement = statement.where(Run.year == year)
+                if iteration is not None:
+                    statement = statement.where(Run.iteration == iteration)
+
+                statement = self._apply_artifact_kv_predicates(
+                    statement=statement,
+                    predicates=resolved_predicates,
+                    namespace=namespace,
+                )
+
+                statement = statement.order_by(
+                    col(Artifact.created_at).asc(), col(Artifact.id).asc()
+                )
+                rows = session.exec(statement.limit(limit)).all()
+
+                # Hydrate required attributes while instances are still bound.
+                seen_run_ids: Set[str] = set()
+                for artifact, run in rows:
+                    _ = artifact.meta
+                    run_id_value = getattr(run, "id", None)
+                    if isinstance(run_id_value, str) and run_id_value in seen_run_ids:
+                        continue
+                    _ = run.meta
+                    _ = run.tags
+                    if isinstance(run_id_value, str):
+                        seen_run_ids.add(run_id_value)
+
+                # Detach in a second pass to avoid expunging shared Run instances
+                # mid-iteration when multiple artifacts belong to the same run.
+                seen_artifact_instances: Set[int] = set()
+                for artifact, _ in rows:
+                    artifact_ref = id(artifact)
+                    if artifact_ref in seen_artifact_instances:
+                        continue
+                    seen_artifact_instances.add(artifact_ref)
+                    if artifact in session:
+                        session.expunge(artifact)
+
+                seen_run_instances: Set[int] = set()
+                for _, run in rows:
+                    run_ref = id(run)
+                    if run_ref in seen_run_instances:
+                        continue
+                    seen_run_instances.add(run_ref)
+                    if run in session:
+                        session.expunge(run)
+                return rows
+
+        try:
+            return self.execute_with_retry(
+                _query, operation_name="find_artifacts_for_grouped_view"
+            )
+        except Exception as e:
+            logging.warning("Failed to resolve grouped-view artifacts: %s", e)
+            return []
+
+    def get_artifact_kv_values_bulk(
+        self,
+        *,
+        artifact_ids: List[uuid.UUID],
+        key_paths: List[str],
+        namespace: Optional[str] = None,
+    ) -> Dict[uuid.UUID, Dict[str, Dict[str, Any]]]:
+        """
+        Bulk lookup for typed artifact facet values.
+
+        Returns
+        -------
+        Dict[uuid.UUID, Dict[str, Dict[str, Any]]]
+            Mapping: artifact_id -> key_path -> {"value": Any, "type": str}
+        """
+        if not artifact_ids or not key_paths:
+            return {}
+
+        def _query() -> Dict[uuid.UUID, Dict[str, Dict[str, Any]]]:
+            with self.session_scope() as session:
+                statement = select(ArtifactKV).where(
+                    col(ArtifactKV.artifact_id).in_(artifact_ids)
+                )
+                statement = statement.where(col(ArtifactKV.key_path).in_(key_paths))
+                if namespace is not None:
+                    statement = statement.where(ArtifactKV.namespace == namespace)
+                statement = statement.order_by(
+                    col(ArtifactKV.created_at).desc(),
+                    col(ArtifactKV.facet_id).desc(),
+                )
+                rows = session.exec(statement).all()
+
+                out: Dict[uuid.UUID, Dict[str, Dict[str, Any]]] = {}
+                for row in rows:
+                    by_key = out.setdefault(row.artifact_id, {})
+                    # Most-recent row wins if duplicates exist.
+                    if row.key_path in by_key:
+                        continue
+                    value: Any = None
+                    if row.value_type == "str":
+                        value = row.value_str
+                    elif row.value_type == "int":
+                        value = (
+                            int(row.value_num) if row.value_num is not None else None
+                        )
+                    elif row.value_type == "float":
+                        value = row.value_num
+                    elif row.value_type == "bool":
+                        value = row.value_bool
+                    elif row.value_type == "json":
+                        value = row.value_json
+                    elif row.value_type == "null":
+                        value = None
+                    by_key[row.key_path] = {"value": value, "type": row.value_type}
+                return out
+
+        try:
+            return self.execute_with_retry(
+                _query, operation_name="get_artifact_kv_values_bulk"
+            )
+        except Exception as e:
+            logging.warning("Failed bulk artifact kv lookup: %s", e)
+            return {}
 
     def find_runs_by_facet_kv(
         self,

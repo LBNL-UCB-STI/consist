@@ -196,3 +196,65 @@ def test_coupler_set_from_artifact_with_string_path() -> None:
 
     assert result == path_str
     assert coupler.get("data") == path_str
+
+
+def test_coupler_view_sets_namespaced_keys_and_preserves_global_access() -> None:
+    coupler = Coupler()
+    beam = coupler.view("beam")
+    art = _artifact(key="plans_in")
+
+    beam.set("plans_in", art)
+
+    assert beam.require("plans_in") == art
+    assert coupler.require("beam/plans_in") == art
+    assert "plans_in" in beam
+    assert "beam/plans_in" in coupler
+    assert set(beam.keys()) == {"plans_in"}
+    assert dict(beam.items()) == {"plans_in": art}
+
+
+def test_coupler_view_nested_namespace_is_composable() -> None:
+    coupler = Coupler()
+    nested = coupler.view("/beam/").view("postprocess")
+    art = _artifact(key="linkstats")
+
+    nested["linkstats"] = art
+
+    assert nested.qualify("linkstats") == "beam/postprocess/linkstats"
+    assert coupler.require("beam/postprocess/linkstats") == art
+    assert nested.require("linkstats") == art
+
+
+def test_coupler_view_require_outputs_tracks_namespaced_contracts() -> None:
+    coupler = Coupler()
+    beam = coupler.view("beam")
+
+    beam.require_outputs("plans")
+
+    assert coupler.missing_declared_outputs() == ["beam/plans"]
+    assert beam.missing_declared_outputs() == ["plans"]
+
+    beam.set("plans", _artifact(key="plans"))
+
+    assert coupler.missing_declared_outputs() == []
+    assert beam.missing_declared_outputs() == []
+
+
+def test_coupler_view_path_resolves_tracker() -> None:
+    coupler = Coupler()
+    coupler.tracker = type(
+        "TrackerStub",
+        (),
+        {"resolve_uri": lambda _self, uri: "/abs/beam/data.csv"},
+    )()
+    beam = coupler.view("beam")
+    beam.set("data", _artifact(key="data", container_uri="inputs://beam/data.csv"))
+
+    assert beam.path("data") == Path("/abs/beam/data.csv")
+
+
+def test_coupler_view_rejects_empty_namespace() -> None:
+    coupler = Coupler()
+
+    with pytest.raises(ValueError, match="cannot be empty"):
+        coupler.view("///")

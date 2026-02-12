@@ -100,6 +100,7 @@ Choose your path:
 - [Config Management](concepts/config-management.md) – Config hashing and queryable metadata (facets)
 - [Caching & Hydration](concepts/caching-and-hydration.md) – Caching patterns and data recovery
 - [Data Materialization Strategy](concepts/data-materialization.md) – When to ingest data and use hybrid views
+- [Grouped Views](concepts/grouped-views.md) – Build one view across schema-matched artifacts
 - [DLT Loader Integration](dlt-loader-guide.md) – Schema-validated data ingestion
 - [Mounts & Portability](mounts-and-portability.md) – Reproducible workflows across machines
 

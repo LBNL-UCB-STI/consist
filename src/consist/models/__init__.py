@@ -6,6 +6,8 @@ used by Consist for tracking runs, artifacts, and their relationships.
 from __future__ import annotations
 
 from consist.models.artifact import Artifact
+from consist.models.artifact_facet import ArtifactFacet
+from consist.models.artifact_kv import ArtifactKV
 from consist.models.artifact_schema import (
     ArtifactSchema,
     ArtifactSchemaField,
@@ -29,6 +31,8 @@ from consist.models.beam import BeamConfigCache, BeamConfigIngestRunLink
 __all__ = [
     "Artifact",
     "ArtifactSchema",
+    "ArtifactFacet",
+    "ArtifactKV",
     "ArtifactSchemaField",
     "ArtifactSchemaObservation",
     "ArtifactSchemaRelation",

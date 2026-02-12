@@ -47,6 +47,7 @@
         - set
         - set_from_artifact
         - update
+        - view
         - get
         - require
         - keys

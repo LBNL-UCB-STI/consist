@@ -20,6 +20,7 @@
         - cached_artifacts
         - cached_output
         - get_artifact
+        - register_artifact_facet_parser
         - log_artifact
         - log_artifacts
         - log_input

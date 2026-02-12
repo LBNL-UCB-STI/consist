@@ -43,11 +43,56 @@ Shows run metadata, configuration, status, duration, and any custom metadata fie
 
 ### consist artifacts
 
-List input and output artifacts for a run.
+Inspect artifacts in two modes:
+
+- **Run mode**: list input/output artifacts for one run.
+- **Query mode**: search artifacts by indexed facet predicates.
 
 ```bash
 consist artifacts <run_id>
+
+# Query by artifact facet params (repeat --param)
+consist artifacts --param beam.phys_sim_iteration=2
+consist artifacts --param beam.year>=2030 --param beam.year<=2035
+
+# Optional query filters
+consist artifacts --param beam.phys_sim_iteration=2 --namespace beam
+consist artifacts --param beam.phys_sim_iteration=2 --key-prefix linkstats
+consist artifacts --param beam.phys_sim_iteration=2 --family-prefix linkstats_unmodified
+consist artifacts --param beam.phys_sim_iteration=2 --limit 500
 ```
+
+Query-mode options:
+
+- `--param`: facet predicate (`key=value`, `key>=value`, `key<=value`)
+- `--namespace`: default namespace when predicates omit one
+- `--key-prefix`: prefix filter on artifact key
+- `--family-prefix`: prefix filter on indexed `artifact_family` facet
+- `--limit`: maximum results (default `100`)
+
+### consist views create
+
+Create a grouped hybrid view from schema identity + facet/run filters.
+
+```bash
+consist views create v_linkstats_all \
+  --schema-id <schema_hash> \
+  --namespace beam \
+  --param artifact_family=linkstats_unmodified_phys_sim_iter_parquet \
+  --param year=2018 \
+  --attach-facet artifact_family \
+  --attach-facet year \
+  --attach-facet phys_sim_iteration \
+  --driver parquet
+```
+
+Common options:
+
+- `--mode hybrid|hot_only|cold_only`
+- `--if-exists replace|error`
+- `--missing-files warn|error|skip_silent`
+- `--schema-compatible`
+- run filters: `--run-id`, `--parent-run-id`, `--model`, `--status`, `--year`, `--iteration`
 
 ### consist lineage
 
