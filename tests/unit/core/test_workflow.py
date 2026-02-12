@@ -5,6 +5,7 @@ import pytest
 from consist.core.coupler import Coupler
 from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
 from consist.core.tracker import Tracker
+from consist.core.workflow import RunContext
 from consist.types import CacheOptions, ExecutionOptions
 
 
@@ -257,6 +258,51 @@ def test_run_artifact_dir_overrides(tracker: Tracker, tmp_path: Path):
         ) as t:
             t.run_artifact_dir()
 
+
+def test_run_context_output_dir_default_and_namespace(tracker: Tracker) -> None:
+    with tracker.start_run("ctx_output_dir", model="demo") as t:
+        ctx = RunContext(t)
+
+        base_dir = ctx.output_dir()
+        assert base_dir == t.run_artifact_dir()
+        assert base_dir.exists()
+
+        namespaced_dir = ctx.output_dir("tables/daily")
+        assert namespaced_dir == base_dir / "tables" / "daily"
+        assert namespaced_dir.exists()
+
+
+def test_run_context_output_path_normalizes_ext_and_creates_dirs(
+    tracker: Tracker,
+) -> None:
+    with tracker.start_run("ctx_output_path", model="demo") as t:
+        ctx = RunContext(t)
+
+        path = ctx.output_path("reports/summary", ext=".CSV")
+        assert path == t.run_artifact_dir() / "reports" / "summary.csv"
+        assert path.parent.exists()
+
+
+def test_run_context_output_path_respects_artifact_dir_override(
+    tracker: Tracker,
+) -> None:
+    with tracker.start_run(
+        "ctx_output_override",
+        model="demo",
+        artifact_dir="custom/managed",
+    ) as t:
+        ctx = RunContext(t)
+
+        path = ctx.output_path("result")
+        assert (
+            path
+            == tracker.run_dir
+            / "outputs"
+            / "custom"
+            / "managed"
+            / "result.parquet"
+        )
+        assert path.parent.exists()
 
 def test_step_default_path_includes_model_name(tracker: Tracker):
     df = pd.DataFrame({"value": [1, 2, 3]})

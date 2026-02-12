@@ -121,7 +121,7 @@ def test_scenario_run_rejects_legacy_policy_kwargs(tracker):
     with tracker.scenario("scen_opts_conflict") as sc:
         with pytest.raises(
             TypeError,
-            match="no longer accepts legacy policy kwarg: `output_missing`",
+            match="unexpected keyword argument 'output_missing'",
         ):
             sc.run(
                 fn=step,

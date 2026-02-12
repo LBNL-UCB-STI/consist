@@ -23,11 +23,7 @@ from typing import TYPE_CHECKING
 from consist.core.coupler import Coupler
 from consist.core.input_utils import coerce_input_map
 from consist.core.metadata_resolver import MetadataResolver
-from consist.core.run_options import (
-    merge_run_options,
-    raise_legacy_policy_kwargs_error,
-    raise_unexpected_run_kwargs_error,
-)
+from consist.core.run_options import merge_run_options
 from consist.types import (
     ArtifactRef,
     CacheOptions,
@@ -95,6 +91,87 @@ class RunContext:
         path = self._tracker.run_artifact_dir()
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def output_dir(self, namespace: Optional[str] = None) -> Path:
+        """
+        Resolve the managed output directory for the active run.
+
+        Parameters
+        ----------
+        namespace : Optional[str], optional
+            Optional relative subdirectory under the managed run output directory.
+
+        Returns
+        -------
+        Path
+            Absolute directory path for managed outputs. The directory is created
+            if it does not exist.
+        """
+        base_dir = self.run_dir.resolve()
+        if namespace is None:
+            return base_dir
+
+        if not isinstance(namespace, str):
+            raise TypeError("namespace must be a string or None.")
+
+        normalized = namespace.strip()
+        if not normalized:
+            return base_dir
+
+        namespace_path = Path(normalized)
+        if namespace_path.is_absolute():
+            raise ValueError("namespace must be a relative path.")
+
+        resolved = (base_dir / namespace_path).resolve()
+        try:
+            resolved.relative_to(base_dir)
+        except ValueError as exc:
+            raise ValueError(
+                f"namespace must resolve under {base_dir}; got {resolved}"
+            ) from exc
+        resolved.mkdir(parents=True, exist_ok=True)
+        return resolved
+
+    def output_path(self, key: str, ext: str = "parquet") -> Path:
+        """
+        Resolve a deterministic managed output path for the active run.
+
+        Parameters
+        ----------
+        key : str
+            Artifact key used as the output filename stem. Relative path segments
+            are allowed to organize outputs into subdirectories.
+        ext : str, default "parquet"
+            File extension to append. Leading dots are ignored and the extension
+            is normalized to lowercase.
+
+        Returns
+        -------
+        Path
+            Absolute managed output path. Parent directories are created if needed.
+        """
+        if not isinstance(key, str):
+            raise TypeError("key must be a string.")
+        normalized_key = key.strip()
+        if not normalized_key:
+            raise ValueError("key must be a non-empty string.")
+
+        if not isinstance(ext, str):
+            raise TypeError("ext must be a string.")
+        normalized_ext = ext.strip().lstrip(".").lower()
+        if not normalized_ext:
+            raise ValueError("ext must be a non-empty string.")
+
+        base_dir = self.output_dir().resolve()
+        resolved = (base_dir / f"{normalized_key}.{normalized_ext}").resolve()
+        try:
+            resolved.relative_to(base_dir)
+        except ValueError as exc:
+            raise ValueError(
+                f"output key must resolve under {base_dir}; got {resolved}"
+            ) from exc
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        return resolved
 
     def log_artifact(self, *args: Any, **kwargs: Any) -> Artifact:
         """
@@ -642,7 +719,6 @@ class ScenarioContext:
         cache_options: Optional[CacheOptions] = None,
         output_policy: Optional[OutputPolicyOptions] = None,
         execution_options: Optional[ExecutionOptions] = None,
-        **legacy_policy_kwargs: Any,
     ) -> RunResult:
         """
         Execute a cached scenario step and update the Coupler with outputs.
@@ -656,15 +732,6 @@ class ScenarioContext:
         """
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
-
-        raise_legacy_policy_kwargs_error(
-            api_name="ScenarioContext.run",
-            kwargs=legacy_policy_kwargs,
-        )
-        raise_unexpected_run_kwargs_error(
-            api_name="ScenarioContext.run",
-            kwargs=legacy_policy_kwargs,
-        )
 
         func_name = getattr(fn, "__name__", None) if fn is not None else None
         if fn is not None and func_name is None and name is None:
