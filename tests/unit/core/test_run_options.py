@@ -5,7 +5,6 @@ import pytest
 from consist.core.run_options import (
     merge_run_options,
     raise_legacy_policy_kwargs_error,
-    raise_unexpected_run_kwargs_error,
 )
 from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
 
@@ -23,37 +22,31 @@ def test_merge_run_options_merges_options_objects() -> None:
     assert merged.inject_context == "ctx"
 
 
-def test_merge_run_options_supports_internal_overrides() -> None:
-    merged = merge_run_options(
-        cache_options=CacheOptions(cache_mode="reuse"),
-        cache_mode="overwrite",
-        execution_options=ExecutionOptions(load_inputs=True),
-        load_inputs=False,
-    )
+def test_merge_run_options_defaults_to_empty_options() -> None:
+    merged = merge_run_options()
 
-    assert merged.cache_mode == "overwrite"
-    assert merged.load_inputs is False
+    assert merged.cache_mode is None
+    assert merged.cache_hydration is None
+    assert merged.cache_version is None
+    assert merged.cache_epoch is None
+    assert merged.validate_cached_outputs is None
+    assert merged.output_mismatch is None
+    assert merged.output_missing is None
+    assert merged.load_inputs is None
+    assert merged.executor is None
+    assert merged.container is None
+    assert merged.runtime_kwargs is None
+    assert merged.inject_context is None
 
 
 def test_raise_legacy_policy_kwargs_error_has_migration_guidance() -> None:
     with pytest.raises(
-        TypeError, match="Tracker\\.run no longer accepts legacy policy"
+        TypeError, match="consist\\.run no longer accepts legacy policy"
     ):
         raise_legacy_policy_kwargs_error(
-            api_name="Tracker.run",
+            api_name="consist.run",
             kwargs={
                 "cache_mode": "reuse",
                 "inject_context": True,
             },
-        )
-
-
-def test_raise_unexpected_run_kwargs_error_uses_typeerror_shape() -> None:
-    with pytest.raises(
-        TypeError,
-        match="Tracker\\.run got an unexpected keyword argument 'unknown_flag'",
-    ):
-        raise_unexpected_run_kwargs_error(
-            api_name="Tracker.run",
-            kwargs={"unknown_flag": 1},
         )

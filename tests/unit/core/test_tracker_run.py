@@ -217,7 +217,7 @@ def test_tracker_run_rejects_legacy_policy_kwargs(tracker):
 
     with pytest.raises(
         TypeError,
-        match="no longer accepts legacy policy kwarg: `cache_mode`",
+        match="unexpected keyword argument 'cache_mode'",
     ):
         tracker.run(fn=step, cache_mode="reuse")
 

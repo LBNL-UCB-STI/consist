@@ -47,11 +47,7 @@ from consist.core.cache import (
 from consist.core.cache_output_logging import (
     maybe_return_cached_output_or_demote_cache_hit,
 )
-from consist.core.run_options import (
-    merge_run_options,
-    raise_legacy_policy_kwargs_error,
-    raise_unexpected_run_kwargs_error,
-)
+from consist.core.run_options import merge_run_options
 from consist.core.config_canonicalization import (
     ConfigAdapter,
     ConfigAdapterOptions,
@@ -1370,7 +1366,6 @@ class Tracker:
         cache_options: Optional[CacheOptions] = None,
         output_policy: Optional[OutputPolicyOptions] = None,
         execution_options: Optional[ExecutionOptions] = None,
-        **legacy_policy_kwargs: Any,
     ) -> RunResult:
         """
         Execute a function-shaped run with caching and output handling.
@@ -1495,15 +1490,6 @@ class Tracker:
         start_run : Manual run context management (more control)
         trace : Context manager alternative (always executes, even on cache hit)
         """
-        raise_legacy_policy_kwargs_error(
-            api_name="Tracker.run",
-            kwargs=legacy_policy_kwargs,
-        )
-        raise_unexpected_run_kwargs_error(
-            api_name="Tracker.run",
-            kwargs=legacy_policy_kwargs,
-        )
-
         merged_options = merge_run_options(
             cache_options=cache_options,
             output_policy=output_policy,

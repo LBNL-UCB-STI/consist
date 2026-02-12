@@ -20,10 +20,12 @@ more verbose, lower-level, or easier to misuse.
 - [`consist.start_run`](api_helpers.md#consist.api.start_run)
 - [`consist.define_step`](api_helpers.md#consist.api.define_step)
 - [`consist.use_tracker`](api_helpers.md#consist.api.use_tracker)
+- [`consist.output_dir`](api_helpers.md#consist.api.output_dir)
+- [`consist.output_path`](api_helpers.md#consist.api.output_path)
 - [`ScenarioContext`](workflow.md#consist.core.workflow.ScenarioContext) (returned by `consist.scenario(...)`)
   - `run_id`, `config`, `inputs`, `add_input`, `declare_outputs`, `require_outputs`, `collect_by_keys`, `run`, `trace`
 - [`RunContext`](workflow.md#consist.core.workflow.RunContext) (injected via `execution_options=ExecutionOptions(inject_context=True)`)
-  - `run_dir`, `inputs`, `load`, `log_artifact`, `log_artifacts`, `log_input`, `log_output`, `log_meta`, `capture_outputs`
+  - `run_dir`, `output_dir`, `output_path`, `inputs`, `load`, `log_artifact`, `log_artifacts`, `log_input`, `log_output`, `log_meta`, `capture_outputs`
 - [`Coupler`](workflow.md#consist.core.coupler.Coupler) (available at `scenario.coupler`)
 
 Scenario defaults like `name_template` and `cache_epoch` are configured via `consist.scenario(...)` and flow into `ScenarioContext.run(...)`.

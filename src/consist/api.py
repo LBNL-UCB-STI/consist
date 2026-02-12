@@ -48,7 +48,7 @@ from consist.core.drivers import ARRAY_DRIVERS, TABLE_DRIVERS, ArrayInfo, TableI
 from consist.core.noop import NoopRunContext, NoopScenarioContext
 from consist.core.run_options import raise_legacy_policy_kwargs_error
 from consist.core.views import _quote_ident, create_view_model
-from consist.core.workflow import OutputCapture
+from consist.core.workflow import OutputCapture, RunContext
 from consist.models.artifact import Artifact, get_tracker_ref
 from consist.models.run import ConsistRecord, Run, RunResult
 from consist.models.run_config_kv import RunConfigKV
@@ -644,6 +644,71 @@ def current_consist() -> Optional[ConsistRecord]:
     except RuntimeError:
         return None
     return tracker.current_consist
+
+
+def _require_active_run_tracker() -> "Tracker":
+    """
+    Return the tracker for the current active run context.
+
+    Raises
+    ------
+    RuntimeError
+        If there is no active run context.
+    """
+    tracker = get_active_tracker()
+    if tracker.current_consist is None:
+        raise RuntimeError(
+            "No active Consist run found. "
+            "Ensure you are within a run or active scenario step."
+        )
+    return tracker
+
+
+def output_dir(namespace: Optional[str] = None) -> Path:
+    """
+    Resolve the managed output directory for the active run context.
+
+    Parameters
+    ----------
+    namespace : Optional[str], optional
+        Optional relative subdirectory under the active run's managed output
+        directory.
+
+    Returns
+    -------
+    Path
+        Absolute path to the managed output directory.
+
+    Raises
+    ------
+    RuntimeError
+        If called outside an active run context.
+    """
+    return RunContext(_require_active_run_tracker()).output_dir(namespace=namespace)
+
+
+def output_path(key: str, ext: str = "parquet") -> Path:
+    """
+    Resolve a deterministic managed output path for the active run context.
+
+    Parameters
+    ----------
+    key : str
+        Artifact key used as the output filename stem.
+    ext : str, default "parquet"
+        File extension to append to the output filename.
+
+    Returns
+    -------
+    Path
+        Absolute managed output path for the current run.
+
+    Raises
+    ------
+    RuntimeError
+        If called outside an active run context.
+    """
+    return RunContext(_require_active_run_tracker()).output_path(key=key, ext=ext)
 
 
 # --- Cache helpers ---

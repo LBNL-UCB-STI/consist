@@ -53,3 +53,14 @@ The notebooks write outputs and DuckDB databases under `examples/runs/` (exact n
 
 - Generated code: keep Consist-generated SQLModel modules in `examples/src/generated/` (or, in real projects, a dedicated `your_pkg/consist_generated/` package) to make imports stable and reviewable.
 - Artifacts: the example prefers Parquet for tabular outputs and uses small binary files (e.g., `.npz`) for raw simulation state snapshots when useful.
+
+## Managed Output Paths (Preferred)
+
+When writing outputs inside an active run, prefer Consist-managed paths over
+manual path construction:
+
+- Use `consist.output_path("key/name", ext="csv")` inside `start_run(...)`.
+- If you inject context in a step, use `ctx.output_path("key/name", ext="csv")`.
+
+This keeps outputs deterministic, run-scoped, and easier to trace. See
+`scripts/model_integrator_wrapper.py` for a concrete example.
