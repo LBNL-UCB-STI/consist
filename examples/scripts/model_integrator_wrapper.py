@@ -70,9 +70,7 @@ def main():
             # ----------------------------------------
 
             policy_summary = output_path("policy_rail/final_summary", ext="csv")
-            policy_summary.write_text(
-                "metric,value\nvmt,111111.0\n", encoding="utf-8"
-            )
+            policy_summary.write_text("metric,value\nvmt,111111.0\n", encoding="utf-8")
             tracker.log_output(policy_summary, key="final_vmt")
             print("Policy Run Complete.")
 
