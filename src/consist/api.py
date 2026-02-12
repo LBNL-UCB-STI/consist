@@ -46,6 +46,7 @@ from consist.core.decorators import (
 )
 from consist.core.drivers import ARRAY_DRIVERS, TABLE_DRIVERS, ArrayInfo, TableInfo
 from consist.core.noop import NoopRunContext, NoopScenarioContext
+from consist.core.run_options import raise_legacy_policy_kwargs_error
 from consist.core.views import _quote_ident, create_view_model
 from consist.core.workflow import OutputCapture
 from consist.models.artifact import Artifact, get_tracker_ref
@@ -530,8 +531,7 @@ def run(
         Grouped runtime execution controls.
     **kwargs : Any
         Arguments forwarded to `Tracker.run`, including `inputs`, `config`,
-        `tags`, and primitive kwargs. Primitive kwargs override option object
-        fields when both are provided with different values.
+        `tags`, and other core run metadata.
 
     Returns
     -------
@@ -539,6 +539,10 @@ def run(
         A container holding the function's return value and the
         immutable `Run` record.
     """
+    raise_legacy_policy_kwargs_error(
+        api_name="consist.run",
+        kwargs=kwargs,
+    )
     tr = _resolve_tracker(tracker)
     return tr.run(
         fn=fn,

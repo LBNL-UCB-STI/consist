@@ -1,6 +1,7 @@
 import pytest
 
 import consist
+from consist.types import ExecutionOptions
 
 
 def test_require_runtime_kwargs_enforces_missing(tracker):
@@ -20,7 +21,9 @@ def test_require_runtime_kwargs_allows_present(tracker):
     result = tracker.run(
         fn=run_step,
         name="with_runtime_kwargs",
-        runtime_kwargs={"settings": {"x": 1}, "state": {"y": 2}},
+        execution_options=ExecutionOptions(
+            runtime_kwargs={"settings": {"x": 1}, "state": {"y": 2}}
+        ),
     )
 
     assert result.run.id.startswith("with_runtime_kwargs")

@@ -4,6 +4,7 @@ import pandas as pd
 from pydantic import BaseModel
 
 from consist.core.tracker import Tracker
+from consist.types import ExecutionOptions
 
 
 class ModelConfig(BaseModel):
@@ -58,7 +59,7 @@ def test_tracker_introspection_and_history(tracker: Tracker, run_dir: Path):
         fn=task_a,
         name="task_a",
         output_paths={"a": "a"},
-        inject_context="ctx",
+        execution_options=ExecutionOptions(inject_context="ctx"),
     )
     assert tracker.last_run.run.model_name == "task_a"
 
@@ -66,7 +67,7 @@ def test_tracker_introspection_and_history(tracker: Tracker, run_dir: Path):
         fn=task_b,
         name="task_b",
         output_paths={"b": "b"},
-        inject_context="ctx",
+        execution_options=ExecutionOptions(inject_context="ctx"),
     )
     assert tracker.last_run.run.model_name == "task_b"
 

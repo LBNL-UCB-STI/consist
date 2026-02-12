@@ -7,6 +7,7 @@ from sqlmodel import SQLModel, Field, select, func
 
 from consist.core.tracker import Tracker
 from consist.models.run import Run
+from consist.types import CacheOptions, ExecutionOptions
 import consist
 
 
@@ -214,8 +215,6 @@ def run_simulation_scenario(
             ):
                 result = scenario.run(
                     name="generate_trips",
-                    executor="container",
-                    container=container_spec,
                     year=year,
                     tags=["simulation", "generate_trips"],
                     config={
@@ -226,7 +225,13 @@ def run_simulation_scenario(
                     hash_inputs=[("generate_trips_config", external_cfg_dir)],
                     inputs=[advanced_person_art],
                     output_paths={"persons": output_path},
-                    validate_cached_outputs=validate_cached_outputs,
+                    cache_options=CacheOptions(
+                        validate_cached_outputs=validate_cached_outputs
+                    ),
+                    execution_options=ExecutionOptions(
+                        executor="container",
+                        container=container_spec,
+                    ),
                 )
 
             persons_art = result.outputs["persons"]

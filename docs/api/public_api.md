@@ -22,7 +22,7 @@ more verbose, lower-level, or easier to misuse.
 - [`consist.use_tracker`](api_helpers.md#consist.api.use_tracker)
 - [`ScenarioContext`](workflow.md#consist.core.workflow.ScenarioContext) (returned by `consist.scenario(...)`)
   - `run_id`, `config`, `inputs`, `add_input`, `declare_outputs`, `require_outputs`, `collect_by_keys`, `run`, `trace`
-- [`RunContext`](workflow.md#consist.core.workflow.RunContext) (injected via `inject_context=True`)
+- [`RunContext`](workflow.md#consist.core.workflow.RunContext) (injected via `execution_options=ExecutionOptions(inject_context=True)`)
   - `run_dir`, `inputs`, `load`, `log_artifact`, `log_artifacts`, `log_input`, `log_output`, `log_meta`, `capture_outputs`
 - [`Coupler`](workflow.md#consist.core.coupler.Coupler) (available at `scenario.coupler`)
 

@@ -130,7 +130,7 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
             config={"step": "transform", "multiplier": 2},
             facet_from=["step", "multiplier"],
             outputs=["features"],
-            load_inputs=True,
+            execution_options=ExecutionOptions(load_inputs=True),
         )
         features_artifact = transform_result.outputs["features"]
         assert scenario.coupler.require("features").id == features_artifact.id
@@ -344,7 +344,7 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
         fn=prepare_data,
         name="prepare_data",
         outputs=["prepared_data"],
-        runtime_kwargs={"rows": 8},
+        execution_options=ExecutionOptions(runtime_kwargs={"rows": 8}),
     )
     prepared_artifact = prepared_result.outputs["prepared_data"]
     # Materialize the predecessor output into DuckDB so downstream steps can still
@@ -361,8 +361,7 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
             name="train_model",
             inputs={"prepared_data": prepared_artifact},
             outputs=["model"],
-            load_inputs=False,
-            inject_context=True,
+            execution_options=ExecutionOptions(load_inputs=False, inject_context=True),
         )
     assert "No space left on device" in str(exc_info.value)
 
@@ -389,7 +388,7 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
         fn=prepare_data,
         name="prepare_data",
         outputs=["prepared_data"],
-        runtime_kwargs={"rows": 8},
+        execution_options=ExecutionOptions(runtime_kwargs={"rows": 8}),
     )
     prepared_artifact_2 = prepared_result_2.outputs["prepared_data"]
     assert prepared_artifact_2.container_uri == prepared_artifact.container_uri
@@ -399,8 +398,7 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
         name="train_model",
         inputs={"prepared_data": prepared_artifact_2},
         outputs=["model"],
-        load_inputs=False,
-        inject_context=True,
+        execution_options=ExecutionOptions(load_inputs=False, inject_context=True),
     )
     report_result: RunResult = tracker.run(
         fn=evaluate_model,
@@ -410,8 +408,7 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
             "prepared_data": prepared_artifact_2,
         },
         outputs=["report"],
-        load_inputs=False,
-        inject_context=True,
+        execution_options=ExecutionOptions(load_inputs=False, inject_context=True),
     )
     report_artifact = report_result.outputs["report"]
 
@@ -467,7 +464,7 @@ def test_scenario_run_skips_callable_on_cache_hit(tracker: Tracker):
             fn=expensive_step,
             config={"v": 1},
             output_paths={"out": rel_out},
-            inject_context=True,
+            execution_options=ExecutionOptions(inject_context=True),
         )
         assert result.outputs["out"].key == "out"
         assert sc.coupler.require("out").id == result.outputs["out"].id
@@ -484,7 +481,7 @@ def test_scenario_run_skips_callable_on_cache_hit(tracker: Tracker):
             fn=expensive_step,
             config={"v": 1},
             output_paths={"out": rel_out},
-            inject_context=True,
+            execution_options=ExecutionOptions(inject_context=True),
         )
         assert result.outputs["out"].key == "out"
         assert sc.coupler.require("out").id == result.outputs["out"].id

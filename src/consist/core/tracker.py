@@ -47,7 +47,11 @@ from consist.core.cache import (
 from consist.core.cache_output_logging import (
     maybe_return_cached_output_or_demote_cache_hit,
 )
-from consist.core.run_options import merge_run_options
+from consist.core.run_options import (
+    merge_run_options,
+    raise_legacy_policy_kwargs_error,
+    raise_unexpected_run_kwargs_error,
+)
 from consist.core.config_canonicalization import (
     ConfigAdapter,
     ConfigAdapterOptions,
@@ -1366,18 +1370,7 @@ class Tracker:
         cache_options: Optional[CacheOptions] = None,
         output_policy: Optional[OutputPolicyOptions] = None,
         execution_options: Optional[ExecutionOptions] = None,
-        cache_mode: Optional[str] = None,
-        cache_hydration: Optional[str] = None,
-        cache_version: Optional[int] = None,
-        cache_epoch: Optional[int] = None,
-        validate_cached_outputs: Optional[str] = None,
-        load_inputs: Optional[bool] = None,
-        executor: Optional[str] = None,
-        container: Optional[Mapping[str, Any]] = None,
-        runtime_kwargs: Optional[Mapping[str, Any]] = None,
-        inject_context: bool | str | None = None,
-        output_mismatch: Optional[str] = None,
-        output_missing: Optional[str] = None,
+        **legacy_policy_kwargs: Any,
     ) -> RunResult:
         """
         Execute a function-shaped run with caching and output handling.
@@ -1456,38 +1449,6 @@ class Tracker:
             Grouped execution controls (`load_inputs`, `executor`, `container`,
             `runtime_kwargs`, `inject_context`).
 
-        cache_mode : str, default "reuse"
-            Cache behavior: "reuse" (return cache hit), "overwrite" (always re-execute), or "readonly".
-        cache_hydration : Optional[str], optional
-            Materialization strategy for cache hits:
-            - "outputs-requested": Copy only output_paths to disk
-            - "outputs-all": Copy all cached outputs to run_artifact_dir
-            - "inputs-missing": Backfill missing inputs from prior runs before executing
-        validate_cached_outputs : str, default "lazy"
-            Validation for cached outputs: "lazy" (check if files exist), "strict", or "none".
-
-        load_inputs : Optional[bool], optional
-            Whether to auto-load input artifacts into function parameters.
-            Defaults to True if inputs is a dict, False if a list.
-        executor : str, default "python"
-            Execution backend: "python" (call fn directly) or "container" (use Docker/Singularity).
-        container : Optional[Mapping[str, Any]], optional
-            Container spec (required if executor='container'). Must contain 'image' and 'command'.
-        runtime_kwargs : Optional[Mapping[str, Any]], optional
-            Additional kwargs to pass to fn at runtime (merged with auto-loaded inputs).
-            These values are not part of the cache signature; use them for handles
-            or runtime-only dependencies. Consider `consist.require_runtime_kwargs`
-            to enforce required keys.
-        inject_context : bool | str, optional
-            If True or a parameter name, inject a RunContext as that parameter (for file I/O, output logging).
-
-        output_mismatch : str, default "warn"
-            Behavior when output count doesn't match: "warn", "error", or "ignore".
-        output_missing : str, default "warn"
-            Behavior when expected outputs are missing: "warn", "error", or "ignore".
-            Direct kwargs take precedence over option object fields. Consist warns
-            only when the same field is provided in both places with different values.
-
         Returns
         -------
         RunResult
@@ -1534,24 +1495,19 @@ class Tracker:
         start_run : Manual run context management (more control)
         trace : Context manager alternative (always executes, even on cache hit)
         """
+        raise_legacy_policy_kwargs_error(
+            api_name="Tracker.run",
+            kwargs=legacy_policy_kwargs,
+        )
+        raise_unexpected_run_kwargs_error(
+            api_name="Tracker.run",
+            kwargs=legacy_policy_kwargs,
+        )
+
         merged_options = merge_run_options(
             cache_options=cache_options,
             output_policy=output_policy,
             execution_options=execution_options,
-            cache_mode=cache_mode,
-            cache_hydration=cache_hydration,
-            cache_version=cache_version,
-            cache_epoch=cache_epoch,
-            validate_cached_outputs=validate_cached_outputs,
-            output_mismatch=output_mismatch,
-            output_missing=output_missing,
-            load_inputs=load_inputs,
-            executor=executor,
-            container=container,
-            runtime_kwargs=runtime_kwargs,
-            inject_context=inject_context,
-            warning_prefix="Tracker.run",
-            warning_stacklevel=3,
         )
 
         cache_mode = merged_options.cache_mode

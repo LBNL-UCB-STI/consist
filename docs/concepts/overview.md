@@ -126,12 +126,16 @@ Write outputs under `tracker.run_dir` or a mounted `outputs://` root. This keeps
 
 ### Input mappings and auto-loading
 
-Inputs can be passed as a list (hash-only) or a mapping (hash + parameter injection). When using a mapping, Consist matches input keys to function parameters and auto-loads artifacts by default. To pass raw paths instead, set `load_inputs=False` and provide paths via `runtime_kwargs`.
+Inputs can be passed as a list (hash-only) or a mapping (hash + parameter
+injection). When using a mapping, Consist matches input keys to function
+parameters and auto-loads artifacts by default. To pass raw paths instead, use
+`execution_options=ExecutionOptions(load_inputs=False, runtime_kwargs={...})`.
 
 Concrete example:
 
 ``` python
 import pandas as pd
+from consist import ExecutionOptions
 
 def summarize_trips(trips_df):
     return trips_df["distance_miles"].mean()
@@ -148,8 +152,10 @@ def summarize_trips_from_path(trips_path: str):
 result = consist.run(  # (2)!
     fn=summarize_trips_from_path,
     inputs={"trips_path": trips_artifact},
-    load_inputs=False,
-    runtime_kwargs={"trips_path": trips_artifact.path},
+    execution_options=ExecutionOptions(
+        load_inputs=False,
+        runtime_kwargs={"trips_path": trips_artifact.path},
+    ),
 )
 ```
 

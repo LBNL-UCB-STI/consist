@@ -10,9 +10,11 @@ from typing import (
     Dict,
     Any,
     Callable,
+    Literal,
     Mapping,
     Iterator,
     Union,
+    cast,
 )
 
 from consist import Artifact
@@ -21,7 +23,11 @@ from typing import TYPE_CHECKING
 from consist.core.coupler import Coupler
 from consist.core.input_utils import coerce_input_map
 from consist.core.metadata_resolver import MetadataResolver
-from consist.core.run_options import merge_run_options
+from consist.core.run_options import (
+    merge_run_options,
+    raise_legacy_policy_kwargs_error,
+    raise_unexpected_run_kwargs_error,
+)
 from consist.types import (
     ArtifactRef,
     CacheOptions,
@@ -636,30 +642,29 @@ class ScenarioContext:
         cache_options: Optional[CacheOptions] = None,
         output_policy: Optional[OutputPolicyOptions] = None,
         execution_options: Optional[ExecutionOptions] = None,
-        cache_mode: Optional[str] = None,
-        cache_hydration: Optional[str] = None,
-        cache_version: Optional[int] = None,
-        validate_cached_outputs: Optional[str] = None,
-        load_inputs: Optional[bool] = None,
-        executor: Optional[str] = None,
-        container: Optional[Mapping[str, Any]] = None,
-        runtime_kwargs: Optional[Mapping[str, Any]] = None,
-        inject_context: bool | str | None = None,
-        output_mismatch: Optional[str] = None,
-        output_missing: Optional[str] = None,
+        **legacy_policy_kwargs: Any,
     ) -> RunResult:
         """
         Execute a cached scenario step and update the Coupler with outputs.
 
         This method wraps ``Tracker.run`` while ensuring the scenario header
         is updated with step metadata and artifacts.
-        Use ``runtime_kwargs`` for runtime-only inputs and `consist.require_runtime_kwargs`
-        to validate required keys. You can pass grouped options via
-        ``cache_options``, ``output_policy``, and ``execution_options``.
-        Direct kwargs take precedence over conflicting option-object values.
+        Use ``execution_options.runtime_kwargs`` for runtime-only inputs and
+        `consist.require_runtime_kwargs` to validate required keys.
+        Pass policy controls via ``cache_options``, ``output_policy``,
+        and ``execution_options``.
         """
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
+
+        raise_legacy_policy_kwargs_error(
+            api_name="ScenarioContext.run",
+            kwargs=legacy_policy_kwargs,
+        )
+        raise_unexpected_run_kwargs_error(
+            api_name="ScenarioContext.run",
+            kwargs=legacy_policy_kwargs,
+        )
 
         func_name = getattr(fn, "__name__", None) if fn is not None else None
         if fn is not None and func_name is None and name is None:
@@ -671,19 +676,6 @@ class ScenarioContext:
             cache_options=cache_options,
             output_policy=output_policy,
             execution_options=execution_options,
-            cache_mode=cache_mode,
-            cache_hydration=cache_hydration,
-            cache_version=cache_version,
-            validate_cached_outputs=validate_cached_outputs,
-            output_mismatch=output_mismatch,
-            output_missing=output_missing,
-            load_inputs=load_inputs,
-            executor=executor,
-            container=container,
-            runtime_kwargs=runtime_kwargs,
-            inject_context=inject_context,
-            warning_prefix="ScenarioContext.run",
-            warning_stacklevel=3,
         )
 
         cache_mode = merged_options.cache_mode
@@ -707,6 +699,13 @@ class ScenarioContext:
             output_mismatch = "warn"
         if output_missing is None:
             output_missing = "warn"
+        resolved_output_mismatch = cast(
+            Literal["warn", "error", "ignore"], output_mismatch
+        )
+        resolved_output_missing = cast(
+            Literal["warn", "error", "ignore"], output_missing
+        )
+        resolved_executor = cast(Literal["python", "container"], executor)
 
         runtime_kwargs_dict: Optional[Dict[str, Any]] = (
             dict(runtime_kwargs) if runtime_kwargs is not None else None
@@ -839,18 +838,24 @@ class ScenarioContext:
             output_paths=resolved_output_paths,
             capture_dir=capture_dir,
             capture_pattern=capture_pattern,
-            cache_mode=resolved_cache_mode,
-            cache_hydration=effective_cache_hydration,
-            cache_version=resolved_cache_version,
-            cache_epoch=resolved_cache_epoch,
-            validate_cached_outputs=resolved_validate_cached_outputs,
-            load_inputs=resolved_load_inputs,
-            executor=executor,
-            container=container,
-            runtime_kwargs=runtime_kwargs_dict,
-            inject_context=inject_context,
-            output_mismatch=output_mismatch,
-            output_missing=output_missing,
+            cache_options=CacheOptions(
+                cache_mode=resolved_cache_mode,
+                cache_hydration=effective_cache_hydration,
+                cache_version=resolved_cache_version,
+                cache_epoch=resolved_cache_epoch,
+                validate_cached_outputs=resolved_validate_cached_outputs,
+            ),
+            output_policy=OutputPolicyOptions(
+                output_mismatch=resolved_output_mismatch,
+                output_missing=resolved_output_missing,
+            ),
+            execution_options=ExecutionOptions(
+                load_inputs=resolved_load_inputs,
+                executor=resolved_executor,
+                container=container,
+                runtime_kwargs=runtime_kwargs_dict,
+                inject_context=inject_context,
+            ),
         )
 
         if result.outputs:

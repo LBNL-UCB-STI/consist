@@ -5,6 +5,7 @@ import pytest
 from consist.core.coupler import Coupler
 from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
 from consist.core.tracker import Tracker
+from consist.types import CacheOptions, ExecutionOptions
 
 
 def _dummy_config_plan(
@@ -171,7 +172,7 @@ def test_inputs_list_promotion_loads_from_coupler(
             fn=consume,
             name="consume",
             inputs=["raw"],
-            load_inputs=True,
+            execution_options=ExecutionOptions(load_inputs=True),
         )
 
 
@@ -279,7 +280,7 @@ def test_run_config_plan_includes_adapter_version(tracker: Tracker):
         fn=lambda: None,
         name="plan_run_v1",
         config_plan=plan_v1,
-        cache_mode="overwrite",
+        cache_options=CacheOptions(cache_mode="overwrite"),
     )
     record_v1 = tracker.last_run
     assert record_v1 is not None
@@ -291,7 +292,7 @@ def test_run_config_plan_includes_adapter_version(tracker: Tracker):
         fn=lambda: None,
         name="plan_run_v2",
         config_plan=plan_v2,
-        cache_mode="overwrite",
+        cache_options=CacheOptions(cache_mode="overwrite"),
     )
     record_v2 = tracker.last_run
     assert record_v2 is not None
@@ -307,7 +308,7 @@ def test_scenario_run_with_config_plan(tracker: Tracker):
             fn=lambda: None,
             name="step",
             config_plan=plan,
-            cache_mode="overwrite",
+            cache_options=CacheOptions(cache_mode="overwrite"),
         )
         record = tracker.last_run
         assert record is not None
@@ -325,7 +326,7 @@ def test_scenario_run_uses_decorator_config_plan_default(tracker: Tracker) -> No
         return None
 
     with tracker.scenario("scen_plan_default") as sc:
-        sc.run(fn=step, year=2042, cache_mode="overwrite")
+        sc.run(fn=step, year=2042, cache_options=CacheOptions(cache_mode="overwrite"))
         record = tracker.last_run
         assert record is not None
         assert record.config["__consist_config_plan__"]["adapter_version"] == "2042"

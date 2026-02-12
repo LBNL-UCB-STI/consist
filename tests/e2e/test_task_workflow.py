@@ -13,6 +13,7 @@ from consist.core.tracker import Tracker
 from consist.core.workflow import RunContext
 from consist.models.artifact import Artifact
 from consist.models.run import Run
+from consist.types import CacheOptions, ExecutionOptions
 
 
 class CleaningConfig(BaseModel):
@@ -149,8 +150,10 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
         fn=clean_data,
         inputs={"raw_file": raw_data_path},
         config=config,
-        runtime_kwargs={"raw_file": raw_data_path},
-        load_inputs=False,
+        execution_options=ExecutionOptions(
+            runtime_kwargs={"raw_file": raw_data_path},
+            load_inputs=False,
+        ),
     )
     cleaned_artifact = cleaned_result.outputs["cleaned"]
     assert isinstance(cleaned_artifact, Artifact), "Run should return output artifacts"
@@ -168,8 +171,10 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     analysis_result = tracker.run(
         fn=analyze_data,
         inputs={"cleaned_file": cleaned_artifact},
-        runtime_kwargs={"cleaned_file": cleaned_artifact.path, "multiplier": 2.0},
-        load_inputs=False,
+        execution_options=ExecutionOptions(
+            runtime_kwargs={"cleaned_file": cleaned_artifact.path, "multiplier": 2.0},
+            load_inputs=False,
+        ),
     )
     analysis_artifact = analysis_result.outputs["analysis"]
     assert isinstance(analysis_artifact, Artifact)
@@ -182,10 +187,12 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     legacy_result = tracker.run(
         fn=run_legacy_analysis,
         inputs={"cleaned_file": cleaned_artifact},
-        runtime_kwargs={"cleaned_file": cleaned_artifact.path},
+        execution_options=ExecutionOptions(
+            runtime_kwargs={"cleaned_file": cleaned_artifact.path},
+            inject_context=True,
+            load_inputs=False,
+        ),
         hash_inputs=[("cleaning_config", config_path), ("params", params_path)],
-        inject_context=True,
-        load_inputs=False,
     )
     assert legacy_result.outputs, "Legacy analysis should capture outputs"
 
@@ -256,8 +263,10 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
         fn=clean_data,
         inputs={"raw_file": raw_data_path},
         config=config,
-        runtime_kwargs={"raw_file": raw_data_path},
-        load_inputs=False,
+        execution_options=ExecutionOptions(
+            runtime_kwargs={"raw_file": raw_data_path},
+            load_inputs=False,
+        ),
     )
 
     # Should get the same artifact back (cache hit)
@@ -291,8 +300,10 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
         fn=clean_data,
         inputs={"raw_file": raw_data_path},
         config=config_new,
-        runtime_kwargs={"raw_file": raw_data_path},
-        load_inputs=False,
+        execution_options=ExecutionOptions(
+            runtime_kwargs={"raw_file": raw_data_path},
+            load_inputs=False,
+        ),
     )
 
     # Should be a new execution (different config = different signature)
@@ -327,17 +338,21 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
         fn=clean_data_overwrite,
         inputs={"raw_file": raw_data_path},
         config=config,
-        runtime_kwargs={"raw_file": raw_data_path},
-        load_inputs=False,
-        cache_mode="overwrite",
+        execution_options=ExecutionOptions(
+            runtime_kwargs={"raw_file": raw_data_path},
+            load_inputs=False,
+        ),
+        cache_options=CacheOptions(cache_mode="overwrite"),
     )
     tracker.run(
         fn=clean_data_overwrite,
         inputs={"raw_file": raw_data_path},
         config=config,
-        runtime_kwargs={"raw_file": raw_data_path},
-        load_inputs=False,
-        cache_mode="overwrite",
+        execution_options=ExecutionOptions(
+            runtime_kwargs={"raw_file": raw_data_path},
+            load_inputs=False,
+        ),
+        cache_options=CacheOptions(cache_mode="overwrite"),
     )
 
     # Both should execute (overwrite mode)
@@ -425,8 +440,10 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
         fn=clean_data,
         inputs={"raw_file": modified_path},
         config=config,
-        runtime_kwargs={"raw_file": modified_path},
-        load_inputs=False,
+        execution_options=ExecutionOptions(
+            runtime_kwargs={"raw_file": modified_path},
+            load_inputs=False,
+        ),
     )
 
     # Should be a new run (different input)

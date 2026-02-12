@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import consist
+import pytest
 from consist import use_tracker
 from consist.types import CacheOptions, ExecutionOptions
 
@@ -30,3 +31,15 @@ def test_consist_run_forwards_options_objects(tracker):
     assert first.cache_hit is False
     assert second.cache_hit is True
     assert calls == ["called"]
+
+
+def test_consist_run_rejects_legacy_policy_kwargs(tracker):
+    def step() -> None:
+        return None
+
+    with use_tracker(tracker):
+        with pytest.raises(
+            TypeError,
+            match="consist.run no longer accepts legacy policy kwarg: `cache_mode`",
+        ):
+            consist.run(fn=step, cache_mode="reuse")

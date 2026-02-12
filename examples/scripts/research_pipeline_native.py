@@ -4,6 +4,7 @@ import pandas as pd
 import xarray as xr
 
 from consist import Tracker, define_step
+from consist.types import ExecutionOptions
 
 # ---------------------------------------------------------------------------------
 # Minimal Template: Researcher / Library Developer
@@ -54,7 +55,9 @@ def main():
         sc.run(
             preprocess,
             inputs={"raw_data": raw_path},
-            runtime_kwargs={"raw_data_path": raw_path},
+            execution_options=ExecutionOptions(
+                runtime_kwargs={"raw_data_path": raw_path}
+            ),
         )
 
         # Step 2: Simulate
@@ -63,8 +66,10 @@ def main():
         sc.run(
             simulate,
             inputs={"clean_data": "clean_data"},
-            load_inputs=True,
-            runtime_kwargs={"params": {"resolution": "high", "seed": 42}},
+            execution_options=ExecutionOptions(
+                load_inputs=True,
+                runtime_kwargs={"params": {"resolution": "high", "seed": 42}},
+            ),
         )
 
         result_artifact = sc.coupler.require("run_simulation")

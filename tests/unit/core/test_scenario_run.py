@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
+from consist.types import CacheOptions, ExecutionOptions
 
 
 def test_scenario_run_updates_coupler_and_cache_hit(tracker):
@@ -19,7 +19,7 @@ def test_scenario_run_updates_coupler_and_cache_hit(tracker):
         result = sc.run(
             fn=step,
             output_paths={"out": "out.txt"},
-            inject_context="ctx",
+            execution_options=ExecutionOptions(inject_context="ctx"),
         )
         assert "out" in sc.coupler
         assert result.cache_hit is False
@@ -28,7 +28,7 @@ def test_scenario_run_updates_coupler_and_cache_hit(tracker):
         result = sc.run(
             fn=step,
             output_paths={"out": "out.txt"},
-            inject_context="ctx",
+            execution_options=ExecutionOptions(inject_context="ctx"),
         )
         assert "out" in sc.coupler
         assert result.cache_hit is True
@@ -49,12 +49,12 @@ def test_scenario_run_resolves_coupler_inputs(tracker):
         sc.run(
             fn=produce,
             output_paths={"data": "data.csv"},
-            inject_context="ctx",
+            execution_options=ExecutionOptions(inject_context="ctx"),
         )
         sc.run(
             fn=consume,
             inputs={"data": "data"},
-            load_inputs=True,
+            execution_options=ExecutionOptions(load_inputs=True),
         )
 
 
@@ -114,17 +114,18 @@ def test_scenario_run_supports_options_objects(tracker):
     assert calls == ["called"]
 
 
-def test_scenario_run_warns_on_conflicting_output_policy(tracker):
+def test_scenario_run_rejects_legacy_policy_kwargs(tracker):
     def step() -> None:
         return None
 
     with tracker.scenario("scen_opts_conflict") as sc:
-        with pytest.warns(UserWarning, match="output_missing"):
-            with pytest.raises(RuntimeError, match="missing outputs"):
-                sc.run(
-                    fn=step,
-                    name="produce",
-                    outputs=["out"],
-                    output_policy=OutputPolicyOptions(output_missing="warn"),
-                    output_missing="error",
-                )
+        with pytest.raises(
+            TypeError,
+            match="no longer accepts legacy policy kwarg: `output_missing`",
+        ):
+            sc.run(
+                fn=step,
+                name="produce",
+                outputs=["out"],
+                output_missing="error",
+            )

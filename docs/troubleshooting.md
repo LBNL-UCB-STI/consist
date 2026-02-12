@@ -70,10 +70,12 @@ Why this happens: Consist defaults to metadata-only cache hits to keep cache che
 Use cache hydration to copy files:
 
 ```python
+from consist import CacheOptions
+
 result = consist.run(
     fn=my_function,
     inputs={...},
-    cache_hydration="outputs-all",  # Copy all cached outputs
+    cache_options=CacheOptions(cache_hydration="outputs-all"),  # Copy all cached outputs
     ...
 )
 ```
@@ -149,11 +151,13 @@ This clears all run history and cache. Next run will re-execute everything.
 To keep history but force re-execution:
 
 ```python
+from consist import CacheOptions
+
 result = consist.run(
     fn=your_fn,
     inputs={...},
     outputs=[...],
-    cache_mode="overwrite",
+    cache_options=CacheOptions(cache_mode="overwrite"),
 )
 ```
 
@@ -567,8 +571,13 @@ with tracker.start_run("ingest_persons", model="example"):
 
 2. **Avoid unnecessary materialization:**
    ```python
+   from consist import CacheOptions
+
    # Don't materialize if you don't need it
-   result = consist.run(..., cache_hydration="none")
+   result = consist.run(
+       ...,
+       cache_options=CacheOptions(cache_hydration="none"),
+   )
    ```
 
 3. **Use Parquet instead of CSV** (faster parsing):

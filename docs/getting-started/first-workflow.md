@@ -27,7 +27,7 @@ Save the following as `workflow.py`:
 from pathlib import Path
 import pandas as pd
 import consist
-from consist import Tracker
+from consist import ExecutionOptions, Tracker
 
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
@@ -63,7 +63,9 @@ with consist.use_tracker(tracker):
         name="clean",
         config={"threshold": 15},  # (5)!
         inputs=[Path("./data/raw.csv")],  # (6)!
-        runtime_kwargs={"raw_path": Path("./data/raw.csv"), "threshold": 15},
+        execution_options=ExecutionOptions(
+            runtime_kwargs={"raw_path": Path("./data/raw.csv"), "threshold": 15}
+        ),
     )
     print(f"Clean: {clean_result.run.status}")
 
@@ -120,7 +122,9 @@ Edit `workflow.py` to change the threshold:
 
 ``` python
 config={"threshold": 25},  # Changed from 15
-runtime_kwargs={"raw_path": Path("./data/raw.csv"), "threshold": 25},
+execution_options=ExecutionOptions(
+    runtime_kwargs={"raw_path": Path("./data/raw.csv"), "threshold": 25},
+),
 ```
 
 Run again:

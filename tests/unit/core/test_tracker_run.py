@@ -18,7 +18,11 @@ def test_tracker_run_load_inputs_requires_mapping(tracker, sample_csv):
     with pytest.raises(
         ValueError, match="load_inputs=True requires inputs to be a dict"
     ):
-        tracker.run(fn=step, inputs=[input_path], load_inputs=True)
+        tracker.run(
+            fn=step,
+            inputs=[input_path],
+            execution_options=ExecutionOptions(load_inputs=True),
+        )
 
 
 def test_tracker_run_loads_inputs_and_injects_context(tracker, sample_csv):
@@ -36,8 +40,7 @@ def test_tracker_run_loads_inputs_and_injects_context(tracker, sample_csv):
         inputs={"data": input_path},
         config={"threshold": 2},
         output_paths={"filtered": "filtered.csv"},
-        load_inputs=True,
-        inject_context="ctx",
+        execution_options=ExecutionOptions(load_inputs=True, inject_context="ctx"),
     )
 
     assert "filtered" in result.outputs
@@ -56,12 +59,12 @@ def test_tracker_run_cache_hit_skips_callable(tracker):
     first = tracker.run(
         fn=step,
         output_paths={"out": "out.txt"},
-        inject_context="ctx",
+        execution_options=ExecutionOptions(inject_context="ctx"),
     )
     second = tracker.run(
         fn=step,
         output_paths={"out": "out.txt"},
-        inject_context="ctx",
+        execution_options=ExecutionOptions(inject_context="ctx"),
     )
 
     assert calls == ["called"]
@@ -78,7 +81,7 @@ def test_run_context_run_dir_is_created(tracker):
     result = tracker.run(
         fn=step,
         outputs=["out"],
-        inject_context="ctx",
+        execution_options=ExecutionOptions(inject_context="ctx"),
     )
 
     assert result.outputs["out"].path.exists()
@@ -122,8 +125,10 @@ def test_tracker_run_output_mismatch_warns(tracker, caplog):
         result = tracker.run(
             fn=step,
             outputs=["a", "b"],
-            output_mismatch="warn",
-            output_missing="ignore",
+            output_policy=OutputPolicyOptions(
+                output_mismatch="warn",
+                output_missing="ignore",
+            ),
         )
 
     assert any(
@@ -138,7 +143,11 @@ def test_tracker_run_output_missing_error(tracker):
         return None
 
     with pytest.raises(RuntimeError, match="missing outputs"):
-        tracker.run(fn=step, outputs=["out"], output_missing="error")
+        tracker.run(
+            fn=step,
+            outputs=["out"],
+            output_policy=OutputPolicyOptions(output_missing="error"),
+        )
 
 
 def test_tracker_run_inject_context_requires_param(tracker):
@@ -146,7 +155,10 @@ def test_tracker_run_inject_context_requires_param(tracker):
         return None
 
     with pytest.raises(ValueError, match="inject_context requested"):
-        tracker.run(fn=step, inject_context=True)
+        tracker.run(
+            fn=step,
+            execution_options=ExecutionOptions(inject_context=True),
+        )
 
 
 def test_cache_epoch_affects_config_hash(tmp_path):
@@ -158,8 +170,8 @@ def test_cache_epoch_affects_config_hash(tmp_path):
     tracker_a.run(
         fn=step,
         output_paths={"out": "out.txt"},
-        inject_context="ctx",
-        cache_mode="overwrite",
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        cache_options=CacheOptions(cache_mode="overwrite"),
     )
     hash_a = tracker_a.last_run.run.config_hash
 
@@ -167,8 +179,8 @@ def test_cache_epoch_affects_config_hash(tmp_path):
     tracker_b.run(
         fn=step,
         output_paths={"out": "out.txt"},
-        inject_context="ctx",
-        cache_mode="overwrite",
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        cache_options=CacheOptions(cache_mode="overwrite"),
     )
     hash_b = tracker_b.last_run.run.config_hash
 
@@ -183,50 +195,31 @@ def test_cache_version_affects_config_hash(tracker):
     tracker.run(
         fn=step,
         output_paths={"out": "out.txt"},
-        inject_context="ctx",
-        cache_version=1,
-        cache_mode="overwrite",
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        cache_options=CacheOptions(cache_version=1, cache_mode="overwrite"),
     )
     hash_v1 = tracker.last_run.run.config_hash
 
     tracker.run(
         fn=step,
         output_paths={"out": "out.txt"},
-        inject_context="ctx",
-        cache_version=2,
-        cache_mode="overwrite",
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        cache_options=CacheOptions(cache_version=2, cache_mode="overwrite"),
     )
     hash_v2 = tracker.last_run.run.config_hash
 
     assert hash_v1 != hash_v2
 
 
-def test_tracker_run_warns_on_conflicting_cache_option_and_uses_kwarg(tracker):
-    calls: list[str] = []
+def test_tracker_run_rejects_legacy_policy_kwargs(tracker):
+    def step() -> None:
+        return None
 
-    def step(ctx) -> None:
-        calls.append("called")
-        ctx.run_dir.mkdir(parents=True, exist_ok=True)
-        (ctx.run_dir / "out.txt").write_text("ok")
-
-    with pytest.warns(UserWarning, match="cache_mode"):
-        tracker.run(
-            fn=step,
-            output_paths={"out": "out.txt"},
-            cache_options=CacheOptions(cache_mode="overwrite"),
-            cache_mode="reuse",
-            execution_options=ExecutionOptions(inject_context="ctx"),
-        )
-
-    second = tracker.run(
-        fn=step,
-        output_paths={"out": "out.txt"},
-        cache_mode="reuse",
-        inject_context="ctx",
-    )
-
-    assert second.cache_hit is True
-    assert calls == ["called"]
+    with pytest.raises(
+        TypeError,
+        match="no longer accepts legacy policy kwarg: `cache_mode`",
+    ):
+        tracker.run(fn=step, cache_mode="reuse")
 
 
 def test_tracker_run_output_policy_options_enforced(tracker):
