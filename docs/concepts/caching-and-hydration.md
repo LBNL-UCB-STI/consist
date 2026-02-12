@@ -184,21 +184,23 @@ with use_tracker(tracker):
             inputs={"raw": Path("raw.csv")},
             outputs=["raw"],
         )
+        transform_inputs = consist.refs(ingest_result, "raw")
 
         with scenario.trace(
             "transform",
-            inputs={"raw": consist.ref(ingest_result, key="raw")},
+            inputs=transform_inputs,
         ):  # (1)!
-            raw_art = consist.ref(ingest_result, key="raw")  # (2)!
+            raw_art = transform_inputs["raw"]  # (2)!
             df = consist.load_df(raw_art, tracker=tracker)
 ```
 
 1. `inputs={...}` links to the exact upstream output artifact.
-2. `consist.ref(...)` selects the artifact explicitly from the prior run result.
+2. `consist.refs(...)` builds a reusable explicit input mapping from the prior run result.
 
-Use `consist.ref(run_result, key="...")` for step coupling so lineage is explicit
-and unambiguous. Legacy coupler-key indirection (`inputs=["raw"]`) still works,
-but it is not the preferred pattern for new workflows.
+Use `consist.ref(run_result, key="...")` for one-off links, or
+`consist.refs(run_result, ...)` when wiring multiple linked inputs. Legacy
+coupler-key indirection (`inputs=["raw"]`) still works, but it is not the
+preferred pattern for new workflows.
 
 !!! note "Step bodies execute on cache hits"
     Consist does not skip Python blocks. On cache hits, `tracker.log_artifact(..., direction="output")` returns the hydrated cached output when the `key` matches. If code produces a different output, Consist demotes the cache hit to an executing run.

@@ -72,9 +72,6 @@ cleaned_df = consist.load_df(artifact)
 
 **Summary**: Consist computes a fingerprint from your code version, config, and input files. If you change anything upstream, only affected downstream steps will re-execute.
 
-**Best practice for multi-step workflows**: Chain outputs explicitly with
-`consist.ref(...)` instead of string key indirection.
-
 ```python
 def analyze_data(cleaned: pd.DataFrame) -> pd.DataFrame:
     return cleaned.groupby("category", as_index=False)["value"].mean()
@@ -92,7 +89,7 @@ analyze = tracker.run(
 ```
 
 Pass `key=...` whenever an upstream run has multiple outputs. Legacy coupler-key
-patterns (for example `inputs=["cleaned"]`) still work, but explicit refs are
+patterns (for example `inputs=["cleaned"]`) still work, but explicit links are
 recommended for new docs and code.
 
 ---

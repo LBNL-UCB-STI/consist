@@ -261,11 +261,13 @@ Use `scenario()` when you have multiple interdependent steps that share state or
 **Benefits over `run()`:**
 
 - Steps cache independently—skip re-executing steps whose inputs haven't changed
-- Use the coupler to pass data between steps with automatic provenance tracking
+- Keep explicit step links with `consist.ref(...)` / `consist.refs(...)` for clear lineage
+- Use the coupler for scenario-scoped runtime state and trace-oriented flows
 - Group runs into scenarios for easy cross-scenario queries
 
-**Best practice:** For step-to-step coupling, pass explicit artifact
-links with `consist.ref(previous_result, key="...")`. This avoids ambiguous
+**Best practice:** For step-to-step coupling, pass explicit artifact links with
+`consist.ref(previous_result, key="...")` (single artifact) or
+`consist.refs(previous_result, ...)` (multiple artifacts). This avoids ambiguous
 direct `RunResult` inputs when an upstream step has multiple outputs.
 
 ### Understanding the Coupler
@@ -288,7 +290,7 @@ The **coupler** is your scenario-scoped artifact registry. When you log an artif
 **You interact with the coupler when:**
 
 - Accessing inputs in trace blocks: `coupler.require("population")`
-- Declaring linked inputs to `sc.run()`: `inputs={"population": consist.ref(init_result, key="population")}`
+- Declaring linked inputs to `sc.run()`: `inputs=consist.refs(init_result, "population")`
 - Validating that outputs were produced: `sc.require_outputs(...)`
 
 **Optional: artifact key registries** help keep keys consistent across large workflows.
@@ -311,12 +313,7 @@ preprocess_result = sc.run(
 )
 sc.run(
     fn=analyze,
-    inputs={
-        Keys.PREPROCESSED: consist.ref(
-            preprocess_result,
-            key=Keys.PREPROCESSED,
-        )
-    },
+    inputs=consist.refs(preprocess_result, Keys.PREPROCESSED),
     execution_options=ExecutionOptions(load_inputs=True),
     outputs=[Keys.ANALYSIS],
 )
@@ -416,9 +413,24 @@ Use this when an upstream step already produced the artifact. With
 `execution_options=ExecutionOptions(load_inputs=True)`, each mapping key becomes
 a function parameter with loaded data.
 
+Rule of thumb:
+- Use `consist.ref(...)` for one-off single links.
+- Use `consist.refs(...)` when wiring multiple outputs or when you plan to reuse the mapping.
+
+**Alias-map form** (when downstream parameter names differ):
+``` python
+sc.run(
+    name="analyze",
+    fn=analyze_data,
+    inputs=consist.refs(preprocess_result, {"cleaned_artifact": "preprocessed"}),
+    execution_options=ExecutionOptions(load_inputs=True),
+    outputs=["analysis"],
+)
+```
+
 **Compatibility note**: Legacy key-indirection patterns (for example,
-`inputs=["preprocessed"]` and `input_keys=`) still work for backward
-compatibility. Prefer explicit links with `consist.ref(...)` in new code.
+`inputs=["preprocessed"]` and `input_keys=`) still work. Prefer explicit links
+with `consist.ref(...)`/`consist.refs(...)` in new code.
 
 <details>
 <summary>Alternative: inline steps with sc.trace</summary>
@@ -434,12 +446,13 @@ with use_tracker(tracker):
             inputs={"raw": Path("raw.csv")},
             outputs=["preprocessed"],
         )
+        analyze_inputs = consist.refs(preprocess_result, "preprocessed")
 
         with sc.trace(
             name="analyze",
-            inputs={"preprocessed": consist.ref(preprocess_result, key="preprocessed")},
+            inputs=analyze_inputs,
         ):
-            df = consist.load_df(consist.ref(preprocess_result, key="preprocessed"))
+            df = consist.load_df(analyze_inputs["preprocessed"])
             summary = df.groupby("category", as_index=False)["value"].mean()
             consist.log_dataframe(summary, key="analysis")
 ```
@@ -461,19 +474,16 @@ with use_tracker(tracker):
             fn=load_population,
             outputs=["population"],
         )
+        population_inputs = consist.refs(initialize_result, "population")
 
         for year in [2020, 2030, 2040]:  # (2)!
             with sc.trace(
                 name="simulate",
                 run_id=f"baseline_{year}",
                 year=year,
-                inputs={
-                    "population": consist.ref(initialize_result, key="population")
-                },  # (3)!
+                inputs=population_inputs,  # (3)!
             ):
-                df_pop = consist.load_df(
-                    consist.ref(initialize_result, key="population")
-                )  # (4)!
+                df_pop = consist.load_df(population_inputs["population"])  # (4)!
                 df_result = run_model(year, df_pop)
 
                 consist.log_dataframe(df_result, key="persons")  # (5)!
@@ -510,14 +520,13 @@ with use_tracker(tracker):
             fn=load_population,
             outputs=["population"],
         )
+        simulation_inputs = consist.refs(initialize_result, "population")
 
         for year in [2020, 2030, 2040]:
             sc.run(
                 name=f"simulate_{year}",
                 fn=simulate_year,
-                inputs={
-                    "population": consist.ref(initialize_result, key="population")
-                },
+                inputs=simulation_inputs,
                 outputs=["persons"],
                 execution_options=ExecutionOptions(load_inputs=True),
                 config={"year": year},
@@ -668,13 +677,14 @@ with use_tracker(tracker):
         )
 
         for threshold in [0.3, 0.5, 0.7]:  # (2)!
+            data_inputs = consist.refs(setup_result, "data")
             with sc.trace(
                 name="analyze",
                 run_id=f"threshold_{threshold}",
                 threshold=threshold,
-                inputs={"data": consist.ref(setup_result, key="data")},
+                inputs=data_inputs,
             ):
-                df = consist.load_df(consist.ref(setup_result, key="data"))
+                df = consist.load_df(data_inputs["data"])
                 filtered = df[df["value"] > threshold]
                 consist.log_dataframe(filtered, key="filtered")
 ```
@@ -786,11 +796,12 @@ with use_tracker(tracker):
             fn=load_population,
             outputs=["population"],
         )
+        population_inputs = consist.refs(prepare_result, "population")
         with sc.trace(
             name="simulate",
-            inputs={"population": consist.ref(prepare_result, key="population")},
+            inputs=population_inputs,
         ):  # (1)!
-            df_pop = consist.load_df(consist.ref(prepare_result, key="population"))
+            df_pop = consist.load_df(population_inputs["population"])
             ...
 ```
 
@@ -810,12 +821,13 @@ with use_tracker(tracker):
             inputs={"network_file": Path("network.geojson")},
             outputs=["processed"],
         )  # (1)!
+        simulate_inputs = consist.refs(preprocess, "processed")
 
         with sc.trace(
             name="simulate",
-            inputs={"processed": consist.ref(preprocess, key="processed")},
+            inputs=simulate_inputs,
         ):  # (2)!
-            network = consist.load_df(consist.ref(preprocess, key="processed"))
+            network = consist.load_df(simulate_inputs["processed"])
             ...
 ```
 
