@@ -37,6 +37,7 @@ pip install git+https://github.com/LBNL-UCB-STI/consist.git
 
 ```python
 import consist
+from pathlib import Path
 from consist import Tracker
 import pandas as pd
 
@@ -48,7 +49,7 @@ def clean_data(raw: pd.DataFrame, threshold: float = 0.5) -> pd.DataFrame:
 # Executes function and records inputs/config/outputs
 result = tracker.run(
     fn=clean_data,
-    inputs={"raw": "raw.csv"},   # Hashed for cache identity
+    inputs={"raw": Path("raw.csv")},   # Hashed for cache identity
     config={"threshold": 0.5},    # Hashed for cache identity
     outputs=["cleaned"],
 )
@@ -56,7 +57,7 @@ result = tracker.run(
 # Second run with same inputs: instant cache hit, no execution
 result = tracker.run(
     fn=clean_data,
-    inputs={"raw": "raw.csv"},
+    inputs={"raw": Path("raw.csv")},
     config={"threshold": 0.5},
     outputs=["cleaned"],
 )
@@ -70,6 +71,29 @@ cleaned_df = consist.load_df(artifact)
 ```
 
 **Summary**: Consist computes a fingerprint from your code version, config, and input files. If you change anything upstream, only affected downstream steps will re-execute.
+
+**Best practice for multi-step workflows**: Chain outputs explicitly with
+`consist.ref(...)` instead of string key indirection.
+
+```python
+def analyze_data(cleaned: pd.DataFrame) -> pd.DataFrame:
+    return cleaned.groupby("category", as_index=False)["value"].mean()
+
+preprocess = tracker.run(
+    fn=clean_data,
+    inputs={"raw": Path("raw.csv")},
+    outputs=["cleaned"],
+)
+analyze = tracker.run(
+    fn=analyze_data,
+    inputs={"cleaned": consist.ref(preprocess, key="cleaned")},
+    outputs=["analysis"],
+)
+```
+
+Pass `key=...` whenever an upstream run has multiple outputs. Legacy coupler-key
+patterns (for example `inputs=["cleaned"]`) still work, but explicit refs are
+recommended for new docs and code.
 
 ---
 

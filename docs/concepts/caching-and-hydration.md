@@ -170,21 +170,35 @@ For multi-step workflows, each step logs outputs as artifacts and the next step 
 ``` python
 import consist
 from consist import use_tracker
+from pathlib import Path
+import pandas as pd
+
+def ingest_raw(raw: pd.DataFrame) -> pd.DataFrame:
+    return raw
 
 with use_tracker(tracker):
     with consist.scenario("my_scenario") as scenario:
-        with scenario.trace("ingest"):
-            consist.log_artifact("raw.csv", key="raw", direction="output")
+        ingest_result = scenario.run(
+            name="ingest",
+            fn=ingest_raw,
+            inputs={"raw": Path("raw.csv")},
+            outputs=["raw"],
+        )
 
-        with scenario.trace("transform", inputs=["raw"]):  # (1)!
-            raw_art = scenario.coupler.require("raw")  # (2)!
+        with scenario.trace(
+            "transform",
+            inputs={"raw": consist.ref(ingest_result, key="raw")},
+        ):  # (1)!
+            raw_art = consist.ref(ingest_result, key="raw")  # (2)!
             df = consist.load_df(raw_art, tracker=tracker)
 ```
 
-1. `inputs=[...]` declares step inputs by Coupler key without repeating.
-2. `scenario.coupler.require(...)` in the `inputs=[...]` list.
+1. `inputs={...}` links to the exact upstream output artifact.
+2. `consist.ref(...)` selects the artifact explicitly from the prior run result.
 
-Use `scenario.coupler.require("raw")` over `get("raw")`—it fails loudly if a predecessor did not set the key. Pass upstream artifacts through `inputs=[...]` for correct caching and provenance.
+Use `consist.ref(run_result, key="...")` for step coupling so lineage is explicit
+and unambiguous. Legacy coupler-key indirection (`inputs=["raw"]`) still works,
+but it is not the preferred pattern for new workflows.
 
 !!! note "Step bodies execute on cache hits"
     Consist does not skip Python blocks. On cache hits, `tracker.log_artifact(..., direction="output")` returns the hydrated cached output when the `key` matches. If code produces a different output, Consist demotes the cache hit to an executing run.

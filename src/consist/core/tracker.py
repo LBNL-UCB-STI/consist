@@ -82,10 +82,15 @@ from consist.core.validation import (
     validate_run_strings,
 )
 from consist.core.workflow import OutputCapture, RunContext, ScenarioContext
-from consist.core.input_utils import coerce_input_map
 from consist.models.artifact import Artifact, get_tracker_ref, set_tracker_ref
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
-from consist.models.run import ConsistRecord, Run, RunArtifacts, RunResult
+from consist.models.run import (
+    ConsistRecord,
+    Run,
+    RunArtifacts,
+    RunResult,
+    resolve_run_result_output,
+)
 from consist.types import (
     ArtifactRef,
     CacheOptions,
@@ -95,6 +100,7 @@ from consist.types import (
     HasFacetSchemaVersion,
     HashInputs,
     OutputPolicyOptions,
+    RunInputRef,
 )
 
 if TYPE_CHECKING:
@@ -107,12 +113,16 @@ AccessMode = Literal["standard", "analysis", "read_only"]
 
 
 def _resolve_input_ref(
-    tracker: "Tracker", ref: ArtifactRef, key: Optional[str]
+    tracker: "Tracker", ref: RunInputRef, key: Optional[str]
 ) -> ArtifactRef:
     if isinstance(ref, Artifact):
         return ref
+    if isinstance(ref, RunResult):
+        return resolve_run_result_output(ref)
     if not isinstance(ref, (str, Path)):
-        raise TypeError(f"inputs must be Artifact, Path, or str (got {type(ref)}).")
+        raise TypeError(
+            f"inputs must be Artifact, RunResult, Path, or str (got {type(ref)})."
+        )
     ref_str = str(ref)
     resolved = (
         Path(tracker.resolve_uri(ref_str))
@@ -156,8 +166,8 @@ def _write_xarray_dataset(dataset: Any, path: Path) -> None:
 
 def _resolve_input_refs(
     tracker: "Tracker",
-    inputs: Optional[Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]],
-    depends_on: Optional[List[ArtifactRef]],
+    inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]],
+    depends_on: Optional[List[RunInputRef]],
     *,
     include_keyed_artifacts: bool,
 ) -> tuple[List[ArtifactRef], Dict[str, Artifact]]:
@@ -165,12 +175,16 @@ def _resolve_input_refs(
     input_artifacts_by_key: Dict[str, Artifact] = {}
     if inputs is not None:
         if isinstance(inputs, MappingABC):
-            inputs_map = coerce_input_map(inputs)
-            for key, ref in inputs_map.items():
-                resolved = _resolve_input_ref(tracker, ref, str(key))
+            typed_inputs = cast(Mapping[str, RunInputRef], inputs)
+            for key, ref in typed_inputs.items():
+                if not isinstance(key, str):
+                    raise TypeError(
+                        f"inputs mapping keys must be str (got {type(key)})."
+                    )
+                resolved = _resolve_input_ref(tracker, ref, key)
                 resolved_inputs.append(resolved)
                 if include_keyed_artifacts and isinstance(resolved, Artifact):
-                    input_artifacts_by_key[str(key)] = resolved
+                    input_artifacts_by_key[key] = resolved
         else:
             for ref in list(inputs):
                 resolved_inputs.append(_resolve_input_ref(tracker, ref, None))
@@ -1343,11 +1357,11 @@ class Tracker:
         config_plan_ingest: bool = True,
         config_plan_profile_schema: bool = False,
         inputs: Optional[
-            Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]
+            Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]
         ] = None,
         input_keys: Optional[Iterable[str] | str] = None,
         optional_input_keys: Optional[Iterable[str] | str] = None,
-        depends_on: Optional[List[ArtifactRef]] = None,
+        depends_on: Optional[List[RunInputRef]] = None,
         tags: Optional[List[str]] = None,
         facet: Optional[FacetLike] = None,
         facet_from: Optional[List[str]] = None,
@@ -1394,7 +1408,7 @@ class Tracker:
             Whether to ingest tables from the config plan.
         config_plan_profile_schema : bool, default False
             Whether to profile ingested schemas for the config plan.
-        inputs : Optional[Mapping[str, ArtifactRef] | Iterable[ArtifactRef]], optional
+        inputs : Optional[Mapping[str, RunInputRef] | Iterable[RunInputRef]], optional
             Input files or artifacts.
             - Dict: Maps names to paths/Artifacts. Auto-loads into function parameters (default load_inputs=True).
             - List/Iterable: Hashed for cache key but not auto-loaded (use load_inputs=False).
@@ -1402,7 +1416,7 @@ class Tracker:
             Deprecated. Use `inputs` mapping instead.
         optional_input_keys : Optional[Iterable[str] | str], optional
             Deprecated. Use `inputs` mapping instead.
-        depends_on : Optional[List[ArtifactRef]], optional
+        depends_on : Optional[List[RunInputRef]], optional
             Additional file paths or artifacts to hash for the cache signature (e.g., config files).
 
         tags : Optional[List[str]], optional
@@ -2095,11 +2109,11 @@ class Tracker:
         config_plan_ingest: bool = True,
         config_plan_profile_schema: bool = False,
         inputs: Optional[
-            Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]
+            Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]
         ] = None,
         input_keys: Optional[Iterable[str] | str] = None,
         optional_input_keys: Optional[Iterable[str] | str] = None,
-        depends_on: Optional[List[ArtifactRef]] = None,
+        depends_on: Optional[List[RunInputRef]] = None,
         tags: Optional[List[str]] = None,
         facet: Optional[FacetLike] = None,
         facet_from: Optional[List[str]] = None,
@@ -2149,7 +2163,7 @@ class Tracker:
         config_plan_profile_schema : bool, default False
             Whether to profile ingested schemas for the config plan.
 
-        inputs : Optional[Mapping[str, ArtifactRef] | Iterable[ArtifactRef]], optional
+        inputs : Optional[Mapping[str, RunInputRef] | Iterable[RunInputRef]], optional
             Input files or artifacts.
             - Dict: Maps names to paths/Artifacts. Logged as inputs but not auto-loaded.
             - List/Iterable: Hashed for cache key but not auto-loaded.
@@ -2157,7 +2171,7 @@ class Tracker:
             Deprecated. Use `inputs` mapping instead.
         optional_input_keys : Optional[Iterable[str] | str], optional
             Deprecated. Use `inputs` mapping instead.
-        depends_on : Optional[List[ArtifactRef]], optional
+        depends_on : Optional[List[RunInputRef]], optional
             Additional file paths or artifacts to hash for the cache signature (e.g., config files).
 
         tags : Optional[List[str]], optional
@@ -5350,6 +5364,86 @@ class Tracker:
             database is not configured or the run is unknown.
         """
         return self.get_artifacts_for_run(run_id).outputs
+
+    def get_run_result(
+        self,
+        run_id: str,
+        *,
+        keys: Optional[Iterable[str]] = None,
+        validate: Literal["lazy", "strict", "none"] = "lazy",
+    ) -> RunResult:
+        """
+        Build a ``RunResult`` view for a historical run.
+
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+        keys : Optional[Iterable[str]], optional
+            Optional subset of output keys to include. When provided, every key
+            must exist in the historical run outputs.
+        validate : {"lazy", "strict", "none"}, default "lazy"
+            Output validation policy.
+            - ``lazy`` / ``none``: no filesystem existence checks
+            - ``strict``: require non-ingested output files to exist on disk
+
+        Returns
+        -------
+        RunResult
+            Historical run metadata plus selected outputs.
+
+        Raises
+        ------
+        KeyError
+            If ``run_id`` is unknown or requested ``keys`` are missing.
+        ValueError
+            If ``validate`` is invalid or ``keys`` contain non-string values.
+        FileNotFoundError
+            If ``validate='strict'`` and a selected non-ingested output is missing.
+        """
+        run = self.get_run(run_id)
+        if run is None:
+            raise KeyError(f"Run {run_id!r} was not found.")
+
+        outputs = self.get_run_outputs(run_id)
+
+        selected_outputs: Dict[str, Artifact]
+        if keys is None:
+            selected_outputs = dict(outputs)
+        else:
+            key_list = list(keys)
+            if any(not isinstance(key, str) for key in key_list):
+                raise ValueError("keys must contain only strings.")
+            missing = sorted(key for key in key_list if key not in outputs)
+            if missing:
+                missing_str = ", ".join(repr(key) for key in missing)
+                available = ", ".join(repr(key) for key in sorted(outputs)) or "<none>"
+                raise KeyError(
+                    f"Run {run_id!r} missing requested output keys: {missing_str}. "
+                    f"Available keys: {available}."
+                )
+            selected_outputs = {key: outputs[key] for key in key_list}
+
+        validation_policy = str(validate).lower()
+        if validation_policy not in {"lazy", "strict", "none"}:
+            raise ValueError("validate must be one of: 'lazy', 'strict', 'none'.")
+
+        if validation_policy == "strict":
+            missing_paths: list[str] = []
+            for key, artifact in selected_outputs.items():
+                if artifact.meta.get("is_ingested", False):
+                    continue
+                resolved = Path(self.resolve_uri(artifact.container_uri))
+                if not resolved.exists():
+                    missing_paths.append(f"{key!r} -> {resolved!s}")
+            if missing_paths:
+                details = "; ".join(missing_paths)
+                raise FileNotFoundError(
+                    f"Run {run_id!r} has missing output files: {details}"
+                )
+
+        cache_hit = bool(run.meta.get("cache_hit")) if isinstance(run.meta, dict) else False
+        return RunResult(run=run, outputs=selected_outputs, cache_hit=cache_hit)
 
     def get_run_inputs(self, run_id: str) -> Dict[str, Artifact]:
         """

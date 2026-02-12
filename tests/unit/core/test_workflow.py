@@ -296,13 +296,10 @@ def test_run_context_output_path_respects_artifact_dir_override(
         path = ctx.output_path("result")
         assert (
             path
-            == tracker.run_dir
-            / "outputs"
-            / "custom"
-            / "managed"
-            / "result.parquet"
+            == tracker.run_dir / "outputs" / "custom" / "managed" / "result.parquet"
         )
         assert path.parent.exists()
+
 
 def test_step_default_path_includes_model_name(tracker: Tracker):
     df = pd.DataFrame({"value": [1, 2, 3]})

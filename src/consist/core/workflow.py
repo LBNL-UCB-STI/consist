@@ -18,7 +18,7 @@ from typing import (
 )
 
 from consist import Artifact
-from consist.models.run import ConsistRecord, RunResult
+from consist.models.run import ConsistRecord, RunResult, resolve_run_result_output
 from typing import TYPE_CHECKING
 from consist.core.coupler import Coupler
 from consist.core.input_utils import coerce_input_map
@@ -31,6 +31,7 @@ from consist.types import (
     FacetLike,
     HashInputs,
     OutputPolicyOptions,
+    RunInputRef,
 )
 from pathlib import Path
 
@@ -585,9 +586,11 @@ class ScenarioContext:
             return [value]
         return list(value)
 
-    def _resolve_input_value(self, value: ArtifactRef) -> ArtifactRef:
+    def _resolve_input_value(self, value: RunInputRef) -> ArtifactRef:
         if isinstance(value, Artifact):
             return value
+        if isinstance(value, RunResult):
+            return resolve_run_result_output(value)
         if isinstance(value, Path):
             if not value.exists():
                 raise ValueError(f"Scenario input path does not exist: {value!s}")
@@ -608,12 +611,13 @@ class ScenarioContext:
                 )
             return resolved
         raise TypeError(
-            f"Scenario inputs must be Artifact, Path, or str (got {type(value)})."
+            "Scenario inputs must be Artifact, RunResult, Path, or str "
+            f"(got {type(value)})."
         )
 
     def _resolve_inputs(
         self,
-        inputs: Optional[Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]],
+        inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]],
         input_keys: Optional[Iterable[str] | str],
         optional_input_keys: Optional[Iterable[str] | str],
     ) -> Optional[Union[Dict[str, ArtifactRef], List[ArtifactRef]]]:
@@ -622,10 +626,15 @@ class ScenarioContext:
         )
         if inputs is not None:
             if isinstance(inputs, MappingABC):
-                resolved_inputs = {
-                    str(k): self._resolve_input_value(v)
-                    for k, v in coerce_input_map(inputs).items()
-                }
+                resolved_dict: Dict[str, ArtifactRef] = {}
+                typed_inputs = cast(Mapping[str, RunInputRef], inputs)
+                for key, value in typed_inputs.items():
+                    if not isinstance(key, str):
+                        raise TypeError(
+                            f"inputs mapping keys must be str (got {type(key)})."
+                        )
+                    resolved_dict[key] = self._resolve_input_value(value)
+                resolved_inputs = resolved_dict
             else:
                 resolved_inputs = [self._resolve_input_value(v) for v in list(inputs)]
 
@@ -653,9 +662,9 @@ class ScenarioContext:
 
     def _promote_inputs_for_load(
         self,
-        inputs: Optional[Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]],
+        inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]],
         load_inputs: Optional[bool],
-    ) -> Optional[Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]]:
+    ) -> Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]]:
         if not load_inputs or inputs is None:
             return inputs
         if isinstance(inputs, (list, tuple)):
@@ -696,11 +705,11 @@ class ScenarioContext:
         config_plan_ingest: bool = True,
         config_plan_profile_schema: bool = False,
         inputs: Optional[
-            Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]
+            Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]
         ] = None,
         input_keys: Optional[Iterable[str] | str] = None,
         optional_input_keys: Optional[Iterable[str] | str] = None,
-        depends_on: Optional[List[ArtifactRef]] = None,
+        depends_on: Optional[List[RunInputRef]] = None,
         tags: Optional[List[str]] = None,
         facet: Optional[FacetLike] = None,
         facet_from: Optional[List[str]] = None,
@@ -947,11 +956,11 @@ class ScenarioContext:
         config_plan_ingest: bool = True,
         config_plan_profile_schema: bool = False,
         inputs: Optional[
-            Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]
+            Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]
         ] = None,
         input_keys: Optional[Iterable[str] | str] = None,
         optional_input_keys: Optional[Iterable[str] | str] = None,
-        depends_on: Optional[List[ArtifactRef]] = None,
+        depends_on: Optional[List[RunInputRef]] = None,
         tags: Optional[List[str]] = None,
         facet: Optional[FacetLike] = None,
         facet_from: Optional[List[str]] = None,

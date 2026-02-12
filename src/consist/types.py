@@ -32,6 +32,7 @@ except Exception:  # pragma: no cover
 
 if TYPE_CHECKING:  # pragma: no cover
     from consist.models.artifact import Artifact
+    from consist.models.run import RunResult
 
 FacetDict: TypeAlias = Mapping[str, Any]
 FacetLike: TypeAlias = Union[FacetDict, BaseModel]
@@ -39,6 +40,8 @@ FacetLike: TypeAlias = Union[FacetDict, BaseModel]
 # Common “path-like” / “artifact-like” helper types.
 PathLike: TypeAlias = Union[str, Path]
 ArtifactRef: TypeAlias = Union["Artifact", PathLike]
+# Run/scenario input references additionally allow linking prior step results.
+RunInputRef: TypeAlias = Union["Artifact", "RunResult", PathLike]
 
 HashInput: TypeAlias = Union[PathLike, tuple[str, PathLike]]
 HashInputs: TypeAlias = Optional[list[HashInput]]
