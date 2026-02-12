@@ -117,6 +117,30 @@ This default suits scientific workflows: large simulations benefit from avoiding
 
 Every run's **signature** is derived from code hash, config hash, and input hash. If Consist finds a completed run with the same signature and valid outputs, the new run is a **cache hit** and reuses prior outputs.
 
+#### Code Identity Modes
+
+By default, code hash uses repository Git state (`repo_git`). For function-shaped runs, you can opt into callable-scoped code identity with `CacheOptions`:
+
+- `repo_git` (default): repository-level hash via Git commit/dirty state.
+- `callable_module`: hash the module file containing `fn`.
+- `callable_source`: hash only `fn` source text.
+- `code_identity_extra_deps`: additional relative file paths to fold into callable-scoped hashes.
+
+```python
+from consist import CacheOptions
+
+result = tracker.run(
+    fn=simulate_step,
+    inputs={"raw": "inputs://raw.csv"},
+    cache_options=CacheOptions(
+        code_identity="callable_module",
+        code_identity_extra_deps=["pilates/common_utils.py"],
+    ),
+)
+```
+
+Use callable-scoped modes when unrelated repo edits are causing unnecessary cache misses.
+
 #### Intentional Cache Invalidation
 
 Sometimes you need to invalidate caches globally or for a specific step (e.g., after a schema change or a bug fix that didn't change the config signature).

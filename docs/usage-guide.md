@@ -94,6 +94,24 @@ result = consist.run(
 )
 ```
 
+To scope code hashing to the callable instead of full-repo Git state:
+
+``` python
+from consist import CacheOptions
+
+result = consist.run(
+    fn=clean_data,
+    inputs={"raw": Path("raw.csv")},
+    outputs=["cleaned"],
+    cache_options=CacheOptions(
+        code_identity="callable_module",
+        code_identity_extra_deps=["shared/helpers.py"],
+    ),
+)
+```
+
+This reduces cache misses when unrelated files elsewhere in the repository change.
+
 Legacy run-policy kwargs are no longer supported on `run(...)` APIs. Use
 `cache_options=...`, `output_policy=...`, and `execution_options=...`.
 
