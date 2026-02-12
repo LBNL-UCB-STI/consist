@@ -12,13 +12,13 @@
         <meta name="author" content="Zach Needell">
       
       
-        <link rel="canonical" href="https://LBNL-UCB-STI.github.io/consist/api/artifact/">
+        <link rel="canonical" href="https://LBNL-UCB-STI.github.io/consist/concepts/decorators-and-metadata/">
       
       
-        <link rel="prev" href="../workflow/">
+        <link rel="prev" href="../config-management/">
       
       
-        <link rel="next" href="../run/">
+        <link rel="next" href="../caching-and-hydration/">
       
       
         
@@ -29,7 +29,7 @@
     
     
       
-        <title>Artifact - Consist</title>
+        <title>Decorators & Metadata - Consist</title>
       
     
     
@@ -87,7 +87,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#artifact" class="md-skip">
+        <a href="#decorators-metadata" class="md-skip">
           Skip to content
         </a>
       
@@ -120,7 +120,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Artifact
+              Decorators &amp; Metadata
             
           </span>
         </div>
@@ -237,11 +237,13 @@
   
   
   
+    
+  
   
     
     
-      <li class="md-tabs__item">
-        <a href="../../concepts/overview/" class="md-tabs__link">
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../overview/" class="md-tabs__link">
           
   
   Concepts
@@ -329,13 +331,11 @@
   
   
   
-    
-  
   
     
     
-      <li class="md-tabs__item md-tabs__item--active">
-        <a href="../" class="md-tabs__link">
+      <li class="md-tabs__item">
+        <a href="../../api/" class="md-tabs__link">
           
   
   API Reference
@@ -592,8 +592,10 @@
       
   
   
+    
   
   
+  
     
     
       
@@ -611,21 +613,22 @@
     
     
       
+        
+        
+      
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
       
         
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
         
           
-        
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
-        
-          
-          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
             
   
   
@@ -643,7 +646,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
           <label class="md-nav__title" for="__nav_3">
             <span class="md-nav__icon md-icon"></span>
             
@@ -661,7 +664,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../concepts/overview/" class="md-nav__link">
+      <a href="../overview/" class="md-nav__link">
         
   
   
@@ -689,7 +692,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../concepts/config-management/" class="md-nav__link">
+      <a href="../config-management/" class="md-nav__link">
         
   
   
@@ -714,10 +717,37 @@
                 
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="../../concepts/decorators-and-metadata/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Decorators &amp; Metadata
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
         
   
   
@@ -733,6 +763,143 @@
   
 
       </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#decorator-defaults" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Decorator Defaults
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Decorator Defaults">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#precedence-rule" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Precedence Rule
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#callable-metadata" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Callable Metadata
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#stepcontext-runtime-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        StepContext Runtime Contract
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#metadata-precedence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Metadata Precedence
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#runtime-callable-examples" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Runtime Callable Examples
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#name-templates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Name Templates
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cache-invalidation-controls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cache Invalidation Controls
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#schema-introspection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Schema Introspection
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#artifact-key-registries" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Artifact Key Registries
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -745,7 +912,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../concepts/caching-and-hydration/" class="md-nav__link">
+      <a href="../caching-and-hydration/" class="md-nav__link">
         
   
   
@@ -773,7 +940,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../concepts/data-materialization/" class="md-nav__link">
+      <a href="../data-materialization/" class="md-nav__link">
         
   
   
@@ -1520,8 +1687,6 @@
       
   
   
-    
-  
   
   
     
@@ -1557,23 +1722,22 @@
     
     
       
-        
-        
-      
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--nested">
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_8" checked>
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_8" >
         
           
           <div class="md-nav__link md-nav__container">
-            <a href="../" class="md-nav__link ">
+            <a href="../../api/" class="md-nav__link ">
               
   
   
@@ -1593,13 +1757,13 @@
             </a>
             
               
-              <label class="md-nav__link " for="__nav_8" id="__nav_8_label" tabindex="">
+              <label class="md-nav__link " for="__nav_8" id="__nav_8_label" tabindex="0">
                 <span class="md-nav__icon md-icon"></span>
               </label>
             
           </div>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="true">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
           <label class="md-nav__title" for="__nav_8">
             <span class="md-nav__icon md-icon"></span>
             
@@ -1619,7 +1783,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../public_api/" class="md-nav__link">
+      <a href="../../api/public_api/" class="md-nav__link">
         
   
   
@@ -1647,7 +1811,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../api_helpers/" class="md-nav__link">
+      <a href="../../api/api_helpers/" class="md-nav__link">
         
   
   
@@ -1675,7 +1839,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../tracker/" class="md-nav__link">
+      <a href="../../api/tracker/" class="md-nav__link">
         
   
   
@@ -1703,7 +1867,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../workflow/" class="md-nav__link">
+      <a href="../../api/workflow/" class="md-nav__link">
         
   
   
@@ -1728,37 +1892,10 @@
                 
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Artifact
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="././" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../../api/artifact/" class="md-nav__link">
         
   
   
@@ -1774,93 +1911,6 @@
   
 
       </a>
-      
-        
-
-
-<nav class="md-nav md-nav--secondary" aria-label="On this page">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      On this page
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#consist.models.artifact.Artifact.abs_path" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        abs_path
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.models.artifact.Artifact.path" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        path
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.models.artifact.Artifact.is_matrix" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        is_matrix
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.models.artifact.Artifact.is_tabular" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        is_tabular
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.models.artifact.Artifact.created_at_iso" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        created_at_iso
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.models.artifact.Artifact.get_meta" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        get_meta
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -1873,7 +1923,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../run/" class="md-nav__link">
+      <a href="../../api/run/" class="md-nav__link">
         
   
   
@@ -1901,7 +1951,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../indexing/" class="md-nav__link">
+      <a href="../../api/indexing/" class="md-nav__link">
         
   
   
@@ -1929,7 +1979,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../identity/" class="md-nav__link">
+      <a href="../../api/identity/" class="md-nav__link">
         
   
   
@@ -1957,7 +2007,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../views/" class="md-nav__link">
+      <a href="../../api/views/" class="md-nav__link">
         
   
   
@@ -1985,7 +2035,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../matrix/" class="md-nav__link">
+      <a href="../../api/matrix/" class="md-nav__link">
         
   
   
@@ -2013,7 +2063,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../materialize/" class="md-nav__link">
+      <a href="../../api/materialize/" class="md-nav__link">
         
   
   
@@ -2069,10 +2119,38 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#consist.models.artifact.Artifact.abs_path" class="md-nav__link">
+  <a href="#decorator-defaults" class="md-nav__link">
     <span class="md-ellipsis">
       
-        abs_path
+        Decorator Defaults
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Decorator Defaults">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#precedence-rule" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Precedence Rule
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#callable-metadata" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Callable Metadata
       
     </span>
   </a>
@@ -2080,10 +2158,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#consist.models.artifact.Artifact.path" class="md-nav__link">
+  <a href="#stepcontext-runtime-contract" class="md-nav__link">
     <span class="md-ellipsis">
       
-        path
+        StepContext Runtime Contract
       
     </span>
   </a>
@@ -2091,10 +2169,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#consist.models.artifact.Artifact.is_matrix" class="md-nav__link">
+  <a href="#metadata-precedence" class="md-nav__link">
     <span class="md-ellipsis">
       
-        is_matrix
+        Metadata Precedence
       
     </span>
   </a>
@@ -2102,10 +2180,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#consist.models.artifact.Artifact.is_tabular" class="md-nav__link">
+  <a href="#runtime-callable-examples" class="md-nav__link">
     <span class="md-ellipsis">
       
-        is_tabular
+        Runtime Callable Examples
       
     </span>
   </a>
@@ -2113,10 +2191,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#consist.models.artifact.Artifact.created_at_iso" class="md-nav__link">
+  <a href="#name-templates" class="md-nav__link">
     <span class="md-ellipsis">
       
-        created_at_iso
+        Name Templates
       
     </span>
   </a>
@@ -2124,10 +2202,32 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#consist.models.artifact.Artifact.get_meta" class="md-nav__link">
+  <a href="#cache-invalidation-controls" class="md-nav__link">
     <span class="md-ellipsis">
       
-        get_meta
+        Cache Invalidation Controls
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#schema-introspection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Schema Introspection
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#artifact-key-registries" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Artifact Key Registries
       
     </span>
   </a>
@@ -2177,10 +2277,10 @@
     
     
       <li class="md-path__item">
-        <a href="../" class="md-path__link">
+        <a href="../overview/" class="md-path__link">
           
   <span class="md-ellipsis">
-    API Reference
+    Concepts
   </span>
 
         </a>
@@ -2197,313 +2297,159 @@
                 
                   
 
-<h1 id="artifact">Artifact<a class="headerlink" href="#artifact" title="Permanent link">&para;</a></h1>
-
-
-<div class="doc doc-object doc-class">
-
-
-
-
-    <div class="doc doc-contents first">
-            <p class="doc doc-class-bases">
-              Bases: <code><span title="sqlmodel.SQLModel">SQLModel</span></code></p>
-
-
-
-        <p>Represents a physical data object in the Consist database.</p>
-<p>This table stores canonical metadata for any file/dataset Consist tracks. It is
-linked to runs via <code>run_artifact_link</code> to record whether an artifact was an
-input or output. The <code>run_id</code> field records the producing run (if any) and
-is often <code>None</code> for external inputs.</p>
-<p>Artifacts are the core building blocks of provenance and caching. Each artifact
-has a unique identity, a virtualized location, and rich metadata, supporting
-both "hot" (ingested) and "cold" (file-based) data strategies.</p>
-<p>Attributes:
-    id (uuid.UUID): A unique identifier for the artifact.
-    key (str): A semantic, human-readable name for the artifact (e.g., "households", "parcels").
-    container_uri (str): A portable, virtualized Uniform Resource Identifier (URI) for the
-               artifact's location (e.g., "inputs://land_use.csv").
-    table_path (Optional[str]): Optional path inside a container (e.g., "/tables/households").
-    array_path (Optional[str]): Optional path inside a container for array artifacts.
-    driver (str): The name of the format handler used to read or write the artifact
-                  (e.g., "parquet", "csv", "zarr").
-    hash (Optional[str]): SHA256 content hash of the artifact's data, enabling content-addressable
-                          lookups and deduplication.
-    run_id (Optional[str]): The ID of the run that generated this artifact. Null for inputs.
-    meta (Dict[str, Any]): A flexible JSON field for storing arbitrary metadata, such as
-                           schema signatures, or data dimensions.
-    created_at (datetime): The timestamp when the artifact was first logged.</p>
-
-
-
-
-
-
-
-
-
-
-
-<div class="doc doc-children">
-
-
-
-
-
-
-
-<div class="doc doc-object doc-attribute">
-
-
-
-<h2 id="consist.models.artifact.Artifact.abs_path" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">abs_path</span></code>
-
-  <span class="doc doc-labels">
-      <small class="doc doc-label doc-label-property"><code>property</code></small>
-      <small class="doc doc-label doc-label-writable"><code>writable</code></small>
-  </span>
-
-<a href="#consist.models.artifact.Artifact.abs_path" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Runtime-only helper to access the absolute path of this artifact.</p>
-<p>This property provides the resolved absolute file system path for the artifact.
-It is not persisted to the database but is crucial for local file operations
-and for chaining Consist runs within the same script or environment.</p>
-
-
-    <p><span class="doc-section-title">Returns:</span></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Type</th>
-          <th>Description</th>
-        </tr>
-      </thead>
-      <tbody>
-          <tr class="doc-section-item">
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>The absolute file system path of the artifact, or <code>None</code> if it has not
-yet been resolved or set.</p>
-              </div>
-            </td>
-          </tr>
-      </tbody>
-    </table>
-
-    </div>
-
-</div>
-
-<div class="doc doc-object doc-attribute">
-
-
-
-<h2 id="consist.models.artifact.Artifact.path" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">path</span></code>
-
-  <span class="doc doc-labels">
-      <small class="doc doc-label doc-label-property"><code>property</code></small>
-  </span>
-
-<a href="#consist.models.artifact.Artifact.path" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Resolve this artifact to a filesystem Path.</p>
-<p>Uses the tracker when available to handle mount-aware URIs; otherwise falls
-back to the cached absolute path or the raw URI.</p>
-
-    </div>
-
-</div>
-
-<div class="doc doc-object doc-attribute">
-
-
-
-<h2 id="consist.models.artifact.Artifact.is_matrix" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">is_matrix</span></code>
-
-  <span class="doc doc-labels">
-      <small class="doc doc-label doc-label-property"><code>property</code></small>
-  </span>
-
-<a href="#consist.models.artifact.Artifact.is_matrix" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Indicates if the artifact represents a multi-dimensional array or matrix-like data.</p>
-<p>This property helps in dispatching to appropriate data loaders or processing
-functions that handle array-based data structures, such as those typically
-found in scientific computing.</p>
-
-
-    <p><span class="doc-section-title">Returns:</span></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Type</th>
-          <th>Description</th>
-        </tr>
-      </thead>
-      <tbody>
-          <tr class="doc-section-item">
-            <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/functions.html#bool">bool</a></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>True if the artifact's driver is associated with matrix-like data formats
-(e.g., Zarr, HDF5, NetCDF, OpenMatrix), False otherwise.</p>
-              </div>
-            </td>
-          </tr>
-      </tbody>
-    </table>
-
-    </div>
-
-</div>
-
-<div class="doc doc-object doc-attribute">
-
-
-
-<h2 id="consist.models.artifact.Artifact.is_tabular" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">is_tabular</span></code>
-
-  <span class="doc doc-labels">
-      <small class="doc doc-label doc-label-property"><code>property</code></small>
-  </span>
-
-<a href="#consist.models.artifact.Artifact.is_tabular" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Indicates if the artifact represents tabular data (rows and columns).</p>
-<p>This property assists in identifying artifacts that can be loaded and processed
-using tools designed for structured, record-based data, such as Pandas DataFrames.</p>
-
-
-    <p><span class="doc-section-title">Returns:</span></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Type</th>
-          <th>Description</th>
-        </tr>
-      </thead>
-      <tbody>
-          <tr class="doc-section-item">
-            <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/functions.html#bool">bool</a></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>True if the artifact's driver is associated with tabular data formats
-(e.g., Parquet, CSV, SQL), False otherwise.</p>
-              </div>
-            </td>
-          </tr>
-      </tbody>
-    </table>
-
-    </div>
-
-</div>
-
-<div class="doc doc-object doc-attribute">
-
-
-
-<h2 id="consist.models.artifact.Artifact.created_at_iso" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">created_at_iso</span></code>
-
-  <span class="doc doc-labels">
-      <small class="doc doc-label doc-label-property"><code>property</code></small>
-  </span>
-
-<a href="#consist.models.artifact.Artifact.created_at_iso" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Return created_at as an ISO 8601 formatted string.</p>
-<p>Useful for serialization to external systems that expect string timestamps.</p>
-
-
-    <p><span class="doc-section-title">Returns:</span></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Type</th>
-          <th>Description</th>
-        </tr>
-      </thead>
-      <tbody>
-          <tr class="doc-section-item">
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>The created_at timestamp as ISO 8601 string, or None if not set.</p>
-              </div>
-            </td>
-          </tr>
-      </tbody>
-    </table>
-
-    </div>
-
-</div>
-
-
-
-
-<div class="doc doc-object doc-function">
-
-
-<h2 id="consist.models.artifact.Artifact.get_meta" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">get_meta</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
-
-<a href="#consist.models.artifact.Artifact.get_meta" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Safely retrieves a value from the 'meta' dictionary.</p>
-<p>Args:
-    key (str): The key to look up in the metadata.
-    default (Any, optional): The default value to return if the key is not found.
-                             Defaults to None.</p>
-<p>Returns:
-    Any: The value associated with the key, or the default value if the key is not present.</p>
-
-
-    </div>
-
-</div>
-
-
-
-  </div>
-
-    </div>
-
-</div>
+<h1 id="decorators-metadata">Decorators &amp; Metadata<a class="headerlink" href="#decorators-metadata" title="Permanent link">&para;</a></h1>
+<p>This page explains how <code>@define_step</code> metadata, templates, and resolver defaults work
+so you can reduce boilerplate without losing clarity or cache correctness.</p>
+<hr />
+<h2 id="decorator-defaults">Decorator Defaults<a class="headerlink" href="#decorator-defaults" title="Permanent link">&para;</a></h2>
+<p><code>@define_step</code> lets you declare defaults once and reuse them across <code>scenario.run(...)</code>
+or <code>tracker.run(...)</code> calls.</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nd">@define_step</span><span class="p">(</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>    <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;analysis&quot;</span><span class="p">],</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;outputs-all&quot;</span><span class="p">,</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>    <span class="n">name_template</span><span class="o">=</span><span class="s2">&quot;</span><span class="si">{func_name}</span><span class="s2">__y</span><span class="si">{year}</span><span class="s2">__i</span><span class="si">{iteration}</span><span class="s2">&quot;</span><span class="p">,</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="p">)</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="k">def</span><span class="w"> </span><span class="nf">analyze</span><span class="p">(</span><span class="n">population</span><span class="p">:</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">:</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    <span class="k">return</span> <span class="n">run_model</span><span class="p">(</span><span class="n">config</span><span class="p">[</span><span class="s2">&quot;year&quot;</span><span class="p">],</span> <span class="n">population</span><span class="p">)</span>
+</span></code></pre></div>
+<h3 id="precedence-rule">Precedence Rule<a class="headerlink" href="#precedence-rule" title="Permanent link">&para;</a></h3>
+<p>Call-site args always override decorator defaults:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="nd">@define_step</span><span class="p">(</span><span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;decorator&quot;</span><span class="p">])</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="k">def</span><span class="w"> </span><span class="nf">step</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>    <span class="k">return</span> <span class="kc">None</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="n">sc</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">step</span><span class="p">,</span> <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;call_site&quot;</span><span class="p">])</span>
+</span></code></pre></div>
+<hr />
+<h2 id="callable-metadata">Callable Metadata<a class="headerlink" href="#callable-metadata" title="Permanent link">&para;</a></h2>
+<p>Decorator values can be callables that resolve at runtime using a <code>StepContext</code>.</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nd">@define_step</span><span class="p">(</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>    <span class="n">outputs</span><span class="o">=</span><span class="k">lambda</span> <span class="n">ctx</span><span class="p">:</span> <span class="p">[</span><span class="sa">f</span><span class="s2">&quot;results_</span><span class="si">{</span><span class="n">ctx</span><span class="o">.</span><span class="n">year</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">],</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>    <span class="n">name_template</span><span class="o">=</span><span class="k">lambda</span> <span class="n">ctx</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">ctx</span><span class="o">.</span><span class="n">func_name</span><span class="si">}</span><span class="s2">__y</span><span class="si">{</span><span class="n">ctx</span><span class="o">.</span><span class="n">year</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="p">)</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="k">def</span><span class="w"> </span><span class="nf">simulate</span><span class="p">(</span><span class="n">year</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>    <span class="o">...</span>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="n">sc</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">simulate</span><span class="p">,</span> <span class="n">year</span><span class="o">=</span><span class="mi">2030</span><span class="p">)</span>
+</span></code></pre></div>
+<p>Callable metadata can use:</p>
+<ul>
+<li><code>year</code>, <code>iteration</code>, <code>phase</code>, <code>stage</code></li>
+<li><code>model</code>, <code>func_name</code></li>
+<li><code>runtime_settings</code>, <code>runtime_workspace</code>, <code>runtime_state</code></li>
+<li><code>runtime_kwargs</code> for raw runtime access</li>
+<li><code>consist_settings</code>, <code>consist_workspace</code>, <code>consist_state</code> for Consist internals</li>
+</ul>
+<hr />
+<h2 id="stepcontext-runtime-contract">StepContext Runtime Contract<a class="headerlink" href="#stepcontext-runtime-contract" title="Permanent link">&para;</a></h2>
+<p><code>StepContext</code> now separates workflow runtime objects from Consist internal objects.
+For workflow/business metadata, prefer <code>runtime_*</code> fields.</p>
+<ul>
+<li>Runtime fields: <code>runtime_settings</code>, <code>runtime_workspace</code>, <code>runtime_state</code></li>
+<li>Internal fields: <code>consist_settings</code>, <code>consist_workspace</code>, <code>consist_state</code></li>
+<li>Raw runtime map: <code>runtime_kwargs</code></li>
+<li>Helpers: <code>ctx.get_runtime("name")</code>, <code>ctx.require_runtime("name")</code></li>
+</ul>
+<p>Deprecated compatibility aliases still exist:</p>
+<ul>
+<li><code>ctx.settings</code></li>
+<li><code>ctx.workspace</code></li>
+<li><code>ctx.state</code></li>
+</ul>
+<p>These aliases emit <code>DeprecationWarning</code> and resolve with runtime-first precedence.</p>
+<hr />
+<h2 id="metadata-precedence">Metadata Precedence<a class="headerlink" href="#metadata-precedence" title="Permanent link">&para;</a></h2>
+<p>For metadata resolved by <code>tracker.run(...)</code> and <code>scenario.run(...)</code>:</p>
+<ul>
+<li>Explicit run arg</li>
+<li>Decorator value (static or callable)</li>
+<li>Existing runtime default behavior</li>
+</ul>
+<p>This precedence applies consistently across <code>Tracker.run(...)</code> and <code>ScenarioContext.run(...)</code>.</p>
+<hr />
+<h2 id="runtime-callable-examples">Runtime Callable Examples<a class="headerlink" href="#runtime-callable-examples" title="Permanent link">&para;</a></h2>
+<p>Runtime-aware <code>config</code>:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nd">@define_step</span><span class="p">(</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>    <span class="n">config</span><span class="o">=</span><span class="k">lambda</span> <span class="n">ctx</span><span class="p">:</span> <span class="p">{</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>        <span class="s2">&quot;scenario&quot;</span><span class="p">:</span> <span class="n">ctx</span><span class="o">.</span><span class="n">require_runtime</span><span class="p">(</span><span class="s2">&quot;settings&quot;</span><span class="p">)[</span><span class="s2">&quot;scenario_name&quot;</span><span class="p">],</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>        <span class="s2">&quot;year&quot;</span><span class="p">:</span> <span class="n">ctx</span><span class="o">.</span><span class="n">year</span><span class="p">,</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>    <span class="p">}</span>
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="p">)</span>
+</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="k">def</span><span class="w"> </span><span class="nf">simulate</span><span class="p">(</span><span class="o">...</span><span class="p">):</span>
+</span><span id="__span-3-8"><a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>    <span class="o">...</span>
+</span></code></pre></div>
+<p>Runtime-aware <code>hash_inputs</code>:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nd">@define_step</span><span class="p">(</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>    <span class="n">hash_inputs</span><span class="o">=</span><span class="k">lambda</span> <span class="n">ctx</span><span class="p">:</span> <span class="s2">&quot;full&quot;</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>    <span class="k">if</span> <span class="n">ctx</span><span class="o">.</span><span class="n">get_runtime</span><span class="p">(</span><span class="s2">&quot;settings&quot;</span><span class="p">,</span> <span class="p">{})</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;strict_hashing&quot;</span><span class="p">)</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>    <span class="k">else</span> <span class="s2">&quot;fast&quot;</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="p">)</span>
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="k">def</span><span class="w"> </span><span class="nf">load_inputs</span><span class="p">(</span><span class="o">...</span><span class="p">):</span>
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>    <span class="o">...</span>
+</span></code></pre></div>
+<p>Declarative <code>config_plan</code> with a built-in resolver helper:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="nd">@define_step</span><span class="p">(</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>    <span class="n">config_plan</span><span class="o">=</span><span class="n">tracker</span><span class="o">.</span><span class="n">prepare_config_resolver</span><span class="p">(</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>        <span class="n">adapter</span><span class="o">=</span><span class="n">activitysim_adapter</span><span class="p">,</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>        <span class="n">config_dirs_from</span><span class="o">=</span><span class="s2">&quot;settings.config_dirs&quot;</span><span class="p">,</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>    <span class="p">),</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="p">)</span>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="k">def</span><span class="w"> </span><span class="nf">run_model</span><span class="p">(</span><span class="o">...</span><span class="p">):</span>
+</span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>    <span class="o">...</span>
+</span></code></pre></div>
+<p>Migration note:</p>
+<ul>
+<li>Replace workflow-facing <code>ctx.settings</code> with <code>ctx.runtime_settings</code></li>
+<li>Replace workflow-facing <code>ctx.workspace</code> with <code>ctx.runtime_workspace</code></li>
+<li>Replace workflow-facing <code>ctx.state</code> with <code>ctx.runtime_state</code></li>
+</ul>
+<hr />
+<h2 id="name-templates">Name Templates<a class="headerlink" href="#name-templates" title="Permanent link">&para;</a></h2>
+<p>Name templates help prevent collisions and keep run directories organized.</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="nd">@define_step</span><span class="p">(</span><span class="n">name_template</span><span class="o">=</span><span class="s2">&quot;</span><span class="si">{func_name}</span><span class="s2">__y</span><span class="si">{year}</span><span class="s2">__phase_</span><span class="si">{phase}</span><span class="s2">&quot;</span><span class="p">)</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="k">def</span><span class="w"> </span><span class="nf">analyze</span><span class="p">(</span><span class="n">population</span><span class="p">,</span> <span class="n">year</span><span class="o">=</span><span class="mi">2030</span><span class="p">,</span> <span class="n">phase</span><span class="o">=</span><span class="s2">&quot;demand&quot;</span><span class="p">):</span>
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>    <span class="o">...</span>
+</span></code></pre></div>
+<p>Scenario-level defaults apply to every step unless a decorator overrides them:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">scenario</span><span class="p">(</span><span class="s2">&quot;baseline&quot;</span><span class="p">,</span> <span class="n">name_template</span><span class="o">=</span><span class="s2">&quot;</span><span class="si">{func_name}</span><span class="s2">_</span><span class="si">{year}</span><span class="s2">&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">sc</span><span class="p">:</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>    <span class="n">sc</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">preprocess</span><span class="p">,</span> <span class="n">year</span><span class="o">=</span><span class="mi">2030</span><span class="p">)</span>  <span class="c1"># name=&quot;preprocess_2030&quot;</span>
+</span></code></pre></div>
+<p>Missing fields are rendered as empty strings (no errors).</p>
+<hr />
+<h2 id="cache-invalidation-controls">Cache Invalidation Controls<a class="headerlink" href="#cache-invalidation-controls" title="Permanent link">&para;</a></h2>
+<p>Use these when the workflow semantics change but code/config do not.</p>
+<ul>
+<li>Global: <code>Tracker(cache_epoch=N)</code></li>
+<li>Scenario: <code>tracker.scenario(..., cache_epoch=N)</code></li>
+<li>Step: <code>@define_step(cache_version=N)</code></li>
+</ul>
+<p>See <strong><a href="../caching-and-hydration/">Caching &amp; Hydration</a></strong> for details.</p>
+<hr />
+<h2 id="schema-introspection">Schema Introspection<a class="headerlink" href="#schema-introspection" title="Permanent link">&para;</a></h2>
+<p><code>collect_step_schema</code> derives a coupler schema from decorated steps.</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">collect_step_schema</span>
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="n">schema</span> <span class="o">=</span> <span class="n">collect_step_schema</span><span class="p">(</span>
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>    <span class="n">steps</span><span class="o">=</span><span class="p">[</span><span class="n">preprocess</span><span class="p">,</span> <span class="n">analyze</span><span class="p">],</span>
+</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>    <span class="n">settings</span><span class="o">=</span><span class="n">settings</span><span class="p">,</span>
+</span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>    <span class="n">extra_keys</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;init/raw&quot;</span><span class="p">:</span> <span class="s2">&quot;Initialization data&quot;</span><span class="p">},</span>
+</span><span id="__span-8-7"><a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a><span class="p">)</span>
+</span><span id="__span-8-8"><a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a><span class="n">coupler</span><span class="o">.</span><span class="n">declare_outputs</span><span class="p">(</span><span class="o">*</span><span class="n">schema</span><span class="o">.</span><span class="n">keys</span><span class="p">(),</span> <span class="n">description</span><span class="o">=</span><span class="n">schema</span><span class="p">)</span>
+</span></code></pre></div>
+<p>If outputs are dynamic, provide <code>schema_outputs=[...]</code> in <code>@define_step</code> so schema
+building stays deterministic.</p>
+<hr />
+<h2 id="artifact-key-registries">Artifact Key Registries<a class="headerlink" href="#artifact-key-registries" title="Permanent link">&para;</a></h2>
+<p>Use <code>ArtifactKeyRegistry</code> to centralize key names in larger workflows:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">ArtifactKeyRegistry</span>
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>
+</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="k">class</span><span class="w"> </span><span class="nc">Keys</span><span class="p">(</span><span class="n">ArtifactKeyRegistry</span><span class="p">):</span>
+</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>    <span class="n">RAW</span> <span class="o">=</span> <span class="s2">&quot;raw&quot;</span>
+</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>    <span class="n">PREPROCESSED</span> <span class="o">=</span> <span class="s2">&quot;preprocessed&quot;</span>
+</span><span id="__span-9-6"><a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>    <span class="n">ANALYSIS</span> <span class="o">=</span> <span class="s2">&quot;analysis&quot;</span>
+</span><span id="__span-9-7"><a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a>
+</span><span id="__span-9-8"><a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a><span class="n">sc</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">fn</span><span class="o">=</span><span class="n">preprocess</span><span class="p">,</span> <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="n">Keys</span><span class="o">.</span><span class="n">RAW</span><span class="p">:</span> <span class="s2">&quot;raw.csv&quot;</span><span class="p">},</span> <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="n">Keys</span><span class="o">.</span><span class="n">PREPROCESSED</span><span class="p">])</span>
+</span></code></pre></div>
 
 
 
@@ -2543,7 +2489,7 @@ using tools designed for structured, record-based data, such as Pandas DataFrame
       <nav class="md-footer__inner md-grid" aria-label="Footer" >
         
           
-          <a href="../workflow/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Workflow Contexts">
+          <a href="../config-management/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Config Management: Caching vs. Filtering">
             <div class="md-footer__button md-icon">
               
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></svg>
@@ -2553,20 +2499,20 @@ using tools designed for structured, record-based data, such as Pandas DataFrame
                 Previous
               </span>
               <div class="md-ellipsis">
-                Workflow Contexts
+                Config Management: Caching vs. Filtering
               </div>
             </div>
           </a>
         
         
           
-          <a href="../run/" class="md-footer__link md-footer__link--next" aria-label="Next: Run">
+          <a href="../caching-and-hydration/" class="md-footer__link md-footer__link--next" aria-label="Next: Caching and Artifact Hydration Patterns">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                Run
+                Caching and Artifact Hydration Patterns
               </div>
             </div>
             <div class="md-footer__button md-icon">

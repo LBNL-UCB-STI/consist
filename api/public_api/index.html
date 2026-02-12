@@ -25,7 +25,7 @@
       
       
       <link rel="icon" href="../../assets/logo.png">
-      <meta name="generator" content="zensical-0.0.21">
+      <meta name="generator" content="zensical-0.0.23">
     
     
       
@@ -36,7 +36,7 @@
       
         
       
-      <link rel="stylesheet" href="../../assets/stylesheets/modern/main.f28b7ce3.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/modern/main.1e989742.min.css">
       
         
           
@@ -605,6 +605,8 @@
       
         
       
+        
+      
     
     
     
@@ -695,6 +697,34 @@
     
   
     Config Management: Caching vs. Filtering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/decorators-and-metadata/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Decorators &amp; Metadata
   
 
     
@@ -1616,7 +1646,7 @@
           <span class="md-nav__icon md-icon"></span>
         </label>
       
-      <a href="./" class="md-nav__link md-nav__link--active">
+      <a href="././" class="md-nav__link md-nav__link--active">
         
   
   
@@ -1666,6 +1696,17 @@
     <span class="md-ellipsis">
       
         Scenario / workflow helpers
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#utilities-and-introspection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Utilities and Introspection
       
     </span>
   </a>
@@ -2151,6 +2192,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#utilities-and-introspection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Utilities and Introspection
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#artifact-logging-and-loading" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2370,6 +2422,12 @@ more verbose, lower-level, or easier to misuse.</p>
 <li><code>run_dir</code>, <code>inputs</code>, <code>load</code>, <code>log_artifact</code>, <code>log_artifacts</code>, <code>log_input</code>, <code>log_output</code>, <code>log_meta</code>, <code>capture_outputs</code></li>
 <li><a href="../workflow/#consist.core.coupler.Coupler"><code>Coupler</code></a> (available at <code>scenario.coupler</code>)</li>
 </ul>
+<p>Scenario defaults like <code>name_template</code> and <code>cache_epoch</code> are configured via <code>consist.scenario(...)</code> and flow into <code>ScenarioContext.run(...)</code>.</p>
+<h3 id="utilities-and-introspection">Utilities and Introspection<a class="headerlink" href="#utilities-and-introspection" title="Permanent link">&para;</a></h3>
+<ul>
+<li><a href="../../schema-export/#introspection"><code>collect_step_schema</code></a> (Extract outputs for Coupler schemas)</li>
+<li><a href="../../usage-guide/#artifact-key-registries"><code>ArtifactKeyRegistry</code></a> (Manage consistent artifact keys)</li>
+</ul>
 <h3 id="artifact-logging-and-loading">Artifact logging and loading<a class="headerlink" href="#artifact-logging-and-loading" title="Permanent link">&para;</a></h3>
 <ul>
 <li><a href="../api_helpers/#consist.api.log_artifact"><code>consist.log_artifact</code></a></li>
@@ -2377,6 +2435,7 @@ more verbose, lower-level, or easier to misuse.</p>
 <li><a href="../api_helpers/#consist.api.load"><code>consist.load</code></a></li>
 <li><a href="../api_helpers/#consist.api.capture_outputs"><code>consist.capture_outputs</code></a></li>
 <li><a href="../api_helpers/#consist.api.get_artifact"><code>consist.get_artifact</code></a></li>
+<li><a href="../api_helpers/#consist.api.register_artifact_facet_parser"><code>consist.register_artifact_facet_parser</code></a></li>
 <li><a href="../api_helpers/#consist.api.cached_output"><code>consist.cached_output</code></a></li>
 <li><a href="../api_helpers/#consist.api.cached_artifacts"><code>consist.cached_artifacts</code></a></li>
 <li><a href="../api_helpers/#consist.api.log_meta"><code>consist.log_meta</code></a></li>
@@ -2423,6 +2482,7 @@ as needed.</p>
 <ul>
 <li><code>find_runs</code>, <code>find_run</code>, <code>find_latest_run</code>, <code>get_latest_run_id</code></li>
 <li><code>find_artifacts</code>, <code>get_artifact</code>, <code>get_artifacts_for_run</code></li>
+<li><code>find_artifacts_by_params</code>, <code>get_artifact_kv</code>, <code>register_artifact_facet_parser</code></li>
 <li><code>get_run</code>, <code>get_run_config</code>, <code>get_run_inputs</code>, <code>get_run_outputs</code></li>
 <li><code>get_artifact_lineage</code>, <code>print_lineage</code>, <code>history</code></li>
 <li><code>diff_runs</code>, <code>get_config_facet</code>, <code>get_config_facets</code>, <code>get_run_config_kv</code></li>
@@ -2580,7 +2640,7 @@ as needed.</p>
       <script id="__config" type="application/json">{"annotate":null,"base":"../..","features":["announce.dismiss","content.action.view","content.code.annotate","content.code.copy","content.code.select","content.footnote.tooltips","content.tabs.link","content.tooltips","navigation.expand","navigation.footer","navigation.indexes","navigation.path","navigation.sections","navigation.tabs","navigation.top","navigation.tracking","search.highlight","toc.follow"],"search":"../../assets/javascripts/workers/search.e2d2d235.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
     
     
-      <script src="../../assets/javascripts/bundle.36a64b72.min.js"></script>
+      <script src="../../assets/javascripts/bundle.5fcf0de6.min.js"></script>
       
     
   </body>

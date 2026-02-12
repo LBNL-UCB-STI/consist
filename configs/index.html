@@ -25,7 +25,7 @@
       
       
       <link rel="icon" href="../assets/logo.png">
-      <meta name="generator" content="zensical-0.0.21">
+      <meta name="generator" content="zensical-0.0.23">
     
     
       
@@ -36,7 +36,7 @@
       
         
       
-      <link rel="stylesheet" href="../assets/stylesheets/modern/main.f28b7ce3.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.1e989742.min.css">
       
         
           
@@ -101,7 +101,7 @@
 
 <header class="md-header" data-md-component="header">
   <nav class="md-header__inner md-grid" aria-label="Header">
-    <a href=".." title="Consist" class="md-header__button md-logo" aria-label="Consist" data-md-component="logo">
+    <a href="./.." title="Consist" class="md-header__button md-logo" aria-label="Consist" data-md-component="logo">
       
   <img src="../assets/logo-square-dark.png" alt="logo">
 
@@ -204,7 +204,7 @@
   
   
     <li class="md-tabs__item">
-      <a href=".." class="md-tabs__link">
+      <a href="./.." class="md-tabs__link">
         
   
   Home
@@ -368,7 +368,7 @@
 
 <nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
   <label class="md-nav__title" for="__drawer">
-    <a href=".." title="Consist" class="md-nav__button md-logo" aria-label="Consist" data-md-component="logo">
+    <a href="./.." title="Consist" class="md-nav__button md-logo" aria-label="Consist" data-md-component="logo">
       
   <img src="../assets/logo-square-dark.png" alt="logo">
 
@@ -385,7 +385,7 @@
   
   
     <li class="md-nav__item">
-      <a href=".." class="md-nav__link">
+      <a href="./.." class="md-nav__link">
         
   
   
@@ -605,6 +605,8 @@
       
         
       
+        
+      
     
     
     
@@ -695,6 +697,34 @@
     
   
     Config Management: Caching vs. Filtering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/decorators-and-metadata/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Decorators &amp; Metadata
   
 
     
@@ -904,7 +934,7 @@
           <span class="md-nav__icon md-icon"></span>
         </label>
       
-      <a href="./" class="md-nav__link md-nav__link--active">
+      <a href="././" class="md-nav__link md-nav__link--active">
         
   
   
@@ -1028,6 +1058,23 @@
       
     </span>
   </a>
+  
+    <nav class="md-nav" aria-label="Querying Facets in DuckDB">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#implementation-note-shared-facet-core" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Implementation Note: Shared Facet Core
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -2219,6 +2266,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Querying Facets in DuckDB">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#implementation-note-shared-facet-core" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Implementation Note: Shared Facet Core
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -2307,7 +2371,7 @@
   
   
     <li class="md-path__item">
-      <a href=".." class="md-path__link">
+      <a href="./.." class="md-path__link">
         
   <span class="md-ellipsis">
     Home
@@ -2540,6 +2604,8 @@ implicit hydration.</p>
 <ul>
 <li><code>config_facet</code>: deduplicated facet JSON blobs</li>
 <li><code>run_config_kv</code>: flattened key/value index for filtering</li>
+<li><code>artifact_facet</code>: deduplicated artifact-level facet JSON blobs</li>
+<li><code>artifact_kv</code>: flattened scalar key/value index for artifact filtering</li>
 </ul>
 <p>Flattened keys use dot-notation, with dots in raw keys escaped as <code>\.</code>.</p>
 <p>Examples:</p>
@@ -2553,6 +2619,17 @@ implicit hydration.</p>
 <p>You can also fetch facets directly:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="n">facet</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">get_config_facet</span><span class="p">(</span><span class="n">facet_id</span><span class="p">)</span>
 </span></code></pre></div>
+<h3 id="implementation-note-shared-facet-core">Implementation Note: Shared Facet Core<a class="headerlink" href="#implementation-note-shared-facet-core" title="Permanent link">&para;</a></h3>
+<p>Run facet and artifact facet pipelines share a common internal module:
+<code>src/consist/core/facet_common.py</code>.</p>
+<p>This module centralizes:</p>
+<ul>
+<li>normalization of facet payloads</li>
+<li>canonical hash/id generation</li>
+<li>dotted-key flattening and typing rules</li>
+</ul>
+<p>Manager classes (<code>ConfigFacetManager</code>, <code>ArtifactFacetManager</code>) stay focused on
+entity-specific persistence/query behavior.</p>
 <h2 id="model-specific-config-adapters">Model-Specific Config Adapters<a class="headerlink" href="#model-specific-config-adapters" title="Permanent link">&para;</a></h2>
 <p>For complex, file-based configurations (such as ActivitySim YAML/CSV configs),
 Consist provides <strong>config adapters</strong>—model-specific modules that discover,
@@ -2739,7 +2816,7 @@ to add new model types without coupling them to the framework.</p>
       <script id="__config" type="application/json">{"annotate":null,"base":"..","features":["announce.dismiss","content.action.view","content.code.annotate","content.code.copy","content.code.select","content.footnote.tooltips","content.tabs.link","content.tooltips","navigation.expand","navigation.footer","navigation.indexes","navigation.path","navigation.sections","navigation.tabs","navigation.top","navigation.tracking","search.highlight","toc.follow"],"search":"../assets/javascripts/workers/search.e2d2d235.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
     
     
-      <script src="../assets/javascripts/bundle.36a64b72.min.js"></script>
+      <script src="../assets/javascripts/bundle.5fcf0de6.min.js"></script>
       
     
   </body>
