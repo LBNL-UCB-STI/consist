@@ -3,7 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Final, Mapping, Optional, Union
 
-from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
+from consist.types import (
+    CacheOptions,
+    CodeIdentityMode,
+    ExecutionOptions,
+    OutputPolicyOptions,
+)
 
 
 LEGACY_POLICY_KWARG_REPLACEMENTS: Final[dict[str, str]] = {
@@ -39,6 +44,8 @@ class ResolvedRunOptions:
     cache_version: Optional[int]
     cache_epoch: Optional[int]
     validate_cached_outputs: Optional[str]
+    code_identity: Optional[CodeIdentityMode]
+    code_identity_extra_deps: Optional[list[str]]
     output_mismatch: Optional[str]
     output_missing: Optional[str]
     load_inputs: Optional[bool]
@@ -89,6 +96,8 @@ def merge_run_options(
         cache_version=cache_obj.cache_version,
         cache_epoch=cache_obj.cache_epoch,
         validate_cached_outputs=cache_obj.validate_cached_outputs,
+        code_identity=cache_obj.code_identity,
+        code_identity_extra_deps=cache_obj.code_identity_extra_deps,
         output_mismatch=output_obj.output_mismatch,
         output_missing=output_obj.output_missing,
         load_inputs=exec_obj.load_inputs,

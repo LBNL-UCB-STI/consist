@@ -94,6 +94,7 @@ from consist.models.run import (
 from consist.types import (
     ArtifactRef,
     CacheOptions,
+    CodeIdentityMode,
     DriverType,
     ExecutionOptions,
     FacetLike,
@@ -900,6 +901,8 @@ class Tracker:
         facet: Optional[FacetLike] = None,
         facet_from: Optional[List[str]] = None,
         hash_inputs: HashInputs = None,
+        code_identity: Optional[CodeIdentityMode] = None,
+        code_identity_extra_deps: Optional[List[str]] = None,
         facet_schema_version: Optional[Union[str, int]] = None,
         facet_index: bool = True,
         **kwargs: Any,
@@ -950,6 +953,12 @@ class Tracker:
             Extra inputs to include in the run identity hash without logging them as run
             inputs/outputs. Useful for config bundles or auxiliary files. Each entry is
             either a path (str/Path) or a named tuple `(name, path)`.
+        code_identity : Optional[CodeIdentityMode], optional
+            Strategy for hashing code identity in cache keys. ``"repo_git"`` (default)
+            uses repository git state. ``"callable_module"`` and ``"callable_source"``
+            scope identity to the callable executed by ``tracker.run``.
+        code_identity_extra_deps : Optional[List[str]], optional
+            Extra dependency file paths to fold into callable-scoped code identity.
         facet_schema_version : Optional[Union[str, int]], optional
             Optional schema version tag for the persisted facet.
         facet_index : bool, default True
@@ -1044,6 +1053,7 @@ class Tracker:
         cache_epoch = kwargs.pop("cache_epoch", None)
         cache_version = kwargs.pop("cache_version", None)
         parent_run_id = kwargs.pop("parent_run_id", None)
+        code_identity_callable = kwargs.pop("_consist_code_identity_callable", None)
 
         if artifact_dir is not None:
             kwargs["artifact_dir"] = str(artifact_dir)
@@ -1085,7 +1095,26 @@ class Tracker:
             cache_epoch=cache_epoch,
             cache_version=cache_version,
         )
-        git_hash = self.identity.get_code_version()
+        identity_mode = code_identity or "repo_git"
+        try:
+            git_hash = self.identity.resolve_code_version(
+                mode=identity_mode,
+                func=code_identity_callable,
+                extra_deps=code_identity_extra_deps,
+            )
+        except Exception as exc:
+            logging.warning(
+                "[Consist] Failed to resolve code identity mode=%s for run %s: %s. "
+                "Falling back to repo git identity.",
+                identity_mode,
+                run_id,
+                exc,
+            )
+            git_hash = self.identity.get_code_version()
+        if code_identity is not None:
+            kwargs["code_identity"] = identity_mode
+        if code_identity_extra_deps:
+            kwargs["code_identity_extra_deps"] = list(code_identity_extra_deps)
 
         kwargs["_physical_run_dir"] = str(self.run_dir)
         if cache_epoch is not None:
@@ -1437,6 +1466,10 @@ class Tracker:
             Year metadata (for multi-year simulations). Included in provenance.
         iteration : Optional[int], optional
             Iteration count (for iterative workflows). Included in provenance.
+        phase : Optional[str], optional
+            Optional lifecycle phase label persisted in run metadata.
+        stage : Optional[str], optional
+            Optional workflow stage label persisted in run metadata.
         parent_run_id : Optional[str], optional
             Parent run ID (for nested runs in scenarios).
 
@@ -1451,7 +1484,8 @@ class Tracker:
             Glob pattern for capturing outputs (used with capture_dir).
         cache_options : Optional[CacheOptions], optional
             Grouped cache controls (`cache_mode`, `cache_hydration`, `cache_version`,
-            `cache_epoch`, `validate_cached_outputs`).
+            `cache_epoch`, `validate_cached_outputs`, `code_identity`,
+            `code_identity_extra_deps`).
         output_policy : Optional[OutputPolicyOptions], optional
             Grouped output policies (`output_mismatch`, `output_missing`).
         execution_options : Optional[ExecutionOptions], optional
@@ -1515,6 +1549,8 @@ class Tracker:
         cache_version = merged_options.cache_version
         cache_epoch = merged_options.cache_epoch
         validate_cached_outputs = merged_options.validate_cached_outputs
+        code_identity = merged_options.code_identity
+        code_identity_extra_deps = merged_options.code_identity_extra_deps
         output_mismatch = merged_options.output_mismatch
         output_missing = merged_options.output_missing
         load_inputs = merged_options.load_inputs
@@ -1534,6 +1570,30 @@ class Tracker:
 
         if executor not in {"python", "container"}:
             raise ValueError("Tracker.run supports executor='python' or 'container'.")
+        if code_identity not in {
+            None,
+            "repo_git",
+            "callable_module",
+            "callable_source",
+        }:
+            raise ValueError(
+                "cache_options.code_identity must be one of: "
+                "'repo_git', 'callable_module', 'callable_source'"
+            )
+        if (
+            code_identity in {"callable_module", "callable_source"}
+            and executor != "python"
+        ):
+            raise ValueError(
+                "cache_options.code_identity callable modes require executor='python'."
+            )
+        if code_identity_extra_deps is not None:
+            if not isinstance(code_identity_extra_deps, list) or not all(
+                isinstance(dep, str) for dep in code_identity_extra_deps
+            ):
+                raise TypeError(
+                    "cache_options.code_identity_extra_deps must be a list[str]."
+                )
 
         if executor == "container":
             if container is None:
@@ -1729,6 +1789,12 @@ class Tracker:
             "validate_cached_outputs": validate_cached_outputs,
             "cache_epoch": resolved_cache_epoch,
         }
+        if code_identity is not None:
+            start_kwargs["code_identity"] = code_identity
+        if code_identity_extra_deps is not None:
+            start_kwargs["code_identity_extra_deps"] = list(code_identity_extra_deps)
+        if executor == "python" and fn is not None:
+            start_kwargs["_consist_code_identity_callable"] = fn
         if cache_version is not None:
             start_kwargs["cache_version"] = cache_version
         if phase is not None:
@@ -3208,6 +3274,11 @@ class Tracker:
             Optional per-key schema versions for artifact facet payloads.
         facet_index : bool, default False
             Whether to index scalar artifact facet values in ``artifact_kv``.
+        reuse_if_unchanged : bool, default False
+            If True and logging outputs, reuse prior artifact rows when content hashes match.
+        reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
+            Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
+            while "any_uri" allows reuse across different URIs with the same hash.
         **shared_meta : Any
             Metadata key-value pairs to apply to ALL logged artifacts.
             Useful for tagging a batch of related files.
@@ -3387,6 +3458,11 @@ class Tracker:
             `content_hash`. By default, mismatched overrides are ignored with a warning.
         validate_content_hash : bool, default False
             If True, verify `content_hash` against the on-disk data and raise on mismatch.
+        reuse_if_unchanged : bool, default False
+            If True, reuse a prior output artifact row when the content hash matches.
+        reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
+            Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
+            while "any_uri" allows reuse across different URIs with the same hash.
         facet : Optional[FacetLike], optional
             Optional artifact-level facet payload for this output artifact.
         facet_schema_version : Optional[Union[str, int]], optional

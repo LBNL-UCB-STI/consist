@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -71,6 +72,35 @@ def test_tracker_run_cache_hit_skips_callable(tracker):
     assert calls == ["called"]
     assert first.outputs["out"].path.read_text() == "calls=1\n"
     assert second.cache_hit is True
+
+
+def test_tracker_run_cache_options_callable_code_identity(tracker):
+    calls: list[str] = []
+
+    def step() -> None:
+        calls.append("called")
+
+    with patch.object(
+        tracker.identity, "compute_callable_hash", return_value="callable_hash"
+    ) as mock_callable_hash:
+        with patch.object(
+            tracker.identity,
+            "get_code_version",
+            side_effect=RuntimeError("repo git hash should not be used"),
+        ):
+            first = tracker.run(
+                fn=step,
+                cache_options=CacheOptions(code_identity="callable_module"),
+            )
+            second = tracker.run(
+                fn=step,
+                cache_options=CacheOptions(code_identity="callable_module"),
+            )
+
+    assert calls == ["called"]
+    assert first.run.git_hash == "callable_hash"
+    assert second.cache_hit is True
+    assert mock_callable_hash.call_count == 2
 
 
 def test_run_context_run_dir_is_created(tracker):

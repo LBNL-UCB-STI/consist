@@ -11,13 +11,20 @@ from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
 
 def test_merge_run_options_merges_options_objects() -> None:
     merged = merge_run_options(
-        cache_options=CacheOptions(cache_mode="reuse", cache_hydration="metadata"),
+        cache_options=CacheOptions(
+            cache_mode="reuse",
+            cache_hydration="metadata",
+            code_identity="callable_module",
+            code_identity_extra_deps=["helpers.py"],
+        ),
         output_policy=OutputPolicyOptions(output_missing="error"),
         execution_options=ExecutionOptions(inject_context="ctx"),
     )
 
     assert merged.cache_mode == "reuse"
     assert merged.cache_hydration == "metadata"
+    assert merged.code_identity == "callable_module"
+    assert merged.code_identity_extra_deps == ["helpers.py"]
     assert merged.output_missing == "error"
     assert merged.inject_context == "ctx"
 
@@ -30,6 +37,8 @@ def test_merge_run_options_defaults_to_empty_options() -> None:
     assert merged.cache_version is None
     assert merged.cache_epoch is None
     assert merged.validate_cached_outputs is None
+    assert merged.code_identity is None
+    assert merged.code_identity_extra_deps is None
     assert merged.output_mismatch is None
     assert merged.output_missing is None
     assert merged.load_inputs is None

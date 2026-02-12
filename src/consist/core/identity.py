@@ -12,7 +12,17 @@ import inspect
 import fnmatch
 from importlib import import_module
 from types import ModuleType
-from typing import TYPE_CHECKING, Dict, List, Any, Optional, Callable, Set, Union
+from typing import (
+    TYPE_CHECKING,
+    Dict,
+    List,
+    Any,
+    Optional,
+    Callable,
+    Set,
+    Union,
+    Literal,
+)
 from pathlib import Path
 
 # Try importing git, handle error if missing (optional dependency)
@@ -259,6 +269,36 @@ class IdentityManager:
         # 3. Composite Hash
         composite = "|".join(sorted(hashes))
         return hashlib.sha256(composite.encode("utf-8")).hexdigest()
+
+    def resolve_code_version(
+        self,
+        *,
+        mode: Literal["repo_git", "callable_module", "callable_source"] = "repo_git",
+        func: Optional[Callable] = None,
+        extra_deps: Optional[List[str]] = None,
+    ) -> str:
+        """
+        Resolve the run code identity hash according to the selected mode.
+
+        Parameters
+        ----------
+        mode : {"repo_git", "callable_module", "callable_source"}, default "repo_git"
+            Code identity strategy.
+        func : Optional[Callable], optional
+            Callable used by callable-scoped modes.
+        extra_deps : Optional[List[str]], optional
+            Additional dependency file paths folded into callable-scoped hashes.
+        """
+        if mode == "repo_git":
+            return self.get_code_version()
+        if func is None:
+            raise ValueError(f"code identity mode {mode!r} requires a callable.")
+        strategy = "module" if mode == "callable_module" else "source"
+        return self.compute_callable_hash(
+            func,
+            strategy=strategy,
+            extra_deps=extra_deps,
+        )
 
     # --- Component 2: Config Identity ---
 

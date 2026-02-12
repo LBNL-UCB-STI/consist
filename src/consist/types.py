@@ -45,6 +45,11 @@ RunInputRef: TypeAlias = Union["Artifact", "RunResult", PathLike]
 
 HashInput: TypeAlias = Union[PathLike, tuple[str, PathLike]]
 HashInputs: TypeAlias = Optional[list[HashInput]]
+CodeIdentityMode: TypeAlias = Literal[
+    "repo_git",
+    "callable_module",
+    "callable_source",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +65,8 @@ class CacheOptions:
     cache_version: Optional[int] = None
     cache_epoch: Optional[int] = None
     validate_cached_outputs: Optional[str] = None
+    code_identity: Optional[CodeIdentityMode] = None
+    code_identity_extra_deps: Optional[list[str]] = None
 
 
 @dataclass(frozen=True, slots=True)
