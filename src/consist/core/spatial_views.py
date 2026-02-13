@@ -7,6 +7,7 @@ Provides a lightweight view for querying spatial metadata ingested by Consist.
 from __future__ import annotations
 
 import logging
+import re
 from numbers import Integral
 from typing import TYPE_CHECKING, Dict, List, Optional
 
@@ -15,6 +16,16 @@ from sqlalchemy import text
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
+
+_SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_concept_key(concept_key: str) -> None:
+    if not _SAFE_IDENTIFIER_RE.fullmatch(concept_key):
+        raise ValueError(
+            "Invalid concept_key. Only letters, numbers, and underscores are allowed, "
+            "and the key must not start with a number."
+        )
 
 
 class SpatialMetadataView:
@@ -48,6 +59,7 @@ class SpatialMetadataView:
         """
         if not self.tracker.engine:
             raise RuntimeError("Database connection required.")
+        _validate_concept_key(concept_key)
 
         query = f"""
             WITH bounds AS (

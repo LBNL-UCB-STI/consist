@@ -1,9 +1,15 @@
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
+from sqlmodel import SQLModel
 
 from consist.integrations import dlt_loader
 from consist.models.artifact import Artifact
+
+
+class _StrictSchema(SQLModel):
+    value: int
 
 
 def _artifact(*, key: str, driver: str, table_path: str | None = None) -> Artifact:
@@ -15,13 +21,87 @@ def _artifact(*, key: str, driver: str, table_path: str | None = None) -> Artifa
     )
 
 
+def _run_context() -> SimpleNamespace:
+    return SimpleNamespace(id="run-1", year=2025, iteration=1)
+
+
+def _lock_error() -> RuntimeError:
+    return RuntimeError(
+        'IO Error: Could not set lock on file "/tmp/provenance.duckdb": '
+        "Conflicting lock is held in PID 0."
+    )
+
+
+def _fake_dlt_module(
+    *,
+    run_behavior=None,
+    load_behavior=None,
+    normalize_prefix: str = "normalized_",
+    resource_observer=None,
+):
+    captured: dict[str, object] = {}
+
+    class _FakePipeline:
+        def __init__(self) -> None:
+            self.default_schema = SimpleNamespace(
+                naming=SimpleNamespace(
+                    normalize_table_identifier=lambda name: f"{normalize_prefix}{name}"
+                )
+            )
+            self.run_calls = 0
+            self.load_calls = 0
+            self.resource = None
+
+        def run(self, resource):
+            self.run_calls += 1
+            self.resource = resource
+            if run_behavior is not None:
+                result = run_behavior(self, resource)
+                if isinstance(result, Exception):
+                    raise result
+                return result
+            list(resource["rows"])
+            return {"phase": "run"}
+
+        def load(self):
+            self.load_calls += 1
+            if load_behavior is not None:
+                result = load_behavior(self)
+                if isinstance(result, Exception):
+                    raise result
+                return result
+            return {"phase": "load"}
+
+    fake_pipeline = _FakePipeline()
+
+    def _resource(rows, *, name, write_disposition, columns, schema_contract):
+        payload = {
+            "rows": rows,
+            "name": name,
+            "write_disposition": write_disposition,
+            "columns": columns,
+            "schema_contract": schema_contract,
+        }
+        captured["resource"] = payload
+        if resource_observer is not None:
+            resource_observer(payload)
+        return payload
+
+    fake_dlt = SimpleNamespace(
+        destinations=SimpleNamespace(duckdb=lambda path: {"db_path": path}),
+        pipeline=lambda **kwargs: fake_pipeline,
+        resource=_resource,
+    )
+    return fake_dlt, fake_pipeline, captured
+
+
 def test_ingest_artifact_raises_when_no_data_iterable_or_path_is_provided(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(dlt_loader, "dlt", object())
 
     artifact = _artifact(key="rows", driver="csv")
-    run_context = SimpleNamespace(id="run-1", year=2025, iteration=1)
+    run_context = _run_context()
 
     with pytest.raises(ValueError, match="No data provided for ingestion"):
         dlt_loader.ingest_artifact(
@@ -38,7 +118,7 @@ def test_ingest_artifact_h5_table_driver_requires_table_path(
     monkeypatch.setattr(dlt_loader, "dlt", object())
 
     artifact = _artifact(key="h5_rows", driver="h5_table", table_path=None)
-    run_context = SimpleNamespace(id="run-1", year=2025, iteration=1)
+    run_context = _run_context()
 
     with pytest.raises(ValueError, match="missing 'table_path'"):
         dlt_loader.ingest_artifact(
@@ -47,6 +127,173 @@ def test_ingest_artifact_h5_table_driver_requires_table_path(
             db_path="/tmp/provenance.duckdb",
             data_iterable="/tmp/data.h5",
         )
+
+
+def test_ingest_artifact_unsupported_driver_raises_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dlt_loader, "dlt", object())
+
+    with pytest.raises(ValueError, match="Ingestion not supported for driver"):
+        dlt_loader.ingest_artifact(
+            artifact=_artifact(key="bad", driver="unsupported_driver"),
+            run_context=_run_context(),
+            db_path="/tmp/provenance.duckdb",
+            data_iterable="/tmp/input.unsupported",
+        )
+
+
+def test_ingest_artifact_strict_schema_violation_for_dataframe_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_dlt, _pipeline, _captured = _fake_dlt_module()
+    monkeypatch.setattr(dlt_loader, "dlt", fake_dlt)
+
+    with pytest.raises(ValueError, match=r"undefined columns .*unexpected"):
+        dlt_loader.ingest_artifact(
+            artifact=_artifact(key="rows", driver="csv"),
+            run_context=_run_context(),
+            db_path="/tmp/provenance.duckdb",
+            data_iterable=pd.DataFrame([{"value": 1, "unexpected": 99}]),
+            schema_model=_StrictSchema,
+        )
+
+
+def test_ingest_artifact_strict_schema_violation_for_dict_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_dlt, _pipeline, _captured = _fake_dlt_module()
+    monkeypatch.setattr(dlt_loader, "dlt", fake_dlt)
+
+    with pytest.raises(ValueError, match=r"undefined columns .*unexpected"):
+        dlt_loader.ingest_artifact(
+            artifact=_artifact(key="rows", driver="csv"),
+            run_context=_run_context(),
+            db_path="/tmp/provenance.duckdb",
+            data_iterable=[{"value": 1, "unexpected": 99}],
+            schema_model=_StrictSchema,
+        )
+
+
+def test_ingest_artifact_dataframe_enrichment_happens_before_resource_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    def _resource_observer(payload) -> None:
+        first = next(payload["rows"])
+        observed["columns"] = list(first.columns)
+        observed["run_id"] = first.iloc[0]["consist_run_id"]
+        observed["artifact_id"] = first.iloc[0]["consist_artifact_id"]
+        observed["year"] = first.iloc[0]["consist_year"]
+        observed["iteration"] = first.iloc[0]["consist_iteration"]
+        payload["rows"] = [first]
+
+    fake_dlt, _pipeline, _captured = _fake_dlt_module(
+        resource_observer=_resource_observer
+    )
+    monkeypatch.setattr(dlt_loader, "dlt", fake_dlt)
+
+    artifact = _artifact(key="rows", driver="csv")
+    info, table = dlt_loader.ingest_artifact(
+        artifact=artifact,
+        run_context=_run_context(),
+        db_path="/tmp/provenance.duckdb",
+        data_iterable=pd.DataFrame([{"value": 1}]),
+    )
+
+    assert info == {"phase": "run"}
+    assert table == "normalized_rows"
+    assert {
+        "consist_run_id",
+        "consist_artifact_id",
+        "consist_year",
+        "consist_iteration",
+    }.issubset(set(observed["columns"]))
+    assert observed["run_id"] == "run-1"
+    assert observed["artifact_id"] == str(artifact.id)
+    assert observed["year"] == 2025
+    assert observed["iteration"] == 1
+
+
+def test_ingest_artifact_non_retryable_run_error_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = RuntimeError("non-retryable failure")
+
+    def _run_behavior(_pipeline, _resource):
+        return sentinel
+
+    fake_dlt, _pipeline, _captured = _fake_dlt_module(run_behavior=_run_behavior)
+    monkeypatch.setattr(dlt_loader, "dlt", fake_dlt)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        dlt_loader.ingest_artifact(
+            artifact=_artifact(key="rows", driver="csv"),
+            run_context=_run_context(),
+            db_path="/tmp/provenance.duckdb",
+            data_iterable=[{"value": 1}],
+        )
+    assert exc_info.value is sentinel
+
+
+def test_ingest_artifact_retryable_lock_then_load_success_returns_info_and_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _run_behavior(_pipeline, _resource):
+        return _lock_error()
+
+    def _load_behavior(_pipeline):
+        return {"phase": "load"}
+
+    fake_dlt, pipeline, _captured = _fake_dlt_module(
+        run_behavior=_run_behavior,
+        load_behavior=_load_behavior,
+    )
+    monkeypatch.setattr(dlt_loader, "dlt", fake_dlt)
+    monkeypatch.setattr(dlt_loader, "_retry_sleep", lambda *_args, **_kwargs: None)
+
+    info, table = dlt_loader.ingest_artifact(
+        artifact=_artifact(key="rows", driver="csv"),
+        run_context=_run_context(),
+        db_path="/tmp/provenance.duckdb",
+        data_iterable=[{"value": 1}],
+        lock_retries=3,
+    )
+
+    assert info == {"phase": "load"}
+    assert table == "normalized_rows"
+    assert pipeline.run_calls == 1
+    assert pipeline.load_calls == 1
+
+
+def test_ingest_artifact_retryable_lock_exhausts_retries_and_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _run_behavior(_pipeline, _resource):
+        return _lock_error()
+
+    def _load_behavior(_pipeline):
+        return _lock_error()
+
+    fake_dlt, pipeline, _captured = _fake_dlt_module(
+        run_behavior=_run_behavior,
+        load_behavior=_load_behavior,
+    )
+    monkeypatch.setattr(dlt_loader, "dlt", fake_dlt)
+    monkeypatch.setattr(dlt_loader, "_retry_sleep", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(RuntimeError, match="Could not set lock on file"):
+        dlt_loader.ingest_artifact(
+            artifact=_artifact(key="rows", driver="csv"),
+            run_context=_run_context(),
+            db_path="/tmp/provenance.duckdb",
+            data_iterable=[{"value": 1}],
+            lock_retries=3,
+        )
+
+    assert pipeline.run_calls == 1
+    assert pipeline.load_calls == 2
 
 
 def test_handle_netcdf_metadata_raises_when_xarray_missing(

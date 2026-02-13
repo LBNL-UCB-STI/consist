@@ -159,3 +159,37 @@ def test_get_geometry_types_returns_empty_mapping_for_empty_metadata(
     view = SpatialMetadataView(_TrackerStub(engine=object()))
 
     assert view.get_geometry_types("tiny_spatial") == {}
+
+
+@pytest.mark.parametrize(
+    "concept_key",
+    [
+        "tiny-spatial",
+        "tiny spatial",
+        "tiny.spatial",
+        "1tiny_spatial",
+        "tiny_spatial;DROP TABLE run;--",
+        'tiny_spatial"or"1"="1',
+    ],
+)
+def test_get_metadata_rejects_unsafe_concept_key(
+    monkeypatch: pytest.MonkeyPatch, concept_key: str
+) -> None:
+    """
+    `get_metadata` should reject unsafe table identifiers before SQL construction.
+
+    This test documents the injection boundary for dynamic global_tables names.
+    """
+    called = {"read_sql": False}
+
+    def fake_read_sql(query: Any, engine: Any, params: dict[str, Any]) -> pd.DataFrame:
+        called["read_sql"] = True
+        return _metadata_frame()
+
+    monkeypatch.setattr("consist.core.spatial_views.pd.read_sql", fake_read_sql)
+    view = SpatialMetadataView(_TrackerStub(engine=object()))
+
+    with pytest.raises(ValueError, match="Invalid concept_key"):
+        view.get_metadata(concept_key)
+
+    assert called["read_sql"] is False
