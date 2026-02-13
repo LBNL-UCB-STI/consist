@@ -1,3 +1,4 @@
+from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
 import importlib
 import logging
@@ -50,7 +51,7 @@ from consist.core.run_options import raise_legacy_policy_kwargs_error
 from consist.core.views import _quote_ident, create_view_model
 from consist.core.workflow import OutputCapture, RunContext
 from consist.models.artifact import Artifact, get_tracker_ref
-from consist.models.run import ConsistRecord, Run, RunResult
+from consist.models.run import ConsistRecord, Run, RunResult, resolve_run_result_output
 from consist.models.run_config_kv import RunConfigKV
 from consist.core.tracker import Tracker
 from consist.types import (
@@ -554,6 +555,158 @@ def run(
     )
 
 
+def ref(run_result: RunResult, key: Optional[str] = None) -> Artifact:
+    """
+    Select a specific output artifact from a ``RunResult``.
+
+    Parameters
+    ----------
+    run_result : RunResult
+        Result object returned by ``consist.run``/``tracker.run``.
+    key : Optional[str], optional
+        Output key to select. If omitted, ``run_result`` must have exactly one
+        output.
+
+    Returns
+    -------
+    Artifact
+        Selected artifact reference, suitable for ``inputs=...``.
+    """
+    return resolve_run_result_output(run_result, key=key)
+
+
+def _set_ref_mapping_value(
+    output_map: Dict[str, Artifact], key: str, artifact: Artifact
+) -> None:
+    if key in output_map:
+        raise ValueError(
+            f"Duplicate input key {key!r} while building refs mapping. "
+            "Use unique keys or keyword aliases in consist.refs(...)."
+        )
+    output_map[key] = artifact
+
+
+def _add_run_result_refs(
+    output_map: Dict[str, Artifact],
+    run_result: RunResult,
+    keys: Optional[Iterable[str]],
+) -> None:
+    if keys is None:
+        for output_key, artifact in run_result.outputs.items():
+            _set_ref_mapping_value(output_map, output_key, artifact)
+        return
+
+    for key in keys:
+        if not isinstance(key, str):
+            raise TypeError(
+                f"consist.refs(...) output keys must be strings (got {type(key)})."
+            )
+        _set_ref_mapping_value(
+            output_map, key, resolve_run_result_output(run_result, key=key)
+        )
+
+
+def refs(
+    *selectors: Union[RunResult, tuple[Any, ...], str, Mapping[str, str]],
+    **aliases: Union[RunResult, tuple[RunResult, str]],
+) -> Dict[str, Artifact]:
+    """
+    Build an ``inputs={...}`` mapping from one or more ``RunResult`` objects.
+
+    Supported forms
+    ---------------
+    - Single result shorthand:
+      ``consist.refs(prep, "households", "persons")``
+    - Single result alias mapping:
+      ``consist.refs(prep, {"hh": "households", "pp": "persons"})``
+    - Multi-result positional groups:
+      ``consist.refs((prep, "households"), (skim, "skims"))``
+    - Keyword aliases:
+      ``consist.refs(hh=(prep, "households"), skims=(skim, "skims"))``
+
+    Returns
+    -------
+    Dict[str, Artifact]
+        Mapping suitable for ``inputs=...``.
+    """
+    result: Dict[str, Artifact] = {}
+
+    if selectors:
+        first = selectors[0]
+        if isinstance(first, RunResult):
+            if len(selectors) == 1:
+                _add_run_result_refs(result, first, keys=None)
+            elif len(selectors) == 2 and isinstance(selectors[1], MappingABC):
+                alias_map = cast(Mapping[Any, Any], selectors[1])
+                if not alias_map:
+                    raise ValueError(
+                        "consist.refs(..., {alias: key}) alias mapping cannot be empty."
+                    )
+                for alias, key in alias_map.items():
+                    if not isinstance(alias, str):
+                        raise TypeError(
+                            "consist.refs(..., {alias: key}) alias mapping keys must "
+                            f"be strings (got {type(alias)})."
+                        )
+                    if not isinstance(key, str):
+                        raise TypeError(
+                            "consist.refs(..., {alias: key}) alias mapping values must "
+                            f"be strings output keys (got {type(key)})."
+                        )
+                    _set_ref_mapping_value(
+                        result, alias, resolve_run_result_output(first, key=key)
+                    )
+            else:
+                keys = selectors[1:]
+                if not all(isinstance(key, str) for key in keys):
+                    raise TypeError(
+                        "When consist.refs(...) starts with a RunResult, remaining "
+                        "positional arguments must be output keys (str), or a single "
+                        "alias mapping {alias: key}."
+                    )
+                _add_run_result_refs(result, first, keys=cast(Iterable[str], keys))
+        else:
+            for selector in selectors:
+                if not isinstance(selector, tuple) or not selector:
+                    raise TypeError(
+                        "Positional selectors for consist.refs(...) must be non-empty "
+                        "tuples of the form (run_result, *keys)."
+                    )
+                run_result = selector[0]
+                if not isinstance(run_result, RunResult):
+                    raise TypeError(
+                        "Tuple selectors for consist.refs(...) must start with "
+                        f"RunResult (got {type(run_result)})."
+                    )
+                _add_run_result_refs(
+                    result,
+                    run_result,
+                    keys=cast(Optional[Iterable[str]], selector[1:] or None),
+                )
+
+    for alias, selector in aliases.items():
+        if isinstance(selector, RunResult):
+            artifact = resolve_run_result_output(selector)
+        elif (
+            isinstance(selector, tuple)
+            and len(selector) == 2
+            and isinstance(selector[0], RunResult)
+            and isinstance(selector[1], str)
+        ):
+            artifact = resolve_run_result_output(selector[0], key=selector[1])
+        else:
+            raise TypeError(
+                "Keyword selectors for consist.refs(...) must be RunResult or "
+                "(RunResult, key)."
+            )
+        _set_ref_mapping_value(result, alias, artifact)
+
+    if not result:
+        raise ValueError("consist.refs(...) requires at least one selector.")
+
+    return result
+
+
 @contextmanager
 def trace(
     name: str,
@@ -754,6 +907,36 @@ def cached_output(key: Optional[str] = None) -> Optional[Artifact]:
     except RuntimeError:
         return None
     return tracker.cached_output(key=key)
+
+
+def get_run_result(
+    run_id: str,
+    *,
+    keys: Optional[Iterable[str]] = None,
+    validate: Literal["lazy", "strict", "none"] = "lazy",
+    tracker: Optional["Tracker"] = None,
+) -> RunResult:
+    """
+    Retrieve a historical run as a ``RunResult`` with selected outputs.
+
+    Parameters
+    ----------
+    run_id : str
+        Identifier of the historical run.
+    keys : Optional[Iterable[str]], optional
+        Optional output keys to include. If omitted, includes all outputs.
+    validate : {"lazy", "strict", "none"}, default "lazy"
+        Output validation policy forwarded to ``Tracker.get_run_result``.
+    tracker : Optional[Tracker], optional
+        Tracker instance to query. If omitted, resolves the active/default tracker.
+
+    Returns
+    -------
+    RunResult
+        Historical run metadata plus selected outputs.
+    """
+    tr = _resolve_tracker(tracker)
+    return tr.get_run_result(run_id, keys=keys, validate=validate)
 
 
 def get_artifact(

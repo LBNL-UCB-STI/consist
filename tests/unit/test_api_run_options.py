@@ -43,3 +43,20 @@ def test_consist_run_rejects_legacy_policy_kwargs(tracker):
             match="consist.run no longer accepts legacy policy kwarg: `cache_mode`",
         ):
             consist.run(fn=step, cache_mode="reuse")
+
+
+def test_consist_get_run_result_wrapper(tracker):
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "out.txt").write_text("ok")
+
+    with use_tracker(tracker):
+        produced = consist.run(
+            fn=step,
+            output_paths={"out": "out.txt"},
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        historical = consist.get_run_result(produced.run.id, keys=["out"])
+
+    assert historical.run.id == produced.run.id
+    assert list(historical.outputs.keys()) == ["out"]

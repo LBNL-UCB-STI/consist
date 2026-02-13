@@ -117,6 +117,30 @@ This default suits scientific workflows: large simulations benefit from avoiding
 
 Every run's **signature** is derived from code hash, config hash, and input hash. If Consist finds a completed run with the same signature and valid outputs, the new run is a **cache hit** and reuses prior outputs.
 
+#### Code Identity Modes
+
+By default, code hash uses repository Git state (`repo_git`). For function-shaped runs, you can opt into callable-scoped code identity with `CacheOptions`:
+
+- `repo_git` (default): repository-level hash via Git commit/dirty state.
+- `callable_module`: hash the module file containing `fn`.
+- `callable_source`: hash only `fn` source text.
+- `code_identity_extra_deps`: additional relative file paths to fold into callable-scoped hashes.
+
+```python
+from consist import CacheOptions
+
+result = tracker.run(
+    fn=simulate_step,
+    inputs={"raw": "inputs://raw.csv"},
+    cache_options=CacheOptions(
+        code_identity="callable_module",
+        code_identity_extra_deps=["pilates/common_utils.py"],
+    ),
+)
+```
+
+Use callable-scoped modes when unrelated repo edits are causing unnecessary cache misses.
+
 #### Intentional Cache Invalidation
 
 Sometimes you need to invalidate caches globally or for a specific step (e.g., after a schema change or a bug fix that didn't change the config signature).
@@ -170,21 +194,37 @@ For multi-step workflows, each step logs outputs as artifacts and the next step 
 ``` python
 import consist
 from consist import use_tracker
+from pathlib import Path
+import pandas as pd
+
+def ingest_raw(raw: pd.DataFrame) -> pd.DataFrame:
+    return raw
 
 with use_tracker(tracker):
     with consist.scenario("my_scenario") as scenario:
-        with scenario.trace("ingest"):
-            consist.log_artifact("raw.csv", key="raw", direction="output")
+        ingest_result = scenario.run(
+            name="ingest",
+            fn=ingest_raw,
+            inputs={"raw": Path("raw.csv")},
+            outputs=["raw"],
+        )
+        transform_inputs = consist.refs(ingest_result, "raw")
 
-        with scenario.trace("transform", inputs=["raw"]):  # (1)!
-            raw_art = scenario.coupler.require("raw")  # (2)!
+        with scenario.trace(
+            "transform",
+            inputs=transform_inputs,
+        ):  # (1)!
+            raw_art = transform_inputs["raw"]  # (2)!
             df = consist.load_df(raw_art, tracker=tracker)
 ```
 
-1. `inputs=[...]` declares step inputs by Coupler key without repeating.
-2. `scenario.coupler.require(...)` in the `inputs=[...]` list.
+1. `inputs={...}` links to the exact upstream output artifact.
+2. `consist.refs(...)` builds a reusable explicit input mapping from the prior run result.
 
-Use `scenario.coupler.require("raw")` over `get("raw")`—it fails loudly if a predecessor did not set the key. Pass upstream artifacts through `inputs=[...]` for correct caching and provenance.
+Use `consist.ref(run_result, key="...")` for one-off links, or
+`consist.refs(run_result, ...)` when wiring multiple linked inputs. Legacy
+coupler-key indirection (`inputs=["raw"]`) still works, but it is not the
+preferred pattern for new workflows.
 
 !!! note "Step bodies execute on cache hits"
     Consist does not skip Python blocks. On cache hits, `tracker.log_artifact(..., direction="output")` returns the hydrated cached output when the `key` matches. If code produces a different output, Consist demotes the cache hit to an executing run.

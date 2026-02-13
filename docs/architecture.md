@@ -10,7 +10,7 @@ signature = SHA256(code_hash || config_hash || input_hash)
 
 | Component | Source | Notes |
 |-----------|--------|-------|
-| **Code hash** | Git commit SHA | Appends `-dirty-<hash>` if tracked files are modified; falls back to `unknown_code_version` without Git |
+| **Code hash** | Configurable code identity | Default `repo_git` uses Git commit/dirty state; callable modes hash the function module or source |
 | **Config hash** | Canonical JSON of config dict | Normalized for key order and numeric types; Pydantic models serialize deterministically |
 | **Input hash** | SHA256 of input content | For Consist artifacts, uses the producing run's signature (Merkle linking); for raw files, hashes bytes or metadata per `hashing_strategy` |
 
@@ -23,7 +23,7 @@ signature = SHA256(code_hash || config_hash || input_hash)
 | Function code | ❌ No | Code hash changes → signature changes |
 | `runtime_kwargs` | ✅ Yes | runtime_kwargs are NOT hashed; don't affect signature |
 | Output file names | ✅ Yes | Output names don't affect signature |
-| Comments in code | Depends | Committed comment changes affect the code hash; uncommitted changes mark the repo dirty and break cache. |
+| Comments in code | Depends | Under `repo_git`, tracked comment changes affect code hash. Under `callable_source`, only comments in the callable source matter. Under `callable_module`, comments in the callable's module matter. |
 
 **Merkle DAG structure**: Each run's signature incorporates the signatures of its input artifacts' producing runs. This forms a directed acyclic graph where:
 

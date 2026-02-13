@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+import consist
 from consist.types import CacheOptions, ExecutionOptions
 
 
@@ -128,4 +129,61 @@ def test_scenario_run_rejects_legacy_policy_kwargs(tracker):
                 name="produce",
                 outputs=["out"],
                 output_missing="error",
+            )
+
+
+def test_scenario_run_accepts_ref_and_single_output_run_result(tracker):
+    def produce_multi(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "left.txt").write_text("left")
+        (ctx.run_dir / "right.txt").write_text("right")
+
+    def produce_single(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "single.txt").write_text("single")
+
+    with tracker.scenario("scen_run_refs") as sc:
+        multi = sc.run(
+            fn=produce_multi,
+            output_paths={"left": "left.txt", "right": "right.txt"},
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        sc.run(
+            fn=lambda: None,
+            inputs={"picked": consist.ref(multi, key="right")},
+            execution_options=ExecutionOptions(load_inputs=False),
+        )
+
+        single = sc.run(
+            fn=produce_single,
+            output_paths={"single": "single.txt"},
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        sc.run(
+            fn=lambda: None,
+            inputs={"direct": single},
+            execution_options=ExecutionOptions(load_inputs=False),
+        )
+
+
+def test_scenario_run_rejects_ambiguous_run_result_input(tracker):
+    def produce_multi(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "a.txt").write_text("a")
+        (ctx.run_dir / "b.txt").write_text("b")
+
+    with tracker.scenario("scen_run_ambiguous_result") as sc:
+        produced = sc.run(
+            fn=produce_multi,
+            output_paths={"a": "a.txt", "b": "b.txt"},
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+
+        with pytest.raises(
+            ValueError, match="consist.ref\\(\\.\\.\\., key='\\.\\.\\.'\\)"
+        ):
+            sc.run(
+                fn=lambda: None,
+                inputs={"upstream": produced},
+                execution_options=ExecutionOptions(load_inputs=False),
             )

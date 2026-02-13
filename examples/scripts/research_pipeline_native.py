@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import consist
 import pandas as pd
 import xarray as xr
 
@@ -52,7 +53,7 @@ def main():
     ) as sc:
         # Step 1: Preprocess
         raw_path = Path("examples/data/raw_data.csv")
-        sc.run(
+        preprocess_result = sc.run(
             preprocess,
             inputs={"raw_data": raw_path},
             execution_options=ExecutionOptions(
@@ -65,7 +66,7 @@ def main():
         # AND the contents of the logged inputs.
         sc.run(
             simulate,
-            inputs={"clean_data": "clean_data"},
+            inputs={"clean_data": consist.ref(preprocess_result, key="clean_data")},
             execution_options=ExecutionOptions(
                 load_inputs=True,
                 runtime_kwargs={"params": {"resolution": "high", "seed": 42}},

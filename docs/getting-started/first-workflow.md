@@ -70,7 +70,7 @@ with consist.use_tracker(tracker):
     print(f"Clean: {clean_result.run.status}")
 
     # Step 2: Summarize (consumes output from Step 1)
-    cleaned_artifact = clean_result.outputs["cleaned"]  # (7)!
+    cleaned_artifact = consist.ref(clean_result, key="cleaned")  # (7)!
     summary_result = tracker.run(
         fn=summarize,
         name="summarize",
@@ -89,8 +89,12 @@ with consist.use_tracker(tracker):
 4. Artifact parameters are auto-loaded when input keys match parameter names.
 5. `config` is hashed into the run's signature. Changing `threshold` causes a cache miss.
 6. `inputs` lists files or artifacts whose content hashes are included in the signature.
-7. Access outputs by key from the result object. Each output is a full `Artifact` with path, hash, and metadata.
-8. Passing an artifact as input creates lineage: the summarize run depends on the clean run.
+7. Use `consist.ref(...)` to select and link the upstream output artifact explicitly.
+8. Passing that linked artifact as input creates lineage: the summarize run depends on the clean run.
+
+**Best practice:** Keep step-to-step links explicit with
+`consist.ref(run_result, key="...")`. Passing a raw `RunResult` is only clear
+when there is exactly one output.
 
 ## Run and Observe Caching
 

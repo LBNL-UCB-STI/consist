@@ -94,6 +94,24 @@ result = consist.run(
 )
 ```
 
+To scope code hashing to the callable instead of full-repo Git state:
+
+``` python
+from consist import CacheOptions
+
+result = consist.run(
+    fn=clean_data,
+    inputs={"raw": Path("raw.csv")},
+    outputs=["cleaned"],
+    cache_options=CacheOptions(
+        code_identity="callable_module",
+        code_identity_extra_deps=["shared/helpers.py"],
+    ),
+)
+```
+
+This reduces cache misses when unrelated files elsewhere in the repository change.
+
 Legacy run-policy kwargs are no longer supported on `run(...)` APIs. Use
 `cache_options=...`, `output_policy=...`, and `execution_options=...`.
 
@@ -261,8 +279,14 @@ Use `scenario()` when you have multiple interdependent steps that share state or
 **Benefits over `run()`:**
 
 - Steps cache independently—skip re-executing steps whose inputs haven't changed
-- Use the coupler to pass data between steps with automatic provenance tracking
+- Keep explicit step links with `consist.ref(...)` / `consist.refs(...)` for clear lineage
+- Use the coupler for scenario-scoped runtime state and trace-oriented flows
 - Group runs into scenarios for easy cross-scenario queries
+
+**Best practice:** For step-to-step coupling, pass explicit artifact links with
+`consist.ref(previous_result, key="...")` (single artifact) or
+`consist.refs(previous_result, ...)` (multiple artifacts). This avoids ambiguous
+direct `RunResult` inputs when an upstream step has multiple outputs.
 
 ### Understanding the Coupler
 
@@ -284,7 +308,7 @@ The **coupler** is your scenario-scoped artifact registry. When you log an artif
 **You interact with the coupler when:**
 
 - Accessing inputs in trace blocks: `coupler.require("population")`
-- Declaring inputs to `sc.run()`: `inputs=["population"]`
+- Declaring linked inputs to `sc.run()`: `inputs=consist.refs(init_result, "population")`
 - Validating that outputs were produced: `sc.require_outputs(...)`
 
 **Optional: artifact key registries** help keep keys consistent across large workflows.
@@ -292,6 +316,7 @@ The **coupler** is your scenario-scoped artifact registry. When you log an artif
 ``` python
 from consist import ExecutionOptions
 from consist.utils import ArtifactKeyRegistry
+from pathlib import Path
 
 class Keys(ArtifactKeyRegistry):
     RAW = "raw"
@@ -299,10 +324,14 @@ class Keys(ArtifactKeyRegistry):
     ANALYSIS = "analysis"
 
 # Use keys in calls
-sc.run(fn=preprocess, inputs={Keys.RAW: "raw.csv"}, outputs=[Keys.PREPROCESSED])
+preprocess_result = sc.run(
+    fn=preprocess,
+    inputs={Keys.RAW: Path("raw.csv")},
+    outputs=[Keys.PREPROCESSED],
+)
 sc.run(
     fn=analyze,
-    inputs=[Keys.PREPROCESSED],
+    inputs=consist.refs(preprocess_result, Keys.PREPROCESSED),
     execution_options=ExecutionOptions(load_inputs=True),
     outputs=[Keys.ANALYSIS],
 )
@@ -345,7 +374,7 @@ def analyze_data(preprocessed: pd.DataFrame) -> pd.DataFrame:
 
 with use_tracker(tracker):  # (2)!
     with consist.scenario("my_analysis") as sc:
-        sc.run(
+        preprocess_result = sc.run(
             name="preprocess",
             fn=preprocess_data,
             inputs={"raw": Path("raw.csv")},
@@ -355,7 +384,7 @@ with use_tracker(tracker):  # (2)!
         sc.run(
             name="analyze",
             fn=analyze_data,
-            inputs=["preprocessed"],
+            inputs={"preprocessed": consist.ref(preprocess_result, key="preprocessed")},
             execution_options=ExecutionOptions(load_inputs=True),
             outputs=["analysis"],
         )
@@ -366,9 +395,9 @@ with use_tracker(tracker):  # (2)!
 
 All steps have `scenario_id="my_analysis"`, making it easy to query together. Change preprocess logic? The preprocess step re-runs; the analyze step re-runs only if the preprocessed artifact changes. Change raw.csv? Both re-execute.
 
-### Declaring Inputs: Mapping Form vs List Form
+### Declaring Inputs: Disk Paths vs Explicit Step Links
 
-The `inputs=` parameter supports two different forms for different situations:
+The `inputs=` parameter supports two common forms:
 
 **Mapping form** (explicit paths from disk):
 ``` python
@@ -383,28 +412,43 @@ sc.run(
 1. Load from disk to create the initial artifact.
 Use this when you're loading data from disk for the first time.
 
-**List form** (resolve from coupler):
+**Linked artifact form** (recommended for step-to-step coupling):
 ``` python
 from consist import ExecutionOptions
 
 sc.run(
     name="analyze",
     fn=analyze_data,
-    inputs=["preprocessed"],          # (1)!
+    inputs={"preprocessed": consist.ref(preprocess_result, key="preprocessed")},  # (1)!
     execution_options=ExecutionOptions(load_inputs=True),  # (2)!
     outputs=["analysis"],
 )
 ```
 
-1. Resolve inputs from the coupler.
+1. Explicitly link to one output from a prior `RunResult`.
 2. Auto-load inputs as function parameters.
-Use this when the artifact is already in the coupler from a prior step. With
-`execution_options=ExecutionOptions(load_inputs=True)`, each key becomes a
-function parameter with the loaded data. For example, `inputs=["preprocessed"]`
-means your function receives a `preprocessed` parameter with the loaded
-DataFrame.
+Use this when an upstream step already produced the artifact. With
+`execution_options=ExecutionOptions(load_inputs=True)`, each mapping key becomes
+a function parameter with loaded data.
 
-**Note**: If you have existing code using `input_keys=`, it continues to work for backward compatibility. `inputs=` is the preferred name for new code.
+Rule of thumb:
+- Use `consist.ref(...)` for one-off single links.
+- Use `consist.refs(...)` when wiring multiple outputs or when you plan to reuse the mapping.
+
+**Alias-map form** (when downstream parameter names differ):
+``` python
+sc.run(
+    name="analyze",
+    fn=analyze_data,
+    inputs=consist.refs(preprocess_result, {"cleaned_artifact": "preprocessed"}),
+    execution_options=ExecutionOptions(load_inputs=True),
+    outputs=["analysis"],
+)
+```
+
+**Compatibility note**: Legacy key-indirection patterns (for example,
+`inputs=["preprocessed"]` and `input_keys=`) still work. Prefer explicit links
+with `consist.ref(...)`/`consist.refs(...)` in new code.
 
 <details>
 <summary>Alternative: inline steps with sc.trace</summary>
@@ -414,12 +458,19 @@ Use this when you want inline code blocks (they always execute, even on cache hi
 ```python
 with use_tracker(tracker):
     with consist.scenario("my_analysis") as sc:
-        with sc.trace(name="preprocess", inputs={"raw": Path("raw.csv")}):
-            df = pd.read_csv("raw.csv")
-            consist.log_dataframe(df, key="preprocessed")
+        preprocess_result = sc.run(
+            name="preprocess",
+            fn=preprocess_data,
+            inputs={"raw": Path("raw.csv")},
+            outputs=["preprocessed"],
+        )
+        analyze_inputs = consist.refs(preprocess_result, "preprocessed")
 
-        with sc.trace(name="analyze", inputs=["preprocessed"]):
-            df = consist.load_df(sc.coupler.require("preprocessed"))
+        with sc.trace(
+            name="analyze",
+            inputs=analyze_inputs,
+        ):
+            df = consist.load_df(analyze_inputs["preprocessed"])
             summary = df.groupby("category", as_index=False)["value"].mean()
             consist.log_dataframe(summary, key="analysis")
 ```
@@ -436,20 +487,21 @@ schema introspection, and cache invalidation helpers, see
 ``` python
 with use_tracker(tracker):
     with consist.scenario("baseline", model="travel_demand") as sc:
-        coupler = sc.coupler
-
-        with sc.trace(name="initialize", run_id="baseline_init"):  # (1)!
-            df_pop = load_population()
-            consist.log_dataframe(df_pop, key="population")
+        initialize_result = sc.run(  # (1)!
+            name="initialize",
+            fn=load_population,
+            outputs=["population"],
+        )
+        population_inputs = consist.refs(initialize_result, "population")
 
         for year in [2020, 2030, 2040]:  # (2)!
             with sc.trace(
                 name="simulate",
                 run_id=f"baseline_{year}",
                 year=year,
-                inputs=["population"],  # (3)!
+                inputs=population_inputs,  # (3)!
             ):
-                df_pop = consist.load_df(coupler.require("population"))  # (4)!
+                df_pop = consist.load_df(population_inputs["population"])  # (4)!
                 df_result = run_model(year, df_pop)
 
                 consist.log_dataframe(df_result, key="persons")  # (5)!
@@ -458,12 +510,12 @@ with use_tracker(tracker):
 1. Step 1: load and prepare the population artifact.
 2. Step 2: simulate for each year.
 3. Declare the dependency on the population artifact.
-4. Get data from the coupler with automatic cache detection.
+4. Load the explicitly linked artifact.
 5. Log output and store it for downstream steps.
 
-**What `inputs` (list form) does:**
+**What explicit linked inputs do:**
 
-- Declares that this step depends on "population" artifact
+- Declares that this step depends on the selected `population` artifact
 - Consist tracks this as part of the cache key
 - If the population artifact hasn't changed, this step's cache is still valid
 
@@ -481,15 +533,18 @@ def simulate_year(population: pd.DataFrame, config: dict) -> pd.DataFrame:
 
 with use_tracker(tracker):
     with consist.scenario("baseline", model="travel_demand") as sc:
-        with sc.trace(name="initialize", run_id="baseline_init"):
-            df_pop = load_population()
-            consist.log_dataframe(df_pop, key="population")
+        initialize_result = sc.run(
+            name="initialize",
+            fn=load_population,
+            outputs=["population"],
+        )
+        simulation_inputs = consist.refs(initialize_result, "population")
 
         for year in [2020, 2030, 2040]:
             sc.run(
                 name=f"simulate_{year}",
                 fn=simulate_year,
-                inputs=["population"],
+                inputs=simulation_inputs,
                 outputs=["persons"],
                 execution_options=ExecutionOptions(load_inputs=True),
                 config={"year": year},
@@ -624,22 +679,30 @@ with consist.scenario("outputs") as sc:
 ### Example: Parameter Sweep in a Scenario
 
 ``` python
+from pathlib import Path
+import pandas as pd
+
 with use_tracker(tracker):
     with consist.scenario("sensitivity_analysis") as sc:
-        coupler = sc.coupler
+        def load_data() -> pd.DataFrame:
+            return pd.read_csv("data.csv")
 
-        with sc.trace(name="setup"):  # (1)!
-            df = pd.read_csv("data.csv")
-            consist.log_dataframe(df, key="data")
+        setup_result = sc.run(  # (1)!
+            name="setup",
+            fn=load_data,
+            inputs=[Path("data.csv")],
+            outputs=["data"],
+        )
 
         for threshold in [0.3, 0.5, 0.7]:  # (2)!
+            data_inputs = consist.refs(setup_result, "data")
             with sc.trace(
                 name="analyze",
                 run_id=f"threshold_{threshold}",
                 threshold=threshold,
-                inputs=["data"],
+                inputs=data_inputs,
             ):
-                df = consist.load_df(coupler.require("data"))
+                df = consist.load_df(data_inputs["data"])
                 filtered = df[df["value"] > threshold]
                 consist.log_dataframe(filtered, key="filtered")
 ```
@@ -746,9 +809,17 @@ or for scenario defaults via `step_cache_hydration=...`:
 ``` python
 with use_tracker(tracker):
     with consist.scenario("baseline", step_cache_hydration="inputs-missing") as sc:
-        coupler = sc.coupler
-        with sc.trace(name="simulate", inputs=["population"]):  # (1)!
-            df_pop = consist.load_df(coupler.require("population"))
+        prepare_result = sc.run(
+            name="prepare_population",
+            fn=load_population,
+            outputs=["population"],
+        )
+        population_inputs = consist.refs(prepare_result, "population")
+        with sc.trace(
+            name="simulate",
+            inputs=population_inputs,
+        ):  # (1)!
+            df_pop = consist.load_df(population_inputs["population"])
             ...
 ```
 
@@ -763,22 +834,23 @@ from consist import ExecutionOptions
 
 with use_tracker(tracker):
     with consist.scenario("baseline") as sc:
-        coupler = sc.coupler
         preprocess = consist.run(
             fn=expensive_preprocessing,
             inputs={"network_file": Path("network.geojson")},
             outputs=["processed"],
         )  # (1)!
-        coupler.update(preprocess.outputs)  # (2)!
+        simulate_inputs = consist.refs(preprocess, "processed")
 
-        with sc.trace(name="simulate", inputs=["processed"]):  # (3)!
-            network = consist.load_df(coupler.require("processed"))
+        with sc.trace(
+            name="simulate",
+            inputs=simulate_inputs,
+        ):  # (2)!
+            network = consist.load_df(simulate_inputs["processed"])
             ...
 ```
 
 1. Run expensive preprocessing independently with its own cache key.
-2. Add outputs to the coupler for downstream steps.
-3. Later steps consume the preprocessed output.
+2. Later steps consume the preprocessed output via an explicit ref.
 
 ## When Does Code Execute? Understanding `sc.run()` vs `sc.trace()`
 

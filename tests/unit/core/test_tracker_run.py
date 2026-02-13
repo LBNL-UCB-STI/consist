@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
 
+import consist
 from consist.core.tracker import Tracker
 from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
 
@@ -70,6 +72,35 @@ def test_tracker_run_cache_hit_skips_callable(tracker):
     assert calls == ["called"]
     assert first.outputs["out"].path.read_text() == "calls=1\n"
     assert second.cache_hit is True
+
+
+def test_tracker_run_cache_options_callable_code_identity(tracker):
+    calls: list[str] = []
+
+    def step() -> None:
+        calls.append("called")
+
+    with patch.object(
+        tracker.identity, "compute_callable_hash", return_value="callable_hash"
+    ) as mock_callable_hash:
+        with patch.object(
+            tracker.identity,
+            "get_code_version",
+            side_effect=RuntimeError("repo git hash should not be used"),
+        ):
+            first = tracker.run(
+                fn=step,
+                cache_options=CacheOptions(code_identity="callable_module"),
+            )
+            second = tracker.run(
+                fn=step,
+                cache_options=CacheOptions(code_identity="callable_module"),
+            )
+
+    assert calls == ["called"]
+    assert first.run.git_hash == "callable_hash"
+    assert second.cache_hit is True
+    assert mock_callable_hash.call_count == 2
 
 
 def test_run_context_run_dir_is_created(tracker):
@@ -159,6 +190,201 @@ def test_tracker_run_inject_context_requires_param(tracker):
             fn=step,
             execution_options=ExecutionOptions(inject_context=True),
         )
+
+
+def test_consist_ref_selects_outputs_and_validates_keys(tracker):
+    def multi_output_step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "left.txt").write_text("left")
+        (ctx.run_dir / "right.txt").write_text("right")
+
+    result = tracker.run(
+        fn=multi_output_step,
+        output_paths={"left": "left.txt", "right": "right.txt"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    selected = consist.ref(result, key="right")
+    assert selected.key == "right"
+
+    with pytest.raises(KeyError, match="Available keys: 'left', 'right'"):
+        consist.ref(result, key="missing")
+
+    with pytest.raises(ValueError, match="consist.ref\\(\\.\\.\\., key='\\.\\.\\.'\\)"):
+        consist.ref(result)
+
+    empty = tracker.run(fn=lambda: None)
+    with pytest.raises(ValueError, match="consist.ref\\(\\.\\.\\., key='\\.\\.\\.'\\)"):
+        consist.ref(empty)
+
+
+def test_consist_refs_builds_and_combines_input_mappings(tracker):
+    def produce_people(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "households.txt").write_text("households")
+        (ctx.run_dir / "persons.txt").write_text("persons")
+
+    def produce_network(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "skims.txt").write_text("skims")
+
+    people = tracker.run(
+        fn=produce_people,
+        output_paths={"households": "households.txt", "persons": "persons.txt"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    network = tracker.run(
+        fn=produce_network,
+        output_paths={"skims": "skims.txt"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    single_result_mapping = consist.refs(people, "households", "persons")
+    assert set(single_result_mapping.keys()) == {"households", "persons"}
+
+    combined = consist.refs((people, "households"), (network, "skims"))
+    assert set(combined.keys()) == {"households", "skims"}
+
+    aliased = consist.refs(hh=(people, "households"), travel_skims=(network, "skims"))
+    assert aliased["hh"].key == "households"
+    assert aliased["travel_skims"].key == "skims"
+
+    alias_map = consist.refs(people, {"hh": "households", "travel_persons": "persons"})
+    assert alias_map["hh"].key == "households"
+    assert alias_map["travel_persons"].key == "persons"
+
+    tracker.run(
+        fn=lambda: None,
+        inputs=combined,
+        execution_options=ExecutionOptions(load_inputs=False),
+    )
+    assert any(a.key == "households" for a in tracker.last_run.inputs)
+    assert any(a.key == "skims" for a in tracker.last_run.inputs)
+
+
+def test_consist_refs_validates_duplicates_and_empty_selectors(tracker):
+    def produce(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "single.txt").write_text("single")
+
+    result = tracker.run(
+        fn=produce,
+        output_paths={"single": "single.txt"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    with pytest.raises(ValueError, match="requires at least one selector"):
+        consist.refs()
+
+    with pytest.raises(ValueError, match="Duplicate input key"):
+        consist.refs((result, "single"), single=(result, "single"))
+
+    with pytest.raises(ValueError, match="alias mapping cannot be empty"):
+        consist.refs(result, {})
+
+    with pytest.raises(TypeError, match="alias mapping keys must be strings"):
+        consist.refs(result, {1: "single"})
+
+    with pytest.raises(TypeError, match="alias mapping values must be strings"):
+        consist.refs(result, {"x": 1})
+
+
+def test_tracker_run_accepts_direct_single_output_run_result_input(tracker):
+    def produce(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "single.txt").write_text("single")
+
+    produced = tracker.run(
+        fn=produce,
+        output_paths={"single": "single.txt"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    tracker.run(
+        fn=lambda: None,
+        inputs={"upstream": produced},
+        execution_options=ExecutionOptions(load_inputs=False),
+    )
+
+    assert any(a.key == "single" for a in tracker.last_run.inputs)
+
+
+def test_tracker_run_rejects_ambiguous_run_result_input(tracker):
+    def produce(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "a.txt").write_text("a")
+        (ctx.run_dir / "b.txt").write_text("b")
+
+    produced = tracker.run(
+        fn=produce,
+        output_paths={"a": "a.txt", "b": "b.txt"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    with pytest.raises(ValueError, match="consist.ref\\(\\.\\.\\., key='\\.\\.\\.'\\)"):
+        tracker.run(
+            fn=lambda: None,
+            inputs={"upstream": produced},
+            execution_options=ExecutionOptions(load_inputs=False),
+        )
+
+
+def test_tracker_get_run_result_returns_selected_outputs(tracker):
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "a.txt").write_text("a")
+        (ctx.run_dir / "b.txt").write_text("b")
+
+    produced = tracker.run(
+        fn=step,
+        output_paths={"a": "a.txt", "b": "b.txt"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    historical = tracker.get_run_result(produced.run.id)
+    assert historical.run.id == produced.run.id
+    assert set(historical.outputs.keys()) == {"a", "b"}
+
+    subset = tracker.get_run_result(produced.run.id, keys=["b"])
+    assert list(subset.outputs.keys()) == ["b"]
+
+
+def test_tracker_get_run_result_validates_keys_and_run_id(tracker):
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "out.txt").write_text("ok")
+
+    produced = tracker.run(
+        fn=step,
+        output_paths={"out": "out.txt"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    with pytest.raises(KeyError, match="missing requested output keys"):
+        tracker.get_run_result(produced.run.id, keys=["missing"])
+
+    with pytest.raises(KeyError, match="was not found"):
+        tracker.get_run_result("missing-run-id")
+
+    with pytest.raises(ValueError, match="validate must be one of"):
+        tracker.get_run_result(produced.run.id, validate="bogus")
+
+
+def test_tracker_get_run_result_strict_validation_checks_paths(tracker):
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        out_path = ctx.run_dir / "out.txt"
+        out_path.write_text("ok")
+
+    produced = tracker.run(
+        fn=step,
+        output_paths={"out": "out.txt"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    produced.outputs["out"].path.unlink()
+
+    with pytest.raises(FileNotFoundError, match="missing output files"):
+        tracker.get_run_result(produced.run.id, validate="strict")
 
 
 def test_cache_epoch_affects_config_hash(tmp_path):

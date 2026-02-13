@@ -20,6 +20,11 @@ class RunResultLike(Protocol):
 
 
 @runtime_checkable
+class RunIdentifiedResultLike(RunResultLike, Protocol):
+    run: Any
+
+
+@runtime_checkable
 class ScenarioLike(Protocol):
     def run(
         self,

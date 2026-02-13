@@ -234,12 +234,13 @@ A single execution of a tracked function or workflow step. A run records:
 **Example**:
 ```python
 import consist
+from pathlib import Path
 from consist import use_tracker
 
 with use_tracker(tracker):
     result = consist.run(
         fn=prepare_load_shapes,
-        inputs={"raw_path": "hourly_demand.csv"},
+        inputs={"raw_path": Path("hourly_demand.csv")},
         config={"peak_shave_threshold": 0.95},
         outputs=["processed_load"],
     )

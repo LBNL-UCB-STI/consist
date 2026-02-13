@@ -28,6 +28,8 @@ from consist.api import (
     RelationConnectionLeakWarning,
     to_df,
     run,
+    ref,
+    refs,
     trace,
     start_run,
     log_artifact,
@@ -50,6 +52,7 @@ from consist.api import (
     view,
     cached_output,
     cached_artifacts,
+    get_run_result,
     get_artifact,
     register_artifact_facet_parser,
     scenario,
@@ -87,7 +90,13 @@ from consist.core.noop import (
     NoopTracker,
 )
 from consist.runtime import create_tracker
-from consist.protocols import ArtifactLike, RunResultLike, ScenarioLike, TrackerLike
+from consist.protocols import (
+    ArtifactLike,
+    RunIdentifiedResultLike,
+    RunResultLike,
+    ScenarioLike,
+    TrackerLike,
+)
 
 __all__ = [
     # Core objects
@@ -108,6 +117,7 @@ __all__ = [
     "NoopTracker",
     "create_tracker",
     "ArtifactLike",
+    "RunIdentifiedResultLike",
     "RunResultLike",
     "ScenarioLike",
     "TrackerLike",
@@ -124,6 +134,8 @@ __all__ = [
     "RelationConnectionLeakWarning",
     "to_df",
     "run",
+    "ref",
+    "refs",
     "trace",
     "start_run",
     "log_artifact",
@@ -146,6 +158,7 @@ __all__ = [
     "view",
     "cached_output",
     "cached_artifacts",
+    "get_run_result",
     "get_artifact",
     "register_artifact_facet_parser",
     "scenario",

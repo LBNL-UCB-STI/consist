@@ -82,19 +82,26 @@ from consist.core.validation import (
     validate_run_strings,
 )
 from consist.core.workflow import OutputCapture, RunContext, ScenarioContext
-from consist.core.input_utils import coerce_input_map
 from consist.models.artifact import Artifact, get_tracker_ref, set_tracker_ref
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
-from consist.models.run import ConsistRecord, Run, RunArtifacts, RunResult
+from consist.models.run import (
+    ConsistRecord,
+    Run,
+    RunArtifacts,
+    RunResult,
+    resolve_run_result_output,
+)
 from consist.types import (
     ArtifactRef,
     CacheOptions,
+    CodeIdentityMode,
     DriverType,
     ExecutionOptions,
     FacetLike,
     HasFacetSchemaVersion,
     HashInputs,
     OutputPolicyOptions,
+    RunInputRef,
 )
 
 if TYPE_CHECKING:
@@ -107,12 +114,16 @@ AccessMode = Literal["standard", "analysis", "read_only"]
 
 
 def _resolve_input_ref(
-    tracker: "Tracker", ref: ArtifactRef, key: Optional[str]
+    tracker: "Tracker", ref: RunInputRef, key: Optional[str]
 ) -> ArtifactRef:
     if isinstance(ref, Artifact):
         return ref
+    if isinstance(ref, RunResult):
+        return resolve_run_result_output(ref)
     if not isinstance(ref, (str, Path)):
-        raise TypeError(f"inputs must be Artifact, Path, or str (got {type(ref)}).")
+        raise TypeError(
+            f"inputs must be Artifact, RunResult, Path, or str (got {type(ref)})."
+        )
     ref_str = str(ref)
     resolved = (
         Path(tracker.resolve_uri(ref_str))
@@ -156,8 +167,8 @@ def _write_xarray_dataset(dataset: Any, path: Path) -> None:
 
 def _resolve_input_refs(
     tracker: "Tracker",
-    inputs: Optional[Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]],
-    depends_on: Optional[List[ArtifactRef]],
+    inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]],
+    depends_on: Optional[List[RunInputRef]],
     *,
     include_keyed_artifacts: bool,
 ) -> tuple[List[ArtifactRef], Dict[str, Artifact]]:
@@ -165,12 +176,16 @@ def _resolve_input_refs(
     input_artifacts_by_key: Dict[str, Artifact] = {}
     if inputs is not None:
         if isinstance(inputs, MappingABC):
-            inputs_map = coerce_input_map(inputs)
-            for key, ref in inputs_map.items():
-                resolved = _resolve_input_ref(tracker, ref, str(key))
+            typed_inputs = cast(Mapping[str, RunInputRef], inputs)
+            for key, ref in typed_inputs.items():
+                if not isinstance(key, str):
+                    raise TypeError(
+                        f"inputs mapping keys must be str (got {type(key)})."
+                    )
+                resolved = _resolve_input_ref(tracker, ref, key)
                 resolved_inputs.append(resolved)
                 if include_keyed_artifacts and isinstance(resolved, Artifact):
-                    input_artifacts_by_key[str(key)] = resolved
+                    input_artifacts_by_key[key] = resolved
         else:
             for ref in list(inputs):
                 resolved_inputs.append(_resolve_input_ref(tracker, ref, None))
@@ -886,6 +901,8 @@ class Tracker:
         facet: Optional[FacetLike] = None,
         facet_from: Optional[List[str]] = None,
         hash_inputs: HashInputs = None,
+        code_identity: Optional[CodeIdentityMode] = None,
+        code_identity_extra_deps: Optional[List[str]] = None,
         facet_schema_version: Optional[Union[str, int]] = None,
         facet_index: bool = True,
         **kwargs: Any,
@@ -936,6 +953,12 @@ class Tracker:
             Extra inputs to include in the run identity hash without logging them as run
             inputs/outputs. Useful for config bundles or auxiliary files. Each entry is
             either a path (str/Path) or a named tuple `(name, path)`.
+        code_identity : Optional[CodeIdentityMode], optional
+            Strategy for hashing code identity in cache keys. ``"repo_git"`` (default)
+            uses repository git state. ``"callable_module"`` and ``"callable_source"``
+            scope identity to the callable executed by ``tracker.run``.
+        code_identity_extra_deps : Optional[List[str]], optional
+            Extra dependency file paths to fold into callable-scoped code identity.
         facet_schema_version : Optional[Union[str, int]], optional
             Optional schema version tag for the persisted facet.
         facet_index : bool, default True
@@ -1030,6 +1053,7 @@ class Tracker:
         cache_epoch = kwargs.pop("cache_epoch", None)
         cache_version = kwargs.pop("cache_version", None)
         parent_run_id = kwargs.pop("parent_run_id", None)
+        code_identity_callable = kwargs.pop("_consist_code_identity_callable", None)
 
         if artifact_dir is not None:
             kwargs["artifact_dir"] = str(artifact_dir)
@@ -1071,7 +1095,26 @@ class Tracker:
             cache_epoch=cache_epoch,
             cache_version=cache_version,
         )
-        git_hash = self.identity.get_code_version()
+        identity_mode = code_identity or "repo_git"
+        try:
+            git_hash = self.identity.resolve_code_version(
+                mode=identity_mode,
+                func=code_identity_callable,
+                extra_deps=code_identity_extra_deps,
+            )
+        except Exception as exc:
+            logging.warning(
+                "[Consist] Failed to resolve code identity mode=%s for run %s: %s. "
+                "Falling back to repo git identity.",
+                identity_mode,
+                run_id,
+                exc,
+            )
+            git_hash = self.identity.get_code_version()
+        if code_identity is not None:
+            kwargs["code_identity"] = identity_mode
+        if code_identity_extra_deps:
+            kwargs["code_identity_extra_deps"] = list(code_identity_extra_deps)
 
         kwargs["_physical_run_dir"] = str(self.run_dir)
         if cache_epoch is not None:
@@ -1343,11 +1386,11 @@ class Tracker:
         config_plan_ingest: bool = True,
         config_plan_profile_schema: bool = False,
         inputs: Optional[
-            Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]
+            Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]
         ] = None,
         input_keys: Optional[Iterable[str] | str] = None,
         optional_input_keys: Optional[Iterable[str] | str] = None,
-        depends_on: Optional[List[ArtifactRef]] = None,
+        depends_on: Optional[List[RunInputRef]] = None,
         tags: Optional[List[str]] = None,
         facet: Optional[FacetLike] = None,
         facet_from: Optional[List[str]] = None,
@@ -1394,7 +1437,7 @@ class Tracker:
             Whether to ingest tables from the config plan.
         config_plan_profile_schema : bool, default False
             Whether to profile ingested schemas for the config plan.
-        inputs : Optional[Mapping[str, ArtifactRef] | Iterable[ArtifactRef]], optional
+        inputs : Optional[Mapping[str, RunInputRef] | Iterable[RunInputRef]], optional
             Input files or artifacts.
             - Dict: Maps names to paths/Artifacts. Auto-loads into function parameters (default load_inputs=True).
             - List/Iterable: Hashed for cache key but not auto-loaded (use load_inputs=False).
@@ -1402,7 +1445,7 @@ class Tracker:
             Deprecated. Use `inputs` mapping instead.
         optional_input_keys : Optional[Iterable[str] | str], optional
             Deprecated. Use `inputs` mapping instead.
-        depends_on : Optional[List[ArtifactRef]], optional
+        depends_on : Optional[List[RunInputRef]], optional
             Additional file paths or artifacts to hash for the cache signature (e.g., config files).
 
         tags : Optional[List[str]], optional
@@ -1423,6 +1466,10 @@ class Tracker:
             Year metadata (for multi-year simulations). Included in provenance.
         iteration : Optional[int], optional
             Iteration count (for iterative workflows). Included in provenance.
+        phase : Optional[str], optional
+            Optional lifecycle phase label persisted in run metadata.
+        stage : Optional[str], optional
+            Optional workflow stage label persisted in run metadata.
         parent_run_id : Optional[str], optional
             Parent run ID (for nested runs in scenarios).
 
@@ -1437,7 +1484,8 @@ class Tracker:
             Glob pattern for capturing outputs (used with capture_dir).
         cache_options : Optional[CacheOptions], optional
             Grouped cache controls (`cache_mode`, `cache_hydration`, `cache_version`,
-            `cache_epoch`, `validate_cached_outputs`).
+            `cache_epoch`, `validate_cached_outputs`, `code_identity`,
+            `code_identity_extra_deps`).
         output_policy : Optional[OutputPolicyOptions], optional
             Grouped output policies (`output_mismatch`, `output_missing`).
         execution_options : Optional[ExecutionOptions], optional
@@ -1501,6 +1549,8 @@ class Tracker:
         cache_version = merged_options.cache_version
         cache_epoch = merged_options.cache_epoch
         validate_cached_outputs = merged_options.validate_cached_outputs
+        code_identity = merged_options.code_identity
+        code_identity_extra_deps = merged_options.code_identity_extra_deps
         output_mismatch = merged_options.output_mismatch
         output_missing = merged_options.output_missing
         load_inputs = merged_options.load_inputs
@@ -1520,6 +1570,30 @@ class Tracker:
 
         if executor not in {"python", "container"}:
             raise ValueError("Tracker.run supports executor='python' or 'container'.")
+        if code_identity not in {
+            None,
+            "repo_git",
+            "callable_module",
+            "callable_source",
+        }:
+            raise ValueError(
+                "cache_options.code_identity must be one of: "
+                "'repo_git', 'callable_module', 'callable_source'"
+            )
+        if (
+            code_identity in {"callable_module", "callable_source"}
+            and executor != "python"
+        ):
+            raise ValueError(
+                "cache_options.code_identity callable modes require executor='python'."
+            )
+        if code_identity_extra_deps is not None:
+            if not isinstance(code_identity_extra_deps, list) or not all(
+                isinstance(dep, str) for dep in code_identity_extra_deps
+            ):
+                raise TypeError(
+                    "cache_options.code_identity_extra_deps must be a list[str]."
+                )
 
         if executor == "container":
             if container is None:
@@ -1715,6 +1789,12 @@ class Tracker:
             "validate_cached_outputs": validate_cached_outputs,
             "cache_epoch": resolved_cache_epoch,
         }
+        if code_identity is not None:
+            start_kwargs["code_identity"] = code_identity
+        if code_identity_extra_deps is not None:
+            start_kwargs["code_identity_extra_deps"] = list(code_identity_extra_deps)
+        if executor == "python" and fn is not None:
+            start_kwargs["_consist_code_identity_callable"] = fn
         if cache_version is not None:
             start_kwargs["cache_version"] = cache_version
         if phase is not None:
@@ -2095,11 +2175,11 @@ class Tracker:
         config_plan_ingest: bool = True,
         config_plan_profile_schema: bool = False,
         inputs: Optional[
-            Union[Mapping[str, ArtifactRef], Iterable[ArtifactRef]]
+            Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]
         ] = None,
         input_keys: Optional[Iterable[str] | str] = None,
         optional_input_keys: Optional[Iterable[str] | str] = None,
-        depends_on: Optional[List[ArtifactRef]] = None,
+        depends_on: Optional[List[RunInputRef]] = None,
         tags: Optional[List[str]] = None,
         facet: Optional[FacetLike] = None,
         facet_from: Optional[List[str]] = None,
@@ -2149,7 +2229,7 @@ class Tracker:
         config_plan_profile_schema : bool, default False
             Whether to profile ingested schemas for the config plan.
 
-        inputs : Optional[Mapping[str, ArtifactRef] | Iterable[ArtifactRef]], optional
+        inputs : Optional[Mapping[str, RunInputRef] | Iterable[RunInputRef]], optional
             Input files or artifacts.
             - Dict: Maps names to paths/Artifacts. Logged as inputs but not auto-loaded.
             - List/Iterable: Hashed for cache key but not auto-loaded.
@@ -2157,7 +2237,7 @@ class Tracker:
             Deprecated. Use `inputs` mapping instead.
         optional_input_keys : Optional[Iterable[str] | str], optional
             Deprecated. Use `inputs` mapping instead.
-        depends_on : Optional[List[ArtifactRef]], optional
+        depends_on : Optional[List[RunInputRef]], optional
             Additional file paths or artifacts to hash for the cache signature (e.g., config files).
 
         tags : Optional[List[str]], optional
@@ -3194,6 +3274,11 @@ class Tracker:
             Optional per-key schema versions for artifact facet payloads.
         facet_index : bool, default False
             Whether to index scalar artifact facet values in ``artifact_kv``.
+        reuse_if_unchanged : bool, default False
+            If True and logging outputs, reuse prior artifact rows when content hashes match.
+        reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
+            Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
+            while "any_uri" allows reuse across different URIs with the same hash.
         **shared_meta : Any
             Metadata key-value pairs to apply to ALL logged artifacts.
             Useful for tagging a batch of related files.
@@ -3373,6 +3458,11 @@ class Tracker:
             `content_hash`. By default, mismatched overrides are ignored with a warning.
         validate_content_hash : bool, default False
             If True, verify `content_hash` against the on-disk data and raise on mismatch.
+        reuse_if_unchanged : bool, default False
+            If True, reuse a prior output artifact row when the content hash matches.
+        reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
+            Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
+            while "any_uri" allows reuse across different URIs with the same hash.
         facet : Optional[FacetLike], optional
             Optional artifact-level facet payload for this output artifact.
         facet_schema_version : Optional[Union[str, int]], optional
@@ -5350,6 +5440,88 @@ class Tracker:
             database is not configured or the run is unknown.
         """
         return self.get_artifacts_for_run(run_id).outputs
+
+    def get_run_result(
+        self,
+        run_id: str,
+        *,
+        keys: Optional[Iterable[str]] = None,
+        validate: Literal["lazy", "strict", "none"] = "lazy",
+    ) -> RunResult:
+        """
+        Build a ``RunResult`` view for a historical run.
+
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+        keys : Optional[Iterable[str]], optional
+            Optional subset of output keys to include. When provided, every key
+            must exist in the historical run outputs.
+        validate : {"lazy", "strict", "none"}, default "lazy"
+            Output validation policy.
+            - ``lazy`` / ``none``: no filesystem existence checks
+            - ``strict``: require non-ingested output files to exist on disk
+
+        Returns
+        -------
+        RunResult
+            Historical run metadata plus selected outputs.
+
+        Raises
+        ------
+        KeyError
+            If ``run_id`` is unknown or requested ``keys`` are missing.
+        ValueError
+            If ``validate`` is invalid or ``keys`` contain non-string values.
+        FileNotFoundError
+            If ``validate='strict'`` and a selected non-ingested output is missing.
+        """
+        run = self.get_run(run_id)
+        if run is None:
+            raise KeyError(f"Run {run_id!r} was not found.")
+
+        outputs = self.get_run_outputs(run_id)
+
+        selected_outputs: Dict[str, Artifact]
+        if keys is None:
+            selected_outputs = dict(outputs)
+        else:
+            key_list = list(keys)
+            if any(not isinstance(key, str) for key in key_list):
+                raise ValueError("keys must contain only strings.")
+            missing = sorted(key for key in key_list if key not in outputs)
+            if missing:
+                missing_str = ", ".join(repr(key) for key in missing)
+                available = ", ".join(repr(key) for key in sorted(outputs)) or "<none>"
+                raise KeyError(
+                    f"Run {run_id!r} missing requested output keys: {missing_str}. "
+                    f"Available keys: {available}."
+                )
+            selected_outputs = {key: outputs[key] for key in key_list}
+
+        validation_policy = str(validate).lower()
+        if validation_policy not in {"lazy", "strict", "none"}:
+            raise ValueError("validate must be one of: 'lazy', 'strict', 'none'.")
+
+        if validation_policy == "strict":
+            missing_paths: list[str] = []
+            for key, artifact in selected_outputs.items():
+                if artifact.meta.get("is_ingested", False):
+                    continue
+                resolved = Path(self.resolve_uri(artifact.container_uri))
+                if not resolved.exists():
+                    missing_paths.append(f"{key!r} -> {resolved!s}")
+            if missing_paths:
+                details = "; ".join(missing_paths)
+                raise FileNotFoundError(
+                    f"Run {run_id!r} has missing output files: {details}"
+                )
+
+        cache_hit = (
+            bool(run.meta.get("cache_hit")) if isinstance(run.meta, dict) else False
+        )
+        return RunResult(run=run, outputs=selected_outputs, cache_hit=cache_hit)
 
     def get_run_inputs(self, run_id: str) -> Dict[str, Artifact]:
         """

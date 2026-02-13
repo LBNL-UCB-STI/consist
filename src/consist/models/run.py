@@ -207,6 +207,57 @@ class RunResult(BaseModel):
         return dict(self.outputs)
 
 
+def resolve_run_result_output(
+    run_result: RunResult, key: Optional[str] = None
+) -> Artifact:
+    """
+    Resolve one output artifact from a RunResult.
+
+    Parameters
+    ----------
+    run_result : RunResult
+        The run result to select from.
+    key : Optional[str], optional
+        Output key to select. If omitted, exactly one output must exist.
+
+    Returns
+    -------
+    Artifact
+        Selected output artifact.
+
+    Raises
+    ------
+    KeyError
+        If ``key`` is provided but missing.
+    ValueError
+        If ``key`` is omitted and output selection is ambiguous.
+    """
+    output_keys = list(run_result.outputs.keys())
+    available_keys = ", ".join(repr(item) for item in output_keys) or "<none>"
+
+    if key is not None:
+        if key in run_result.outputs:
+            return run_result.outputs[key]
+        raise KeyError(
+            f"RunResult output key {key!r} was not found. Available keys: {available_keys}."
+        )
+
+    if len(output_keys) == 1:
+        return run_result.outputs[output_keys[0]]
+
+    if not output_keys:
+        raise ValueError(
+            "RunResult has no outputs. Select an explicit output with "
+            "consist.ref(..., key='...')."
+        )
+
+    raise ValueError(
+        "RunResult has multiple outputs. Select an explicit output with "
+        "consist.ref(..., key='...'). "
+        f"Available keys: {available_keys}."
+    )
+
+
 class ConsistRecord(SQLModel):
     """
     A comprehensive record of a run, acting as the primary log entry.
