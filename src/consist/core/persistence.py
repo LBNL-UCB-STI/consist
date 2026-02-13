@@ -315,8 +315,7 @@ class DatabaseManager:
                     if i == retry_count - 1:
                         raise e
                     sleep_time = min(
-                        (base_sleep_seconds * (1.5**i))
-                        + random.uniform(0.05, 0.2),
+                        (base_sleep_seconds * (1.5**i)) + random.uniform(0.05, 0.2),
                         max_sleep_seconds,
                     )
                     time.sleep(sleep_time)
