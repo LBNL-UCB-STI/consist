@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -38,7 +39,7 @@ def test_preview_shows_driver_specific_hint_for_missing_optional_dependency(
 
     assert result.exit_code == 1
     assert "Missing optional dependency while loading artifact" in result.stdout
-    assert "install Zarr support" in result.stdout
+    assert "install optional support with pip install -e '.[zarr]'" in result.stdout
 
 
 def test_shell_runs_reports_parse_error_for_invalid_limit(capsys) -> None:
@@ -178,3 +179,149 @@ def test_shell_schema_profile_reports_missing_artifact(capsys) -> None:
 
     out = capsys.readouterr().out
     assert "Artifact 'missing_artifact' not found." in out
+
+
+def test_preview_reports_mount_diagnostics_on_missing_file() -> None:
+    """CLI preview should use mount diagnostic formatting for missing files."""
+    tracker = MagicMock()
+    tracker.mounts = {"inputs": "/workspace/current"}
+    tracker.get_artifact.return_value = SimpleNamespace(
+        id="artifact-id",
+        run_id=None,
+        key="missing_artifact",
+        driver="parquet",
+        container_uri="inputs://data/missing.parquet",
+        meta={"mount_root": "/workspace/original"},
+    )
+    tracker.resolve_uri.return_value = "/workspace/current/data/missing.parquet"
+
+    hint = object()
+    with (
+        patch("consist.cli.get_tracker", return_value=tracker),
+        patch("consist.load", side_effect=FileNotFoundError),
+        patch(
+            "consist.tools.mount_diagnostics.build_mount_resolution_hint",
+            return_value=hint,
+        ),
+        patch(
+            "consist.tools.mount_diagnostics.format_missing_artifact_mount_help",
+            return_value="Mount diagnostics: configure inputs mount.",
+        ) as format_help,
+    ):
+        result = runner.invoke(app, ["preview", "missing_artifact"])
+
+    assert result.exit_code == 1
+    assert "Artifact file not found at: inputs://data/missing.parquet" in result.stdout
+    assert "Mount diagnostics: configure inputs mount." in result.stdout
+    format_help.assert_called_once_with(
+        hint, resolved_path="/workspace/current/data/missing.parquet"
+    )
+
+
+def test_shell_preview_reports_mount_diagnostics_on_missing_file(capsys) -> None:
+    """Shell preview should show mount diagnostics when a file cannot be resolved."""
+    tracker = MagicMock()
+    tracker.mounts = {"inputs": "/workspace/current"}
+    tracker.get_artifact.return_value = SimpleNamespace(
+        id="artifact-id",
+        run_id=None,
+        key="missing_artifact",
+        driver="csv",
+        container_uri="inputs://data/missing.csv",
+        meta={"mount_root": "/workspace/original"},
+    )
+    tracker.resolve_uri.return_value = "/workspace/current/data/missing.csv"
+
+    shell = ConsistShell(tracker)
+    with (
+        patch("consist.load", side_effect=FileNotFoundError),
+        patch(
+            "consist.tools.mount_diagnostics.build_mount_resolution_hint",
+            return_value=object(),
+        ),
+        patch(
+            "consist.tools.mount_diagnostics.format_missing_artifact_mount_help",
+            return_value="Mount diagnostics for shell preview.",
+        ),
+    ):
+        shell.do_preview("missing_artifact")
+
+    out = capsys.readouterr().out
+    assert "Artifact file not found at: inputs://data/missing.csv" in out
+    assert "Mount diagnostics for shell preview." in out
+
+
+def test_shell_schema_stub_requires_artifact_key(capsys) -> None:
+    """Shell schema_stub should require an artifact key argument."""
+    shell = ConsistShell(MagicMock())
+
+    shell.do_schema_stub("")
+
+    out = capsys.readouterr().out
+    assert "artifact_key required" in out
+
+
+def test_shell_schema_stub_reports_missing_artifact(capsys) -> None:
+    """Shell schema_stub should report a missing artifact lookup."""
+    tracker = MagicMock()
+    tracker.get_artifact.return_value = None
+    shell = ConsistShell(tracker)
+
+    shell.do_schema_stub("missing_artifact")
+
+    out = capsys.readouterr().out
+    assert "Artifact 'missing_artifact' not found." in out
+
+
+def test_shell_schema_stub_reports_missing_captured_schema(capsys) -> None:
+    """Shell schema_stub should handle KeyError as missing captured schema."""
+    tracker = MagicMock()
+    tracker.get_artifact.return_value = SimpleNamespace(id="artifact-id")
+    tracker.export_schema_sqlmodel.side_effect = KeyError("schema missing")
+    shell = ConsistShell(tracker)
+
+    shell.do_schema_stub("artifact_key")
+
+    out = capsys.readouterr().out
+    assert "Captured schema not found for this artifact." in out
+
+
+def test_shell_schema_stub_surfaces_value_error(capsys) -> None:
+    """Shell schema_stub should print ValueError text from export failures."""
+    tracker = MagicMock()
+    tracker.get_artifact.return_value = SimpleNamespace(id="artifact-id")
+    tracker.export_schema_sqlmodel.side_effect = ValueError("invalid class name")
+    shell = ConsistShell(tracker)
+
+    shell.do_schema_stub("artifact_key")
+
+    out = capsys.readouterr().out
+    assert "invalid class name" in out
+
+
+def test_shell_schema_profile_unsupported_loaded_type_without_db_profile(
+    capsys,
+) -> None:
+    """Shell schema_profile should report unsupported loaded type when no DB profile exists."""
+    tracker = MagicMock()
+    tracker.mounts = {}
+    tracker.db = MagicMock()
+    tracker.db.get_artifact_schema_for_artifact.return_value = None
+    tracker.get_artifact.return_value = SimpleNamespace(
+        id="artifact-id",
+        run_id=None,
+        key="artifact_key",
+        driver="bin",
+        container_uri="inputs://data/object.bin",
+        meta={},
+    )
+    shell = ConsistShell(tracker)
+
+    with (
+        patch("consist.load", return_value=object()),
+        patch("consist.cli._optional_xarray", return_value=None),
+    ):
+        shell.do_schema_profile("artifact_key")
+
+    out = capsys.readouterr().out
+    assert "Schema not implemented for loaded type: object" in out

@@ -108,4 +108,3 @@ def test_get_attributes_handles_missing_variable_and_parses_json_attributes(
 
     assert view.get_attributes("climate", variable_name="missing") is None
     assert view.get_attributes("climate", variable_name="temperature") == {"units": "K"}
-

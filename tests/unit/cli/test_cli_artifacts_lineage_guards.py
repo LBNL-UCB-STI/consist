@@ -51,3 +51,30 @@ def test_schema_export_rejects_non_uuid_artifact_id(cli_runner) -> None:
 
     assert result.exit_code == 2
     assert "--artifact-id must be a UUID" in result.stdout
+
+
+def test_schema_export_reports_missing_artifact_key() -> None:
+    """`schema export --artifact-key` should fail when the artifact is unknown."""
+    with patch("consist.cli.get_tracker") as mock_get_tracker:
+        tracker = mock_get_tracker.return_value
+        tracker.get_artifact.return_value = None
+
+        result = runner.invoke(
+            app,
+            ["schema", "export", "--artifact-key", "missing_artifact_key"],
+        )
+
+    assert result.exit_code == 1
+    assert "Artifact 'missing_artifact_key' not found." in result.stdout
+
+
+def test_artifacts_query_mode_surfaces_value_errors(cli_runner) -> None:
+    """`artifacts` query mode should exit 1 and print parser/query validation errors."""
+    with patch(
+        "consist.cli.queries.find_artifacts_by_params",
+        side_effect=ValueError("invalid --param expression"),
+    ):
+        result = cli_runner.invoke(app, ["artifacts", "--param", "beam.year>="])
+
+    assert result.exit_code == 1
+    assert "invalid --param expression" in result.stdout

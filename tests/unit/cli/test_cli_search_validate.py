@@ -37,6 +37,15 @@ def test_search_reports_no_results(cli_runner) -> None:
     assert "No runs found matching 'no-match'" in result.stdout
 
 
+def test_search_escaped_wildcard_chars_reports_no_results(cli_runner) -> None:
+    """`search` should safely handle `%` and `_` patterns and still return no-results."""
+    query = "mix%_literal"
+    result = cli_runner.invoke(app, ["search", query])
+
+    assert result.exit_code == 0
+    assert f"No runs found matching '{query}'" in result.stdout
+
+
 def test_validate_invalid_env_batch_size_falls_back_to_default(
     monkeypatch: pytest.MonkeyPatch,
     cli_runner,
