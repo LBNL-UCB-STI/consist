@@ -60,6 +60,11 @@ if TYPE_CHECKING:
     from consist.models.artifact import Artifact
     from consist.models.run import Run
 
+try:
+    import readline as _READLINE
+except ImportError:  # pragma: no cover - platform dependent
+    _READLINE = None
+
 app = typer.Typer(rich_markup_mode="markdown")
 schema_app = typer.Typer(rich_markup_mode="markdown")
 views_app = typer.Typer(rich_markup_mode="markdown")
@@ -1348,16 +1353,174 @@ class ConsistShell(cmd.Cmd):
 
     intro = "Welcome to Consist Shell. Type help or ? to list commands.\n"
     prompt = "(consist) "
+    _RUN_COMPLETION_FLAGS: Tuple[str, ...] = ("--limit", "--model", "--status", "--tag")
+    _PREVIEW_COMPLETION_FLAGS: Tuple[str, ...] = ("--rows", "-n")
+    _SCENARIOS_COMPLETION_FLAGS: Tuple[str, ...] = ("--limit",)
+    _SCHEMA_STUB_COMPLETION_FLAGS: Tuple[str, ...] = (
+        "--class-name",
+        "--table-name",
+        "--include-system-cols",
+        "--no-stats-comments",
+        "--concrete",
+    )
+    _PICKER_LIMIT = 20
 
     def __init__(self, tracker: Tracker, *, trust_db: bool = False):
         super().__init__()
         self.tracker = tracker
         self.trust_db = trust_db
+        self._history_path = Path.home() / ".consist" / "shell_history"
+        self._history_saved = False
+        self._load_history()
+
+    def _safe_split(self, value: str) -> List[str]:
+        try:
+            return shlex.split(value)
+        except ValueError:
+            return value.split()
+
+    @staticmethod
+    def _is_tty() -> bool:
+        stdin = getattr(sys.stdin, "isatty", None)
+        stdout = getattr(sys.stdout, "isatty", None)
+        return bool(callable(stdin) and callable(stdout) and stdin() and stdout())
+
+    @staticmethod
+    def _complete_choices(text: str, options: Iterable[str]) -> List[str]:
+        return [option for option in options if option.startswith(text)]
+
+    def _is_first_argument(self, line: str, begidx: int) -> bool:
+        return len(self._safe_split(line[:begidx])) <= 1
+
+    def _recent_run_ids(self, limit: int = _PICKER_LIMIT) -> List[str]:
+        try:
+            from consist.models.run import Run
+
+            with _tracker_session(self.tracker) as session:
+                statement = (
+                    select(Run.id).order_by(col(Run.created_at).desc()).limit(limit)
+                )
+                return [str(run_id) for run_id in session.exec(statement).all() if run_id]
+        except Exception:
+            return []
+
+    def _recent_artifact_keys(self, limit: int = _PICKER_LIMIT) -> List[str]:
+        try:
+            from consist.models.artifact import Artifact
+
+            with _tracker_session(self.tracker) as session:
+                statement = (
+                    select(Artifact.key)
+                    .order_by(col(Artifact.created_at).desc())
+                    .limit(limit)
+                )
+                seen: set[str] = set()
+                keys: List[str] = []
+                for key in session.exec(statement).all():
+                    if isinstance(key, str) and key and key not in seen:
+                        seen.add(key)
+                        keys.append(key)
+                return keys
+        except Exception:
+            return []
+
+    def _load_history(self) -> None:
+        if _READLINE is None:
+            return
+        try:
+            if self._history_path.exists():
+                _READLINE.read_history_file(str(self._history_path))
+        except Exception:
+            return
+
+    def _save_history_once(self) -> None:
+        if self._history_saved or _READLINE is None:
+            return
+        try:
+            self._history_path.parent.mkdir(parents=True, exist_ok=True)
+            _READLINE.write_history_file(str(self._history_path))
+        except Exception:
+            return
+        self._history_saved = True
+
+    @staticmethod
+    def _select_from_list(
+        title: str,
+        choices: List[str],
+        *,
+        missing_message: str,
+        prompt: str,
+    ) -> Optional[str]:
+        if not choices:
+            console.print(missing_message)
+            return None
+
+        console.print(title)
+        for index, value in enumerate(choices, start=1):
+            console.print(f"  {index}. {value}")
+
+        while True:
+            raw_choice = input(prompt).strip()
+            if not raw_choice:
+                return None
+            try:
+                selected_index = int(raw_choice)
+            except ValueError:
+                console.print("[red]Error: enter a number or press Enter to cancel[/red]")
+                continue
+            if 1 <= selected_index <= len(choices):
+                return choices[selected_index - 1]
+            console.print(
+                f"[red]Error: selection must be between 1 and {len(choices)}[/red]"
+            )
+
+    def _resolve_run_id(self, arg: str, *, command_name: str) -> Optional[str]:
+        run_id = arg.strip()
+        if run_id:
+            return run_id
+        if not self._is_tty():
+            console.print("[red]Error: run_id required[/red]")
+            return None
+        return self._select_from_list(
+            f"Recent runs for [cyan]{command_name}[/cyan]:",
+            self._recent_run_ids(),
+            missing_message="[yellow]No runs available.[/yellow]",
+            prompt="Choose run number (Enter to cancel): ",
+        )
+
+    def _resolve_artifact_key(self, args: List[str]) -> Optional[str]:
+        if args:
+            return args[0]
+        if not self._is_tty():
+            console.print("[red]Error: artifact_key required[/red]")
+            return None
+        return self._select_from_list(
+            "Recent artifacts for [cyan]preview[/cyan]:",
+            self._recent_artifact_keys(),
+            missing_message="[yellow]No artifacts available.[/yellow]",
+            prompt="Choose artifact number (Enter to cancel): ",
+        )
+
+    def do_ls(self, arg: str) -> None:
+        """Alias for runs/artifacts. Usage: ls [<run_id>]"""
+        parts = self._safe_split(arg)
+        if not parts or parts[0].startswith("-"):
+            self.do_runs(arg)
+            return
+        self.do_artifacts(arg)
+
+    def do_cat(self, arg: str) -> None:
+        """Alias for preview. Usage: cat <artifact_key>"""
+        self.do_preview(arg)
+
+    def do_q(self, arg: str) -> bool:
+        """Alias for quit. Usage: q"""
+        return self.do_quit(arg)
 
     def do_runs(self, arg: str) -> None:
         """List recent runs. Usage: runs [--limit N] [--model NAME] [--status STATUS] [--tag TAG]"""
         try:
-            args = shlex.split(arg)
+            args = self._safe_split(arg)
             limit = 10
             model_name = None
             status = None
@@ -1393,14 +1556,14 @@ class ConsistShell(cmd.Cmd):
 
     def do_show(self, arg: str) -> None:
         """Show details for a run. Usage: show <run_id>"""
-        if not arg.strip():
-            console.print("[red]Error: run_id required[/red]")
+        run_id = self._resolve_run_id(arg, command_name="show")
+        if run_id is None:
             return
 
         try:
-            run = self.tracker.get_run(arg.strip())
+            run = self.tracker.get_run(run_id)
             if not run:
-                console.print(f"[red]Run '{arg.strip()}' not found.[/red]")
+                console.print(f"[red]Run '{run_id}' not found.[/red]")
                 return
             _render_run_details(run)
         except Exception as exc:
@@ -1408,30 +1571,29 @@ class ConsistShell(cmd.Cmd):
 
     def do_artifacts(self, arg: str) -> None:
         """Show artifacts for a run. Usage: artifacts <run_id>"""
-        if not arg.strip():
-            console.print("[red]Error: run_id required[/red]")
+        run_id = self._resolve_run_id(arg, command_name="artifacts")
+        if run_id is None:
             return
 
         try:
-            run = self.tracker.get_run(arg.strip())
+            run = self.tracker.get_run(run_id)
             if not run:
-                console.print(f"[red]Run '{arg.strip()}' not found.[/red]")
+                console.print(f"[red]Run '{run_id}' not found.[/red]")
                 return
-            _render_artifacts_table(self.tracker, arg.strip())
+            _render_artifacts_table(self.tracker, run_id)
         except Exception as exc:
             console.print(f"[red]Error: {exc}[/red]")
 
     def do_preview(self, arg: str) -> None:
         """Preview an artifact. Usage: preview <artifact_key> [--rows N]"""
         try:
-            args = shlex.split(arg)
-            if not args:
-                console.print("[red]Error: artifact_key required[/red]")
+            args = self._safe_split(arg)
+            artifact_key = self._resolve_artifact_key(args)
+            if artifact_key is None:
                 return
 
-            artifact_key = args[0]
             n_rows = 5
-            i = 1
+            i = 1 if args else 0
             while i < len(args):
                 if args[i] in {"--rows", "-n"} and i + 1 < len(args):
                     n_rows = _parse_bounded_int(
@@ -1506,7 +1668,7 @@ class ConsistShell(cmd.Cmd):
     def do_schema_profile(self, arg: str) -> None:
         """Show artifact schema. Usage: schema_profile <artifact_key>"""
         try:
-            args = shlex.split(arg)
+            args = self._safe_split(arg)
             if not args:
                 console.print("[red]Error: artifact_key required[/red]")
                 return
@@ -1589,7 +1751,7 @@ class ConsistShell(cmd.Cmd):
     def do_schema_stub(self, arg: str) -> None:
         """Export SQLModel schema stub. Usage: schema_stub <artifact_key> [--class-name NAME] [--table-name NAME] [--include-system-cols] [--no-stats-comments] [--concrete]"""
         try:
-            args = shlex.split(arg)
+            args = self._safe_split(arg)
             if not args:
                 console.print("[red]Error: artifact_key required[/red]")
                 return
@@ -1653,7 +1815,7 @@ class ConsistShell(cmd.Cmd):
 
     def do_scenarios(self, arg: str) -> None:
         """List scenarios. Usage: scenarios [--limit N]"""
-        args = shlex.split(arg)
+        args = self._safe_split(arg)
         limit = 20
 
         if args:
@@ -1683,6 +1845,7 @@ class ConsistShell(cmd.Cmd):
 
     def do_exit(self, arg: str) -> bool:
         """Exit the shell."""
+        self._save_history_once()
         console.print("Goodbye!")
         return True
 
@@ -1694,6 +1857,73 @@ class ConsistShell(cmd.Cmd):
         """Handle Ctrl+D."""
         print()
         return self.do_exit(arg)
+
+    def complete_runs(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+        del line, begidx, endidx
+        return self._complete_choices(text, self._RUN_COMPLETION_FLAGS)
+
+    def complete_scenarios(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del line, begidx, endidx
+        return self._complete_choices(text, self._SCENARIOS_COMPLETION_FLAGS)
+
+    def complete_show(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+        del endidx
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._recent_run_ids())
+        return []
+
+    def complete_artifacts(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del endidx
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._recent_run_ids())
+        return []
+
+    def complete_preview(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del endidx
+        if text.startswith("-"):
+            return self._complete_choices(text, self._PREVIEW_COMPLETION_FLAGS)
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._recent_artifact_keys())
+        return []
+
+    def complete_schema_profile(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del endidx
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._recent_artifact_keys())
+        return []
+
+    def complete_schema_stub(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del endidx
+        if text.startswith("-"):
+            return self._complete_choices(text, self._SCHEMA_STUB_COMPLETION_FLAGS)
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._recent_artifact_keys())
+        return []
+
+    def complete_ls(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+        del endidx
+        if text.startswith("-"):
+            return self._complete_choices(text, self._RUN_COMPLETION_FLAGS)
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._recent_run_ids())
+        return []
+
+    def complete_cat(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+        return self.complete_preview(text, line, begidx, endidx)
+
+    def postloop(self) -> None:
+        self._save_history_once()
+        super().postloop()
 
     def emptyline(self) -> bool:
         """Do nothing on empty line (prevent repeating last command)."""
