@@ -46,13 +46,20 @@ from consist.core.decorators import (
 )
 from consist.core.drivers import ARRAY_DRIVERS, TABLE_DRIVERS, ArrayInfo, TableInfo
 from consist.core.noop import NoopRunContext, NoopScenarioContext
+from consist.core.run_options import raise_legacy_policy_kwargs_error
 from consist.core.views import _quote_ident, create_view_model
-from consist.core.workflow import OutputCapture
+from consist.core.workflow import OutputCapture, RunContext
 from consist.models.artifact import Artifact, get_tracker_ref
 from consist.models.run import ConsistRecord, Run, RunResult
 from consist.models.run_config_kv import RunConfigKV
 from consist.core.tracker import Tracker
-from consist.types import ArtifactRef, DriverType
+from consist.types import (
+    ArtifactRef,
+    CacheOptions,
+    DriverType,
+    ExecutionOptions,
+    OutputPolicyOptions,
+)
 
 if TYPE_CHECKING:
     import geopandas
@@ -493,6 +500,9 @@ def run(
     name: Optional[str] = None,
     *,
     tracker: Optional["Tracker"] = None,
+    cache_options: Optional[CacheOptions] = None,
+    output_policy: Optional[OutputPolicyOptions] = None,
+    execution_options: Optional[ExecutionOptions] = None,
     **kwargs: Any,
 ) -> RunResult:
     """
@@ -513,9 +523,15 @@ def run(
     tracker : Optional[Tracker]
         The Tracker instance responsible for provenance and caching.
         If None, the active global tracker is resolved.
+    cache_options : Optional[CacheOptions]
+        Grouped cache controls for run execution.
+    output_policy : Optional[OutputPolicyOptions]
+        Grouped output mismatch/missing policy controls.
+    execution_options : Optional[ExecutionOptions]
+        Grouped runtime execution controls.
     **kwargs : Any
         Arguments forwarded to `Tracker.run`, including `inputs`, `config`,
-        `tags`, and `runtime_kwargs`.
+        `tags`, and other core run metadata.
 
     Returns
     -------
@@ -523,8 +539,19 @@ def run(
         A container holding the function's return value and the
         immutable `Run` record.
     """
+    raise_legacy_policy_kwargs_error(
+        api_name="consist.run",
+        kwargs=kwargs,
+    )
     tr = _resolve_tracker(tracker)
-    return tr.run(fn=fn, name=name, **kwargs)
+    return tr.run(
+        fn=fn,
+        name=name,
+        cache_options=cache_options,
+        output_policy=output_policy,
+        execution_options=execution_options,
+        **kwargs,
+    )
 
 
 @contextmanager
@@ -617,6 +644,71 @@ def current_consist() -> Optional[ConsistRecord]:
     except RuntimeError:
         return None
     return tracker.current_consist
+
+
+def _require_active_run_tracker() -> "Tracker":
+    """
+    Return the tracker for the current active run context.
+
+    Raises
+    ------
+    RuntimeError
+        If there is no active run context.
+    """
+    tracker = get_active_tracker()
+    if tracker.current_consist is None:
+        raise RuntimeError(
+            "No active Consist run found. "
+            "Ensure you are within a run or active scenario step."
+        )
+    return tracker
+
+
+def output_dir(namespace: Optional[str] = None) -> Path:
+    """
+    Resolve the managed output directory for the active run context.
+
+    Parameters
+    ----------
+    namespace : Optional[str], optional
+        Optional relative subdirectory under the active run's managed output
+        directory.
+
+    Returns
+    -------
+    Path
+        Absolute path to the managed output directory.
+
+    Raises
+    ------
+    RuntimeError
+        If called outside an active run context.
+    """
+    return RunContext(_require_active_run_tracker()).output_dir(namespace=namespace)
+
+
+def output_path(key: str, ext: str = "parquet") -> Path:
+    """
+    Resolve a deterministic managed output path for the active run context.
+
+    Parameters
+    ----------
+    key : str
+        Artifact key used as the output filename stem.
+    ext : str, default "parquet"
+        File extension to append to the output filename.
+
+    Returns
+    -------
+    Path
+        Absolute managed output path for the current run.
+
+    Raises
+    ------
+    RuntimeError
+        If called outside an active run context.
+    """
+    return RunContext(_require_active_run_tracker()).output_path(key=key, ext=ext)
 
 
 # --- Cache helpers ---

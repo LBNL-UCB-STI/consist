@@ -250,7 +250,7 @@ For detailed usage and API reference, see the [Config Adapters Integration Guide
 
 ```python
 import consist
-from consist import use_tracker
+from consist import CacheOptions, use_tracker
 
 with use_tracker(tracker):
     consist.run(
@@ -279,7 +279,7 @@ with use_tracker(tracker):
         name="activitysim",
         config={"scenario": "baseline"},
         config_plan=plan,
-        cache_mode="reuse",
+        cache_options=CacheOptions(cache_mode="reuse"),
     )
 ```
 

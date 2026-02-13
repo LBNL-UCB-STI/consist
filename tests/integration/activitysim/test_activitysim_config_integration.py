@@ -6,6 +6,7 @@ from sqlmodel import Session, select
 
 from consist.integrations.activitysim import ActivitySimConfigAdapter
 from consist.models.activitysim import ActivitySimConstantsCache
+from consist.types import CacheOptions
 from tests.helpers.activitysim_fixtures import build_activitysim_test_configs
 
 
@@ -203,7 +204,7 @@ def test_activitysim_config_plan_run_applies_ingest(tracker, tmp_path: Path):
         name="activitysim_plan_run",
         model="activitysim",
         config_plan=plan,
-        cache_mode="overwrite",
+        cache_options=CacheOptions(cache_mode="overwrite"),
     )
 
     if tracker.engine is None:

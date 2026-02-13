@@ -27,6 +27,8 @@
       show_root_toc_entry: false
       members:
         - run_dir
+        - output_dir
+        - output_path
         - inputs
         - load
         - log_artifact

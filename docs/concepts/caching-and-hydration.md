@@ -205,14 +205,14 @@ def clean(raw_file: Path):
     return {"cleaned": cleaned_df}
 
 import consist
-from consist import use_tracker
+from consist import ExecutionOptions, use_tracker
 
 with use_tracker(tracker):
     result = consist.run(
         fn=clean,
         inputs={"raw_file": Path("raw.csv")},
         outputs=["cleaned"],
-        load_inputs=True,
+        execution_options=ExecutionOptions(load_inputs=True),
     )
 ```
 
@@ -239,7 +239,9 @@ See [Data Materialization](data-materialization.md) for ingestion patterns, sche
 On a cache hit, Consist:
 
 - Finds a matching **completed** prior run with the same signature
-- Skips filesystem checks for cached outputs (pass `validate_cached_outputs="eager"` to require files exist or are ingested)
+- Skips filesystem checks for cached outputs (for `run(...)`, use
+  `cache_options=CacheOptions(validate_cached_outputs="eager")` to require files
+  exist or are ingested)
 - Hydrates artifact objects into the current run context; paths resolve lazily via the active tracker
 
 On a cache hit, Consist does **not**:
@@ -301,14 +303,18 @@ with tracker.start_run(
 Equivalent with `consist.run(...)`:
 
 ```python
+from consist import CacheOptions
+
 result = consist.run(
     fn=step,
-    cache_hydration="outputs-requested",
+    cache_options=CacheOptions(cache_hydration="outputs-requested"),
     output_paths={"features": Path("outputs/features.csv")},
 )
 ```
 
-Default is `cache_hydration="metadata"` (artifact hydration only). For `consist.run(...)` or `sc.run(...)`, use `output_paths={...}` with `cache_hydration="outputs-requested"`.
+Default is `cache_hydration="metadata"` (artifact hydration only). For
+`consist.run(...)` or `sc.run(...)`, use `output_paths={...}` with
+`cache_options=CacheOptions(cache_hydration="outputs-requested")`.
 
 | Policy | Requires | Rejects |
 |--------|----------|---------|

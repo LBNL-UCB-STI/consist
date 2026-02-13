@@ -17,6 +17,8 @@
         - current_tracker
         - current_run
         - current_consist
+        - output_dir
+        - output_path
         - cached_artifacts
         - cached_output
         - get_artifact

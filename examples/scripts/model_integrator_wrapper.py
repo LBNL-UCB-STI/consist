@@ -1,5 +1,5 @@
 from pathlib import Path
-from consist import Tracker
+from consist import Tracker, output_path
 
 # ---------------------------------------------------------------------------------
 # Minimal Template: Public Sector / Model Integrator
@@ -42,8 +42,13 @@ def main():
             # os.system("activitysim run -c ./configs/baseline")
             # ----------------------------------------
 
-            # Log the entire output folder as a "Snapshot"
-            tracker.log_artifact("outputs/baseline/final_summary.csv", key="final_vmt")
+            # Prefer managed output helpers over hand-built output folders.
+            # This keeps run outputs deterministic and scoped to the active run.
+            baseline_summary = output_path("baseline/final_summary", ext="csv")
+            baseline_summary.write_text(
+                "metric,value\nvmt,123456.0\n", encoding="utf-8"
+            )
+            tracker.log_output(baseline_summary, key="final_vmt")
             print("Baseline Complete.")
 
         # --- Run 2: Policy Alternative (e.g., New Light Rail) ---
@@ -64,9 +69,9 @@ def main():
             # os.system("activitysim run -c ./configs/rail_policy")
             # ----------------------------------------
 
-            tracker.log_artifact(
-                "outputs/policy_rail/final_summary.csv", key="final_vmt"
-            )
+            policy_summary = output_path("policy_rail/final_summary", ext="csv")
+            policy_summary.write_text("metric,value\nvmt,111111.0\n", encoding="utf-8")
+            tracker.log_output(policy_summary, key="final_vmt")
             print("Policy Run Complete.")
 
     # 3. Post-Run Insight

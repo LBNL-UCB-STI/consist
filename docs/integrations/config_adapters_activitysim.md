@@ -53,7 +53,7 @@ inside `consist.run`/`consist.trace` (or `Tracker.run`/`Tracker.trace`):
 
 ```python
 import consist
-from consist import use_tracker
+from consist import CacheOptions, use_tracker
 
 adapter = ActivitySimConfigAdapter()
 plan = tracker.prepare_config(adapter, [overlay_dir, base_dir])
@@ -64,7 +64,7 @@ with use_tracker(tracker):
         name="activitysim",
         config={"scenario": "baseline"},
         config_plan=plan,
-        cache_mode="auto",
+        cache_options=CacheOptions(cache_mode="auto"),
     )
 ```
 

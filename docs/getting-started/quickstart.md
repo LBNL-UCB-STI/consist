@@ -9,7 +9,7 @@ Save the following as `quickstart.py`. This example uses `consist.run()`, which 
 ``` python
 from pathlib import Path
 import consist
-from consist import Tracker
+from consist import ExecutionOptions, Tracker
 
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")  # (1)!
 
@@ -22,7 +22,7 @@ with consist.use_tracker(tracker):  # (3)!
         fn=process_data,
         name="square",
         config={"value": 5},
-        runtime_kwargs={"value": 5},  # (4)!
+        execution_options=ExecutionOptions(runtime_kwargs={"value": 5}),  # (4)!
     )
 
 print(result.run.id, result.outputs)

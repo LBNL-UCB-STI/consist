@@ -12,6 +12,7 @@ import uuid
 from consist.core.coupler import CouplerView, DeclaredOutput
 from consist.core.validation import validate_artifact_key
 from consist.protocols import TrackerLike
+from consist.types import ExecutionOptions
 
 from consist.models.run import Run
 
@@ -385,18 +386,47 @@ class NoopScenarioContext:
         run_id: Optional[str] = None,
         outputs: Optional[Sequence[str]] = None,
         output_paths: Optional[Mapping[str, Any]] = None,
+        execution_options: Optional[ExecutionOptions] = None,
         runtime_kwargs: Optional[Dict[str, Any]] = None,
-        inject_context: bool | str = False,
+        inject_context: bool | str | None = None,
         **kwargs: Any,
     ) -> NoopRunResult:
+        resolved_runtime_kwargs_mapping = (
+            runtime_kwargs
+            if runtime_kwargs is not None
+            else (
+                execution_options.runtime_kwargs
+                if execution_options is not None
+                else None
+            )
+        )
+        resolved_runtime_kwargs = (
+            dict(resolved_runtime_kwargs_mapping)
+            if resolved_runtime_kwargs_mapping is not None
+            else None
+        )
+        resolved_inject_context_value = (
+            inject_context
+            if inject_context is not None
+            else (
+                execution_options.inject_context
+                if execution_options is not None
+                else False
+            )
+        )
+        resolved_inject_context: bool | str = (
+            resolved_inject_context_value
+            if resolved_inject_context_value is not None
+            else False
+        )
         return _run_noop_step(
             fn=fn,
             name=name,
             run_id=run_id,
             outputs=outputs,
             output_paths=output_paths,
-            runtime_kwargs=runtime_kwargs,
-            inject_context=inject_context,
+            runtime_kwargs=resolved_runtime_kwargs,
+            inject_context=resolved_inject_context,
             default_name=self.name,
             on_outputs=self.coupler.update,
             output_base_dir=self._output_base_dir,
@@ -454,19 +484,48 @@ class NoopTracker(TrackerLike):
         run_id: Optional[str] = None,
         outputs: Optional[Sequence[str]] = None,
         output_paths: Optional[Mapping[str, Any]] = None,
+        execution_options: Optional[ExecutionOptions] = None,
         runtime_kwargs: Optional[Dict[str, Any]] = None,
-        inject_context: bool | str = False,
+        inject_context: bool | str | None = None,
         **kwargs: Any,
     ) -> NoopRunResult:
         self._warn_disabled()
+        resolved_runtime_kwargs_mapping = (
+            runtime_kwargs
+            if runtime_kwargs is not None
+            else (
+                execution_options.runtime_kwargs
+                if execution_options is not None
+                else None
+            )
+        )
+        resolved_runtime_kwargs = (
+            dict(resolved_runtime_kwargs_mapping)
+            if resolved_runtime_kwargs_mapping is not None
+            else None
+        )
+        resolved_inject_context_value = (
+            inject_context
+            if inject_context is not None
+            else (
+                execution_options.inject_context
+                if execution_options is not None
+                else False
+            )
+        )
+        resolved_inject_context: bool | str = (
+            resolved_inject_context_value
+            if resolved_inject_context_value is not None
+            else False
+        )
         return _run_noop_step(
             fn=fn,
             name=name,
             run_id=run_id,
             outputs=outputs,
             output_paths=output_paths,
-            runtime_kwargs=runtime_kwargs,
-            inject_context=inject_context,
+            runtime_kwargs=resolved_runtime_kwargs,
+            inject_context=resolved_inject_context,
             output_base_dir=self._output_base_dir,
         )
 
@@ -524,7 +583,8 @@ def _run_noop_step(
             missing_list = ", ".join(sorted(missing))
             raise ValueError(
                 f"Missing runtime_kwargs for {resolved_name!r}: {missing_list}. "
-                "Provide them via runtime_kwargs={...} or remove "
+                "Provide them via execution_options=ExecutionOptions(runtime_kwargs={...}) "
+                "or runtime_kwargs={...}, or remove "
                 "@consist.require_runtime_kwargs."
             )
 

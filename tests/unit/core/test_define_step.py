@@ -2,6 +2,7 @@ from typing import Any, cast
 
 from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
 from consist.core.tracker import Tracker
+from consist.types import CacheOptions, ExecutionOptions
 
 
 def _dummy_config_plan(*, adapter_version: str, content_hash: str) -> ConfigPlan:
@@ -31,7 +32,7 @@ def test_define_step_metadata_applied(tracker: Tracker) -> None:
     result = tracker.run(
         fn=step,
         output_paths={"out": "out.txt"},
-        inject_context="ctx",
+        execution_options=ExecutionOptions(inject_context="ctx"),
     )
 
     assert "out" in result.outputs
@@ -56,7 +57,7 @@ def test_define_step_name_template_and_callable_metadata(tracker: Tracker) -> No
         year=2030,
         phase="demand",
         output_paths={"out": "out.txt"},
-        inject_context="ctx",
+        execution_options=ExecutionOptions(inject_context="ctx"),
     )
 
     run = tracker.last_run.run
@@ -75,7 +76,11 @@ def test_define_step_config_plan_default_applied(tracker: Tracker) -> None:
     def step() -> None:
         return None
 
-    tracker.run(fn=step, year=2035, cache_mode="overwrite")
+    tracker.run(
+        fn=step,
+        year=2035,
+        cache_options=CacheOptions(cache_mode="overwrite"),
+    )
 
     record = tracker.last_run
     assert record is not None
@@ -93,7 +98,11 @@ def test_define_step_config_plan_explicit_override(tracker: Tracker) -> None:
     def step() -> None:
         return None
 
-    tracker.run(fn=step, config_plan=explicit_plan, cache_mode="overwrite")
+    tracker.run(
+        fn=step,
+        config_plan=explicit_plan,
+        cache_options=CacheOptions(cache_mode="overwrite"),
+    )
 
     record = tracker.last_run
     assert record is not None
@@ -125,10 +134,12 @@ def test_define_step_config_plan_prepare_config_resolver(
 
     tracker.run(
         fn=step,
-        runtime_kwargs={
-            "settings": {"config_dirs": ["configs/base", "configs/overlay"]}
-        },
-        cache_mode="overwrite",
+        execution_options=ExecutionOptions(
+            runtime_kwargs={
+                "settings": {"config_dirs": ["configs/base", "configs/overlay"]}
+            }
+        ),
+        cache_options=CacheOptions(cache_mode="overwrite"),
     )
 
     record = tracker.last_run

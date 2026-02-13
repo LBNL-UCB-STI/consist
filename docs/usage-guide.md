@@ -78,15 +78,40 @@ print(f"Output: {cleaned_artifact.path}")
 
 If you run it again with the same inputs and config, you should get a cache hit and no re-execution.
 
+Preferred run configuration style (options objects):
+
+``` python
+from consist import CacheOptions, ExecutionOptions, OutputPolicyOptions
+
+result = consist.run(
+    fn=clean_data,
+    inputs={"raw": Path("raw.csv")},
+    config={"threshold": 0.5},
+    outputs=["cleaned"],
+    cache_options=CacheOptions(cache_mode="reuse", cache_hydration="inputs-missing"),
+    output_policy=OutputPolicyOptions(output_missing="error"),
+    execution_options=ExecutionOptions(load_inputs=True),
+)
+```
+
+Legacy run-policy kwargs are no longer supported on `run(...)` APIs. Use
+`cache_options=...`, `output_policy=...`, and `execution_options=...`.
+
+For file outputs, prefer managed helpers: use `consist.output_path(...)` in active runs, or `_consist_ctx.output_path(...)`/`_consist_ctx.output_dir(...)` when context is injected. Then call `_consist_ctx.log_output(...)` (or return the path when auto-output mapping applies).
+
 <details>
 <summary>Alternative: keep raw file paths (no auto-load)</summary>
 
-Use this when your function needs a `Path` and manages I/O directly (common for legacy tools or file-based APIs).
+Use this when your function needs a `Path` and manages I/O directly (common for legacy tools or file-based APIs). Prefer `_consist_ctx.output_path(...)` so paths stay under the managed run output policy and honor `artifact_dir` overrides.
 
 ``` python
+from consist import ExecutionOptions
+from pathlib import Path
+import pandas as pd
+
 def clean_data(raw_file: Path, _consist_ctx) -> None:
     df = pd.read_csv(raw_file)
-    out_path = _consist_ctx.run_dir / "cleaned.parquet"
+    out_path = _consist_ctx.output_path("cleaned")
     df.to_parquet(out_path)
     _consist_ctx.log_output(out_path, key="cleaned")
 
@@ -94,9 +119,11 @@ with use_tracker(tracker):
     result = consist.run(
         fn=clean_data,
         inputs={"raw_file": Path("raw.csv")},  # (1)!
-        load_inputs=False,
-        runtime_kwargs={"raw_file": Path("raw.csv")},
-        inject_context=True,
+        execution_options=ExecutionOptions(
+            load_inputs=False,
+            runtime_kwargs={"raw_file": Path("raw.csv")},
+            inject_context=True,
+        ),
     )
 ```
 
@@ -140,16 +167,16 @@ Each distinct config → separate cache entries. Change the threshold? Only that
 
 ### Wrapping Legacy or Black-Box Tools
 
-If you have existing code that writes files to a directory, use the injected run context to capture outputs:
+If you have existing code that writes files to a directory, use the injected run context to capture outputs. `_consist_ctx.output_dir(...)` avoids manual `mkdir`/path joining and keeps files in the managed artifact location.
 
 ``` python
 from pathlib import Path
+from consist import ExecutionOptions
 
 def run_legacy_model(upstream, _consist_ctx) -> None:
     import legacy_model
 
-    output_dir = _consist_ctx.run_dir / "legacy_outputs"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = _consist_ctx.output_dir("legacy_outputs")
     with _consist_ctx.capture_outputs(output_dir, pattern="*.csv"):
         legacy_model.run(upstream, output_dir=output_dir)
 
@@ -158,14 +185,17 @@ with use_tracker(tracker):
         fn=run_legacy_model,
         inputs={"upstream": Path("input.csv")},
         depends_on=[Path("config.yaml"), Path("parameters.json")],  # (1)!
-        load_inputs=False,
-        runtime_kwargs={"upstream": Path("input.csv")},  # (2)!
-        inject_context=True,
+        execution_options=ExecutionOptions(
+            load_inputs=False,
+            runtime_kwargs={"upstream": Path("input.csv")},  # (2)!
+            inject_context=True,
+        ),
     )
 ```
 
 1. Hash these files too so config changes invalidate the cache.
-2. Pass raw paths at runtime when `load_inputs=False`.
+2. Pass raw paths at runtime with
+   `execution_options=ExecutionOptions(load_inputs=False, runtime_kwargs={...})`.
 
 Captured outputs are keyed by filename stem (for example, `results.csv` -> `results`).
 
@@ -175,6 +205,8 @@ Captured outputs are keyed by filename stem (for example, `results.csv` -> `resu
 If the tool always writes to a known folder and returns `None`, you can capture it directly:
 
 ``` python
+from consist import ExecutionOptions
+
 with use_tracker(tracker):
     def run_legacy_model(upstream) -> None:
         import legacy_model
@@ -185,8 +217,10 @@ with use_tracker(tracker):
         fn=run_legacy_model,
         inputs={"upstream": Path("input.csv")},  # (1)!
         depends_on=[Path("config.yaml")],
-        load_inputs=False,
-        runtime_kwargs={"upstream": Path("input.csv")},
+        execution_options=ExecutionOptions(
+            load_inputs=False,
+            runtime_kwargs={"upstream": Path("input.csv")},
+        ),
         capture_dir=Path("outputs"),
         capture_pattern="*.csv",
     )
@@ -200,11 +234,12 @@ with use_tracker(tracker):
 
 When `inputs` is a mapping, Consist matches keys to function parameters and auto-loads
 those artifacts (for example, a CSV becomes a DataFrame) into the call by default.
-If you keep `load_inputs=True`, `inputs={"upstream": ...}` becomes the `upstream`
+If you keep auto-loading enabled (`execution_options=ExecutionOptions(load_inputs=True)`),
+`inputs={"upstream": ...}` becomes the `upstream`
 argument automatically.
 
-If you want raw paths instead of auto-loaded data, set `load_inputs=False` and pass
-paths explicitly via `runtime_kwargs`.
+If you want raw paths instead of auto-loaded data, use
+`execution_options=ExecutionOptions(load_inputs=False, runtime_kwargs={...})`.
 </details>
 
 The `depends_on` files are hashed as part of the cache key, so changing config.yaml invalidates the cache.
@@ -255,6 +290,7 @@ The **coupler** is your scenario-scoped artifact registry. When you log an artif
 **Optional: artifact key registries** help keep keys consistent across large workflows.
 
 ``` python
+from consist import ExecutionOptions
 from consist.utils import ArtifactKeyRegistry
 
 class Keys(ArtifactKeyRegistry):
@@ -264,7 +300,12 @@ class Keys(ArtifactKeyRegistry):
 
 # Use keys in calls
 sc.run(fn=preprocess, inputs={Keys.RAW: "raw.csv"}, outputs=[Keys.PREPROCESSED])
-sc.run(fn=analyze, inputs=[Keys.PREPROCESSED], load_inputs=True, outputs=[Keys.ANALYSIS])
+sc.run(
+    fn=analyze,
+    inputs=[Keys.PREPROCESSED],
+    execution_options=ExecutionOptions(load_inputs=True),
+    outputs=[Keys.ANALYSIS],
+)
 
 # Validate ad-hoc key lists when needed
 Keys.validate([Keys.RAW, Keys.PREPROCESSED])
@@ -288,7 +329,7 @@ sc.coupler.require("beam/plans_in")       # global access still works
 
 ``` python
 import consist
-from consist import Tracker, use_tracker
+from consist import ExecutionOptions, Tracker, use_tracker
 from pathlib import Path
 import pandas as pd
 
@@ -315,7 +356,7 @@ with use_tracker(tracker):  # (2)!
             name="analyze",
             fn=analyze_data,
             inputs=["preprocessed"],
-            load_inputs=True,
+            execution_options=ExecutionOptions(load_inputs=True),
             outputs=["analysis"],
         )
 ```
@@ -344,18 +385,24 @@ Use this when you're loading data from disk for the first time.
 
 **List form** (resolve from coupler):
 ``` python
+from consist import ExecutionOptions
+
 sc.run(
     name="analyze",
     fn=analyze_data,
     inputs=["preprocessed"],          # (1)!
-    load_inputs=True,                 # (2)!
+    execution_options=ExecutionOptions(load_inputs=True),  # (2)!
     outputs=["analysis"],
 )
 ```
 
 1. Resolve inputs from the coupler.
 2. Auto-load inputs as function parameters.
-Use this when the artifact is already in the coupler from a prior step. With `load_inputs=True`, each key becomes a function parameter with the loaded data. For example, `inputs=["preprocessed"]` means your function receives a `preprocessed` parameter with the loaded DataFrame.
+Use this when the artifact is already in the coupler from a prior step. With
+`execution_options=ExecutionOptions(load_inputs=True)`, each key becomes a
+function parameter with the loaded data. For example, `inputs=["preprocessed"]`
+means your function receives a `preprocessed` parameter with the loaded
+DataFrame.
 
 **Note**: If you have existing code using `input_keys=`, it continues to work for backward compatibility. `inputs=` is the preferred name for new code.
 
@@ -426,6 +473,8 @@ If your step can be expressed as a function, `sc.run` can auto-load inputs into
 function parameters so you don't need to call `coupler.require(...)` manually:
 
 ```python
+from consist import ExecutionOptions
+
 def simulate_year(population: pd.DataFrame, config: dict) -> pd.DataFrame:
     year = config["year"]
     return run_model(year, population)
@@ -442,7 +491,7 @@ with use_tracker(tracker):
                 fn=simulate_year,
                 inputs=["population"],
                 outputs=["persons"],
-                load_inputs=True,
+                execution_options=ExecutionOptions(load_inputs=True),
                 config={"year": year},
             )
 ```
@@ -641,24 +690,27 @@ output_artifact = result.artifacts["results"]
 Change the image version? Cache invalidates. Same image + inputs? Returns cached results.
 
 <details>
-<summary>Alternative: use consist.run with executor="container"</summary>
+<summary>Alternative: use consist.run with ExecutionOptions(executor="container")</summary>
 
 If you prefer the same API as `consist.run`, you can use the container executor:
 
 ```python
 import consist
+from consist import ExecutionOptions
 
 with consist.use_tracker(tracker):
     result = consist.run(
         name="model_2030",
-        executor="container",
         inputs=[host_inputs / "input.csv"],
         output_paths={"results": host_outputs / "results.parquet"},
-        container={
-            "image": "travel-model:v2.1",
-            "command": ["python", "run.py", "--year", "2030"],
-            "volumes": {str(host_inputs): "/inputs", str(host_outputs): "/outputs"},
-        },
+        execution_options=ExecutionOptions(
+            executor="container",
+            container={
+                "image": "travel-model:v2.1",
+                "command": ["python", "run.py", "--year", "2030"],
+                "volumes": {str(host_inputs): "/inputs", str(host_outputs): "/outputs"},
+            },
+        ),
     )
 ```
 </details>
@@ -688,7 +740,8 @@ By default, Consist returns metadata-only cache hits (no file copies). You can o
 `inputs-missing` only works for inputs that are tracked artifacts (not raw paths), so Consist can find
 the prior run's files or reconstruct ingested tables.
 
-Set per-run via `cache_hydration=...` or for scenario steps via `step_cache_hydration=...`:
+Set per-run via `cache_options=CacheOptions(cache_hydration=...)` (for `run(...)`)
+or for scenario defaults via `step_cache_hydration=...`:
 
 ``` python
 with use_tracker(tracker):
@@ -706,6 +759,8 @@ with use_tracker(tracker):
 Call `consist.run(...)` inside a scenario when a step should cache independently:
 
 ``` python
+from consist import ExecutionOptions
+
 with use_tracker(tracker):
     with consist.scenario("baseline") as sc:
         coupler = sc.coupler
@@ -787,7 +842,7 @@ with use_tracker(tracker):
             fn=prepare_land_use,
             inputs={"geojson_path": Path("land_use.geojson")},
             outputs=["zones"],
-            load_inputs=True,  # (2)!
+            execution_options=ExecutionOptions(load_inputs=True),  # (2)!
         )
 ```
 
@@ -818,7 +873,10 @@ Choose based on your workflow needs:
 - You want explicit control over what happens every run vs. only on cache miss
 - Your step is fast enough that re-execution overhead doesn't matter
 
-**On large file inputs:** If your function receives multi-GB files, set `load_inputs=False` and use `cache_hydration="inputs-missing"` to ensure input files are available on cache misses without re-loading on every run.
+**On large file inputs:** If your function receives multi-GB files, use
+`execution_options=ExecutionOptions(load_inputs=False, runtime_kwargs={...})`
+and `cache_options=CacheOptions(cache_hydration="inputs-missing")` to ensure
+input files are available on cache misses without re-loading on every run.
 
 <details>
 <summary>Alternative: log file outputs inside the step</summary>
@@ -826,8 +884,11 @@ Choose based on your workflow needs:
 If your function writes files, log them with the injected context (and read inputs yourself if needed):
 
 ```python
+from consist import ExecutionOptions
+from pathlib import Path
+
 def beam_preprocess(data_file, _consist_ctx) -> None:
-    out_path = _consist_ctx.run_dir / "beam_inputs.parquet"
+    out_path = _consist_ctx.output_path("beam_inputs")
     ...
     _consist_ctx.log_output(out_path, key="beam_inputs")
 
@@ -837,9 +898,11 @@ with use_tracker(tracker):
             name="beam_preprocess",
             fn=beam_preprocess,
             inputs={"data_file": Path("data.parquet")},
-            load_inputs=False,
-            runtime_kwargs={"data_file": Path("data.parquet")},
-            inject_context=True,
+            execution_options=ExecutionOptions(
+                load_inputs=False,
+                runtime_kwargs={"data_file": Path("data.parquet")},
+                inject_context=True,
+            ),
         )
 ```
 </details>

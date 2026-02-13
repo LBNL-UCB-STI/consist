@@ -44,6 +44,8 @@ from consist.api import (
     current_tracker,
     current_run,
     current_consist,
+    output_dir,
+    output_path,
     log_meta,
     view,
     cached_output,
@@ -72,7 +74,10 @@ from consist.api import (
 
 # Types
 from consist.types import (
+    CacheOptions,
     DriverType,
+    ExecutionOptions,
+    OutputPolicyOptions,
 )
 from consist.core.noop import (
     NoopArtifact,
@@ -93,6 +98,9 @@ __all__ = [
     "Artifact",
     # Types
     "DriverType",
+    "CacheOptions",
+    "OutputPolicyOptions",
+    "ExecutionOptions",
     "NoopArtifact",
     "NoopCoupler",
     "NoopRunResult",
@@ -132,6 +140,8 @@ __all__ = [
     "current_tracker",
     "current_run",
     "current_consist",
+    "output_dir",
+    "output_path",
     "log_meta",
     "view",
     "cached_output",

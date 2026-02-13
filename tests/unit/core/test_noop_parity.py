@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 import consist
+from consist.types import ExecutionOptions
 
 
 def test_noop_and_real_run_parity(tracker, tmp_path: Path) -> None:
@@ -16,7 +17,9 @@ def test_noop_and_real_run_parity(tracker, tmp_path: Path) -> None:
         real_result = sc.run(
             fn=step,
             name="step",
-            runtime_kwargs={"output_path": out_path},
+            execution_options=ExecutionOptions(
+                runtime_kwargs={"output_path": out_path}
+            ),
             outputs=["out"],
         )
 
@@ -25,7 +28,9 @@ def test_noop_and_real_run_parity(tracker, tmp_path: Path) -> None:
         noop_result = sc.run(
             fn=step,
             name="step",
-            runtime_kwargs={"output_path": out_path},
+            execution_options=ExecutionOptions(
+                runtime_kwargs={"output_path": out_path}
+            ),
             outputs=["out"],
         )
 
@@ -39,8 +44,16 @@ def test_noop_and_real_missing_runtime_kwargs(tracker) -> None:
         return None
 
     with pytest.raises(TypeError):
-        tracker.run(fn=step, name="real_step", runtime_kwargs={})
+        tracker.run(
+            fn=step,
+            name="real_step",
+            execution_options=ExecutionOptions(runtime_kwargs={}),
+        )
 
     noop_tracker = consist.NoopTracker()
     with pytest.raises(TypeError):
-        noop_tracker.run(fn=step, name="noop_step", runtime_kwargs={})
+        noop_tracker.run(
+            fn=step,
+            name="noop_step",
+            execution_options=ExecutionOptions(runtime_kwargs={}),
+        )

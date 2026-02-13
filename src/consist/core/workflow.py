@@ -10,9 +10,11 @@ from typing import (
     Dict,
     Any,
     Callable,
+    Literal,
     Mapping,
     Iterator,
     Union,
+    cast,
 )
 
 from consist import Artifact
@@ -21,7 +23,15 @@ from typing import TYPE_CHECKING
 from consist.core.coupler import Coupler
 from consist.core.input_utils import coerce_input_map
 from consist.core.metadata_resolver import MetadataResolver
-from consist.types import ArtifactRef, FacetLike, HashInputs
+from consist.core.run_options import merge_run_options
+from consist.types import (
+    ArtifactRef,
+    CacheOptions,
+    ExecutionOptions,
+    FacetLike,
+    HashInputs,
+    OutputPolicyOptions,
+)
 from pathlib import Path
 
 if TYPE_CHECKING:
@@ -81,6 +91,87 @@ class RunContext:
         path = self._tracker.run_artifact_dir()
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def output_dir(self, namespace: Optional[str] = None) -> Path:
+        """
+        Resolve the managed output directory for the active run.
+
+        Parameters
+        ----------
+        namespace : Optional[str], optional
+            Optional relative subdirectory under the managed run output directory.
+
+        Returns
+        -------
+        Path
+            Absolute directory path for managed outputs. The directory is created
+            if it does not exist.
+        """
+        base_dir = self.run_dir.resolve()
+        if namespace is None:
+            return base_dir
+
+        if not isinstance(namespace, str):
+            raise TypeError("namespace must be a string or None.")
+
+        normalized = namespace.strip()
+        if not normalized:
+            return base_dir
+
+        namespace_path = Path(normalized)
+        if namespace_path.is_absolute():
+            raise ValueError("namespace must be a relative path.")
+
+        resolved = (base_dir / namespace_path).resolve()
+        try:
+            resolved.relative_to(base_dir)
+        except ValueError as exc:
+            raise ValueError(
+                f"namespace must resolve under {base_dir}; got {resolved}"
+            ) from exc
+        resolved.mkdir(parents=True, exist_ok=True)
+        return resolved
+
+    def output_path(self, key: str, ext: str = "parquet") -> Path:
+        """
+        Resolve a deterministic managed output path for the active run.
+
+        Parameters
+        ----------
+        key : str
+            Artifact key used as the output filename stem. Relative path segments
+            are allowed to organize outputs into subdirectories.
+        ext : str, default "parquet"
+            File extension to append. Leading dots are ignored and the extension
+            is normalized to lowercase.
+
+        Returns
+        -------
+        Path
+            Absolute managed output path. Parent directories are created if needed.
+        """
+        if not isinstance(key, str):
+            raise TypeError("key must be a string.")
+        normalized_key = key.strip()
+        if not normalized_key:
+            raise ValueError("key must be a non-empty string.")
+
+        if not isinstance(ext, str):
+            raise TypeError("ext must be a string.")
+        normalized_ext = ext.strip().lstrip(".").lower()
+        if not normalized_ext:
+            raise ValueError("ext must be a non-empty string.")
+
+        base_dir = self.output_dir().resolve()
+        resolved = (base_dir / f"{normalized_key}.{normalized_ext}").resolve()
+        try:
+            resolved.relative_to(base_dir)
+        except ValueError as exc:
+            raise ValueError(
+                f"output key must resolve under {base_dir}; got {resolved}"
+            ) from exc
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        return resolved
 
     def log_artifact(self, *args: Any, **kwargs: Any) -> Artifact:
         """
@@ -625,25 +716,19 @@ class ScenarioContext:
         output_paths: Optional[Mapping[str, ArtifactRef]] = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
-        cache_mode: Optional[str] = None,
-        cache_hydration: Optional[str] = None,
-        cache_version: Optional[int] = None,
-        validate_cached_outputs: Optional[str] = None,
-        load_inputs: Optional[bool] = None,
-        executor: str = "python",
-        container: Optional[Mapping[str, Any]] = None,
-        runtime_kwargs: Optional[Dict[str, Any]] = None,
-        inject_context: bool | str = False,
-        output_mismatch: str = "warn",
-        output_missing: str = "warn",
+        cache_options: Optional[CacheOptions] = None,
+        output_policy: Optional[OutputPolicyOptions] = None,
+        execution_options: Optional[ExecutionOptions] = None,
     ) -> RunResult:
         """
         Execute a cached scenario step and update the Coupler with outputs.
 
         This method wraps ``Tracker.run`` while ensuring the scenario header
         is updated with step metadata and artifacts.
-        Use ``runtime_kwargs`` for runtime-only inputs and `consist.require_runtime_kwargs`
-        to validate required keys.
+        Use ``execution_options.runtime_kwargs`` for runtime-only inputs and
+        `consist.require_runtime_kwargs` to validate required keys.
+        Pass policy controls via ``cache_options``, ``output_policy``,
+        and ``execution_options``.
         """
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
@@ -653,6 +738,45 @@ class ScenarioContext:
             raise ValueError("ScenarioContext.run requires a run name.")
         if fn is None and name is None:
             raise ValueError("ScenarioContext.run requires name when fn is None.")
+
+        merged_options = merge_run_options(
+            cache_options=cache_options,
+            output_policy=output_policy,
+            execution_options=execution_options,
+        )
+
+        cache_mode = merged_options.cache_mode
+        cache_hydration = merged_options.cache_hydration
+        cache_version = merged_options.cache_version
+        cache_epoch = merged_options.cache_epoch
+        validate_cached_outputs = merged_options.validate_cached_outputs
+        load_inputs = merged_options.load_inputs
+        executor = merged_options.executor
+        container = merged_options.container
+        runtime_kwargs = merged_options.runtime_kwargs
+        inject_context = merged_options.inject_context
+        output_mismatch = merged_options.output_mismatch
+        output_missing = merged_options.output_missing
+
+        if executor is None:
+            executor = "python"
+        if inject_context is None:
+            inject_context = False
+        if output_mismatch is None:
+            output_mismatch = "warn"
+        if output_missing is None:
+            output_missing = "warn"
+        resolved_output_mismatch = cast(
+            Literal["warn", "error", "ignore"], output_mismatch
+        )
+        resolved_output_missing = cast(
+            Literal["warn", "error", "ignore"], output_missing
+        )
+        resolved_executor = cast(Literal["python", "container"], executor)
+
+        runtime_kwargs_dict: Optional[Dict[str, Any]] = (
+            dict(runtime_kwargs) if runtime_kwargs is not None else None
+        )
 
         resolver = MetadataResolver(
             default_name_template=self.name_template,
@@ -682,7 +806,7 @@ class ScenarioContext:
             consist_settings=self.tracker.settings,
             consist_workspace=self.tracker.run_dir,
             consist_state=self._header_record,
-            runtime_kwargs=runtime_kwargs,
+            runtime_kwargs=runtime_kwargs_dict,
             outputs=outputs,
             output_paths=output_paths,
             cache_mode=cache_mode,
@@ -743,9 +867,13 @@ class ScenarioContext:
         resolved_output_paths = self._resolve_output_paths(resolved_output_paths)
 
         resolved_cache_epoch = (
-            self.cache_epoch
-            if self.cache_epoch is not None
-            else getattr(self.tracker, "_cache_epoch", None)
+            cache_epoch
+            if cache_epoch is not None
+            else (
+                self.cache_epoch
+                if self.cache_epoch is not None
+                else getattr(self.tracker, "_cache_epoch", None)
+            )
         )
 
         result = self.tracker.run(
@@ -777,18 +905,24 @@ class ScenarioContext:
             output_paths=resolved_output_paths,
             capture_dir=capture_dir,
             capture_pattern=capture_pattern,
-            cache_mode=resolved_cache_mode,
-            cache_hydration=effective_cache_hydration,
-            cache_version=resolved_cache_version,
-            cache_epoch=resolved_cache_epoch,
-            validate_cached_outputs=resolved_validate_cached_outputs,
-            load_inputs=resolved_load_inputs,
-            executor=executor,
-            container=container,
-            runtime_kwargs=runtime_kwargs,
-            inject_context=inject_context,
-            output_mismatch=output_mismatch,
-            output_missing=output_missing,
+            cache_options=CacheOptions(
+                cache_mode=resolved_cache_mode,
+                cache_hydration=effective_cache_hydration,
+                cache_version=resolved_cache_version,
+                cache_epoch=resolved_cache_epoch,
+                validate_cached_outputs=resolved_validate_cached_outputs,
+            ),
+            output_policy=OutputPolicyOptions(
+                output_mismatch=resolved_output_mismatch,
+                output_missing=resolved_output_missing,
+            ),
+            execution_options=ExecutionOptions(
+                load_inputs=resolved_load_inputs,
+                executor=resolved_executor,
+                container=container,
+                runtime_kwargs=runtime_kwargs_dict,
+                inject_context=inject_context,
+            ),
         )
 
         if result.outputs:
