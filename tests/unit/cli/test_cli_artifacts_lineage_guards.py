@@ -20,7 +20,9 @@ def test_artifacts_rejects_mixing_run_id_with_query_flags(cli_runner) -> None:
     result = cli_runner.invoke(app, ["artifacts", "run-1", "--param", "beam.year=2020"])
 
     assert result.exit_code == 1
-    assert "run_id cannot be combined with --param" in result.stdout
+    normalized = " ".join(result.stdout.split())
+    assert "run_id cannot be combined with" in normalized
+    assert "--param/--namespace/--key-prefix/--family-prefix." in normalized
 
 
 def test_artifacts_query_mode_reports_no_matches(cli_runner) -> None:
