@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from consist.core.materialize import (
     materialize_artifacts,
@@ -105,4 +106,83 @@ def test_materialize_ingested_artifact_from_db_rejects_unsupported_driver(
             artifact=artifact,
             tracker=tracker,
             destination=tmp_path / "reconstructed.json",
+        )
+
+
+def test_materialize_ingested_artifact_from_db_wraps_reflection_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = Artifact(
+        key="ingested_csv",
+        container_uri="./ingested_csv.csv",
+        driver="csv",
+        meta={"is_ingested": True},
+    )
+    tracker = SimpleNamespace(engine=object())
+
+    def _raise_reflection_error(*args, **kwargs):
+        raise SQLAlchemyError("reflection failed")
+
+    monkeypatch.setattr("consist.core.materialize.Table", _raise_reflection_error)
+
+    with pytest.raises(RuntimeError, match="Failed to reflect table"):
+        materialize_ingested_artifact_from_db(
+            artifact=artifact,
+            tracker=tracker,
+            destination=tmp_path / "reconstructed.csv",
+        )
+
+
+def test_materialize_ingested_artifact_from_db_requires_consist_artifact_id_column(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = Artifact(
+        key="ingested_csv",
+        container_uri="./ingested_csv.csv",
+        driver="csv",
+        meta={"is_ingested": True},
+    )
+    tracker = SimpleNamespace(engine=object())
+
+    reflected_table = SimpleNamespace(c={})
+    monkeypatch.setattr(
+        "consist.core.materialize.Table",
+        lambda *args, **kwargs: reflected_table,
+    )
+
+    with pytest.raises(RuntimeError, match="missing consist_artifact_id"):
+        materialize_ingested_artifact_from_db(
+            artifact=artifact,
+            tracker=tracker,
+            destination=tmp_path / "reconstructed.csv",
+        )
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    [
+        Artifact(
+            key="ingested_csv",
+            container_uri="./ingested_csv.csv",
+            driver="csv",
+            meta={"is_ingested": True, "dlt_table_name": 123},
+        ),
+        Artifact(
+            key="",
+            container_uri="./ingested_csv.csv",
+            driver="csv",
+            meta={"is_ingested": True, "dlt_table_name": ""},
+        ),
+    ],
+)
+def test_materialize_ingested_artifact_from_db_rejects_invalid_or_empty_table_name(
+    tmp_path: Path, artifact: Artifact
+) -> None:
+    tracker = SimpleNamespace(engine=object())
+
+    with pytest.raises(ValueError, match="table name is missing"):
+        materialize_ingested_artifact_from_db(
+            artifact=artifact,
+            tracker=tracker,
+            destination=tmp_path / "reconstructed.csv",
         )
