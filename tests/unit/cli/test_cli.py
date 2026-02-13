@@ -746,6 +746,24 @@ def test_shell_command_invokes_cmdloop():
         m_shell.return_value.cmdloop.assert_called_once()
 
 
+def test_shell_uses_env_db_when_db_path_omitted(tmp_path, monkeypatch):
+    env_db = tmp_path / "env_provenance.duckdb"
+    engine = create_engine(f"duckdb:///{env_db}")
+    with engine.connect():
+        pass
+    engine.dispose()
+    monkeypatch.setenv("CONSIST_DB", str(env_db))
+
+    with patch("consist.cli.ConsistShell") as m_shell:
+        result = runner.invoke(app, ["shell"])
+
+    assert result.exit_code == 0
+    normalized_stdout = result.stdout.replace("\n", "")
+    assert "Loaded database:" in normalized_stdout
+    assert str(env_db) in normalized_stdout
+    m_shell.return_value.cmdloop.assert_called_once()
+
+
 def test_shell_runs_parsing_calls_helper():
     tracker = MagicMock()
     shell = ConsistShell(tracker)

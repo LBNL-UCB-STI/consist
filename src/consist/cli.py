@@ -71,6 +71,7 @@ app.add_typer(views_app, name="views")
 MAX_CLI_LIMIT = 1_000_000
 MAX_PREVIEW_ROWS = 1_000_000
 MAX_SEARCH_QUERY_LENGTH = 256
+LIKE_ESCAPE_CHAR = "!"
 
 
 def _optional_xarray() -> Any | None:
@@ -101,9 +102,9 @@ def _parse_bounded_int(value: str, *, name: str, minimum: int, maximum: int) -> 
 
 
 def _escape_like_pattern(value: str) -> str:
-    value = value.replace("\\", "\\\\")
-    value = value.replace("%", "\\%")
-    value = value.replace("_", "\\_")
+    value = value.replace(LIKE_ESCAPE_CHAR, LIKE_ESCAPE_CHAR * 2)
+    value = value.replace("%", f"{LIKE_ESCAPE_CHAR}%")
+    value = value.replace("_", f"{LIKE_ESCAPE_CHAR}_")
     return value
 
 
@@ -289,8 +290,8 @@ def schema_export(
         "--prefer-source",
         help="Preference hint for when user_provided schema does not exist: 'file' (original CSV/Parquet dtypes) or 'duckdb' (post-ingestion schema). User-provided schemas are ALWAYS preferred if they exist and cannot be overridden.",
     ),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the DuckDB database."
     ),
 ) -> None:
     """Export a captured artifact schema as an editable SQLModel stub.
@@ -356,8 +357,8 @@ def schema_export(
 
 @schema_app.command("apply-fks")
 def schema_apply_fks(
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the DuckDB database."
     ),
 ) -> None:
     """Best-effort application of physical foreign key constraints."""
@@ -437,8 +438,8 @@ def views_create(
         "--schema-compatible",
         help="Include subset/superset schema variants by field names.",
     ),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
 ) -> None:
     """Create a selector-driven grouped hybrid view across many artifacts."""
@@ -753,8 +754,8 @@ def search(
     query: str = typer.Argument(
         ..., help="Search term (searches run IDs, model names, tags)."
     ),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the DuckDB database."
     ),
     limit: int = typer.Option(20, help="Maximum results."),
 ) -> None:
@@ -775,9 +776,12 @@ def search(
             select(Run)
             .where(
                 or_(
-                    col(Run.id).contains(escaped_query, escape="\\"),
-                    col(Run.model_name).contains(escaped_query, escape="\\"),
-                    col(Run.parent_run_id).contains(escaped_query, escape="\\")
+                    col(Run.id).contains(escaped_query, escape=LIKE_ESCAPE_CHAR),
+                    col(Run.model_name).contains(escaped_query, escape=LIKE_ESCAPE_CHAR),
+                    col(Run.tags).contains(escaped_query, escape=LIKE_ESCAPE_CHAR),
+                    col(Run.parent_run_id).contains(
+                        escaped_query, escape=LIKE_ESCAPE_CHAR
+                    )
                     if escaped_query
                     else False,
                 )
@@ -814,8 +818,8 @@ def search(
 
 @app.command()
 def validate(
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the DuckDB database."
     ),
     fix: bool = typer.Option(
         False, help="Attempt to fix issues (mark artifacts as missing)."
@@ -823,9 +827,11 @@ def validate(
 ) -> None:
     """Check that artifacts referenced in DB actually exist on disk."""
     tracker = get_tracker(db_path)
+    from consist.models.artifact import Artifact
 
     with _tracker_session(tracker) as session:
         missing = []
+        missing_ids: List[uuid.UUID] = []
         batch_size = 1000
         if env_batch_size := os.getenv("CONSIST_VALIDATE_BATCH_SIZE"):
             try:
@@ -833,17 +839,34 @@ def validate(
             except ValueError:
                 batch_size = 1000
 
-        for _, key, uri, run_id in _iter_artifact_rows(session, batch_size=batch_size):
+        for artifact_id, key, uri, run_id in _iter_artifact_rows(
+            session, batch_size=batch_size
+        ):
             try:
                 abs_path = tracker.resolve_uri(uri)
                 if not Path(abs_path).exists():
                     missing.append((key, uri, run_id))
+                    missing_ids.append(artifact_id)
             except Exception:
                 missing.append((key, uri, run_id))
+                missing_ids.append(artifact_id)
 
         if not missing:
             console.print("[green]✓ All artifacts validated successfully[/green]")
             return
+
+        if fix and missing_ids:
+            updates = (
+                select(Artifact)
+                .where(col(Artifact.id).in_(set(missing_ids)))
+                .order_by(col(Artifact.created_at))
+            )
+            for artifact in session.exec(cast(Any, updates)).all():
+                current_meta = dict(artifact.meta or {})
+                current_meta["missing_on_disk"] = True
+                artifact.meta = current_meta
+                session.add(artifact)
+            session.commit()
 
         console.print(f"[yellow]⚠ Found {len(missing)} missing artifacts:[/yellow]\n")
 
@@ -863,8 +886,8 @@ def validate(
 
 @app.command()
 def scenarios(
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the DuckDB database."
     ),
     limit: int = typer.Option(20, help="Maximum scenarios to display."),
 ) -> None:
@@ -876,8 +899,8 @@ def scenarios(
 @app.command()
 def scenario(
     scenario_id: str = typer.Argument(..., help="The scenario ID to inspect."),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the DuckDB database."
     ),
 ) -> None:
     """Show all runs in a scenario."""
@@ -917,8 +940,8 @@ def scenario(
 
 @app.command()
 def runs(
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
     limit: int = typer.Option(10, help="Maximum number of recent runs to display."),
     json_output: bool = typer.Option(
@@ -1001,8 +1024,8 @@ def artifacts(
         "--limit",
         help="Maximum number of artifact query results.",
     ),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
 ) -> None:
     """Display run artifacts or query artifacts by indexed facet parameters."""
@@ -1155,8 +1178,8 @@ def lineage(
     artifact_key: str = typer.Argument(
         ..., help="The key or ID of the artifact to trace."
     ),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
 ) -> None:
     """Traces and displays the full lineage of an artifact."""
@@ -1184,8 +1207,8 @@ def lineage(
 
 @app.command()
 def summary(
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
 ) -> None:
     """Displays a high-level summary of the provenance database."""
@@ -1203,8 +1226,8 @@ def preview(
     artifact_key: str = typer.Argument(
         ..., help="The key or ID of the artifact to preview."
     ),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
     n_rows: int = typer.Option(5, "--rows", "-n", help="Number of rows to display."),
     trust_db: bool = typer.Option(
@@ -1680,8 +1703,8 @@ class ConsistShell(cmd.Cmd):
 @app.command()
 def show(
     run_id: str = typer.Argument(..., help="The ID of the run to inspect."),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the DuckDB database."
     ),
 ) -> None:
     """Display detailed information about a specific run."""
@@ -1696,8 +1719,8 @@ def show(
 
 @app.command()
 def shell(
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
     trust_db: bool = typer.Option(
         False,
@@ -1710,7 +1733,10 @@ def shell(
     The database is loaded once and reused across shell commands.
     """
     tracker = get_tracker(db_path)
-    console.print(f"[green]✓ Loaded database: {db_path}[/green]")
+    resolved_db_path = getattr(tracker, "db_path", None)
+    if not isinstance(resolved_db_path, str) or not resolved_db_path:
+        resolved_db_path = find_db_path(db_path)
+    console.print(f"[green]✓ Loaded database: {resolved_db_path}[/green]")
     ConsistShell(tracker, trust_db=trust_db).cmdloop()
 
 
