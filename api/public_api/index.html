@@ -2406,6 +2406,7 @@ more verbose, lower-level, or easier to misuse.</p>
 <li><a href="../tracker/"><code>consist.Tracker</code></a></li>
 <li><a href="../run/"><code>consist.Run</code></a></li>
 <li><a href="../artifact/"><code>consist.Artifact</code></a></li>
+<li><code>consist.CacheOptions</code>, <code>consist.OutputPolicyOptions</code>, <code>consist.ExecutionOptions</code></li>
 </ul>
 <h3 id="scenario-workflow-helpers">Scenario / workflow helpers<a class="headerlink" href="#scenario-workflow-helpers" title="Permanent link">&para;</a></h3>
 <ul>
@@ -2416,10 +2417,12 @@ more verbose, lower-level, or easier to misuse.</p>
 <li><a href="../api_helpers/#consist.api.start_run"><code>consist.start_run</code></a></li>
 <li><a href="../api_helpers/#consist.api.define_step"><code>consist.define_step</code></a></li>
 <li><a href="../api_helpers/#consist.api.use_tracker"><code>consist.use_tracker</code></a></li>
+<li><a href="../api_helpers/#consist.api.output_dir"><code>consist.output_dir</code></a></li>
+<li><a href="../api_helpers/#consist.api.output_path"><code>consist.output_path</code></a></li>
 <li><a href="../workflow/#consist.core.workflow.ScenarioContext"><code>ScenarioContext</code></a> (returned by <code>consist.scenario(...)</code>)</li>
 <li><code>run_id</code>, <code>config</code>, <code>inputs</code>, <code>add_input</code>, <code>declare_outputs</code>, <code>require_outputs</code>, <code>collect_by_keys</code>, <code>run</code>, <code>trace</code></li>
-<li><a href="../workflow/#consist.core.workflow.RunContext"><code>RunContext</code></a> (injected via <code>inject_context=True</code>)</li>
-<li><code>run_dir</code>, <code>inputs</code>, <code>load</code>, <code>log_artifact</code>, <code>log_artifacts</code>, <code>log_input</code>, <code>log_output</code>, <code>log_meta</code>, <code>capture_outputs</code></li>
+<li><a href="../workflow/#consist.core.workflow.RunContext"><code>RunContext</code></a> (injected via <code>execution_options=ExecutionOptions(inject_context=True)</code>)</li>
+<li><code>run_dir</code>, <code>output_dir</code>, <code>output_path</code>, <code>inputs</code>, <code>load</code>, <code>log_artifact</code>, <code>log_artifacts</code>, <code>log_input</code>, <code>log_output</code>, <code>log_meta</code>, <code>capture_outputs</code></li>
 <li><a href="../workflow/#consist.core.coupler.Coupler"><code>Coupler</code></a> (available at <code>scenario.coupler</code>)</li>
 </ul>
 <p>Scenario defaults like <code>name_template</code> and <code>cache_epoch</code> are configured via <code>consist.scenario(...)</code> and flow into <code>ScenarioContext.run(...)</code>.</p>

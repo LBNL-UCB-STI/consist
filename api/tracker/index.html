@@ -4524,7 +4524,7 @@ end_run : Imperative alternative for ending runs.</p>
 
 
 <h2 id="consist.core.tracker.Tracker.run" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">run</span><span class="p">(</span><span class="n">fn</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">run_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config_plan</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config_plan_ingest</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">config_plan_profile_schema</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">input_keys</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">optional_input_keys</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">depends_on</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">tags</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_from</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_schema_version</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_index</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">hash_inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">year</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">iteration</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">phase</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">stage</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">parent_run_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">outputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">output_paths</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">capture_dir</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">capture_pattern</span><span class="o">=</span><span class="s1">&#39;*&#39;</span><span class="p">,</span> <span class="n">cache_mode</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">cache_hydration</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">cache_version</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">cache_epoch</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">validate_cached_outputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">load_inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">executor</span><span class="o">=</span><span class="s1">&#39;python&#39;</span><span class="p">,</span> <span class="n">container</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">runtime_kwargs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">inject_context</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">output_mismatch</span><span class="o">=</span><span class="s1">&#39;warn&#39;</span><span class="p">,</span> <span class="n">output_missing</span><span class="o">=</span><span class="s1">&#39;warn&#39;</span><span class="p">)</span></code>
+            <code class="highlight language-python"><span class="n">run</span><span class="p">(</span><span class="n">fn</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">run_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config_plan</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config_plan_ingest</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">config_plan_profile_schema</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">input_keys</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">optional_input_keys</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">depends_on</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">tags</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_from</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_schema_version</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_index</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">hash_inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">year</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">iteration</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">phase</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">stage</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">parent_run_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">outputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">output_paths</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">capture_dir</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">capture_pattern</span><span class="o">=</span><span class="s1">&#39;*&#39;</span><span class="p">,</span> <span class="n">cache_options</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">output_policy</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">execution_options</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
 
 <a href="#consist.core.tracker.Tracker.run" class="headerlink" title="Permanent link">&para;</a></h2>
 
@@ -4969,33 +4969,15 @@ Maps artifact key to ingested table name.</p>
           </tr>
           <tr class="doc-section-item">
             <td>
-                <code>cache_mode</code>
+                <code>cache_options</code>
             </td>
             <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Cache behavior: "reuse" (return cache hit), "overwrite" (always re-execute), or "skip_check".</p>
-              </div>
-            </td>
-            <td>
-                  <code>&#34;reuse&#34;</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>cache_hydration</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<span title="consist.types.CacheOptions">CacheOptions</span>]</code>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Materialization strategy for cache hits:
-- "outputs-requested": Copy only output_paths to disk
-- "outputs-all": Copy all cached outputs to run_artifact_dir
-- "inputs-missing": Backfill missing inputs from prior runs before executing</p>
+                <p>Grouped cache controls (<code>cache_mode</code>, <code>cache_hydration</code>, <code>cache_version</code>,
+<code>cache_epoch</code>, <code>validate_cached_outputs</code>).</p>
               </div>
             </td>
             <td>
@@ -5004,31 +4986,14 @@ Maps artifact key to ingested table name.</p>
           </tr>
           <tr class="doc-section-item">
             <td>
-                <code>validate_cached_outputs</code>
+                <code>output_policy</code>
             </td>
             <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Validation for cached outputs: "lazy" (check if files exist), "strict", or "none".</p>
-              </div>
-            </td>
-            <td>
-                  <code>&#34;lazy&#34;</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>load_inputs</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/functions.html#bool">bool</a>]</code>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<span title="consist.types.OutputPolicyOptions">OutputPolicyOptions</span>]</code>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Whether to auto-load input artifacts into function parameters.
-Defaults to True if inputs is a dict, False if a list.</p>
+                <p>Grouped output policies (<code>output_mismatch</code>, <code>output_missing</code>).</p>
               </div>
             </td>
             <td>
@@ -5037,101 +5002,19 @@ Defaults to True if inputs is a dict, False if a list.</p>
           </tr>
           <tr class="doc-section-item">
             <td>
-                <code>executor</code>
+                <code>execution_options</code>
             </td>
             <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Execution backend: "python" (call fn directly) or "container" (use Docker/Singularity).</p>
-              </div>
-            </td>
-            <td>
-                  <code>&#34;python&#34;</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>container</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" title="typing.Mapping" href="https://docs.python.org/3/library/typing.html#typing.Mapping">Mapping</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>, <a class="autorefs autorefs-external" title="typing.Any" href="https://docs.python.org/3/library/typing.html#typing.Any">Any</a>]]</code>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<span title="consist.types.ExecutionOptions">ExecutionOptions</span>]</code>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Container spec (required if executor='container'). Must contain 'image' and 'command'.</p>
+                <p>Grouped execution controls (<code>load_inputs</code>, <code>executor</code>, <code>container</code>,
+<code>runtime_kwargs</code>, <code>inject_context</code>).</p>
               </div>
             </td>
             <td>
                   <code>None</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>runtime_kwargs</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" title="typing.Dict" href="https://docs.python.org/3/library/typing.html#typing.Dict">Dict</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>, <a class="autorefs autorefs-external" title="typing.Any" href="https://docs.python.org/3/library/typing.html#typing.Any">Any</a>]]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Additional kwargs to pass to fn at runtime (merged with auto-loaded inputs).
-These values are not part of the cache signature; use them for handles
-or runtime-only dependencies. Consider <code>consist.require_runtime_kwargs</code>
-to enforce required keys.</p>
-              </div>
-            </td>
-            <td>
-                  <code>None</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>inject_context</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/functions.html#bool">bool</a> | <a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>If True or a parameter name, inject a RunContext as that parameter (for file I/O, output logging).</p>
-              </div>
-            </td>
-            <td>
-                  <code>False</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>output_mismatch</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Behavior when output count doesn't match: "warn", "error", or "ignore".</p>
-              </div>
-            </td>
-            <td>
-                  <code>&#34;warn&#34;</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>output_missing</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Behavior when expected outputs are missing: "warn", "error", or "ignore".</p>
-              </div>
-            </td>
-            <td>
-                  <code>&#34;warn&#34;</code>
             </td>
           </tr>
       </tbody>
