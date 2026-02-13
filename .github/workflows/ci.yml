@@ -57,9 +57,11 @@ jobs:
           --extra all
 
       - name: Ruff
+        if: runner.os == 'Linux' && matrix.python-version == '3.12'
         run: uv run -m ruff check src tests
 
       - name: Ruff format
+        if: runner.os == 'Linux' && matrix.python-version == '3.12'
         run: uv run -m ruff format --check src tests
 
       - name: Pytest (skip heavy)
@@ -67,3 +69,42 @@ jobs:
           uv run -m pytest -q
           -m "not heavy"
           tests/unit tests/integration tests/e2e
+          --cov=src/consist
+          --cov-report=term
+          --cov-report=json:coverage.json
+          --cov-fail-under=80
+
+      - name: Coverage Guardrails (Critical Modules)
+        if: runner.os == 'Linux' && matrix.python-version == '3.11'
+        run: |
+          uv run python - <<'PY'
+          import json
+          from pathlib import Path
+
+          data = json.loads(Path("coverage.json").read_text())
+          files = data.get("files", {})
+
+          thresholds = {
+              "src/consist/cli.py": 60.0,
+              "src/consist/core/materialize.py": 70.0,
+              "src/consist/integrations/dlt_loader.py": 70.0
+          }
+
+          failures = []
+          for path, minimum in thresholds.items():
+              summary = files.get(path, {}).get("summary")
+              if summary is None:
+                  failures.append(f"{path}: missing from coverage report")
+                  continue
+              actual = float(summary.get("percent_covered", 0.0))
+              if actual < minimum:
+                  failures.append(f"{path}: {actual:.1f}% < {minimum:.1f}%")
+              else:
+                  print(f"PASS {path}: {actual:.1f}% >= {minimum:.1f}%")
+
+          if failures:
+              print("Coverage guardrail failures:")
+              for failure in failures:
+                  print(f"- {failure}")
+              raise SystemExit(1)
+          PY
