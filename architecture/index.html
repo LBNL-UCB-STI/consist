@@ -2491,8 +2491,8 @@
 <tbody>
 <tr>
 <td><strong>Code hash</strong></td>
-<td>Git commit SHA</td>
-<td>Appends <code>-dirty-&lt;hash&gt;</code> if tracked files are modified; falls back to <code>unknown_code_version</code> without Git</td>
+<td>Configurable code identity</td>
+<td>Default <code>repo_git</code> uses Git commit/dirty state; callable modes hash the function module or source</td>
 </tr>
 <tr>
 <td><strong>Config hash</strong></td>
@@ -2544,7 +2544,7 @@
 <tr>
 <td>Comments in code</td>
 <td>Depends</td>
-<td>Committed comment changes affect the code hash; uncommitted changes mark the repo dirty and break cache.</td>
+<td>Under <code>repo_git</code>, tracked comment changes affect code hash. Under <code>callable_source</code>, only comments in the callable source matter. Under <code>callable_module</code>, comments in the callable's module matter.</td>
 </tr>
 </tbody>
 </table>

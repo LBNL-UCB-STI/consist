@@ -4019,7 +4019,7 @@ tracker/query helpers are insufficient.</p>
 
 
 <h2 id="consist.core.tracker.Tracker.begin_run" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">begin_run</span><span class="p">(</span><span class="n">run_id</span><span class="p">,</span> <span class="n">model</span><span class="p">,</span> <span class="n">config</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">tags</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">cache_mode</span><span class="o">=</span><span class="s1">&#39;reuse&#39;</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">artifact_dir</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">allow_external_paths</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_from</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">hash_inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_schema_version</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_index</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span></code>
+            <code class="highlight language-python"><span class="n">begin_run</span><span class="p">(</span><span class="n">run_id</span><span class="p">,</span> <span class="n">model</span><span class="p">,</span> <span class="n">config</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">tags</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">cache_mode</span><span class="o">=</span><span class="s1">&#39;reuse&#39;</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">artifact_dir</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">allow_external_paths</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_from</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">hash_inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">code_identity</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">code_identity_extra_deps</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_schema_version</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_index</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span></code>
 
 <a href="#consist.core.tracker.Tracker.begin_run" class="headerlink" title="Permanent link">&para;</a></h2>
 
@@ -4241,6 +4241,40 @@ with any explicit <code>facet</code>, with explicit keys taking precedence.</p>
                 <p>Extra inputs to include in the run identity hash without logging them as run
 inputs/outputs. Useful for config bundles or auxiliary files. Each entry is
 either a path (str/Path) or a named tuple <code>(name, path)</code>.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>code_identity</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<span title="consist.types.CodeIdentityMode">CodeIdentityMode</span>]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Strategy for hashing code identity in cache keys. <code>"repo_git"</code> (default)
+uses repository git state. <code>"callable_module"</code> and <code>"callable_source"</code>
+scope identity to the callable executed by <code>tracker.run</code>.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>code_identity_extra_deps</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" title="typing.List" href="https://docs.python.org/3/library/typing.html#typing.List">List</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Extra dependency file paths to fold into callable-scoped code identity.</p>
               </div>
             </td>
             <td>
@@ -4697,7 +4731,7 @@ is folded into the run config hash and its artifacts/ingestables are applied on 
                 <code>inputs</code>
             </td>
             <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" title="typing.Mapping" href="https://docs.python.org/3/library/typing.html#typing.Mapping">Mapping</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>, <span title="consist.types.ArtifactRef">ArtifactRef</span>] | <a class="autorefs autorefs-external" title="typing.Iterable" href="https://docs.python.org/3/library/typing.html#typing.Iterable">Iterable</a>[<span title="consist.types.ArtifactRef">ArtifactRef</span>]]</code>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" title="typing.Mapping" href="https://docs.python.org/3/library/typing.html#typing.Mapping">Mapping</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>, <span title="consist.types.RunInputRef">RunInputRef</span>] | <a class="autorefs autorefs-external" title="typing.Iterable" href="https://docs.python.org/3/library/typing.html#typing.Iterable">Iterable</a>[<span title="consist.types.RunInputRef">RunInputRef</span>]]</code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -4747,7 +4781,7 @@ is folded into the run config hash and its artifacts/ingestables are applied on 
                 <code>depends_on</code>
             </td>
             <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" title="typing.List" href="https://docs.python.org/3/library/typing.html#typing.List">List</a>[<span title="consist.types.ArtifactRef">ArtifactRef</span>]]</code>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" title="typing.List" href="https://docs.python.org/3/library/typing.html#typing.List">List</a>[<span title="consist.types.RunInputRef">RunInputRef</span>]]</code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -4888,6 +4922,38 @@ is folded into the run config hash and its artifacts/ingestables are applied on 
           </tr>
           <tr class="doc-section-item">
             <td>
+                <code>phase</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Optional lifecycle phase label persisted in run metadata.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>stage</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Optional workflow stage label persisted in run metadata.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
                 <code>parent_run_id</code>
             </td>
             <td>
@@ -4977,7 +5043,8 @@ Maps artifact key to ingested table name.</p>
             <td>
               <div class="doc-md-description">
                 <p>Grouped cache controls (<code>cache_mode</code>, <code>cache_hydration</code>, <code>cache_version</code>,
-<code>cache_epoch</code>, <code>validate_cached_outputs</code>).</p>
+<code>cache_epoch</code>, <code>validate_cached_outputs</code>, <code>code_identity</code>,
+<code>code_identity_extra_deps</code>).</p>
               </div>
             </td>
             <td>
@@ -5275,7 +5342,7 @@ is folded into the run config hash and its artifacts/ingestables are applied on 
                 <code>inputs</code>
             </td>
             <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" title="typing.Mapping" href="https://docs.python.org/3/library/typing.html#typing.Mapping">Mapping</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>, <span title="consist.types.ArtifactRef">ArtifactRef</span>] | <a class="autorefs autorefs-external" title="typing.Iterable" href="https://docs.python.org/3/library/typing.html#typing.Iterable">Iterable</a>[<span title="consist.types.ArtifactRef">ArtifactRef</span>]]</code>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" title="typing.Mapping" href="https://docs.python.org/3/library/typing.html#typing.Mapping">Mapping</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>, <span title="consist.types.RunInputRef">RunInputRef</span>] | <a class="autorefs autorefs-external" title="typing.Iterable" href="https://docs.python.org/3/library/typing.html#typing.Iterable">Iterable</a>[<span title="consist.types.RunInputRef">RunInputRef</span>]]</code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -5325,7 +5392,7 @@ is folded into the run config hash and its artifacts/ingestables are applied on 
                 <code>depends_on</code>
             </td>
             <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" title="typing.List" href="https://docs.python.org/3/library/typing.html#typing.List">List</a>[<span title="consist.types.ArtifactRef">ArtifactRef</span>]]</code>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" title="typing.List" href="https://docs.python.org/3/library/typing.html#typing.List">List</a>[<span title="consist.types.RunInputRef">RunInputRef</span>]]</code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -7138,6 +7205,39 @@ from each file's extension individually.</p>
           </tr>
           <tr class="doc-section-item">
             <td>
+                <code>reuse_if_unchanged</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/functions.html#bool">bool</a></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>If True and logging outputs, reuse prior artifact rows when content hashes match.</p>
+              </div>
+            </td>
+            <td>
+                  <code>False</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>reuse_scope</code>
+            </td>
+            <td>
+                  <code>(<span title="same_uri">same_uri</span>, <span title="any_uri">any_uri</span>)</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
+while "any_uri" allows reuse across different URIs with the same hash.</p>
+              </div>
+            </td>
+            <td>
+                  <code>&#34;same_uri&#34;</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
                 <code>**shared_meta</code>
             </td>
             <td>
@@ -7545,6 +7645,39 @@ the path on disk.</p>
             </td>
             <td>
                   <code>False</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>reuse_if_unchanged</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/functions.html#bool">bool</a></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>If True, reuse a prior output artifact row when the content hash matches.</p>
+              </div>
+            </td>
+            <td>
+                  <code>False</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>reuse_scope</code>
+            </td>
+            <td>
+                  <code>(<span title="same_uri">same_uri</span>, <span title="any_uri">any_uri</span>)</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
+while "any_uri" allows reuse across different URIs with the same hash.</p>
+              </div>
+            </td>
+            <td>
+                  <code>&#34;same_uri&#34;</code>
             </td>
           </tr>
           <tr class="doc-section-item">

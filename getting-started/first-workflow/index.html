@@ -2280,7 +2280,7 @@
 </span><span id="__span-2-44"><a id="__codelineno-2-44" name="__codelineno-2-44" href="#__codelineno-2-44"></a>    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Clean: </span><span class="si">{</span><span class="n">clean_result</span><span class="o">.</span><span class="n">run</span><span class="o">.</span><span class="n">status</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
 </span><span id="__span-2-45"><a id="__codelineno-2-45" name="__codelineno-2-45" href="#__codelineno-2-45"></a>
 </span><span id="__span-2-46"><a id="__codelineno-2-46" name="__codelineno-2-46" href="#__codelineno-2-46"></a>    <span class="c1"># Step 2: Summarize (consumes output from Step 1)</span>
-</span><span id="__span-2-47"><a id="__codelineno-2-47" name="__codelineno-2-47" href="#__codelineno-2-47"></a>    <span class="n">cleaned_artifact</span> <span class="o">=</span> <span class="n">clean_result</span><span class="o">.</span><span class="n">outputs</span><span class="p">[</span><span class="s2">&quot;cleaned&quot;</span><span class="p">]</span>  <span class="c1"># (7)!</span>
+</span><span id="__span-2-47"><a id="__codelineno-2-47" name="__codelineno-2-47" href="#__codelineno-2-47"></a>    <span class="n">cleaned_artifact</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">ref</span><span class="p">(</span><span class="n">clean_result</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;cleaned&quot;</span><span class="p">)</span>  <span class="c1"># (7)!</span>
 </span><span id="__span-2-48"><a id="__codelineno-2-48" name="__codelineno-2-48" href="#__codelineno-2-48"></a>    <span class="n">summary_result</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
 </span><span id="__span-2-49"><a id="__codelineno-2-49" name="__codelineno-2-49" href="#__codelineno-2-49"></a>        <span class="n">fn</span><span class="o">=</span><span class="n">summarize</span><span class="p">,</span>
 </span><span id="__span-2-50"><a id="__codelineno-2-50" name="__codelineno-2-50" href="#__codelineno-2-50"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;summarize&quot;</span><span class="p">,</span>
@@ -2299,9 +2299,12 @@
 <li>Artifact parameters are auto-loaded when input keys match parameter names.</li>
 <li><code>config</code> is hashed into the run's signature. Changing <code>threshold</code> causes a cache miss.</li>
 <li><code>inputs</code> lists files or artifacts whose content hashes are included in the signature.</li>
-<li>Access outputs by key from the result object. Each output is a full <code>Artifact</code> with path, hash, and metadata.</li>
-<li>Passing an artifact as input creates lineage: the summarize run depends on the clean run.</li>
+<li>Use <code>consist.ref(...)</code> to select and link the upstream output artifact explicitly.</li>
+<li>Passing that linked artifact as input creates lineage: the summarize run depends on the clean run.</li>
 </ol>
+<p><strong>Best practice:</strong> Keep step-to-step links explicit with
+<code>consist.ref(run_result, key="...")</code>. Passing a raw <code>RunResult</code> is only clear
+when there is exactly one output.</p>
 <h2 id="run-and-observe-caching">Run and Observe Caching<a class="headerlink" href="#run-and-observe-caching" title="Permanent link">&para;</a></h2>
 <p>Execute the pipeline:</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>python<span class="w"> </span>workflow.py
