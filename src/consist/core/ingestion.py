@@ -142,6 +142,9 @@ def ingest_artifact(
         db_path=tracker.db_path,
         data_iterable=data_to_pass,
         schema_model=schema,
+        lock_retries=tracker._dlt_lock_retries,
+        lock_base_sleep_seconds=tracker._dlt_lock_base_sleep_seconds,
+        lock_max_sleep_seconds=tracker._dlt_lock_max_sleep_seconds,
     )
 
     if tracker.db:

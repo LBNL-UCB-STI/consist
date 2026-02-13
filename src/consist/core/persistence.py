@@ -48,6 +48,21 @@ if TYPE_CHECKING:
 
 
 MAX_JSON_DEPTH = 50
+_RETRYABLE_DB_ERROR_MARKERS = (
+    "database is locked",
+    "database is busy",
+    "io error",
+    "lock",
+    "already active",
+    "already open",
+    "another connection",
+    "another process",
+)
+
+
+def _is_retryable_db_error(message: str) -> bool:
+    normalized = message.lower()
+    return any(marker in normalized for marker in _RETRYABLE_DB_ERROR_MARKERS)
 
 
 def _assert_json_depth(obj: Any, *, max_depth: int) -> None:
@@ -85,8 +100,18 @@ class DatabaseManager:
     4. CRUD operations for Runs and Artifacts.
     """
 
-    def __init__(self, db_path: str):
+    def __init__(
+        self,
+        db_path: str,
+        *,
+        lock_retries: int = 20,
+        lock_base_sleep_seconds: float = 0.1,
+        lock_max_sleep_seconds: float = 2.0,
+    ):
         self.db_path = db_path
+        self._lock_retries = max(1, int(lock_retries))
+        self._lock_base_sleep_seconds = max(0.0, float(lock_base_sleep_seconds))
+        self._lock_max_sleep_seconds = max(0.0, float(lock_max_sleep_seconds))
         # Using NullPool ensures the file lock is released when the session closes
         self.engine = create_engine(f"duckdb:///{db_path}", poolclass=NullPool)
         self._session_ctx: contextvars.ContextVar[Session | None] = (
@@ -274,19 +299,26 @@ class DatabaseManager:
         self,
         func: Callable,
         operation_name: str = "db_op",
-        retries: int = 20,
+        retries: Optional[int] = None,
         **kwargs,  # <--- Add this to absorb extra arguments
     ) -> Any:
         """Executes a function with exponential backoff for DB locks."""
-        for i in range(retries):
+        default_retries = getattr(self, "_lock_retries", 20)
+        base_sleep_seconds = getattr(self, "_lock_base_sleep_seconds", 0.1)
+        max_sleep_seconds = getattr(self, "_lock_max_sleep_seconds", 2.0)
+        retry_count = default_retries if retries is None else max(1, int(retries))
+        for i in range(retry_count):
             try:
                 return func()
             except (OperationalError, DatabaseError) as e:
-                msg = str(e)
-                if "lock" in msg or "IO Error" in msg or "database is locked" in msg:
-                    if i == retries - 1:
+                if _is_retryable_db_error(str(e)):
+                    if i == retry_count - 1:
                         raise e
-                    sleep_time = min((0.1 * (1.5**i)) + random.uniform(0.05, 0.2), 2.0)
+                    sleep_time = min(
+                        (base_sleep_seconds * (1.5**i))
+                        + random.uniform(0.05, 0.2),
+                        max_sleep_seconds,
+                    )
                     time.sleep(sleep_time)
                 else:
                     raise e

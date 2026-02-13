@@ -60,6 +60,28 @@ def test_execute_with_retry_raises_on_constraint_operational_error() -> None:
     assert len(calls) == 1
 
 
+def test_execute_with_retry_retries_on_active_connection_lock(monkeypatch) -> None:
+    """
+    execute_with_retry should retry connection-lock errors from DuckDB.
+    """
+    db = DatabaseManager.__new__(DatabaseManager)
+    calls: List[int] = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) < 3:
+            raise OperationalError(
+                "stmt",
+                {},
+                Exception("IO Error: Could not set lock on file: conflicting lock"),
+            )
+        return "ok"
+
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    assert db.execute_with_retry(flaky, retries=3) == "ok"
+    assert len(calls) == 3
+
+
 def test_insert_run_config_kv_bulk_warns_on_duplicate_keys(
     tmp_path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -92,3 +114,15 @@ def test_insert_run_config_kv_bulk_warns_on_duplicate_keys(
         "Failed to insert run config kv rows" in record.message
         for record in caplog.records
     )
+
+
+def test_database_manager_uses_configured_retry_defaults(tmp_path) -> None:
+    db = DatabaseManager(
+        str(tmp_path / "provenance_retry_defaults.db"),
+        lock_retries=7,
+        lock_base_sleep_seconds=0.3,
+        lock_max_sleep_seconds=1.1,
+    )
+    assert db._lock_retries == 7
+    assert db._lock_base_sleep_seconds == 0.3
+    assert db._lock_max_sleep_seconds == 1.1
