@@ -185,11 +185,36 @@ result = consist.run(
    )
    ```
 
-3. **Increase lock timeout:**
-   ```python
-   import duckdb
-   conn = duckdb.connect("provenance.duckdb", timeout=30)
+3. **Tune Consist retry/backoff settings** (best for shared HPC DB files):
+
+   ```bash
+   # dlt ingest lock retries
+   export CONSIST_DLT_LOCK_RETRIES=40
+   export CONSIST_DLT_LOCK_BASE_SLEEP_SECONDS=0.2
+   export CONSIST_DLT_LOCK_MAX_SLEEP_SECONDS=5.0
+
+   # run/artifact/config sync lock retries
+   export CONSIST_DB_LOCK_RETRIES=40
+   export CONSIST_DB_LOCK_BASE_SLEEP_SECONDS=0.2
+   export CONSIST_DB_LOCK_MAX_SLEEP_SECONDS=5.0
    ```
+
+   These settings apply process-wide for each `Tracker` instance.
+
+   Defaults:
+   - `CONSIST_DLT_LOCK_RETRIES=20`
+   - `CONSIST_DLT_LOCK_BASE_SLEEP_SECONDS=0.1`
+   - `CONSIST_DLT_LOCK_MAX_SLEEP_SECONDS=2.0`
+   - `CONSIST_DB_LOCK_RETRIES=20`
+   - `CONSIST_DB_LOCK_BASE_SLEEP_SECONDS=0.1`
+   - `CONSIST_DB_LOCK_MAX_SLEEP_SECONDS=2.0`
+
+4. **HPC starting profile** (multiple concurrent writers):
+   - Start with retries at `40`.
+   - Start with base sleep at `0.2` seconds.
+   - Start with max sleep at `5.0` seconds.
+   - If lock failures persist, increase retries first, then max sleep.
+   - If runs feel too slow to fail when lock is permanent, lower retries.
 
 ---
 

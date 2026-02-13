@@ -346,10 +346,21 @@ class Tracker:
             project_root=project_root, hashing_strategy=hashing_strategy
         )
         self.settings = ConsistSettings.from_env()
+        self._dlt_lock_retries = self.settings.dlt_lock_retries
+        self._dlt_lock_base_sleep_seconds = self.settings.dlt_lock_base_sleep_seconds
+        self._dlt_lock_max_sleep_seconds = self.settings.dlt_lock_max_sleep_seconds
+        self._db_lock_retries = self.settings.db_lock_retries
+        self._db_lock_base_sleep_seconds = self.settings.db_lock_base_sleep_seconds
+        self._db_lock_max_sleep_seconds = self.settings.db_lock_max_sleep_seconds
 
         self.db = None
         if self.db_path:
-            self.db = DatabaseManager(self.db_path)
+            self.db = DatabaseManager(
+                self.db_path,
+                lock_retries=self._db_lock_retries,
+                lock_base_sleep_seconds=self._db_lock_base_sleep_seconds,
+                lock_max_sleep_seconds=self._db_lock_max_sleep_seconds,
+            )
         self.persistence = ProvenanceWriter(self)
 
         self.artifacts = ArtifactManager(self)

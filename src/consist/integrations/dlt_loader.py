@@ -23,6 +23,8 @@ Key functionalities include:
 
 import importlib
 import logging
+import random
+import time
 import uuid
 import pandas as pd
 from typing import (
@@ -80,6 +82,29 @@ try:
     geopandas = importlib.import_module("geopandas")
 except ImportError:
     geopandas = None
+
+
+_RETRYABLE_DUCKDB_LOCK_MARKERS = (
+    "database is locked",
+    "could not set lock on file",
+    "conflicting lock is held",
+    "io error",
+)
+
+
+def _is_retryable_duckdb_lock_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in _RETRYABLE_DUCKDB_LOCK_MARKERS)
+
+
+def _retry_sleep(
+    attempt: int, *, base_sleep_seconds: float, max_sleep_seconds: float
+) -> None:
+    delay = min(
+        (base_sleep_seconds * (1.5**attempt)) + random.uniform(0.05, 0.2),
+        max_sleep_seconds,
+    )
+    time.sleep(delay)
 
 
 def _json_dumps(value: Dict[str, Any]) -> str:
@@ -459,6 +484,9 @@ def ingest_artifact(
     db_path: str,
     data_iterable: Optional[Union[Iterable[Any], str, pd.DataFrame]] = None,
     schema_model: Optional[Type[SQLModel]] = None,
+    lock_retries: int = 20,
+    lock_base_sleep_seconds: float = 0.1,
+    lock_max_sleep_seconds: float = 2.0,
 ) -> Tuple[Any, str]:
     """
     Ingests artifact data into a DuckDB database using the `dlt` (Data Load Tool) library.
@@ -691,8 +719,37 @@ def ingest_artifact(
         schema_contract=schema_contract,
     )
 
-    # 6. Run
-    info = pipeline.run(resource)
+    # 6. Run with retries for transient DuckDB file lock conflicts.
+    # If load fails after extraction/normalization, retry pipeline.load() so we
+    # do not depend on replaying the original input iterator.
+    try:
+        info = pipeline.run(resource)
+    except Exception as exc:
+        if not _is_retryable_duckdb_lock_error(exc):
+            raise
+
+        retries = max(1, int(lock_retries))
+        for attempt in range(retries):
+            if attempt == retries - 1:
+                raise exc
+            logging.warning(
+                "[Consist][dlt] Load failed due to DuckDB lock (attempt %d/%d): %s",
+                attempt + 1,
+                retries,
+                exc,
+            )
+            _retry_sleep(
+                attempt,
+                base_sleep_seconds=max(0.0, float(lock_base_sleep_seconds)),
+                max_sleep_seconds=max(0.0, float(lock_max_sleep_seconds)),
+            )
+            try:
+                info = pipeline.load()
+                break
+            except Exception as retry_exc:
+                if not _is_retryable_duckdb_lock_error(retry_exc):
+                    raise
+                exc = retry_exc
 
     real_table_name = pipeline.default_schema.naming.normalize_table_identifier(
         str(desired_table_name)
