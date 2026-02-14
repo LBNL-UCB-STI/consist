@@ -12,6 +12,7 @@ in-memory operations with Pandas/Polars.
 """
 
 import logging
+import importlib
 from pathlib import Path
 
 import pytest
@@ -28,12 +29,12 @@ from consist.core.tracker import Tracker
 
 # Try imports for competitors/profiling
 try:
-    import polars as pl
+    pl = importlib.import_module("polars")
 except ImportError:
     pl = None
 
 try:
-    import psutil
+    psutil = importlib.import_module("psutil")
 except ImportError:
     psutil = None
 
@@ -258,8 +259,26 @@ def test_comparative_join_benchmark(tmp_path: Path):
     with Profiler("Ingestion Cost"):
         # We pass the paths directly to avoid loading into Python RAM
         # Tracker sees the path string and streams it via Arrow
-        tracker.ingest(artifact=art_a, data=str(path_a), run=Run(id="run_a", model="x"))
-        tracker.ingest(artifact=art_b, data=str(path_b), run=Run(id="run_b", model="x"))
+        tracker.ingest(
+            artifact=art_a,
+            data=str(path_a),
+            run=Run(
+                id="run_a",
+                model_name="x",
+                config_hash=None,
+                git_hash=None,
+            ),
+        )
+        tracker.ingest(
+            artifact=art_b,
+            data=str(path_b),
+            run=Run(
+                id="run_b",
+                model_name="x",
+                config_hash=None,
+                git_hash=None,
+            ),
+        )
 
     # 4b. Measure Query Cost
     with Profiler("Consist (Hot)"):

@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+import uuid
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlmodel import Session
 from typer.testing import CliRunner
 
 from consist.cli import app
+from consist.models.artifact import Artifact
+from consist.models.run import Run
 
 
 runner = CliRunner()
@@ -46,6 +51,28 @@ def test_search_escaped_wildcard_chars_reports_no_results(cli_runner) -> None:
     assert f"No runs found matching '{query}'" in result.stdout
 
 
+def test_search_matches_tags(cli_runner, tracker) -> None:
+    """`search` should match runs by tags, not just id/model/scenario."""
+    run = Run(
+        id="run_tagged",
+        model_name="model_alpha",
+        config_hash=None,
+        git_hash=None,
+        status="completed",
+        tags=["tag_only_term"],
+        created_at=datetime(2025, 1, 1, 12, 0),
+        started_at=datetime(2025, 1, 1, 12, 0),
+    )
+    with Session(tracker.engine) as session:
+        session.add(run)
+        session.commit()
+
+    result = cli_runner.invoke(app, ["search", "tag_only_term"])
+
+    assert result.exit_code == 0
+    assert "run_tagged" in result.stdout
+
+
 def test_validate_invalid_env_batch_size_falls_back_to_default(
     monkeypatch: pytest.MonkeyPatch,
     cli_runner,
@@ -69,6 +96,60 @@ def test_validate_invalid_env_batch_size_falls_back_to_default(
     assert result.exit_code == 0
     assert called["batch_size"] == 1000
     assert "All artifacts validated successfully" in result.stdout
+
+
+def test_validate_fix_persists_missing_marker(cli_runner, tracker, tmp_path) -> None:
+    """`validate --fix` should persist a missing marker on missing artifacts."""
+    missing_path = tmp_path / "missing.txt"
+    artifact_id = uuid.uuid4()
+    artifact = Artifact(
+        id=artifact_id,
+        key="missing_artifact",
+        container_uri=str(missing_path),
+        driver="txt",
+        run_id="run_missing",
+        hash="hash_missing",
+    )
+    with Session(tracker.engine) as session:
+        session.add(artifact)
+        session.commit()
+
+    result = cli_runner.invoke(app, ["validate", "--fix"])
+
+    assert result.exit_code == 0
+    with Session(tracker.engine) as session:
+        refreshed = session.get(Artifact, artifact_id)
+        assert refreshed is not None
+        assert refreshed.meta.get("missing_on_disk") is True
+
+
+def test_validate_fix_noop_when_no_missing(cli_runner, tracker, tmp_path) -> None:
+    """`validate --fix` should be a no-op when all artifacts exist."""
+    present_path = tmp_path / "present.txt"
+    present_path.write_text("ok", encoding="utf-8")
+    artifact_id = uuid.uuid4()
+    artifact = Artifact(
+        id=artifact_id,
+        key="present_artifact",
+        container_uri=str(present_path),
+        driver="txt",
+        run_id="run_present",
+        hash="hash_present",
+        meta={"existing": "value"},
+    )
+    with Session(tracker.engine) as session:
+        session.add(artifact)
+        session.commit()
+
+    result = cli_runner.invoke(app, ["validate", "--fix"])
+
+    assert result.exit_code == 0
+    assert "All artifacts validated successfully" in result.stdout
+    with Session(tracker.engine) as session:
+        refreshed = session.get(Artifact, artifact_id)
+        assert refreshed is not None
+        assert refreshed.meta.get("existing") == "value"
+        assert "missing_on_disk" not in refreshed.meta
 
 
 def test_schema_apply_fks_errors_when_tracker_db_missing() -> None:

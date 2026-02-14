@@ -22,10 +22,12 @@ if __package__ is None and __spec__ is None:
 
 import cmd
 from contextlib import contextmanager
+import importlib
 import shlex
 import json
 import uuid
 from pathlib import Path
+from types import ModuleType
 from typing import (
     Any,
     Dict,
@@ -60,6 +62,12 @@ if TYPE_CHECKING:
     from consist.models.artifact import Artifact
     from consist.models.run import Run
 
+_READLINE: ModuleType | None = None
+try:
+    _READLINE = importlib.import_module("readline")
+except ImportError:  # pragma: no cover - platform dependent
+    pass
+
 app = typer.Typer(rich_markup_mode="markdown")
 schema_app = typer.Typer(rich_markup_mode="markdown")
 views_app = typer.Typer(rich_markup_mode="markdown")
@@ -71,14 +79,14 @@ app.add_typer(views_app, name="views")
 MAX_CLI_LIMIT = 1_000_000
 MAX_PREVIEW_ROWS = 1_000_000
 MAX_SEARCH_QUERY_LENGTH = 256
+LIKE_ESCAPE_CHAR = "!"
 
 
 def _optional_xarray() -> Any | None:
     try:
-        import xarray as xr
+        return importlib.import_module("xarray")
     except ImportError:
         return None
-    return xr
 
 
 def output_json(data: Any) -> None:
@@ -101,9 +109,9 @@ def _parse_bounded_int(value: str, *, name: str, minimum: int, maximum: int) -> 
 
 
 def _escape_like_pattern(value: str) -> str:
-    value = value.replace("\\", "\\\\")
-    value = value.replace("%", "\\%")
-    value = value.replace("_", "\\_")
+    value = value.replace(LIKE_ESCAPE_CHAR, LIKE_ESCAPE_CHAR * 2)
+    value = value.replace("%", f"{LIKE_ESCAPE_CHAR}%")
+    value = value.replace("_", f"{LIKE_ESCAPE_CHAR}_")
     return value
 
 
@@ -289,9 +297,7 @@ def schema_export(
         "--prefer-source",
         help="Preference hint for when user_provided schema does not exist: 'file' (original CSV/Parquet dtypes) or 'duckdb' (post-ingestion schema). User-provided schemas are ALWAYS preferred if they exist and cannot be overridden.",
     ),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
 ) -> None:
     """Export a captured artifact schema as an editable SQLModel stub.
 
@@ -356,9 +362,7 @@ def schema_export(
 
 @schema_app.command("apply-fks")
 def schema_apply_fks(
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
 ) -> None:
     """Best-effort application of physical foreign key constraints."""
     tracker = get_tracker(db_path)
@@ -437,8 +441,8 @@ def views_create(
         "--schema-compatible",
         help="Include subset/superset schema variants by field names.",
     ),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
 ) -> None:
     """Create a selector-driven grouped hybrid view across many artifacts."""
@@ -753,9 +757,7 @@ def search(
     query: str = typer.Argument(
         ..., help="Search term (searches run IDs, model names, tags)."
     ),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
     limit: int = typer.Option(20, help="Maximum results."),
 ) -> None:
     """Search for runs by ID, model name, or tags (query length is capped)."""
@@ -775,9 +777,14 @@ def search(
             select(Run)
             .where(
                 or_(
-                    col(Run.id).contains(escaped_query, escape="\\"),
-                    col(Run.model_name).contains(escaped_query, escape="\\"),
-                    col(Run.parent_run_id).contains(escaped_query, escape="\\")
+                    col(Run.id).contains(escaped_query, escape=LIKE_ESCAPE_CHAR),
+                    col(Run.model_name).contains(
+                        escaped_query, escape=LIKE_ESCAPE_CHAR
+                    ),
+                    col(Run.tags).contains(escaped_query, escape=LIKE_ESCAPE_CHAR),
+                    col(Run.parent_run_id).contains(
+                        escaped_query, escape=LIKE_ESCAPE_CHAR
+                    )
                     if escaped_query
                     else False,
                 )
@@ -814,18 +821,18 @@ def search(
 
 @app.command()
 def validate(
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
     fix: bool = typer.Option(
         False, help="Attempt to fix issues (mark artifacts as missing)."
     ),
 ) -> None:
     """Check that artifacts referenced in DB actually exist on disk."""
     tracker = get_tracker(db_path)
+    from consist.models.artifact import Artifact
 
     with _tracker_session(tracker) as session:
         missing = []
+        missing_ids: List[uuid.UUID] = []
         batch_size = 1000
         if env_batch_size := os.getenv("CONSIST_VALIDATE_BATCH_SIZE"):
             try:
@@ -833,17 +840,34 @@ def validate(
             except ValueError:
                 batch_size = 1000
 
-        for _, key, uri, run_id in _iter_artifact_rows(session, batch_size=batch_size):
+        for artifact_id, key, uri, run_id in _iter_artifact_rows(
+            session, batch_size=batch_size
+        ):
             try:
                 abs_path = tracker.resolve_uri(uri)
                 if not Path(abs_path).exists():
                     missing.append((key, uri, run_id))
+                    missing_ids.append(artifact_id)
             except Exception:
                 missing.append((key, uri, run_id))
+                missing_ids.append(artifact_id)
 
         if not missing:
             console.print("[green]✓ All artifacts validated successfully[/green]")
             return
+
+        if fix and missing_ids:
+            updates = (
+                select(Artifact)
+                .where(col(Artifact.id).in_(set(missing_ids)))
+                .order_by(col(Artifact.created_at))
+            )
+            for artifact in session.exec(cast(Any, updates)).all():
+                current_meta = dict(artifact.meta or {})
+                current_meta["missing_on_disk"] = True
+                artifact.meta = current_meta
+                session.add(artifact)
+            session.commit()
 
         console.print(f"[yellow]⚠ Found {len(missing)} missing artifacts:[/yellow]\n")
 
@@ -863,9 +887,7 @@ def validate(
 
 @app.command()
 def scenarios(
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
     limit: int = typer.Option(20, help="Maximum scenarios to display."),
 ) -> None:
     """List all scenarios and their run counts."""
@@ -876,9 +898,7 @@ def scenarios(
 @app.command()
 def scenario(
     scenario_id: str = typer.Argument(..., help="The scenario ID to inspect."),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
 ) -> None:
     """Show all runs in a scenario."""
     tracker = get_tracker(db_path)
@@ -917,8 +937,8 @@ def scenario(
 
 @app.command()
 def runs(
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
     limit: int = typer.Option(10, help="Maximum number of recent runs to display."),
     json_output: bool = typer.Option(
@@ -1001,8 +1021,8 @@ def artifacts(
         "--limit",
         help="Maximum number of artifact query results.",
     ),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
 ) -> None:
     """Display run artifacts or query artifacts by indexed facet parameters."""
@@ -1155,8 +1175,8 @@ def lineage(
     artifact_key: str = typer.Argument(
         ..., help="The key or ID of the artifact to trace."
     ),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
 ) -> None:
     """Traces and displays the full lineage of an artifact."""
@@ -1184,8 +1204,8 @@ def lineage(
 
 @app.command()
 def summary(
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
 ) -> None:
     """Displays a high-level summary of the provenance database."""
@@ -1203,8 +1223,8 @@ def preview(
     artifact_key: str = typer.Argument(
         ..., help="The key or ID of the artifact to preview."
     ),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
     n_rows: int = typer.Option(5, "--rows", "-n", help="Number of rows to display."),
     trust_db: bool = typer.Option(
@@ -1325,16 +1345,178 @@ class ConsistShell(cmd.Cmd):
 
     intro = "Welcome to Consist Shell. Type help or ? to list commands.\n"
     prompt = "(consist) "
+    _RUN_COMPLETION_FLAGS: Tuple[str, ...] = ("--limit", "--model", "--status", "--tag")
+    _PREVIEW_COMPLETION_FLAGS: Tuple[str, ...] = ("--rows", "-n")
+    _SCENARIOS_COMPLETION_FLAGS: Tuple[str, ...] = ("--limit",)
+    _SCHEMA_STUB_COMPLETION_FLAGS: Tuple[str, ...] = (
+        "--class-name",
+        "--table-name",
+        "--include-system-cols",
+        "--no-stats-comments",
+        "--concrete",
+    )
+    _PICKER_LIMIT = 20
 
     def __init__(self, tracker: Tracker, *, trust_db: bool = False):
         super().__init__()
         self.tracker = tracker
         self.trust_db = trust_db
+        self._history_path = Path.home() / ".consist" / "shell_history"
+        self._history_saved = False
+        self._load_history()
+
+    def _safe_split(self, value: str) -> List[str]:
+        try:
+            return shlex.split(value)
+        except ValueError:
+            return value.split()
+
+    @staticmethod
+    def _is_tty() -> bool:
+        stdin = getattr(sys.stdin, "isatty", None)
+        stdout = getattr(sys.stdout, "isatty", None)
+        return bool(callable(stdin) and callable(stdout) and stdin() and stdout())
+
+    @staticmethod
+    def _complete_choices(text: str, options: Iterable[str]) -> List[str]:
+        return [option for option in options if option.startswith(text)]
+
+    def _is_first_argument(self, line: str, begidx: int) -> bool:
+        return len(self._safe_split(line[:begidx])) <= 1
+
+    def _recent_run_ids(self, limit: int = _PICKER_LIMIT) -> List[str]:
+        try:
+            from consist.models.run import Run
+
+            with _tracker_session(self.tracker) as session:
+                statement = (
+                    select(Run.id).order_by(col(Run.created_at).desc()).limit(limit)
+                )
+                return [
+                    str(run_id) for run_id in session.exec(statement).all() if run_id
+                ]
+        except Exception:
+            return []
+
+    def _recent_artifact_keys(self, limit: int = _PICKER_LIMIT) -> List[str]:
+        try:
+            from consist.models.artifact import Artifact
+
+            with _tracker_session(self.tracker) as session:
+                statement = (
+                    select(Artifact.key)
+                    .order_by(col(Artifact.created_at).desc())
+                    .limit(limit)
+                )
+                seen: set[str] = set()
+                keys: List[str] = []
+                for key in session.exec(statement).all():
+                    if isinstance(key, str) and key and key not in seen:
+                        seen.add(key)
+                        keys.append(key)
+                return keys
+        except Exception:
+            return []
+
+    def _load_history(self) -> None:
+        if _READLINE is None:
+            return
+        try:
+            if self._history_path.exists():
+                _READLINE.read_history_file(str(self._history_path))
+        except Exception:
+            return
+
+    def _save_history_once(self) -> None:
+        if self._history_saved or _READLINE is None:
+            return
+        try:
+            self._history_path.parent.mkdir(parents=True, exist_ok=True)
+            _READLINE.write_history_file(str(self._history_path))
+        except Exception:
+            return
+        self._history_saved = True
+
+    @staticmethod
+    def _select_from_list(
+        title: str,
+        choices: List[str],
+        *,
+        missing_message: str,
+        prompt: str,
+    ) -> Optional[str]:
+        if not choices:
+            console.print(missing_message)
+            return None
+
+        console.print(title)
+        for index, value in enumerate(choices, start=1):
+            console.print(f"  {index}. {value}")
+
+        while True:
+            raw_choice = input(prompt).strip()
+            if not raw_choice:
+                return None
+            try:
+                selected_index = int(raw_choice)
+            except ValueError:
+                console.print(
+                    "[red]Error: enter a number or press Enter to cancel[/red]"
+                )
+                continue
+            if 1 <= selected_index <= len(choices):
+                return choices[selected_index - 1]
+            console.print(
+                f"[red]Error: selection must be between 1 and {len(choices)}[/red]"
+            )
+
+    def _resolve_run_id(self, arg: str, *, command_name: str) -> Optional[str]:
+        run_id = arg.strip()
+        if run_id:
+            return run_id
+        if not self._is_tty():
+            console.print("[red]Error: run_id required[/red]")
+            return None
+        return self._select_from_list(
+            f"Recent runs for [cyan]{command_name}[/cyan]:",
+            self._recent_run_ids(),
+            missing_message="[yellow]No runs available.[/yellow]",
+            prompt="Choose run number (Enter to cancel): ",
+        )
+
+    def _resolve_artifact_key(self, args: List[str]) -> Optional[str]:
+        if args:
+            return args[0]
+        if not self._is_tty():
+            console.print("[red]Error: artifact_key required[/red]")
+            return None
+        return self._select_from_list(
+            "Recent artifacts for [cyan]preview[/cyan]:",
+            self._recent_artifact_keys(),
+            missing_message="[yellow]No artifacts available.[/yellow]",
+            prompt="Choose artifact number (Enter to cancel): ",
+        )
+
+    def do_ls(self, arg: str) -> None:
+        """Alias for runs/artifacts. Usage: ls [<run_id>]"""
+        parts = self._safe_split(arg)
+        if not parts or parts[0].startswith("-"):
+            self.do_runs(arg)
+            return
+        self.do_artifacts(arg)
+
+    def do_cat(self, arg: str) -> None:
+        """Alias for preview. Usage: cat <artifact_key>"""
+        self.do_preview(arg)
+
+    def do_q(self, arg: str) -> bool:
+        """Alias for quit. Usage: q"""
+        return self.do_quit(arg)
 
     def do_runs(self, arg: str) -> None:
         """List recent runs. Usage: runs [--limit N] [--model NAME] [--status STATUS] [--tag TAG]"""
         try:
-            args = shlex.split(arg)
+            args = self._safe_split(arg)
             limit = 10
             model_name = None
             status = None
@@ -1370,14 +1552,14 @@ class ConsistShell(cmd.Cmd):
 
     def do_show(self, arg: str) -> None:
         """Show details for a run. Usage: show <run_id>"""
-        if not arg.strip():
-            console.print("[red]Error: run_id required[/red]")
+        run_id = self._resolve_run_id(arg, command_name="show")
+        if run_id is None:
             return
 
         try:
-            run = self.tracker.get_run(arg.strip())
+            run = self.tracker.get_run(run_id)
             if not run:
-                console.print(f"[red]Run '{arg.strip()}' not found.[/red]")
+                console.print(f"[red]Run '{run_id}' not found.[/red]")
                 return
             _render_run_details(run)
         except Exception as exc:
@@ -1385,30 +1567,29 @@ class ConsistShell(cmd.Cmd):
 
     def do_artifacts(self, arg: str) -> None:
         """Show artifacts for a run. Usage: artifacts <run_id>"""
-        if not arg.strip():
-            console.print("[red]Error: run_id required[/red]")
+        run_id = self._resolve_run_id(arg, command_name="artifacts")
+        if run_id is None:
             return
 
         try:
-            run = self.tracker.get_run(arg.strip())
+            run = self.tracker.get_run(run_id)
             if not run:
-                console.print(f"[red]Run '{arg.strip()}' not found.[/red]")
+                console.print(f"[red]Run '{run_id}' not found.[/red]")
                 return
-            _render_artifacts_table(self.tracker, arg.strip())
+            _render_artifacts_table(self.tracker, run_id)
         except Exception as exc:
             console.print(f"[red]Error: {exc}[/red]")
 
     def do_preview(self, arg: str) -> None:
         """Preview an artifact. Usage: preview <artifact_key> [--rows N]"""
         try:
-            args = shlex.split(arg)
-            if not args:
-                console.print("[red]Error: artifact_key required[/red]")
+            args = self._safe_split(arg)
+            artifact_key = self._resolve_artifact_key(args)
+            if artifact_key is None:
                 return
 
-            artifact_key = args[0]
             n_rows = 5
-            i = 1
+            i = 1 if args else 0
             while i < len(args):
                 if args[i] in {"--rows", "-n"} and i + 1 < len(args):
                     n_rows = _parse_bounded_int(
@@ -1483,7 +1664,7 @@ class ConsistShell(cmd.Cmd):
     def do_schema_profile(self, arg: str) -> None:
         """Show artifact schema. Usage: schema_profile <artifact_key>"""
         try:
-            args = shlex.split(arg)
+            args = self._safe_split(arg)
             if not args:
                 console.print("[red]Error: artifact_key required[/red]")
                 return
@@ -1566,7 +1747,7 @@ class ConsistShell(cmd.Cmd):
     def do_schema_stub(self, arg: str) -> None:
         """Export SQLModel schema stub. Usage: schema_stub <artifact_key> [--class-name NAME] [--table-name NAME] [--include-system-cols] [--no-stats-comments] [--concrete]"""
         try:
-            args = shlex.split(arg)
+            args = self._safe_split(arg)
             if not args:
                 console.print("[red]Error: artifact_key required[/red]")
                 return
@@ -1630,7 +1811,7 @@ class ConsistShell(cmd.Cmd):
 
     def do_scenarios(self, arg: str) -> None:
         """List scenarios. Usage: scenarios [--limit N]"""
-        args = shlex.split(arg)
+        args = self._safe_split(arg)
         limit = 20
 
         if args:
@@ -1660,6 +1841,7 @@ class ConsistShell(cmd.Cmd):
 
     def do_exit(self, arg: str) -> bool:
         """Exit the shell."""
+        self._save_history_once()
         console.print("Goodbye!")
         return True
 
@@ -1672,6 +1854,77 @@ class ConsistShell(cmd.Cmd):
         print()
         return self.do_exit(arg)
 
+    def complete_runs(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del line, begidx, endidx
+        return self._complete_choices(text, self._RUN_COMPLETION_FLAGS)
+
+    def complete_scenarios(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del line, begidx, endidx
+        return self._complete_choices(text, self._SCENARIOS_COMPLETION_FLAGS)
+
+    def complete_show(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del endidx
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._recent_run_ids())
+        return []
+
+    def complete_artifacts(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del endidx
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._recent_run_ids())
+        return []
+
+    def complete_preview(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del endidx
+        if text.startswith("-"):
+            return self._complete_choices(text, self._PREVIEW_COMPLETION_FLAGS)
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._recent_artifact_keys())
+        return []
+
+    def complete_schema_profile(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del endidx
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._recent_artifact_keys())
+        return []
+
+    def complete_schema_stub(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del endidx
+        if text.startswith("-"):
+            return self._complete_choices(text, self._SCHEMA_STUB_COMPLETION_FLAGS)
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._recent_artifact_keys())
+        return []
+
+    def complete_ls(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+        del endidx
+        if text.startswith("-"):
+            return self._complete_choices(text, self._RUN_COMPLETION_FLAGS)
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._recent_run_ids())
+        return []
+
+    def complete_cat(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+        return self.complete_preview(text, line, begidx, endidx)
+
+    def postloop(self) -> None:
+        self._save_history_once()
+        super().postloop()
+
     def emptyline(self) -> bool:
         """Do nothing on empty line (prevent repeating last command)."""
         return False
@@ -1680,9 +1933,7 @@ class ConsistShell(cmd.Cmd):
 @app.command()
 def show(
     run_id: str = typer.Argument(..., help="The ID of the run to inspect."),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
 ) -> None:
     """Display detailed information about a specific run."""
     tracker = get_tracker(db_path)
@@ -1696,8 +1947,8 @@ def show(
 
 @app.command()
 def shell(
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
     trust_db: bool = typer.Option(
         False,
@@ -1710,7 +1961,10 @@ def shell(
     The database is loaded once and reused across shell commands.
     """
     tracker = get_tracker(db_path)
-    console.print(f"[green]✓ Loaded database: {db_path}[/green]")
+    resolved_db_path = getattr(tracker, "db_path", None)
+    if not isinstance(resolved_db_path, str) or not resolved_db_path:
+        resolved_db_path = find_db_path(db_path)
+    console.print(f"[green]✓ Loaded database: {resolved_db_path}[/green]")
     ConsistShell(tracker, trust_db=trust_db).cmdloop()
 
 

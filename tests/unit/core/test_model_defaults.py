@@ -6,8 +6,8 @@ from consist.models.run import ConsistRecord, Run, RunArtifacts
 
 
 def test_run_defaults_are_isolated() -> None:
-    run_a = Run(id="run_a", model_name="model")
-    run_b = Run(id="run_b", model_name="model")
+    run_a = Run(id="run_a", model_name="model", config_hash=None, git_hash=None)
+    run_b = Run(id="run_b", model_name="model", config_hash=None, git_hash=None)
 
     run_a.tags.append("tag-a")
     run_a.meta["alpha"] = "a"
@@ -36,8 +36,8 @@ def test_run_artifacts_defaults_are_isolated() -> None:
 
 
 def test_consist_record_defaults_are_isolated() -> None:
-    run_a = Run(id="run_a", model_name="model")
-    run_b = Run(id="run_b", model_name="model")
+    run_a = Run(id="run_a", model_name="model", config_hash=None, git_hash=None)
+    run_b = Run(id="run_b", model_name="model", config_hash=None, git_hash=None)
     record_a = ConsistRecord(run=run_a)
     record_b = ConsistRecord(run=run_b)
 

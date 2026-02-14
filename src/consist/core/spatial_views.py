@@ -154,11 +154,11 @@ class SpatialMetadataView:
         if df.empty:
             return {}
         results: Dict[str, object] = {}
-        for row in df.itertuples():
-            run_id = row.run_id
+        for _, row in df.iterrows():
+            run_id = row.get("run_id")
             if not isinstance(run_id, str) or not run_id:
                 continue
-            results[run_id] = row.bounds
+            results[run_id] = row.get("bounds")
         return results
 
     def get_feature_counts(
@@ -173,11 +173,11 @@ class SpatialMetadataView:
         if df.empty:
             return {}
         results: Dict[str, int] = {}
-        for row in df.itertuples():
-            run_id = row.run_id
+        for _, row in df.iterrows():
+            run_id = row.get("run_id")
             if not isinstance(run_id, str) or not run_id:
                 continue
-            count = row.feature_count
+            count = row.get("feature_count")
             if isinstance(count, Integral):
                 results[run_id] = int(count)
                 continue
@@ -197,9 +197,9 @@ class SpatialMetadataView:
         if df.empty:
             return {}
         results: Dict[str, object] = {}
-        for row in df.itertuples():
-            run_id = row.run_id
+        for _, row in df.iterrows():
+            run_id = row.get("run_id")
             if not isinstance(run_id, str) or not run_id:
                 continue
-            results[run_id] = row.geometry_types
+            results[run_id] = row.get("geometry_types")
         return results

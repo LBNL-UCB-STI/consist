@@ -1,5 +1,6 @@
 import inspect
 import itertools
+import importlib
 from dataclasses import replace
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
@@ -148,7 +149,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 def _is_xarray_dataset(value: Any) -> bool:
     try:
-        import xarray as xr
+        xr = importlib.import_module("xarray")
     except ImportError:
         return False
     return isinstance(value, xr.Dataset)
@@ -156,7 +157,7 @@ def _is_xarray_dataset(value: Any) -> bool:
 
 def _write_xarray_dataset(dataset: Any, path: Path) -> None:
     try:
-        import xarray as xr
+        xr = importlib.import_module("xarray")
     except ImportError as exc:
         raise ImportError("xarray is required to log xarray.Dataset outputs.") from exc
     if not isinstance(dataset, xr.Dataset):

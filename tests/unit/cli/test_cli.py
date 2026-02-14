@@ -1,6 +1,7 @@
 """TODO: add unit coverage for query/helper utilities when expanded (tools.queries)."""
 
 import json
+from pathlib import Path
 import re
 import uuid
 from datetime import datetime
@@ -14,7 +15,14 @@ from sqlmodel import SQLModel, Session, create_engine, text
 from typer.testing import CliRunner
 
 from consist import Tracker
-from consist.cli import ConsistShell, app, _tracker_session
+from consist.cli import (
+    ConsistShell,
+    _render_run_details,
+    _render_scenarios,
+    _tracker_session,
+    app,
+    find_db_path,
+)
 from consist.core.persistence import DatabaseManager
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifactLink
@@ -33,6 +41,8 @@ def mock_data(tmp_path):
     run1 = Run(
         id="run1",
         model_name="create_data",
+        config_hash=None,
+        git_hash=None,
         status="completed",
         created_at=datetime(2025, 1, 1, 12, 0),
         started_at=datetime(2025, 1, 1, 12, 0),
@@ -56,6 +66,8 @@ def mock_data(tmp_path):
     run2 = Run(
         id="run2",
         model_name="process_data",
+        config_hash=None,
+        git_hash=None,
         status="failed",
         created_at=datetime(2025, 1, 2, 12, 0),
         started_at=datetime(2025, 1, 2, 12, 0),
@@ -84,6 +96,8 @@ def mock_data(tmp_path):
     run3 = Run(
         id="run3",
         model_name="create_data",
+        config_hash=None,
+        git_hash=None,
         status="completed",
         created_at=datetime(2025, 1, 3, 12, 0),
         started_at=datetime(2025, 1, 3, 12, 0),
@@ -176,6 +190,41 @@ def test_tracker_session_falls_back_to_engine(mock_db_session):
 
     with _tracker_session(tracker) as session:
         assert session.get_bind() == mock_db_session.get_bind()
+
+
+def test_find_db_path_prefers_explicit_path(monkeypatch):
+    monkeypatch.setenv("CONSIST_DB", "/tmp/from_env.duckdb")
+    assert find_db_path("/tmp/explicit.duckdb") == "/tmp/explicit.duckdb"
+
+
+def test_find_db_path_uses_env_when_no_explicit(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    env_db = tmp_path / "env.duckdb"
+    monkeypatch.setenv("CONSIST_DB", str(env_db))
+    assert find_db_path() == str(env_db)
+
+
+def test_find_db_path_uses_cwd_provenance_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CONSIST_DB", raising=False)
+    (tmp_path / "provenance.duckdb").write_text("", encoding="utf-8")
+    assert find_db_path() == "provenance.duckdb"
+
+
+@pytest.mark.parametrize("subdir", ["data", "db", ".consist"])
+def test_find_db_path_uses_common_subdirs(tmp_path, monkeypatch, subdir):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CONSIST_DB", raising=False)
+    subdir_path = tmp_path / subdir
+    subdir_path.mkdir(parents=True, exist_ok=True)
+    (subdir_path / "provenance.duckdb").write_text("", encoding="utf-8")
+    assert find_db_path() == str(Path(subdir) / "provenance.duckdb")
+
+
+def test_find_db_path_defaults_when_nothing_found(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CONSIST_DB", raising=False)
+    assert find_db_path() == "provenance.duckdb"
 
 
 def test_runs_with_db(mock_db_session):
@@ -275,6 +324,30 @@ def test_show_uses_renderer(mock_db_session):
 
         assert result.exit_code == 0
         render_details.assert_called_once()
+
+
+def test_render_run_details_includes_config_and_meta(capsys):
+    run = MagicMock()
+    run.id = "run_details"
+    run.model_name = "demo_model"
+    run.status = "completed"
+    run.parent_run_id = "scenario_a"
+    run.year = 2030
+    run.created_at = datetime(2025, 1, 1, 12, 0)
+    run.duration_seconds = 300.0
+    run.tags = ["dev", "test"]
+    run.signature = "abcdef1234567890"
+    run.config = {"threshold": 0.5}
+    run.meta = {"note": "hello"}
+
+    _render_run_details(run)
+
+    out = capsys.readouterr().out
+    assert "Run Details" in out
+    assert "Configuration" in out
+    assert "threshold" in out
+    assert "Metadata:" in out
+    assert "note" in out
 
 
 def test_artifacts_with_db(mock_db_session, tmp_path):
@@ -454,6 +527,79 @@ def test_summary_command(mock_db_session):
         assert "Database Summary" in result.stdout
         assert "Runs: 3" in result.stdout
         assert "create_data" in result.stdout
+
+
+def test_render_scenarios_no_results_prints_empty_message(tracker, capsys):
+    _render_scenarios(tracker, limit=5)
+
+    out = capsys.readouterr().out
+    assert "No scenarios found." in out
+
+
+def test_render_scenarios_populated_prints_rows(tracker, capsys):
+    with Session(tracker.engine) as session:
+        session.add_all(
+            [
+                Run(
+                    id="scenario_child_1",
+                    model_name="demo",
+                    config_hash=None,
+                    git_hash=None,
+                    status="completed",
+                    parent_run_id="scenario_x",
+                    created_at=datetime(2025, 1, 1, 12, 0),
+                    started_at=datetime(2025, 1, 1, 12, 0),
+                ),
+                Run(
+                    id="scenario_child_2",
+                    model_name="demo",
+                    config_hash=None,
+                    git_hash=None,
+                    status="completed",
+                    parent_run_id="scenario_x",
+                    created_at=datetime(2025, 1, 1, 12, 5),
+                    started_at=datetime(2025, 1, 1, 12, 5),
+                ),
+            ]
+        )
+        session.commit()
+
+    _render_scenarios(tracker, limit=5)
+
+    out = capsys.readouterr().out
+    assert "Scenarios" in out
+    assert "scenario_x" in out
+    assert "2" in out
+
+
+def test_scenario_command_no_runs_returns_exit_1(cli_runner):
+    result = cli_runner.invoke(app, ["scenario", "missing_scenario"])
+    assert result.exit_code == 1
+    assert "No runs found for scenario 'missing_scenario'" in result.stdout
+
+
+def test_scenario_command_lists_matching_runs(cli_runner, tracker):
+    with Session(tracker.engine) as session:
+        session.add(
+            Run(
+                id="scenario_run_1",
+                model_name="transport",
+                config_hash=None,
+                git_hash=None,
+                status="completed",
+                parent_run_id="scenario_2025",
+                year=2025,
+                created_at=datetime(2025, 1, 1, 12, 0),
+                started_at=datetime(2025, 1, 1, 12, 0),
+            )
+        )
+        session.commit()
+
+    result = cli_runner.invoke(app, ["scenario", "scenario_2025"])
+    assert result.exit_code == 0
+    assert "Runs in Scenario: scenario_2025" in result.stdout
+    assert "transport" in result.stdout
+    assert "2025" in result.stdout
 
 
 def test_preview_command_success(mock_db_session, tmp_path):
@@ -744,6 +890,24 @@ def test_shell_command_invokes_cmdloop():
         assert result.exit_code == 0
         m_shell.assert_called_once_with(tracker, trust_db=False)
         m_shell.return_value.cmdloop.assert_called_once()
+
+
+def test_shell_uses_env_db_when_db_path_omitted(tmp_path, monkeypatch):
+    env_db = tmp_path / "env_provenance.duckdb"
+    engine = create_engine(f"duckdb:///{env_db}")
+    with engine.connect():
+        pass
+    engine.dispose()
+    monkeypatch.setenv("CONSIST_DB", str(env_db))
+
+    with patch("consist.cli.ConsistShell") as m_shell:
+        result = runner.invoke(app, ["shell"])
+
+    assert result.exit_code == 0
+    normalized_stdout = result.stdout.replace("\n", "")
+    assert "Loaded database:" in normalized_stdout
+    assert str(env_db) in normalized_stdout
+    m_shell.return_value.cmdloop.assert_called_once()
 
 
 def test_shell_runs_parsing_calls_helper():

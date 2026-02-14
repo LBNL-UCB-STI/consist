@@ -637,7 +637,13 @@ def _run_noop_step(
         on_outputs(outputs_map)
 
     return NoopRunResult(
-        run=Run(id=resolved_run_id, model_name=resolved_name, status="completed"),
+        run=Run(
+            id=resolved_run_id,
+            model_name=resolved_name,
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+        ),
         outputs=outputs_map,
         cache_hit=False,
     )
