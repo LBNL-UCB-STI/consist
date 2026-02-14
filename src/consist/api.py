@@ -63,10 +63,11 @@ from consist.types import (
 )
 
 if TYPE_CHECKING:
-    import geopandas
-    import xarray
     from consist.core.config_canonicalization import ConfigPlan
     from consist.core.step_context import StepContext
+
+GeoDataFrameType = Any
+XarrayDatasetType = Any
 
 # Import loaders for specific formats
 xr: Optional[ModuleType]
@@ -104,8 +105,8 @@ LoadResult = Union[
     duckdb.DuckDBPyRelation,
     pd.DataFrame,
     pd.Series,
-    "geopandas.GeoDataFrame",
-    "xarray.Dataset",
+    GeoDataFrameType,
+    XarrayDatasetType,
     pd.HDFStore,
 ]
 
@@ -2059,7 +2060,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     **kwargs: Any,
-) -> "xarray.Dataset": ...
+) -> XarrayDatasetType: ...
 
 
 @overload
@@ -2069,7 +2070,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     **kwargs: Any,
-) -> "xarray.Dataset": ...
+) -> XarrayDatasetType: ...
 
 
 @overload
@@ -2079,7 +2080,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     **kwargs: Any,
-) -> "xarray.Dataset": ...
+) -> XarrayDatasetType: ...
 
 
 @overload
@@ -2089,7 +2090,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     **kwargs: Any,
-) -> "geopandas.GeoDataFrame": ...
+) -> GeoDataFrameType: ...
 
 
 @overload

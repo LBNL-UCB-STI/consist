@@ -22,10 +22,12 @@ if __package__ is None and __spec__ is None:
 
 import cmd
 from contextlib import contextmanager
+import importlib
 import shlex
 import json
 import uuid
 from pathlib import Path
+from types import ModuleType
 from typing import (
     Any,
     Dict,
@@ -60,10 +62,11 @@ if TYPE_CHECKING:
     from consist.models.artifact import Artifact
     from consist.models.run import Run
 
+_READLINE: ModuleType | None = None
 try:
-    import readline as _READLINE
+    _READLINE = importlib.import_module("readline")
 except ImportError:  # pragma: no cover - platform dependent
-    _READLINE = None
+    pass
 
 app = typer.Typer(rich_markup_mode="markdown")
 schema_app = typer.Typer(rich_markup_mode="markdown")
@@ -81,10 +84,9 @@ LIKE_ESCAPE_CHAR = "!"
 
 def _optional_xarray() -> Any | None:
     try:
-        import xarray as xr
+        return importlib.import_module("xarray")
     except ImportError:
         return None
-    return xr
 
 
 def output_json(data: Any) -> None:

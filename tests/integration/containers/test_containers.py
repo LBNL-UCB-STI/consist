@@ -1,4 +1,5 @@
 import pytest
+import importlib
 from pathlib import Path
 from typing import List, Dict, Optional, Union
 from unittest.mock import patch
@@ -536,7 +537,7 @@ def has_docker() -> bool:
         True if Docker is available and responsive, False otherwise.
     """
     try:
-        import docker
+        docker = importlib.import_module("docker")
 
         client = docker.from_env()
         client.ping()

@@ -15,6 +15,7 @@ analysis libraries for certain workloads.
 """
 
 import logging
+import importlib
 from pathlib import Path
 
 import pytest
@@ -30,12 +31,12 @@ from consist.core.tracker import Tracker
 
 # Try imports for competitors/profiling
 try:
-    import polars as pl
+    pl = importlib.import_module("polars")
 except ImportError:
     pl = None
 
 try:
-    import psutil
+    psutil = importlib.import_module("psutil")
 except ImportError:
     psutil = None
 

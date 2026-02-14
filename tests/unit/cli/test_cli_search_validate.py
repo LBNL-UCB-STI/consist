@@ -56,6 +56,8 @@ def test_search_matches_tags(cli_runner, tracker) -> None:
     run = Run(
         id="run_tagged",
         model_name="model_alpha",
+        config_hash=None,
+        git_hash=None,
         status="completed",
         tags=["tag_only_term"],
         created_at=datetime(2025, 1, 1, 12, 0),

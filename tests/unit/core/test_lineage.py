@@ -1,4 +1,5 @@
 from unittest.mock import MagicMock
+import uuid
 from consist.core.lineage import build_lineage_tree, format_lineage_tree, LineageService
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifacts
@@ -15,11 +16,23 @@ def test_build_lineage_tree():
     mock_tracker = MagicMock()
 
     # Setup Data
-    run_a = Run(id="run_a", model_name="model_a")
-    run_b = Run(id="run_b", model_name="model_b")
+    run_a = Run(id="run_a", model_name="model_a", config_hash=None, git_hash=None)
+    run_b = Run(id="run_b", model_name="model_b", config_hash=None, git_hash=None)
 
-    art_1 = Artifact(id="a1", key="data_v1", run_id="run_a")  # Produced by A
-    art_2 = Artifact(id="a2", key="data_v2", run_id="run_b")  # Produced by B
+    art_1 = Artifact(  # Produced by A
+        id=uuid.uuid4(),
+        key="data_v1",
+        container_uri="outputs://data_v1.csv",
+        driver="csv",
+        run_id="run_a",
+    )
+    art_2 = Artifact(  # Produced by B
+        id=uuid.uuid4(),
+        key="data_v2",
+        container_uri="outputs://data_v2.csv",
+        driver="csv",
+        run_id="run_b",
+    )
 
     # Mock Tracker lookups
     def get_artifact(key_or_id):
@@ -73,8 +86,14 @@ def test_format_lineage_tree():
     """
     Verify lineage formatting produces a readable string.
     """
-    run = Run(id="run_x", model_name="model_x")
-    art = Artifact(id="a1", key="data_v1", run_id="run_x", driver="csv")
+    run = Run(id="run_x", model_name="model_x", config_hash=None, git_hash=None)
+    art = Artifact(
+        id=uuid.uuid4(),
+        key="data_v1",
+        container_uri="outputs://data_v1.csv",
+        run_id="run_x",
+        driver="csv",
+    )
     tree = {"artifact": art, "producing_run": {"run": run, "inputs": []}}
 
     formatted = format_lineage_tree(tree)
@@ -87,8 +106,14 @@ def test_lineage_service_prints(monkeypatch):
     """
     Verify LineageService.print_lineage formats and prints output.
     """
-    run = Run(id="run_x", model_name="model_x")
-    art = Artifact(id="a1", key="data_v1", run_id="run_x", driver="csv")
+    run = Run(id="run_x", model_name="model_x", config_hash=None, git_hash=None)
+    art = Artifact(
+        id=uuid.uuid4(),
+        key="data_v1",
+        container_uri="outputs://data_v1.csv",
+        run_id="run_x",
+        driver="csv",
+    )
     tree = {"artifact": art, "producing_run": {"run": run, "inputs": []}}
 
     def fake_build_lineage_tree(*args, **kwargs):
@@ -119,7 +144,13 @@ def test_build_lineage_missing_run_returns_stub() -> None:
     Missing producing run should return a node without producing_run details.
     """
     mock_tracker = MagicMock()
-    art = Artifact(id="a1", key="missing", run_id="missing_run")
+    art = Artifact(
+        id=uuid.uuid4(),
+        key="missing",
+        container_uri="outputs://missing.csv",
+        driver="csv",
+        run_id="missing_run",
+    )
     mock_tracker.get_artifact.return_value = art
     mock_tracker.get_run.return_value = None
     mock_tracker.get_artifacts_for_run.return_value = RunArtifacts()
@@ -134,9 +165,21 @@ def test_build_lineage_cycle_does_not_recurse_forever() -> None:
     Cycle detection should stop recursion when a run reappears.
     """
     mock_tracker = MagicMock()
-    run = Run(id="run_cycle", model_name="model")
-    art_root = Artifact(id="a1", key="root", run_id="run_cycle")
-    art_cycle = Artifact(id="a2", key="cycle", run_id="run_cycle")
+    run = Run(id="run_cycle", model_name="model", config_hash=None, git_hash=None)
+    art_root = Artifact(
+        id=uuid.uuid4(),
+        key="root",
+        container_uri="outputs://root.csv",
+        driver="csv",
+        run_id="run_cycle",
+    )
+    art_cycle = Artifact(
+        id=uuid.uuid4(),
+        key="cycle",
+        container_uri="outputs://cycle.csv",
+        driver="csv",
+        run_id="run_cycle",
+    )
 
     def get_artifact(key_or_id):
         if key_or_id == "a1":

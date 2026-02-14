@@ -41,6 +41,8 @@ def mock_data(tmp_path):
     run1 = Run(
         id="run1",
         model_name="create_data",
+        config_hash=None,
+        git_hash=None,
         status="completed",
         created_at=datetime(2025, 1, 1, 12, 0),
         started_at=datetime(2025, 1, 1, 12, 0),
@@ -64,6 +66,8 @@ def mock_data(tmp_path):
     run2 = Run(
         id="run2",
         model_name="process_data",
+        config_hash=None,
+        git_hash=None,
         status="failed",
         created_at=datetime(2025, 1, 2, 12, 0),
         started_at=datetime(2025, 1, 2, 12, 0),
@@ -92,6 +96,8 @@ def mock_data(tmp_path):
     run3 = Run(
         id="run3",
         model_name="create_data",
+        config_hash=None,
+        git_hash=None,
         status="completed",
         created_at=datetime(2025, 1, 3, 12, 0),
         started_at=datetime(2025, 1, 3, 12, 0),
@@ -537,6 +543,8 @@ def test_render_scenarios_populated_prints_rows(tracker, capsys):
                 Run(
                     id="scenario_child_1",
                     model_name="demo",
+                    config_hash=None,
+                    git_hash=None,
                     status="completed",
                     parent_run_id="scenario_x",
                     created_at=datetime(2025, 1, 1, 12, 0),
@@ -545,6 +553,8 @@ def test_render_scenarios_populated_prints_rows(tracker, capsys):
                 Run(
                     id="scenario_child_2",
                     model_name="demo",
+                    config_hash=None,
+                    git_hash=None,
                     status="completed",
                     parent_run_id="scenario_x",
                     created_at=datetime(2025, 1, 1, 12, 5),
@@ -574,6 +584,8 @@ def test_scenario_command_lists_matching_runs(cli_runner, tracker):
             Run(
                 id="scenario_run_1",
                 model_name="transport",
+                config_hash=None,
+                git_hash=None,
                 status="completed",
                 parent_run_id="scenario_2025",
                 year=2025,

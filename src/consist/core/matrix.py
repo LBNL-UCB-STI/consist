@@ -34,7 +34,9 @@ except ImportError:
     xr = None
 
 if TYPE_CHECKING:
-    from xarray import Dataset as XrDataset
+    from typing import Any
+
+    XrDataset = Any
     from consist.core.tracker import Tracker
 
 

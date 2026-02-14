@@ -17,6 +17,7 @@ Key features include:
 """
 
 import abc
+import importlib
 import os
 import logging
 import shlex
@@ -27,7 +28,7 @@ from typing import Dict, List, Optional, Union, Any
 
 # Optional Docker Import
 try:
-    import docker
+    docker = importlib.import_module("docker")
 except ImportError:
     docker = None
 
