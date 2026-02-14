@@ -1076,6 +1076,80 @@ def _build_lineage_tree(
         _build_lineage_tree(child_branch, input_lineage, visited_runs.copy())
 
 
+def _print_missing_artifact_file_help(tracker: Tracker, artifact: "Artifact") -> None:
+    abs_path = tracker.resolve_uri(artifact.container_uri)
+    from consist.tools.mount_diagnostics import (
+        build_mount_resolution_hint,
+        format_missing_artifact_mount_help,
+    )
+
+    hint = build_mount_resolution_hint(
+        artifact.container_uri, artifact_meta=artifact.meta, mounts=tracker.mounts
+    )
+    help_text = (
+        format_missing_artifact_mount_help(hint, resolved_path=abs_path)
+        if hint
+        else f"Resolved path: {abs_path}\nThe artifact may have been deleted, moved, or your mounts are misconfigured."
+    )
+    console.print(
+        f"[red]Artifact file not found at: {artifact.container_uri}[/red]\n{help_text}"
+    )
+
+
+def _print_optional_dependency_hint(driver: str) -> None:
+    extras_map = {
+        "zarr": "zarr",
+        "h5": "hdf5",
+        "hdf5": "hdf5",
+        "h5_table": "hdf5",
+        "geojson": "spatial",
+        "shapefile": "spatial",
+        "geopackage": "spatial",
+    }
+    extra = extras_map.get(driver)
+    if extra is None:
+        return
+    console.print(
+        f"Hint: install optional support with pip install -e '.[{extra}]'",
+        markup=False,
+    )
+
+
+def _load_artifact_with_diagnostics(
+    tracker: Tracker,
+    artifact: "Artifact",
+    *,
+    n_rows: int | None = None,
+) -> Any | None:
+    try:
+        import consist
+
+        load_kwargs: Dict[str, Any] = {}
+        if artifact.driver == "csv" and n_rows is not None:
+            # Avoid loading the full file when we only need a small preview.
+            load_kwargs["nrows"] = n_rows
+        return consist.load(
+            artifact, tracker=tracker, db_fallback="always", **load_kwargs
+        )
+    except FileNotFoundError:
+        _print_missing_artifact_file_help(tracker, artifact)
+        return None
+    except ImportError as e:
+        console.print(
+            f"[red]Missing optional dependency while loading artifact: {e}[/red]"
+        )
+        _print_optional_dependency_hint(str(artifact.driver))
+        return None
+    except ValueError as e:
+        console.print(
+            f"[red]Unsupported artifact driver '{artifact.driver}': {e}[/red]"
+        )
+        return None
+    except Exception as e:
+        console.print(f"[red]Error loading artifact: {e}[/red]")
+        return None
+
+
 @app.command()
 def lineage(
     artifact_key: str = typer.Argument(
@@ -1149,61 +1223,8 @@ def preview(
         raise typer.Exit(1)
 
     _ensure_tracker_mounts_for_artifact(tracker, artifact, trust_db=trust_db)
-
-    try:
-        import consist
-
-        load_kwargs: Dict[str, Any] = {}
-        if artifact.driver == "csv":
-            # Avoid loading the full file when we only need a head() preview.
-            load_kwargs["nrows"] = n_rows
-
-        data = consist.load(
-            artifact, tracker=tracker, db_fallback="always", **load_kwargs
-        )
-    except FileNotFoundError:
-        abs_path = tracker.resolve_uri(artifact.container_uri)
-        from consist.tools.mount_diagnostics import (
-            build_mount_resolution_hint,
-            format_missing_artifact_mount_help,
-        )
-
-        hint = build_mount_resolution_hint(
-            artifact.container_uri, artifact_meta=artifact.meta, mounts=tracker.mounts
-        )
-        help_text = (
-            format_missing_artifact_mount_help(hint, resolved_path=abs_path)
-            if hint
-            else f"Resolved path: {abs_path}\nThe artifact may have been deleted, moved, or your mounts are misconfigured."
-        )
-        console.print(
-            f"[red]Artifact file not found at: {artifact.container_uri}[/red]\n{help_text}"
-        )
-        raise typer.Exit(1)
-    except ImportError as e:
-        console.print(
-            f"[red]Missing optional dependency while loading artifact: {e}[/red]"
-        )
-        if artifact.driver == "zarr":
-            console.print(
-                "[yellow]Hint:[/] install Zarr support: `pip install -e '.[zarr]'`"
-            )
-        elif artifact.driver in {"h5", "hdf5", "h5_table"}:
-            console.print(
-                "[yellow]Hint:[/] install HDF5 support: `pip install -e '.[hdf5]'`"
-            )
-        elif artifact.driver in {"geojson", "shapefile", "geopackage"}:
-            console.print(
-                "[yellow]Hint:[/] install spatial support: `pip install -e '.[spatial]'`"
-            )
-        raise typer.Exit(1)
-    except ValueError as e:
-        console.print(
-            f"[red]Unsupported artifact driver '{artifact.driver}': {e}[/red]"
-        )
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Error loading artifact: {e}[/red]")
+    data = _load_artifact_with_diagnostics(tracker, artifact, n_rows=n_rows)
+    if data is None:
         raise typer.Exit(1)
 
     console.print(f"Preview: {artifact_key} [dim]({artifact.driver})[/dim]")
@@ -1408,55 +1429,16 @@ class ConsistShell(cmd.Cmd):
             _ensure_tracker_mounts_for_artifact(
                 self.tracker, artifact, trust_db=self.trust_db
             )
-
-            try:
-                import consist
-
-                load_kwargs: Dict[str, Any] = {}
-                if artifact.driver == "csv":
-                    load_kwargs["nrows"] = n_rows
-                data = consist.load(
-                    artifact, tracker=self.tracker, db_fallback="always", **load_kwargs
-                )
-            except FileNotFoundError:
-                abs_path = self.tracker.resolve_uri(artifact.container_uri)
-                from consist.tools.mount_diagnostics import (
-                    build_mount_resolution_hint,
-                    format_missing_artifact_mount_help,
-                )
-
-                hint = build_mount_resolution_hint(
-                    artifact.container_uri,
-                    artifact_meta=artifact.meta,
-                    mounts=self.tracker.mounts,
-                )
-                help_text = (
-                    format_missing_artifact_mount_help(hint, resolved_path=abs_path)
-                    if hint
-                    else f"Resolved path: {abs_path}\nThe artifact may have been deleted, moved, or your mounts are misconfigured."
-                )
-                console.print(
-                    f"[red]Artifact file not found at: {artifact.container_uri}[/red]\n{help_text}"
-                )
-                return
-            except ImportError as e:
-                console.print(
-                    f"[red]Missing optional dependency while loading artifact: {e}[/red]"
-                )
-                return
-            except ValueError as e:
-                console.print(
-                    f"[red]Unsupported artifact driver '{artifact.driver}': {e}[/red]"
-                )
-                return
-            except Exception as e:
-                console.print(f"[red]Error loading artifact: {e}[/red]")
+            data = _load_artifact_with_diagnostics(
+                self.tracker, artifact, n_rows=n_rows
+            )
+            if data is None:
                 return
 
             console.print(f"Preview: {artifact_key} [dim]({artifact.driver})[/dim]")
 
             if isinstance(data, duckdb.DuckDBPyRelation):
-                df = consist.to_df(data.limit(n_rows), close=True)
+                df = data.limit(n_rows).df()
             elif isinstance(data, pd.DataFrame):
                 df = data.head(n_rows)
             else:
@@ -1527,46 +1509,8 @@ class ConsistShell(cmd.Cmd):
                     )
                     _render_schema_profile(schema, fields)
                     return
-
-            try:
-                import consist
-
-                data = consist.load(
-                    artifact, tracker=self.tracker, db_fallback="always"
-                )
-            except FileNotFoundError:
-                abs_path = self.tracker.resolve_uri(artifact.container_uri)
-                from consist.tools.mount_diagnostics import (
-                    build_mount_resolution_hint,
-                    format_missing_artifact_mount_help,
-                )
-
-                hint = build_mount_resolution_hint(
-                    artifact.container_uri,
-                    artifact_meta=artifact.meta,
-                    mounts=self.tracker.mounts,
-                )
-                help_text = (
-                    format_missing_artifact_mount_help(hint, resolved_path=abs_path)
-                    if hint
-                    else f"Resolved path: {abs_path}\nThe artifact may have been deleted, moved, or your mounts are misconfigured."
-                )
-                console.print(
-                    f"[red]Artifact file not found at: {artifact.container_uri}[/red]\n{help_text}"
-                )
-                return
-            except ImportError as e:
-                console.print(
-                    f"[red]Missing optional dependency while loading artifact: {e}[/red]"
-                )
-                return
-            except ValueError as e:
-                console.print(
-                    f"[red]Unsupported artifact driver '{artifact.driver}': {e}[/red]"
-                )
-                return
-            except Exception as e:
-                console.print(f"[red]Error loading artifact: {e}[/red]")
+            data = _load_artifact_with_diagnostics(self.tracker, artifact)
+            if data is None:
                 return
 
             console.print(f"Schema: {artifact_key} [dim]({artifact.driver})[/dim]")
