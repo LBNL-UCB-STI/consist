@@ -295,9 +295,7 @@ def schema_export(
         "--prefer-source",
         help="Preference hint for when user_provided schema does not exist: 'file' (original CSV/Parquet dtypes) or 'duckdb' (post-ingestion schema). User-provided schemas are ALWAYS preferred if they exist and cannot be overridden.",
     ),
-    db_path: Optional[str] = typer.Option(
-        None, help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
 ) -> None:
     """Export a captured artifact schema as an editable SQLModel stub.
 
@@ -362,9 +360,7 @@ def schema_export(
 
 @schema_app.command("apply-fks")
 def schema_apply_fks(
-    db_path: Optional[str] = typer.Option(
-        None, help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
 ) -> None:
     """Best-effort application of physical foreign key constraints."""
     tracker = get_tracker(db_path)
@@ -759,9 +755,7 @@ def search(
     query: str = typer.Argument(
         ..., help="Search term (searches run IDs, model names, tags)."
     ),
-    db_path: Optional[str] = typer.Option(
-        None, help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
     limit: int = typer.Option(20, help="Maximum results."),
 ) -> None:
     """Search for runs by ID, model name, or tags (query length is capped)."""
@@ -782,7 +776,9 @@ def search(
             .where(
                 or_(
                     col(Run.id).contains(escaped_query, escape=LIKE_ESCAPE_CHAR),
-                    col(Run.model_name).contains(escaped_query, escape=LIKE_ESCAPE_CHAR),
+                    col(Run.model_name).contains(
+                        escaped_query, escape=LIKE_ESCAPE_CHAR
+                    ),
                     col(Run.tags).contains(escaped_query, escape=LIKE_ESCAPE_CHAR),
                     col(Run.parent_run_id).contains(
                         escaped_query, escape=LIKE_ESCAPE_CHAR
@@ -823,9 +819,7 @@ def search(
 
 @app.command()
 def validate(
-    db_path: Optional[str] = typer.Option(
-        None, help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
     fix: bool = typer.Option(
         False, help="Attempt to fix issues (mark artifacts as missing)."
     ),
@@ -891,9 +885,7 @@ def validate(
 
 @app.command()
 def scenarios(
-    db_path: Optional[str] = typer.Option(
-        None, help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
     limit: int = typer.Option(20, help="Maximum scenarios to display."),
 ) -> None:
     """List all scenarios and their run counts."""
@@ -904,9 +896,7 @@ def scenarios(
 @app.command()
 def scenario(
     scenario_id: str = typer.Argument(..., help="The scenario ID to inspect."),
-    db_path: Optional[str] = typer.Option(
-        None, help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
 ) -> None:
     """Show all runs in a scenario."""
     tracker = get_tracker(db_path)
@@ -1400,7 +1390,9 @@ class ConsistShell(cmd.Cmd):
                 statement = (
                     select(Run.id).order_by(col(Run.created_at).desc()).limit(limit)
                 )
-                return [str(run_id) for run_id in session.exec(statement).all() if run_id]
+                return [
+                    str(run_id) for run_id in session.exec(statement).all() if run_id
+                ]
         except Exception:
             return []
 
@@ -1466,7 +1458,9 @@ class ConsistShell(cmd.Cmd):
             try:
                 selected_index = int(raw_choice)
             except ValueError:
-                console.print("[red]Error: enter a number or press Enter to cancel[/red]")
+                console.print(
+                    "[red]Error: enter a number or press Enter to cancel[/red]"
+                )
                 continue
             if 1 <= selected_index <= len(choices):
                 return choices[selected_index - 1]
@@ -1858,7 +1852,9 @@ class ConsistShell(cmd.Cmd):
         print()
         return self.do_exit(arg)
 
-    def complete_runs(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+    def complete_runs(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
         del line, begidx, endidx
         return self._complete_choices(text, self._RUN_COMPLETION_FLAGS)
 
@@ -1868,7 +1864,9 @@ class ConsistShell(cmd.Cmd):
         del line, begidx, endidx
         return self._complete_choices(text, self._SCENARIOS_COMPLETION_FLAGS)
 
-    def complete_show(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+    def complete_show(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
         del endidx
         if self._is_first_argument(line, begidx):
             return self._complete_choices(text, self._recent_run_ids())
@@ -1933,9 +1931,7 @@ class ConsistShell(cmd.Cmd):
 @app.command()
 def show(
     run_id: str = typer.Argument(..., help="The ID of the run to inspect."),
-    db_path: Optional[str] = typer.Option(
-        None, help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
 ) -> None:
     """Display detailed information about a specific run."""
     tracker = get_tracker(db_path)
