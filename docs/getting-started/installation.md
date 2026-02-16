@@ -51,6 +51,19 @@ python -c "import consist; print(consist.__file__)"
 
 This prints the path to the installed package.
 
+## Tutorial Prerequisites
+
+Core installs include `pandas`, which is used throughout the getting-started
+tutorials.
+
+The [First Workflow](first-workflow.md) tutorial writes Parquet output via
+`pandas.DataFrame.to_parquet(...)`, which requires a Parquet engine such as
+`pyarrow`. Install the optional Parquet extra before running that tutorial:
+
+```bash
+pip install "consist[parquet]"
+```
+
 ## Next Steps
 
 Proceed to the [Quickstart](quickstart.md) to run your first cached workflow.

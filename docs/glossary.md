@@ -26,7 +26,10 @@ When Consist skips execution because it finds a previous run with an identical s
 
 **Example**: You run a function with config `{"threshold": 0.5}` on input `data.csv`, then re-run with the exact same config and input. Second execution is a cache hit—no computation happens.
 
-**Research example**: In a parameter sweep, Consist skips preprocessing steps that haven't changed, saving hours of compute time. See [Usage Guide](usage-guide.md#motivation-when-caching-saves-time) for realistic time-saving scenarios.
+**Research example**: In a parameter sweep, Consist skips preprocessing steps
+that haven't changed, saving hours of compute time. See the [Usage Guide
+motivation section](usage-guide.md#motivation-when-caching-saves-time) for
+realistic time-saving scenarios.
 
 **Opposite**: Cache miss (run must execute)
 

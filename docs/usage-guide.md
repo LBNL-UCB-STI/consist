@@ -6,7 +6,9 @@ Consist provides flexible patterns for tracking provenance in scientific workflo
 - **Practitioners** running tools and wanting clearer inputs/outputs
 - **Researchers** managing multi-stage pipelines and reproducibility
 
-**New to Consist?** Start with the [quickstart notebook](examples.md#quickstart), then work through the examples below in order.
+**New to Consist?** Start with the
+[quickstart tutorial](getting-started/quickstart.md), then work through the
+examples below in order.
 
 ---
 
