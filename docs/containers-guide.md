@@ -81,6 +81,7 @@ for key, artifact in result.artifacts.items():
 ```
 
 **What happened:**
+
 1. Consist created a signature from image + command + inputs
 2. Checked if this signature exists in the database
 3. If no prior run: executed the container, scanned outputs, logged them as artifacts
@@ -96,27 +97,29 @@ ActivitySim is a commonly used transportation demand modeling tool. Here's how t
 
 1. Create a Docker image with ActivitySim installed:
 
-```dockerfile
-FROM python:3.11
-RUN pip install activitysim numpy pandas
-COPY . /workspace
-WORKDIR /workspace
-```
+    ```dockerfile
+    FROM python:3.11
+    RUN pip install activitysim numpy pandas
+    COPY . /workspace
+    WORKDIR /workspace
+    ```
 
-Build and push to registry:
-```bash
-docker build -t my-org/activitysim:v1.0 .
-docker push my-org/activitysim:v1.0
-```
+    Build and push to registry:
+
+    ```bash
+    docker build -t my-org/activitysim:v1.0 .
+    docker push my-org/activitysim:v1.0
+    ```
 
 2. Create ActivitySim config files (as usual) in a local directory:
-```
-./configs/
-├── settings.yaml
-├── accessibility_coefficients.csv
-├── mode_choice_coefficients.csv
-└── ...
-```
+
+    ```text
+    ./configs/
+    ├── settings.yaml
+    ├── accessibility_coefficients.csv
+    ├── mode_choice_coefficients.csv
+    └── ...
+    ```
 
 ### Running a Scenario
 
@@ -238,6 +241,55 @@ Key differences:
 
 ## Volume Mounting Best Practices
 
+### Portable Mapping: `Tracker(mounts=...)` + container `volumes={...}`
+
+For portable container runs across machines, keep container paths stable
+(`"/inputs"`, `"/outputs"`) and map host paths from tracker mounts.
+
+```python
+from pathlib import Path
+from consist import Tracker
+from consist.integrations.containers import run_container
+
+tracker = Tracker(
+    run_dir="/data/project_scratch/consist_runs",
+    db_path="./provenance.duckdb",
+    mounts={
+        "inputs": "/data/project_inputs",
+        "runs": "/data/project_scratch/consist_runs",
+    },
+)
+
+inputs_root = Path(tracker.mounts["inputs"]).resolve()
+runs_root = Path(tracker.mounts["runs"]).resolve()
+
+result = run_container(
+    tracker=tracker,
+    run_id="asim_baseline",
+    image="my-org/activitysim:v1.0",
+    command=["python", "-m", "activitysim.core.workflow", "-c", "/inputs", "-o", "/outputs"],
+    volumes={
+        str(inputs_root): "/inputs",   # host mount root -> stable container path
+        str(runs_root): "/outputs",
+    },
+    inputs=[inputs_root / "settings.yaml", inputs_root / "households.csv"],
+    outputs=[runs_root / "asim_baseline" / "final_trips.csv"],
+    backend_type="docker",
+)
+```
+
+Why this works:
+
+- Different users can map the same mount names to different local paths.
+- Container-internal paths stay stable, so command lines do not change.
+- Requested outputs stay under `tracker.run_dir` (`runs_root`), so defaults work
+  with `strict_mounts=True` and `allow_external_paths=False`.
+- `strict_mounts=True` (default) enforces that host paths are under configured
+  tracker mounts.
+
+See [Mounts & Portability](mounts-and-portability.md) for mount semantics and
+cross-machine path resolution.
+
 ### Mount Paths
 
 Map host directories to container paths consistently:
@@ -338,7 +390,7 @@ On a cache hit:
 
 1. Consist finds a prior run with the same signature
 2. **No container execution** occurs
-3. Cached output files are **copied to host paths**
+3. Cached output files are **materialized (copied) to requested host output paths**
 4. `result.cache_hit == True`, `result.cache_source` = prior run ID
 
 ```python
@@ -347,6 +399,16 @@ if result.cache_hit:
     print(f"Cache hit from {result.cache_source}")
     # result.artifacts are materialized (files exist on disk)
 ```
+
+!!! note "Container cache hits vs standard run hydration"
+    `run_container(...)` materializes requested output files on cache hits so
+    expected host output paths exist. This differs from default
+    `consist.run(...)` behavior (`cache_hydration="metadata"`), which hydrates
+    artifact metadata without copying bytes unless explicitly requested.
+
+For byte-recovery and hydration policy details, see
+[Mounts & Portability](mounts-and-portability.md) and
+[Caching & Hydration](concepts/caching-and-hydration.md).
 
 ### Cache Invalidation
 
@@ -545,3 +607,5 @@ This is useful if you're embedding Consist-executed containers inside a non-Cons
 - [Usage Guide: Pattern 3 (Container Integration)](usage-guide.md#pattern-3-container-integration)
 - [Architecture: Container Integration](architecture.md#container-integration)
 - [Troubleshooting: Container Execution](troubleshooting.md#container-execution-issues)
+- [Mounts & Portability](mounts-and-portability.md) — host path remapping and historical resolution
+- [Containers API Reference](integrations/containers.md) — `run_container` and `ContainerDefinition`
