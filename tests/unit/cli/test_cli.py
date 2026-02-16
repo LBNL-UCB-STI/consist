@@ -171,6 +171,23 @@ def test_runs_no_db():
     assert "Database not found at" in result.stdout
 
 
+def test_cli_version_option_prints_version_and_exits_cleanly():
+    with patch("consist.cli._resolve_cli_version", return_value="9.9.9"):
+        result = runner.invoke(app, ["--version"])
+        short_result = runner.invoke(app, ["-V"])
+
+    assert result.exit_code == 0
+    assert "consist 9.9.9" in result.stdout
+    assert short_result.exit_code == 0
+    assert "consist 9.9.9" in short_result.stdout
+
+
+def test_cli_root_without_command_keeps_usage_exit_code():
+    result = runner.invoke(app, [])
+
+    assert result.exit_code == 2
+
+
 def test_tracker_session_uses_db_session_scope(tmp_path):
     db = DatabaseManager(str(tmp_path / "cli_session.db"))
     tracker = MagicMock()

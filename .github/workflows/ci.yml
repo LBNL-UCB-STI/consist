@@ -85,7 +85,6 @@ jobs:
           files = data.get("files", {})
 
           thresholds = {
-              "src/consist/cli.py": 60.0,
               "src/consist/core/materialize.py": 70.0,
               "src/consist/integrations/dlt_loader.py": 70.0
           }
@@ -108,3 +107,44 @@ jobs:
                   print(f"- {failure}")
               raise SystemExit(1)
           PY
+
+      - name: Coverage Guardrails (CLI)
+        if: runner.os == 'Linux' && matrix.python-version == '3.11'
+        run: |
+          uv run python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("coverage.json").read_text())
+          files = report.get("files", {})
+          cli_path = "src/consist/cli.py"
+          threshold = 80.0
+
+          summary = files.get(cli_path, {}).get("summary")
+          if summary is None:
+              raise SystemExit(f"{cli_path}: missing from coverage report")
+
+          actual = float(summary.get("percent_covered", 0.0))
+          if actual < threshold:
+              raise SystemExit(
+                  f"{cli_path}: {actual:.1f}% < {threshold:.1f}% (CLI coverage gate)"
+              )
+          print(f"PASS {cli_path}: {actual:.1f}% >= {threshold:.1f}%")
+          PY
+
+      - name: CLI startup benchmark
+        if: runner.os == 'Linux' && matrix.python-version == '3.11'
+        run: |
+          mkdir -p ci-artifacts
+          uv run python scripts/benchmarks/cli_startup_benchmark.py \
+            --iterations 8 \
+            --warmup 2 \
+            --out ci-artifacts/cli-startup-benchmark.json
+
+      - name: Upload CLI startup benchmark
+        if: runner.os == 'Linux' && matrix.python-version == '3.11'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-startup-benchmark-${{ github.sha }}
+          path: ci-artifacts/cli-startup-benchmark.json
+          if-no-files-found: error

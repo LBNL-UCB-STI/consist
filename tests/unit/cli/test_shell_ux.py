@@ -8,6 +8,12 @@ import pandas as pd
 from consist.cli import ConsistShell
 
 
+def test_shell_tty_check_uses_shared_helper() -> None:
+    with patch("consist.cli._is_interactive_tty", return_value=True) as helper:
+        assert ConsistShell._is_tty() is True
+    helper.assert_called_once()
+
+
 def test_shell_alias_ls_routes_to_runs_or_artifacts(tmp_path) -> None:
     tracker = MagicMock()
     with (

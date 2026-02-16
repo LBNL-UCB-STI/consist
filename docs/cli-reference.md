@@ -14,6 +14,13 @@ The CLI looks for the provenance database in this order:
 3. `provenance.duckdb` in the current directory
 4. Common subdirectories (`./data/`, `./db/`, `./.consist/`)
 
+## Global Options
+
+```bash
+consist --help
+consist --version
+```
+
 ---
 
 ## Commands

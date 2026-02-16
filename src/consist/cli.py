@@ -23,6 +23,7 @@ if __package__ is None and __spec__ is None:
 import cmd
 from contextlib import contextmanager
 import importlib
+from importlib.metadata import PackageNotFoundError, version as package_version
 import shlex
 import json
 import uuid
@@ -80,6 +81,51 @@ MAX_CLI_LIMIT = 1_000_000
 MAX_PREVIEW_ROWS = 1_000_000
 MAX_SEARCH_QUERY_LENGTH = 256
 LIKE_ESCAPE_CHAR = "!"
+CLI_EXIT_SUCCESS = 0
+CLI_EXIT_RUNTIME_ERROR = 1
+CLI_EXIT_USAGE_ERROR = 2
+CLI_EXIT_INTERRUPTED = 130
+
+
+def _resolve_cli_version() -> str:
+    try:
+        return package_version("consist")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+def _version_callback(value: bool) -> None:
+    if not value:
+        return
+    console.print(f"consist {_resolve_cli_version()}")
+    raise typer.Exit(CLI_EXIT_SUCCESS)
+
+
+def _is_interactive_tty() -> bool:
+    """Return True when stdin/stdout are both TTYs (safe for interactive prompts)."""
+    stdin_isatty = getattr(sys.stdin, "isatty", None)
+    stdout_isatty = getattr(sys.stdout, "isatty", None)
+    return bool(
+        callable(stdin_isatty)
+        and callable(stdout_isatty)
+        and stdin_isatty()
+        and stdout_isatty()
+    )
+
+
+@app.callback()
+def cli_root(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        "-V",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show Consist CLI version and exit.",
+    ),
+) -> None:
+    """Consist CLI root options."""
+    del version
 
 
 def _optional_xarray() -> Any | None:
@@ -149,7 +195,7 @@ def get_tracker(db_path: Optional[str] = None) -> Tracker:
         console.print(
             "[yellow]Hint: Use --db-path to specify location or set CONSIST_DB environment variable[/yellow]"
         )
-        raise typer.Exit(1)
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
     return Tracker(run_dir=Path("."), db_path=resolved_path)
 
 
@@ -312,18 +358,18 @@ def schema_export(
         console.print(
             "[red]Provide exactly one of --schema-id, --artifact-id, or --artifact-key[/red]"
         )
-        raise typer.Exit(2)
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR)
     if artifact_id is not None:
         try:
             uuid.UUID(artifact_id)
         except ValueError:
             console.print("[red]--artifact-id must be a UUID[/red]")
-            raise typer.Exit(2)
+            raise typer.Exit(CLI_EXIT_USAGE_ERROR)
 
     # Validate prefer_source if provided
     if prefer_source is not None and prefer_source not in ("file", "duckdb"):
         console.print("[red]--prefer-source must be either 'file' or 'duckdb'[/red]")
-        raise typer.Exit(2)
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR)
     resolved_prefer_source: Optional[Literal["file", "duckdb"]] = None
     if prefer_source is not None:
         resolved_prefer_source = cast(Literal["file", "duckdb"], prefer_source)
@@ -333,7 +379,7 @@ def schema_export(
         artifact = tracker.get_artifact(artifact_key)
         if artifact is None:
             console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
         artifact_id = str(artifact.id)
     try:
         code = tracker.export_schema_sqlmodel(
@@ -349,10 +395,10 @@ def schema_export(
         )
     except KeyError:
         console.print("[red]Captured schema not found for the provided selector.[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
     except ValueError as e:
         console.print(f"[red]{e}[/red]")
-        raise typer.Exit(2)
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR)
 
     if out is None:
         print(code)
@@ -368,7 +414,7 @@ def schema_apply_fks(
     tracker = get_tracker(db_path)
     if not tracker.db:
         console.print("[red]Tracker database not initialized.[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
     applied = tracker.db.apply_physical_fks()
     console.print(
         f"[green]Applied {applied} foreign key constraint(s) (best-effort).[/green]"
@@ -469,7 +515,7 @@ def views_create(
         )
     except (RuntimeError, ValueError, FileNotFoundError) as exc:
         console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1) from exc
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR) from exc
 
     console.print(f"[green]Created grouped view '{view_name}'.[/green]")
 
@@ -915,7 +961,7 @@ def scenario(
 
         if not results:
             console.print(f"[red]No runs found for scenario '{scenario_id}'[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
         table = Table(title=f"Runs in Scenario: [cyan]{scenario_id}[/cyan]")
         table.add_column("Model", style="green")
@@ -1033,11 +1079,11 @@ def artifacts(
             console.print(
                 "[red]Provide a run_id or use query options like --param.[/red]"
             )
-            raise typer.Exit(1)
+            raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
         run = tracker.get_run(run_id)
         if not run:
             console.print(f"[red]Run with ID '{run_id}' not found.[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
         _render_artifacts_table(tracker, run_id)
         return
 
@@ -1046,7 +1092,7 @@ def artifacts(
             "[red]run_id cannot be combined with --param/--namespace/--key-prefix/"
             "--family-prefix.[/red]"
         )
-        raise typer.Exit(1)
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
     try:
         results = queries.find_artifacts_by_params(
@@ -1059,7 +1105,7 @@ def artifacts(
         )
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1) from exc
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR) from exc
 
     if not results:
         console.print("[yellow]No artifacts matched the provided filters.[/yellow]")
@@ -1187,7 +1233,7 @@ def lineage(
         console.print(
             f"[red]Could not find artifact with key or ID '{artifact_key}'.[/red]"
         )
-        raise typer.Exit(1)
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
     start_artifact = lineage_data["artifact"]
     tree = Tree(
@@ -1240,12 +1286,12 @@ def preview(
     artifact = tracker.get_artifact(artifact_key)
     if not artifact:
         console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
     _ensure_tracker_mounts_for_artifact(tracker, artifact, trust_db=trust_db)
     data = _load_artifact_with_diagnostics(tracker, artifact, n_rows=n_rows)
     if data is None:
-        raise typer.Exit(1)
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
     console.print(f"Preview: {artifact_key} [dim]({artifact.driver})[/dim]")
 
@@ -1373,9 +1419,7 @@ class ConsistShell(cmd.Cmd):
 
     @staticmethod
     def _is_tty() -> bool:
-        stdin = getattr(sys.stdin, "isatty", None)
-        stdout = getattr(sys.stdout, "isatty", None)
-        return bool(callable(stdin) and callable(stdout) and stdin() and stdout())
+        return _is_interactive_tty()
 
     @staticmethod
     def _complete_choices(text: str, options: Iterable[str]) -> List[str]:
@@ -1940,7 +1984,7 @@ def show(
     run = tracker.get_run(run_id)
     if not run:
         console.print(f"[red]Run '{run_id}' not found.[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
     _render_run_details(run)
 
