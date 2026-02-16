@@ -1,5 +1,51 @@
 # API Helpers
 
+`consist.api` provides top-level helper functions that forward to the active
+tracker. Use these when you want concise scripts and notebooks without passing
+a tracker object to every call.
+
+## When to use helpers vs class methods
+
+| Prefer | When |
+|---|---|
+| `consist.*` helpers | Notebook/script workflows where `use_tracker(...)` is already set |
+| `Tracker.*` methods | Library/application code where explicit object wiring is preferred |
+
+## High-traffic helpers
+
+- Run execution: `consist.run`, `consist.scenario`, `consist.trace`,
+  `consist.start_run`
+- Context and output paths: `consist.use_tracker`, `consist.output_dir`,
+  `consist.output_path`
+- Artifact logging/loading: `consist.log_artifact`, `consist.log_dataframe`,
+  `consist.load`, `consist.load_df`
+- Querying: `consist.find_run`, `consist.find_runs`, `consist.run_query`
+
+## Minimal runnable helper workflow
+
+```python
+from pathlib import Path
+import consist
+from consist import Tracker
+
+tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+
+def step() -> Path:
+    out = consist.output_path("step", ext="txt")
+    out.write_text("done\n")
+    return out
+
+with consist.use_tracker(tracker):
+    result = consist.run(fn=step, outputs=["step"])
+    latest = consist.find_run(run_id=result.run.id)
+
+print(result.outputs["step"].path)
+print(latest.id if latest else None)
+```
+
+For class-level equivalents, see [Tracker](tracker.md) and
+[Workflow Contexts](workflow.md).
+
 ::: consist.api
     options:
       show_source: false

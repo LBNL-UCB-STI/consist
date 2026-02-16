@@ -4,6 +4,48 @@ This page defines Consist's **public API** for the `0.1.x` series. Items listed 
 *Advanced* are still public but are primarily targeted at advanced users and may be
 more verbose, lower-level, or easier to misuse.
 
+## When to use each run entry point
+
+| Entry point | Use when | Notes |
+|---|---|---|
+| [`consist.run`](api_helpers.md#consist.api.run) | You want the quickest cache-aware call for one function | Convenience wrapper around `Tracker.run` |
+| [`Tracker.run`](tracker.md#consist.core.tracker.Tracker.run) | You want explicit tracker ownership in app/library code | Same core behavior as `consist.run` |
+| [`consist.scenario`](api_helpers.md#consist.api.scenario) | You need multi-step workflows with shared scenario context | Returns [`ScenarioContext`](workflow.md#consist.core.workflow.ScenarioContext) |
+| [`ScenarioContext.run`](workflow.md#consist.core.workflow.ScenarioContext.run) | You are inside a scenario and want cache-aware steps | Step-level equivalent of `Tracker.run` |
+
+## Relationship: `consist.scenario`, `consist.run`, and `Tracker.run`
+
+- `consist.run(...)` resolves the active/default tracker and then calls `Tracker.run(...)`.
+- `Tracker.run(...)` is the explicit class method for a single cache-aware step.
+- `consist.scenario(...)` creates a scenario context; inside it, call `sc.run(...)`
+  for cache-aware steps or `sc.trace(...)` for inline blocks that execute each time.
+
+## Minimal runnable comparison
+
+```python
+from pathlib import Path
+import consist
+from consist import Tracker
+
+tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+
+def write_result() -> Path:
+    out = consist.output_path("result", ext="txt")
+    out.write_text("ok\n")
+    return out
+
+# Convenience helper: resolves tracker from context.
+with consist.use_tracker(tracker):
+    one = consist.run(fn=write_result, outputs=["result"])
+
+# Explicit class API: same run behavior, explicit object wiring.
+two = tracker.run(fn=write_result, outputs=["result"])
+
+# Scenario API: grouped multi-step workflows.
+with tracker.scenario("baseline") as sc:
+    step = sc.run(fn=write_result, name="step_result", outputs=["result"])
+```
+
 ## Stable (intended for external users)
 
 - [`consist.Tracker`](tracker.md)

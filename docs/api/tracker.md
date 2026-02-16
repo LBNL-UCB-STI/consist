@@ -1,5 +1,40 @@
 # Tracker
 
+`Tracker` is the core class for provenance persistence, cache lookups, and query
+access. If you want explicit control over where state is stored and how runs are
+executed, start here.
+
+## When to use `Tracker`
+
+- You are building a reusable library or service and want explicit dependencies.
+- You want direct control over lifecycle methods like `start_run`, `run`,
+  `scenario`, and query methods (`find_runs`, `get_artifact`, lineage helpers).
+- You want to avoid relying on global context (`consist.use_tracker(...)`).
+
+## Minimal runnable example
+
+```python
+from pathlib import Path
+import consist
+from consist import Tracker
+
+tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+
+def write_summary() -> Path:
+    out = consist.output_path("summary", ext="txt")
+    out.write_text("summary\n")
+    return out
+
+result = tracker.run(fn=write_summary, outputs=["summary"])
+latest = tracker.find_latest_run(model=result.run.model_name)
+
+print(result.run.id)
+print(latest.id if latest else None)
+```
+
+For top-level wrappers around these methods, see [API Helpers](api_helpers.md).
+For grouped workflows, see [Workflow Contexts](workflow.md).
+
 ::: consist.core.tracker.Tracker
     options:
       show_source: false
