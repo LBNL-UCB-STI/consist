@@ -60,59 +60,24 @@ Provenance answers three questions: *Can I re-run this exactly?* (reproducibilit
 
 ---
 
-## Key Terms (Dependency-Ordered)
+## Canonical Terms (Quick Reference)
 
-### Identity & Caching Foundation
+This page keeps one-line canonical definitions. Detailed behavior and policies
+live in the linked specialized pages.
 
-**Signature**: A fingerprint of a run computed by hashing code version, configuration, and input data.
+| Term | Definition | Deep dive |
+|---|---|---|
+| **Signature** | Fingerprint of code + config + inputs used for cache lookup. | [Caching & Hydration](caching-and-hydration.md) |
+| **Facet** | Queryable metadata subset used for filtering runs (not cache identity). | [Config Management](config-management.md) |
+| **Cache hit / miss** | Hit reuses prior completed outputs; miss executes and records new lineage. | [Caching & Hydration](caching-and-hydration.md) |
+| **Hydration** | Recover artifact metadata/paths without copying bytes. | [Caching & Hydration](caching-and-hydration.md) |
+| **Materialization** | Ensure bytes exist in a target location (filesystem or DB path). | [Data Materialization](data-materialization.md) |
+| **Cold / hot data** | Cold stays file-based; hot is ingested into DuckDB for SQL queries. | [Data Materialization](data-materialization.md) |
+| **Hybrid view** | SQL view that combines ingested rows with file-backed rows. | [Data Materialization](data-materialization.md) |
+| **Ghost mode** | Recovery path when files are missing but provenance/ingestion exists. | [Caching & Hydration](caching-and-hydration.md) |
+| **Coupler** | Scenario helper for passing step outputs to downstream inputs. | [Decorators & Metadata](decorators-and-metadata.md) |
 
-**Canonical Hashing**: Converting configuration data into a deterministic fingerprint regardless of field order or number formatting—`{"a": 1, "b": 2}` and `{"b": 2, "a": 1}` produce the same hash.
-
-**Merkle DAG**: A graph structure where each step's inputs link to previous steps' outputs, creating an immutable lineage record that enables cache validation and data recovery.
-
-### Configuration & Querying
-
-**Config**: Parameters that affect computation and are included in the cache signature; changing config triggers re-execution.
-
-**Identity Config**: The subset of configuration parameters that affect a run's cache signature.
-
-**Facet**: A queryable subset of configuration (e.g., `{"year": 2030, "scenario": "baseline"}`) indexed in DuckDB for filtering runs without affecting caching.
-
-### Cache Behavior
-
-**Cache Hit**: Consist finds a previous run with identical signature and returns cached artifact metadata.
-
-**Cache Miss**: No matching cached result exists; the function executes and outputs are recorded as new artifacts.
-
-**Hydration**: Recovering metadata and location information about a previous run's output without copying file bytes. Hydration ≠ copying files.
-
-### Data Storage & Recovery
-
-**Ingestion**: Loading artifact data into DuckDB for SQL-native analysis.
-
-**Materialization**: Copying artifact bytes into DuckDB so data is recoverable if original files are deleted.
-
-**Ghost Mode**: Recovering artifacts from DuckDB when physical files no longer exist.
-
-### Data Virtualization
-
-**Virtualization**: Querying multiple artifacts as a single table without loading all data into memory.
-
-**Hybrid View**: A SQL view combining hot data (ingested into DuckDB) with cold data (read from files on-the-fly).
-
-### Data Types
-
-**Cold Data**: File-based data on disk; provenance is tracked but data is not queryable via SQL until ingested.
-
-**Hot Data**: Data ingested into DuckDB for SQL queries, schema tracking, and optional recovery.
-
-### Integrations & Extensions
-
-**DLT (Data Load Tool)**: A Python library for loading data into warehouses; Consist uses DLT to ingest artifacts with provenance columns.
-
-**Coupler**: A pattern for multi-step workflows that passes artifacts between steps and links lineage through scenario trees.
-
-**Trace**: The execution path through a multi-step workflow showing which runs executed, which cache-hit, and which artifacts were passed.
+For a full term index, see the [Glossary](../glossary.md).
 
 ---
 

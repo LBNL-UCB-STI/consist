@@ -9,17 +9,9 @@ This page covers patterns for making caching reliable, keeping pipelines portabl
 
 ---
 
-## Terms Used Precisely
-
-This page separates **provenance objects** (Artifacts, Runs) from **physical bytes** (files on disk) and **database-backed data** (DuckDB tables).
-
-**Cache Hit**: Consist finds a prior run with the same signature and returns cached artifact metadata.
-
-**Hydration**: Recovering metadata and location information about a previous run's outputs without copying file bytes.
-
-**Materialization**: Copying artifact bytes to disk (or into DuckDB) so files exist in a new location.
-
----
+Canonical one-line definitions for cache hit, hydration, materialization, and
+ghost mode live in [Core Concepts Overview](overview.md). This page focuses on
+operational behavior, policies, and workflow patterns.
 
 ## Hydration vs Materialization
 
