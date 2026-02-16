@@ -206,3 +206,18 @@
 [data-md-color-scheme="slate"] .tagline {
   color: #ffffff;
 }
+
+/* Homepage-only subtle polish (scoped by #home-page marker). */
+[data-md-color-scheme="default"] #home-page ~ .tabbed-set {
+  border: 1px solid rgba(0, 49, 60, 0.12);
+  border-radius: 0.45rem;
+  padding: 0.3rem 0.45rem;
+  background: rgba(0, 49, 60, 0.015);
+}
+
+[data-md-color-scheme="slate"] #home-page ~ .tabbed-set {
+  border: 1px solid rgba(247, 250, 251, 0.16);
+  border-radius: 0.45rem;
+  padding: 0.3rem 0.45rem;
+  background: rgba(247, 250, 251, 0.03);
+}
