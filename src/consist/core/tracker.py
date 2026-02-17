@@ -114,30 +114,66 @@ UTC = timezone.utc
 AccessMode = Literal["standard", "analysis", "read_only"]
 
 
-def _resolve_input_ref(
+def _resolve_input_reference(
     tracker: "Tracker", ref: RunInputRef, key: Optional[str]
+) -> ArtifactRef:
+    return _resolve_input_reference_configured(
+        tracker,
+        ref,
+        key,
+        type_label="inputs",
+        missing_path_error="Input path does not exist: {path!s}",
+    )
+
+
+def _resolve_input_reference_configured(
+    tracker: "Tracker",
+    ref: RunInputRef,
+    key: Optional[str],
+    *,
+    type_label: str,
+    missing_path_error: str,
+    missing_string_error: Optional[str] = None,
+    string_ref_resolver: Optional[Callable[[str], Optional[ArtifactRef]]] = None,
 ) -> ArtifactRef:
     if isinstance(ref, Artifact):
         return ref
     if isinstance(ref, RunResult):
         return resolve_run_result_output(ref)
-    if not isinstance(ref, (str, Path)):
+
+    if isinstance(ref, str):
+        if string_ref_resolver is not None:
+            resolved_ref = string_ref_resolver(ref)
+            if resolved_ref is not None:
+                return resolved_ref
+        ref_str = ref
+    elif isinstance(ref, Path):
+        ref_str = str(ref)
+    else:
         raise TypeError(
-            f"inputs must be Artifact, RunResult, Path, or str (got {type(ref)})."
+            f"{type_label} must be Artifact, RunResult, Path, or str (got {type(ref)})."
         )
-    ref_str = str(ref)
+
     resolved = (
         Path(tracker.resolve_uri(ref_str))
         if isinstance(ref, str) and "://" in ref_str
         else Path(ref_str)
     )
     if not resolved.exists():
-        raise ValueError(f"Input path does not exist: {resolved!s}")
+        if isinstance(ref, str) and missing_string_error is not None:
+            raise ValueError(missing_string_error.format(value=ref, path=resolved))
+        raise ValueError(missing_path_error.format(path=resolved))
     if key is None:
         return resolved
     return tracker.artifacts.create_artifact(
         resolved, run_id=None, key=key, direction="input"
     )
+
+
+def _resolve_input_ref(
+    tracker: "Tracker", ref: RunInputRef, key: Optional[str]
+) -> ArtifactRef:
+    return _resolve_input_reference(tracker, ref, key)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -833,6 +869,26 @@ class Tracker:
         if isinstance(obj, Mapping):
             return dict(obj)
         raise ValueError(f"Tracker {label} must be a mapping or Pydantic model.")
+
+    def _resolve_input_reference(
+        self,
+        ref: RunInputRef,
+        key: Optional[str] = None,
+        *,
+        type_label: str = "inputs",
+        missing_path_error: str = "Input path does not exist: {path!s}",
+        missing_string_error: Optional[str] = None,
+        string_ref_resolver: Optional[Callable[[str], Optional[ArtifactRef]]] = None,
+    ) -> ArtifactRef:
+        return _resolve_input_reference_configured(
+            self,
+            ref,
+            key,
+            type_label=type_label,
+            missing_path_error=missing_path_error,
+            missing_string_error=missing_string_error,
+            string_ref_resolver=string_ref_resolver,
+        )
 
     def register_artifact_facet_parser(
         self, prefix: str, parser_fn: Callable[[str], Optional[FacetLike]]

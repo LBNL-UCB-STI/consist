@@ -10,7 +10,17 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
-from typing import Any, Dict, Optional, Protocol, Sequence, Tuple, Iterable
+from typing import (
+    Any,
+    Dict,
+    Generic,
+    Iterable,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+    TypeVar,
+)
 
 import duckdb
 
@@ -62,57 +72,31 @@ class ArrayDriver(Protocol):
     ): ...
 
 
-class DriverRegistry:
+DriverT = TypeVar("DriverT")
+
+
+def _normalize_extension(ext: str) -> str:
+    normalized = ext.lower()
+    if not normalized.startswith("."):
+        normalized = f".{normalized}"
+    return normalized
+
+
+class _BaseDriverRegistry(Generic[DriverT]):
     def __init__(self) -> None:
-        self._drivers: Dict[str, Driver] = {}
+        self._drivers: Dict[str, DriverT] = {}
         self._ext_map: Dict[str, str] = {}
 
     def register(
-        self, name: str, driver: Driver, handles_exts: Optional[Sequence[str]]
-    ):
-        self._drivers[name] = driver
-        for ext in handles_exts or []:
-            if not ext:
-                continue
-            normalized = ext.lower()
-            if not normalized.startswith("."):
-                normalized = f".{normalized}"
-            self._ext_map[normalized] = name
-
-    def get(self, name: str) -> Driver:
-        return self._drivers[name]
-
-    def resolve_driver(self, path: Path) -> Optional[str]:
-        suffixes = [s.lower() for s in path.suffixes]
-        if len(suffixes) >= 2:
-            composite = "".join(suffixes[-2:])
-            if composite in self._ext_map:
-                return self._ext_map[composite]
-        if suffixes:
-            ext = suffixes[-1]
-            if ext in self._ext_map:
-                return self._ext_map[ext]
-        return None
-
-
-class ArrayDriverRegistry:
-    def __init__(self) -> None:
-        self._drivers: Dict[str, ArrayDriver] = {}
-        self._ext_map: Dict[str, str] = {}
-
-    def register(
-        self, name: str, driver: ArrayDriver, handles_exts: Optional[Sequence[str]]
+        self, name: str, driver: DriverT, handles_exts: Optional[Sequence[str]]
     ) -> None:
         self._drivers[name] = driver
         for ext in handles_exts or []:
             if not ext:
                 continue
-            normalized = ext.lower()
-            if not normalized.startswith("."):
-                normalized = f".{normalized}"
-            self._ext_map[normalized] = name
+            self._ext_map[_normalize_extension(ext)] = name
 
-    def get(self, name: str) -> ArrayDriver:
+    def get(self, name: str) -> DriverT:
         return self._drivers[name]
 
     def resolve_driver(self, path: Path) -> Optional[str]:
@@ -126,6 +110,14 @@ class ArrayDriverRegistry:
             if ext in self._ext_map:
                 return self._ext_map[ext]
         return None
+
+
+class DriverRegistry(_BaseDriverRegistry[Driver]):
+    pass
+
+
+class ArrayDriverRegistry(_BaseDriverRegistry[ArrayDriver]):
+    pass
 
 
 def _safe_duckdb_path(path: str) -> str:

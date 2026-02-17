@@ -18,7 +18,7 @@ from typing import (
 )
 
 from consist import Artifact
-from consist.models.run import ConsistRecord, RunResult, resolve_run_result_output
+from consist.models.run import ConsistRecord, RunResult
 from typing import TYPE_CHECKING
 from consist.core.coupler import Coupler
 from consist.core.input_utils import coerce_input_map
@@ -587,32 +587,20 @@ class ScenarioContext:
         return list(value)
 
     def _resolve_input_value(self, value: RunInputRef) -> ArtifactRef:
-        if isinstance(value, Artifact):
-            return value
-        if isinstance(value, RunResult):
-            return resolve_run_result_output(value)
-        if isinstance(value, Path):
-            if not value.exists():
-                raise ValueError(f"Scenario input path does not exist: {value!s}")
-            return value
-        if isinstance(value, str):
-            if value in self.coupler:
-                return self.coupler.require(value)
-            ref_str = value
-            resolved = (
-                Path(self.tracker.resolve_uri(ref_str))
-                if "://" in ref_str
-                else Path(ref_str)
-            )
-            if not resolved.exists():
-                raise ValueError(
-                    "Scenario input string must resolve to a Coupler key or existing "
-                    f"path (got {value!r})."
-                )
-            return resolved
-        raise TypeError(
-            "Scenario inputs must be Artifact, RunResult, Path, or str "
-            f"(got {type(value)})."
+        def _resolve_coupler_ref(ref: str) -> Optional[ArtifactRef]:
+            if ref in self.coupler:
+                return self.coupler.require(ref)
+            return None
+
+        return self.tracker._resolve_input_reference(
+            value,
+            type_label="Scenario inputs",
+            missing_path_error="Scenario input path does not exist: {path!s}",
+            missing_string_error=(
+                "Scenario input string must resolve to a Coupler key or existing "
+                "path (got {value!r})."
+            ),
+            string_ref_resolver=_resolve_coupler_ref,
         )
 
     def _resolve_inputs(
