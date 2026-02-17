@@ -3272,31 +3272,32 @@ class Tracker:
 
         base_meta = dict(shared_meta)
         logged: Dict[str, Artifact] = {}
-        for key in sorted(keys):
-            value = outputs[key]
-            if value is None:
-                raise ValueError(f"log_artifacts received None for key {key!r}.")
-            meta = dict(base_meta)
-            if metadata_by_key and key in metadata_by_key:
-                meta.update(metadata_by_key[key])
-            facet = facets_by_key.get(key) if facets_by_key else None
-            facet_schema_version = (
-                facet_schema_versions_by_key.get(key)
-                if facet_schema_versions_by_key
-                else None
-            )
-            logged[key] = self.log_artifact(
-                value,
-                key=key,
-                direction=direction,
-                driver=driver,
-                facet=facet,
-                facet_schema_version=facet_schema_version,
-                facet_index=facet_index,
-                reuse_if_unchanged=reuse_if_unchanged,
-                reuse_scope=reuse_scope,
-                **meta,
-            )
+        with self.persistence.batch_artifact_writes():
+            for key in sorted(keys):
+                value = outputs[key]
+                if value is None:
+                    raise ValueError(f"log_artifacts received None for key {key!r}.")
+                meta = dict(base_meta)
+                if metadata_by_key and key in metadata_by_key:
+                    meta.update(metadata_by_key[key])
+                facet = facets_by_key.get(key) if facets_by_key else None
+                facet_schema_version = (
+                    facet_schema_versions_by_key.get(key)
+                    if facet_schema_versions_by_key
+                    else None
+                )
+                logged[key] = self.log_artifact(
+                    value,
+                    key=key,
+                    direction=direction,
+                    driver=driver,
+                    facet=facet,
+                    facet_schema_version=facet_schema_version,
+                    facet_index=facet_index,
+                    reuse_if_unchanged=reuse_if_unchanged,
+                    reuse_scope=reuse_scope,
+                    **meta,
+                )
         return logged
 
     def log_input(
