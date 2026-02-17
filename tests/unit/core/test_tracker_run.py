@@ -149,6 +149,48 @@ def test_start_run_overwrite_updates_cache_index(tracker, tmp_path):
         assert t.current_consist.cached_run.id == "run_b_overwrite"
 
 
+def test_begin_end_run_imperative_logs_output(tracker):
+    tracker.begin_run("imperative_run", "imperative_model", config={"alpha": 1})
+    assert tracker.current_consist is not None
+
+    out_path = tracker.run_artifact_dir() / "out.txt"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("ok\n")
+    output = tracker.log_artifact(out_path, key="out", direction="output")
+
+    completed = tracker.end_run(status="completed")
+    assert completed.id == "imperative_run"
+    assert completed.status == "completed"
+    assert output.key == "out"
+    assert tracker.current_consist is None
+    assert tracker.last_run.run.id == "imperative_run"
+    assert any(artifact.key == "out" for artifact in tracker.last_run.outputs)
+
+
+def test_trace_cache_hit_relogs_cached_output(tracker):
+    first_artifact = None
+    second_artifact = None
+    calls: list[int] = []
+    shared_out = tracker.run_dir / "trace_cached_output.txt"
+
+    with tracker.trace("trace_cached_output") as t:
+        calls.append(1)
+        shared_out.parent.mkdir(parents=True, exist_ok=True)
+        shared_out.write_text("value=1\n")
+        first_artifact = t.log_artifact(shared_out, key="out", direction="output")
+
+    with tracker.trace("trace_cached_output") as t:
+        assert t.is_cached
+        calls.append(1)
+        shared_out.write_text("value=1\n")
+        second_artifact = t.log_artifact(shared_out, key="out", direction="output")
+
+    assert len(calls) == 2
+    assert first_artifact is not None
+    assert second_artifact is not None
+    assert second_artifact.id == first_artifact.id
+
+
 def test_tracker_run_output_mismatch_warns(tracker, caplog):
     def step():
         return ["only-one"]
