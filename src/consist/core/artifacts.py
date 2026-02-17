@@ -235,8 +235,7 @@ class ArtifactManager:
             computed = _compute_content_hash(raise_on_error=True)
             if computed != content_hash:
                 raise ValueError(
-                    "content_hash does not match on-disk data for "
-                    f"{resolved_abs_path}."
+                    f"content_hash does not match on-disk data for {resolved_abs_path}."
                 )
 
         def _apply_content_hash_override(artifact: Artifact) -> None:
