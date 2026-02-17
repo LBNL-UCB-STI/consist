@@ -178,6 +178,8 @@ class ArtifactManager:
         content_hash : Optional[str], optional
             A precomputed SHA256 hash. If provided, Consist skips the
             expensive file hashing step unless validation is requested.
+            When hashing is needed, it is computed lazily and reused within
+            this single call.
         force_hash_override : bool, default False
             If True, permits overwriting an existing artifact's hash with a
             new value.

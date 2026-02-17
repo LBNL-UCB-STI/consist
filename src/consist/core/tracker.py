@@ -2833,6 +2833,9 @@ class Tracker:
         -   **Schema Metadata Injection**: Embeds schema information (if provided) into the
             artifact's metadata, useful for later "Strict Mode" validation or introspection.
 
+        -   **Immediate Persistence**: This single-artifact method flushes JSON state
+            and syncs artifact links to the database immediately for this call.
+
         Parameters
         ----------
         path : ArtifactRef
@@ -3184,6 +3187,8 @@ class Tracker:
         This is a convenience method for bulk artifact logging, particularly useful
         when a model produces many output files or when registering multiple inputs.
         This requires an explicit mapping so artifact keys are always deliberate.
+        For efficiency, persistence is batched: JSON flush and DB artifact sync occur
+        once at the end of the call (not once per artifact).
 
         Parameters
         ----------
