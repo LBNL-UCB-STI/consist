@@ -21,6 +21,7 @@ from consist.models.run import ConsistRecord, RunResult, resolve_run_result_outp
 from typing import TYPE_CHECKING
 from consist.core.coupler import Coupler
 from consist.core.input_utils import coerce_input_map
+from consist.core.run_invocation import resolve_run_invocation
 from consist.types import (
     ArtifactRef,
     CacheOptions,
@@ -745,7 +746,7 @@ class ScenarioContext:
         if fn is None and name is None:
             raise ValueError("ScenarioContext.run requires name when fn is None.")
 
-        resolved_invocation = self.tracker._resolve_run_invocation(
+        resolved_invocation = resolve_run_invocation(
             fn=fn,
             name=name,
             model=model,
@@ -773,6 +774,8 @@ class ScenarioContext:
             default_name_template=self.name_template,
             allow_template=True,
             apply_step_defaults=True,
+            consist_settings=self.tracker.settings,
+            consist_workspace=self.tracker.run_dir,
             consist_state=self._header_record,
             missing_name_error="ScenarioContext.run requires a run name.",
             python_missing_fn_error="Tracker.run requires a callable fn.",
@@ -797,9 +800,7 @@ class ScenarioContext:
         resolved_cache_mode = resolved_invocation.cache_mode
         resolved_cache_hydration = resolved_invocation.cache_hydration
         resolved_cache_version = resolved_invocation.cache_version
-        resolved_validate_cached_outputs = (
-            resolved_invocation.validate_cached_outputs
-        )
+        resolved_validate_cached_outputs = resolved_invocation.validate_cached_outputs
         resolved_load_inputs = resolved_invocation.load_inputs
         resolved_output_mismatch = resolved_invocation.output_mismatch
         resolved_output_missing = resolved_invocation.output_missing

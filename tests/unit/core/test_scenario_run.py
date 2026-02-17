@@ -317,7 +317,9 @@ def test_scenario_run_execution_options_match_tracker_run(tracker, tmp_path):
 
     assert set(tracker_result.outputs.keys()) == {"filtered"}
     assert set(scenario_result.outputs.keys()) == {"filtered"}
-    tracker_values = pd.read_csv(tracker_result.outputs["filtered"].path)["value"].tolist()
+    tracker_values = pd.read_csv(tracker_result.outputs["filtered"].path)[
+        "value"
+    ].tolist()
     scenario_values = pd.read_csv(scenario_result.outputs["filtered"].path)[
         "value"
     ].tolist()
