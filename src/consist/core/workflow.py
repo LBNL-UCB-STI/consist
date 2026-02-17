@@ -10,7 +10,6 @@ from typing import (
     Dict,
     Any,
     Callable,
-    Literal,
     Mapping,
     Iterator,
     Union,
@@ -22,8 +21,7 @@ from consist.models.run import ConsistRecord, RunResult
 from typing import TYPE_CHECKING
 from consist.core.coupler import Coupler
 from consist.core.input_utils import coerce_input_map
-from consist.core.metadata_resolver import MetadataResolver
-from consist.core.run_options import merge_run_options
+from consist.core.run_invocation import resolve_run_invocation
 from consist.types import (
     ArtifactRef,
     CacheOptions,
@@ -736,51 +734,7 @@ class ScenarioContext:
         if fn is None and name is None:
             raise ValueError("ScenarioContext.run requires name when fn is None.")
 
-        merged_options = merge_run_options(
-            cache_options=cache_options,
-            output_policy=output_policy,
-            execution_options=execution_options,
-        )
-
-        cache_mode = merged_options.cache_mode
-        cache_hydration = merged_options.cache_hydration
-        cache_version = merged_options.cache_version
-        cache_epoch = merged_options.cache_epoch
-        validate_cached_outputs = merged_options.validate_cached_outputs
-        load_inputs = merged_options.load_inputs
-        executor = merged_options.executor
-        container = merged_options.container
-        runtime_kwargs = merged_options.runtime_kwargs
-        inject_context = merged_options.inject_context
-        output_mismatch = merged_options.output_mismatch
-        output_missing = merged_options.output_missing
-
-        if executor is None:
-            executor = "python"
-        if inject_context is None:
-            inject_context = False
-        if output_mismatch is None:
-            output_mismatch = "warn"
-        if output_missing is None:
-            output_missing = "warn"
-        resolved_output_mismatch = cast(
-            Literal["warn", "error", "ignore"], output_mismatch
-        )
-        resolved_output_missing = cast(
-            Literal["warn", "error", "ignore"], output_missing
-        )
-        resolved_executor = cast(Literal["python", "container"], executor)
-
-        runtime_kwargs_dict: Optional[Dict[str, Any]] = (
-            dict(runtime_kwargs) if runtime_kwargs is not None else None
-        )
-
-        resolver = MetadataResolver(
-            default_name_template=self.name_template,
-            allow_template=True,
-            apply_step_defaults=True,
-        )
-        resolved = resolver.resolve(
+        resolved_invocation = resolve_run_invocation(
             fn=fn,
             name=name,
             model=model,
@@ -800,41 +754,49 @@ class ScenarioContext:
             iteration=iteration,
             phase=phase,
             stage=stage,
+            outputs=outputs,
+            output_paths=output_paths,
+            cache_options=cache_options,
+            output_policy=output_policy,
+            execution_options=execution_options,
+            default_name_template=self.name_template,
+            allow_template=True,
+            apply_step_defaults=True,
             consist_settings=self.tracker.settings,
             consist_workspace=self.tracker.run_dir,
             consist_state=self._header_record,
-            runtime_kwargs=runtime_kwargs_dict,
-            outputs=outputs,
-            output_paths=output_paths,
-            cache_mode=cache_mode,
-            cache_hydration=cache_hydration,
-            cache_version=cache_version,
-            validate_cached_outputs=validate_cached_outputs,
-            load_inputs=load_inputs,
             missing_name_error="ScenarioContext.run requires a run name.",
+            python_missing_fn_error="Tracker.run requires a callable fn.",
         )
 
-        resolved_name = resolved.name
-        resolved_model = resolved.model
-        resolved_description = resolved.description
-        resolved_config = resolved.config
-        resolved_config_plan = resolved.config_plan
-        resolved_tags = resolved.tags
-        resolved_facet = resolved.facet
-        resolved_facet_index = resolved.facet_index
-        resolved_outputs = resolved.outputs
-        resolved_output_paths = resolved.output_paths
-        resolved_inputs = resolved.inputs
-        resolved_input_keys = resolved.input_keys
-        resolved_optional_input_keys = resolved.optional_input_keys
-        resolved_facet_from = resolved.facet_from
-        resolved_facet_schema_version = resolved.facet_schema_version
-        resolved_hash_inputs = resolved.hash_inputs
-        resolved_cache_mode = resolved.cache_mode
-        resolved_cache_hydration = resolved.cache_hydration
-        resolved_cache_version = resolved.cache_version
-        resolved_validate_cached_outputs = resolved.validate_cached_outputs
-        resolved_load_inputs = resolved.load_inputs
+        resolved_name = resolved_invocation.name
+        resolved_model = resolved_invocation.model
+        resolved_description = resolved_invocation.description
+        resolved_config = resolved_invocation.config
+        resolved_config_plan = resolved_invocation.config_plan
+        resolved_tags = resolved_invocation.tags
+        resolved_facet = resolved_invocation.facet
+        resolved_facet_index = resolved_invocation.facet_index
+        resolved_outputs = resolved_invocation.outputs
+        resolved_output_paths = resolved_invocation.output_paths
+        resolved_inputs = resolved_invocation.inputs
+        resolved_input_keys = resolved_invocation.input_keys
+        resolved_optional_input_keys = resolved_invocation.optional_input_keys
+        resolved_facet_from = resolved_invocation.facet_from
+        resolved_facet_schema_version = resolved_invocation.facet_schema_version
+        resolved_hash_inputs = resolved_invocation.hash_inputs
+        resolved_cache_mode = resolved_invocation.cache_mode
+        resolved_cache_hydration = resolved_invocation.cache_hydration
+        resolved_cache_version = resolved_invocation.cache_version
+        resolved_validate_cached_outputs = resolved_invocation.validate_cached_outputs
+        resolved_load_inputs = resolved_invocation.load_inputs
+        resolved_output_mismatch = resolved_invocation.output_mismatch
+        resolved_output_missing = resolved_invocation.output_missing
+        resolved_executor = resolved_invocation.executor
+        resolved_container = resolved_invocation.container
+        runtime_kwargs_dict = resolved_invocation.runtime_kwargs
+        resolved_inject_context = resolved_invocation.inject_context
+        cache_epoch = resolved_invocation.cache_epoch
 
         if run_id is None:
             run_id = f"{self.run_id}_{resolved_name}_{uuid.uuid4().hex[:8]}"
@@ -843,11 +805,6 @@ class ScenarioContext:
 
         self._first_step_started = True
         self._last_step_name = resolved_name
-
-        if resolved_cache_mode is None:
-            resolved_cache_mode = "reuse"
-        if resolved_validate_cached_outputs is None:
-            resolved_validate_cached_outputs = "lazy"
 
         effective_cache_hydration = (
             resolved_cache_hydration
@@ -908,6 +865,8 @@ class ScenarioContext:
                 cache_version=resolved_cache_version,
                 cache_epoch=resolved_cache_epoch,
                 validate_cached_outputs=resolved_validate_cached_outputs,
+                code_identity=resolved_invocation.code_identity,
+                code_identity_extra_deps=resolved_invocation.code_identity_extra_deps,
             ),
             output_policy=OutputPolicyOptions(
                 output_mismatch=resolved_output_mismatch,
@@ -916,9 +875,9 @@ class ScenarioContext:
             execution_options=ExecutionOptions(
                 load_inputs=resolved_load_inputs,
                 executor=resolved_executor,
-                container=container,
+                container=resolved_container,
                 runtime_kwargs=runtime_kwargs_dict,
-                inject_context=inject_context,
+                inject_context=resolved_inject_context,
             ),
         )
 
