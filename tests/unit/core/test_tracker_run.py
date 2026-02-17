@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any, cast
 from unittest.mock import patch
 
 import pandas as pd
@@ -242,12 +243,21 @@ def test_consist_refs_builds_and_combines_input_mappings(tracker):
     single_result_mapping = consist.refs(people, "households", "persons")
     assert set(single_result_mapping.keys()) == {"households", "persons"}
 
+    all_outputs = consist.refs(people)
+    assert set(all_outputs.keys()) == {"households", "persons"}
+
     combined = consist.refs((people, "households"), (network, "skims"))
     assert set(combined.keys()) == {"households", "skims"}
+
+    tuple_selector_all_outputs = consist.refs((people,))
+    assert set(tuple_selector_all_outputs.keys()) == {"households", "persons"}
 
     aliased = consist.refs(hh=(people, "households"), travel_skims=(network, "skims"))
     assert aliased["hh"].key == "households"
     assert aliased["travel_skims"].key == "skims"
+
+    single_output_alias = consist.refs(skims=network)
+    assert single_output_alias["skims"].key == "skims"
 
     alias_map = consist.refs(people, {"hh": "households", "travel_persons": "persons"})
     assert alias_map["hh"].key == "households"
@@ -283,10 +293,28 @@ def test_consist_refs_validates_duplicates_and_empty_selectors(tracker):
         consist.refs(result, {})
 
     with pytest.raises(TypeError, match="alias mapping keys must be strings"):
-        consist.refs(result, {1: "single"})
+        cast(Any, consist.refs)(result, {1: "single"})
 
     with pytest.raises(TypeError, match="alias mapping values must be strings"):
-        consist.refs(result, {"x": 1})
+        cast(Any, consist.refs)(result, {"x": 1})
+
+    with pytest.raises(TypeError, match="remaining positional arguments must be"):
+        cast(Any, consist.refs)(result, 1)
+
+    with pytest.raises(TypeError, match="Positional selectors.*must be non-empty"):
+        cast(Any, consist.refs)("single")
+
+    with pytest.raises(TypeError, match="Positional selectors.*must be non-empty"):
+        consist.refs(())
+
+    with pytest.raises(TypeError, match="must start with RunResult"):
+        consist.refs(("single",))
+
+    with pytest.raises(TypeError, match="Keyword selectors.*RunResult or"):
+        consist.refs(single=(result, 1))
+
+    with pytest.raises(TypeError, match="Keyword selectors.*RunResult or"):
+        consist.refs(single=(result, "single", "extra"))
 
 
 def test_tracker_run_accepts_direct_single_output_run_result_input(tracker):

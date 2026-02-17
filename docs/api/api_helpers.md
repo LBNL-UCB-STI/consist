@@ -15,11 +15,14 @@ a tracker object to every call.
 
 - Run execution: `consist.run`, `consist.scenario`, `consist.trace`,
   `consist.start_run`
+- Input wiring: `consist.ref`, `consist.refs`
 - Context and output paths: `consist.use_tracker`, `consist.output_dir`,
   `consist.output_path`
 - Artifact logging/loading: `consist.log_artifact`, `consist.log_dataframe`,
   `consist.load`, `consist.load_df`
-- Querying: `consist.find_run`, `consist.find_runs`, `consist.run_query`
+- Querying: `consist.find_run`, `consist.find_runs`, `consist.run_query`,
+  `consist.get_run_result`, `consist.config_run_query`,
+  `consist.config_run_rows`
 
 ## Minimal runnable helper workflow
 
@@ -55,9 +58,12 @@ For class-level equivalents, see [Tracker](tracker.md) and
         - view
         - use_tracker
         - run
+        - ref
+        - refs
         - trace
         - start_run
         - define_step
+        - require_runtime_kwargs
         - scenario
         - single_step_scenario
         - current_tracker
@@ -67,6 +73,7 @@ For class-level equivalents, see [Tracker](tracker.md) and
         - output_path
         - cached_artifacts
         - cached_output
+        - get_run_result
         - get_artifact
         - register_artifact_facet_parser
         - log_artifact
@@ -81,6 +88,8 @@ For class-level equivalents, see [Tracker](tracker.md) and
         - find_runs
         - db_session
         - run_query
+        - config_run_query
+        - config_run_rows
         - pivot_facets
         - capture_outputs
         - load
@@ -96,8 +105,6 @@ For class-level equivalents, see [Tracker](tracker.md) and
         - is_json_artifact
         - is_zarr_artifact
         - is_hdf_artifact
-        - is_netcdf_artifact
-        - is_openmatrix_artifact
         - is_spatial_artifact
       filters:
         - "!^_"

@@ -535,11 +535,23 @@ def run(
         Arguments forwarded to `Tracker.run`, including `inputs`, `config`,
         `tags`, and other core run metadata.
 
+        Legacy direct policy kwargs are rejected (for example `cache_mode`,
+        `output_missing`, `inject_context`). Use options objects instead:
+        `cache_options=CacheOptions(...)`,
+        `output_policy=OutputPolicyOptions(...)`, and
+        `execution_options=ExecutionOptions(...)`.
+
     Returns
     -------
     RunResult
         A container holding the function's return value and the
         immutable `Run` record.
+
+    Raises
+    ------
+    TypeError
+        Raised when legacy run-policy kwargs are provided directly instead of
+        via options objects.
     """
     raise_legacy_policy_kwargs_error(
         api_name="consist.run",
@@ -607,8 +619,35 @@ def _add_run_result_refs(
         )
 
 
+@overload
 def refs(
-    *selectors: Union[RunResult, tuple[Any, ...], str, Mapping[str, str]],
+    run_result: RunResult,
+) -> Dict[str, Artifact]: ...
+
+
+@overload
+def refs(
+    run_result: RunResult,
+    *keys: str,
+) -> Dict[str, Artifact]: ...
+
+
+@overload
+def refs(
+    run_result: RunResult,
+    alias_map: Mapping[str, str],
+) -> Dict[str, Artifact]: ...
+
+
+@overload
+def refs(
+    *selectors: tuple[Any, ...],
+    **aliases: Union[RunResult, tuple[RunResult, str]],
+) -> Dict[str, Artifact]: ...
+
+
+def refs(
+    *selectors: Any,
     **aliases: Union[RunResult, tuple[RunResult, str]],
 ) -> Dict[str, Artifact]:
     """
@@ -624,6 +663,11 @@ def refs(
       ``consist.refs((prep, "households"), (skim, "skims"))``
     - Keyword aliases:
       ``consist.refs(hh=(prep, "households"), skims=(skim, "skims"))``
+
+    Notes
+    -----
+    Bare string selectors (for example ``consist.refs("households")``) are not
+    supported. Provide a ``RunResult`` context via positional or keyword forms.
 
     Returns
     -------
