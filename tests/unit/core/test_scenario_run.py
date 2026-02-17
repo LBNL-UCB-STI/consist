@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 import consist
-from consist.types import CacheOptions, ExecutionOptions
+from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
 
 
 def test_scenario_run_updates_coupler_and_cache_hit(tracker):
@@ -187,3 +187,176 @@ def test_scenario_run_rejects_ambiguous_run_result_input(tracker):
                 inputs={"upstream": produced},
                 execution_options=ExecutionOptions(load_inputs=False),
             )
+
+
+def test_scenario_run_cache_options_match_tracker_run(tracker):
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        out_path = ctx.run_dir / "out.txt"
+        out_path.write_text("ok\n")
+
+    options = CacheOptions(
+        cache_mode="overwrite",
+        cache_epoch=11,
+        cache_version=3,
+        validate_cached_outputs="eager",
+        code_identity="callable_module",
+    )
+
+    tracker_result = tracker.run(
+        fn=step,
+        year=2035,
+        output_paths={"out": "out.txt"},
+        cache_options=options,
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    tracker_run = tracker.last_run.run
+
+    with tracker.scenario("scen_cache_parity") as sc:
+        scenario_result = sc.run(
+            fn=step,
+            year=2035,
+            output_paths={"out": "out.txt"},
+            cache_options=options,
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        scenario_run = tracker.last_run.run
+
+    assert tracker_result.cache_hit is False
+    assert scenario_result.cache_hit is False
+    assert tracker_run.config_hash == scenario_run.config_hash
+    assert tracker_run.git_hash == scenario_run.git_hash
+    assert tracker_run.meta["cache_epoch"] == scenario_run.meta["cache_epoch"] == 11
+    assert tracker_run.meta["cache_version"] == scenario_run.meta["cache_version"] == 3
+    assert (
+        tracker_run.meta["code_identity"]
+        == scenario_run.meta["code_identity"]
+        == "callable_module"
+    )
+
+
+def test_scenario_run_output_policy_matches_tracker_run(tracker):
+    def missing_step() -> None:
+        return None
+
+    def mismatch_step():
+        return ["only-one"]
+
+    with pytest.raises(RuntimeError, match="missing outputs"):
+        tracker.run(
+            fn=missing_step,
+            name="tracker_missing",
+            outputs=["out"],
+            output_policy=OutputPolicyOptions(output_missing="error"),
+        )
+
+    with tracker.scenario("scen_output_policy_missing") as sc:
+        with pytest.raises(RuntimeError, match="missing outputs"):
+            sc.run(
+                fn=missing_step,
+                name="scenario_missing",
+                outputs=["out"],
+                output_policy=OutputPolicyOptions(output_missing="error"),
+            )
+
+    with pytest.raises(RuntimeError, match="Output list length does not match"):
+        tracker.run(
+            fn=mismatch_step,
+            name="tracker_mismatch",
+            outputs=["a", "b"],
+            output_policy=OutputPolicyOptions(
+                output_mismatch="error",
+                output_missing="ignore",
+            ),
+        )
+
+    with tracker.scenario("scen_output_policy_mismatch") as sc:
+        with pytest.raises(RuntimeError, match="Output list length does not match"):
+            sc.run(
+                fn=mismatch_step,
+                name="scenario_mismatch",
+                outputs=["a", "b"],
+                output_policy=OutputPolicyOptions(
+                    output_mismatch="error",
+                    output_missing="ignore",
+                ),
+            )
+
+
+def test_scenario_run_execution_options_match_tracker_run(tracker, tmp_path):
+    input_path = tmp_path / "data.csv"
+    pd.DataFrame({"value": [0, 1, 2, 3]}).to_csv(input_path, index=False)
+
+    def step(data: pd.DataFrame, threshold: int, ctx) -> dict:
+        filtered = data[data["value"] >= threshold]
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        out_path = ctx.run_dir / "filtered.csv"
+        filtered.to_csv(out_path, index=False)
+        return {"filtered": out_path}
+
+    options = ExecutionOptions(
+        load_inputs=True,
+        inject_context="ctx",
+        runtime_kwargs={"threshold": 2},
+    )
+
+    tracker_result = tracker.run(
+        fn=step,
+        inputs={"data": input_path},
+        outputs=["filtered"],
+        execution_options=options,
+    )
+
+    with tracker.scenario("scen_execution_parity") as sc:
+        scenario_result = sc.run(
+            fn=step,
+            inputs={"data": input_path},
+            outputs=["filtered"],
+            execution_options=options,
+        )
+
+    assert set(tracker_result.outputs.keys()) == {"filtered"}
+    assert set(scenario_result.outputs.keys()) == {"filtered"}
+    tracker_values = pd.read_csv(tracker_result.outputs["filtered"].path)["value"].tolist()
+    scenario_values = pd.read_csv(scenario_result.outputs["filtered"].path)[
+        "value"
+    ].tolist()
+    assert tracker_values == scenario_values == [2, 3]
+
+
+def test_scenario_run_metadata_resolution_matches_tracker_run(tracker):
+    @tracker.define_step(
+        name_template="{func_name}__y{year}",
+        description=lambda ctx: f"phase:{ctx.phase}",
+        tags=lambda ctx: [f"stage:{ctx.stage}"],
+    )
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "out.txt").write_text("ok\n")
+
+    tracker.run(
+        fn=step,
+        year=2040,
+        phase="calibration",
+        stage="model",
+        output_paths={"out": "out.txt"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    tracker_run = tracker.last_run.run
+
+    with tracker.scenario("scen_metadata_parity") as sc:
+        sc.run(
+            fn=step,
+            year=2040,
+            phase="calibration",
+            stage="model",
+            output_paths={"out": "out.txt"},
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        scenario_run = tracker.last_run.run
+
+    assert tracker_run.model_name == scenario_run.model_name == "step__y2040"
+    assert tracker_run.description == scenario_run.description == "phase:calibration"
+    assert tracker_run.tags == scenario_run.tags == ["stage:model"]
+    assert "step__y2040" in tracker_run.id
+    assert "step__y2040" in scenario_run.id

@@ -1,7 +1,7 @@
 import inspect
 import itertools
 import importlib
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -112,6 +112,40 @@ if TYPE_CHECKING:
 UTC = timezone.utc
 
 AccessMode = Literal["standard", "analysis", "read_only"]
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedRunInvocation:
+    name: str
+    model: str
+    description: Optional[str]
+    config: Optional[Union[Dict[str, Any], BaseModel]]
+    config_plan: Optional[ConfigPlan]
+    tags: Optional[List[str]]
+    facet: Optional[FacetLike]
+    facet_from: Optional[List[str]]
+    facet_schema_version: Optional[Union[str, int]]
+    facet_index: Optional[bool]
+    hash_inputs: HashInputs
+    inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]]
+    input_keys: Optional[Iterable[str] | str]
+    optional_input_keys: Optional[Iterable[str] | str]
+    outputs: Optional[List[str]]
+    output_paths: Optional[Mapping[str, ArtifactRef]]
+    cache_mode: str
+    cache_hydration: Optional[str]
+    cache_version: Optional[int]
+    cache_epoch: Optional[int]
+    validate_cached_outputs: str
+    code_identity: Optional[CodeIdentityMode]
+    code_identity_extra_deps: Optional[List[str]]
+    output_mismatch: Literal["warn", "error", "ignore"]
+    output_missing: Literal["warn", "error", "ignore"]
+    load_inputs: Optional[bool]
+    executor: Literal["python", "container"]
+    container: Optional[Mapping[str, Any]]
+    runtime_kwargs: Optional[Dict[str, Any]]
+    inject_context: Union[bool, str]
 
 
 def _resolve_input_ref(
@@ -1385,6 +1419,214 @@ class Tracker:
             self.end_run(status="failed", error=e)
             raise
 
+    def _resolve_run_invocation(
+        self,
+        *,
+        fn: Optional[Callable[..., Any]],
+        name: Optional[str],
+        model: Optional[str],
+        description: Optional[str],
+        config: Optional[Union[Dict[str, Any], BaseModel]],
+        config_plan: Optional[ConfigPlan],
+        inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]],
+        input_keys: Optional[Iterable[str] | str],
+        optional_input_keys: Optional[Iterable[str] | str],
+        tags: Optional[List[str]],
+        facet: Optional[FacetLike],
+        facet_from: Optional[List[str]],
+        facet_schema_version: Optional[Union[str, int]],
+        facet_index: Optional[bool],
+        hash_inputs: HashInputs,
+        year: Optional[int],
+        iteration: Optional[int],
+        phase: Optional[str],
+        stage: Optional[str],
+        outputs: Optional[List[str]],
+        output_paths: Optional[Mapping[str, ArtifactRef]],
+        cache_options: Optional[CacheOptions],
+        output_policy: Optional[OutputPolicyOptions],
+        execution_options: Optional[ExecutionOptions],
+        default_name_template: Optional[str],
+        allow_template: Optional[bool],
+        apply_step_defaults: Optional[bool],
+        consist_state: Optional[ConsistRecord],
+        missing_name_error: str,
+        python_missing_fn_error: str,
+    ) -> _ResolvedRunInvocation:
+        merged_options = merge_run_options(
+            cache_options=cache_options,
+            output_policy=output_policy,
+            execution_options=execution_options,
+        )
+
+        cache_mode = merged_options.cache_mode
+        cache_hydration = merged_options.cache_hydration
+        cache_version = merged_options.cache_version
+        cache_epoch = merged_options.cache_epoch
+        validate_cached_outputs = merged_options.validate_cached_outputs
+        code_identity = merged_options.code_identity
+        code_identity_extra_deps = merged_options.code_identity_extra_deps
+        output_mismatch = merged_options.output_mismatch
+        output_missing = merged_options.output_missing
+        load_inputs = merged_options.load_inputs
+        executor = merged_options.executor
+        container = merged_options.container
+        runtime_kwargs = merged_options.runtime_kwargs
+        inject_context = merged_options.inject_context
+
+        if executor is None:
+            executor = "python"
+        if inject_context is None:
+            inject_context = False
+        if output_mismatch is None:
+            output_mismatch = "warn"
+        if output_missing is None:
+            output_missing = "warn"
+
+        if executor not in {"python", "container"}:
+            raise ValueError("Tracker.run supports executor='python' or 'container'.")
+        if code_identity not in {
+            None,
+            "repo_git",
+            "callable_module",
+            "callable_source",
+        }:
+            raise ValueError(
+                "cache_options.code_identity must be one of: "
+                "'repo_git', 'callable_module', 'callable_source'"
+            )
+        if (
+            code_identity in {"callable_module", "callable_source"}
+            and executor != "python"
+        ):
+            raise ValueError(
+                "cache_options.code_identity callable modes require executor='python'."
+            )
+        if code_identity_extra_deps is not None:
+            if not isinstance(code_identity_extra_deps, list) or not all(
+                isinstance(dep, str) for dep in code_identity_extra_deps
+            ):
+                raise TypeError(
+                    "cache_options.code_identity_extra_deps must be a list[str]."
+                )
+
+        if executor == "container":
+            if container is None:
+                raise ValueError("executor='container' requires a container spec.")
+            if output_paths is None:
+                raise ValueError("executor='container' requires output_paths.")
+            if outputs is not None:
+                raise ValueError(
+                    "executor='container' does not accept outputs; use output_paths."
+                )
+            if fn is None and name is None:
+                raise ValueError("executor='container' requires name when fn is None.")
+        elif fn is None:
+            raise ValueError(python_missing_fn_error)
+
+        runtime_kwargs_dict: Optional[Dict[str, Any]] = (
+            dict(runtime_kwargs) if runtime_kwargs is not None else None
+        )
+
+        resolved_allow_template = (
+            executor == "python" if allow_template is None else allow_template
+        )
+        resolved_apply_step_defaults = (
+            executor == "python"
+            if apply_step_defaults is None
+            else apply_step_defaults
+        )
+
+        resolver = MetadataResolver(
+            default_name_template=default_name_template,
+            allow_template=resolved_allow_template,
+            apply_step_defaults=resolved_apply_step_defaults,
+        )
+        resolved = resolver.resolve(
+            fn=fn,
+            name=name,
+            model=model,
+            description=description,
+            config=config,
+            config_plan=config_plan,
+            inputs=inputs,
+            input_keys=input_keys,
+            optional_input_keys=optional_input_keys,
+            tags=tags,
+            facet=facet,
+            facet_from=facet_from,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
+            hash_inputs=hash_inputs,
+            year=year,
+            iteration=iteration,
+            phase=phase,
+            stage=stage,
+            consist_settings=self.settings,
+            consist_workspace=self.run_dir,
+            consist_state=consist_state,
+            runtime_kwargs=runtime_kwargs_dict,
+            outputs=outputs,
+            output_paths=output_paths,
+            cache_mode=cache_mode,
+            cache_hydration=cache_hydration,
+            cache_version=cache_version,
+            validate_cached_outputs=validate_cached_outputs,
+            load_inputs=load_inputs,
+            missing_name_error=missing_name_error,
+        )
+
+        resolved_cache_mode = resolved.cache_mode
+        resolved_validate_cached_outputs = resolved.validate_cached_outputs
+        if resolved_cache_mode is None:
+            resolved_cache_mode = "reuse"
+        if resolved_validate_cached_outputs is None:
+            resolved_validate_cached_outputs = "lazy"
+
+        if output_mismatch not in {"warn", "error", "ignore"}:
+            raise ValueError(
+                "output_mismatch must be one of: 'warn', 'error', 'ignore'"
+            )
+        if output_missing not in {"warn", "error", "ignore"}:
+            raise ValueError("output_missing must be one of: 'warn', 'error', 'ignore'")
+
+        return _ResolvedRunInvocation(
+            name=resolved.name,
+            model=resolved.model,
+            description=resolved.description,
+            config=resolved.config,
+            config_plan=resolved.config_plan,
+            tags=resolved.tags,
+            facet=resolved.facet,
+            facet_from=resolved.facet_from,
+            facet_schema_version=resolved.facet_schema_version,
+            facet_index=resolved.facet_index,
+            hash_inputs=resolved.hash_inputs,
+            inputs=resolved.inputs,
+            input_keys=resolved.input_keys,
+            optional_input_keys=resolved.optional_input_keys,
+            outputs=resolved.outputs,
+            output_paths=resolved.output_paths,
+            cache_mode=resolved_cache_mode,
+            cache_hydration=resolved.cache_hydration,
+            cache_version=resolved.cache_version,
+            cache_epoch=cache_epoch,
+            validate_cached_outputs=resolved_validate_cached_outputs,
+            code_identity=code_identity,
+            code_identity_extra_deps=(
+                list(code_identity_extra_deps)
+                if code_identity_extra_deps is not None
+                else None
+            ),
+            output_mismatch=cast(Literal["warn", "error", "ignore"], output_mismatch),
+            output_missing=cast(Literal["warn", "error", "ignore"], output_missing),
+            load_inputs=resolved.load_inputs,
+            executor=cast(Literal["python", "container"], executor),
+            container=container,
+            runtime_kwargs=runtime_kwargs_dict,
+            inject_context=inject_context,
+        )
+
     def run(
         self,
         fn: Optional[Callable[..., Any]] = None,
@@ -1550,88 +1792,7 @@ class Tracker:
         start_run : Manual run context management (more control)
         trace : Context manager alternative (always executes, even on cache hit)
         """
-        merged_options = merge_run_options(
-            cache_options=cache_options,
-            output_policy=output_policy,
-            execution_options=execution_options,
-        )
-
-        cache_mode = merged_options.cache_mode
-        cache_hydration = merged_options.cache_hydration
-        cache_version = merged_options.cache_version
-        cache_epoch = merged_options.cache_epoch
-        validate_cached_outputs = merged_options.validate_cached_outputs
-        code_identity = merged_options.code_identity
-        code_identity_extra_deps = merged_options.code_identity_extra_deps
-        output_mismatch = merged_options.output_mismatch
-        output_missing = merged_options.output_missing
-        load_inputs = merged_options.load_inputs
-        executor = merged_options.executor
-        container = merged_options.container
-        runtime_kwargs = merged_options.runtime_kwargs
-        inject_context = merged_options.inject_context
-
-        if executor is None:
-            executor = "python"
-        if inject_context is None:
-            inject_context = False
-        if output_mismatch is None:
-            output_mismatch = "warn"
-        if output_missing is None:
-            output_missing = "warn"
-
-        if executor not in {"python", "container"}:
-            raise ValueError("Tracker.run supports executor='python' or 'container'.")
-        if code_identity not in {
-            None,
-            "repo_git",
-            "callable_module",
-            "callable_source",
-        }:
-            raise ValueError(
-                "cache_options.code_identity must be one of: "
-                "'repo_git', 'callable_module', 'callable_source'"
-            )
-        if (
-            code_identity in {"callable_module", "callable_source"}
-            and executor != "python"
-        ):
-            raise ValueError(
-                "cache_options.code_identity callable modes require executor='python'."
-            )
-        if code_identity_extra_deps is not None:
-            if not isinstance(code_identity_extra_deps, list) or not all(
-                isinstance(dep, str) for dep in code_identity_extra_deps
-            ):
-                raise TypeError(
-                    "cache_options.code_identity_extra_deps must be a list[str]."
-                )
-
-        if executor == "container":
-            if container is None:
-                raise ValueError("executor='container' requires a container spec.")
-            if output_paths is None:
-                raise ValueError("executor='container' requires output_paths.")
-            if outputs is not None:
-                raise ValueError(
-                    "executor='container' does not accept outputs; use output_paths."
-                )
-            if fn is None and name is None:
-                raise ValueError("executor='container' requires name when fn is None.")
-        else:
-            if fn is None:
-                raise ValueError("Tracker.run requires a callable fn.")
-
-        runtime_kwargs_dict: Optional[Dict[str, Any]] = (
-            dict(runtime_kwargs) if runtime_kwargs is not None else None
-        )
-
-        resolver = MetadataResolver(
-            default_name_template=None,
-            allow_template=executor == "python",
-            apply_step_defaults=executor == "python",
-        )
-        resolved = resolver.resolve(
+        resolved_invocation = self._resolve_run_invocation(
             fn=fn,
             name=name,
             model=model,
@@ -1651,46 +1812,49 @@ class Tracker:
             iteration=iteration,
             phase=phase,
             stage=stage,
-            consist_settings=self.settings,
-            consist_workspace=self.run_dir,
-            consist_state=self.current_consist,
-            runtime_kwargs=runtime_kwargs_dict,
             outputs=outputs,
             output_paths=output_paths,
-            cache_mode=cache_mode,
-            cache_hydration=cache_hydration,
-            cache_version=cache_version,
-            validate_cached_outputs=validate_cached_outputs,
-            load_inputs=load_inputs,
+            cache_options=cache_options,
+            output_policy=output_policy,
+            execution_options=execution_options,
+            default_name_template=None,
+            allow_template=None,
+            apply_step_defaults=None,
+            consist_state=self.current_consist,
             missing_name_error="Tracker.run requires a run name.",
+            python_missing_fn_error="Tracker.run requires a callable fn.",
         )
 
-        resolved_name = resolved.name
-        resolved_model = resolved.model
-        description = resolved.description
-        config = resolved.config
-        config_plan = resolved.config_plan
-        tags = resolved.tags
-        facet = resolved.facet
-        facet_index = resolved.facet_index
-        outputs = resolved.outputs
-        output_paths = resolved.output_paths
-        inputs = resolved.inputs
-        input_keys = resolved.input_keys
-        optional_input_keys = resolved.optional_input_keys
-        cache_mode = resolved.cache_mode
-        cache_hydration = resolved.cache_hydration
-        cache_version = resolved.cache_version
-        validate_cached_outputs = resolved.validate_cached_outputs
-        load_inputs = resolved.load_inputs
-        hash_inputs = resolved.hash_inputs
-        facet_from = resolved.facet_from
-        facet_schema_version = resolved.facet_schema_version
-
-        if cache_mode is None:
-            cache_mode = "reuse"
-        if validate_cached_outputs is None:
-            validate_cached_outputs = "lazy"
+        resolved_name = resolved_invocation.name
+        resolved_model = resolved_invocation.model
+        description = resolved_invocation.description
+        config = resolved_invocation.config
+        config_plan = resolved_invocation.config_plan
+        tags = resolved_invocation.tags
+        facet = resolved_invocation.facet
+        facet_index = resolved_invocation.facet_index
+        outputs = resolved_invocation.outputs
+        output_paths = resolved_invocation.output_paths
+        inputs = resolved_invocation.inputs
+        input_keys = resolved_invocation.input_keys
+        optional_input_keys = resolved_invocation.optional_input_keys
+        cache_mode = resolved_invocation.cache_mode
+        cache_hydration = resolved_invocation.cache_hydration
+        cache_version = resolved_invocation.cache_version
+        validate_cached_outputs = resolved_invocation.validate_cached_outputs
+        load_inputs = resolved_invocation.load_inputs
+        hash_inputs = resolved_invocation.hash_inputs
+        facet_from = resolved_invocation.facet_from
+        facet_schema_version = resolved_invocation.facet_schema_version
+        code_identity = resolved_invocation.code_identity
+        code_identity_extra_deps = resolved_invocation.code_identity_extra_deps
+        output_mismatch = resolved_invocation.output_mismatch
+        output_missing = resolved_invocation.output_missing
+        executor = resolved_invocation.executor
+        container = resolved_invocation.container
+        runtime_kwargs_dict = resolved_invocation.runtime_kwargs
+        inject_context = resolved_invocation.inject_context
+        cache_epoch = resolved_invocation.cache_epoch
 
         if load_inputs is None:
             load_inputs = isinstance(inputs, Mapping)
@@ -1706,13 +1870,6 @@ class Tracker:
                 DeprecationWarning,
                 stacklevel=2,
             )
-
-        if output_mismatch not in {"warn", "error", "ignore"}:
-            raise ValueError(
-                "output_mismatch must be one of: 'warn', 'error', 'ignore'"
-            )
-        if output_missing not in {"warn", "error", "ignore"}:
-            raise ValueError("output_missing must be one of: 'warn', 'error', 'ignore'")
 
         resolved_inputs, input_artifacts_by_key = _resolve_input_refs(
             self,
@@ -1945,7 +2102,7 @@ class Tracker:
                     cache_hit=result.cache_hit,
                 )
 
-            runtime_kwargs = dict(runtime_kwargs or {})
+            runtime_kwargs = dict(runtime_kwargs_dict or {})
             required_runtime = getattr(fn, "__consist_runtime_required__", ())
             if required_runtime:
                 missing = [
