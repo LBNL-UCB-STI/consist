@@ -66,7 +66,9 @@ def test_log_artifacts_batches_flush_and_db_sync(tracker, run_dir: Path, monkeyp
     assert len(links) == 2
 
 
-def test_log_artifact_single_call_keeps_immediate_sync(tracker, run_dir: Path, monkeypatch):
+def test_log_artifact_single_call_keeps_immediate_sync(
+    tracker, run_dir: Path, monkeypatch
+):
     output = run_dir / "single.csv"
     output.write_text("x,y\n1,2\n", encoding="utf-8")
 
