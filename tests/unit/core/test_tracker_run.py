@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -528,6 +529,49 @@ def test_tracker_run_output_policy_options_enforced(tracker):
             outputs=["out"],
             output_policy=OutputPolicyOptions(output_missing="error"),
         )
+
+
+def test_tracker_run_container_forces_overwrite_and_errors_on_missing_outputs(
+    tracker, monkeypatch, caplog
+):
+    from types import SimpleNamespace
+
+    from consist.integrations import containers
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run_container(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(artifacts={}, cache_hit=False)
+
+    monkeypatch.setattr(containers, "run_container", _fake_run_container)
+
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(RuntimeError, match=r"Run 'container_step' missing outputs"),
+    ):
+        tracker.run(
+            fn=None,
+            name="container_step",
+            output_paths={"out": "container_out.txt"},
+            cache_options=CacheOptions(cache_mode="reuse"),
+            output_policy=OutputPolicyOptions(output_missing="error"),
+            execution_options=ExecutionOptions(
+                executor="container",
+                container={
+                    "image": "ghcr.io/example/test:latest",
+                    "command": ["python", "-V"],
+                },
+            ),
+        )
+
+    assert any(
+        "forcing cache_mode='overwrite'" in record.message for record in caplog.records
+    )
+    assert "out" in captured["outputs"]
+    out_path = Path(str(captured["outputs"]["out"]))
+    assert out_path.name == "container_out.txt"
+    assert Path(tracker.run_dir) in out_path.parents
 
 
 def test_tracker_run_delegates_invocation_defaults_and_validation(
