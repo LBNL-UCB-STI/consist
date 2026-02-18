@@ -528,3 +528,35 @@ def test_tracker_run_output_policy_options_enforced(tracker):
             outputs=["out"],
             output_policy=OutputPolicyOptions(output_missing="error"),
         )
+
+
+def test_tracker_run_delegates_invocation_defaults_and_validation(
+    tracker, monkeypatch
+):
+    from consist.core import tracker_orchestration
+    from consist.core.run_invocation import resolve_run_invocation as _resolve
+
+    captured: dict[str, Any] = {}
+
+    def _spy_resolve_run_invocation(**kwargs):
+        captured.update(kwargs)
+        return _resolve(**kwargs)
+
+    monkeypatch.setattr(
+        tracker_orchestration,
+        "resolve_run_invocation",
+        _spy_resolve_run_invocation,
+    )
+
+    with pytest.raises(
+        ValueError, match="Tracker.run supports executor='python' or 'container'."
+    ):
+        tracker.run(
+            fn=lambda: None,
+            execution_options=ExecutionOptions(executor=cast(Any, "invalid")),
+        )
+
+    assert captured["allow_template"] is None
+    assert captured["apply_step_defaults"] is None
+    assert captured["missing_name_error"] == "Tracker.run requires a run name."
+    assert captured["python_missing_fn_error"] == "Tracker.run requires a callable fn."
