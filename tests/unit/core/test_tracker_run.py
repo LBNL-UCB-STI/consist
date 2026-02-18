@@ -213,6 +213,51 @@ def test_tracker_run_output_mismatch_warns(tracker, caplog):
     assert result.outputs == {}
 
 
+def test_tracker_run_output_mismatch_error_raises(tracker):
+    def step():
+        return ["only-one"]
+
+    with pytest.raises(RuntimeError, match="Output list length does not match"):
+        tracker.run(
+            fn=step,
+            outputs=["a", "b"],
+            output_policy=OutputPolicyOptions(
+                output_mismatch="error",
+                output_missing="ignore",
+            ),
+        )
+
+
+def test_tracker_run_logs_dataframe_for_single_declared_output(tracker):
+    def step():
+        return pd.DataFrame({"id": [1, 2], "value": [10.0, 20.0]})
+
+    result = tracker.run(fn=step, outputs=["table"])
+    assert "table" in result.outputs
+
+    artifact = result.outputs["table"]
+    assert artifact.path.exists()
+    loaded = consist.load_df(artifact, tracker=tracker)
+    assert isinstance(loaded, pd.DataFrame)
+    assert list(loaded.columns) == ["id", "value"]
+    assert loaded.shape == (2, 2)
+
+
+def test_tracker_run_logs_series_for_single_declared_output(tracker):
+    def step():
+        return pd.Series([3, 4], name="ignored_name")
+
+    result = tracker.run(fn=step, outputs=["series_out"])
+    assert "series_out" in result.outputs
+
+    artifact = result.outputs["series_out"]
+    assert artifact.path.exists()
+    loaded = consist.load_df(artifact, tracker=tracker)
+    assert isinstance(loaded, pd.DataFrame)
+    assert list(loaded.columns) == ["series_out"]
+    assert loaded["series_out"].tolist() == [3, 4]
+
+
 def test_tracker_run_output_missing_error(tracker):
     def step() -> None:
         return None
@@ -574,9 +619,7 @@ def test_tracker_run_container_forces_overwrite_and_errors_on_missing_outputs(
     assert Path(tracker.run_dir) in out_path.parents
 
 
-def test_tracker_run_delegates_invocation_defaults_and_validation(
-    tracker, monkeypatch
-):
+def test_tracker_run_delegates_invocation_defaults_and_validation(tracker, monkeypatch):
     from consist.core import tracker_orchestration
     from consist.core.run_invocation import resolve_run_invocation as _resolve
 

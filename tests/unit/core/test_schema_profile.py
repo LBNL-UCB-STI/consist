@@ -516,3 +516,150 @@ def test_get_artifact_schema_for_artifact_respects_prefer_source(tracker):
     assert fetched_duckdb is not None
     schema_duckdb_row, _ = fetched_duckdb
     assert schema_duckdb_row.id == schema_duckdb
+
+
+def test_get_artifact_schema_for_artifact_backfills_ordinals_from_profile_order(
+    tracker,
+):
+    artifact_id = uuid.uuid4()
+    schema_id = "schema_profile_backfill_order"
+
+    with Session(tracker.engine) as session:
+        session.add(
+            Artifact(
+                id=artifact_id,
+                key="artifact_profile_backfill",
+                container_uri="inputs://artifact_profile_backfill.csv",
+                driver="csv",
+                hash="profile_backfill_hash",
+            )
+        )
+        session.add(
+            ArtifactSchema(
+                id=schema_id,
+                summary_json={"table_name": "ordered_rows"},
+                profile_json={
+                    "fields": [
+                        {"name": "beta"},
+                        {"name": "alpha"},
+                        {"name": "gamma"},
+                    ]
+                },
+                profile_version=1,
+            )
+        )
+        session.add_all(
+            [
+                ArtifactSchemaField(
+                    schema_id=schema_id,
+                    ordinal_position=None,
+                    name="alpha",
+                    logical_type="varchar",
+                    nullable=True,
+                ),
+                ArtifactSchemaField(
+                    schema_id=schema_id,
+                    ordinal_position=None,
+                    name="beta",
+                    logical_type="varchar",
+                    nullable=True,
+                ),
+                ArtifactSchemaField(
+                    schema_id=schema_id,
+                    ordinal_position=7,
+                    name="gamma",
+                    logical_type="varchar",
+                    nullable=True,
+                ),
+            ]
+        )
+        session.add(
+            ArtifactSchemaObservation(
+                artifact_id=artifact_id,
+                schema_id=schema_id,
+                source="file",
+            )
+        )
+        session.commit()
+
+    fetched = tracker.db.get_artifact_schema_for_artifact(artifact_id=artifact_id)
+    assert fetched is not None
+    _, fields = fetched
+    assert [field.name for field in fields] == ["beta", "alpha", "gamma"]
+    ordinal_by_name = {field.name: field.ordinal_position for field in fields}
+    assert ordinal_by_name == {"alpha": 2, "beta": 1, "gamma": 7}
+
+    with Session(tracker.engine) as session:
+        persisted_fields = session.exec(
+            select(ArtifactSchemaField).where(
+                ArtifactSchemaField.schema_id == schema_id
+            )
+        ).all()
+    persisted_ordinal_by_name = {
+        field.name: field.ordinal_position for field in persisted_fields
+    }
+    assert persisted_ordinal_by_name == {"alpha": 2, "beta": 1, "gamma": 7}
+
+
+def test_get_artifact_schema_for_artifact_backfills_ordinals_alphabetically(tracker):
+    artifact_id = uuid.uuid4()
+    schema_id = "schema_profile_backfill_alpha"
+
+    with Session(tracker.engine) as session:
+        session.add(
+            Artifact(
+                id=artifact_id,
+                key="artifact_alpha_backfill",
+                container_uri="inputs://artifact_alpha_backfill.csv",
+                driver="csv",
+                hash="alpha_backfill_hash",
+            )
+        )
+        session.add(
+            ArtifactSchema(
+                id=schema_id,
+                summary_json={"table_name": "alpha_rows"},
+                profile_json={},
+                profile_version=1,
+            )
+        )
+        session.add_all(
+            [
+                ArtifactSchemaField(
+                    schema_id=schema_id,
+                    ordinal_position=None,
+                    name="c_col",
+                    logical_type="varchar",
+                    nullable=True,
+                ),
+                ArtifactSchemaField(
+                    schema_id=schema_id,
+                    ordinal_position=None,
+                    name="a_col",
+                    logical_type="varchar",
+                    nullable=True,
+                ),
+                ArtifactSchemaField(
+                    schema_id=schema_id,
+                    ordinal_position=None,
+                    name="b_col",
+                    logical_type="varchar",
+                    nullable=True,
+                ),
+            ]
+        )
+        session.add(
+            ArtifactSchemaObservation(
+                artifact_id=artifact_id,
+                schema_id=schema_id,
+                source="duckdb",
+            )
+        )
+        session.commit()
+
+    fetched = tracker.db.get_artifact_schema_for_artifact(artifact_id=artifact_id)
+    assert fetched is not None
+    _, fields = fetched
+    assert [field.name for field in fields] == ["a_col", "b_col", "c_col"]
+    ordinal_by_name = {field.name: field.ordinal_position for field in fields}
+    assert ordinal_by_name == {"a_col": 1, "b_col": 2, "c_col": 3}
