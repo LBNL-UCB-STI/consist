@@ -34,6 +34,7 @@ import warnings
 import pandas as pd
 from pydantic import BaseModel
 
+from consist.core.error_messages import format_problem_cause_fix
 from consist.core.run_invocation import resolve_run_invocation
 from consist.core.workflow import RunContext
 from consist.models.artifact import Artifact, get_tracker_ref, set_tracker_ref
@@ -144,7 +145,20 @@ class RunTraceCoordinator:
                 values = list(value)
             except TypeError as exc:
                 raise TypeError(
-                    "adapter root_dirs/config_dirs must be a path or iterable of paths."
+                    format_problem_cause_fix(
+                        problem=(
+                            "adapter root_dirs/config_dirs must be a path or iterable "
+                            "of paths."
+                        ),
+                        cause=(
+                            "The adapter did not provide usable config roots for "
+                            "identity resolution."
+                        ),
+                        fix=(
+                            "Expose adapter.root_dirs or adapter.config_dirs as "
+                            "Path/str values (or iterables of them)."
+                        ),
+                    )
                 ) from exc
             return values or None
 
@@ -157,8 +171,17 @@ class RunTraceCoordinator:
                 root_dirs = [Path(primary_config).expanduser().resolve().parent]
         if root_dirs is None:
             raise ValueError(
-                "adapter= requires config roots via adapter.root_dirs/config_dirs "
-                "or adapter.primary_config."
+                format_problem_cause_fix(
+                    problem=(
+                        "adapter= requires config roots via "
+                        "adapter.root_dirs/config_dirs or adapter.primary_config."
+                    ),
+                    cause="The adapter cannot locate configuration files to hash.",
+                    fix=(
+                        "Use the recommended path and provide adapter.root_dirs "
+                        "(or config_dirs), or set adapter.primary_config."
+                    ),
+                )
             )
         return root_dirs
 
@@ -169,7 +192,19 @@ class RunTraceCoordinator:
         legacy_config_plan: Optional["ConfigPlan"],
     ) -> Optional["ConfigPlan"]:
         if adapter is not None and legacy_config_plan is not None:
-            raise ValueError("Pass either adapter= or config_plan=, not both.")
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem="Pass either adapter= or config_plan=, not both.",
+                    cause=(
+                        "Both identity sources were supplied, making run identity "
+                        "ambiguous."
+                    ),
+                    fix=(
+                        "Use the recommended path with adapter=... and remove "
+                        "config_plan=."
+                    ),
+                )
+            )
         if legacy_config_plan is not None:
             return legacy_config_plan
         if adapter is None:
@@ -305,7 +340,19 @@ class RunTraceCoordinator:
         legacy_hash_inputs = legacy_kwargs.pop("hash_inputs", None)
         self._raise_unexpected_kwargs(legacy_kwargs)
         if identity_inputs is not None and legacy_hash_inputs is not None:
-            raise ValueError("Pass either identity_inputs= or hash_inputs=, not both.")
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem=("Pass either identity_inputs= or hash_inputs=, not both."),
+                    cause=(
+                        "Both new and legacy identity input options were provided, "
+                        "which makes intent ambiguous."
+                    ),
+                    fix=(
+                        "Use the recommended path with identity_inputs=... and remove "
+                        "hash_inputs=."
+                    ),
+                )
+            )
         resolved_identity_inputs = (
             identity_inputs if identity_inputs is not None else legacy_hash_inputs
         )
@@ -383,7 +430,19 @@ class RunTraceCoordinator:
         if load_inputs is None:
             load_inputs = isinstance(inputs, Mapping)
         if load_inputs and inputs is not None and not isinstance(inputs, Mapping):
-            raise ValueError("load_inputs=True requires inputs to be a dict.")
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem="load_inputs=True requires inputs to be a dict.",
+                    cause=(
+                        "Automatic parameter loading needs named inputs so Consist can "
+                        "match function parameters."
+                    ),
+                    fix=(
+                        "Pass inputs as a mapping (for example {'data': path}) or set "
+                        "ExecutionOptions(load_inputs=False)."
+                    ),
+                )
+            )
 
         if cache_hydration is None and load_inputs:
             cache_hydration = "inputs-missing"
@@ -410,7 +469,19 @@ class RunTraceCoordinator:
         if cache_hydration == "outputs-requested":
             if output_paths is None:
                 raise ValueError(
-                    "cache_hydration='outputs-requested' requires output_paths."
+                    format_problem_cause_fix(
+                        problem=(
+                            "cache_hydration='outputs-requested' requires output_paths."
+                        ),
+                        cause=(
+                            "Requested-output hydration needs explicit destination "
+                            "paths."
+                        ),
+                        fix=(
+                            "Declare output_paths={key: path} when using "
+                            "cache_hydration='outputs-requested'."
+                        ),
+                    )
                 )
             output_base_dir = self._helpers.preview_run_artifact_dir(
                 tracker,
@@ -570,11 +641,31 @@ class RunTraceCoordinator:
                     )
                 if load_inputs:
                     raise ValueError(
-                        "executor='container' does not support load_inputs."
+                        format_problem_cause_fix(
+                            problem="executor='container' does not support load_inputs.",
+                            cause=(
+                                "Input auto-loading is only supported for Python "
+                                "callable execution."
+                            ),
+                            fix=(
+                                "Disable load_inputs for container runs and pass input "
+                                "artifacts through inputs=... instead."
+                            ),
+                        )
                     )
                 if not isinstance(container, MappingABC):
                     raise TypeError(
-                        "container must be a mapping of run_container arguments."
+                        format_problem_cause_fix(
+                            problem=(
+                                "container must be a mapping of run_container "
+                                "arguments."
+                            ),
+                            cause="The provided container spec is not a mapping object.",
+                            fix=(
+                                "Pass execution_options=ExecutionOptions(container={...}) "
+                                "with key/value options."
+                            ),
+                        )
                     )
 
                 from consist.integrations.containers import run_container
@@ -594,10 +685,36 @@ class RunTraceCoordinator:
 
                 if container_args:
                     raise ValueError(
-                        f"Unknown container options: {sorted(container_args.keys())}"
+                        format_problem_cause_fix(
+                            problem=(
+                                "Unknown container options were provided: "
+                                f"{sorted(container_args.keys())}."
+                            ),
+                            cause=(
+                                "The container spec includes keys that are not accepted "
+                                "by the run_container integration."
+                            ),
+                            fix=(
+                                "Remove unknown keys and keep only supported fields "
+                                "(for example image, command, backend, environment, "
+                                "volumes, working_dir, pull_latest, lineage_mode)."
+                            ),
+                        )
                     )
                 if image is None or command is None:
-                    raise ValueError("container spec must include image and command.")
+                    raise ValueError(
+                        format_problem_cause_fix(
+                            problem="container spec must include image and command.",
+                            cause=(
+                                "Container execution cannot start without an image and "
+                                "command."
+                            ),
+                            fix=(
+                                "Set container={'image': '...', 'command': [...]} in "
+                                "ExecutionOptions."
+                            ),
+                        )
+                    )
 
                 output_base_dir = tracker.run_artifact_dir()
                 resolved_output_paths = {
@@ -643,9 +760,21 @@ class RunTraceCoordinator:
                 if missing:
                     missing_list = ", ".join(sorted(missing))
                     raise ValueError(
-                        f"Missing runtime_kwargs for {resolved_name!r}: {missing_list}. "
-                        "Provide them via runtime_kwargs={...} or remove "
-                        "@consist.require_runtime_kwargs."
+                        format_problem_cause_fix(
+                            problem=(
+                                f"Missing runtime_kwargs for {resolved_name!r}: "
+                                f"{missing_list}."
+                            ),
+                            cause=(
+                                "The step requires runtime-only parameters declared via "
+                                "@consist.require_runtime_kwargs."
+                            ),
+                            fix=(
+                                "Provide execution_options=ExecutionOptions("
+                                "runtime_kwargs={...}) with those keys, or remove "
+                                "@consist.require_runtime_kwargs."
+                            ),
+                        )
                     )
             config_dict: Dict[str, Any] = {}
             if config is None:
@@ -656,7 +785,17 @@ class RunTraceCoordinator:
                 config_dict = dict(config)
 
             if fn is None:
-                raise ValueError("run() requires a callable `fn` to execute.")
+                raise ValueError(
+                    format_problem_cause_fix(
+                        problem="run() requires a callable `fn` to execute.",
+                        cause="The Python executor was selected without a function.",
+                        fix=(
+                            "Provide fn=callable, or use "
+                            "ExecutionOptions(executor='container') with container "
+                            "settings."
+                        ),
+                    )
+                )
             fn_callable = fn
             sig = inspect.signature(fn_callable)
             params = sig.parameters
@@ -720,7 +859,21 @@ class RunTraceCoordinator:
                         call_kwargs[ctx_name] = RunContext(tracker)
                     else:
                         raise ValueError(
-                            f"inject_context requested '{ctx_name}', but fn does not accept it."
+                            format_problem_cause_fix(
+                                problem=(
+                                    f"inject_context requested '{ctx_name}', but fn does "
+                                    "not accept it."
+                                ),
+                                cause=(
+                                    "Context injection was enabled, but the function "
+                                    "signature has no matching parameter."
+                                ),
+                                fix=(
+                                    f"Add a '{ctx_name}' parameter to fn, set "
+                                    "inject_context to a parameter name that exists, "
+                                    "or disable inject_context."
+                                ),
+                            )
                         )
 
             try:
@@ -1007,7 +1160,19 @@ class RunTraceCoordinator:
         legacy_hash_inputs = legacy_kwargs.pop("hash_inputs", None)
         self._raise_unexpected_kwargs(legacy_kwargs)
         if identity_inputs is not None and legacy_hash_inputs is not None:
-            raise ValueError("Pass either identity_inputs= or hash_inputs=, not both.")
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem=("Pass either identity_inputs= or hash_inputs=, not both."),
+                    cause=(
+                        "Both new and legacy identity input options were provided, "
+                        "which makes intent ambiguous."
+                    ),
+                    fix=(
+                        "Use the recommended path with identity_inputs=... and remove "
+                        "hash_inputs=."
+                    ),
+                )
+            )
         resolved_identity_inputs = (
             identity_inputs if identity_inputs is not None else legacy_hash_inputs
         )
@@ -1114,7 +1279,19 @@ class RunTraceCoordinator:
         if cache_hydration == "outputs-requested":
             if output_paths is None:
                 raise ValueError(
-                    "cache_hydration='outputs-requested' requires output_paths."
+                    format_problem_cause_fix(
+                        problem=(
+                            "cache_hydration='outputs-requested' requires output_paths."
+                        ),
+                        cause=(
+                            "Requested-output hydration needs explicit destination "
+                            "paths."
+                        ),
+                        fix=(
+                            "Declare output_paths={key: path} when using "
+                            "cache_hydration='outputs-requested'."
+                        ),
+                    )
                 )
             output_base_dir = self._helpers.preview_run_artifact_dir(
                 tracker,

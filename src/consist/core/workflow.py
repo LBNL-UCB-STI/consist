@@ -20,6 +20,7 @@ from consist import Artifact
 from consist.models.run import ConsistRecord, RunResult
 from typing import TYPE_CHECKING
 from consist.core.coupler import Coupler
+from consist.core.error_messages import format_problem_cause_fix
 from consist.core.input_utils import coerce_input_map
 from consist.core.run_invocation import resolve_run_invocation
 from consist.types import (
@@ -604,10 +605,18 @@ class ScenarioContext:
         return self.tracker._resolve_input_reference(
             value,
             type_label="Scenario inputs",
-            missing_path_error="Scenario input path does not exist: {path!s}",
+            missing_path_error=(
+                "Problem: Scenario input path does not exist: {path!s}\n"
+                "Cause: The provided scenario input path is missing or not accessible.\n"
+                "Fix: Use an existing path, or pass a Coupler key from a prior step. "
+                "For the recommended path, use consist.refs(...) between steps."
+            ),
             missing_string_error=(
-                "Scenario input string must resolve to a Coupler key or existing "
-                "path (got {value!r})."
+                "Problem: Scenario input string did not resolve: {value!r} "
+                "(checked path: {path!s}).\n"
+                "Cause: The string is neither a Coupler key nor an existing path.\n"
+                "Fix: Use a Coupler key produced earlier in the scenario, or provide "
+                "a valid file path. For the recommended path, use consist.refs(...)."
             ),
             string_ref_resolver=_resolve_coupler_ref,
         )
@@ -682,7 +691,20 @@ class ScenarioContext:
                 path = self.coupler.path(ref)
                 if path is None:
                     raise RuntimeError(
-                        f"Coupler key {ref!r} has no path to use for output_paths[{key!r}]."
+                        format_problem_cause_fix(
+                            problem=(
+                                f"Coupler key {ref!r} has no path to use for "
+                                f"output_paths[{key!r}]."
+                            ),
+                            cause=(
+                                "The referenced Coupler artifact has no materialized "
+                                "path."
+                            ),
+                            fix=(
+                                "Log the artifact with a real path before reusing it in "
+                                "output_paths, or provide an explicit filesystem path."
+                            ),
+                        )
                     )
                 resolved_output_paths[str(key)] = path
             else:
@@ -754,12 +776,36 @@ class ScenarioContext:
         legacy_hash_inputs = legacy_kwargs.pop("hash_inputs", None)
         _raise_unexpected_kwargs(legacy_kwargs)
         if identity_inputs is not None and legacy_hash_inputs is not None:
-            raise ValueError("Pass either identity_inputs= or hash_inputs=, not both.")
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem="Pass either identity_inputs= or hash_inputs=, not both.",
+                    cause=(
+                        "Both new and legacy identity input options were provided, "
+                        "which makes step identity ambiguous."
+                    ),
+                    fix=(
+                        "Use the recommended path with identity_inputs=... and remove "
+                        "hash_inputs=."
+                    ),
+                )
+            )
         resolved_identity_inputs = (
             identity_inputs if identity_inputs is not None else legacy_hash_inputs
         )
         if adapter is not None and legacy_config_plan is not None:
-            raise ValueError("Pass either adapter= or config_plan=, not both.")
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem="Pass either adapter= or config_plan=, not both.",
+                    cause=(
+                        "Both identity/config sources were provided, which makes step "
+                        "configuration ambiguous."
+                    ),
+                    fix=(
+                        "Use the recommended path with adapter=... and remove "
+                        "config_plan=."
+                    ),
+                )
+            )
         config_plan = legacy_config_plan
 
         resolved_invocation = resolve_run_invocation(

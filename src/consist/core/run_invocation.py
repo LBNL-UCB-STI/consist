@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Union, cast
 
 from consist.core.config_canonicalization import ConfigPlan
+from consist.core.error_messages import format_problem_cause_fix
 from consist.core.metadata_resolver import MetadataResolver
 from consist.core.run_options import merge_run_options
 from consist.core.settings import ConsistSettings
@@ -305,7 +306,22 @@ def resolve_run_invocation(
         output_missing = "warn"
 
     if executor not in {"python", "container"}:
-        raise ValueError("Tracker.run supports executor='python' or 'container'.")
+        raise ValueError(
+            format_problem_cause_fix(
+                problem=(
+                    "Tracker.run supports executor='python' or 'container'. "
+                    f"Received executor={executor!r}."
+                ),
+                cause=(
+                    "The executor value is outside the supported run backends for the "
+                    "recommended path."
+                ),
+                fix=(
+                    "Use execution_options=ExecutionOptions(executor='python') for "
+                    "callables or executor='container' with a valid container spec."
+                ),
+            )
+        )
     if code_identity not in {
         None,
         "repo_git",
@@ -313,32 +329,108 @@ def resolve_run_invocation(
         "callable_source",
     }:
         raise ValueError(
-            "cache_options.code_identity must be one of: "
-            "'repo_git', 'callable_module', 'callable_source'"
+            format_problem_cause_fix(
+                problem=(
+                    "cache_options.code_identity must be one of "
+                    "'repo_git', 'callable_module', or 'callable_source'. "
+                    f"Received {code_identity!r}."
+                ),
+                cause="An unsupported code identity mode was configured.",
+                fix=(
+                    "Choose a supported mode in CacheOptions(...). For most workflows "
+                    "on the recommended path, use 'repo_git'."
+                ),
+            )
         )
     if code_identity in {"callable_module", "callable_source"} and executor != "python":
         raise ValueError(
-            "cache_options.code_identity callable modes require executor='python'."
+            format_problem_cause_fix(
+                problem=(
+                    "cache_options.code_identity callable modes require "
+                    "executor='python'."
+                ),
+                cause=(
+                    "Callable code identity needs a Python callable and cannot be "
+                    "computed for container execution."
+                ),
+                fix=(
+                    "Use executor='python' for callable_module/callable_source, or "
+                    "switch code_identity to 'repo_git' for container runs."
+                ),
+            )
         )
     if code_identity_extra_deps is not None:
         if not isinstance(code_identity_extra_deps, list) or not all(
             isinstance(dep, str) for dep in code_identity_extra_deps
         ):
             raise TypeError(
-                "cache_options.code_identity_extra_deps must be a list[str]."
+                format_problem_cause_fix(
+                    problem=(
+                        "cache_options.code_identity_extra_deps must be a list[str]."
+                    ),
+                    cause=(
+                        "The configured dependency list contains a non-string value or "
+                        "is not a list."
+                    ),
+                    fix=(
+                        "Pass paths as strings, for example: "
+                        "CacheOptions(code_identity_extra_deps=['src/my_module.py'])."
+                    ),
+                )
             )
 
     if executor == "container":
         if container is None:
-            raise ValueError("executor='container' requires a container spec.")
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem="executor='container' requires a container spec.",
+                    cause="No container configuration was provided.",
+                    fix=(
+                        "Set execution_options=ExecutionOptions(executor='container', "
+                        "container={...})."
+                    ),
+                )
+            )
         if output_paths is None:
-            raise ValueError("executor='container' requires output_paths.")
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem="executor='container' requires output_paths.",
+                    cause=(
+                        "Container runs cannot infer outputs from Python return values."
+                    ),
+                    fix=(
+                        "Declare explicit output paths, for example "
+                        "output_paths={'result': 'result.parquet'}."
+                    ),
+                )
+            )
         if outputs is not None:
             raise ValueError(
-                "executor='container' does not accept outputs; use output_paths."
+                format_problem_cause_fix(
+                    problem=(
+                        "executor='container' does not accept outputs; use "
+                        "output_paths."
+                    ),
+                    cause=(
+                        "outputs=[...] is only valid for Python return-value logging."
+                    ),
+                    fix=(
+                        "Replace outputs=[...] with output_paths={key: path} for "
+                        "container execution."
+                    ),
+                )
             )
         if fn is None and name is None:
-            raise ValueError("executor='container' requires name when fn is None.")
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem="executor='container' requires name when fn is None.",
+                    cause=(
+                        "No callable name can be inferred when container runs are "
+                        "configured without fn."
+                    ),
+                    fix="Provide name='step_name' for container execution.",
+                )
+            )
     elif fn is None and not allow_python_without_fn:
         raise ValueError(python_missing_fn_error)
 
@@ -400,9 +492,33 @@ def resolve_run_invocation(
         resolved_validate_cached_outputs = "lazy"
 
     if output_mismatch not in {"warn", "error", "ignore"}:
-        raise ValueError("output_mismatch must be one of: 'warn', 'error', 'ignore'")
+        raise ValueError(
+            format_problem_cause_fix(
+                problem=(
+                    "output_mismatch must be one of: 'warn', 'error', 'ignore'. "
+                    f"Received {output_mismatch!r}."
+                ),
+                cause="An unsupported output mismatch policy was configured.",
+                fix=(
+                    "Set output_policy=OutputPolicyOptions(output_mismatch='warn' | "
+                    "'error' | 'ignore')."
+                ),
+            )
+        )
     if output_missing not in {"warn", "error", "ignore"}:
-        raise ValueError("output_missing must be one of: 'warn', 'error', 'ignore'")
+        raise ValueError(
+            format_problem_cause_fix(
+                problem=(
+                    "output_missing must be one of: 'warn', 'error', 'ignore'. "
+                    f"Received {output_missing!r}."
+                ),
+                cause="An unsupported missing-output policy was configured.",
+                fix=(
+                    "Set output_policy=OutputPolicyOptions(output_missing='warn' | "
+                    "'error' | 'ignore')."
+                ),
+            )
+        )
 
     return ResolvedRunInvocation(
         name=resolved.name,
