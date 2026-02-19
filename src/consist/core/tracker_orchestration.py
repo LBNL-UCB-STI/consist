@@ -1018,9 +1018,7 @@ class RunTraceCoordinator:
         output_mismatch_policy = cast(
             Literal["warn", "error", "ignore"], output_mismatch
         )
-        output_missing_policy = cast(
-            Literal["warn", "error", "ignore"], output_missing
-        )
+        output_missing_policy = cast(Literal["warn", "error", "ignore"], output_missing)
 
         resolved_invocation = resolve_run_invocation(
             fn=None,
