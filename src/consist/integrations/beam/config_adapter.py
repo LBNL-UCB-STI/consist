@@ -64,6 +64,7 @@ class BeamConfigOverrides:
 class BeamConfigAdapter:
     model_name: str = "beam"
     adapter_version: str = "0.1"
+    root_dirs: Optional[list[Path]] = None
     primary_config: Optional[Path] = None
     resolve_substitutions: bool = True
     env_overrides: Optional[dict[str, str]] = None

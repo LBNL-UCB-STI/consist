@@ -85,6 +85,7 @@ from consist.types import (
     ExecutionOptions,
     FacetLike,
     HashInputs,
+    IdentityInputs,
     OutputPolicyOptions,
     RunInputRef,
 )
@@ -1149,7 +1150,7 @@ class Tracker:
         model: Optional[str] = None,
         description: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
-        config_plan: Optional[ConfigPlan] = None,
+        adapter: Optional[ConfigAdapter] = None,
         config_plan_ingest: bool = True,
         config_plan_profile_schema: bool = False,
         inputs: Optional[
@@ -1163,7 +1164,7 @@ class Tracker:
         facet_from: Optional[List[str]] = None,
         facet_schema_version: Optional[Union[str, int]] = None,
         facet_index: Optional[bool] = None,
-        hash_inputs: HashInputs = None,
+        identity_inputs: IdentityInputs = None,
         year: Optional[int] = None,
         iteration: Optional[int] = None,
         phase: Optional[str] = None,
@@ -1176,6 +1177,7 @@ class Tracker:
         cache_options: Optional[CacheOptions] = None,
         output_policy: Optional[OutputPolicyOptions] = None,
         execution_options: Optional[ExecutionOptions] = None,
+        **legacy_kwargs: Any,
     ) -> RunResult:
         """
         Execute a function-shaped run with caching and output handling.
@@ -1197,9 +1199,8 @@ class Tracker:
             Human-readable description of the run.
         config : Optional[Dict[str, Any]], optional
             Configuration parameters. Becomes part of the cache signature. Can be a dict or Pydantic model.
-        config_plan : Optional[ConfigPlan], optional
-            Precomputed config plan (e.g., from ActivitySim adapter). The plan's identity hash
-            is folded into the run config hash and its artifacts/ingestables are applied on cache miss.
+        adapter : Optional[ConfigAdapter], optional
+            Config adapter used to derive a config plan before execution.
         config_plan_ingest : bool, default True
             Whether to ingest tables from the config plan.
         config_plan_profile_schema : bool, default False
@@ -1226,8 +1227,10 @@ class Tracker:
         facet_index : Optional[bool], optional
             Whether to index facets for faster queries.
 
-        hash_inputs : Optional[HashInputs], optional
-            Strategy for hashing inputs: "fast" (mtime), "full" (content), or None (auto-detect).
+        identity_inputs : Optional[IdentityInputs], optional
+            Additional hash-only identity inputs (for example config files or
+            directories) that should affect cache keys without being logged as
+            run inputs.
 
         year : Optional[int], optional
             Year metadata (for multi-year simulations). Included in provenance.
@@ -1258,6 +1261,11 @@ class Tracker:
         execution_options : Optional[ExecutionOptions], optional
             Grouped execution controls (`load_inputs`, `executor`, `container`,
             `runtime_kwargs`, `inject_context`).
+
+        **legacy_kwargs : Any
+            Hidden backwards-compatibility kwargs. ``config_plan`` and
+            ``hash_inputs`` are still accepted, but ``adapter`` and
+            ``identity_inputs`` are the public API.
 
         Returns
         -------
@@ -1312,7 +1320,7 @@ class Tracker:
             model=model,
             description=description,
             config=config,
-            config_plan=config_plan,
+            adapter=adapter,
             config_plan_ingest=config_plan_ingest,
             config_plan_profile_schema=config_plan_profile_schema,
             inputs=inputs,
@@ -1324,7 +1332,7 @@ class Tracker:
             facet_from=facet_from,
             facet_schema_version=facet_schema_version,
             facet_index=facet_index,
-            hash_inputs=hash_inputs,
+            identity_inputs=identity_inputs,
             year=year,
             iteration=iteration,
             phase=phase,
@@ -1337,6 +1345,7 @@ class Tracker:
             cache_options=cache_options,
             output_policy=output_policy,
             execution_options=execution_options,
+            **legacy_kwargs,
         )
 
     @contextmanager
@@ -1348,7 +1357,7 @@ class Tracker:
         model: Optional[str] = None,
         description: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
-        config_plan: Optional[ConfigPlan] = None,
+        adapter: Optional[ConfigAdapter] = None,
         config_plan_ingest: bool = True,
         config_plan_profile_schema: bool = False,
         inputs: Optional[
@@ -1362,7 +1371,7 @@ class Tracker:
         facet_from: Optional[List[str]] = None,
         facet_schema_version: Optional[Union[str, int]] = None,
         facet_index: Optional[bool] = None,
-        hash_inputs: HashInputs = None,
+        identity_inputs: IdentityInputs = None,
         year: Optional[int] = None,
         iteration: Optional[int] = None,
         parent_run_id: Optional[str] = None,
@@ -1372,9 +1381,14 @@ class Tracker:
         capture_pattern: str = "*",
         cache_mode: str = "reuse",
         cache_hydration: Optional[str] = None,
+        cache_version: Optional[int] = None,
+        cache_epoch: Optional[int] = None,
         validate_cached_outputs: str = "lazy",
+        code_identity: Optional[CodeIdentityMode] = None,
+        code_identity_extra_deps: Optional[List[str]] = None,
         output_mismatch: str = "warn",
         output_missing: str = "warn",
+        **legacy_kwargs: Any,
     ) -> Iterator["Tracker"]:
         """
         Context manager for inline tracing of a run with inline execution.
@@ -1398,9 +1412,8 @@ class Tracker:
             Human-readable description of the run.
         config : Optional[Dict[str, Any]], optional
             Configuration parameters. Becomes part of the cache signature. Can be a dict or Pydantic model.
-        config_plan : Optional[ConfigPlan], optional
-            Precomputed config plan (e.g., from ActivitySim adapter). The plan's identity hash
-            is folded into the run config hash and its artifacts/ingestables are applied on cache miss.
+        adapter : Optional[ConfigAdapter], optional
+            Config adapter used to derive a config plan before execution.
         config_plan_ingest : bool, default True
             Whether to ingest tables from the config plan.
         config_plan_profile_schema : bool, default False
@@ -1428,8 +1441,10 @@ class Tracker:
         facet_index : Optional[bool], optional
             Whether to index facets for faster queries.
 
-        hash_inputs : Optional[HashInputs], optional
-            Strategy for hashing inputs: "fast" (mtime), "full" (content), or None (auto-detect).
+        identity_inputs : Optional[IdentityInputs], optional
+            Additional hash-only identity inputs (for example config files or
+            directories) that should affect cache keys without being logged as
+            run inputs.
 
         year : Optional[int], optional
             Year metadata (for multi-year simulations). Included in provenance.
@@ -1454,13 +1469,26 @@ class Tracker:
             - "outputs-requested": Copy only output_paths to disk
             - "outputs-all": Copy all cached outputs to run_artifact_dir
             - "inputs-missing": Backfill missing inputs from prior runs before executing
+        cache_version : Optional[int], optional
+            Optional cache-version discriminator folded into run identity.
+        cache_epoch : Optional[int], optional
+            Optional cache-epoch discriminator folded into run identity.
         validate_cached_outputs : str, default "lazy"
             Validation for cached outputs: "lazy" (check if files exist), "strict", or "none".
+        code_identity : Optional[CodeIdentityMode], optional
+            Strategy for hashing code identity in cache keys.
+        code_identity_extra_deps : Optional[List[str]], optional
+            Extra dependency file paths folded into code identity hashing.
 
         output_mismatch : str, default "warn"
             Behavior when output count doesn't match: "warn", "error", or "ignore".
         output_missing : str, default "warn"
             Behavior when expected outputs are missing: "warn", "error", or "ignore".
+
+        **legacy_kwargs : Any
+            Hidden backwards-compatibility kwargs. ``config_plan`` and
+            ``hash_inputs`` are still accepted, but ``adapter`` and
+            ``identity_inputs`` are the public API.
 
         Yields
         ------
@@ -1519,7 +1547,7 @@ class Tracker:
             model=model,
             description=description,
             config=config,
-            config_plan=config_plan,
+            adapter=adapter,
             config_plan_ingest=config_plan_ingest,
             config_plan_profile_schema=config_plan_profile_schema,
             inputs=inputs,
@@ -1531,7 +1559,7 @@ class Tracker:
             facet_from=facet_from,
             facet_schema_version=facet_schema_version,
             facet_index=facet_index,
-            hash_inputs=hash_inputs,
+            identity_inputs=identity_inputs,
             year=year,
             iteration=iteration,
             parent_run_id=parent_run_id,
@@ -1541,9 +1569,14 @@ class Tracker:
             capture_pattern=capture_pattern,
             cache_mode=cache_mode,
             cache_hydration=cache_hydration,
+            cache_version=cache_version,
+            cache_epoch=cache_epoch,
             validate_cached_outputs=validate_cached_outputs,
+            code_identity=code_identity,
+            code_identity_extra_deps=code_identity_extra_deps,
             output_mismatch=output_mismatch,
             output_missing=output_missing,
+            **legacy_kwargs,
         ) as active_tracker:
             yield active_tracker
 

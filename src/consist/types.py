@@ -45,6 +45,7 @@ RunInputRef: TypeAlias = Union["Artifact", "RunResult", PathLike]
 
 HashInput: TypeAlias = Union[PathLike, tuple[str, PathLike]]
 HashInputs: TypeAlias = Optional[list[HashInput]]
+IdentityInputs: TypeAlias = HashInputs
 CodeIdentityMode: TypeAlias = Literal[
     "repo_git",
     "callable_module",

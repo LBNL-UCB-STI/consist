@@ -39,16 +39,17 @@ from consist.models.run import RunResult
 from consist.types import (
     ArtifactRef,
     CacheOptions,
+    CodeIdentityMode,
     DriverType,
     ExecutionOptions,
     FacetLike,
-    HashInputs,
+    IdentityInputs,
     OutputPolicyOptions,
     RunInputRef,
 )
 
 if TYPE_CHECKING:
-    from consist.core.config_canonicalization import ConfigPlan
+    from consist.core.config_canonicalization import ConfigAdapter, ConfigPlan
     from consist.core.tracker import Tracker
 
 
@@ -121,6 +122,62 @@ class RunTraceCoordinator:
         self._tracker = tracker
         self._helpers = helpers
 
+    @staticmethod
+    def _raise_unexpected_kwargs(kwargs: Mapping[str, Any]) -> None:
+        names = sorted(kwargs.keys())
+        if not names:
+            return
+        if len(names) == 1:
+            raise TypeError(f"unexpected keyword argument '{names[0]}'")
+        joined = "', '".join(names)
+        raise TypeError(f"unexpected keyword arguments '{joined}'")
+
+    def _resolve_adapter_config_dirs(self, adapter: "ConfigAdapter") -> list[Any]:
+        def _coerce_roots(value: Any) -> Optional[list[Any]]:
+            if value is None:
+                return None
+            if isinstance(value, (str, Path)):
+                return [value]
+            try:
+                values = list(value)
+            except TypeError as exc:
+                raise TypeError(
+                    "adapter root_dirs/config_dirs must be a path or iterable of paths."
+                ) from exc
+            return values or None
+
+        root_dirs = _coerce_roots(getattr(adapter, "root_dirs", None))
+        if root_dirs is None:
+            root_dirs = _coerce_roots(getattr(adapter, "config_dirs", None))
+        if root_dirs is None:
+            primary_config = getattr(adapter, "primary_config", None)
+            if primary_config is not None:
+                root_dirs = [Path(primary_config).expanduser().resolve().parent]
+        if root_dirs is None:
+            raise ValueError(
+                "adapter= requires config roots via adapter.root_dirs/config_dirs "
+                "or adapter.primary_config."
+            )
+        return root_dirs
+
+    def _prepare_config_plan(
+        self,
+        *,
+        adapter: Optional["ConfigAdapter"],
+        legacy_config_plan: Optional["ConfigPlan"],
+    ) -> Optional["ConfigPlan"]:
+        if adapter is not None and legacy_config_plan is not None:
+            raise ValueError("Pass either adapter= or config_plan=, not both.")
+        if legacy_config_plan is not None:
+            return legacy_config_plan
+        if adapter is None:
+            return None
+        tracker = self._tracker
+        return tracker.prepare_config(
+            adapter=adapter,
+            config_dirs=self._resolve_adapter_config_dirs(adapter),
+        )
+
     def run(
         self,
         fn: Optional[Callable[..., Any]] = None,
@@ -130,7 +187,7 @@ class RunTraceCoordinator:
         model: Optional[str] = None,
         description: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
-        config_plan: Optional[ConfigPlan] = None,
+        adapter: Optional["ConfigAdapter"] = None,
         config_plan_ingest: bool = True,
         config_plan_profile_schema: bool = False,
         inputs: Optional[
@@ -144,7 +201,7 @@ class RunTraceCoordinator:
         facet_from: Optional[List[str]] = None,
         facet_schema_version: Optional[Union[str, int]] = None,
         facet_index: Optional[bool] = None,
-        hash_inputs: HashInputs = None,
+        identity_inputs: IdentityInputs = None,
         year: Optional[int] = None,
         iteration: Optional[int] = None,
         phase: Optional[str] = None,
@@ -157,6 +214,7 @@ class RunTraceCoordinator:
         cache_options: Optional[CacheOptions] = None,
         output_policy: Optional[OutputPolicyOptions] = None,
         execution_options: Optional[ExecutionOptions] = None,
+        **legacy_kwargs: Any,
     ) -> RunResult:
         """Execute function/container run flow with tracker-level orchestration.
 
@@ -175,8 +233,8 @@ class RunTraceCoordinator:
             Human-readable run description.
         config : dict[str, Any] | None, optional
             Run config payload.
-        config_plan : ConfigPlan | None, optional
-            Optional precomputed config plan to apply on cache miss.
+        adapter : ConfigAdapter | None, optional
+            Config adapter used to derive a config plan before execution.
         config_plan_ingest : bool, default True
             Whether config-plan ingestables are ingested.
         config_plan_profile_schema : bool, default False
@@ -199,7 +257,7 @@ class RunTraceCoordinator:
             Optional run facet schema version.
         facet_index : bool | None, optional
             Whether run facet key/values are indexed.
-        hash_inputs : HashInputs, optional
+        identity_inputs : IdentityInputs, optional
             Additional identity hash inputs.
         year : int | None, optional
             Run year metadata.
@@ -236,8 +294,26 @@ class RunTraceCoordinator:
         This method currently performs both metadata resolution and execution-time
         validation. Future cleanup should split those responsibilities into
         independent phases/components.
+
+        Hidden compatibility kwargs are still accepted:
+        ``config_plan`` and ``hash_inputs``.
         """
         tracker = self._tracker
+        legacy_config_plan = legacy_kwargs.pop("config_plan", None)
+        legacy_hash_inputs = legacy_kwargs.pop("hash_inputs", None)
+        self._raise_unexpected_kwargs(legacy_kwargs)
+        if identity_inputs is not None and legacy_hash_inputs is not None:
+            raise ValueError(
+                "Pass either identity_inputs= or hash_inputs=, not both."
+            )
+        resolved_identity_inputs = (
+            identity_inputs if identity_inputs is not None else legacy_hash_inputs
+        )
+        config_plan = self._prepare_config_plan(
+            adapter=adapter,
+            legacy_config_plan=legacy_config_plan,
+        )
+
         resolved_invocation = resolve_run_invocation(
             fn=fn,
             name=name,
@@ -253,7 +329,7 @@ class RunTraceCoordinator:
             facet_from=facet_from,
             facet_schema_version=facet_schema_version,
             facet_index=facet_index,
-            hash_inputs=hash_inputs,
+            hash_inputs=resolved_identity_inputs,
             year=year,
             iteration=iteration,
             phase=phase,
@@ -291,7 +367,7 @@ class RunTraceCoordinator:
         cache_version = resolved_invocation.cache_version
         validate_cached_outputs = resolved_invocation.validate_cached_outputs
         load_inputs = resolved_invocation.load_inputs
-        hash_inputs = resolved_invocation.hash_inputs
+        identity_inputs = resolved_invocation.hash_inputs
         facet_from = resolved_invocation.facet_from
         facet_schema_version = resolved_invocation.facet_schema_version
         output_mismatch = resolved_invocation.output_mismatch
@@ -403,7 +479,7 @@ class RunTraceCoordinator:
             "cache_mode": cache_mode,
             "facet": facet,
             "facet_from": facet_from,
-            "hash_inputs": hash_inputs,
+            "hash_inputs": identity_inputs,
             "year": year,
             "iteration": iteration,
             "parent_run_id": parent_run_id,
@@ -810,7 +886,7 @@ class RunTraceCoordinator:
         model: Optional[str] = None,
         description: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
-        config_plan: Optional[ConfigPlan] = None,
+        adapter: Optional["ConfigAdapter"] = None,
         config_plan_ingest: bool = True,
         config_plan_profile_schema: bool = False,
         inputs: Optional[
@@ -824,7 +900,7 @@ class RunTraceCoordinator:
         facet_from: Optional[List[str]] = None,
         facet_schema_version: Optional[Union[str, int]] = None,
         facet_index: Optional[bool] = None,
-        hash_inputs: HashInputs = None,
+        identity_inputs: IdentityInputs = None,
         year: Optional[int] = None,
         iteration: Optional[int] = None,
         parent_run_id: Optional[str] = None,
@@ -834,9 +910,14 @@ class RunTraceCoordinator:
         capture_pattern: str = "*",
         cache_mode: str = "reuse",
         cache_hydration: Optional[str] = None,
+        cache_version: Optional[int] = None,
+        cache_epoch: Optional[int] = None,
         validate_cached_outputs: str = "lazy",
+        code_identity: Optional[CodeIdentityMode] = None,
+        code_identity_extra_deps: Optional[List[str]] = None,
         output_mismatch: str = "warn",
         output_missing: str = "warn",
+        **legacy_kwargs: Any,
     ) -> Iterator["Tracker"]:
         """Execute context-managed trace flow with tracker-level orchestration.
 
@@ -852,8 +933,8 @@ class RunTraceCoordinator:
             Human-readable run description.
         config : dict[str, Any] | None, optional
             Run config payload.
-        config_plan : ConfigPlan | None, optional
-            Optional precomputed config plan applied on cache miss.
+        adapter : ConfigAdapter | None, optional
+            Config adapter used to derive a config plan before execution.
         config_plan_ingest : bool, default True
             Whether config-plan ingestables are ingested.
         config_plan_profile_schema : bool, default False
@@ -876,7 +957,7 @@ class RunTraceCoordinator:
             Optional run facet schema version.
         facet_index : bool | None, optional
             Whether run facet key/values are indexed.
-        hash_inputs : HashInputs, optional
+        identity_inputs : IdentityInputs, optional
             Additional identity hash inputs.
         year : int | None, optional
             Run year metadata.
@@ -896,8 +977,16 @@ class RunTraceCoordinator:
             Cache mode for the trace run.
         cache_hydration : str | None, optional
             Cache materialization policy.
+        cache_version : int | None, optional
+            Cache-version discriminator folded into run identity.
+        cache_epoch : int | None, optional
+            Cache-epoch discriminator folded into run identity.
         validate_cached_outputs : str, default "lazy"
             Cached-output validation policy.
+        code_identity : CodeIdentityMode | None, optional
+            Code identity mode override for hash computation.
+        code_identity_extra_deps : list[str] | None, optional
+            Extra dependency paths included in code identity hashing.
         output_mismatch : str, default "warn"
             Output mismatch policy.
         output_missing : str, default "warn"
@@ -907,9 +996,99 @@ class RunTraceCoordinator:
         ------
         Tracker
             Active tracker within trace run scope.
+
+        Notes
+        -----
+        Hidden compatibility kwargs are still accepted:
+        ``config_plan`` and ``hash_inputs``.
         """
         tracker = self._tracker
-        resolved_model = model or name
+        legacy_config_plan = legacy_kwargs.pop("config_plan", None)
+        legacy_hash_inputs = legacy_kwargs.pop("hash_inputs", None)
+        self._raise_unexpected_kwargs(legacy_kwargs)
+        if identity_inputs is not None and legacy_hash_inputs is not None:
+            raise ValueError(
+                "Pass either identity_inputs= or hash_inputs=, not both."
+            )
+        resolved_identity_inputs = (
+            identity_inputs if identity_inputs is not None else legacy_hash_inputs
+        )
+        config_plan = self._prepare_config_plan(
+            adapter=adapter,
+            legacy_config_plan=legacy_config_plan,
+        )
+
+        resolved_invocation = resolve_run_invocation(
+            fn=None,
+            name=name,
+            model=model,
+            description=description,
+            config=config,
+            config_plan=config_plan,
+            inputs=inputs,
+            input_keys=input_keys,
+            optional_input_keys=optional_input_keys,
+            tags=tags,
+            facet=facet,
+            facet_from=facet_from,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
+            hash_inputs=resolved_identity_inputs,
+            year=year,
+            iteration=iteration,
+            phase=None,
+            stage=None,
+            outputs=outputs,
+            output_paths=output_paths,
+            cache_options=CacheOptions(
+                cache_mode=cache_mode,
+                cache_hydration=cache_hydration,
+                cache_version=cache_version,
+                cache_epoch=cache_epoch,
+                validate_cached_outputs=validate_cached_outputs,
+                code_identity=code_identity,
+                code_identity_extra_deps=code_identity_extra_deps,
+            ),
+            output_policy=OutputPolicyOptions(
+                output_mismatch=output_mismatch,
+                output_missing=output_missing,
+            ),
+            execution_options=None,
+            default_name_template=None,
+            allow_template=None,
+            apply_step_defaults=None,
+            consist_settings=tracker.settings,
+            consist_workspace=tracker.run_dir,
+            consist_state=tracker.current_consist,
+            missing_name_error="Tracker.trace requires a run name.",
+            python_missing_fn_error="Tracker.trace does not execute callable functions.",
+            allow_python_without_fn=True,
+        )
+
+        resolved_name = resolved_invocation.name
+        resolved_model = resolved_invocation.model
+        description = resolved_invocation.description
+        config = resolved_invocation.config
+        config_plan = resolved_invocation.config_plan
+        tags = resolved_invocation.tags
+        facet = resolved_invocation.facet
+        facet_index = resolved_invocation.facet_index
+        outputs = resolved_invocation.outputs
+        output_paths = resolved_invocation.output_paths
+        inputs = resolved_invocation.inputs
+        input_keys = resolved_invocation.input_keys
+        optional_input_keys = resolved_invocation.optional_input_keys
+        cache_mode = resolved_invocation.cache_mode
+        cache_hydration = resolved_invocation.cache_hydration
+        cache_version = resolved_invocation.cache_version
+        validate_cached_outputs = resolved_invocation.validate_cached_outputs
+        identity_inputs = resolved_invocation.hash_inputs
+        facet_from = resolved_invocation.facet_from
+        facet_schema_version = resolved_invocation.facet_schema_version
+        output_missing = resolved_invocation.output_missing
+        code_identity = resolved_invocation.code_identity
+        code_identity_extra_deps = resolved_invocation.code_identity_extra_deps
+        cache_epoch = resolved_invocation.cache_epoch
 
         if input_keys is not None or optional_input_keys is not None:
             warnings.warn(
@@ -917,13 +1096,6 @@ class RunTraceCoordinator:
                 DeprecationWarning,
                 stacklevel=2,
             )
-
-        if output_mismatch not in {"warn", "error", "ignore"}:
-            raise ValueError(
-                "output_mismatch must be one of: 'warn', 'error', 'ignore'"
-            )
-        if output_missing not in {"warn", "error", "ignore"}:
-            raise ValueError("output_missing must be one of: 'warn', 'error', 'ignore'")
 
         resolved_inputs, _ = self._helpers.resolve_input_refs(
             tracker,
@@ -933,7 +1105,7 @@ class RunTraceCoordinator:
         )
 
         if run_id is None:
-            run_id = f"{name}_{uuid.uuid4().hex[:8]}"
+            run_id = f"{resolved_name}_{uuid.uuid4().hex[:8]}"
 
         materialize_cached_output_paths: Optional[Dict[str, Path]] = None
         materialize_cached_outputs_dir: Optional[Path] = None
@@ -991,6 +1163,10 @@ class RunTraceCoordinator:
                 "adapter_version": config_plan.adapter_version,
             }
 
+        resolved_cache_epoch = (
+            tracker._cache_epoch if cache_epoch is None else cache_epoch
+        )
+
         start_kwargs: Dict[str, Any] = {
             "run_id": run_id,
             "model": resolved_model,
@@ -1001,13 +1177,19 @@ class RunTraceCoordinator:
             "cache_mode": cache_mode,
             "facet": facet,
             "facet_from": facet_from,
-            "hash_inputs": hash_inputs,
+            "hash_inputs": identity_inputs,
             "year": year,
             "iteration": iteration,
             "parent_run_id": parent_run_id,
             "validate_cached_outputs": validate_cached_outputs,
-            "cache_epoch": tracker._cache_epoch,
+            "cache_epoch": resolved_cache_epoch,
         }
+        if code_identity is not None:
+            start_kwargs["code_identity"] = code_identity
+        if code_identity_extra_deps is not None:
+            start_kwargs["code_identity_extra_deps"] = list(code_identity_extra_deps)
+        if cache_version is not None:
+            start_kwargs["cache_version"] = cache_version
         if facet_schema_version is not None:
             start_kwargs["facet_schema_version"] = facet_schema_version
         if facet_index is not None:
@@ -1063,7 +1245,9 @@ class RunTraceCoordinator:
                             output_base_dir,
                         )
                         if not ref_path.exists():
-                            _handle_missing_outputs(f"Run {name!r}", [str(output_key)])
+                            _handle_missing_outputs(
+                                f"Run {resolved_name!r}", [str(output_key)]
+                            )
                             continue
                         if isinstance(ref, Artifact):
                             tracker.log_artifact(
@@ -1085,4 +1269,4 @@ class RunTraceCoordinator:
                         for output_key in outputs
                         if output_key not in logged_outputs
                     ]
-                    _handle_missing_outputs(f"Run {name!r}", missing_keys)
+                    _handle_missing_outputs(f"Run {resolved_name!r}", missing_keys)

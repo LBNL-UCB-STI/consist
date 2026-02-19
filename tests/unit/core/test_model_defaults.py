@@ -80,3 +80,40 @@ def test_artifact_schema_defaults_are_isolated() -> None:
     schema_a.summary_json["alpha"] = "a"
 
     assert "alpha" not in schema_b.summary_json
+
+
+def test_run_identity_summary_exposes_components() -> None:
+    run = Run(
+        id="identity_run",
+        model_name="activitysim",
+        config_hash="cfg_hash",
+        input_hash="inp_hash",
+        git_hash="code_hash",
+        signature="sig_hash",
+        year=2030,
+        iteration=2,
+        meta={
+            "config_adapter": "activitysim",
+            "config_adapter_version": "0.1",
+            "config_bundle_hash": "adapter_hash",
+            "consist_hash_inputs": {"extra_dep.yaml": "dep_hash"},
+            "cache_epoch": 9,
+            "cache_version": 3,
+            "code_identity": "repo_git",
+            "code_identity_extra_deps": ["extra_dep.yaml"],
+        },
+    )
+
+    summary = run.identity_summary
+
+    assert summary["signature"] == "sig_hash"
+    assert summary["code_version"] == "code_hash"
+    assert summary["config_hash"] == "cfg_hash"
+    assert summary["input_hash"] == "inp_hash"
+    assert summary["adapter"]["name"] == "activitysim"
+    assert summary["adapter"]["hash"] == "adapter_hash"
+    assert summary["identity_inputs"] == {"extra_dep.yaml": "dep_hash"}
+    assert summary["identity_inputs_count"] == 1
+    assert summary["run_fields"]["year"] == 2030
+    assert summary["run_fields"]["cache_epoch"] == 9
+    assert summary["run_fields"]["cache_version"] == 3

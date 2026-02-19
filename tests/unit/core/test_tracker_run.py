@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 import consist
+from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
 from consist.core.tracker import Tracker
 from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
 
@@ -551,6 +552,71 @@ def test_cache_version_affects_config_hash(tracker):
     hash_v2 = tracker.last_run.run.config_hash
 
     assert hash_v1 != hash_v2
+
+
+def test_tracker_run_adapter_identity_matches_legacy_config_plan(
+    tracker, tmp_path, monkeypatch
+):
+    dep_path = tmp_path / "identity_dep.yaml"
+    dep_path.write_text("threshold: 0.5\n")
+
+    config_root = tmp_path / "adapter_config"
+    config_root.mkdir(parents=True, exist_ok=True)
+
+    adapter_plan = ConfigPlan(
+        adapter_name="dummy_adapter",
+        adapter_version="1.0",
+        canonical=CanonicalConfig(
+            root_dirs=[config_root],
+            primary_config=None,
+            config_files=[],
+            external_files=[],
+            content_hash="adapter_identity_hash",
+        ),
+        artifacts=[],
+        ingestables=[],
+    )
+
+    class DummyAdapter:
+        model_name = "dummy_adapter"
+        root_dirs = [config_root]
+
+    dummy_adapter = DummyAdapter()
+
+    calls: list[list[Path]] = []
+
+    def fake_prepare_config(adapter, config_dirs, **kwargs):
+        del kwargs
+        assert adapter is dummy_adapter
+        resolved_dirs = [Path(p) for p in config_dirs]
+        calls.append(resolved_dirs)
+        return adapter_plan
+
+    monkeypatch.setattr(tracker, "prepare_config", fake_prepare_config)
+
+    def step() -> None:
+        return None
+
+    adapter_run = tracker.run(
+        fn=step,
+        name="identity_step",
+        adapter=dummy_adapter,
+        identity_inputs=[dep_path],
+        cache_options=CacheOptions(cache_mode="overwrite"),
+    )
+    legacy_run = tracker.run(
+        fn=step,
+        name="identity_step",
+        config_plan=adapter_plan,
+        hash_inputs=[dep_path],
+        cache_options=CacheOptions(cache_mode="overwrite"),
+    )
+
+    assert calls == [[config_root]]
+    assert adapter_run.run.config_hash == legacy_run.run.config_hash
+    assert adapter_run.run.meta["config_adapter"] == "dummy_adapter"
+    assert adapter_run.run.meta["config_bundle_hash"] == "adapter_identity_hash"
+    assert adapter_run.run.meta["consist_hash_inputs"]
 
 
 def test_tracker_run_rejects_legacy_policy_kwargs(tracker):

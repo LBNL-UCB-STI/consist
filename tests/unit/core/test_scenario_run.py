@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 import consist
+from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
 from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
 
 
@@ -130,6 +131,54 @@ def test_scenario_run_rejects_legacy_policy_kwargs(tracker):
                 outputs=["out"],
                 output_missing="error",
             )
+
+
+def test_scenario_run_accepts_adapter_identity_flow(
+    tracker, tmp_path, monkeypatch
+):
+    config_root = tmp_path / "sc_adapter"
+    config_root.mkdir(parents=True, exist_ok=True)
+
+    adapter_plan = ConfigPlan(
+        adapter_name="scenario_adapter",
+        adapter_version="1.0",
+        canonical=CanonicalConfig(
+            root_dirs=[config_root],
+            primary_config=None,
+            config_files=[],
+            external_files=[],
+            content_hash="scenario_adapter_hash",
+        ),
+        artifacts=[],
+        ingestables=[],
+    )
+
+    class DummyAdapter:
+        model_name = "scenario_adapter"
+        root_dirs = [config_root]
+
+    dummy_adapter = DummyAdapter()
+    calls: list[list[str]] = []
+
+    def fake_prepare_config(adapter, config_dirs, **kwargs):
+        del kwargs
+        assert adapter is dummy_adapter
+        calls.append([str(p) for p in config_dirs])
+        return adapter_plan
+
+    monkeypatch.setattr(tracker, "prepare_config", fake_prepare_config)
+
+    with tracker.scenario("scen_adapter_flow") as sc:
+        result = sc.run(
+            fn=lambda: None,
+            name="produce",
+            adapter=dummy_adapter,
+            cache_options=CacheOptions(cache_mode="overwrite"),
+        )
+
+    assert result.cache_hit is False
+    assert calls == [[str(config_root)]]
+    assert result.run.meta["config_adapter"] == "scenario_adapter"
 
 
 def test_scenario_run_accepts_ref_and_single_output_run_result(tracker):

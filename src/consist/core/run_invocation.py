@@ -167,6 +167,7 @@ def resolve_run_invocation(
     consist_state: Optional[ConsistRecord],
     missing_name_error: str,
     python_missing_fn_error: str,
+    allow_python_without_fn: bool = False,
 ) -> ResolvedRunInvocation:
     """
     Resolve and validate a run invocation into a normalized internal contract.
@@ -244,6 +245,10 @@ def resolve_run_invocation(
         Error message used if no run name can be resolved.
     python_missing_fn_error : str
         Error message used when python execution is selected without a callable.
+    allow_python_without_fn : bool, default False
+        If True, allow python executor resolution when ``fn`` is omitted.
+        This is used by ``trace()`` flows that execute inline block code
+        rather than a direct callable.
 
     Returns
     -------
@@ -334,7 +339,7 @@ def resolve_run_invocation(
             )
         if fn is None and name is None:
             raise ValueError("executor='container' requires name when fn is None.")
-    elif fn is None:
+    elif fn is None and not allow_python_without_fn:
         raise ValueError(python_missing_fn_error)
 
     runtime_kwargs_dict: Optional[Dict[str, Any]] = (
