@@ -20,6 +20,10 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 ### Changed
 
+- Establish a recommended-path docs/examples surface around
+  `run(...)` / `trace(...)` / `scenario(...)`, while repositioning manual
+  lifecycle and decorator-heavy patterns as advanced guidance
+  by @zneedell (PR link TBD).
 - Unify run/trace identity public surface around `adapter=` and
   `identity_inputs=` across `Tracker`, `ScenarioContext`, and top-level
   `consist` wrappers by @zneedell (PR link TBD).
