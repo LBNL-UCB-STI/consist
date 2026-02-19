@@ -5,6 +5,11 @@ Consist executes containerized tools (Docker, Singularity) with automatic proven
 !!! note "Image Digest"
     An image digest is the SHA256 hash of a container image's content (e.g., `sha256:a1b2c3...`). Unlike tags (`:latest`, `:v1.0`), digests are immutable—the same digest always refers to the same image bytes.
 
+!!! note "Recommended path"
+    `run_container(...)` is an integration-specific API for external tools. For
+    Python workflow steps, the recommended path is `consist.run(...)`,
+    `consist.trace(...)`, or `consist.scenario(...)`.
+
 ---
 
 ## When to Use Containers
@@ -423,6 +428,11 @@ Cache is invalidated (new run executed) if any of these change:
 ### Manual Cache Bypass
 
 To force re-execution even with matching signature:
+
+!!! note "Advanced lifecycle pattern"
+    The `tracker.begin_run(...)`/`tracker.end_run()` wrapper below is low-level.
+    Prefer the recommended path (`run`/`trace`/`scenario`) unless you need manual
+    lifecycle control around container orchestration.
 
 ```python
 # No built-in flag, but you can:

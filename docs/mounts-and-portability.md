@@ -4,6 +4,12 @@ Consist stores portable URIs instead of absolute filesystem paths so runs can mo
 between machines without breaking lineage. This page explains how mounts, workspace
 URIs, and historical path resolution work.
 
+!!! note "Recommended path"
+    For most workflow code, the recommended path is `consist.run(...)`,
+    `consist.trace(...)`, or `consist.scenario(...)`. This page includes
+    `tracker.start_run(...)`/`consist.log_artifact(...)` snippets as low-level
+    examples for path and URI mechanics.
+
 ---
 
 ## Getting Started with Mounts

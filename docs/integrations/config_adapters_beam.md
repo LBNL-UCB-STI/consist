@@ -8,7 +8,18 @@ Dependencies:
 - Requires `pyhocon` for parsing `.conf` files.
 - Requires `pandas` only if you use tabular ingestion via `BeamIngestSpec`.
 
+!!! note "Recommended path"
+    For workflow execution, the recommended path is `consist.run(...)`,
+    `consist.trace(...)`, or `consist.scenario(...)` with `adapter=` and
+    `identity_inputs=`. Examples using `tracker.begin_run(...)`,
+    `tracker.canonicalize_config(...)`, and `tracker.end_run()` are
+    integration-specific advanced lifecycle patterns.
+
 ## Usage
+
+!!! note "Integration-specific advanced lifecycle snippet"
+    This usage block shows explicit adapter lifecycle control. Prefer the
+    recommended path (`run`/`trace`/`scenario`) for regular BEAM runs.
 
 ```python
 from pathlib import Path

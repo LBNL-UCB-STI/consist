@@ -7,6 +7,12 @@ Consist's core loop: declare inputs → compute signature → check cache → lo
 
 This page covers patterns for making caching reliable, keeping pipelines portable, and choosing when artifacts should be hydrated or materialized.
 
+!!! note "Recommended path"
+    For routine workflow code, the recommended path is `consist.run(...)`,
+    `consist.trace(...)`, or `consist.scenario(...)`. Low-level lifecycle snippets
+    in this page (for example `tracker.start_run(...)`) are advanced examples to
+    make hydration/materialization mechanics explicit.
+
 ---
 
 Canonical one-line definitions for cache hit, hydration, materialization, and
@@ -42,6 +48,11 @@ Materialize cached outputs (copy bytes to your current run) in three cases:
 3. **Ensuring local reproducibility**: All results accessible without remote mounts. Use `cache_hydration="outputs-all"` to copy all cached outputs.
 
 ### Example: Electric Grid Modeling Workflow
+
+!!! note "Advanced lifecycle example"
+    This walkthrough uses low-level lifecycle APIs to show cache and hydration
+    behavior step-by-step. Prefer the recommended path (`run`/`trace`/`scenario`)
+    for new workflow code.
 
 ``` python
 from pathlib import Path

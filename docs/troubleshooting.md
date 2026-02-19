@@ -6,6 +6,12 @@ This guide organizes issues by symptom. For concept definitions, see [Core Conce
 - [DLT Loader](dlt-loader-guide.md#common-errors)
 - [Mounts & Portability](mounts-and-portability.md#troubleshooting)
 
+!!! note "Recommended path"
+    For normal workflow code, the recommended path is `consist.run(...)`,
+    `consist.trace(...)`, or `consist.scenario(...)`. Some troubleshooting sections
+    intentionally use low-level lifecycle APIs (for example `tracker.start_run(...)`
+    and manual materialization helpers) to isolate specific failure modes.
+
 ---
 
 ## Cache & Provenance Issues

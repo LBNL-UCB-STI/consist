@@ -1,5 +1,11 @@
 # Architecture
 
+!!! note "Recommended path"
+    For most user workflows, the recommended path is `consist.run(...)`,
+    `consist.trace(...)`, or `consist.scenario(...)`. Low-level lifecycle snippets
+    in this page (for example `tracker.start_run(...)` + `tracker.log_artifact(...)`)
+    are advanced and primarily explain internal behavior.
+
 ## How Caching Works
 
 Consist identifies runs using a three-part signature:
@@ -104,6 +110,11 @@ On cache hits, if a file is missing from disk, you have two recovery paths:
 - **DB recovery** (for ingested tabular outputs) via `consist.load_df(..., db_fallback="always")`
 
 Example: recover a missing, ingested tabular artifact from DuckDB:
+
+!!! note "Advanced lifecycle example"
+    This snippet uses low-level lifecycle APIs to show recovery mechanics directly.
+    Prefer the recommended path (`run`/`trace`/`scenario`) for regular workflow code.
+
 ```python
 with tracker.start_run("2036_dispatch", model="grid_sim"):
     artifact = tracker.log_artifact(
