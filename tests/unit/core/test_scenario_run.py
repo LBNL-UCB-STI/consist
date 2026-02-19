@@ -133,9 +133,7 @@ def test_scenario_run_rejects_legacy_policy_kwargs(tracker):
             )
 
 
-def test_scenario_run_accepts_adapter_identity_flow(
-    tracker, tmp_path, monkeypatch
-):
+def test_scenario_run_accepts_adapter_identity_flow(tracker, tmp_path, monkeypatch):
     config_root = tmp_path / "sc_adapter"
     config_root.mkdir(parents=True, exist_ok=True)
 
