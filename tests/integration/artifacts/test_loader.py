@@ -1,4 +1,5 @@
 # tests/integration/test_loader.py
+from importlib import import_module
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -260,7 +261,7 @@ def test_loader_drivers(run_dir: Path):
 
     # --- 2. Zarr Test ---
     if HAS_ZARR:
-        import xarray as xr
+        xr = import_module("xarray")
 
         zarr_path = run_dir / "test.zarr"
 
@@ -355,7 +356,7 @@ def test_loader_type_guard_dispatch(run_dir: Path):
     assert isinstance(loaded_json, pd.DataFrame)
 
     if HAS_ZARR:
-        import xarray as xr
+        xr = import_module("xarray")
 
         zarr_path = run_dir / "guard.zarr"
         ds = xr.Dataset({"temp": (("x", "y"), np.random.rand(2, 2))})

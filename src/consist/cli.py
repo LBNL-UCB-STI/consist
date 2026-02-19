@@ -22,10 +22,13 @@ if __package__ is None and __spec__ is None:
 
 import cmd
 from contextlib import contextmanager
+import importlib
+from importlib.metadata import PackageNotFoundError, version as package_version
 import shlex
 import json
 import uuid
 from pathlib import Path
+from types import ModuleType
 from typing import (
     Any,
     Dict,
@@ -60,6 +63,12 @@ if TYPE_CHECKING:
     from consist.models.artifact import Artifact
     from consist.models.run import Run
 
+_READLINE: ModuleType | None = None
+try:
+    _READLINE = importlib.import_module("readline")
+except ImportError:  # pragma: no cover - platform dependent
+    pass
+
 app = typer.Typer(rich_markup_mode="markdown")
 schema_app = typer.Typer(rich_markup_mode="markdown")
 views_app = typer.Typer(rich_markup_mode="markdown")
@@ -71,14 +80,59 @@ app.add_typer(views_app, name="views")
 MAX_CLI_LIMIT = 1_000_000
 MAX_PREVIEW_ROWS = 1_000_000
 MAX_SEARCH_QUERY_LENGTH = 256
+LIKE_ESCAPE_CHAR = "!"
+CLI_EXIT_SUCCESS = 0
+CLI_EXIT_RUNTIME_ERROR = 1
+CLI_EXIT_USAGE_ERROR = 2
+CLI_EXIT_INTERRUPTED = 130
+
+
+def _resolve_cli_version() -> str:
+    try:
+        return package_version("consist")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+def _version_callback(value: bool) -> None:
+    if not value:
+        return
+    console.print(f"consist {_resolve_cli_version()}")
+    raise typer.Exit(CLI_EXIT_SUCCESS)
+
+
+def _is_interactive_tty() -> bool:
+    """Return True when stdin/stdout are both TTYs (safe for interactive prompts)."""
+    stdin_isatty = getattr(sys.stdin, "isatty", None)
+    stdout_isatty = getattr(sys.stdout, "isatty", None)
+    return bool(
+        callable(stdin_isatty)
+        and callable(stdout_isatty)
+        and stdin_isatty()
+        and stdout_isatty()
+    )
+
+
+@app.callback()
+def cli_root(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        "-V",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show Consist CLI version and exit.",
+    ),
+) -> None:
+    """Consist CLI root options."""
+    del version
 
 
 def _optional_xarray() -> Any | None:
     try:
-        import xarray as xr
+        return importlib.import_module("xarray")
     except ImportError:
         return None
-    return xr
 
 
 def output_json(data: Any) -> None:
@@ -101,9 +155,9 @@ def _parse_bounded_int(value: str, *, name: str, minimum: int, maximum: int) -> 
 
 
 def _escape_like_pattern(value: str) -> str:
-    value = value.replace("\\", "\\\\")
-    value = value.replace("%", "\\%")
-    value = value.replace("_", "\\_")
+    value = value.replace(LIKE_ESCAPE_CHAR, LIKE_ESCAPE_CHAR * 2)
+    value = value.replace("%", f"{LIKE_ESCAPE_CHAR}%")
+    value = value.replace("_", f"{LIKE_ESCAPE_CHAR}_")
     return value
 
 
@@ -141,7 +195,7 @@ def get_tracker(db_path: Optional[str] = None) -> Tracker:
         console.print(
             "[yellow]Hint: Use --db-path to specify location or set CONSIST_DB environment variable[/yellow]"
         )
-        raise typer.Exit(1)
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
     return Tracker(run_dir=Path("."), db_path=resolved_path)
 
 
@@ -289,9 +343,7 @@ def schema_export(
         "--prefer-source",
         help="Preference hint for when user_provided schema does not exist: 'file' (original CSV/Parquet dtypes) or 'duckdb' (post-ingestion schema). User-provided schemas are ALWAYS preferred if they exist and cannot be overridden.",
     ),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
 ) -> None:
     """Export a captured artifact schema as an editable SQLModel stub.
 
@@ -306,18 +358,18 @@ def schema_export(
         console.print(
             "[red]Provide exactly one of --schema-id, --artifact-id, or --artifact-key[/red]"
         )
-        raise typer.Exit(2)
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR)
     if artifact_id is not None:
         try:
             uuid.UUID(artifact_id)
         except ValueError:
             console.print("[red]--artifact-id must be a UUID[/red]")
-            raise typer.Exit(2)
+            raise typer.Exit(CLI_EXIT_USAGE_ERROR)
 
     # Validate prefer_source if provided
     if prefer_source is not None and prefer_source not in ("file", "duckdb"):
         console.print("[red]--prefer-source must be either 'file' or 'duckdb'[/red]")
-        raise typer.Exit(2)
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR)
     resolved_prefer_source: Optional[Literal["file", "duckdb"]] = None
     if prefer_source is not None:
         resolved_prefer_source = cast(Literal["file", "duckdb"], prefer_source)
@@ -327,7 +379,7 @@ def schema_export(
         artifact = tracker.get_artifact(artifact_key)
         if artifact is None:
             console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
         artifact_id = str(artifact.id)
     try:
         code = tracker.export_schema_sqlmodel(
@@ -343,10 +395,10 @@ def schema_export(
         )
     except KeyError:
         console.print("[red]Captured schema not found for the provided selector.[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
     except ValueError as e:
         console.print(f"[red]{e}[/red]")
-        raise typer.Exit(2)
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR)
 
     if out is None:
         print(code)
@@ -356,15 +408,13 @@ def schema_export(
 
 @schema_app.command("apply-fks")
 def schema_apply_fks(
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
 ) -> None:
     """Best-effort application of physical foreign key constraints."""
     tracker = get_tracker(db_path)
     if not tracker.db:
         console.print("[red]Tracker database not initialized.[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
     applied = tracker.db.apply_physical_fks()
     console.print(
         f"[green]Applied {applied} foreign key constraint(s) (best-effort).[/green]"
@@ -437,8 +487,8 @@ def views_create(
         "--schema-compatible",
         help="Include subset/superset schema variants by field names.",
     ),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
 ) -> None:
     """Create a selector-driven grouped hybrid view across many artifacts."""
@@ -465,7 +515,7 @@ def views_create(
         )
     except (RuntimeError, ValueError, FileNotFoundError) as exc:
         console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1) from exc
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR) from exc
 
     console.print(f"[green]Created grouped view '{view_name}'.[/green]")
 
@@ -753,9 +803,7 @@ def search(
     query: str = typer.Argument(
         ..., help="Search term (searches run IDs, model names, tags)."
     ),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
     limit: int = typer.Option(20, help="Maximum results."),
 ) -> None:
     """Search for runs by ID, model name, or tags (query length is capped)."""
@@ -775,9 +823,14 @@ def search(
             select(Run)
             .where(
                 or_(
-                    col(Run.id).contains(escaped_query, escape="\\"),
-                    col(Run.model_name).contains(escaped_query, escape="\\"),
-                    col(Run.parent_run_id).contains(escaped_query, escape="\\")
+                    col(Run.id).contains(escaped_query, escape=LIKE_ESCAPE_CHAR),
+                    col(Run.model_name).contains(
+                        escaped_query, escape=LIKE_ESCAPE_CHAR
+                    ),
+                    col(Run.tags).contains(escaped_query, escape=LIKE_ESCAPE_CHAR),
+                    col(Run.parent_run_id).contains(
+                        escaped_query, escape=LIKE_ESCAPE_CHAR
+                    )
                     if escaped_query
                     else False,
                 )
@@ -814,18 +867,18 @@ def search(
 
 @app.command()
 def validate(
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
     fix: bool = typer.Option(
         False, help="Attempt to fix issues (mark artifacts as missing)."
     ),
 ) -> None:
     """Check that artifacts referenced in DB actually exist on disk."""
     tracker = get_tracker(db_path)
+    from consist.models.artifact import Artifact
 
     with _tracker_session(tracker) as session:
         missing = []
+        missing_ids: List[uuid.UUID] = []
         batch_size = 1000
         if env_batch_size := os.getenv("CONSIST_VALIDATE_BATCH_SIZE"):
             try:
@@ -833,17 +886,34 @@ def validate(
             except ValueError:
                 batch_size = 1000
 
-        for _, key, uri, run_id in _iter_artifact_rows(session, batch_size=batch_size):
+        for artifact_id, key, uri, run_id in _iter_artifact_rows(
+            session, batch_size=batch_size
+        ):
             try:
                 abs_path = tracker.resolve_uri(uri)
                 if not Path(abs_path).exists():
                     missing.append((key, uri, run_id))
+                    missing_ids.append(artifact_id)
             except Exception:
                 missing.append((key, uri, run_id))
+                missing_ids.append(artifact_id)
 
         if not missing:
             console.print("[green]✓ All artifacts validated successfully[/green]")
             return
+
+        if fix and missing_ids:
+            updates = (
+                select(Artifact)
+                .where(col(Artifact.id).in_(set(missing_ids)))
+                .order_by(col(Artifact.created_at))
+            )
+            for artifact in session.exec(cast(Any, updates)).all():
+                current_meta = dict(artifact.meta or {})
+                current_meta["missing_on_disk"] = True
+                artifact.meta = current_meta
+                session.add(artifact)
+            session.commit()
 
         console.print(f"[yellow]⚠ Found {len(missing)} missing artifacts:[/yellow]\n")
 
@@ -863,9 +933,7 @@ def validate(
 
 @app.command()
 def scenarios(
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
     limit: int = typer.Option(20, help="Maximum scenarios to display."),
 ) -> None:
     """List all scenarios and their run counts."""
@@ -876,9 +944,7 @@ def scenarios(
 @app.command()
 def scenario(
     scenario_id: str = typer.Argument(..., help="The scenario ID to inspect."),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
 ) -> None:
     """Show all runs in a scenario."""
     tracker = get_tracker(db_path)
@@ -895,7 +961,7 @@ def scenario(
 
         if not results:
             console.print(f"[red]No runs found for scenario '{scenario_id}'[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
         table = Table(title=f"Runs in Scenario: [cyan]{scenario_id}[/cyan]")
         table.add_column("Model", style="green")
@@ -917,8 +983,8 @@ def scenario(
 
 @app.command()
 def runs(
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
     limit: int = typer.Option(10, help="Maximum number of recent runs to display."),
     json_output: bool = typer.Option(
@@ -1001,8 +1067,8 @@ def artifacts(
         "--limit",
         help="Maximum number of artifact query results.",
     ),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
 ) -> None:
     """Display run artifacts or query artifacts by indexed facet parameters."""
@@ -1013,11 +1079,11 @@ def artifacts(
             console.print(
                 "[red]Provide a run_id or use query options like --param.[/red]"
             )
-            raise typer.Exit(1)
+            raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
         run = tracker.get_run(run_id)
         if not run:
             console.print(f"[red]Run with ID '{run_id}' not found.[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
         _render_artifacts_table(tracker, run_id)
         return
 
@@ -1026,7 +1092,7 @@ def artifacts(
             "[red]run_id cannot be combined with --param/--namespace/--key-prefix/"
             "--family-prefix.[/red]"
         )
-        raise typer.Exit(1)
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
     try:
         results = queries.find_artifacts_by_params(
@@ -1039,7 +1105,7 @@ def artifacts(
         )
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1) from exc
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR) from exc
 
     if not results:
         console.print("[yellow]No artifacts matched the provided filters.[/yellow]")
@@ -1076,13 +1142,87 @@ def _build_lineage_tree(
         _build_lineage_tree(child_branch, input_lineage, visited_runs.copy())
 
 
+def _print_missing_artifact_file_help(tracker: Tracker, artifact: "Artifact") -> None:
+    abs_path = tracker.resolve_uri(artifact.container_uri)
+    from consist.tools.mount_diagnostics import (
+        build_mount_resolution_hint,
+        format_missing_artifact_mount_help,
+    )
+
+    hint = build_mount_resolution_hint(
+        artifact.container_uri, artifact_meta=artifact.meta, mounts=tracker.mounts
+    )
+    help_text = (
+        format_missing_artifact_mount_help(hint, resolved_path=abs_path)
+        if hint
+        else f"Resolved path: {abs_path}\nThe artifact may have been deleted, moved, or your mounts are misconfigured."
+    )
+    console.print(
+        f"[red]Artifact file not found at: {artifact.container_uri}[/red]\n{help_text}"
+    )
+
+
+def _print_optional_dependency_hint(driver: str) -> None:
+    extras_map = {
+        "zarr": "zarr",
+        "h5": "hdf5",
+        "hdf5": "hdf5",
+        "h5_table": "hdf5",
+        "geojson": "spatial",
+        "shapefile": "spatial",
+        "geopackage": "spatial",
+    }
+    extra = extras_map.get(driver)
+    if extra is None:
+        return
+    console.print(
+        f"Hint: install optional support with pip install -e '.[{extra}]'",
+        markup=False,
+    )
+
+
+def _load_artifact_with_diagnostics(
+    tracker: Tracker,
+    artifact: "Artifact",
+    *,
+    n_rows: int | None = None,
+) -> Any | None:
+    try:
+        import consist
+
+        load_kwargs: Dict[str, Any] = {}
+        if artifact.driver == "csv" and n_rows is not None:
+            # Avoid loading the full file when we only need a small preview.
+            load_kwargs["nrows"] = n_rows
+        return consist.load(
+            artifact, tracker=tracker, db_fallback="always", **load_kwargs
+        )
+    except FileNotFoundError:
+        _print_missing_artifact_file_help(tracker, artifact)
+        return None
+    except ImportError as e:
+        console.print(
+            f"[red]Missing optional dependency while loading artifact: {e}[/red]"
+        )
+        _print_optional_dependency_hint(str(artifact.driver))
+        return None
+    except ValueError as e:
+        console.print(
+            f"[red]Unsupported artifact driver '{artifact.driver}': {e}[/red]"
+        )
+        return None
+    except Exception as e:
+        console.print(f"[red]Error loading artifact: {e}[/red]")
+        return None
+
+
 @app.command()
 def lineage(
     artifact_key: str = typer.Argument(
         ..., help="The key or ID of the artifact to trace."
     ),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
 ) -> None:
     """Traces and displays the full lineage of an artifact."""
@@ -1093,7 +1233,7 @@ def lineage(
         console.print(
             f"[red]Could not find artifact with key or ID '{artifact_key}'.[/red]"
         )
-        raise typer.Exit(1)
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
     start_artifact = lineage_data["artifact"]
     tree = Tree(
@@ -1110,8 +1250,8 @@ def lineage(
 
 @app.command()
 def summary(
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
 ) -> None:
     """Displays a high-level summary of the provenance database."""
@@ -1129,8 +1269,8 @@ def preview(
     artifact_key: str = typer.Argument(
         ..., help="The key or ID of the artifact to preview."
     ),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
     n_rows: int = typer.Option(5, "--rows", "-n", help="Number of rows to display."),
     trust_db: bool = typer.Option(
@@ -1146,65 +1286,12 @@ def preview(
     artifact = tracker.get_artifact(artifact_key)
     if not artifact:
         console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
     _ensure_tracker_mounts_for_artifact(tracker, artifact, trust_db=trust_db)
-
-    try:
-        import consist
-
-        load_kwargs: Dict[str, Any] = {}
-        if artifact.driver == "csv":
-            # Avoid loading the full file when we only need a head() preview.
-            load_kwargs["nrows"] = n_rows
-
-        data = consist.load(
-            artifact, tracker=tracker, db_fallback="always", **load_kwargs
-        )
-    except FileNotFoundError:
-        abs_path = tracker.resolve_uri(artifact.container_uri)
-        from consist.tools.mount_diagnostics import (
-            build_mount_resolution_hint,
-            format_missing_artifact_mount_help,
-        )
-
-        hint = build_mount_resolution_hint(
-            artifact.container_uri, artifact_meta=artifact.meta, mounts=tracker.mounts
-        )
-        help_text = (
-            format_missing_artifact_mount_help(hint, resolved_path=abs_path)
-            if hint
-            else f"Resolved path: {abs_path}\nThe artifact may have been deleted, moved, or your mounts are misconfigured."
-        )
-        console.print(
-            f"[red]Artifact file not found at: {artifact.container_uri}[/red]\n{help_text}"
-        )
-        raise typer.Exit(1)
-    except ImportError as e:
-        console.print(
-            f"[red]Missing optional dependency while loading artifact: {e}[/red]"
-        )
-        if artifact.driver == "zarr":
-            console.print(
-                "[yellow]Hint:[/] install Zarr support: `pip install -e '.[zarr]'`"
-            )
-        elif artifact.driver in {"h5", "hdf5", "h5_table"}:
-            console.print(
-                "[yellow]Hint:[/] install HDF5 support: `pip install -e '.[hdf5]'`"
-            )
-        elif artifact.driver in {"geojson", "shapefile", "geopackage"}:
-            console.print(
-                "[yellow]Hint:[/] install spatial support: `pip install -e '.[spatial]'`"
-            )
-        raise typer.Exit(1)
-    except ValueError as e:
-        console.print(
-            f"[red]Unsupported artifact driver '{artifact.driver}': {e}[/red]"
-        )
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Error loading artifact: {e}[/red]")
-        raise typer.Exit(1)
+    data = _load_artifact_with_diagnostics(tracker, artifact, n_rows=n_rows)
+    if data is None:
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
     console.print(f"Preview: {artifact_key} [dim]({artifact.driver})[/dim]")
 
@@ -1304,16 +1391,176 @@ class ConsistShell(cmd.Cmd):
 
     intro = "Welcome to Consist Shell. Type help or ? to list commands.\n"
     prompt = "(consist) "
+    _RUN_COMPLETION_FLAGS: Tuple[str, ...] = ("--limit", "--model", "--status", "--tag")
+    _PREVIEW_COMPLETION_FLAGS: Tuple[str, ...] = ("--rows", "-n")
+    _SCENARIOS_COMPLETION_FLAGS: Tuple[str, ...] = ("--limit",)
+    _SCHEMA_STUB_COMPLETION_FLAGS: Tuple[str, ...] = (
+        "--class-name",
+        "--table-name",
+        "--include-system-cols",
+        "--no-stats-comments",
+        "--concrete",
+    )
+    _PICKER_LIMIT = 20
 
     def __init__(self, tracker: Tracker, *, trust_db: bool = False):
         super().__init__()
         self.tracker = tracker
         self.trust_db = trust_db
+        self._history_path = Path.home() / ".consist" / "shell_history"
+        self._history_saved = False
+        self._load_history()
+
+    def _safe_split(self, value: str) -> List[str]:
+        try:
+            return shlex.split(value)
+        except ValueError:
+            return value.split()
+
+    @staticmethod
+    def _is_tty() -> bool:
+        return _is_interactive_tty()
+
+    @staticmethod
+    def _complete_choices(text: str, options: Iterable[str]) -> List[str]:
+        return [option for option in options if option.startswith(text)]
+
+    def _is_first_argument(self, line: str, begidx: int) -> bool:
+        return len(self._safe_split(line[:begidx])) <= 1
+
+    def _recent_run_ids(self, limit: int = _PICKER_LIMIT) -> List[str]:
+        try:
+            from consist.models.run import Run
+
+            with _tracker_session(self.tracker) as session:
+                statement = (
+                    select(Run.id).order_by(col(Run.created_at).desc()).limit(limit)
+                )
+                return [
+                    str(run_id) for run_id in session.exec(statement).all() if run_id
+                ]
+        except Exception:
+            return []
+
+    def _recent_artifact_keys(self, limit: int = _PICKER_LIMIT) -> List[str]:
+        try:
+            from consist.models.artifact import Artifact
+
+            with _tracker_session(self.tracker) as session:
+                statement = (
+                    select(Artifact.key)
+                    .order_by(col(Artifact.created_at).desc())
+                    .limit(limit)
+                )
+                seen: set[str] = set()
+                keys: List[str] = []
+                for key in session.exec(statement).all():
+                    if isinstance(key, str) and key and key not in seen:
+                        seen.add(key)
+                        keys.append(key)
+                return keys
+        except Exception:
+            return []
+
+    def _load_history(self) -> None:
+        if _READLINE is None:
+            return
+        try:
+            if self._history_path.exists():
+                _READLINE.read_history_file(str(self._history_path))
+        except Exception:
+            return
+
+    def _save_history_once(self) -> None:
+        if self._history_saved or _READLINE is None:
+            return
+        try:
+            self._history_path.parent.mkdir(parents=True, exist_ok=True)
+            _READLINE.write_history_file(str(self._history_path))
+        except Exception:
+            return
+        self._history_saved = True
+
+    @staticmethod
+    def _select_from_list(
+        title: str,
+        choices: List[str],
+        *,
+        missing_message: str,
+        prompt: str,
+    ) -> Optional[str]:
+        if not choices:
+            console.print(missing_message)
+            return None
+
+        console.print(title)
+        for index, value in enumerate(choices, start=1):
+            console.print(f"  {index}. {value}")
+
+        while True:
+            raw_choice = input(prompt).strip()
+            if not raw_choice:
+                return None
+            try:
+                selected_index = int(raw_choice)
+            except ValueError:
+                console.print(
+                    "[red]Error: enter a number or press Enter to cancel[/red]"
+                )
+                continue
+            if 1 <= selected_index <= len(choices):
+                return choices[selected_index - 1]
+            console.print(
+                f"[red]Error: selection must be between 1 and {len(choices)}[/red]"
+            )
+
+    def _resolve_run_id(self, arg: str, *, command_name: str) -> Optional[str]:
+        run_id = arg.strip()
+        if run_id:
+            return run_id
+        if not self._is_tty():
+            console.print("[red]Error: run_id required[/red]")
+            return None
+        return self._select_from_list(
+            f"Recent runs for [cyan]{command_name}[/cyan]:",
+            self._recent_run_ids(),
+            missing_message="[yellow]No runs available.[/yellow]",
+            prompt="Choose run number (Enter to cancel): ",
+        )
+
+    def _resolve_artifact_key(self, args: List[str]) -> Optional[str]:
+        if args:
+            return args[0]
+        if not self._is_tty():
+            console.print("[red]Error: artifact_key required[/red]")
+            return None
+        return self._select_from_list(
+            "Recent artifacts for [cyan]preview[/cyan]:",
+            self._recent_artifact_keys(),
+            missing_message="[yellow]No artifacts available.[/yellow]",
+            prompt="Choose artifact number (Enter to cancel): ",
+        )
+
+    def do_ls(self, arg: str) -> None:
+        """Alias for runs/artifacts. Usage: ls [<run_id>]"""
+        parts = self._safe_split(arg)
+        if not parts or parts[0].startswith("-"):
+            self.do_runs(arg)
+            return
+        self.do_artifacts(arg)
+
+    def do_cat(self, arg: str) -> None:
+        """Alias for preview. Usage: cat <artifact_key>"""
+        self.do_preview(arg)
+
+    def do_q(self, arg: str) -> bool:
+        """Alias for quit. Usage: q"""
+        return self.do_quit(arg)
 
     def do_runs(self, arg: str) -> None:
         """List recent runs. Usage: runs [--limit N] [--model NAME] [--status STATUS] [--tag TAG]"""
         try:
-            args = shlex.split(arg)
+            args = self._safe_split(arg)
             limit = 10
             model_name = None
             status = None
@@ -1349,14 +1596,14 @@ class ConsistShell(cmd.Cmd):
 
     def do_show(self, arg: str) -> None:
         """Show details for a run. Usage: show <run_id>"""
-        if not arg.strip():
-            console.print("[red]Error: run_id required[/red]")
+        run_id = self._resolve_run_id(arg, command_name="show")
+        if run_id is None:
             return
 
         try:
-            run = self.tracker.get_run(arg.strip())
+            run = self.tracker.get_run(run_id)
             if not run:
-                console.print(f"[red]Run '{arg.strip()}' not found.[/red]")
+                console.print(f"[red]Run '{run_id}' not found.[/red]")
                 return
             _render_run_details(run)
         except Exception as exc:
@@ -1364,30 +1611,29 @@ class ConsistShell(cmd.Cmd):
 
     def do_artifacts(self, arg: str) -> None:
         """Show artifacts for a run. Usage: artifacts <run_id>"""
-        if not arg.strip():
-            console.print("[red]Error: run_id required[/red]")
+        run_id = self._resolve_run_id(arg, command_name="artifacts")
+        if run_id is None:
             return
 
         try:
-            run = self.tracker.get_run(arg.strip())
+            run = self.tracker.get_run(run_id)
             if not run:
-                console.print(f"[red]Run '{arg.strip()}' not found.[/red]")
+                console.print(f"[red]Run '{run_id}' not found.[/red]")
                 return
-            _render_artifacts_table(self.tracker, arg.strip())
+            _render_artifacts_table(self.tracker, run_id)
         except Exception as exc:
             console.print(f"[red]Error: {exc}[/red]")
 
     def do_preview(self, arg: str) -> None:
         """Preview an artifact. Usage: preview <artifact_key> [--rows N]"""
         try:
-            args = shlex.split(arg)
-            if not args:
-                console.print("[red]Error: artifact_key required[/red]")
+            args = self._safe_split(arg)
+            artifact_key = self._resolve_artifact_key(args)
+            if artifact_key is None:
                 return
 
-            artifact_key = args[0]
             n_rows = 5
-            i = 1
+            i = 1 if args else 0
             while i < len(args):
                 if args[i] in {"--rows", "-n"} and i + 1 < len(args):
                     n_rows = _parse_bounded_int(
@@ -1408,55 +1654,16 @@ class ConsistShell(cmd.Cmd):
             _ensure_tracker_mounts_for_artifact(
                 self.tracker, artifact, trust_db=self.trust_db
             )
-
-            try:
-                import consist
-
-                load_kwargs: Dict[str, Any] = {}
-                if artifact.driver == "csv":
-                    load_kwargs["nrows"] = n_rows
-                data = consist.load(
-                    artifact, tracker=self.tracker, db_fallback="always", **load_kwargs
-                )
-            except FileNotFoundError:
-                abs_path = self.tracker.resolve_uri(artifact.container_uri)
-                from consist.tools.mount_diagnostics import (
-                    build_mount_resolution_hint,
-                    format_missing_artifact_mount_help,
-                )
-
-                hint = build_mount_resolution_hint(
-                    artifact.container_uri,
-                    artifact_meta=artifact.meta,
-                    mounts=self.tracker.mounts,
-                )
-                help_text = (
-                    format_missing_artifact_mount_help(hint, resolved_path=abs_path)
-                    if hint
-                    else f"Resolved path: {abs_path}\nThe artifact may have been deleted, moved, or your mounts are misconfigured."
-                )
-                console.print(
-                    f"[red]Artifact file not found at: {artifact.container_uri}[/red]\n{help_text}"
-                )
-                return
-            except ImportError as e:
-                console.print(
-                    f"[red]Missing optional dependency while loading artifact: {e}[/red]"
-                )
-                return
-            except ValueError as e:
-                console.print(
-                    f"[red]Unsupported artifact driver '{artifact.driver}': {e}[/red]"
-                )
-                return
-            except Exception as e:
-                console.print(f"[red]Error loading artifact: {e}[/red]")
+            data = _load_artifact_with_diagnostics(
+                self.tracker, artifact, n_rows=n_rows
+            )
+            if data is None:
                 return
 
             console.print(f"Preview: {artifact_key} [dim]({artifact.driver})[/dim]")
 
             if isinstance(data, duckdb.DuckDBPyRelation):
-                df = consist.to_df(data.limit(n_rows), close=True)
+                df = data.limit(n_rows).df()
             elif isinstance(data, pd.DataFrame):
                 df = data.head(n_rows)
             else:
@@ -1501,7 +1708,7 @@ class ConsistShell(cmd.Cmd):
     def do_schema_profile(self, arg: str) -> None:
         """Show artifact schema. Usage: schema_profile <artifact_key>"""
         try:
-            args = shlex.split(arg)
+            args = self._safe_split(arg)
             if not args:
                 console.print("[red]Error: artifact_key required[/red]")
                 return
@@ -1527,46 +1734,8 @@ class ConsistShell(cmd.Cmd):
                     )
                     _render_schema_profile(schema, fields)
                     return
-
-            try:
-                import consist
-
-                data = consist.load(
-                    artifact, tracker=self.tracker, db_fallback="always"
-                )
-            except FileNotFoundError:
-                abs_path = self.tracker.resolve_uri(artifact.container_uri)
-                from consist.tools.mount_diagnostics import (
-                    build_mount_resolution_hint,
-                    format_missing_artifact_mount_help,
-                )
-
-                hint = build_mount_resolution_hint(
-                    artifact.container_uri,
-                    artifact_meta=artifact.meta,
-                    mounts=self.tracker.mounts,
-                )
-                help_text = (
-                    format_missing_artifact_mount_help(hint, resolved_path=abs_path)
-                    if hint
-                    else f"Resolved path: {abs_path}\nThe artifact may have been deleted, moved, or your mounts are misconfigured."
-                )
-                console.print(
-                    f"[red]Artifact file not found at: {artifact.container_uri}[/red]\n{help_text}"
-                )
-                return
-            except ImportError as e:
-                console.print(
-                    f"[red]Missing optional dependency while loading artifact: {e}[/red]"
-                )
-                return
-            except ValueError as e:
-                console.print(
-                    f"[red]Unsupported artifact driver '{artifact.driver}': {e}[/red]"
-                )
-                return
-            except Exception as e:
-                console.print(f"[red]Error loading artifact: {e}[/red]")
+            data = _load_artifact_with_diagnostics(self.tracker, artifact)
+            if data is None:
                 return
 
             console.print(f"Schema: {artifact_key} [dim]({artifact.driver})[/dim]")
@@ -1622,7 +1791,7 @@ class ConsistShell(cmd.Cmd):
     def do_schema_stub(self, arg: str) -> None:
         """Export SQLModel schema stub. Usage: schema_stub <artifact_key> [--class-name NAME] [--table-name NAME] [--include-system-cols] [--no-stats-comments] [--concrete]"""
         try:
-            args = shlex.split(arg)
+            args = self._safe_split(arg)
             if not args:
                 console.print("[red]Error: artifact_key required[/red]")
                 return
@@ -1686,7 +1855,7 @@ class ConsistShell(cmd.Cmd):
 
     def do_scenarios(self, arg: str) -> None:
         """List scenarios. Usage: scenarios [--limit N]"""
-        args = shlex.split(arg)
+        args = self._safe_split(arg)
         limit = 20
 
         if args:
@@ -1716,6 +1885,7 @@ class ConsistShell(cmd.Cmd):
 
     def do_exit(self, arg: str) -> bool:
         """Exit the shell."""
+        self._save_history_once()
         console.print("Goodbye!")
         return True
 
@@ -1728,6 +1898,77 @@ class ConsistShell(cmd.Cmd):
         print()
         return self.do_exit(arg)
 
+    def complete_runs(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del line, begidx, endidx
+        return self._complete_choices(text, self._RUN_COMPLETION_FLAGS)
+
+    def complete_scenarios(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del line, begidx, endidx
+        return self._complete_choices(text, self._SCENARIOS_COMPLETION_FLAGS)
+
+    def complete_show(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del endidx
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._recent_run_ids())
+        return []
+
+    def complete_artifacts(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del endidx
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._recent_run_ids())
+        return []
+
+    def complete_preview(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del endidx
+        if text.startswith("-"):
+            return self._complete_choices(text, self._PREVIEW_COMPLETION_FLAGS)
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._recent_artifact_keys())
+        return []
+
+    def complete_schema_profile(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del endidx
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._recent_artifact_keys())
+        return []
+
+    def complete_schema_stub(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del endidx
+        if text.startswith("-"):
+            return self._complete_choices(text, self._SCHEMA_STUB_COMPLETION_FLAGS)
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._recent_artifact_keys())
+        return []
+
+    def complete_ls(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+        del endidx
+        if text.startswith("-"):
+            return self._complete_choices(text, self._RUN_COMPLETION_FLAGS)
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._recent_run_ids())
+        return []
+
+    def complete_cat(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+        return self.complete_preview(text, line, begidx, endidx)
+
+    def postloop(self) -> None:
+        self._save_history_once()
+        super().postloop()
+
     def emptyline(self) -> bool:
         """Do nothing on empty line (prevent repeating last command)."""
         return False
@@ -1736,24 +1977,22 @@ class ConsistShell(cmd.Cmd):
 @app.command()
 def show(
     run_id: str = typer.Argument(..., help="The ID of the run to inspect."),
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the DuckDB database."
-    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
 ) -> None:
     """Display detailed information about a specific run."""
     tracker = get_tracker(db_path)
     run = tracker.get_run(run_id)
     if not run:
         console.print(f"[red]Run '{run_id}' not found.[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
     _render_run_details(run)
 
 
 @app.command()
 def shell(
-    db_path: str = typer.Option(
-        "provenance.duckdb", help="Path to the Consist DuckDB database."
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
     ),
     trust_db: bool = typer.Option(
         False,
@@ -1766,7 +2005,10 @@ def shell(
     The database is loaded once and reused across shell commands.
     """
     tracker = get_tracker(db_path)
-    console.print(f"[green]✓ Loaded database: {db_path}[/green]")
+    resolved_db_path = getattr(tracker, "db_path", None)
+    if not isinstance(resolved_db_path, str) or not resolved_db_path:
+        resolved_db_path = find_db_path(db_path)
+    console.print(f"[green]✓ Loaded database: {resolved_db_path}[/green]")
     ConsistShell(tracker, trust_db=trust_db).cmdloop()
 
 

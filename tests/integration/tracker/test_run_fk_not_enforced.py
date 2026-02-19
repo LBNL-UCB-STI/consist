@@ -21,6 +21,8 @@ def test_parent_status_update_not_blocked(tracker: Tracker):
         parent = Run(
             id="parent_run",
             model_name="model",
+            config_hash=None,
+            git_hash=None,
             status="running",
             tags=[],
             started_at=now,
@@ -29,6 +31,8 @@ def test_parent_status_update_not_blocked(tracker: Tracker):
         child = Run(
             id="child_run",
             model_name="model",
+            config_hash=None,
+            git_hash=None,
             status="completed",
             parent_run_id="parent_run",
             tags=[],

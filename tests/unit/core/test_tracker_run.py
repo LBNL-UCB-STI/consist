@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
+from typing import Any, cast
 from unittest.mock import patch
 
 import pandas as pd
@@ -148,6 +150,48 @@ def test_start_run_overwrite_updates_cache_index(tracker, tmp_path):
         assert t.current_consist.cached_run.id == "run_b_overwrite"
 
 
+def test_begin_end_run_imperative_logs_output(tracker):
+    tracker.begin_run("imperative_run", "imperative_model", config={"alpha": 1})
+    assert tracker.current_consist is not None
+
+    out_path = tracker.run_artifact_dir() / "out.txt"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("ok\n")
+    output = tracker.log_artifact(out_path, key="out", direction="output")
+
+    completed = tracker.end_run(status="completed")
+    assert completed.id == "imperative_run"
+    assert completed.status == "completed"
+    assert output.key == "out"
+    assert tracker.current_consist is None
+    assert tracker.last_run.run.id == "imperative_run"
+    assert any(artifact.key == "out" for artifact in tracker.last_run.outputs)
+
+
+def test_trace_cache_hit_relogs_cached_output(tracker):
+    first_artifact = None
+    second_artifact = None
+    calls: list[int] = []
+    shared_out = tracker.run_dir / "trace_cached_output.txt"
+
+    with tracker.trace("trace_cached_output") as t:
+        calls.append(1)
+        shared_out.parent.mkdir(parents=True, exist_ok=True)
+        shared_out.write_text("value=1\n")
+        first_artifact = t.log_artifact(shared_out, key="out", direction="output")
+
+    with tracker.trace("trace_cached_output") as t:
+        assert t.is_cached
+        calls.append(1)
+        shared_out.write_text("value=1\n")
+        second_artifact = t.log_artifact(shared_out, key="out", direction="output")
+
+    assert len(calls) == 2
+    assert first_artifact is not None
+    assert second_artifact is not None
+    assert second_artifact.id == first_artifact.id
+
+
 def test_tracker_run_output_mismatch_warns(tracker, caplog):
     def step():
         return ["only-one"]
@@ -167,6 +211,51 @@ def test_tracker_run_output_mismatch_warns(tracker, caplog):
         for record in caplog.records
     )
     assert result.outputs == {}
+
+
+def test_tracker_run_output_mismatch_error_raises(tracker):
+    def step():
+        return ["only-one"]
+
+    with pytest.raises(RuntimeError, match="Output list length does not match"):
+        tracker.run(
+            fn=step,
+            outputs=["a", "b"],
+            output_policy=OutputPolicyOptions(
+                output_mismatch="error",
+                output_missing="ignore",
+            ),
+        )
+
+
+def test_tracker_run_logs_dataframe_for_single_declared_output(tracker):
+    def step():
+        return pd.DataFrame({"id": [1, 2], "value": [10.0, 20.0]})
+
+    result = tracker.run(fn=step, outputs=["table"])
+    assert "table" in result.outputs
+
+    artifact = result.outputs["table"]
+    assert artifact.path.exists()
+    loaded = consist.load_df(artifact, tracker=tracker)
+    assert isinstance(loaded, pd.DataFrame)
+    assert list(loaded.columns) == ["id", "value"]
+    assert loaded.shape == (2, 2)
+
+
+def test_tracker_run_logs_series_for_single_declared_output(tracker):
+    def step():
+        return pd.Series([3, 4], name="ignored_name")
+
+    result = tracker.run(fn=step, outputs=["series_out"])
+    assert "series_out" in result.outputs
+
+    artifact = result.outputs["series_out"]
+    assert artifact.path.exists()
+    loaded = consist.load_df(artifact, tracker=tracker)
+    assert isinstance(loaded, pd.DataFrame)
+    assert list(loaded.columns) == ["series_out"]
+    assert loaded["series_out"].tolist() == [3, 4]
 
 
 def test_tracker_run_output_missing_error(tracker):
@@ -242,12 +331,21 @@ def test_consist_refs_builds_and_combines_input_mappings(tracker):
     single_result_mapping = consist.refs(people, "households", "persons")
     assert set(single_result_mapping.keys()) == {"households", "persons"}
 
+    all_outputs = consist.refs(people)
+    assert set(all_outputs.keys()) == {"households", "persons"}
+
     combined = consist.refs((people, "households"), (network, "skims"))
     assert set(combined.keys()) == {"households", "skims"}
+
+    tuple_selector_all_outputs = consist.refs((people,))
+    assert set(tuple_selector_all_outputs.keys()) == {"households", "persons"}
 
     aliased = consist.refs(hh=(people, "households"), travel_skims=(network, "skims"))
     assert aliased["hh"].key == "households"
     assert aliased["travel_skims"].key == "skims"
+
+    single_output_alias = consist.refs(skims=network)
+    assert single_output_alias["skims"].key == "skims"
 
     alias_map = consist.refs(people, {"hh": "households", "travel_persons": "persons"})
     assert alias_map["hh"].key == "households"
@@ -283,10 +381,28 @@ def test_consist_refs_validates_duplicates_and_empty_selectors(tracker):
         consist.refs(result, {})
 
     with pytest.raises(TypeError, match="alias mapping keys must be strings"):
-        consist.refs(result, {1: "single"})
+        cast(Any, consist.refs)(result, {1: "single"})
 
     with pytest.raises(TypeError, match="alias mapping values must be strings"):
-        consist.refs(result, {"x": 1})
+        cast(Any, consist.refs)(result, {"x": 1})
+
+    with pytest.raises(TypeError, match="remaining positional arguments must be"):
+        cast(Any, consist.refs)(result, 1)
+
+    with pytest.raises(TypeError, match="Positional selectors.*must be non-empty"):
+        cast(Any, consist.refs)("single")
+
+    with pytest.raises(TypeError, match="Positional selectors.*must be non-empty"):
+        consist.refs(())
+
+    with pytest.raises(TypeError, match="must start with RunResult"):
+        consist.refs(("single",))
+
+    with pytest.raises(TypeError, match="Keyword selectors.*RunResult or"):
+        consist.refs(single=(result, 1))
+
+    with pytest.raises(TypeError, match="Keyword selectors.*RunResult or"):
+        consist.refs(single=(result, "single", "extra"))
 
 
 def test_tracker_run_accepts_direct_single_output_run_result_input(tracker):
@@ -458,3 +574,76 @@ def test_tracker_run_output_policy_options_enforced(tracker):
             outputs=["out"],
             output_policy=OutputPolicyOptions(output_missing="error"),
         )
+
+
+def test_tracker_run_container_forces_overwrite_and_errors_on_missing_outputs(
+    tracker, monkeypatch, caplog
+):
+    from types import SimpleNamespace
+
+    from consist.integrations import containers
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run_container(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(artifacts={}, cache_hit=False)
+
+    monkeypatch.setattr(containers, "run_container", _fake_run_container)
+
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(RuntimeError, match=r"Run 'container_step' missing outputs"),
+    ):
+        tracker.run(
+            fn=None,
+            name="container_step",
+            output_paths={"out": "container_out.txt"},
+            cache_options=CacheOptions(cache_mode="reuse"),
+            output_policy=OutputPolicyOptions(output_missing="error"),
+            execution_options=ExecutionOptions(
+                executor="container",
+                container={
+                    "image": "ghcr.io/example/test:latest",
+                    "command": ["python", "-V"],
+                },
+            ),
+        )
+
+    assert any(
+        "forcing cache_mode='overwrite'" in record.message for record in caplog.records
+    )
+    assert "out" in captured["outputs"]
+    out_path = Path(str(captured["outputs"]["out"]))
+    assert out_path.name == "container_out.txt"
+    assert Path(tracker.run_dir) in out_path.parents
+
+
+def test_tracker_run_delegates_invocation_defaults_and_validation(tracker, monkeypatch):
+    from consist.core import tracker_orchestration
+    from consist.core.run_invocation import resolve_run_invocation as _resolve
+
+    captured: dict[str, Any] = {}
+
+    def _spy_resolve_run_invocation(**kwargs):
+        captured.update(kwargs)
+        return _resolve(**kwargs)
+
+    monkeypatch.setattr(
+        tracker_orchestration,
+        "resolve_run_invocation",
+        _spy_resolve_run_invocation,
+    )
+
+    with pytest.raises(
+        ValueError, match="Tracker.run supports executor='python' or 'container'."
+    ):
+        tracker.run(
+            fn=lambda: None,
+            execution_options=ExecutionOptions(executor=cast(Any, "invalid")),
+        )
+
+    assert captured["allow_template"] is None
+    assert captured["apply_step_defaults"] is None
+    assert captured["missing_name_error"] == "Tracker.run requires a run name."
+    assert captured["python_missing_fn_error"] == "Tracker.run requires a callable fn."

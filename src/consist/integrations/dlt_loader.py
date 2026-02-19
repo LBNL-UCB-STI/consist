@@ -62,8 +62,8 @@ except ImportError:
     pq = None
 
 try:
-    import zarr
-    import xarray as xr
+    zarr = importlib.import_module("zarr")
+    xr = importlib.import_module("xarray")
 except ImportError:
     zarr = None
     xr = None

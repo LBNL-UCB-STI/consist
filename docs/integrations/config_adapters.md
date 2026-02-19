@@ -64,5 +64,5 @@ as a reference implementation.
 ## See Also
 
 - [Configuration, Identity, and Facets](../configs.md) — In-memory config and facets
-- [Ingestion and Hybrid Views](../ingestion-and-hybrid-views.md) — DLT-based data ingestion
-- [Caching and Hydration](../caching-and-hydration.md) — Run signature and cache identity
+- [Data Virtualization & Materialization Strategy](../concepts/data-materialization.md) — DLT-based data ingestion
+- [Caching and Artifact Hydration Patterns](../concepts/caching-and-hydration.md) — Run signature and cache identity

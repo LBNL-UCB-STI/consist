@@ -2,6 +2,13 @@
 
 This tutorial builds a two-step data pipeline demonstrating artifact passing, cache invalidation, and lineage tracking. Each step is a separate cached run; changing config or code in one step invalidates only that step and its dependents.
 
+## Prerequisites
+
+Install Consist first and ensure your environment can write Parquet files:
+
+- Base installation instructions: [Installation](installation.md)
+- Parquet engine required for this tutorial: `pip install "consist[parquet]"`
+
 ## Create Input Data
 
 Save this as `setup_data.py` and run it once:

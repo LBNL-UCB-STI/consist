@@ -41,6 +41,32 @@ For detailed terminology, see [Core Concepts](concepts/overview.md).
 | `overwrite` | Always execute, update cache with new result |
 | `readonly` | Use cache but don't persist new results (sandbox mode) |
 
+Runnable example with options objects:
+
+```python
+from pathlib import Path
+import consist
+from consist import CacheOptions, Tracker
+
+tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+
+def clean_data(raw: Path) -> Path:
+    out = consist.output_path("cleaned")
+    out.write_text(raw.read_text().strip() + "\n")
+    return out
+
+with consist.use_tracker(tracker):
+    result = consist.run(
+        fn=clean_data,
+        inputs={"raw": Path("data/raw.csv")},
+        outputs=["cleaned"],
+        cache_options=CacheOptions(cache_mode="reuse"),
+    )
+```
+
+For migration guidance from legacy run-policy kwargs, see
+[Options Objects Migration Guide](migrations/options-objects-migration-guide.md).
+
 ### Ghost Mode
 
 Consist enables "Ghost Mode" — the ability to delete intermediate files while preserving provenance and recoverability. As long as the provenance database records lineage and content hashes, Consist can:
@@ -178,18 +204,6 @@ graph TD
 **JSON snapshots** (`consist.json` per run): Portable, human-readable, version-controllable. Each run directory contains a complete record that survives database corruption.
 
 **DuckDB database**: Enables fast queries across runs, artifacts, and lineage. Can be rebuilt from JSON snapshots if needed. Handles concurrent access with retry logic.
-
----
-
-## Testing & Coverage Focus
-
-The test suite prioritizes correctness for production workflows and portability:
-
-- Cache hydration across run directories (metadata-only, requested/all outputs, missing-input reconstruction, permission/mount issues).
-- Path virtualization and mount resolution (workspace URIs, symlink handling, stale/moved run directories).
-- Persistence resilience (lock retries, constraint conflict handling, JSON snapshot safety).
-- Ingestion and data virtualization (DLT ingestion paths, strict schema validation, hybrid view behavior).
-- CLI/query helpers for inspection workflows (filters, preview error modes).
 
 ---
 

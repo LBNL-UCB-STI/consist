@@ -1,5 +1,6 @@
 import hashlib
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Any, Type, TYPE_CHECKING, Callable, Union, Literal
 
@@ -11,6 +12,20 @@ from consist.types import ArtifactRef
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
+
+
+@dataclass(slots=True)
+class _ContentHashState:
+    """
+    Mutable per-call state for lazy content-hash memoization.
+
+    This keeps helper functions explicit and debugger-friendly without relying on
+    `nonlocal` closure assignment.
+    """
+
+    effective_hash: Optional[str]
+    computed_hash: Optional[str] = None
+    attempted_compute: bool = False
 
 
 def _infer_driver_from_path(path: Path) -> str:
@@ -163,6 +178,8 @@ class ArtifactManager:
         content_hash : Optional[str], optional
             A precomputed SHA256 hash. If provided, Consist skips the
             expensive file hashing step unless validation is requested.
+            When hashing is needed, it is computed lazily and reused within
+            this single call.
         force_hash_override : bool, default False
             If True, permits overwriting an existing artifact's hash with a
             new value.
@@ -190,32 +207,62 @@ class ArtifactManager:
         resolved_abs_path = None
         mount_scheme: Optional[str] = None
         mount_root: Optional[str] = None
+        # Shared mutable state for nested helpers in this single create call.
+        hash_state = _ContentHashState(effective_hash=content_hash)
 
-        def _apply_content_hash_override(artifact: Artifact) -> None:
-            if content_hash is None:
-                return
-            if validate_content_hash:
-                if not resolved_abs_path:
+        def _compute_content_hash(
+            *,
+            raise_on_error: bool,
+        ) -> Optional[str]:
+            if hash_state.computed_hash is not None or hash_state.attempted_compute:
+                return hash_state.computed_hash
+            if not resolved_abs_path:
+                if raise_on_error:
                     raise ValueError(
                         "validate_content_hash=True requires a resolvable path."
                     )
-                try:
-                    computed = self.tracker.identity.compute_file_checksum(
-                        resolved_abs_path
-                    )
-                except Exception as e:
+                return None
+            hash_state.attempted_compute = True
+            try:
+                hash_state.computed_hash = self.tracker.identity.compute_file_checksum(
+                    resolved_abs_path
+                )
+            except Exception as e:
+                if raise_on_error:
                     raise ValueError(
                         f"Failed to validate content_hash for {resolved_abs_path}: {e}"
                     ) from e
-                if computed != content_hash:
-                    raise ValueError(
-                        "content_hash does not match on-disk data for "
-                        f"{resolved_abs_path}."
-                    )
+                logging.warning(
+                    "[Consist Warning] Failed to compute hash for %s: %s",
+                    resolved_abs_path,
+                    e,
+                )
+            return hash_state.computed_hash
+
+        def _ensure_content_hash(*, raise_on_error: bool = False) -> Optional[str]:
+            if hash_state.effective_hash is None:
+                hash_state.effective_hash = _compute_content_hash(
+                    raise_on_error=raise_on_error
+                )
+            return hash_state.effective_hash
+
+        def _validate_content_hash() -> None:
+            if not validate_content_hash or hash_state.effective_hash is None:
+                return
+            computed = _compute_content_hash(raise_on_error=True)
+            if computed != hash_state.effective_hash:
+                raise ValueError(
+                    f"content_hash does not match on-disk data for {resolved_abs_path}."
+                )
+
+        def _apply_content_hash_override(artifact: Artifact) -> None:
+            if hash_state.effective_hash is None:
+                return
+            _validate_content_hash()
             existing_hash = getattr(artifact, "hash", None)
             if (
                 existing_hash
-                and existing_hash != content_hash
+                and existing_hash != hash_state.effective_hash
                 and not force_hash_override
             ):
                 logging.warning(
@@ -225,7 +272,7 @@ class ArtifactManager:
                     getattr(artifact, "container_uri", None),
                 )
                 return
-            artifact.hash = content_hash
+            artifact.hash = hash_state.effective_hash
 
         if isinstance(path, Artifact):
             artifact_obj = path
@@ -272,25 +319,16 @@ class ArtifactManager:
                 if parent:
                     should_reuse = True
                     if driver in {"h5", "hdf5"}:
-                        if content_hash is None and resolved_abs_path:
-                            try:
-                                content_hash = (
-                                    self.tracker.identity.compute_file_checksum(
-                                        resolved_abs_path
-                                    )
-                                )
-                            except Exception as e:
-                                logging.warning(
-                                    "[Consist Warning] Failed to compute hash for %s: %s",
-                                    resolved_abs_path,
-                                    e,
-                                )
+                        if hash_state.effective_hash is None:
+                            _ensure_content_hash()
                         should_reuse = (
-                            content_hash is not None and parent.hash == content_hash
+                            hash_state.effective_hash is not None
+                            and parent.hash == hash_state.effective_hash
                         )
                     elif driver == "h5_table":
                         should_reuse = (
-                            content_hash is not None and parent.hash == content_hash
+                            hash_state.effective_hash is not None
+                            and parent.hash == hash_state.effective_hash
                         )
 
                     if should_reuse:
@@ -311,18 +349,9 @@ class ArtifactManager:
                     raise ValueError(
                         "reuse_scope must be one of: 'same_uri', 'any_uri'."
                     )
-                if content_hash is None and resolved_abs_path:
-                    try:
-                        content_hash = self.tracker.identity.compute_file_checksum(
-                            resolved_abs_path
-                        )
-                    except Exception as e:
-                        logging.warning(
-                            "[Consist Warning] Failed to compute hash for %s: %s",
-                            resolved_abs_path,
-                            e,
-                        )
-                if content_hash is not None:
+                if hash_state.effective_hash is None:
+                    _ensure_content_hash()
+                if hash_state.effective_hash is not None:
                     if reuse_scope == "same_uri":
                         parent = self.tracker.db.find_latest_artifact_at_uri(
                             container_uri,
@@ -330,11 +359,11 @@ class ArtifactManager:
                             table_path=table_path,
                             array_path=array_path,
                         )
-                        if parent and parent.hash == content_hash:
+                        if parent and parent.hash == hash_state.effective_hash:
                             artifact_obj = parent
                     else:
                         parent = self.tracker.db.find_latest_artifact_by_hash(
-                            content_hash, driver=driver
+                            hash_state.effective_hash, driver=driver
                         )
                         if parent is not None:
                             artifact_obj = parent
@@ -347,29 +376,10 @@ class ArtifactManager:
                         artifact_obj.meta.update(meta)
 
             if artifact_obj is None:
-                if content_hash is not None and validate_content_hash:
-                    try:
-                        computed = self.tracker.identity.compute_file_checksum(
-                            resolved_abs_path
-                        )
-                    except Exception as e:
-                        raise ValueError(
-                            f"Failed to validate content_hash for {resolved_abs_path}: {e}"
-                        ) from e
-                    if computed != content_hash:
-                        raise ValueError(
-                            "content_hash does not match on-disk data for "
-                            f"{resolved_abs_path}."
-                        )
-                elif content_hash is None:
-                    try:
-                        content_hash = self.tracker.identity.compute_file_checksum(
-                            resolved_abs_path
-                        )
-                    except Exception as e:
-                        logging.warning(
-                            f"[Consist Warning] Failed to compute hash for {path}: {e}"
-                        )
+                if hash_state.effective_hash is not None and validate_content_hash:
+                    _validate_content_hash()
+                elif hash_state.effective_hash is None:
+                    _ensure_content_hash()
 
                 artifact_obj = Artifact(
                     key=key,
@@ -377,7 +387,7 @@ class ArtifactManager:
                     driver=driver,
                     table_path=table_path,
                     array_path=array_path,
-                    hash=content_hash,
+                    hash=hash_state.effective_hash,
                     run_id=run_id,
                     meta=meta,
                 )

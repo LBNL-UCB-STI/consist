@@ -2,6 +2,10 @@
 
 This guide explains when to keep data on disk (virtualize) versus ingesting it into DuckDB (materialize).
 
+Canonical one-line definitions for cold/hot data, hybrid views, and
+materialization live in [Core Concepts Overview](overview.md). This page focuses
+on decision criteria and implementation patterns.
+
 ---
 
 ## Why the Distinction Matters
@@ -14,9 +18,11 @@ The tradeoff: ingested data is queryable and recoverable; cold data requires kee
 
 ## Two Storage Modes
 
-**Cold Data**: Files remain on disk. Provenance metadata is tracked but data is not queryable via SQL until ingested. Load on demand with `consist.load_df(artifact)`. Minimal database size.
+**Cold Data**: File-backed artifacts with provenance metadata but no SQL query
+surface until ingested.
 
-**Hot Data**: Ingested into DuckDB. Queryable via SQL, indexed alongside provenance, and recoverable if original files are deleted. Trades disk space for query performance.
+**Hot Data**: Ingested artifacts in DuckDB for SQL analytics, indexing, and
+optional recovery when source files are missing.
 
 ---
 

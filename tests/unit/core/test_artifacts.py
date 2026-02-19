@@ -66,3 +66,29 @@ def test_create_artifact_rejects_mismatched_validated_hash(mock_tracker):
         )
 
     mock_tracker.identity.compute_file_checksum.assert_called()
+
+
+def test_create_artifact_hashes_once_for_reuse_and_validation(tmp_path):
+    tracker = MagicMock()
+    tracker.resolve_uri = lambda uri: f"/abs/{uri}"
+    tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
+    tracker.mounts = {}
+    tracker.identity.compute_file_checksum.return_value = "mock_hash"
+    tracker.db.find_latest_artifact_at_uri.return_value = None
+    tracker.db.find_latest_artifact_by_hash.return_value = None
+
+    manager = ArtifactManager(tracker)
+    output_path = tmp_path / "output.csv"
+    output_path.write_text("a,b\n1,2\n", encoding="utf-8")
+
+    art = manager.create_artifact(
+        path=output_path,
+        key="output",
+        run_id="run_ABC",
+        direction="output",
+        reuse_if_unchanged=True,
+        validate_content_hash=True,
+    )
+
+    assert art.hash == "mock_hash"
+    assert tracker.identity.compute_file_checksum.call_count == 1

@@ -1,15 +1,14 @@
 import inspect
 import itertools
+import importlib
 from dataclasses import replace
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import logging
 import os
-import time
 from types import MappingProxyType
 import uuid
-import warnings
 from pathlib import Path
 from typing import (
     Any,
@@ -39,15 +38,10 @@ from consist.core.artifact_facets import ArtifactFacetManager
 from consist.core.artifacts import ArtifactManager
 from consist.core.cache import (
     ActiveRunCacheOptions,
-    hydrate_cache_hit_outputs,
-    materialize_missing_inputs,
-    parse_materialize_cached_outputs_kwargs,
-    validate_cached_run_outputs,
 )
-from consist.core.cache_output_logging import (
-    maybe_return_cached_output_or_demote_cache_hit,
-)
-from consist.core.run_options import merge_run_options
+from consist.core.tracker_artifact_logging import ArtifactLoggingCoordinator
+from consist.core.tracker_lifecycle import RunLifecycleCoordinator
+from consist.core.tracker_orchestration import RunTraceCoordinator, RunTraceHelpers
 from consist.core.config_canonicalization import (
     ConfigAdapter,
     ConfigAdapterOptions,
@@ -58,7 +52,6 @@ from consist.core.config_canonicalization import (
     validate_config_plan,
 )
 from consist.core.config_facets import ConfigFacetManager
-from consist.core.context import pop_tracker, push_tracker
 from consist.core.decorators import define_step as define_step_decorator
 from consist.core.events import EventManager
 from consist.core.fs import FileSystemManager
@@ -75,14 +68,8 @@ from consist.core.openmatrix_views import OpenMatrixMetadataView
 from consist.core.spatial_views import SpatialMetadataView
 from consist.core.queries import RunQueryService
 from consist.core.settings import ConsistSettings
-from consist.core.metadata_resolver import MetadataResolver
-from consist.core.validation import (
-    validate_config_structure,
-    validate_run_meta,
-    validate_run_strings,
-)
-from consist.core.workflow import OutputCapture, RunContext, ScenarioContext
-from consist.models.artifact import Artifact, get_tracker_ref, set_tracker_ref
+from consist.core.workflow import OutputCapture, ScenarioContext
+from consist.models.artifact import Artifact, set_tracker_ref
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.models.run import (
     ConsistRecord,
@@ -95,10 +82,8 @@ from consist.types import (
     ArtifactRef,
     CacheOptions,
     CodeIdentityMode,
-    DriverType,
     ExecutionOptions,
     FacetLike,
-    HasFacetSchemaVersion,
     HashInputs,
     OutputPolicyOptions,
     RunInputRef,
@@ -113,30 +98,66 @@ UTC = timezone.utc
 AccessMode = Literal["standard", "analysis", "read_only"]
 
 
-def _resolve_input_ref(
+def _resolve_input_reference(
     tracker: "Tracker", ref: RunInputRef, key: Optional[str]
+) -> ArtifactRef:
+    return _resolve_input_reference_configured(
+        tracker,
+        ref,
+        key,
+        type_label="inputs",
+        missing_path_error="Input path does not exist: {path!s}",
+    )
+
+
+def _resolve_input_reference_configured(
+    tracker: "Tracker",
+    ref: RunInputRef,
+    key: Optional[str],
+    *,
+    type_label: str,
+    missing_path_error: str,
+    missing_string_error: Optional[str] = None,
+    string_ref_resolver: Optional[Callable[[str], Optional[ArtifactRef]]] = None,
 ) -> ArtifactRef:
     if isinstance(ref, Artifact):
         return ref
     if isinstance(ref, RunResult):
         return resolve_run_result_output(ref)
-    if not isinstance(ref, (str, Path)):
+
+    if isinstance(ref, str):
+        if string_ref_resolver is not None:
+            resolved_ref = string_ref_resolver(ref)
+            if resolved_ref is not None:
+                return resolved_ref
+        ref_str = ref
+    elif isinstance(ref, Path):
+        ref_str = str(ref)
+    else:
         raise TypeError(
-            f"inputs must be Artifact, RunResult, Path, or str (got {type(ref)})."
+            f"{type_label} must be Artifact, RunResult, Path, or str (got {type(ref)})."
         )
-    ref_str = str(ref)
+
     resolved = (
         Path(tracker.resolve_uri(ref_str))
         if isinstance(ref, str) and "://" in ref_str
         else Path(ref_str)
     )
     if not resolved.exists():
-        raise ValueError(f"Input path does not exist: {resolved!s}")
+        if isinstance(ref, str) and missing_string_error is not None:
+            raise ValueError(missing_string_error.format(value=ref, path=resolved))
+        raise ValueError(missing_path_error.format(path=resolved))
     if key is None:
         return resolved
     return tracker.artifacts.create_artifact(
         resolved, run_id=None, key=key, direction="input"
     )
+
+
+def _resolve_input_ref(
+    tracker: "Tracker", ref: RunInputRef, key: Optional[str]
+) -> ArtifactRef:
+    return _resolve_input_reference(tracker, ref, key)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -148,7 +169,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 def _is_xarray_dataset(value: Any) -> bool:
     try:
-        import xarray as xr
+        xr = importlib.import_module("xarray")
     except ImportError:
         return False
     return isinstance(value, xr.Dataset)
@@ -156,7 +177,7 @@ def _is_xarray_dataset(value: Any) -> bool:
 
 def _write_xarray_dataset(dataset: Any, path: Path) -> None:
     try:
-        import xarray as xr
+        xr = importlib.import_module("xarray")
     except ImportError as exc:
         raise ImportError("xarray is required to log xarray.Dataset outputs.") from exc
     if not isinstance(dataset, xr.Dataset):
@@ -369,6 +390,18 @@ class Tracker:
         self.artifact_schemas = ArtifactSchemaManager(self)
         self.queries = RunQueryService(self)
         self.lineage = LineageService(self)
+        self._run_lifecycle = RunLifecycleCoordinator(self)
+        self._artifact_logging = ArtifactLoggingCoordinator(self)
+        self._run_trace = RunTraceCoordinator(
+            self,
+            helpers=RunTraceHelpers(
+                resolve_input_refs=_resolve_input_refs,
+                preview_run_artifact_dir=_preview_run_artifact_dir,
+                resolve_output_path=_resolve_output_path,
+                is_xarray_dataset=_is_xarray_dataset,
+                write_xarray_dataset=_write_xarray_dataset,
+            ),
+        )
 
         self.views = ViewRegistry(self)
         # Store registered schemas by class name for cross-session lookup.
@@ -833,6 +866,26 @@ class Tracker:
             return dict(obj)
         raise ValueError(f"Tracker {label} must be a mapping or Pydantic model.")
 
+    def _resolve_input_reference(
+        self,
+        ref: RunInputRef,
+        key: Optional[str] = None,
+        *,
+        type_label: str = "inputs",
+        missing_path_error: str = "Input path does not exist: {path!s}",
+        missing_string_error: Optional[str] = None,
+        string_ref_resolver: Optional[Callable[[str], Optional[ArtifactRef]]] = None,
+    ) -> ArtifactRef:
+        return _resolve_input_reference_configured(
+            self,
+            ref,
+            key,
+            type_label=type_label,
+            missing_path_error=missing_path_error,
+            missing_string_error=missing_string_error,
+            string_ref_resolver=string_ref_resolver,
+        )
+
     def register_artifact_facet_parser(
         self, prefix: str, parser_fn: Callable[[str], Optional[FacetLike]]
     ) -> None:
@@ -1003,322 +1056,25 @@ class Tracker:
             raise
         ```
         """
-        self._ensure_write_provenance()
-        timing_enabled = os.getenv("CONSIST_CACHE_TIMING", "").lower() in {
-            "1",
-            "true",
-            "yes",
-        }
-        debug_cache = os.getenv("CONSIST_CACHE_DEBUG", "").lower() in {
-            "1",
-            "true",
-            "yes",
-        }
-
-        def _log_timing(label: str, start: float) -> None:
-            elapsed = time.perf_counter() - start
-            if timing_enabled:
-                logging.info("[Consist][timing] %s %.3fs", label, elapsed)
-            if debug_cache:
-                logging.info("[Consist][cache] %s %.3fs", label, elapsed)
-
-        if self.current_consist is not None:
-            raise RuntimeError(
-                f"Cannot begin_run: A run is already active (id={self.current_consist.run.id}). "
-                "Call end_run() first."
-            )
-
-        validate_run_strings(model_name=model, description=description, tags=tags)
-
-        (
-            cache_hydration,
-            materialize_cached_output_paths,
-            materialize_cached_outputs_dir,
-            validate_cached_outputs,
-        ) = parse_materialize_cached_outputs_kwargs(kwargs)
-
-        raw_config_model: Optional[BaseModel] = (
-            config if isinstance(config, BaseModel) else None
-        )
-        if facet_from:
-            if isinstance(facet_from, str):
-                raise ValueError("facet_from must be a list of config keys.")
-            config_dict_for_facet = self._coerce_facet_mapping(config, "config")
-            missing = [key for key in facet_from if key not in config_dict_for_facet]
-            if missing:
-                raise KeyError(f"facet_from keys not found in config: {missing}")
-            derived = {key: config_dict_for_facet[key] for key in facet_from}
-            if facet is not None:
-                facet_dict = self._coerce_facet_mapping(facet, "facet")
-                merged = dict(derived)
-                merged.update(facet_dict)
-                facet = self.identity.normalize_json(merged)
-            else:
-                facet = self.identity.normalize_json(derived)
-
-        # Extract explicit Run fields early so they can contribute to identity hashing.
-        # These are identity-relevant parameters for most workflows (e.g., a different year
-        # should not silently cache-hit a different year).
-        year = kwargs.pop("year", None)
-        iteration = kwargs.pop("iteration", None)
-        cache_epoch = kwargs.pop("cache_epoch", None)
-        cache_version = kwargs.pop("cache_version", None)
-        parent_run_id = kwargs.pop("parent_run_id", None)
-        code_identity_callable = kwargs.pop("_consist_code_identity_callable", None)
-
-        if artifact_dir is not None:
-            kwargs["artifact_dir"] = str(artifact_dir)
-        if allow_external_paths is not None:
-            kwargs["allow_external_paths"] = bool(allow_external_paths)
-
-        if config is None:
-            config_dict: Dict[str, Any] = {}
-        elif isinstance(config, BaseModel):
-            config_dict = config.model_dump()
-        else:
-            config_dict = config
-
-        if hash_inputs:
-            config_dict = dict(config_dict)
-            digest_map = self.identity.compute_hash_inputs_digests(hash_inputs)
-            # Fold into config identity so it contributes to config_hash/signature.
-            if "__consist_hash_inputs__" in config_dict:
-                logging.warning(
-                    "[Consist] Overwriting user-provided '__consist_hash_inputs__' in config for run %s.",
-                    run_id,
-                )
-            config_dict["__consist_hash_inputs__"] = digest_map
-            kwargs["consist_hash_inputs"] = digest_map
-
-        config_dict = self.identity.normalize_json(config_dict)
-        if not isinstance(config_dict, MappingABC):
-            raise TypeError("config must be a mapping after normalization.")
-        validate_config_structure(config_dict)
-
-        # Compute core identity hashes early
-        # Important: keep the stored config snapshot as user-provided config, but include
-        # selected Run fields in the identity hash to avoid accidental cache hits.
-        config_hash = self.identity.compute_run_config_hash(
-            config=config_dict,
+        return self._run_lifecycle.begin_run(
+            run_id=run_id,
             model=model,
-            year=year,
-            iteration=iteration,
-            cache_epoch=cache_epoch,
-            cache_version=cache_version,
-        )
-        identity_mode = code_identity or "repo_git"
-        try:
-            git_hash = self.identity.resolve_code_version(
-                mode=identity_mode,
-                func=code_identity_callable,
-                extra_deps=code_identity_extra_deps,
-            )
-        except Exception as exc:
-            logging.warning(
-                "[Consist] Failed to resolve code identity mode=%s for run %s: %s. "
-                "Falling back to repo git identity.",
-                identity_mode,
-                run_id,
-                exc,
-            )
-            git_hash = self.identity.get_code_version()
-        if code_identity is not None:
-            kwargs["code_identity"] = identity_mode
-        if code_identity_extra_deps:
-            kwargs["code_identity_extra_deps"] = list(code_identity_extra_deps)
-
-        kwargs["_physical_run_dir"] = str(self.run_dir)
-        if cache_epoch is not None:
-            kwargs["cache_epoch"] = cache_epoch
-        if cache_version is not None:
-            kwargs["cache_version"] = cache_version
-        if kwargs:
-            validate_run_meta(kwargs)
-
-        now = datetime.now(UTC)
-        run = Run(
-            id=run_id,
-            model_name=model,
+            config=config,
+            inputs=inputs,
+            tags=tags,
             description=description,
-            year=year,
-            iteration=iteration,
-            parent_run_id=parent_run_id,
-            tags=tags or [],
-            status="running",
-            config_hash=config_hash,
-            git_hash=git_hash,
-            meta=kwargs,
-            started_at=now,
-            created_at=now,
-        )
-        self._runs_by_id[run.id] = run
-
-        if run.meta is None:
-            run.meta = {}
-        run.meta.setdefault("mounts", dict(self.mounts))
-
-        push_tracker(self)
-        self.current_consist = ConsistRecord(run=run, config=config_dict)
-        self._active_run_cache_options = ActiveRunCacheOptions(
             cache_mode=cache_mode,
-            cache_hydration=cache_hydration,
-            materialize_cached_output_paths=materialize_cached_output_paths,
-            materialize_cached_outputs_dir=materialize_cached_outputs_dir,
-            validate_cached_outputs=validate_cached_outputs,
+            artifact_dir=artifact_dir,
+            allow_external_paths=allow_external_paths,
+            facet=facet,
+            facet_from=facet_from,
+            hash_inputs=hash_inputs,
+            code_identity=code_identity,
+            code_identity_extra_deps=code_identity_extra_deps,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
+            **kwargs,
         )
-
-        # Persist a queryable facet (optional)
-        facet_dict = self.config_facets.resolve_facet_dict(
-            model=model, raw_config_model=raw_config_model, facet=facet, run_id=run.id
-        )
-        if facet_dict is not None:
-            self.current_consist.facet = facet_dict
-            schema_version = facet_schema_version
-            if (
-                schema_version is None
-                and raw_config_model is not None
-                and isinstance(raw_config_model, HasFacetSchemaVersion)
-            ):
-                schema_version = raw_config_model.facet_schema_version
-            self.config_facets.persist_facet(
-                run=run,
-                model=model,
-                facet_dict=facet_dict,
-                schema_name=self.config_facets.infer_schema_name(
-                    raw_config_model, facet
-                ),
-                schema_version=schema_version,
-                index_kv=facet_index,
-            )
-
-        current_consist = self.current_consist
-        if current_consist is None:
-            raise RuntimeError("Cannot start run: no active consist record.")
-
-        # Process Inputs & Auto-Forking
-        if inputs:
-            for item in inputs:
-                if isinstance(item, Artifact):
-                    self.log_artifact(item, direction="input")
-                else:
-                    key = Path(item).stem
-                    self.log_artifact(item, key=key, direction="input")
-
-        # Auto-Lineage
-        if not run.parent_run_id:
-            parent_candidates = [
-                a.run_id for a in current_consist.inputs if a.run_id is not None
-            ]
-            if parent_candidates:
-                run.parent_run_id = parent_candidates[-1]
-
-        try:
-            t0 = time.perf_counter()
-            self._prefetch_run_signatures(current_consist.inputs)
-            _log_timing("prefetch_run_signatures", t0)
-            t0 = time.perf_counter()
-            input_hash = self.identity.compute_input_hash(
-                current_consist.inputs,
-                path_resolver=self.resolve_uri,
-                signature_lookup=self._resolve_run_signature,
-            )
-            run.input_hash = input_hash
-            run.signature = self.identity.calculate_run_signature(
-                code_hash=git_hash, config_hash=config_hash, input_hash=input_hash
-            )
-            _log_timing("compute_input_hash", t0)
-        except Exception as e:
-            logging.warning(
-                f"[Consist Warning] Failed to compute inputs hash for run {run_id}: {e}"
-            )
-            run.input_hash = "error"
-            run.signature = "error"
-
-        cached_output_ids: Optional[List[uuid.UUID]] = None
-
-        # --- Cache Logic (Refactored) ---
-        if cache_mode == "reuse":
-            cache_key = (
-                (run.config_hash, run.input_hash, run.git_hash)
-                if run.config_hash and run.input_hash and run.git_hash
-                else None
-            )
-            if debug_cache:
-                logging.info(
-                    "[Consist][cache] lookup key config=%s input=%s code=%s",
-                    run.config_hash,
-                    run.input_hash,
-                    run.git_hash,
-                )
-
-            cached_run = self._local_cache_index.get(cache_key) if cache_key else None
-            if cached_run is None:
-                t0 = time.perf_counter()
-                if cache_key:
-                    config_hash, input_hash, git_hash = cache_key
-                    cached_run = self.find_matching_run(
-                        config_hash=config_hash,
-                        input_hash=input_hash,
-                        git_hash=git_hash,
-                    )
-                _log_timing("find_matching_run", t0)
-            cache_valid = False
-            if cached_run:
-                t0 = time.perf_counter()
-                cache_valid = validate_cached_run_outputs(
-                    tracker=self,
-                    run=cached_run,
-                    options=self._active_run_cache_options,
-                )
-                _log_timing("validate_cached_outputs", t0)
-            elif debug_cache:
-                logging.info("[Consist][cache] miss: no matching completed run.")
-
-            if cached_run and cache_valid:
-                t0 = time.perf_counter()
-                cached_items = hydrate_cache_hit_outputs(
-                    tracker=self,
-                    run=run,
-                    cached_run=cached_run,
-                    options=self._active_run_cache_options,
-                    link_outputs=False,
-                )
-                cached_output_ids = [art.id for art in cached_items.outputs.values()]
-                _log_timing("hydrate_cache_hit_outputs", t0)
-                if debug_cache:
-                    logging.info(
-                        "[Consist][cache] hit: cached_run=%s outputs=%d hydration=%s",
-                        cached_run.id,
-                        len(cached_items.outputs),
-                        self._active_run_cache_options.cache_hydration,
-                    )
-            else:
-                if cached_run and not cache_valid and debug_cache:
-                    logging.info(
-                        "[Consist][cache] miss: cached run %s failed validation.",
-                        cached_run.id,
-                    )
-                logging.debug("🔄 [Consist] Cache Miss. Running...")
-        elif cache_mode == "overwrite":
-            logging.debug("⚠️ [Consist] Cache lookup skipped (Mode: Overwrite).")
-        elif cache_mode == "readonly":
-            logging.debug("👁️ [Consist] Read-only mode.")
-
-        if not self.current_consist.cached_run:
-            materialize_missing_inputs(
-                tracker=self, options=self._active_run_cache_options
-            )
-
-        self._flush_json()
-        if cached_output_ids and self.db:
-            self.persistence.sync_run_with_links(
-                run, artifact_ids=cached_output_ids, direction="output"
-            )
-        else:
-            self._sync_run_to_db(run)
-        self._emit_run_start(run)
-
-        return run
 
     @contextmanager
     def start_run(
@@ -1549,97 +1305,20 @@ class Tracker:
         start_run : Manual run context management (more control)
         trace : Context manager alternative (always executes, even on cache hit)
         """
-        merged_options = merge_run_options(
-            cache_options=cache_options,
-            output_policy=output_policy,
-            execution_options=execution_options,
-        )
-
-        cache_mode = merged_options.cache_mode
-        cache_hydration = merged_options.cache_hydration
-        cache_version = merged_options.cache_version
-        cache_epoch = merged_options.cache_epoch
-        validate_cached_outputs = merged_options.validate_cached_outputs
-        code_identity = merged_options.code_identity
-        code_identity_extra_deps = merged_options.code_identity_extra_deps
-        output_mismatch = merged_options.output_mismatch
-        output_missing = merged_options.output_missing
-        load_inputs = merged_options.load_inputs
-        executor = merged_options.executor
-        container = merged_options.container
-        runtime_kwargs = merged_options.runtime_kwargs
-        inject_context = merged_options.inject_context
-
-        if executor is None:
-            executor = "python"
-        if inject_context is None:
-            inject_context = False
-        if output_mismatch is None:
-            output_mismatch = "warn"
-        if output_missing is None:
-            output_missing = "warn"
-
-        if executor not in {"python", "container"}:
-            raise ValueError("Tracker.run supports executor='python' or 'container'.")
-        if code_identity not in {
-            None,
-            "repo_git",
-            "callable_module",
-            "callable_source",
-        }:
-            raise ValueError(
-                "cache_options.code_identity must be one of: "
-                "'repo_git', 'callable_module', 'callable_source'"
-            )
-        if (
-            code_identity in {"callable_module", "callable_source"}
-            and executor != "python"
-        ):
-            raise ValueError(
-                "cache_options.code_identity callable modes require executor='python'."
-            )
-        if code_identity_extra_deps is not None:
-            if not isinstance(code_identity_extra_deps, list) or not all(
-                isinstance(dep, str) for dep in code_identity_extra_deps
-            ):
-                raise TypeError(
-                    "cache_options.code_identity_extra_deps must be a list[str]."
-                )
-
-        if executor == "container":
-            if container is None:
-                raise ValueError("executor='container' requires a container spec.")
-            if output_paths is None:
-                raise ValueError("executor='container' requires output_paths.")
-            if outputs is not None:
-                raise ValueError(
-                    "executor='container' does not accept outputs; use output_paths."
-                )
-            if fn is None and name is None:
-                raise ValueError("executor='container' requires name when fn is None.")
-        else:
-            if fn is None:
-                raise ValueError("Tracker.run requires a callable fn.")
-
-        runtime_kwargs_dict: Optional[Dict[str, Any]] = (
-            dict(runtime_kwargs) if runtime_kwargs is not None else None
-        )
-
-        resolver = MetadataResolver(
-            default_name_template=None,
-            allow_template=executor == "python",
-            apply_step_defaults=executor == "python",
-        )
-        resolved = resolver.resolve(
+        return self._run_trace.run(
             fn=fn,
             name=name,
+            run_id=run_id,
             model=model,
             description=description,
             config=config,
             config_plan=config_plan,
+            config_plan_ingest=config_plan_ingest,
+            config_plan_profile_schema=config_plan_profile_schema,
             inputs=inputs,
             input_keys=input_keys,
             optional_input_keys=optional_input_keys,
+            depends_on=depends_on,
             tags=tags,
             facet=facet,
             facet_from=facet_from,
@@ -1650,528 +1329,15 @@ class Tracker:
             iteration=iteration,
             phase=phase,
             stage=stage,
-            consist_settings=self.settings,
-            consist_workspace=self.run_dir,
-            consist_state=self.current_consist,
-            runtime_kwargs=runtime_kwargs_dict,
+            parent_run_id=parent_run_id,
             outputs=outputs,
             output_paths=output_paths,
-            cache_mode=cache_mode,
-            cache_hydration=cache_hydration,
-            cache_version=cache_version,
-            validate_cached_outputs=validate_cached_outputs,
-            load_inputs=load_inputs,
-            missing_name_error="Tracker.run requires a run name.",
+            capture_dir=capture_dir,
+            capture_pattern=capture_pattern,
+            cache_options=cache_options,
+            output_policy=output_policy,
+            execution_options=execution_options,
         )
-
-        resolved_name = resolved.name
-        resolved_model = resolved.model
-        description = resolved.description
-        config = resolved.config
-        config_plan = resolved.config_plan
-        tags = resolved.tags
-        facet = resolved.facet
-        facet_index = resolved.facet_index
-        outputs = resolved.outputs
-        output_paths = resolved.output_paths
-        inputs = resolved.inputs
-        input_keys = resolved.input_keys
-        optional_input_keys = resolved.optional_input_keys
-        cache_mode = resolved.cache_mode
-        cache_hydration = resolved.cache_hydration
-        cache_version = resolved.cache_version
-        validate_cached_outputs = resolved.validate_cached_outputs
-        load_inputs = resolved.load_inputs
-        hash_inputs = resolved.hash_inputs
-        facet_from = resolved.facet_from
-        facet_schema_version = resolved.facet_schema_version
-
-        if cache_mode is None:
-            cache_mode = "reuse"
-        if validate_cached_outputs is None:
-            validate_cached_outputs = "lazy"
-
-        if load_inputs is None:
-            load_inputs = isinstance(inputs, Mapping)
-        if load_inputs and inputs is not None and not isinstance(inputs, Mapping):
-            raise ValueError("load_inputs=True requires inputs to be a dict.")
-
-        if cache_hydration is None and load_inputs:
-            cache_hydration = "inputs-missing"
-
-        if input_keys is not None or optional_input_keys is not None:
-            warnings.warn(
-                "Tracker.run ignores input_keys/optional_input_keys; use inputs mapping instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
-        if output_mismatch not in {"warn", "error", "ignore"}:
-            raise ValueError(
-                "output_mismatch must be one of: 'warn', 'error', 'ignore'"
-            )
-        if output_missing not in {"warn", "error", "ignore"}:
-            raise ValueError("output_missing must be one of: 'warn', 'error', 'ignore'")
-
-        resolved_inputs, input_artifacts_by_key = _resolve_input_refs(
-            self,
-            inputs,
-            depends_on,
-            include_keyed_artifacts=executor == "python",
-        )
-
-        if run_id is None:
-            run_id = f"{resolved_name}_{uuid.uuid4().hex[:8]}"
-
-        materialize_cached_output_paths: Optional[Dict[str, Path]] = None
-        materialize_cached_outputs_dir: Optional[Path] = None
-        if cache_hydration == "outputs-requested":
-            if output_paths is None:
-                raise ValueError(
-                    "cache_hydration='outputs-requested' requires output_paths."
-                )
-            output_base_dir = _preview_run_artifact_dir(
-                self,
-                run_id=run_id,
-                model=resolved_model,
-                description=description,
-                year=year,
-                iteration=iteration,
-                parent_run_id=parent_run_id,
-                tags=tags,
-            )
-            materialize_cached_output_paths = {
-                str(key): _resolve_output_path(self, ref, output_base_dir)
-                for key, ref in output_paths.items()
-            }
-        elif cache_hydration == "outputs-all":
-            materialize_cached_outputs_dir = _preview_run_artifact_dir(
-                self,
-                run_id=run_id,
-                model=resolved_model,
-                description=description,
-                year=year,
-                iteration=iteration,
-                parent_run_id=parent_run_id,
-                tags=tags,
-            )
-
-        if executor == "container" and cache_mode != "overwrite":
-            logging.warning(
-                "[Consist] executor='container' uses container-level caching; forcing cache_mode='overwrite'."
-            )
-            cache_mode = "overwrite"
-
-        resolved_cache_epoch = self._cache_epoch if cache_epoch is None else cache_epoch
-
-        config_for_run = config
-        if config_plan is not None:
-            if config is None:
-                config_for_run = {}
-            elif isinstance(config, BaseModel):
-                config_for_run = config.model_dump()
-            else:
-                config_for_run = dict(config)
-            if "__consist_config_plan__" in config_for_run:
-                logging.warning(
-                    "[Consist] Overwriting user-provided '__consist_config_plan__' in config for run %s.",
-                    run_id,
-                )
-            config_for_run["__consist_config_plan__"] = {
-                "adapter": config_plan.adapter_name,
-                "hash": config_plan.identity_hash,
-                "adapter_version": config_plan.adapter_version,
-            }
-
-        start_kwargs: Dict[str, Any] = {
-            "run_id": run_id,
-            "model": resolved_model,
-            "config": config_for_run,
-            "inputs": resolved_inputs or None,
-            "tags": tags,
-            "description": description,
-            "cache_mode": cache_mode,
-            "facet": facet,
-            "facet_from": facet_from,
-            "hash_inputs": hash_inputs,
-            "year": year,
-            "iteration": iteration,
-            "parent_run_id": parent_run_id,
-            "validate_cached_outputs": validate_cached_outputs,
-            "cache_epoch": resolved_cache_epoch,
-        }
-        if code_identity is not None:
-            start_kwargs["code_identity"] = code_identity
-        if code_identity_extra_deps is not None:
-            start_kwargs["code_identity_extra_deps"] = list(code_identity_extra_deps)
-        if executor == "python" and fn is not None:
-            start_kwargs["_consist_code_identity_callable"] = fn
-        if cache_version is not None:
-            start_kwargs["cache_version"] = cache_version
-        if phase is not None:
-            start_kwargs["phase"] = phase
-        if stage is not None:
-            start_kwargs["stage"] = stage
-        if facet_schema_version is not None:
-            start_kwargs["facet_schema_version"] = facet_schema_version
-        if facet_index is not None:
-            start_kwargs["facet_index"] = facet_index
-        if cache_hydration is not None:
-            start_kwargs["cache_hydration"] = cache_hydration
-        if materialize_cached_output_paths is not None:
-            start_kwargs["materialize_cached_output_paths"] = (
-                materialize_cached_output_paths
-            )
-        if materialize_cached_outputs_dir is not None:
-            start_kwargs["materialize_cached_outputs_dir"] = (
-                materialize_cached_outputs_dir
-            )
-
-        def _handle_missing_outputs(label: str, missing: List[str]) -> None:
-            if not missing:
-                return
-            msg = f"{label} missing outputs: {missing}"
-            if output_missing == "error":
-                raise RuntimeError(msg)
-            if output_missing == "warn":
-                logging.warning("[Consist] %s", msg)
-
-        def _handle_output_mismatch(msg: str) -> bool:
-            if output_mismatch == "error":
-                raise RuntimeError(msg)
-            if output_mismatch == "warn":
-                logging.warning("[Consist] %s", msg)
-            return False
-
-        with self.start_run(**start_kwargs) as t:
-            current_consist = t.current_consist
-            if current_consist is None:
-                raise RuntimeError("No active run context is available.")
-
-            if t.is_cached:
-                cached_outputs = {a.key: a for a in current_consist.outputs}
-                expected_keys = set(outputs or [])
-                if output_paths:
-                    expected_keys.update(output_paths.keys())
-                missing = [k for k in expected_keys if k not in cached_outputs]
-                _handle_missing_outputs(f"Cache hit for run {resolved_name!r}", missing)
-                if expected_keys:
-                    outputs_map = {
-                        k: cached_outputs[k]
-                        for k in expected_keys
-                        if k in cached_outputs
-                    }
-                else:
-                    outputs_map = cached_outputs
-                return RunResult(
-                    run=current_consist.run,
-                    outputs=outputs_map,
-                    cache_hit=True,
-                )
-
-            if config_plan is not None:
-                self.apply_config_plan(
-                    config_plan,
-                    run=current_consist.run,
-                    ingest=config_plan_ingest,
-                    profile_schema=config_plan_profile_schema,
-                )
-
-            if executor == "container":
-                if container is None or output_paths is None:
-                    raise RuntimeError(
-                        "Container execution requires container and output_paths."
-                    )
-                if load_inputs:
-                    raise ValueError(
-                        "executor='container' does not support load_inputs."
-                    )
-                if not isinstance(container, MappingABC):
-                    raise TypeError(
-                        "container must be a mapping of run_container arguments."
-                    )
-
-                from consist.integrations.containers import run_container
-
-                container_args = dict(container)
-                image = container_args.pop("image", None)
-                command = container_args.pop("command", None)
-                backend_type = container_args.pop(
-                    "backend", None
-                ) or container_args.pop("backend_type", None)
-                backend_type = backend_type or "docker"
-                environment = container_args.pop("environment", None) or {}
-                working_dir = container_args.pop("working_dir", None)
-                volumes = container_args.pop("volumes", None) or {}
-                pull_latest = bool(container_args.pop("pull_latest", False))
-                lineage_mode = container_args.pop("lineage_mode", "full")
-
-                if container_args:
-                    raise ValueError(
-                        f"Unknown container options: {sorted(container_args.keys())}"
-                    )
-                if image is None or command is None:
-                    raise ValueError("container spec must include image and command.")
-
-                output_base_dir = self.run_artifact_dir()
-                resolved_output_paths = {
-                    str(key): _resolve_output_path(self, ref, output_base_dir)
-                    for key, ref in output_paths.items()
-                }
-
-                result = run_container(
-                    tracker=self,
-                    run_id=run_id,
-                    image=image,
-                    command=command,
-                    volumes=volumes,
-                    inputs=resolved_inputs,
-                    outputs=resolved_output_paths,
-                    environment=environment,
-                    working_dir=working_dir,
-                    backend_type=backend_type,
-                    pull_latest=pull_latest,
-                    lineage_mode=lineage_mode,
-                )
-
-                outputs_map = dict(result.artifacts)
-                missing = [key for key in output_paths.keys() if key not in outputs_map]
-                _handle_missing_outputs(f"Run {resolved_name!r}", missing)
-
-                return RunResult(
-                    run=current_consist.run,
-                    outputs=outputs_map,
-                    cache_hit=result.cache_hit,
-                )
-
-            runtime_kwargs = dict(runtime_kwargs or {})
-            required_runtime = getattr(fn, "__consist_runtime_required__", ())
-            if required_runtime:
-                missing = [
-                    name for name in required_runtime if name not in runtime_kwargs
-                ]
-                if missing:
-                    missing_list = ", ".join(sorted(missing))
-                    raise ValueError(
-                        f"Missing runtime_kwargs for {resolved_name!r}: {missing_list}. "
-                        "Provide them via runtime_kwargs={...} or remove "
-                        "@consist.require_runtime_kwargs."
-                    )
-            config_dict: Dict[str, Any] = {}
-            if config is None:
-                config_dict = {}
-            elif isinstance(config, BaseModel):
-                config_dict = config.model_dump()
-            else:
-                config_dict = dict(config)
-
-            if fn is None:
-                raise ValueError("run() requires a callable `fn` to execute.")
-            fn_callable = fn
-            sig = inspect.signature(fn_callable)
-            params = sig.parameters
-            has_var_kw = any(
-                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
-            )
-            call_kwargs: Dict[str, Any] = {}
-
-            if (
-                "config" in params
-                and "config" not in runtime_kwargs
-                and config is not None
-            ):
-                call_kwargs["config"] = (
-                    config if isinstance(config, BaseModel) else config_dict
-                )
-
-            for param_name, param in params.items():
-                if param.kind in (
-                    inspect.Parameter.VAR_POSITIONAL,
-                    inspect.Parameter.VAR_KEYWORD,
-                ):
-                    continue
-                if param_name in call_kwargs:
-                    continue
-                if param_name in runtime_kwargs:
-                    call_kwargs[param_name] = runtime_kwargs[param_name]
-                    continue
-                if load_inputs and isinstance(inputs, Mapping):
-                    if param_name in input_artifacts_by_key:
-                        if param_name in config_dict:
-                            logging.warning(
-                                "[Consist] Ambiguous param %r present in inputs and config; preferring inputs.",
-                                param_name,
-                            )
-                        artifact = input_artifacts_by_key[param_name]
-                        if get_tracker_ref(artifact) is None:
-                            set_tracker_ref(artifact, self)
-                        if artifact.driver in DriverType.tabular_drivers():
-                            from consist.api import load_df
-
-                            call_kwargs[param_name] = load_df(artifact, tracker=self)
-                        else:
-                            call_kwargs[param_name] = self.load(artifact)
-                        continue
-                if param_name in config_dict:
-                    call_kwargs[param_name] = config_dict[param_name]
-
-            for key, value in runtime_kwargs.items():
-                if key not in call_kwargs:
-                    call_kwargs[key] = value
-
-            if inject_context:
-                ctx_name = (
-                    inject_context
-                    if isinstance(inject_context, str)
-                    else "_consist_ctx"
-                )
-                if ctx_name not in call_kwargs:
-                    if ctx_name in params or has_var_kw:
-                        call_kwargs[ctx_name] = RunContext(self)
-                    else:
-                        raise ValueError(
-                            f"inject_context requested '{ctx_name}', but fn does not accept it."
-                        )
-
-            try:
-                sig.bind_partial(**call_kwargs)
-            except TypeError as exc:
-                raise TypeError(
-                    f"Tracker.run could not bind arguments for {resolved_name!r}: {exc}"
-                ) from exc
-
-            captured_outputs: Dict[str, Artifact] = {}
-            if capture_dir is not None:
-                with t.capture_outputs(capture_dir, pattern=capture_pattern) as cap:
-                    result = fn_callable(**call_kwargs)
-                if result is not None:
-                    raise ValueError(
-                        "capture_dir requires the run function to return None. "
-                        "Use inject_context to log outputs manually if you need a return value."
-                    )
-                captured_outputs = {a.key: a for a in cap.artifacts}
-            else:
-                result = fn_callable(**call_kwargs)
-
-            outputs_map: Dict[str, Artifact] = {}
-            output_base_dir = self.run_artifact_dir()
-
-            def _log_output_value(key: str, value: ArtifactRef) -> Optional[Artifact]:
-                if value is None:
-                    return None
-                return self.log_artifact(value, key=key, direction="output")
-
-            if output_paths is not None:
-                for key, ref in output_paths.items():
-                    if isinstance(ref, Artifact):
-                        ref_path = _resolve_output_path(self, ref, output_base_dir)
-                        if not ref_path.exists():
-                            _handle_missing_outputs(
-                                f"Run {resolved_name!r}", [str(key)]
-                            )
-                            continue
-                        outputs_map[key] = self.log_artifact(
-                            ref, key=key, direction="output"
-                        )
-                    else:
-                        ref_path = _resolve_output_path(self, ref, output_base_dir)
-                        if not ref_path.exists():
-                            _handle_missing_outputs(
-                                f"Run {resolved_name!r}", [str(key)]
-                            )
-                            continue
-                        outputs_map[key] = self.log_artifact(
-                            ref_path, key=key, direction="output"
-                        )
-
-            if outputs:
-                if result is None:
-                    pass
-                elif isinstance(result, dict):
-                    for key, value in result.items():
-                        logged = _log_output_value(str(key), value)
-                        if logged is not None:
-                            outputs_map[str(key)] = logged
-                elif isinstance(result, (list, tuple)):
-                    if len(result) != len(outputs):
-                        _handle_output_mismatch(
-                            "Output list length does not match declared outputs."
-                        )
-                    else:
-                        for key, value in zip(outputs, result):
-                            logged = _log_output_value(key, value)
-                            if logged is not None:
-                                outputs_map[key] = logged
-                elif isinstance(result, pd.DataFrame):
-                    if len(outputs) != 1:
-                        _handle_output_mismatch(
-                            "Single return value does not match declared outputs."
-                        )
-                    else:
-                        outputs_map[outputs[0]] = self.log_dataframe(
-                            result, key=outputs[0]
-                        )
-                elif isinstance(result, pd.Series):
-                    if len(outputs) != 1:
-                        _handle_output_mismatch(
-                            "Single return value does not match declared outputs."
-                        )
-                    else:
-                        outputs_map[outputs[0]] = self.log_dataframe(
-                            result.to_frame(name=outputs[0]), key=outputs[0]
-                        )
-                elif _is_xarray_dataset(result):
-                    if len(outputs) != 1:
-                        _handle_output_mismatch(
-                            "Single return value does not match declared outputs."
-                        )
-                    else:
-                        key = outputs[0]
-                        output_path = output_base_dir / f"{key}.zarr"
-                        _write_xarray_dataset(result, output_path)
-                        outputs_map[key] = self.log_artifact(
-                            output_path, key=key, direction="output", driver="zarr"
-                        )
-                elif isinstance(result, (Artifact, str, Path)):
-                    if len(outputs) != 1:
-                        _handle_output_mismatch(
-                            "Single return value does not match declared outputs."
-                        )
-                    else:
-                        logged = _log_output_value(outputs[0], result)
-                        if logged is not None:
-                            outputs_map[outputs[0]] = logged
-                else:
-                    raise TypeError(f"Run returned unsupported type {type(result)}")
-            elif result is not None:
-                logging.warning(
-                    "[Consist] Run %r returned a value but no outputs were declared; ignoring return value.",
-                    resolved_name,
-                )
-
-            if captured_outputs:
-                for key, artifact in captured_outputs.items():
-                    outputs_map.setdefault(key, artifact)
-
-            logged_outputs = {a.key: a for a in current_consist.outputs}
-            if outputs:
-                missing_keys = [
-                    key
-                    for key in outputs
-                    if key not in outputs_map and key not in logged_outputs
-                ]
-                _handle_missing_outputs(f"Run {resolved_name!r}", missing_keys)
-                for key in outputs:
-                    if key not in outputs_map and key in logged_outputs:
-                        outputs_map[key] = logged_outputs[key]
-            elif not outputs_map and logged_outputs:
-                outputs_map = logged_outputs
-
-            return RunResult(
-                run=current_consist.run,
-                outputs=outputs_map,
-                cache_hit=False,
-            )
 
     @contextmanager
     def trace(
@@ -2347,164 +1513,39 @@ class Tracker:
         scenario : Multi-step workflow grouping
         start_run : Imperative alternative for run lifecycle management
         """
-        resolved_model = model or name
-
-        if input_keys is not None or optional_input_keys is not None:
-            warnings.warn(
-                "Tracker.trace ignores input_keys/optional_input_keys; use inputs mapping instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
-        if output_mismatch not in {"warn", "error", "ignore"}:
-            raise ValueError(
-                "output_mismatch must be one of: 'warn', 'error', 'ignore'"
-            )
-        if output_missing not in {"warn", "error", "ignore"}:
-            raise ValueError("output_missing must be one of: 'warn', 'error', 'ignore'")
-
-        resolved_inputs, _ = _resolve_input_refs(
-            self,
-            inputs,
-            depends_on,
-            include_keyed_artifacts=False,
-        )
-
-        if run_id is None:
-            run_id = f"{name}_{uuid.uuid4().hex[:8]}"
-
-        materialize_cached_output_paths: Optional[Dict[str, Path]] = None
-        materialize_cached_outputs_dir: Optional[Path] = None
-        if cache_hydration == "outputs-requested":
-            if output_paths is None:
-                raise ValueError(
-                    "cache_hydration='outputs-requested' requires output_paths."
-                )
-            output_base_dir = _preview_run_artifact_dir(
-                self,
-                run_id=run_id,
-                model=resolved_model,
-                description=description,
-                year=year,
-                iteration=iteration,
-                parent_run_id=parent_run_id,
-                tags=tags,
-            )
-            materialize_cached_output_paths = {
-                str(key): _resolve_output_path(self, ref, output_base_dir)
-                for key, ref in output_paths.items()
-            }
-        elif cache_hydration == "outputs-all":
-            materialize_cached_outputs_dir = _preview_run_artifact_dir(
-                self,
-                run_id=run_id,
-                model=resolved_model,
-                description=description,
-                year=year,
-                iteration=iteration,
-                parent_run_id=parent_run_id,
-                tags=tags,
-            )
-
-        config_for_run = config
-        if config_plan is not None:
-            if config is None:
-                config_for_run = {}
-            elif isinstance(config, BaseModel):
-                config_for_run = config.model_dump()
-            else:
-                config_for_run = dict(config)
-            if "__consist_config_plan__" in config_for_run:
-                logging.warning(
-                    "[Consist] Overwriting user-provided '__consist_config_plan__' in config for run %s.",
-                    run_id,
-                )
-            config_for_run["__consist_config_plan__"] = {
-                "adapter": config_plan.adapter_name,
-                "hash": config_plan.identity_hash,
-                "adapter_version": config_plan.adapter_version,
-            }
-
-        start_kwargs: Dict[str, Any] = {
-            "run_id": run_id,
-            "model": resolved_model,
-            "config": config_for_run,
-            "inputs": resolved_inputs or None,
-            "tags": tags,
-            "description": description,
-            "cache_mode": cache_mode,
-            "facet": facet,
-            "facet_from": facet_from,
-            "hash_inputs": hash_inputs,
-            "year": year,
-            "iteration": iteration,
-            "parent_run_id": parent_run_id,
-            "validate_cached_outputs": validate_cached_outputs,
-            "cache_epoch": self._cache_epoch,
-        }
-        if facet_schema_version is not None:
-            start_kwargs["facet_schema_version"] = facet_schema_version
-        if facet_index is not None:
-            start_kwargs["facet_index"] = facet_index
-        if cache_hydration is not None:
-            start_kwargs["cache_hydration"] = cache_hydration
-        if materialize_cached_output_paths is not None:
-            start_kwargs["materialize_cached_output_paths"] = (
-                materialize_cached_output_paths
-            )
-        if materialize_cached_outputs_dir is not None:
-            start_kwargs["materialize_cached_outputs_dir"] = (
-                materialize_cached_outputs_dir
-            )
-
-        def _handle_missing_outputs(label: str, missing: List[str]) -> None:
-            if not missing:
-                return
-            msg = f"{label} missing outputs: {missing}"
-            if output_missing == "error":
-                raise RuntimeError(msg)
-            if output_missing == "warn":
-                logging.warning("[Consist] %s", msg)
-
-        with self.start_run(**start_kwargs) as t:
-            current_consist = t.current_consist
-            if current_consist is None:
-                raise RuntimeError("No active run context is available.")
-
-            output_base_dir = self.run_artifact_dir()
-            try:
-                if config_plan is not None and not t.is_cached:
-                    self.apply_config_plan(
-                        config_plan,
-                        run=current_consist.run,
-                        ingest=config_plan_ingest,
-                        profile_schema=config_plan_profile_schema,
-                    )
-                if capture_dir is not None:
-                    with t.capture_outputs(capture_dir, pattern=capture_pattern):
-                        yield t
-                else:
-                    yield t
-            finally:
-                if output_paths is not None:
-                    for key, ref in output_paths.items():
-                        if isinstance(ref, Artifact):
-                            ref_path = _resolve_output_path(self, ref, output_base_dir)
-                            if not ref_path.exists():
-                                _handle_missing_outputs(f"Run {name!r}", [str(key)])
-                                continue
-                            self.log_artifact(ref, key=key, direction="output")
-                        else:
-                            ref_path = _resolve_output_path(self, ref, output_base_dir)
-                            if not ref_path.exists():
-                                _handle_missing_outputs(f"Run {name!r}", [str(key)])
-                                continue
-                            self.log_artifact(ref_path, key=key, direction="output")
-
-                if outputs:
-                    logged_outputs = {a.key: a for a in current_consist.outputs}
-                    missing_keys = [key for key in outputs if key not in logged_outputs]
-                    _handle_missing_outputs(f"Run {name!r}", missing_keys)
+        with self._run_trace.trace(
+            name=name,
+            run_id=run_id,
+            model=model,
+            description=description,
+            config=config,
+            config_plan=config_plan,
+            config_plan_ingest=config_plan_ingest,
+            config_plan_profile_schema=config_plan_profile_schema,
+            inputs=inputs,
+            input_keys=input_keys,
+            optional_input_keys=optional_input_keys,
+            depends_on=depends_on,
+            tags=tags,
+            facet=facet,
+            facet_from=facet_from,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
+            hash_inputs=hash_inputs,
+            year=year,
+            iteration=iteration,
+            parent_run_id=parent_run_id,
+            outputs=outputs,
+            output_paths=output_paths,
+            capture_dir=capture_dir,
+            capture_pattern=capture_pattern,
+            cache_mode=cache_mode,
+            cache_hydration=cache_hydration,
+            validate_cached_outputs=validate_cached_outputs,
+            output_mismatch=output_mismatch,
+            output_missing=output_missing,
+        ) as active_tracker:
+            yield active_tracker
 
     def scenario(
         self,
@@ -2625,72 +1666,7 @@ class Tracker:
             raise
         ```
         """
-        if not self.current_consist:
-            raise RuntimeError("No active run to end. Call begin_run() first.")
-
-        run = self.current_consist.run
-        cache_mode = self._active_run_cache_options.cache_mode or "reuse"
-
-        # Update run status
-        if cache_mode != "readonly":
-            run.status = status
-        else:
-            run.status = "skipped_save" if status == "completed" else status
-
-        if error:
-            run.meta["error"] = str(error)
-
-        # Clean up global tracker context
-        pop_tracker()
-
-        # Snapshot the result for introspection
-        self._last_consist = self.current_consist
-
-        # Set timing fields
-        end_time = datetime.now(UTC)
-        run.ended_at = end_time
-        run.updated_at = end_time
-
-        # Persist final state
-        self._flush_json()
-        if cache_mode != "readonly":
-            self._sync_run_to_db(run)
-
-        # Update in-process cache index (best-effort) so immediate re-runs can cache-hit
-        # even if the DB is briefly locked or slow to reflect status updates.
-        if cache_mode != "readonly" and run.status == "completed":
-            cache_key = (
-                run.config_hash or "",
-                run.input_hash or "",
-                run.git_hash or "",
-            )
-            cache_hit = bool(run.meta.get("cache_hit")) if run.meta else False
-            if cache_key in self._local_cache_index and cache_mode != "overwrite":
-                if not cache_hit:
-                    logging.warning(
-                        "Cache key collision detected (extremely rare): %s. "
-                        "Keeping first cached run (created %s).",
-                        cache_key,
-                        self._local_cache_index[cache_key].created_at,
-                    )
-            else:
-                self._local_cache_index[cache_key] = run
-            if len(self._local_cache_index) > self._local_cache_max_entries:
-                # FIFO eviction (dict preserves insertion order).
-                self._local_cache_index.pop(next(iter(self._local_cache_index)))
-
-        # Emit lifecycle hooks
-        if error is not None:
-            self._emit_run_failed(run, error)
-        elif run.status == "completed":
-            outputs = self.current_consist.outputs if self.current_consist else []
-            self._emit_run_complete(run, outputs)
-
-        # Clear current run context
-        self.current_consist = None
-        self._active_run_cache_options = ActiveRunCacheOptions()
-
-        return run
+        return self._run_lifecycle.end_run(status=status, error=error)
 
     # --- Query Helpers ---
 
@@ -2916,6 +1892,9 @@ class Tracker:
         -   **Schema Metadata Injection**: Embeds schema information (if provided) into the
             artifact's metadata, useful for later "Strict Mode" validation or introspection.
 
+        -   **Immediate Persistence**: This single-artifact method flushes JSON state
+            and syncs artifact links to the database immediately for this call.
+
         Parameters
         ----------
         path : ArtifactRef
@@ -2977,42 +1956,12 @@ class Tracker:
         ValueError
             If `key` is not provided when `path` is a path-like (str/Path).
         """
-        self._ensure_write_provenance()
-
-        if not self.current_consist:
-            raise RuntimeError("Cannot log artifact: no active run.")
-
-        # Cache-hit ergonomics:
-        # - Scenario/trace bodies still execute on cache hits (we hydrate cached outputs,
-        #   but we do not skip user code).
-        # - Many workflows write cache-agnostic code that calls `log_artifact(...)` in
-        #   both cache-hit and cache-miss cases.
-        # - On cache hits, re-logging outputs should typically *return the hydrated cached
-        #   output* (by key) rather than creating a new artifact node.
-        #
-        # If the caller attempts to produce outputs that do not match the cached outputs,
-        # we *demote* the cache hit to an executing run (so provenance remains truthful).
-        if direction == "output" and self.is_cached:
-            cached = maybe_return_cached_output_or_demote_cache_hit(
-                tracker=self,
-                path=path,
-                key=key,
-            )
-            if cached is not None:
-                if self._active_coupler is not None and cached.key:
-                    self._active_coupler.set(cached.key, cached)
-                return cached
-
-        run_id = self.current_consist.run.id if direction == "output" else None
-
-        # DELEGATE CREATION LOGIC
-        artifact_obj = self.artifacts.create_artifact(
-            path,
-            run_id,
-            key,
-            direction,
-            schema,
-            driver,
+        return self._artifact_logging.log_artifact(
+            path=path,
+            key=key,
+            direction=direction,
+            schema=schema,
+            driver=driver,
             table_path=table_path,
             array_path=array_path,
             content_hash=content_hash,
@@ -3020,150 +1969,13 @@ class Tracker:
             validate_content_hash=validate_content_hash,
             reuse_if_unchanged=reuse_if_unchanged,
             reuse_scope=reuse_scope,
+            profile_file_schema=profile_file_schema,
+            file_schema_sample_rows=file_schema_sample_rows,
+            facet=facet,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
             **meta,
         )
-
-        resolved_artifact_facet: Optional[Dict[str, Any]] = None
-        artifact_facet_payload: Optional[FacetLike] = facet
-        if artifact_facet_payload is None and artifact_obj.key:
-            artifact_facet_payload = self._parse_artifact_facet_from_registered_parsers(
-                artifact_obj.key
-            )
-        if artifact_facet_payload is not None:
-            resolved_artifact_facet = self.artifact_facets.resolve_facet_dict(
-                artifact_facet_payload
-            )
-
-        # Artifact contract clarification:
-        # - If the caller passes an existing Artifact reference, `artifact.run_id` is treated as the
-        #   producing run id (and is not overwritten), but we warn when the caller attempts to log it
-        #   as an output of a different run.
-        # - If an Artifact has no producing run_id yet and is logged as an output, we attribute it to
-        #   the current run.
-        if isinstance(path, Artifact) and direction == "output":
-            producing_run_id = artifact_obj.run_id
-            if producing_run_id is None:
-                artifact_obj.run_id = run_id
-            elif producing_run_id != run_id:
-                logging.warning(
-                    "[Consist] log_artifact received an Artifact with run_id=%s but is logging it as output of run_id=%s (artifact key=%s id=%s).",
-                    producing_run_id,
-                    run_id,
-                    getattr(artifact_obj, "key", None),
-                    getattr(artifact_obj, "id", None),
-                )
-
-        # Inherit selected run metadata onto the artifact unless already present
-        run_ctx = self.current_consist.run
-        inherited_fields = {
-            "year": run_ctx.year,
-            "iteration": run_ctx.iteration,
-            "tags": run_ctx.tags or [],
-        }
-        if artifact_obj.meta is None:
-            artifact_obj.meta = {}
-        for k, v in inherited_fields.items():
-            if v is not None and k not in artifact_obj.meta:
-                artifact_obj.meta[k] = v
-
-        # TRACKER HANDLES STATE & PERSISTENCE
-        set_tracker_ref(artifact_obj, self)
-        if direction == "input":
-            self.current_consist.inputs.append(artifact_obj)
-        else:
-            self.current_consist.outputs.append(artifact_obj)
-            if self._active_coupler is not None and artifact_obj.key:
-                self._active_coupler.set(artifact_obj.key, artifact_obj)
-
-        self._flush_json()
-        self._sync_artifact_to_db(artifact_obj, direction)
-
-        if resolved_artifact_facet is not None:
-            schema_version = facet_schema_version
-            if schema_version is None and isinstance(
-                artifact_facet_payload, HasFacetSchemaVersion
-            ):
-                schema_version = artifact_facet_payload.facet_schema_version
-            self.artifact_facets.persist_facet(
-                artifact=artifact_obj,
-                namespace=self.current_consist.run.model_name,
-                facet_dict=resolved_artifact_facet,
-                schema_name=self.artifact_facets.infer_schema_name(
-                    artifact_facet_payload
-                ),
-                schema_version=schema_version,
-                index_kv=facet_index,
-            )
-
-        profile_mode = (
-            self.settings.schema_profile_enabled
-            if profile_file_schema is None
-            else profile_file_schema
-        )
-        sample_rows = (
-            self.settings.schema_sample_rows
-            if file_schema_sample_rows is None
-            else file_schema_sample_rows
-        )
-        if (
-            profile_mode
-            and artifact_obj.is_tabular
-            and self.current_consist is not None
-        ):
-            try:
-                if isinstance(artifact_obj.meta, dict) and artifact_obj.meta.get(
-                    "schema_id"
-                ):
-                    return artifact_obj
-                resolved_path = artifact_obj.abs_path or self.resolve_uri(
-                    artifact_obj.container_uri
-                )
-                if resolved_path:
-                    driver = artifact_obj.driver
-                    if driver not in ("csv", "parquet", "h5_table"):
-                        return artifact_obj
-                    self.artifact_schemas.profile_file_artifact(
-                        artifact=artifact_obj,
-                        run=self.current_consist.run,
-                        resolved_path=str(resolved_path),
-                        driver=cast(Literal["csv", "parquet", "h5_table"], driver),
-                        sample_rows=sample_rows,
-                        source="file",
-                        reuse_if_unchanged=profile_mode == "if_changed",
-                    )
-            except FileNotFoundError:
-                logging.warning(
-                    "[Consist] File schema capture skipped; file not found: %s",
-                    artifact_obj.container_uri,
-                )
-
-        # Store user-provided schema if one was given.
-        # User-provided schemas (manually curated with FK constraints, indexes, etc.)
-        # are stored with source="user_provided" and will be preferred over
-        # auto-profiled schemas (file or duckdb) during export.
-        # NOTE: Schema persistence requires a configured database. Without a DB,
-        # schema_name will not be set in artifact metadata, so registry-based
-        # auto-detection in ingest() won't work (but explicit schema parameter will).
-        if (
-            schema is not None
-            and artifact_obj.is_tabular
-            and self.current_consist is not None
-        ):
-            try:
-                self.artifact_schemas.profile_user_provided_schema(
-                    artifact=artifact_obj,
-                    run=self.current_consist.run,
-                    schema_model=schema,
-                    source="user_provided",
-                )
-            except Exception as e:
-                logging.warning(
-                    "[Consist] Failed to store user-provided schema for artifact=%s: %s",
-                    getattr(artifact_obj, "key", None),
-                    e,
-                )
-
-        return artifact_obj
 
     def log_dataframe(
         self,
@@ -3267,6 +2079,8 @@ class Tracker:
         This is a convenience method for bulk artifact logging, particularly useful
         when a model produces many output files or when registering multiple inputs.
         This requires an explicit mapping so artifact keys are always deliberate.
+        For efficiency, persistence is batched: JSON flush and DB artifact sync occur
+        once at the end of the call (not once per artifact).
 
         Parameters
         ----------
@@ -3355,31 +2169,32 @@ class Tracker:
 
         base_meta = dict(shared_meta)
         logged: Dict[str, Artifact] = {}
-        for key in sorted(keys):
-            value = outputs[key]
-            if value is None:
-                raise ValueError(f"log_artifacts received None for key {key!r}.")
-            meta = dict(base_meta)
-            if metadata_by_key and key in metadata_by_key:
-                meta.update(metadata_by_key[key])
-            facet = facets_by_key.get(key) if facets_by_key else None
-            facet_schema_version = (
-                facet_schema_versions_by_key.get(key)
-                if facet_schema_versions_by_key
-                else None
-            )
-            logged[key] = self.log_artifact(
-                value,
-                key=key,
-                direction=direction,
-                driver=driver,
-                facet=facet,
-                facet_schema_version=facet_schema_version,
-                facet_index=facet_index,
-                reuse_if_unchanged=reuse_if_unchanged,
-                reuse_scope=reuse_scope,
-                **meta,
-            )
+        with self.persistence.batch_artifact_writes():
+            for key in sorted(keys):
+                value = outputs[key]
+                if value is None:
+                    raise ValueError(f"log_artifacts received None for key {key!r}.")
+                meta = dict(base_meta)
+                if metadata_by_key and key in metadata_by_key:
+                    meta.update(metadata_by_key[key])
+                facet = facets_by_key.get(key) if facets_by_key else None
+                facet_schema_version = (
+                    facet_schema_versions_by_key.get(key)
+                    if facet_schema_versions_by_key
+                    else None
+                )
+                logged[key] = self.log_artifact(
+                    value,
+                    key=key,
+                    direction=direction,
+                    driver=driver,
+                    facet=facet,
+                    facet_schema_version=facet_schema_version,
+                    facet_index=facet_index,
+                    reuse_if_unchanged=reuse_if_unchanged,
+                    reuse_scope=reuse_scope,
+                    **meta,
+                )
         return logged
 
     def log_input(

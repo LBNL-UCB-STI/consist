@@ -602,10 +602,18 @@ def test_hydrate_cache_hit_outputs_records_materialized_outputs_meta(
         run_id="cached",
         meta={},
     )
-    run = Run(id="active", model_name="model", meta={})
+    run = Run(
+        id="active",
+        model_name="model",
+        config_hash=None,
+        git_hash=None,
+        meta={},
+    )
     cached_run = Run(
         id="cached",
         model_name="model",
+        config_hash=None,
+        git_hash=None,
         meta={"_physical_run_dir": str(cached_run_dir)},
     )
 

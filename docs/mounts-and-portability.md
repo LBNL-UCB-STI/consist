@@ -123,6 +123,45 @@ This keeps provenance portable and lets each user remap mounts on their machine.
 
 ---
 
+## Container volumes aligned with mounts
+
+When using `run_container(...)`, map container host volume roots from
+`Tracker(mounts=...)` so paths remain portable across machines.
+
+```python
+from pathlib import Path
+from consist import Tracker
+
+tracker = Tracker(
+    run_dir="/shared/team_scratch/consist_runs",
+    db_path="./provenance.duckdb",
+    mounts={
+        "inputs": "/shared/team_inputs",
+        "runs": "/shared/team_scratch/consist_runs",
+    },
+)
+
+inputs_root = Path(tracker.mounts["inputs"]).resolve()
+runs_root = Path(tracker.mounts["runs"]).resolve()
+
+volumes = {
+    str(inputs_root): "/inputs",
+    str(runs_root): "/outputs",
+}
+outputs = [runs_root / "beam_step" / "summary.csv"]  # under tracker.run_dir
+```
+
+Guidelines:
+
+- Keep container paths stable (`/inputs`, `/outputs`) across environments.
+- Keep host paths machine-specific via tracker mounts.
+- Keep `strict_mounts=True` unless you intentionally allow external paths.
+
+For a complete runnable example using this mapping pattern, see
+[Container Integration Guide](containers-guide.md).
+
+---
+
 ## Workspace URIs (run-local outputs)
 
 Paths under the run directory are stored relative to the active run:
@@ -175,6 +214,28 @@ log a warning and proceed without materializing the files.
 
 ---
 
+## Hydration implications for container workflows
+
+Container runs and function runs differ on cache-hit file behavior:
+
+- `run_container(...)`: cache hits copy cached outputs to requested host output
+  paths (materialized bytes expected on disk).
+- `consist.run(...)`/`tracker.run(...)`: default cache hits hydrate metadata
+  only (`cache_hydration="metadata"`), and bytes are loaded/copied on demand.
+
+Portability implications:
+
+- If mounts are mapped correctly, container cache-hit materialization succeeds
+  on each machine's local host paths.
+- If mounts are missing/misaligned, cache metadata can still exist but output
+  file materialization may warn/skip.
+
+See [Container Integration Guide](containers-guide.md#cache-behavior-hydration)
+for container cache details and [Caching & Hydration](concepts/caching-and-hydration.md)
+for non-container run policies.
+
+---
+
 ## Best practices
 
 - Prefer mounts for shared data directories; avoid absolute paths in artifacts.
@@ -193,5 +254,13 @@ log a warning and proceed without materializing the files.
   will warn because `_physical_run_dir` no longer points to the original location.
 - **Permission denied**: Consist warns and continues; adjust mount permissions or
   use a shared accessible path for cached outputs you need to materialize.
+
+---
+
+## See also
+
+- [Container Integration Guide](containers-guide.md)
+- [Containers API Reference](integrations/containers.md)
+- [Caching & Hydration](concepts/caching-and-hydration.md)
 
 ---

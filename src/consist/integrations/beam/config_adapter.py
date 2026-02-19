@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import logging
 import os
@@ -28,8 +29,11 @@ if TYPE_CHECKING:  # pragma: no cover
     from consist.core.tracker import Tracker
 
 try:
-    from pyhocon import ConfigFactory, HOCONConverter
-    from pyhocon.config_tree import NonExistentKey
+    _pyhocon = importlib.import_module("pyhocon")
+    _pyhocon_config_tree = importlib.import_module("pyhocon.config_tree")
+    ConfigFactory = _pyhocon.ConfigFactory
+    HOCONConverter = _pyhocon.HOCONConverter
+    NonExistentKey = _pyhocon_config_tree.NonExistentKey
 except ImportError:  # pragma: no cover
     ConfigFactory = None
     HOCONConverter = None
@@ -203,6 +207,8 @@ class BeamConfigAdapter:
     ) -> CanonicalConfig:
         if ConfigFactory is None:
             raise ImportError("pyhocon is required for BEAM canonicalization.")
+        if HOCONConverter is None:
+            raise ImportError("pyhocon is required for BEAM canonicalization.")
         if output_dir.exists() and any(output_dir.iterdir()):
             raise ValueError(f"output_dir must be empty: {output_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -321,6 +327,8 @@ def _load_config_tree(
     path: Path, *, resolve: bool, env_overrides: Optional[dict[str, str]] = None
 ) -> dict[str, Any]:
     if ConfigFactory is None:
+        raise ImportError("pyhocon is required for BEAM canonicalization.")
+    if HOCONConverter is None:
         raise ImportError("pyhocon is required for BEAM canonicalization.")
     original_env: dict[str, Optional[str]] = {}
     if env_overrides:

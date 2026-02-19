@@ -1,4 +1,5 @@
 import logging
+import importlib
 from pathlib import Path
 
 from sqlalchemy import func, select
@@ -51,7 +52,7 @@ def test_beam_canonicalize_artifacts_and_rows(tracker, tmp_path: Path, caplog):
 
 
 def test_beam_materialize_overrides(tracker, tmp_path: Path):
-    from pyhocon import ConfigFactory
+    ConfigFactory = importlib.import_module("pyhocon").ConfigFactory
 
     case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
     adapter = BeamConfigAdapter(primary_config=overlay_conf)
@@ -71,7 +72,7 @@ def test_beam_materialize_overrides(tracker, tmp_path: Path):
 
 
 def test_beam_materialize_from_plan_uses_config_dirs(tracker, tmp_path: Path):
-    from pyhocon import ConfigFactory
+    ConfigFactory = importlib.import_module("pyhocon").ConfigFactory
 
     case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
     adapter = BeamConfigAdapter(primary_config=overlay_conf)

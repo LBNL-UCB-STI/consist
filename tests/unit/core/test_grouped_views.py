@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import pandas as pd
 import pytest
-from sqlmodel import Field, SQLModel, text
+from sqlmodel import Field, SQLModel, Session, text
+
+from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 
 
 def test_grouped_view_param_parser(tracker) -> None:
@@ -164,3 +166,114 @@ def test_grouped_view_selector_validation(tracker, tmp_path) -> None:
         tracker.create_grouped_view(
             "v_bad_selector2", schema_id="abc", schema=SelectorModel
         )
+
+
+def test_resolve_schema_compatible_ids_respects_table_name_and_subset_rules(
+    tracker,
+) -> None:
+    assert tracker.db is not None
+
+    base_schema_id = "schema_base"
+    superset_schema_id = "schema_superset"
+    subset_schema_id = "schema_subset"
+    wrong_table_schema_id = "schema_wrong_table"
+    empty_schema_id = "schema_empty"
+
+    with Session(tracker.engine) as session:
+        session.add_all(
+            [
+                ArtifactSchema(
+                    id=base_schema_id,
+                    summary_json={"table_name": "events"},
+                    profile_version=1,
+                ),
+                ArtifactSchema(
+                    id=superset_schema_id,
+                    summary_json={"table_name": "events"},
+                    profile_version=1,
+                ),
+                ArtifactSchema(
+                    id=subset_schema_id,
+                    summary_json={"table_name": "events"},
+                    profile_version=1,
+                ),
+                ArtifactSchema(
+                    id=wrong_table_schema_id,
+                    summary_json={"table_name": "households"},
+                    profile_version=1,
+                ),
+                ArtifactSchema(
+                    id=empty_schema_id,
+                    summary_json={"table_name": "events"},
+                    profile_version=1,
+                ),
+            ]
+        )
+        session.add_all(
+            [
+                ArtifactSchemaField(
+                    schema_id=base_schema_id,
+                    ordinal_position=1,
+                    name="id",
+                    logical_type="integer",
+                    nullable=False,
+                ),
+                ArtifactSchemaField(
+                    schema_id=base_schema_id,
+                    ordinal_position=2,
+                    name="value",
+                    logical_type="double",
+                    nullable=True,
+                ),
+                ArtifactSchemaField(
+                    schema_id=superset_schema_id,
+                    ordinal_position=1,
+                    name="id",
+                    logical_type="integer",
+                    nullable=False,
+                ),
+                ArtifactSchemaField(
+                    schema_id=superset_schema_id,
+                    ordinal_position=2,
+                    name="value",
+                    logical_type="double",
+                    nullable=True,
+                ),
+                ArtifactSchemaField(
+                    schema_id=superset_schema_id,
+                    ordinal_position=3,
+                    name="mode",
+                    logical_type="varchar",
+                    nullable=True,
+                ),
+                ArtifactSchemaField(
+                    schema_id=subset_schema_id,
+                    ordinal_position=1,
+                    name="id",
+                    logical_type="integer",
+                    nullable=False,
+                ),
+                ArtifactSchemaField(
+                    schema_id=wrong_table_schema_id,
+                    ordinal_position=1,
+                    name="id",
+                    logical_type="integer",
+                    nullable=False,
+                ),
+                ArtifactSchemaField(
+                    schema_id=wrong_table_schema_id,
+                    ordinal_position=2,
+                    name="value",
+                    logical_type="double",
+                    nullable=True,
+                ),
+            ]
+        )
+        session.commit()
+
+        compatible_ids = tracker.db._resolve_schema_compatible_ids(
+            session=session,
+            schema_id=base_schema_id,
+        )
+
+    assert compatible_ids == {base_schema_id, superset_schema_id, subset_schema_id}

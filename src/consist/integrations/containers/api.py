@@ -1,5 +1,5 @@
 """
-Consist Container API Module
+## Consist Container API Module
 
 This module provides a high-level API for executing containerized steps
 (e.g., Docker, Singularity/Apptainer) with automatic provenance tracking
@@ -9,6 +9,7 @@ with Consist's `Tracker` to log container execution details, input
 dependencies, and output artifacts.
 
 Key functionalities include:
+
 -   **Container Execution with Provenance**: Wraps container execution
     within a Consist `start_run` context, ensuring that container image
     identity, commands, environment hash, and file I/O are tracked.

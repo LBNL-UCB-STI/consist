@@ -13,7 +13,14 @@ from consist.models.run import Run
 
 
 def test_openlineage_dataset_name_suffixes():
-    run = Run(id="r1", model_name="step", meta={}, tags=[])
+    run = Run(
+        id="r1",
+        model_name="step",
+        config_hash=None,
+        git_hash=None,
+        meta={},
+        tags=[],
+    )
     artifact = Artifact(key="trips", container_uri="inputs://trips.csv", driver="csv")
     artifact.meta = {"year": 2026, "iteration": 1}
 
@@ -24,6 +31,8 @@ def test_openlineage_jsonl_written(tmp_path: Path):
     run = Run(
         id="r1",
         model_name="step_a",
+        config_hash=None,
+        git_hash=None,
         meta={},
         tags=[],
         started_at=datetime.now(timezone.utc),
@@ -55,6 +64,8 @@ def test_openlineage_schema_facet_from_meta(tmp_path: Path):
     run = Run(
         id="r1",
         model_name="step_a",
+        config_hash=None,
+        git_hash=None,
         meta={},
         tags=[],
         started_at=datetime.now(timezone.utc),

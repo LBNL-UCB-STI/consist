@@ -872,6 +872,77 @@ class DatabaseManager:
             logging.warning("Artifact sync failed: %s", e)
             logging.warning("Database sync failed: %s", e)
 
+    def sync_artifacts(
+        self,
+        *,
+        artifacts: Sequence[Artifact],
+        run_id: str,
+        direction: str,
+    ) -> None:
+        """
+        Upsert multiple Artifacts and link them to a Run in one transaction.
+
+        Parameters
+        ----------
+        artifacts : Sequence[Artifact]
+            Artifacts to sync.
+        run_id : str
+            Run id to link artifacts to.
+        direction : str
+            Link direction for all artifacts ("input" or "output").
+        """
+        if not artifacts:
+            return
+
+        def _do_sync():
+            with self.session_scope() as session:
+                deduped: Dict[uuid.UUID, Artifact] = {}
+                for artifact in artifacts:
+                    deduped[artifact.id] = artifact
+
+                for artifact in deduped.values():
+                    session.merge(artifact)
+
+                artifact_ids = list(deduped.keys())
+                existing = session.exec(
+                    select(RunArtifactLink)
+                    .where(RunArtifactLink.run_id == run_id)
+                    .where(col(RunArtifactLink.artifact_id).in_(artifact_ids))
+                ).all()
+                existing_by_id = {row.artifact_id: row for row in existing}
+
+                new_links: List[RunArtifactLink] = []
+                for artifact_id in artifact_ids:
+                    row = existing_by_id.get(artifact_id)
+                    if row is not None:
+                        if row.direction != direction:
+                            logging.warning(
+                                "[Consist] Ignoring attempt to link artifact_id=%s to run_id=%s as '%s' "
+                                "because it is already linked as '%s'. "
+                                "If this step truly produces a new output, write to a new path (preferred), "
+                                "or log a distinct Artifact instance rather than reusing the same Artifact reference.",
+                                artifact_id,
+                                run_id,
+                                direction,
+                                row.direction,
+                            )
+                        continue
+                    new_links.append(
+                        RunArtifactLink(
+                            run_id=run_id, artifact_id=artifact_id, direction=direction
+                        )
+                    )
+
+                if new_links:
+                    session.add_all(new_links)
+                session.commit()
+
+        try:
+            self.execute_with_retry(_do_sync, operation_name="sync_artifacts")
+        except Exception as e:
+            logging.warning("Artifacts sync failed: %s", e)
+            logging.warning("Database sync failed: %s", e)
+
     # --- Read Operations ---
 
     def find_latest_artifact_at_uri(
@@ -2177,6 +2248,39 @@ class ProvenanceWriter:
 
     def __init__(self, tracker: "Tracker"):
         self._tracker = tracker
+        self._artifact_batch_depth = 0
+        self._batch_pending_json_flush = False
+        self._batch_pending_artifacts: list[tuple["Artifact", str]] = []
+
+    @contextmanager
+    def batch_artifact_writes(self) -> Iterator[None]:
+        """
+        Defer artifact JSON flushes and DB syncs until the end of a batch.
+
+        This keeps `log_artifact(...)` semantics unchanged while allowing callers
+        such as `log_artifacts(...)` to avoid redundant per-item persistence I/O.
+        """
+        is_outermost = self._artifact_batch_depth == 0
+        if is_outermost:
+            self._batch_pending_json_flush = False
+            self._batch_pending_artifacts = []
+        self._artifact_batch_depth += 1
+        try:
+            yield
+        finally:
+            self._artifact_batch_depth -= 1
+            if self._artifact_batch_depth != 0:
+                return
+
+            pending_json_flush = self._batch_pending_json_flush
+            pending_artifacts = list(self._batch_pending_artifacts)
+            self._batch_pending_json_flush = False
+            self._batch_pending_artifacts = []
+
+            if pending_json_flush:
+                self._flush_json_now()
+            if pending_artifacts:
+                self._sync_artifacts_now(pending_artifacts)
 
     def flush_json(self) -> None:
         """
@@ -2185,6 +2289,13 @@ class ProvenanceWriter:
         Uses an atomic write strategy for both the per-run snapshot and the
         rolling latest snapshot.
         """
+        if self._artifact_batch_depth > 0:
+            self._batch_pending_json_flush = True
+            return
+        self._flush_json_now()
+
+    def _flush_json_now(self) -> None:
+        """Immediate implementation behind `flush_json`."""
         tracker = self._tracker
         if not tracker.current_consist:
             return
@@ -2265,11 +2376,37 @@ class ProvenanceWriter:
             Direction of the artifact relative to the current run
             ("input" or "output").
         """
+        if self._artifact_batch_depth > 0:
+            self._batch_pending_artifacts.append((artifact, direction))
+            return
+
         tracker = self._tracker
         if tracker.db and tracker.current_consist:
             try:
                 tracker.db.sync_artifact(
                     artifact, tracker.current_consist.run.id, direction
+                )
+            except Exception as e:
+                logging.warning("Database sync failed: %s", e)
+
+    def _sync_artifacts_now(
+        self, artifacts_with_direction: Sequence[tuple["Artifact", str]]
+    ) -> None:
+        tracker = self._tracker
+        if not tracker.db or not tracker.current_consist:
+            return
+
+        run_id = tracker.current_consist.run.id
+        artifacts_by_direction: Dict[str, List["Artifact"]] = {}
+        for artifact, direction in artifacts_with_direction:
+            artifacts_by_direction.setdefault(direction, []).append(artifact)
+
+        for direction, artifacts in artifacts_by_direction.items():
+            try:
+                tracker.db.sync_artifacts(
+                    artifacts=artifacts,
+                    run_id=run_id,
+                    direction=direction,
                 )
             except Exception as e:
                 logging.warning("Database sync failed: %s", e)
