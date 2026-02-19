@@ -120,6 +120,37 @@ This default suits scientific workflows: large simulations benefit from avoiding
 
 Every run's **signature** is derived from code hash, config hash, and input hash. If Consist finds a completed run with the same signature and valid outputs, the new run is a **cache hit** and reuses prior outputs.
 
+#### Unified identity model: code + config + inputs
+
+For recommended-path runs, treat cache identity as one model:
+
+1. **Code identity**: selected by `CacheOptions(code_identity=...)`.
+2. **Config identity**: `config=...` plus run fields folded into config hashing.
+3. **Input identity**: declared `inputs=...` plus `identity_inputs=[...]` digests.
+
+Identity-related kwargs on `run(...)`/`trace(...)`/`scenario(...).run(...)`:
+
+- `adapter=...` contributes canonical config identity (adapter hash).
+- `identity_inputs=[...]` contributes hash-only file/dir digests.
+
+When debugging a cache miss or unexpected hit, inspect `run.identity_summary`
+first instead of recomputing hashes manually:
+
+```python
+run = tracker.get_run("my_run_id")
+summary = run.identity_summary
+
+print(summary["signature"])
+print(summary["code_version"])
+print(summary["config_hash"])
+print(summary["input_hash"])
+print(summary["adapter"])
+print(summary["identity_inputs"])
+```
+
+Use this as the canonical explanation for "why this run did or did not reuse
+cache."
+
 #### Code Identity Modes
 
 By default, code hash uses repository Git state (`repo_git`). For function-shaped runs, you can opt into callable-scoped code identity with `CacheOptions`:
