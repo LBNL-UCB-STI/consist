@@ -38,23 +38,19 @@ from consist import ExecutionOptions, Tracker
 
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
-
-@tracker.define_step(outputs=["cleaned"])  # (1)!
 def clean_data(raw_path: Path, threshold: float) -> Path:
     """Remove rows below threshold and write cleaned output."""
     df = pd.read_csv(raw_path)
     df_clean = df[df["value"] >= threshold]
 
-    out_path = consist.output_path("cleaned")  # (2)!
+    out_path = consist.output_path("cleaned")  # (1)!
     df_clean.to_parquet(out_path, index=False)
-    return out_path  # (3)!
+    return out_path  # (2)!
 
 
-@tracker.define_step(outputs=["summary"])
-def summarize(cleaned_artifact) -> Path:  # (4)!
+def summarize(cleaned) -> Path:  # (3)!
     """Compute summary statistics from cleaned data."""
-    df = pd.read_parquet(cleaned_artifact.path)
-    summary = {"mean": df["value"].mean(), "count": len(df)}
+    summary = {"mean": cleaned["value"].mean(), "count": len(cleaned)}
 
     out_path = consist.output_path("summary", ext="json")
     pd.Series(summary).to_json(out_path)
@@ -68,8 +64,9 @@ with consist.use_tracker(tracker):
     clean_result = tracker.run(
         fn=clean_data,
         name="clean",
-        config={"threshold": 15},  # (5)!
-        inputs=[Path("./data/raw.csv")],  # (6)!
+        config={"threshold": 15},  # (4)!
+        inputs=[Path("./data/raw.csv")],  # (5)!
+        outputs=["cleaned"],
         execution_options=ExecutionOptions(
             runtime_kwargs={"raw_path": Path("./data/raw.csv"), "threshold": 15}
         ),
@@ -77,11 +74,12 @@ with consist.use_tracker(tracker):
     print(f"Clean: {clean_result.run.status}")
 
     # Step 2: Summarize (consumes output from Step 1)
-    cleaned_artifact = consist.ref(clean_result, key="cleaned")  # (7)!
     summary_result = tracker.run(
         fn=summarize,
         name="summarize",
-        inputs={"cleaned_artifact": cleaned_artifact},  # (8)!
+        inputs={"cleaned": consist.ref(clean_result, key="cleaned")},  # (6)!
+        outputs=["summary"],
+        execution_options=ExecutionOptions(load_inputs=True),
     )
     print(f"Summarize: {summary_result.run.status}")
 
@@ -90,14 +88,12 @@ with consist.use_tracker(tracker):
     print(f"Result: {final.to_dict()}")
 ```
 
-1. `@tracker.define_step` declares which output keys this function produces. Consist creates artifacts for each key.
-2. Use `consist.output_path(...)` to resolve a managed output path. This honors output policy and `artifact_dir` overrides while avoiding manual path bugs.
-3. Return the output path. Consist registers it as the `cleaned` artifact.
-4. Artifact parameters are auto-loaded when input keys match parameter names.
-5. `config` is hashed into the run's signature. Changing `threshold` causes a cache miss.
-6. `inputs` lists files or artifacts whose content hashes are included in the signature.
-7. Use `consist.ref(...)` to select and link the upstream output artifact explicitly.
-8. Passing that linked artifact as input creates lineage: the summarize run depends on the clean run.
+1. Use `consist.output_path(...)` to resolve a managed output path. This honors output policy and `artifact_dir` overrides while avoiding manual path bugs.
+2. Return the output path. Consist registers it as the `cleaned` artifact.
+3. Artifact inputs are auto-loaded when input keys match parameter names and `load_inputs=True`.
+4. `config` is hashed into the run's signature. Changing `threshold` causes a cache miss.
+5. `inputs` lists files or artifacts whose content hashes are included in the signature.
+6. Use `consist.ref(...)` to select and link the upstream output artifact explicitly.
 
 **Best practice:** Keep step-to-step links explicit with
 `consist.ref(run_result, key="...")`. Passing a raw `RunResult` is only clear
@@ -168,7 +164,7 @@ Each run shows its inputs, outputs, config hash, and status. Artifacts link to t
 
 This workflow demonstrated:
 
-- **Step definition** with `@tracker.define_step` declaring outputs
+- **Cacheable function steps** with explicit `run(..., outputs=[...])`
 - **Artifact passing** where one step's output becomes another's input
 - **Cache invalidation** triggered by config changes
 - **Lineage tracking** linking runs through their artifacts

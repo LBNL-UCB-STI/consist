@@ -4,6 +4,11 @@ This page defines Consist's **public API** for the `0.1.x` series. Items listed 
 *Advanced* are still public but are primarily targeted at advanced users and may be
 more verbose, lower-level, or easier to misuse.
 
+For tiered guidance:
+
+- [API Essentials](essentials.md) for onboarding and recommended path usage
+- [API Advanced](advanced.md) for manual lifecycle, decorators, and lower-level APIs
+
 ## When to use each run entry point
 
 | Entry point | Use when | Notes |

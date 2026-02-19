@@ -26,7 +26,8 @@ def main():
         print(f"Starting scenario {sc.name}")
 
         # --- Run 1: Baseline ---
-        with tracker.start_run(
+        with sc.trace(
+            name="baseline_2040",
             run_id="baseline_2040",
             model="activitysim",
             tags=["baseline", "official"],
@@ -52,7 +53,8 @@ def main():
             print("Baseline Complete.")
 
         # --- Run 2: Policy Alternative (e.g., New Light Rail) ---
-        with tracker.start_run(
+        with sc.trace(
+            name="policy_rail_2040",
             run_id="policy_rail_2040",
             model="activitysim",
             tags=["policy", "light_rail"],

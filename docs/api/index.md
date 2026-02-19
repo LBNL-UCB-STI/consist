@@ -4,23 +4,24 @@ icon: lucide/book-open
 
 # API reference
 
-This section documents Consist's public API and key helpers. Start with the
-public surface area, then drill into the core classes and supporting utilities.
+The API reference is organized into two tiers:
 
-## Recommended path
+- **Essentials**: the recommended path API for most users (`run`, `trace`, `scenario`)
+- **Advanced**: lifecycle, decorators, and lower-level utilities for integrations
 
-1. [Public API](public_api.md) for the stable surface and entry-point choices.
-2. [API Helpers](api_helpers.md) for top-level `consist.*` convenience calls.
-3. [Tracker](tracker.md), [Workflow Contexts](workflow.md), and
-   [Artifact](artifact.md) for class-level behavior.
+## Start Here
 
-## Choose your entry point
+1. [API Essentials](essentials.md)
+2. [API Advanced](advanced.md)
+3. [Public API](public_api.md) for complete surface-area inventory
+
+## Essentials entry points
 
 | If you need | Start here | Why |
 |---|---|---|
 | One cache-aware function call | [`consist.run`](api_helpers.md#consist.api.run) | Smallest API surface; uses active/default tracker |
 | Multi-step workflow with shared context | [`consist.scenario`](api_helpers.md#consist.api.scenario) | Groups steps and lineage under one scenario header |
-| Explicit tracker wiring in library/app code | [`Tracker.run`](tracker.md#consist.core.tracker.Tracker.run) | No global context; dependencies are explicit |
+| Always-execute run-scoped block | [`consist.trace`](api_helpers.md#consist.api.trace) | Records provenance but executes block every time |
 
 ## Minimal first run
 
@@ -42,8 +43,10 @@ with consist.use_tracker(tracker):
 print(result.outputs["answer"].path)
 ```
 
-## API pages
+## API pages (full)
 
+- [API Essentials](essentials.md)
+- [API Advanced](advanced.md)
 - [Public API](public_api.md)
 - [API Helpers](api_helpers.md)
 - [Tracker](tracker.md)

@@ -25,6 +25,7 @@ Follow this path in order if you are new to Consist:
 4. [Core Concepts](concepts/overview.md)
 5. [Usage Guide](usage-guide.md)
 6. [Example Gallery](examples.md)
+7. [Advanced Usage](advanced/index.md)
 
 This path takes you from a fresh environment to a working multi-step cached
 pipeline, then into deeper usage patterns.
