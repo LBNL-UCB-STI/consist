@@ -20,11 +20,13 @@ from typing import (
     Dict,
     Iterator,
     List,
+    Literal,
     Mapping,
     Optional,
     Protocol,
     TYPE_CHECKING,
     Union,
+    cast,
 )
 import uuid
 import warnings
@@ -303,9 +305,7 @@ class RunTraceCoordinator:
         legacy_hash_inputs = legacy_kwargs.pop("hash_inputs", None)
         self._raise_unexpected_kwargs(legacy_kwargs)
         if identity_inputs is not None and legacy_hash_inputs is not None:
-            raise ValueError(
-                "Pass either identity_inputs= or hash_inputs=, not both."
-            )
+            raise ValueError("Pass either identity_inputs= or hash_inputs=, not both.")
         resolved_identity_inputs = (
             identity_inputs if identity_inputs is not None else legacy_hash_inputs
         )
@@ -1007,15 +1007,19 @@ class RunTraceCoordinator:
         legacy_hash_inputs = legacy_kwargs.pop("hash_inputs", None)
         self._raise_unexpected_kwargs(legacy_kwargs)
         if identity_inputs is not None and legacy_hash_inputs is not None:
-            raise ValueError(
-                "Pass either identity_inputs= or hash_inputs=, not both."
-            )
+            raise ValueError("Pass either identity_inputs= or hash_inputs=, not both.")
         resolved_identity_inputs = (
             identity_inputs if identity_inputs is not None else legacy_hash_inputs
         )
         config_plan = self._prepare_config_plan(
             adapter=adapter,
             legacy_config_plan=legacy_config_plan,
+        )
+        output_mismatch_policy = cast(
+            Literal["warn", "error", "ignore"], output_mismatch
+        )
+        output_missing_policy = cast(
+            Literal["warn", "error", "ignore"], output_missing
         )
 
         resolved_invocation = resolve_run_invocation(
@@ -1050,8 +1054,8 @@ class RunTraceCoordinator:
                 code_identity_extra_deps=code_identity_extra_deps,
             ),
             output_policy=OutputPolicyOptions(
-                output_mismatch=output_mismatch,
-                output_missing=output_missing,
+                output_mismatch=output_mismatch_policy,
+                output_missing=output_missing_policy,
             ),
             execution_options=None,
             default_name_template=None,

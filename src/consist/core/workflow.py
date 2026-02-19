@@ -754,9 +754,7 @@ class ScenarioContext:
         legacy_hash_inputs = legacy_kwargs.pop("hash_inputs", None)
         _raise_unexpected_kwargs(legacy_kwargs)
         if identity_inputs is not None and legacy_hash_inputs is not None:
-            raise ValueError(
-                "Pass either identity_inputs= or hash_inputs=, not both."
-            )
+            raise ValueError("Pass either identity_inputs= or hash_inputs=, not both.")
         resolved_identity_inputs = (
             identity_inputs if identity_inputs is not None else legacy_hash_inputs
         )

@@ -204,7 +204,9 @@ class Run(SQLModel, table=True):
             "input_hash": self.input_hash,
             "code_hash": self.git_hash,
             "signature": self.signature,
-            "signature_ready": bool(self.config_hash and self.input_hash and self.git_hash),
+            "signature_ready": bool(
+                self.config_hash and self.input_hash and self.git_hash
+            ),
             "components": {
                 "config_hash": self.config_hash,
                 "input_hash": self.input_hash,
