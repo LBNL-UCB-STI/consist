@@ -46,29 +46,40 @@ rows_by_run = adapter.constants_by_run(
 sample_rate_sq = adapter.constants_query(key="sample_rate").subquery()
 ```
 
-**2. Precompute config plans for caching + orchestration**
+**2. Use adapter handoff on run/trace surfaces**
 
-Prepare config artifacts and ingestion specs before a run, then apply them
-inside `consist.run`/`consist.trace` (or `Tracker.run`/`Tracker.trace`):
+For run/trace APIs, pass `adapter=...` and `identity_inputs=...` directly:
 
 ```python
+from consist.integrations.activitysim import ActivitySimConfigAdapter
+
 import consist
 from consist import CacheOptions, use_tracker
 
 adapter = ActivitySimConfigAdapter()
-plan = tracker.prepare_config(adapter, [overlay_dir, base_dir])
 
 with use_tracker(tracker):
     consist.run(
         fn=run_activitysim,
         name="activitysim",
         config={"scenario": "baseline"},
-        config_plan=plan,
+        adapter=adapter,
+        identity_inputs=[("asim_config", overlay_dir)],
         cache_options=CacheOptions(cache_mode="auto"),
     )
+
+    with consist.trace(
+        name="activitysim_trace",
+        adapter=adapter,
+        identity_inputs=[("asim_config", overlay_dir)],
+    ):
+        run_activitysim()
 ```
 
-You can also pass shared adapter options and run validation without ingesting:
+`config_plan` is still accepted as a compatibility kwarg, but it is not the
+recommended public run/trace surface.
+
+You can still precompute plans for validation and orchestration workflows:
 
 ```python
 from consist.core.config_canonicalization import ConfigAdapterOptions

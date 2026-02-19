@@ -418,6 +418,14 @@ For large iterative workflows, cache-hit time is spent fetching cached outputs a
 - `CONSIST_CACHE_TIMING=1`: logs timing for signature prefetch, input hashing, cache lookup, validation, hydration
 - `CONSIST_CACHE_DEBUG=1`: logs cache hit/miss details and signatures
 
+For run-level identity debugging (including `identity_inputs` digests and
+adapter metadata), inspect `run.identity_summary`:
+
+```python
+run = tracker.get_run("my_run_id")
+print(run.identity_summary)
+```
+
 ```text
 [cache_timing] signature_prefetch=2.1ms input_hashing=145.8ms cache_lookup=3.4ms validate=0.6ms hydration=0.2ms
 ```

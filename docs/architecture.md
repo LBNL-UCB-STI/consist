@@ -149,9 +149,9 @@ Consist provides three strategies for tracking configuration:
 |----------|----------|--------------|---------------|
 | **Identity config** (`config=`) | Standard parameters | JSON snapshot only | Yes |
 | **Facet** (`facet=`) | Queryable subset | DuckDB table | No |
-| **Hash-only inputs** (`hash_inputs=`) | Large config files (10MB+) | Hash only | Yes |
+| **Identity inputs** (`identity_inputs=`) | Large config files (10MB+) | Hash only | Yes |
 
-Most workflows combine all three: identity config for full parameters, facet for filtering, and hash-only for large external files.
+Most workflows combine all three: identity config for full parameters, facet for filtering, and identity inputs for large external files.
 
 For detailed usage, see [Configuration, Identity, and Facets](configs.md).
 

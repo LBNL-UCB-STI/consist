@@ -14,6 +14,19 @@ Use options objects instead:
 For migration details, see
 [Options Objects Migration Guide](../migrations/options-objects-migration-guide.md).
 
+## Identity kwargs for run/trace surfaces
+
+Public identity kwargs for `consist.run(...)`, `consist.trace(...)`,
+`Tracker.run(...)`, `Tracker.trace(...)`, `ScenarioContext.run(...)`, and
+`ScenarioContext.trace(...)` are:
+
+- `adapter=...`
+- `identity_inputs=[...]`
+
+`config_plan=` and `hash_inputs=` are hidden compatibility kwargs. They remain
+accepted for migration compatibility, but they are not the recommended public
+surface for new code.
+
 ::: consist.api.run
     options:
       show_source: false
@@ -22,6 +35,10 @@ For migration details, see
 
 ## `Run` model
 
+Use `run.identity_summary` to debug cache identity composition
+(`config_hash`, `input_hash`, `code_hash`, adapter metadata, and
+`identity_inputs` digests).
+
 ::: consist.models.run.Run
     options:
       show_source: false
@@ -29,3 +46,4 @@ For migration details, see
       show_root_toc_entry: false
       members:
         - duration_seconds
+        - identity_summary

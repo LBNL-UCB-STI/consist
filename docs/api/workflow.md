@@ -20,6 +20,33 @@ Workflow contexts are the APIs that coordinate multi-step pipelines.
 | `ScenarioContext.run` | Function step inside scenario | Same cache behavior as `Tracker.run` |
 | `ScenarioContext.trace` / `Tracker.trace` | Inline `with` block | Block executes each time; cache state is still recorded |
 
+## Scenario step identity kwargs
+
+`Tracker.scenario(...)` creates the header context. Identity kwargs are passed on
+step surfaces (`ScenarioContext.run(...)` / `ScenarioContext.trace(...)`):
+
+```python
+with tracker.scenario("baseline") as sc:
+    step = sc.run(
+        fn=prepare,
+        name="prepare",
+        adapter=activitysim_adapter,
+        identity_inputs=[("asim_config", asim_config_dir)],
+        outputs=["prepared"],
+    )
+
+    with sc.trace(
+        "analyze",
+        adapter=activitysim_adapter,
+        identity_inputs=[("asim_config", asim_config_dir)],
+    ):
+        analyze_inline(step.outputs["prepared"])
+```
+
+`config_plan` and `hash_inputs` remain accepted as hidden compatibility kwargs,
+but `adapter` and `identity_inputs` are the public kwargs for run/trace
+identity.
+
 ## Minimal runnable scenario example
 
 ```python
