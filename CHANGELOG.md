@@ -41,6 +41,10 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 - Restore canonical `unexpected keyword argument` error shape for rejected
   kwargs in run/scenario entrypoints by @zneedell (PR link TBD).
+- Upgrade run/trace/scenario validation diagnostics to standardized
+  `Problem` / `Cause` / `Fix` messages across identity/path/option failures,
+  with matching tests and troubleshooting guidance
+  by @zneedell (PR link TBD).
 
 ## [0.1.0-beta.3] - 2026-02-19
 
