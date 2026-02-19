@@ -15,7 +15,7 @@
         <link rel="canonical" href="https://LBNL-UCB-STI.github.io/consist/glossary/">
       
       
-        <link rel="prev" href="../troubleshooting/">
+        <link rel="prev" href="../cli-error-style/">
       
       
         <link rel="next" href="../architecture/">
@@ -1380,6 +1380,8 @@
       
         
       
+        
+      
     
     
     
@@ -1443,6 +1445,34 @@
     
   
     Troubleshooting Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli-error-style/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Error Style Guide
   
 
     
@@ -2565,7 +2595,10 @@
 <h2 id="cache-hit">Cache Hit<a class="headerlink" href="#cache-hit" title="Permanent link">&para;</a></h2>
 <p>When Consist skips execution because it finds a previous run with an identical signature. The cached results (artifact metadata and optionally file copies) are returned instantly.</p>
 <p><strong>Example</strong>: You run a function with config <code>{"threshold": 0.5}</code> on input <code>data.csv</code>, then re-run with the exact same config and input. Second execution is a cache hit—no computation happens.</p>
-<p><strong>Research example</strong>: In a parameter sweep, Consist skips preprocessing steps that haven't changed, saving hours of compute time. See <a href="../usage-guide/#motivation-when-caching-saves-time">Usage Guide</a> for realistic time-saving scenarios.</p>
+<p><strong>Research example</strong>: In a parameter sweep, Consist skips preprocessing steps
+that haven't changed, saving hours of compute time. See the <a href="../usage-guide/#motivation-when-caching-saves-time">Usage Guide
+motivation section</a> for
+realistic time-saving scenarios.</p>
 <p><strong>Opposite</strong>: Cache miss (run must execute)</p>
 <p><strong>See also</strong>: Signature, Cache Miss</p>
 <hr />
@@ -2785,7 +2818,7 @@
       <nav class="md-footer__inner md-grid" aria-label="Footer" >
         
           
-          <a href="../troubleshooting/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Troubleshooting Guide">
+          <a href="../cli-error-style/" class="md-footer__link md-footer__link--prev" aria-label="Previous: CLI Error Style Guide">
             <div class="md-footer__button md-icon">
               
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></svg>
@@ -2795,7 +2828,7 @@
                 Previous
               </span>
               <div class="md-ellipsis">
-                Troubleshooting Guide
+                CLI Error Style Guide
               </div>
             </div>
           </a>

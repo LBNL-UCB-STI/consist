@@ -1378,6 +1378,8 @@
       
         
       
+        
+      
     
     
     
@@ -1440,6 +1442,34 @@
     
   
     Troubleshooting Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cli-error-style/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Error Style Guide
   
 
     
@@ -1678,6 +1708,39 @@
       On this page
     </label>
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#when-to-use-each-run-entry-point" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When to use each run entry point
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#relationship-consistscenario-consistrun-and-trackerrun" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Relationship: consist.scenario, consist.run, and Tracker.run
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#minimal-runnable-comparison" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Minimal runnable comparison
+      
+    </span>
+  </a>
+  
+</li>
       
         <li class="md-nav__item">
   <a href="#stable-intended-for-external-users" class="md-nav__link">
@@ -2169,6 +2232,39 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#when-to-use-each-run-entry-point" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When to use each run entry point
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#relationship-consistscenario-consistrun-and-trackerrun" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Relationship: consist.scenario, consist.run, and Tracker.run
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#minimal-runnable-comparison" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Minimal runnable comparison
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#stable-intended-for-external-users" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2401,6 +2497,68 @@
 <p>This page defines Consist's <strong>public API</strong> for the <code>0.1.x</code> series. Items listed as
 <em>Advanced</em> are still public but are primarily targeted at advanced users and may be
 more verbose, lower-level, or easier to misuse.</p>
+<h2 id="when-to-use-each-run-entry-point">When to use each run entry point<a class="headerlink" href="#when-to-use-each-run-entry-point" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Entry point</th>
+<th>Use when</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="../api_helpers/#consist.api.run"><code>consist.run</code></a></td>
+<td>You want the quickest cache-aware call for one function</td>
+<td>Convenience wrapper around <code>Tracker.run</code></td>
+</tr>
+<tr>
+<td><a href="../tracker/#consist.core.tracker.Tracker.run"><code>Tracker.run</code></a></td>
+<td>You want explicit tracker ownership in app/library code</td>
+<td>Same core behavior as <code>consist.run</code></td>
+</tr>
+<tr>
+<td><a href="../api_helpers/#consist.api.scenario"><code>consist.scenario</code></a></td>
+<td>You need multi-step workflows with shared scenario context</td>
+<td>Returns <a href="../workflow/#consist.core.workflow.ScenarioContext"><code>ScenarioContext</code></a></td>
+</tr>
+<tr>
+<td><a href="../workflow/#consist.core.workflow.ScenarioContext.run"><code>ScenarioContext.run</code></a></td>
+<td>You are inside a scenario and want cache-aware steps</td>
+<td>Step-level equivalent of <code>Tracker.run</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="relationship-consistscenario-consistrun-and-trackerrun">Relationship: <code>consist.scenario</code>, <code>consist.run</code>, and <code>Tracker.run</code><a class="headerlink" href="#relationship-consistscenario-consistrun-and-trackerrun" title="Permanent link">&para;</a></h2>
+<ul>
+<li><code>consist.run(...)</code> resolves the active/default tracker and then calls <code>Tracker.run(...)</code>.</li>
+<li><code>Tracker.run(...)</code> is the explicit class method for a single cache-aware step.</li>
+<li><code>consist.scenario(...)</code> creates a scenario context; inside it, call <code>sc.run(...)</code>
+  for cache-aware steps or <code>sc.trace(...)</code> for inline blocks that execute each time.</li>
+</ul>
+<h2 id="minimal-runnable-comparison">Minimal runnable comparison<a class="headerlink" href="#minimal-runnable-comparison" title="Permanent link">&para;</a></h2>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">Tracker</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span><span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;./runs&quot;</span><span class="p">,</span> <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">)</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="k">def</span><span class="w"> </span><span class="nf">write_result</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    <span class="n">out</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">output_path</span><span class="p">(</span><span class="s2">&quot;result&quot;</span><span class="p">,</span> <span class="n">ext</span><span class="o">=</span><span class="s2">&quot;txt&quot;</span><span class="p">)</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    <span class="n">out</span><span class="o">.</span><span class="n">write_text</span><span class="p">(</span><span class="s2">&quot;ok</span><span class="se">\n</span><span class="s2">&quot;</span><span class="p">)</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="k">return</span> <span class="n">out</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="c1"># Convenience helper: resolves tracker from context.</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="k">with</span> <span class="n">consist</span><span class="o">.</span><span class="n">use_tracker</span><span class="p">(</span><span class="n">tracker</span><span class="p">):</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>    <span class="n">one</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">fn</span><span class="o">=</span><span class="n">write_result</span><span class="p">,</span> <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;result&quot;</span><span class="p">])</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="c1"># Explicit class API: same run behavior, explicit object wiring.</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="n">two</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">fn</span><span class="o">=</span><span class="n">write_result</span><span class="p">,</span> <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;result&quot;</span><span class="p">])</span>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>
+</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a><span class="c1"># Scenario API: grouped multi-step workflows.</span>
+</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">scenario</span><span class="p">(</span><span class="s2">&quot;baseline&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">sc</span><span class="p">:</span>
+</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>    <span class="n">step</span> <span class="o">=</span> <span class="n">sc</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">fn</span><span class="o">=</span><span class="n">write_result</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="s2">&quot;step_result&quot;</span><span class="p">,</span> <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;result&quot;</span><span class="p">])</span>
+</span></code></pre></div>
 <h2 id="stable-intended-for-external-users">Stable (intended for external users)<a class="headerlink" href="#stable-intended-for-external-users" title="Permanent link">&para;</a></h2>
 <ul>
 <li><a href="../tracker/"><code>consist.Tracker</code></a></li>

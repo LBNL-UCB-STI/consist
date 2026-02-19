@@ -1190,6 +1190,34 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#portable-volume-mapping-quick-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Portable volume mapping quick example
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Portable volume mapping quick example">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#consist.integrations.containers.api--consist-container-api-module" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consist Container API Module
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#consist.integrations.containers.api.ContainerResult" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1581,6 +1609,8 @@
       
         
       
+        
+      
     
     
     
@@ -1643,6 +1673,34 @@
     
   
     Troubleshooting Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cli-error-style/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Error Style Guide
   
 
     
@@ -2155,6 +2213,34 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#portable-volume-mapping-quick-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Portable volume mapping quick example
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Portable volume mapping quick example">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#consist.integrations.containers.api--consist-container-api-module" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consist Container API Module
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#consist.integrations.containers.api.ContainerResult" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2367,6 +2453,47 @@
                   
 
 <h1 id="containers">Containers<a class="headerlink" href="#containers" title="Permanent link">&para;</a></h1>
+<p>This page is the API surface for container execution. For architecture,
+portability patterns, and practical examples, use:</p>
+<ul>
+<li><a href="../../containers-guide/">Container Integration Guide</a></li>
+<li><a href="../../mounts-and-portability/">Mounts &amp; Portability</a></li>
+<li><a href="../../concepts/caching-and-hydration/">Caching &amp; Hydration</a></li>
+</ul>
+<h2 id="portable-volume-mapping-quick-example">Portable volume mapping quick example<a class="headerlink" href="#portable-volume-mapping-quick-example" title="Permanent link">&para;</a></h2>
+<p>Use tracker mount roots as host-side volumes and keep stable container paths:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">Tracker</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist.integrations.containers</span><span class="w"> </span><span class="kn">import</span> <span class="n">run_container</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    <span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;/scratch/consist_runs&quot;</span><span class="p">,</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">,</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    <span class="n">mounts</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;inputs&quot;</span><span class="p">:</span> <span class="s2">&quot;/shared/inputs&quot;</span><span class="p">,</span> <span class="s2">&quot;runs&quot;</span><span class="p">:</span> <span class="s2">&quot;/scratch/consist_runs&quot;</span><span class="p">},</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="p">)</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="n">run_container</span><span class="p">(</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>    <span class="n">tracker</span><span class="o">=</span><span class="n">tracker</span><span class="p">,</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>    <span class="n">run_id</span><span class="o">=</span><span class="s2">&quot;container_step&quot;</span><span class="p">,</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>    <span class="n">image</span><span class="o">=</span><span class="s2">&quot;my-org/tool:v1&quot;</span><span class="p">,</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>    <span class="n">command</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;python&quot;</span><span class="p">,</span> <span class="s2">&quot;tool.py&quot;</span><span class="p">,</span> <span class="s2">&quot;--in&quot;</span><span class="p">,</span> <span class="s2">&quot;/inputs&quot;</span><span class="p">,</span> <span class="s2">&quot;--out&quot;</span><span class="p">,</span> <span class="s2">&quot;/outputs&quot;</span><span class="p">],</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>    <span class="n">volumes</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>        <span class="nb">str</span><span class="p">(</span><span class="n">Path</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">mounts</span><span class="p">[</span><span class="s2">&quot;inputs&quot;</span><span class="p">])</span><span class="o">.</span><span class="n">resolve</span><span class="p">()):</span> <span class="s2">&quot;/inputs&quot;</span><span class="p">,</span>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>        <span class="nb">str</span><span class="p">(</span><span class="n">Path</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">mounts</span><span class="p">[</span><span class="s2">&quot;runs&quot;</span><span class="p">])</span><span class="o">.</span><span class="n">resolve</span><span class="p">()):</span> <span class="s2">&quot;/outputs&quot;</span><span class="p">,</span>
+</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a>    <span class="p">},</span>
+</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">[</span><span class="n">Path</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">mounts</span><span class="p">[</span><span class="s2">&quot;inputs&quot;</span><span class="p">])</span> <span class="o">/</span> <span class="s2">&quot;data.csv&quot;</span><span class="p">],</span>
+</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>    <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="n">Path</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">mounts</span><span class="p">[</span><span class="s2">&quot;runs&quot;</span><span class="p">])</span> <span class="o">/</span> <span class="s2">&quot;container_step&quot;</span> <span class="o">/</span> <span class="s2">&quot;result.csv&quot;</span><span class="p">],</span>
+</span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a><span class="p">)</span>
+</span></code></pre></div>
+<div class="admonition note">
+<p class="admonition-title">Mount validation and defaults</p>
+<p><code>run_container(...)</code> validates host volume paths against
+<code>Tracker(mounts=...)</code> when <code>strict_mounts=True</code> (default).</p>
+</div>
+<p>On cache hits, <code>run_container(...)</code> materializes requested output paths on the
+host (copy-only) and skips container execution.</p>
+<p>For an end-to-end example and portability guidance, see
+<a href="../../containers-guide/">Container Integration Guide</a>.</p>
 
 
 <div class="doc doc-object doc-module">
@@ -2376,22 +2503,24 @@
 
     <div class="doc doc-contents first">
 
-        <p>Consist Container API Module</p>
+        <h3 id="consist.integrations.containers.api--consist-container-api-module">Consist Container API Module<a class="headerlink" href="#consist.integrations.containers.api--consist-container-api-module" title="Permanent link">&para;</a></h3>
 <p>This module provides a high-level API for executing containerized steps
 (e.g., Docker, Singularity/Apptainer) with automatic provenance tracking
 and caching through Consist. It abstracts away the complexities of
 interacting directly with container runtimes and integrates seamlessly
 with Consist's <code>Tracker</code> to log container execution details, input
 dependencies, and output artifacts.</p>
-<p>Key functionalities include:
--   <strong>Container Execution with Provenance</strong>: Wraps container execution
+<p>Key functionalities include:</p>
+<ul>
+<li><strong>Container Execution with Provenance</strong>: Wraps container execution
     within a Consist <code>start_run</code> context, ensuring that container image
-    identity, commands, environment hash, and file I/O are tracked.
--   <strong>Backend Agnosticism</strong>: Supports different container runtimes
-    (Docker, Singularity/Apptainer) via a unified interface.
--   <strong>Automated Input/Output Logging</strong>: Automatically logs host-side
+    identity, commands, environment hash, and file I/O are tracked.</li>
+<li><strong>Backend Agnosticism</strong>: Supports different container runtimes
+    (Docker, Singularity/Apptainer) via a unified interface.</li>
+<li><strong>Automated Input/Output Logging</strong>: Automatically logs host-side
     files as inputs and scans specified paths for outputs, linking them
-    to the container run.</p>
+    to the container run.</li>
+</ul>
 
 
 

@@ -601,6 +601,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#tutorial-prerequisites" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tutorial Prerequisites
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#next-steps" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1501,6 +1512,8 @@
       
         
       
+        
+      
     
     
     
@@ -1563,6 +1576,34 @@
     
   
     Troubleshooting Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cli-error-style/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Error Style Guide
   
 
     
@@ -2136,6 +2177,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#tutorial-prerequisites" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tutorial Prerequisites
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#next-steps" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2239,6 +2291,14 @@
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>python<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;import consist; print(consist.__file__)&quot;</span>
 </span></code></pre></div>
 <p>This prints the path to the installed package.</p>
+<h2 id="tutorial-prerequisites">Tutorial Prerequisites<a class="headerlink" href="#tutorial-prerequisites" title="Permanent link">&para;</a></h2>
+<p>Core installs include <code>pandas</code>, which is used throughout the getting-started
+tutorials.</p>
+<p>The <a href="../first-workflow/">First Workflow</a> tutorial writes Parquet output via
+<code>pandas.DataFrame.to_parquet(...)</code>, which requires a Parquet engine such as
+<code>pyarrow</code>. Install the optional Parquet extra before running that tutorial:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;consist[parquet]&quot;</span>
+</span></code></pre></div>
 <h2 id="next-steps">Next Steps<a class="headerlink" href="#next-steps" title="Permanent link">&para;</a></h2>
 <p>Proceed to the <a href="../quickstart/">Quickstart</a> to run your first cached workflow.</p>
 

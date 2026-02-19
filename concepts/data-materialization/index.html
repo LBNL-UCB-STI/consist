@@ -1583,6 +1583,8 @@
       
         
       
+        
+      
     
     
     
@@ -1645,6 +1647,34 @@
     
   
     Troubleshooting Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cli-error-style/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Error Style Guide
   
 
     
@@ -2375,14 +2405,19 @@
 
 <h1 id="data-virtualization-materialization-strategy">Data Virtualization &amp; Materialization Strategy<a class="headerlink" href="#data-virtualization-materialization-strategy" title="Permanent link">&para;</a></h1>
 <p>This guide explains when to keep data on disk (virtualize) versus ingesting it into DuckDB (materialize).</p>
+<p>Canonical one-line definitions for cold/hot data, hybrid views, and
+materialization live in <a href="../overview/">Core Concepts Overview</a>. This page focuses
+on decision criteria and implementation patterns.</p>
 <hr />
 <h2 id="why-the-distinction-matters">Why the Distinction Matters<a class="headerlink" href="#why-the-distinction-matters" title="Permanent link">&para;</a></h2>
 <p>Simulation workflows produce many artifacts across runs. Comparing results requires querying across runs—but ingesting every output doubles your database size. The cold/hot distinction lets you choose: keep storage efficient for artifacts you rarely query, enable SQL analysis for artifacts you compare frequently.</p>
 <p>The tradeoff: ingested data is queryable and recoverable; cold data requires keeping original files but adds no database overhead.</p>
 <hr />
 <h2 id="two-storage-modes">Two Storage Modes<a class="headerlink" href="#two-storage-modes" title="Permanent link">&para;</a></h2>
-<p><strong>Cold Data</strong>: Files remain on disk. Provenance metadata is tracked but data is not queryable via SQL until ingested. Load on demand with <code>consist.load_df(artifact)</code>. Minimal database size.</p>
-<p><strong>Hot Data</strong>: Ingested into DuckDB. Queryable via SQL, indexed alongside provenance, and recoverable if original files are deleted. Trades disk space for query performance.</p>
+<p><strong>Cold Data</strong>: File-backed artifacts with provenance metadata but no SQL query
+surface until ingested.</p>
+<p><strong>Hot Data</strong>: Ingested artifacts in DuckDB for SQL analytics, indexing, and
+optional recovery when source files are missing.</p>
 <hr />
 <h2 id="when-to-ingest">When to Ingest<a class="headerlink" href="#when-to-ingest" title="Permanent link">&para;</a></h2>
 <p>Ingest when you need:</p>

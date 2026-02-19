@@ -1074,6 +1074,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#container-volumes-aligned-with-mounts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Container volumes aligned with mounts
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#workspace-uris-run-local-outputs" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1107,6 +1118,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#hydration-implications-for-container-workflows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Hydration implications for container workflows
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#best-practices" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1122,6 +1144,17 @@
     <span class="md-ellipsis">
       
         Troubleshooting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
       
     </span>
   </a>
@@ -1506,6 +1539,8 @@
       
         
       
+        
+      
     
     
     
@@ -1568,6 +1603,34 @@
     
   
     Troubleshooting Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli-error-style/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Error Style Guide
   
 
     
@@ -2102,6 +2165,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#container-volumes-aligned-with-mounts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Container volumes aligned with mounts
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#workspace-uris-run-local-outputs" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2135,6 +2209,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#hydration-implications-for-container-workflows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Hydration implications for container workflows
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#best-practices" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2150,6 +2235,17 @@
     <span class="md-ellipsis">
       
         Troubleshooting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
       
     </span>
   </a>
@@ -2313,9 +2409,42 @@ URIs, and historical path resolution work.</p>
 </span></code></pre></div>
 <p>This keeps provenance portable and lets each user remap mounts on their machine.</p>
 <hr />
+<h2 id="container-volumes-aligned-with-mounts">Container volumes aligned with mounts<a class="headerlink" href="#container-volumes-aligned-with-mounts" title="Permanent link">&para;</a></h2>
+<p>When using <code>run_container(...)</code>, map container host volume roots from
+<code>Tracker(mounts=...)</code> so paths remain portable across machines.</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">Tracker</span>
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span>
+</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>    <span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;/shared/team_scratch/consist_runs&quot;</span><span class="p">,</span>
+</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>    <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">,</span>
+</span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>    <span class="n">mounts</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-7-8"><a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>        <span class="s2">&quot;inputs&quot;</span><span class="p">:</span> <span class="s2">&quot;/shared/team_inputs&quot;</span><span class="p">,</span>
+</span><span id="__span-7-9"><a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a>        <span class="s2">&quot;runs&quot;</span><span class="p">:</span> <span class="s2">&quot;/shared/team_scratch/consist_runs&quot;</span><span class="p">,</span>
+</span><span id="__span-7-10"><a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a>    <span class="p">},</span>
+</span><span id="__span-7-11"><a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a><span class="p">)</span>
+</span><span id="__span-7-12"><a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a>
+</span><span id="__span-7-13"><a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="n">inputs_root</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">mounts</span><span class="p">[</span><span class="s2">&quot;inputs&quot;</span><span class="p">])</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+</span><span id="__span-7-14"><a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a><span class="n">runs_root</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">mounts</span><span class="p">[</span><span class="s2">&quot;runs&quot;</span><span class="p">])</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+</span><span id="__span-7-15"><a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a>
+</span><span id="__span-7-16"><a id="__codelineno-7-16" name="__codelineno-7-16" href="#__codelineno-7-16"></a><span class="n">volumes</span> <span class="o">=</span> <span class="p">{</span>
+</span><span id="__span-7-17"><a id="__codelineno-7-17" name="__codelineno-7-17" href="#__codelineno-7-17"></a>    <span class="nb">str</span><span class="p">(</span><span class="n">inputs_root</span><span class="p">):</span> <span class="s2">&quot;/inputs&quot;</span><span class="p">,</span>
+</span><span id="__span-7-18"><a id="__codelineno-7-18" name="__codelineno-7-18" href="#__codelineno-7-18"></a>    <span class="nb">str</span><span class="p">(</span><span class="n">runs_root</span><span class="p">):</span> <span class="s2">&quot;/outputs&quot;</span><span class="p">,</span>
+</span><span id="__span-7-19"><a id="__codelineno-7-19" name="__codelineno-7-19" href="#__codelineno-7-19"></a><span class="p">}</span>
+</span><span id="__span-7-20"><a id="__codelineno-7-20" name="__codelineno-7-20" href="#__codelineno-7-20"></a><span class="n">outputs</span> <span class="o">=</span> <span class="p">[</span><span class="n">runs_root</span> <span class="o">/</span> <span class="s2">&quot;beam_step&quot;</span> <span class="o">/</span> <span class="s2">&quot;summary.csv&quot;</span><span class="p">]</span>  <span class="c1"># under tracker.run_dir</span>
+</span></code></pre></div>
+<p>Guidelines:</p>
+<ul>
+<li>Keep container paths stable (<code>/inputs</code>, <code>/outputs</code>) across environments.</li>
+<li>Keep host paths machine-specific via tracker mounts.</li>
+<li>Keep <code>strict_mounts=True</code> unless you intentionally allow external paths.</li>
+</ul>
+<p>For a complete runnable example using this mapping pattern, see
+<a href="../containers-guide/">Container Integration Guide</a>.</p>
+<hr />
 <h2 id="workspace-uris-run-local-outputs">Workspace URIs (run-local outputs)<a class="headerlink" href="#workspace-uris-run-local-outputs" title="Permanent link">&para;</a></h2>
 <p>Paths under the run directory are stored relative to the active run:</p>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>./outputs/&lt;run_id&gt;/model.csv
+<div class="language-text highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>./outputs/&lt;run_id&gt;/model.csv
 </span></code></pre></div>
 <p>Consist resolves these using the run's <code>_physical_run_dir</code> metadata field, which records the absolute run directory at execution time.</p>
 <table>
@@ -2366,6 +2495,25 @@ mounts consistent in intent even if the physical paths differ.</p>
 <p>If a user hits a cache hit but cannot access the source filesystem, Consist will
 log a warning and proceed without materializing the files.</p>
 <hr />
+<h2 id="hydration-implications-for-container-workflows">Hydration implications for container workflows<a class="headerlink" href="#hydration-implications-for-container-workflows" title="Permanent link">&para;</a></h2>
+<p>Container runs and function runs differ on cache-hit file behavior:</p>
+<ul>
+<li><code>run_container(...)</code>: cache hits copy cached outputs to requested host output
+  paths (materialized bytes expected on disk).</li>
+<li><code>consist.run(...)</code>/<code>tracker.run(...)</code>: default cache hits hydrate metadata
+  only (<code>cache_hydration="metadata"</code>), and bytes are loaded/copied on demand.</li>
+</ul>
+<p>Portability implications:</p>
+<ul>
+<li>If mounts are mapped correctly, container cache-hit materialization succeeds
+  on each machine's local host paths.</li>
+<li>If mounts are missing/misaligned, cache metadata can still exist but output
+  file materialization may warn/skip.</li>
+</ul>
+<p>See <a href="../containers-guide/#cache-behavior-hydration">Container Integration Guide</a>
+for container cache details and <a href="../concepts/caching-and-hydration/">Caching &amp; Hydration</a>
+for non-container run policies.</p>
+<hr />
 <h2 id="best-practices">Best practices<a class="headerlink" href="#best-practices" title="Permanent link">&para;</a></h2>
 <ul>
 <li>Prefer mounts for shared data directories; avoid absolute paths in artifacts.</li>
@@ -2383,6 +2531,13 @@ log a warning and proceed without materializing the files.</p>
   will warn because <code>_physical_run_dir</code> no longer points to the original location.</li>
 <li><strong>Permission denied</strong>: Consist warns and continues; adjust mount permissions or
   use a shared accessible path for cached outputs you need to materialize.</li>
+</ul>
+<hr />
+<h2 id="see-also">See also<a class="headerlink" href="#see-also" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="../containers-guide/">Container Integration Guide</a></li>
+<li><a href="../integrations/containers/">Containers API Reference</a></li>
+<li><a href="../concepts/caching-and-hydration/">Caching &amp; Hydration</a></li>
 </ul>
 <hr />
 

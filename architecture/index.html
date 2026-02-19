@@ -1380,6 +1380,8 @@
       
         
       
+        
+      
     
     
     
@@ -1443,6 +1445,34 @@
     
   
     Troubleshooting Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli-error-style/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Error Style Guide
   
 
     
@@ -1645,17 +1675,6 @@
     <span class="md-ellipsis">
       
         Dual-Write Persistence
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#testing-coverage-focus" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Testing &amp; Coverage Focus
       
     </span>
   </a>
@@ -2308,17 +2327,6 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#testing-coverage-focus" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Testing &amp; Coverage Focus
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
   <a href="#path-virtualization" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2578,6 +2586,28 @@
 </tr>
 </tbody>
 </table>
+<p>Runnable example with options objects:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">CacheOptions</span><span class="p">,</span> <span class="n">Tracker</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span><span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;./runs&quot;</span><span class="p">,</span> <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">)</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="k">def</span><span class="w"> </span><span class="nf">clean_data</span><span class="p">(</span><span class="n">raw</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>    <span class="n">out</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">output_path</span><span class="p">(</span><span class="s2">&quot;cleaned&quot;</span><span class="p">)</span>
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>    <span class="n">out</span><span class="o">.</span><span class="n">write_text</span><span class="p">(</span><span class="n">raw</span><span class="o">.</span><span class="n">read_text</span><span class="p">()</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span> <span class="o">+</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span><span class="p">)</span>
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>    <span class="k">return</span> <span class="n">out</span>
+</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>
+</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="k">with</span> <span class="n">consist</span><span class="o">.</span><span class="n">use_tracker</span><span class="p">(</span><span class="n">tracker</span><span class="p">):</span>
+</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>    <span class="n">result</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-1-14"><a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a>        <span class="n">fn</span><span class="o">=</span><span class="n">clean_data</span><span class="p">,</span>
+</span><span id="__span-1-15"><a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a>        <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;raw&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;data/raw.csv&quot;</span><span class="p">)},</span>
+</span><span id="__span-1-16"><a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a>        <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;cleaned&quot;</span><span class="p">],</span>
+</span><span id="__span-1-17"><a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a>        <span class="n">cache_options</span><span class="o">=</span><span class="n">CacheOptions</span><span class="p">(</span><span class="n">cache_mode</span><span class="o">=</span><span class="s2">&quot;reuse&quot;</span><span class="p">),</span>
+</span><span id="__span-1-18"><a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a>    <span class="p">)</span>
+</span></code></pre></div>
+<p>For migration guidance from legacy run-policy kwargs, see
+<a href="../migrations/options-objects-migration-guide/">Options Objects Migration Guide</a>.</p>
 <h3 id="ghost-mode">Ghost Mode<a class="headerlink" href="#ghost-mode" title="Permanent link">&para;</a></h3>
 <p>Consist enables "Ghost Mode" — the ability to delete intermediate files while preserving provenance and recoverability. As long as the provenance database records lineage and content hashes, Consist can:</p>
 <ul>
@@ -2587,10 +2617,10 @@
 </ul>
 <p><strong>When You Need This</strong></p>
 <p>Long-running research workflows accumulate massive intermediate datasets that you want to keep for lineage but eventually need to reclaim space. Consider a 20-year grid planning study with annual dispatch simulations:</p>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>Year 2025: Compute hourly dispatch → Store (200GB) → Use as input for 2026 capacity expansion
-</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>Year 2026: Compute hourly dispatch → Store (200GB) → Use as input for 2027 capacity expansion
-</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>... (20 years × 200GB = 4TB)
-</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>Year 2045: Final resource plan published
+<div class="language-text highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>Year 2025: Compute hourly dispatch → Store (200GB) → Use as input for 2026 capacity expansion
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>Year 2026: Compute hourly dispatch → Store (200GB) → Use as input for 2027 capacity expansion
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>... (20 years × 200GB = 4TB)
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>Year 2045: Final resource plan published
 </span></code></pre></div>
 <p>Once you've published results (2035–2045), you can safely delete 2025–2034 intermediate files. The provenance database still tracks what those files contained (via content hashes). If you later need to re-run 2036, Consist can:
 1. Detect that 2035's output is missing from disk (via cache validation)
@@ -2607,11 +2637,11 @@
 - <strong>Re-execute</strong> (recommended for non-ingested outputs) by enabling strict cache validation
 - <strong>DB recovery</strong> (for ingested tabular outputs) via <code>consist.load_df(..., db_fallback="always")</code></p>
 <p>Example: recover a missing, ingested tabular artifact from DuckDB:
-<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;2036_dispatch&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;grid_sim&quot;</span><span class="p">):</span>
-</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>    <span class="n">artifact</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span>
-</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>        <span class="s2">&quot;year_2035_dispatch.parquet&quot;</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;dispatch&quot;</span><span class="p">,</span> <span class="n">direction</span><span class="o">=</span><span class="s2">&quot;input&quot;</span>
-</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>    <span class="p">)</span>
-</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>    <span class="n">df</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">load_df</span><span class="p">(</span><span class="n">artifact</span><span class="p">,</span> <span class="n">db_fallback</span><span class="o">=</span><span class="s2">&quot;always&quot;</span><span class="p">)</span>  <span class="c1"># (1)!</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;2036_dispatch&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;grid_sim&quot;</span><span class="p">):</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>    <span class="n">artifact</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>        <span class="s2">&quot;year_2035_dispatch.parquet&quot;</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;dispatch&quot;</span><span class="p">,</span> <span class="n">direction</span><span class="o">=</span><span class="s2">&quot;input&quot;</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>    <span class="p">)</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>    <span class="n">df</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">load_df</span><span class="p">(</span><span class="n">artifact</span><span class="p">,</span> <span class="n">db_fallback</span><span class="o">=</span><span class="s2">&quot;always&quot;</span><span class="p">)</span>  <span class="c1"># (1)!</span>
 </span></code></pre></div></p>
 <ol>
 <li>Retrieves the 2035 dispatch data from DuckDB even though the original Parquet file was deleted. Requires the artifact to have been ingested during the original run.</li>
@@ -2728,24 +2758,14 @@ same core flattening/hash logic.</p>
 <p><strong>JSON snapshots</strong> (<code>consist.json</code> per run): Portable, human-readable, version-controllable. Each run directory contains a complete record that survives database corruption.</p>
 <p><strong>DuckDB database</strong>: Enables fast queries across runs, artifacts, and lineage. Can be rebuilt from JSON snapshots if needed. Handles concurrent access with retry logic.</p>
 <hr />
-<h2 id="testing-coverage-focus">Testing &amp; Coverage Focus<a class="headerlink" href="#testing-coverage-focus" title="Permanent link">&para;</a></h2>
-<p>The test suite prioritizes correctness for production workflows and portability:</p>
-<ul>
-<li>Cache hydration across run directories (metadata-only, requested/all outputs, missing-input reconstruction, permission/mount issues).</li>
-<li>Path virtualization and mount resolution (workspace URIs, symlink handling, stale/moved run directories).</li>
-<li>Persistence resilience (lock retries, constraint conflict handling, JSON snapshot safety).</li>
-<li>Ingestion and data virtualization (DLT ingestion paths, strict schema validation, hybrid view behavior).</li>
-<li>CLI/query helpers for inspection workflows (filters, preview error modes).</li>
-</ul>
-<hr />
 <h2 id="path-virtualization">Path Virtualization<a class="headerlink" href="#path-virtualization" title="Permanent link">&para;</a></h2>
 <p>Absolute paths break portability. Consist stores relative URIs and resolves them at runtime.
 For a focused guide, see <a href="../mounts-and-portability/">Mounts &amp; Portability</a>.</p>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>User logs: /mnt/data/land_use.csv
-</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>           ↓
-</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>Tracker detects mount: mounts={&quot;inputs&quot;: &quot;/mnt/data&quot;}
-</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>           ↓
-</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>Stored URI: inputs://land_use.csv
+<div class="language-text highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>User logs: /mnt/data/land_use.csv
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>           ↓
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>Tracker detects mount: mounts={&quot;inputs&quot;: &quot;/mnt/data&quot;}
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>           ↓
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>Stored URI: inputs://land_use.csv
 </span></code></pre></div>
 <p><strong>Workspace URIs</strong>: For run-specific output directories, Consist mounts the current run's directory as <code>workspace://</code>. Historical paths are resolved via metadata stored in <code>Run.meta["_physical_run_dir"]</code>.</p>
 <p>This means:
@@ -2756,17 +2776,17 @@ For a focused guide, see <a href="../mounts-and-portability/">Mounts &amp; Porta
 <h2 id="data-virtualization">Data Virtualization<a class="headerlink" href="#data-virtualization" title="Permanent link">&para;</a></h2>
 <h3 id="sql-views">SQL Views<a class="headerlink" href="#sql-views" title="Permanent link">&para;</a></h3>
 <p>Register SQLModel schemas to query artifacts across runs as unified tables:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">Person</span><span class="p">(</span><span class="n">SQLModel</span><span class="p">,</span> <span class="n">table</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
-</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>    <span class="n">person_id</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">primary_key</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
-</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>    <span class="n">age</span><span class="p">:</span> <span class="nb">int</span>
-</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>
-</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span><span class="n">schemas</span><span class="o">=</span><span class="p">[</span><span class="n">Person</span><span class="p">])</span>
-</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>
-</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="c1"># Access the view</span>
-</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="n">VPerson</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">views</span><span class="o">.</span><span class="n">Person</span>
-</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>
-</span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a><span class="c1"># Query across all runs</span>
-</span><span id="__span-4-11"><a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a><span class="n">query</span> <span class="o">=</span> <span class="n">select</span><span class="p">(</span><span class="n">VPerson</span><span class="p">)</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">VPerson</span><span class="o">.</span><span class="n">consist_year</span> <span class="o">==</span> <span class="mi">2030</span><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">Person</span><span class="p">(</span><span class="n">SQLModel</span><span class="p">,</span> <span class="n">table</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>    <span class="n">person_id</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">primary_key</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>    <span class="n">age</span><span class="p">:</span> <span class="nb">int</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span><span class="n">schemas</span><span class="o">=</span><span class="p">[</span><span class="n">Person</span><span class="p">])</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="c1"># Access the view</span>
+</span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a><span class="n">VPerson</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">views</span><span class="o">.</span><span class="n">Person</span>
+</span><span id="__span-5-9"><a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a>
+</span><span id="__span-5-10"><a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a><span class="c1"># Query across all runs</span>
+</span><span id="__span-5-11"><a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a><span class="n">query</span> <span class="o">=</span> <span class="n">select</span><span class="p">(</span><span class="n">VPerson</span><span class="p">)</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">VPerson</span><span class="o">.</span><span class="n">consist_year</span> <span class="o">==</span> <span class="mi">2030</span><span class="p">)</span>
 </span></code></pre></div>
 <p>Views automatically include system columns:
 - <code>consist_run_id</code> — Which run produced this row
@@ -2785,13 +2805,13 @@ For a focused guide, see <a href="../mounts-and-portability/">Mounts &amp; Porta
 <li>Open each store lazily (no data loaded)</li>
 <li>Concatenate along <code>run_id</code> dimension with <code>year</code>/<code>iteration</code> as coordinates</li>
 </ol>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="n">ds</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">matrix</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="s2">&quot;skim_matrices&quot;</span><span class="p">,</span> <span class="n">variables</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;travel_time&quot;</span><span class="p">])</span>
-</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="c1"># ds is an xarray.Dataset with dims: (run_id, origin, destination)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="n">ds</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">matrix</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="s2">&quot;skim_matrices&quot;</span><span class="p">,</span> <span class="n">variables</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;travel_time&quot;</span><span class="p">])</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="c1"># ds is an xarray.Dataset with dims: (run_id, origin, destination)</span>
 </span></code></pre></div>
 <hr />
 <h2 id="container-integration">Container Integration<a class="headerlink" href="#container-integration" title="Permanent link">&para;</a></h2>
 <p>Containers are treated as pure functions. The cache signature includes:</p>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>signature = SHA256(image_digest || command || env_hash || mount_hashes || input_signatures)
+<div class="language-text highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>signature = SHA256(image_digest || command || env_hash || mount_hashes || input_signatures)
 </span></code></pre></div>
 <table>
 <thead>
@@ -2815,8 +2835,8 @@ For a focused guide, see <a href="../mounts-and-portability/">Mounts &amp; Porta
 <hr />
 <h2 id="event-hooks">Event Hooks<a class="headerlink" href="#event-hooks" title="Permanent link">&para;</a></h2>
 <p>Register callbacks for run lifecycle events:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="n">tracker</span><span class="o">.</span><span class="n">events</span><span class="o">.</span><span class="n">on_run_complete</span><span class="p">(</span><span class="k">lambda</span> <span class="n">run</span><span class="p">,</span> <span class="n">artifacts</span><span class="p">:</span> <span class="n">notify_slack</span><span class="p">(</span><span class="n">run</span><span class="o">.</span><span class="n">id</span><span class="p">))</span>
-</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="n">tracker</span><span class="o">.</span><span class="n">events</span><span class="o">.</span><span class="n">on_run_failed</span><span class="p">(</span><span class="k">lambda</span> <span class="n">run</span><span class="p">,</span> <span class="n">error</span><span class="p">:</span> <span class="n">log_to_sentry</span><span class="p">(</span><span class="n">error</span><span class="p">))</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="n">tracker</span><span class="o">.</span><span class="n">events</span><span class="o">.</span><span class="n">on_run_complete</span><span class="p">(</span><span class="k">lambda</span> <span class="n">run</span><span class="p">,</span> <span class="n">artifacts</span><span class="p">:</span> <span class="n">notify_slack</span><span class="p">(</span><span class="n">run</span><span class="o">.</span><span class="n">id</span><span class="p">))</span>
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="n">tracker</span><span class="o">.</span><span class="n">events</span><span class="o">.</span><span class="n">on_run_failed</span><span class="p">(</span><span class="k">lambda</span> <span class="n">run</span><span class="p">,</span> <span class="n">error</span><span class="p">:</span> <span class="n">log_to_sentry</span><span class="p">(</span><span class="n">error</span><span class="p">))</span>
 </span></code></pre></div>
 <table>
 <thead>
@@ -2840,14 +2860,14 @@ For a focused guide, see <a href="../mounts-and-portability/">Mounts &amp; Porta
 <hr />
 <h2 id="context-stack">Context Stack<a class="headerlink" href="#context-stack" title="Permanent link">&para;</a></h2>
 <p>Consist maintains a context-local stack of active trackers, allowing nested contexts and implicit tracker resolution:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
-</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">use_tracker</span>
-</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>
-</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="k">with</span> <span class="n">use_tracker</span><span class="p">(</span><span class="n">tracker</span><span class="p">):</span>
-</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>    <span class="k">with</span> <span class="n">consist</span><span class="o">.</span><span class="n">scenario</span><span class="p">(</span><span class="s2">&quot;baseline&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">sc</span><span class="p">:</span>
-</span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>        <span class="c1"># consist.log_artifact() finds the active tracker automatically</span>
-</span><span id="__span-8-7"><a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a>        <span class="k">with</span> <span class="n">sc</span><span class="o">.</span><span class="n">step</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;simulate&quot;</span><span class="p">):</span>
-</span><span id="__span-8-8"><a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a>            <span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span><span class="n">df</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;results&quot;</span><span class="p">)</span>  <span class="c1"># No tracker= needed</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">use_tracker</span>
+</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>
+</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="k">with</span> <span class="n">use_tracker</span><span class="p">(</span><span class="n">tracker</span><span class="p">):</span>
+</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>    <span class="k">with</span> <span class="n">consist</span><span class="o">.</span><span class="n">scenario</span><span class="p">(</span><span class="s2">&quot;baseline&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">sc</span><span class="p">:</span>
+</span><span id="__span-9-6"><a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>        <span class="c1"># consist.log_artifact() finds the active tracker automatically</span>
+</span><span id="__span-9-7"><a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a>        <span class="k">with</span> <span class="n">sc</span><span class="o">.</span><span class="n">step</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;simulate&quot;</span><span class="p">):</span>
+</span><span id="__span-9-8"><a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a>            <span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span><span class="n">df</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;results&quot;</span><span class="p">)</span>  <span class="c1"># No tracker= needed</span>
 </span></code></pre></div>
 <p>This enables clean APIs where most functions don't require explicit tracker parameters.</p>
 

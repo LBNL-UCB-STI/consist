@@ -635,6 +635,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#global-options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Global Options
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#commands" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1600,6 +1611,8 @@
       
         
       
+        
+      
     
     
     
@@ -1662,6 +1675,34 @@
     
   
     Troubleshooting Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli-error-style/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Error Style Guide
   
 
     
@@ -2185,6 +2226,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#global-options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Global Options
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#commands" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2417,20 +2469,24 @@
 2. <code>CONSIST_DB</code> environment variable
 3. <code>provenance.duckdb</code> in the current directory
 4. Common subdirectories (<code>./data/</code>, <code>./db/</code>, <code>./.consist/</code>)</p>
+<h2 id="global-options">Global Options<a class="headerlink" href="#global-options" title="Permanent link">&para;</a></h2>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>consist<span class="w"> </span>--help
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>consist<span class="w"> </span>--version
+</span></code></pre></div>
 <hr />
 <h2 id="commands">Commands<a class="headerlink" href="#commands" title="Permanent link">&para;</a></h2>
 <h3 id="consist-runs">consist runs<a class="headerlink" href="#consist-runs" title="Permanent link">&para;</a></h3>
 <p>List recent runs with optional filters.</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>consist<span class="w"> </span>runs<span class="w">                          </span><span class="c1"># Last 10 runs</span>
-</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>consist<span class="w"> </span>runs<span class="w"> </span>--limit<span class="w"> </span><span class="m">20</span><span class="w">               </span><span class="c1"># Last 20 runs</span>
-</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>consist<span class="w"> </span>runs<span class="w"> </span>--model<span class="w"> </span>travel_demand<span class="w">    </span><span class="c1"># Filter by model name</span>
-</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>consist<span class="w"> </span>runs<span class="w"> </span>--status<span class="w"> </span>completed<span class="w">       </span><span class="c1"># Filter by status</span>
-</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>consist<span class="w"> </span>runs<span class="w"> </span>--tag<span class="w"> </span>simulation<span class="w">         </span><span class="c1"># Filter by tag</span>
-</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>consist<span class="w"> </span>runs<span class="w"> </span>--json<span class="w">                   </span><span class="c1"># JSON output for scripting</span>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>consist<span class="w"> </span>runs<span class="w">                          </span><span class="c1"># Last 10 runs</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>consist<span class="w"> </span>runs<span class="w"> </span>--limit<span class="w"> </span><span class="m">20</span><span class="w">               </span><span class="c1"># Last 20 runs</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>consist<span class="w"> </span>runs<span class="w"> </span>--model<span class="w"> </span>travel_demand<span class="w">    </span><span class="c1"># Filter by model name</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>consist<span class="w"> </span>runs<span class="w"> </span>--status<span class="w"> </span>completed<span class="w">       </span><span class="c1"># Filter by status</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>consist<span class="w"> </span>runs<span class="w"> </span>--tag<span class="w"> </span>simulation<span class="w">         </span><span class="c1"># Filter by tag</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>consist<span class="w"> </span>runs<span class="w"> </span>--json<span class="w">                   </span><span class="c1"># JSON output for scripting</span>
 </span></code></pre></div>
 <h3 id="consist-show">consist show<a class="headerlink" href="#consist-show" title="Permanent link">&para;</a></h3>
 <p>Display detailed information about a specific run.</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>consist<span class="w"> </span>show<span class="w"> </span>&lt;run_id&gt;
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>consist<span class="w"> </span>show<span class="w"> </span>&lt;run_id&gt;
 </span></code></pre></div>
 <p>Shows run metadata, configuration, status, duration, and any custom metadata fields.</p>
 <h3 id="consist-artifacts">consist artifacts<a class="headerlink" href="#consist-artifacts" title="Permanent link">&para;</a></h3>
@@ -2439,17 +2495,17 @@
 <li><strong>Run mode</strong>: list input/output artifacts for one run.</li>
 <li><strong>Query mode</strong>: search artifacts by indexed facet predicates.</li>
 </ul>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>consist<span class="w"> </span>artifacts<span class="w"> </span>&lt;run_id&gt;
-</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>
-</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="c1"># Query by artifact facet params (repeat --param)</span>
-</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>consist<span class="w"> </span>artifacts<span class="w"> </span>--param<span class="w"> </span>beam.phys_sim_iteration<span class="o">=</span><span class="m">2</span>
-</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>consist<span class="w"> </span>artifacts<span class="w"> </span>--param<span class="w"> </span>beam.year&gt;<span class="o">=</span><span class="m">2030</span><span class="w"> </span>--param<span class="w"> </span>beam.year&lt;<span class="o">=</span><span class="m">2035</span>
-</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>
-</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="c1"># Optional query filters</span>
-</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>consist<span class="w"> </span>artifacts<span class="w"> </span>--param<span class="w"> </span>beam.phys_sim_iteration<span class="o">=</span><span class="m">2</span><span class="w"> </span>--namespace<span class="w"> </span>beam
-</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>consist<span class="w"> </span>artifacts<span class="w"> </span>--param<span class="w"> </span>beam.phys_sim_iteration<span class="o">=</span><span class="m">2</span><span class="w"> </span>--key-prefix<span class="w"> </span>linkstats
-</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>consist<span class="w"> </span>artifacts<span class="w"> </span>--param<span class="w"> </span>beam.phys_sim_iteration<span class="o">=</span><span class="m">2</span><span class="w"> </span>--family-prefix<span class="w"> </span>linkstats_unmodified
-</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>consist<span class="w"> </span>artifacts<span class="w"> </span>--param<span class="w"> </span>beam.phys_sim_iteration<span class="o">=</span><span class="m">2</span><span class="w"> </span>--limit<span class="w"> </span><span class="m">500</span>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>consist<span class="w"> </span>artifacts<span class="w"> </span>&lt;run_id&gt;
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="c1"># Query by artifact facet params (repeat --param)</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>consist<span class="w"> </span>artifacts<span class="w"> </span>--param<span class="w"> </span>beam.phys_sim_iteration<span class="o">=</span><span class="m">2</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>consist<span class="w"> </span>artifacts<span class="w"> </span>--param<span class="w"> </span>beam.year&gt;<span class="o">=</span><span class="m">2030</span><span class="w"> </span>--param<span class="w"> </span>beam.year&lt;<span class="o">=</span><span class="m">2035</span>
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>
+</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="c1"># Optional query filters</span>
+</span><span id="__span-3-8"><a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>consist<span class="w"> </span>artifacts<span class="w"> </span>--param<span class="w"> </span>beam.phys_sim_iteration<span class="o">=</span><span class="m">2</span><span class="w"> </span>--namespace<span class="w"> </span>beam
+</span><span id="__span-3-9"><a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>consist<span class="w"> </span>artifacts<span class="w"> </span>--param<span class="w"> </span>beam.phys_sim_iteration<span class="o">=</span><span class="m">2</span><span class="w"> </span>--key-prefix<span class="w"> </span>linkstats
+</span><span id="__span-3-10"><a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>consist<span class="w"> </span>artifacts<span class="w"> </span>--param<span class="w"> </span>beam.phys_sim_iteration<span class="o">=</span><span class="m">2</span><span class="w"> </span>--family-prefix<span class="w"> </span>linkstats_unmodified
+</span><span id="__span-3-11"><a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>consist<span class="w"> </span>artifacts<span class="w"> </span>--param<span class="w"> </span>beam.phys_sim_iteration<span class="o">=</span><span class="m">2</span><span class="w"> </span>--limit<span class="w"> </span><span class="m">500</span>
 </span></code></pre></div>
 <p>Query-mode options:</p>
 <ul>
@@ -2461,15 +2517,15 @@
 </ul>
 <h3 id="consist-views-create">consist views create<a class="headerlink" href="#consist-views-create" title="Permanent link">&para;</a></h3>
 <p>Create a grouped hybrid view from schema identity + facet/run filters.</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>consist<span class="w"> </span>views<span class="w"> </span>create<span class="w"> </span>v_linkstats_all<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span>--schema-id<span class="w"> </span>&lt;schema_hash&gt;<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span>--namespace<span class="w"> </span>beam<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">  </span>--param<span class="w"> </span><span class="nv">artifact_family</span><span class="o">=</span>linkstats_unmodified_phys_sim_iter_parquet<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">  </span>--param<span class="w"> </span><span class="nv">year</span><span class="o">=</span><span class="m">2018</span><span class="w"> </span><span class="se">\</span>
-</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">  </span>--attach-facet<span class="w"> </span>artifact_family<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">  </span>--attach-facet<span class="w"> </span>year<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-3-8"><a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a><span class="w">  </span>--attach-facet<span class="w"> </span>phys_sim_iteration<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-3-9"><a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a><span class="w">  </span>--driver<span class="w"> </span>parquet
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>consist<span class="w"> </span>views<span class="w"> </span>create<span class="w"> </span>v_linkstats_all<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span>--schema-id<span class="w"> </span>&lt;schema_hash&gt;<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">  </span>--namespace<span class="w"> </span>beam<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">  </span>--param<span class="w"> </span><span class="nv">artifact_family</span><span class="o">=</span>linkstats_unmodified_phys_sim_iter_parquet<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="w">  </span>--param<span class="w"> </span><span class="nv">year</span><span class="o">=</span><span class="m">2018</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="w">  </span>--attach-facet<span class="w"> </span>artifact_family<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="w">  </span>--attach-facet<span class="w"> </span>year<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="w">  </span>--attach-facet<span class="w"> </span>phys_sim_iteration<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a><span class="w">  </span>--driver<span class="w"> </span>parquet
 </span></code></pre></div>
 <p>Common options:</p>
 <ul>
@@ -2481,54 +2537,54 @@
 </ul>
 <h3 id="consist-lineage">consist lineage<a class="headerlink" href="#consist-lineage" title="Permanent link">&para;</a></h3>
 <p>Trace the full provenance chain for an artifact.</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>consist<span class="w"> </span>lineage<span class="w"> </span>&lt;artifact_key_or_id&gt;
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>consist<span class="w"> </span>lineage<span class="w"> </span>&lt;artifact_key_or_id&gt;
 </span></code></pre></div>
 <p>Displays a tree showing which runs and inputs produced the artifact.</p>
 <h3 id="consist-scenarios">consist scenarios<a class="headerlink" href="#consist-scenarios" title="Permanent link">&para;</a></h3>
 <p>List all scenarios and their run counts.</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>consist<span class="w"> </span>scenarios
-</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>consist<span class="w"> </span>scenarios<span class="w"> </span>--limit<span class="w"> </span><span class="m">50</span>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>consist<span class="w"> </span>scenarios
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>consist<span class="w"> </span>scenarios<span class="w"> </span>--limit<span class="w"> </span><span class="m">50</span>
 </span></code></pre></div>
 <h3 id="consist-scenario">consist scenario<a class="headerlink" href="#consist-scenario" title="Permanent link">&para;</a></h3>
 <p>Show all runs within a specific scenario.</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>consist<span class="w"> </span>scenario<span class="w"> </span>&lt;scenario_id&gt;
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>consist<span class="w"> </span>scenario<span class="w"> </span>&lt;scenario_id&gt;
 </span></code></pre></div>
 <h3 id="consist-search">consist search<a class="headerlink" href="#consist-search" title="Permanent link">&para;</a></h3>
 <p>Search runs by ID, model name, or scenario.</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>consist<span class="w"> </span>search<span class="w"> </span><span class="s2">&quot;baseline&quot;</span>
-</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>consist<span class="w"> </span>search<span class="w"> </span><span class="s2">&quot;travel&quot;</span><span class="w"> </span>--limit<span class="w"> </span><span class="m">50</span>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>consist<span class="w"> </span>search<span class="w"> </span><span class="s2">&quot;baseline&quot;</span>
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>consist<span class="w"> </span>search<span class="w"> </span><span class="s2">&quot;travel&quot;</span><span class="w"> </span>--limit<span class="w"> </span><span class="m">50</span>
 </span></code></pre></div>
 <h3 id="consist-summary">consist summary<a class="headerlink" href="#consist-summary" title="Permanent link">&para;</a></h3>
 <p>Display database statistics: total runs, artifacts, date range, and runs per model.</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>consist<span class="w"> </span>summary
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>consist<span class="w"> </span>summary
 </span></code></pre></div>
 <h3 id="consist-preview">consist preview<a class="headerlink" href="#consist-preview" title="Permanent link">&para;</a></h3>
 <p>Preview tabular artifacts (CSV, Parquet) without loading full data.</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>consist<span class="w"> </span>preview<span class="w"> </span>&lt;artifact_key&gt;
-</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>consist<span class="w"> </span>preview<span class="w"> </span>&lt;artifact_key&gt;<span class="w"> </span>--rows<span class="w"> </span><span class="m">10</span>
-</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>consist<span class="w"> </span>preview<span class="w"> </span>&lt;artifact_key&gt;<span class="w"> </span>--trust-db<span class="w">  </span><span class="c1"># Allow mount inference from DB metadata</span>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>consist<span class="w"> </span>preview<span class="w"> </span>&lt;artifact_key&gt;
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>consist<span class="w"> </span>preview<span class="w"> </span>&lt;artifact_key&gt;<span class="w"> </span>--rows<span class="w"> </span><span class="m">10</span>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a>consist<span class="w"> </span>preview<span class="w"> </span>&lt;artifact_key&gt;<span class="w"> </span>--trust-db<span class="w">  </span><span class="c1"># Allow mount inference from DB metadata</span>
 </span></code></pre></div>
 <h3 id="consist-validate">consist validate<a class="headerlink" href="#consist-validate" title="Permanent link">&para;</a></h3>
 <p>Check that artifacts in the database exist on disk.</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>consist<span class="w"> </span>validate
-</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>consist<span class="w"> </span>validate<span class="w"> </span>--fix<span class="w">  </span><span class="c1"># Mark missing artifacts</span>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>consist<span class="w"> </span>validate
+</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>consist<span class="w"> </span>validate<span class="w"> </span>--fix<span class="w">  </span><span class="c1"># Mark missing artifacts</span>
 </span></code></pre></div>
 <h3 id="consist-shell">consist shell<a class="headerlink" href="#consist-shell" title="Permanent link">&para;</a></h3>
 <p>Start an interactive session for exploring provenance.</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>consist<span class="w"> </span>shell
-</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>consist<span class="w"> </span>shell<span class="w"> </span>--trust-db<span class="w">  </span><span class="c1"># Allow mount inference from DB metadata</span>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>consist<span class="w"> </span>shell
+</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>consist<span class="w"> </span>shell<span class="w"> </span>--trust-db<span class="w">  </span><span class="c1"># Allow mount inference from DB metadata</span>
 </span></code></pre></div>
 <p>Inside the shell:
-<div class="language-text highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>(consist) runs --limit 5
-</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>(consist) show abc123
-</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>(consist) artifacts abc123
-</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>(consist) scenarios
-</span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a>(consist) exit
+<div class="language-text highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>(consist) runs --limit 5
+</span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>(consist) show abc123
+</span><span id="__span-13-3"><a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>(consist) artifacts abc123
+</span><span id="__span-13-4"><a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a>(consist) scenarios
+</span><span id="__span-13-5"><a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a>(consist) exit
 </span></code></pre></div></p>
 <hr />
 <h2 id="scripting-with-json-output">Scripting with JSON Output<a class="headerlink" href="#scripting-with-json-output" title="Permanent link">&para;</a></h2>
 <p>Use <code>--json</code> for machine-readable output:</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>consist<span class="w"> </span>runs<span class="w"> </span>--json<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.[] | select(.status == &quot;completed&quot;)&#39;</span>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>consist<span class="w"> </span>runs<span class="w"> </span>--json<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.[] | select(.status == &quot;completed&quot;)&#39;</span>
 </span></code></pre></div>
 
 

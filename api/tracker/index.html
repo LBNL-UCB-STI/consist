@@ -1378,6 +1378,8 @@
       
         
       
+        
+      
     
     
     
@@ -1440,6 +1442,34 @@
     
   
     Troubleshooting Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cli-error-style/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Error Style Guide
   
 
     
@@ -1734,6 +1764,28 @@
       On this page
     </label>
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#when-to-use-tracker" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When to use Tracker
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#minimal-runnable-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Minimal runnable example
+      
+    </span>
+  </a>
+  
+</li>
       
         <li class="md-nav__item">
   <a href="#consist.core.tracker.Tracker.last_run" class="md-nav__link">
@@ -2850,6 +2902,28 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#when-to-use-tracker" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When to use Tracker
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#minimal-runnable-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Minimal runnable example
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#consist.core.tracker.Tracker.last_run" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3760,6 +3834,36 @@
                   
 
 <h1 id="tracker">Tracker<a class="headerlink" href="#tracker" title="Permanent link">&para;</a></h1>
+<p><code>Tracker</code> is the core class for provenance persistence, cache lookups, and query
+access. If you want explicit control over where state is stored and how runs are
+executed, start here.</p>
+<h2 id="when-to-use-tracker">When to use <code>Tracker</code><a class="headerlink" href="#when-to-use-tracker" title="Permanent link">&para;</a></h2>
+<ul>
+<li>You are building a reusable library or service and want explicit dependencies.</li>
+<li>You want direct control over lifecycle methods like <code>start_run</code>, <code>run</code>,
+  <code>scenario</code>, and query methods (<code>find_runs</code>, <code>get_artifact</code>, lineage helpers).</li>
+<li>You want to avoid relying on global context (<code>consist.use_tracker(...)</code>).</li>
+</ul>
+<h2 id="minimal-runnable-example">Minimal runnable example<a class="headerlink" href="#minimal-runnable-example" title="Permanent link">&para;</a></h2>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">Tracker</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span><span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;./runs&quot;</span><span class="p">,</span> <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">)</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="k">def</span><span class="w"> </span><span class="nf">write_summary</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    <span class="n">out</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">output_path</span><span class="p">(</span><span class="s2">&quot;summary&quot;</span><span class="p">,</span> <span class="n">ext</span><span class="o">=</span><span class="s2">&quot;txt&quot;</span><span class="p">)</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    <span class="n">out</span><span class="o">.</span><span class="n">write_text</span><span class="p">(</span><span class="s2">&quot;summary</span><span class="se">\n</span><span class="s2">&quot;</span><span class="p">)</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="k">return</span> <span class="n">out</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="n">result</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">fn</span><span class="o">=</span><span class="n">write_summary</span><span class="p">,</span> <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;summary&quot;</span><span class="p">])</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="n">latest</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">find_latest_run</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="n">result</span><span class="o">.</span><span class="n">run</span><span class="o">.</span><span class="n">model_name</span><span class="p">)</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">run</span><span class="o">.</span><span class="n">id</span><span class="p">)</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="nb">print</span><span class="p">(</span><span class="n">latest</span><span class="o">.</span><span class="n">id</span> <span class="k">if</span> <span class="n">latest</span> <span class="k">else</span> <span class="kc">None</span><span class="p">)</span>
+</span></code></pre></div>
+<p>For top-level wrappers around these methods, see <a href="../api_helpers/">API Helpers</a>.
+For grouped workflows, see <a href="../workflow/">Workflow Contexts</a>.</p>
 
 
 <div class="doc doc-object doc-class">
@@ -6686,6 +6790,10 @@ the current run. Existing keys will be updated, and new keys will be added.</p>
 <p><strong>Schema Metadata Injection</strong>: Embeds schema information (if provided) into the
     artifact's metadata, useful for later "Strict Mode" validation or introspection.</p>
 </li>
+<li>
+<p><strong>Immediate Persistence</strong>: This single-artifact method flushes JSON state
+    and syncs artifact links to the database immediately for this call.</p>
+</li>
 </ul>
 
 
@@ -7076,7 +7184,9 @@ Use "if_changed" to skip profiling when a matching content hash already has a sc
         <p>Log multiple artifacts in a single call for efficiency.</p>
 <p>This is a convenience method for bulk artifact logging, particularly useful
 when a model produces many output files or when registering multiple inputs.
-This requires an explicit mapping so artifact keys are always deliberate.</p>
+This requires an explicit mapping so artifact keys are always deliberate.
+For efficiency, persistence is batched: JSON flush and DB artifact sync occur
+once at the end of the call (not once per artifact).</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
