@@ -11,6 +11,8 @@ import pytest
 import consist
 from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
 from consist.core.tracker import Tracker
+from consist.models.artifact import Artifact
+from consist.models.run import RunResult
 from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
 
 
@@ -499,6 +501,44 @@ def test_tracker_get_run_result_returns_selected_outputs(tracker):
 
     subset = tracker.get_run_result(produced.run.id, keys=["b"])
     assert list(subset.outputs.keys()) == ["b"]
+
+
+def test_run_result_output_path_resolves_immediate_and_historical_outputs(tracker):
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "out.txt").write_text("ok")
+
+    produced = tracker.run(
+        fn=step,
+        output_paths={"out": "out.txt"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert produced.output_path("out") == produced.outputs["out"].path
+
+    historical = tracker.get_run_result(produced.run.id, keys=["out"])
+    assert historical.output_path("out") == produced.outputs["out"].path
+
+
+def test_run_result_output_path_supports_explicit_tracker_fallback(tracker):
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "out.txt").write_text("ok")
+
+    produced = tracker.run(
+        fn=step,
+        output_paths={"out": "out.txt"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    detached_output = Artifact.model_validate(produced.outputs["out"].model_dump())
+    detached_result = RunResult(
+        run=produced.run,
+        outputs={"out": detached_output},
+        cache_hit=False,
+    )
+
+    resolved = detached_result.output_path("out", tracker=tracker)
+    assert resolved == produced.outputs["out"].path
 
 
 def test_tracker_get_run_result_validates_keys_and_run_id(tracker):

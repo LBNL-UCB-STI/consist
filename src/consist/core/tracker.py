@@ -1198,6 +1198,7 @@ class Tracker:
         cache_options: Optional[CacheOptions] = None,
         output_policy: Optional[OutputPolicyOptions] = None,
         execution_options: Optional[ExecutionOptions] = None,
+        runtime_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> RunResult:
         """
         Execute a function-shaped run with caching and output handling.
@@ -1281,6 +1282,10 @@ class Tracker:
         execution_options : Optional[ExecutionOptions], optional
             Grouped execution controls (`load_inputs`, `executor`, `container`,
             `runtime_kwargs`, `inject_context`).
+        runtime_kwargs : Optional[Mapping[str, Any]], optional
+            Top-level alias for `execution_options.runtime_kwargs`. This is
+            mutually exclusive with
+            `execution_options=ExecutionOptions(runtime_kwargs=...)`.
 
         Returns
         -------
@@ -1360,6 +1365,7 @@ class Tracker:
             cache_options=cache_options,
             output_policy=output_policy,
             execution_options=execution_options,
+            runtime_kwargs=runtime_kwargs,
         )
 
     def run_with_config_overrides(

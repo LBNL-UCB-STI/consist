@@ -5,6 +5,7 @@ import pytest
 from consist.core.run_options import (
     merge_run_options,
     raise_legacy_policy_kwargs_error,
+    resolve_runtime_kwargs_alias,
 )
 from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
 
@@ -58,4 +59,32 @@ def test_raise_legacy_policy_kwargs_error_has_migration_guidance() -> None:
                 "cache_mode": "reuse",
                 "inject_context": True,
             },
+        )
+
+
+def test_resolve_runtime_kwargs_alias_merges_into_execution_options() -> None:
+    resolved = resolve_runtime_kwargs_alias(
+        api_name="Tracker.run",
+        execution_options=ExecutionOptions(load_inputs=True, inject_context="ctx"),
+        runtime_kwargs={"threshold": 2},
+    )
+
+    assert resolved is not None
+    assert resolved.load_inputs is True
+    assert resolved.inject_context == "ctx"
+    assert resolved.runtime_kwargs == {"threshold": 2}
+
+
+def test_resolve_runtime_kwargs_alias_rejects_conflicting_values() -> None:
+    with pytest.raises(
+        ValueError,
+        match=(
+            "both top-level runtime_kwargs and "
+            "execution_options\\.runtime_kwargs"
+        ),
+    ):
+        resolve_runtime_kwargs_alias(
+            api_name="Tracker.run",
+            execution_options=ExecutionOptions(runtime_kwargs={"a": 1}),
+            runtime_kwargs={"a": 2},
         )

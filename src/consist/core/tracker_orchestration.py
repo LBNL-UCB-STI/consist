@@ -36,6 +36,7 @@ from pydantic import BaseModel
 
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.run_invocation import resolve_run_invocation
+from consist.core.run_options import resolve_runtime_kwargs_alias
 from consist.core.workflow import RunContext
 from consist.models.artifact import Artifact, get_tracker_ref, set_tracker_ref
 from consist.models.run import RunResult
@@ -234,6 +235,7 @@ class RunTraceCoordinator:
         cache_options: Optional[CacheOptions] = None,
         output_policy: Optional[OutputPolicyOptions] = None,
         execution_options: Optional[ExecutionOptions] = None,
+        runtime_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> RunResult:
         """Execute function/container run flow with tracker-level orchestration.
 
@@ -302,6 +304,10 @@ class RunTraceCoordinator:
             Grouped output mismatch/missing policy controls.
         execution_options : ExecutionOptions | None, optional
             Grouped execution controls.
+        runtime_kwargs : Mapping[str, Any] | None, optional
+            Top-level alias for ``execution_options.runtime_kwargs``.
+            This is mutually exclusive with
+            ``execution_options=ExecutionOptions(runtime_kwargs=...)``.
 
         Returns
         -------
@@ -316,6 +322,11 @@ class RunTraceCoordinator:
 
         """
         tracker = self._tracker
+        execution_options = resolve_runtime_kwargs_alias(
+            api_name="Tracker.run",
+            execution_options=execution_options,
+            runtime_kwargs=runtime_kwargs,
+        )
 
         resolved_invocation = resolve_run_invocation(
             fn=fn,
@@ -729,8 +740,9 @@ class RunTraceCoordinator:
                                 "@consist.require_runtime_kwargs."
                             ),
                             fix=(
-                                "Provide execution_options=ExecutionOptions("
-                                "runtime_kwargs={...}) with those keys, or remove "
+                                "Provide runtime_kwargs={...} (or "
+                                "execution_options=ExecutionOptions("
+                                "runtime_kwargs={...})) with those keys, or remove "
                                 "@consist.require_runtime_kwargs."
                             ),
                         )
