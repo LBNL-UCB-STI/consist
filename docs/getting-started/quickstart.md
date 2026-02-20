@@ -92,3 +92,4 @@ with consist.scenario("demo_pipeline", tracker=tracker, config={"value": 5}) as 
 
 - **[First Workflow](first-workflow.md)** for a larger two-step pipeline
 - **[API Essentials](../api/essentials.md)** for the recommended API surface
+- **[Building a Domain Tracker](../building-domain-tracker.md)** for reusable wrapper design

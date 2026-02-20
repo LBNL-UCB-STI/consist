@@ -10,6 +10,10 @@ Consist provides flexible patterns for tracking provenance in scientific workflo
 [quickstart tutorial](getting-started/quickstart.md), then work through the
 examples below in order.
 
+If you are building a reusable domain integration, see
+[Building a Domain Tracker](building-domain-tracker.md#when-to-wrap-vs-use-direct-apis)
+for the recommended wrapper architecture.
+
 ---
 
 ## Choosing Your Pattern
@@ -436,6 +440,23 @@ a function parameter with loaded data.
 Rule of thumb:
 - Use `consist.ref(...)` for one-off single links.
 - Use `consist.refs(...)` when wiring multiple outputs or when you plan to reuse the mapping.
+
+Concise and explicit `refs(...)` forms:
+
+```python
+# Assume setup_result has outputs: "zones", "persons", and "jobs".
+# Concise: map all outputs by their original keys.
+all_inputs = consist.refs(setup_result)
+
+# Explicit: select only the outputs you need.
+subset_inputs = consist.refs(setup_result, "persons", "jobs")
+
+# Explicit aliases: rename keys for downstream function parameters.
+aliased_inputs = consist.refs(
+    setup_result,
+    {"population_df": "persons", "employment_df": "jobs"},
+)
+```
 
 **Alias-map form** (when downstream parameter names differ):
 ``` python
