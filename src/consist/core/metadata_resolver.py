@@ -197,7 +197,10 @@ class MetadataResolver:
         resolved_load_inputs = _resolve_meta(load_inputs, step_def.load_inputs)
         # TODO(v0.1.0): Remove legacy config_plan/hash_inputs resolution path.
         resolved_hash_inputs_legacy = _resolve_meta(hash_inputs, step_def.hash_inputs)
-        if resolved_identity_inputs is not None and resolved_hash_inputs_legacy is not None:
+        if (
+            resolved_identity_inputs is not None
+            and resolved_hash_inputs_legacy is not None
+        ):
             raise ValueError(
                 format_problem_cause_fix(
                     problem="Pass either identity_inputs= or hash_inputs=, not both.",

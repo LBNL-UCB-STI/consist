@@ -101,6 +101,7 @@ recommended public kwargs for new run/trace calls.
         - get_run_config
         - get_run_inputs
         - get_run_outputs
+        - get_config_bundle
         - get_artifact_lineage
         - print_lineage
         - history

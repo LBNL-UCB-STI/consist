@@ -4258,6 +4258,93 @@ class Tracker:
             return None
         return record.config
 
+    def get_config_bundle(
+        self,
+        run_id: str,
+        *,
+        adapter: str | None = None,
+        role: str = "bundle",
+        allow_missing: bool = False,
+    ) -> Path | None:
+        """
+        Resolve a config artifact path for a run by role.
+
+        This helper scans run-linked artifacts and selects those with
+        ``artifact.meta["config_role"] == role``. When ``adapter`` is provided,
+        matching uses existing adapter identity conventions:
+        ``run.meta["config_adapter"]`` and/or artifact metadata
+        (``artifact.meta["config_adapter"]`` or ``artifact.meta["adapter"]``).
+
+        If multiple artifacts match, selection is deterministic: sort by
+        ``(artifact.key, artifact.created_at, artifact.id)`` and return the first.
+        """
+        artifacts = self.get_artifacts_for_run(run_id)
+        input_artifacts = list(artifacts.inputs.values())
+
+        matching: list[Artifact] = []
+        for artifact in input_artifacts:
+            meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+            if meta.get("config_role") == role:
+                matching.append(artifact)
+
+        run = self.get_run(run_id)
+        run_adapter: str | None = None
+        if run is not None and isinstance(run.meta, dict):
+            candidate = run.meta.get("config_adapter")
+            if isinstance(candidate, str) and candidate:
+                run_adapter = candidate
+
+        if adapter is not None:
+            if run_adapter is not None and run_adapter != adapter:
+                matching = []
+            else:
+                filtered: list[Artifact] = []
+                for artifact in matching:
+                    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+                    artifact_adapters: list[str] = []
+                    for key in ("config_adapter", "adapter"):
+                        value = meta.get(key)
+                        if isinstance(value, str) and value:
+                            artifact_adapters.append(value)
+                    if artifact_adapters:
+                        if adapter in artifact_adapters:
+                            filtered.append(artifact)
+                    elif run_adapter == adapter:
+                        filtered.append(artifact)
+                matching = filtered
+
+        if matching:
+            selected = sorted(
+                matching,
+                key=lambda artifact: (
+                    artifact.key,
+                    artifact.created_at.isoformat() if artifact.created_at else "",
+                    str(artifact.id),
+                ),
+            )[0]
+            resolved = Path(self.resolve_uri(selected.container_uri))
+            if resolved.exists():
+                return resolved
+
+            if allow_missing:
+                return None
+            raise FileNotFoundError(
+                "Config artifact was found but the resolved file is missing for "
+                f"run_id={run_id!r}, role={role!r}, key={selected.key!r}: {resolved!s}. "
+                "Check path mounts or regenerate config artifacts for this run."
+            )
+
+        if allow_missing:
+            return None
+        adapter_hint = f", adapter={adapter!r}" if adapter is not None else ""
+        raise FileNotFoundError(
+            "No config artifact found for "
+            f"run_id={run_id!r}, role={role!r}{adapter_hint}. "
+            "Ensure config artifacts were logged with meta['config_role'] and, when "
+            "adapter filtering is requested, run.meta['config_adapter'] and/or "
+            "artifact.meta['config_adapter'|'adapter'] match."
+        )
+
     def get_artifacts_for_run(self, run_id: str) -> RunArtifacts:
         """
         Retrieve inputs and outputs for a specific run, organized by key.

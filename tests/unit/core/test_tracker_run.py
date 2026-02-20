@@ -557,6 +557,121 @@ def test_tracker_get_run_result_strict_validation_checks_paths(tracker):
         tracker.get_run_result(produced.run.id, validate="strict")
 
 
+def test_tracker_get_config_bundle_returns_resolved_bundle_path(tracker):
+    with tracker.start_run("bundle_run", "bundle_model"):
+        bundle_path = tracker.run_artifact_dir() / "config_bundle.tar.gz"
+        bundle_path.parent.mkdir(parents=True, exist_ok=True)
+        bundle_path.write_text("bundle")
+        tracker.log_artifact(
+            bundle_path,
+            key="config_bundle",
+            direction="input",
+            config_role="bundle",
+        )
+
+    resolved = tracker.get_config_bundle("bundle_run")
+    assert resolved == bundle_path.resolve()
+
+
+def test_tracker_get_config_bundle_adapter_filter_matches_and_misses(tracker):
+    with tracker.start_run("bundle_adapter", "bundle_model"):
+        tracker.log_meta(config_adapter="activitysim")
+        bundle_path = tracker.run_artifact_dir() / "config_bundle.tar.gz"
+        bundle_path.parent.mkdir(parents=True, exist_ok=True)
+        bundle_path.write_text("bundle")
+        tracker.log_artifact(
+            bundle_path,
+            key="config_bundle",
+            direction="input",
+            config_role="bundle",
+        )
+
+    assert (
+        tracker.get_config_bundle("bundle_adapter", adapter="activitysim")
+        == bundle_path.resolve()
+    )
+    assert (
+        tracker.get_config_bundle(
+            "bundle_adapter",
+            adapter="beam",
+            allow_missing=True,
+        )
+        is None
+    )
+
+
+def test_tracker_get_config_bundle_adapter_filter_uses_artifact_metadata(tracker):
+    with tracker.start_run("bundle_artifact_adapter", "bundle_model"):
+        bundle_path = tracker.run_artifact_dir() / "config_bundle.tar.gz"
+        bundle_path.parent.mkdir(parents=True, exist_ok=True)
+        bundle_path.write_text("bundle")
+        tracker.log_artifact(
+            bundle_path,
+            key="config_bundle",
+            direction="input",
+            config_role="bundle",
+            adapter="beam",
+        )
+
+    resolved = tracker.get_config_bundle("bundle_artifact_adapter", adapter="beam")
+    assert resolved == bundle_path.resolve()
+
+
+def test_tracker_get_config_bundle_allow_missing_returns_none(tracker):
+    with tracker.start_run("bundle_missing_allow", "bundle_model"):
+        pass
+
+    assert tracker.get_config_bundle("bundle_missing_allow", allow_missing=True) is None
+
+
+def test_tracker_get_config_bundle_missing_raises_file_not_found(tracker):
+    with tracker.start_run("bundle_missing_error", "bundle_model"):
+        pass
+
+    with pytest.raises(FileNotFoundError, match="No config artifact found"):
+        tracker.get_config_bundle("bundle_missing_error")
+
+
+def test_tracker_get_config_bundle_selects_deterministic_match(tracker):
+    with tracker.start_run("bundle_multiple", "bundle_model"):
+        first = tracker.run_artifact_dir() / "z_config_bundle.tar.gz"
+        second = tracker.run_artifact_dir() / "a_config_bundle.tar.gz"
+        first.parent.mkdir(parents=True, exist_ok=True)
+        first.write_text("z")
+        second.write_text("a")
+
+        tracker.log_artifact(
+            first,
+            key="z_bundle",
+            direction="input",
+            config_role="bundle",
+        )
+        tracker.log_artifact(
+            second,
+            key="a_bundle",
+            direction="input",
+            config_role="bundle",
+        )
+
+    resolved = tracker.get_config_bundle("bundle_multiple")
+    assert resolved == second.resolve()
+
+
+def test_tracker_get_config_bundle_ignores_output_artifacts(tracker):
+    with tracker.start_run("bundle_output_only", "bundle_model"):
+        bundle_path = tracker.run_artifact_dir() / "config_bundle.tar.gz"
+        bundle_path.parent.mkdir(parents=True, exist_ok=True)
+        bundle_path.write_text("bundle")
+        tracker.log_artifact(
+            bundle_path,
+            key="config_bundle",
+            direction="output",
+            config_role="bundle",
+        )
+
+    assert tracker.get_config_bundle("bundle_output_only", allow_missing=True) is None
+
+
 def test_cache_epoch_affects_config_hash(tmp_path):
     def step(ctx) -> None:
         ctx.run_dir.mkdir(parents=True, exist_ok=True)
