@@ -533,5 +533,8 @@ def compute_config_pack_hash(
     digest_map: dict[str, str] = {}
     for idx, root_dir in enumerate(root_dirs):
         label = f"config_dir_{idx}:{root_dir}"
-        digest_map[label] = identity.digest_path(root_dir)
+        digest_map[label] = identity.digest_path(
+            root_dir,
+            hashing_strategy_override="full",
+        )
     return identity.canonical_json_sha256({"config_dirs": digest_map})

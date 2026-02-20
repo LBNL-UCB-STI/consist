@@ -311,6 +311,54 @@ def test_run_with_config_overrides_hit_miss_behavior(tracker, tmp_path: Path):
     assert bundle.exists()
 
 
+def test_run_with_config_overrides_hit_miss_behavior_fast_hashing(
+    tracker, tmp_path: Path
+):
+    tracker.identity.hashing_strategy = "fast"
+    adapter = ActivitySimConfigAdapter()
+    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path / "base_case_fast")
+
+    calls: list[Path] = []
+
+    def step(config_dir: Path) -> None:
+        calls.append(config_dir)
+        assert config_dir.is_dir()
+
+    run_a = tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_config_dirs=[overlay_dir, base_dir],
+        base_primary_config=Path("settings.yaml"),
+        overrides=ConfigOverrides(
+            coefficients={("accessibility_coefficients.csv", "time", ""): 1.1}
+        ),
+        output_dir=tmp_path / "materialized_overrides_fast",
+        fn=step,
+        name="activitysim_override_run_fast",
+        model="activitysim",
+        config={"calibration_step": "time"},
+        cache_options=CacheOptions(cache_mode="reuse"),
+    )
+    run_b = tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_config_dirs=[overlay_dir, base_dir],
+        base_primary_config=Path("settings.yaml"),
+        overrides=ConfigOverrides(
+            coefficients={("accessibility_coefficients.csv", "time", ""): 1.1}
+        ),
+        output_dir=tmp_path / "materialized_overrides_fast",
+        fn=step,
+        name="activitysim_override_run_fast",
+        model="activitysim",
+        config={"calibration_step": "time"},
+        cache_options=CacheOptions(cache_mode="reuse"),
+    )
+
+    assert run_a.run.config_hash == run_b.run.config_hash
+    assert run_a.cache_hit is False
+    assert run_b.cache_hit is True
+    assert len(calls) == 1
+
+
 def test_run_with_config_overrides_rejects_multiple_base_selectors(
     tracker, tmp_path: Path
 ):

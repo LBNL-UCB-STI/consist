@@ -240,6 +240,23 @@ class TestInputHashing:
         finally:
             os.remove(fname)
 
+    def test_digest_path_hashing_strategy_override_uses_content_hashing(self, tmp_path):
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        settings = config_dir / "settings.yaml"
+        settings.write_text("sample_rate: 0.25\n", encoding="utf-8")
+
+        identity = IdentityManager(project_root=str(tmp_path), hashing_strategy="fast")
+        digest_a = identity.digest_path(config_dir, hashing_strategy_override="full")
+        original_strategy = identity.hashing_strategy
+
+        time.sleep(0.01)
+        settings.touch()
+        digest_b = identity.digest_path(config_dir, hashing_strategy_override="full")
+
+        assert digest_a == digest_b
+        assert identity.hashing_strategy == original_strategy
+
 
 class TestZarrHashing:
     """Tests Zarr-aware hashing behavior for directory inputs."""

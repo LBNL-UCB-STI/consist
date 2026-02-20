@@ -673,6 +673,7 @@ class IdentityManager:
         *,
         ignore_dotfiles: bool = True,
         allowlist: Optional[List[str]] = None,
+        hashing_strategy_override: Optional[str] = None,
     ) -> str:
         """
         Digest a file or directory with optional filtering.
@@ -691,50 +692,56 @@ class IdentityManager:
         allowlist : Optional[List[str]], optional
             If provided, only include files whose relative path matches at least one glob pattern.
         """
-        resolved = (path if isinstance(path, Path) else Path(path)).resolve()
-        if not resolved.exists():
-            raise FileNotFoundError(str(resolved))
+        original_strategy = self.hashing_strategy
+        if hashing_strategy_override is not None:
+            self.hashing_strategy = hashing_strategy_override
+        try:
+            resolved = (path if isinstance(path, Path) else Path(path)).resolve()
+            if not resolved.exists():
+                raise FileNotFoundError(str(resolved))
 
-        if resolved.is_file():
-            return self.compute_file_checksum(resolved)
+            if resolved.is_file():
+                return self.compute_file_checksum(resolved)
 
-        if allowlist is None and self._is_zarr_store(resolved):
-            if self.hashing_strategy != "fast":
-                logging.warning(
-                    "[Consist Warning] Performing full content hashing on Zarr store '%s'. "
-                    "This can be slow. Consider using 'fast' hashing_strategy for metadata-based hashing.",
-                    resolved.name,
-                )
-            return self._hash_zarr_store(resolved)
+            if allowlist is None and self._is_zarr_store(resolved):
+                if self.hashing_strategy != "fast":
+                    logging.warning(
+                        "[Consist Warning] Performing full content hashing on Zarr store '%s'. "
+                        "This can be slow. Consider using 'fast' hashing_strategy for metadata-based hashing.",
+                        resolved.name,
+                    )
+                return self._hash_zarr_store(resolved)
 
-        sha = hashlib.sha256()
-        for file_path in sorted(resolved.rglob("*")):
-            if not file_path.is_file():
-                continue
+            sha = hashlib.sha256()
+            for file_path in sorted(resolved.rglob("*")):
+                if not file_path.is_file():
+                    continue
 
-            rel = file_path.relative_to(resolved).as_posix()
-            if ignore_dotfiles and any(
-                part.startswith(".") for part in Path(rel).parts
-            ):
-                continue
-            if allowlist is not None and not any(
-                fnmatch.fnmatch(rel, pat) for pat in allowlist
-            ):
-                continue
+                rel = file_path.relative_to(resolved).as_posix()
+                if ignore_dotfiles and any(
+                    part.startswith(".") for part in Path(rel).parts
+                ):
+                    continue
+                if allowlist is not None and not any(
+                    fnmatch.fnmatch(rel, pat) for pat in allowlist
+                ):
+                    continue
 
-            if self.hashing_strategy == "fast":
-                stat = file_path.stat()
-                leaf = f"{rel}:{stat.st_size}:{stat.st_mtime_ns}"
-                sha.update(leaf.encode("utf-8"))
-            else:
-                sha.update(f"{rel}:".encode("utf-8"))
-                with open(file_path, "rb") as f:
-                    while True:
-                        chunk = f.read(65536)
-                        if not chunk:
-                            break
-                        sha.update(chunk)
-        return sha.hexdigest()
+                if self.hashing_strategy == "fast":
+                    stat = file_path.stat()
+                    leaf = f"{rel}:{stat.st_size}:{stat.st_mtime_ns}"
+                    sha.update(leaf.encode("utf-8"))
+                else:
+                    sha.update(f"{rel}:".encode("utf-8"))
+                    with open(file_path, "rb") as f:
+                        while True:
+                            chunk = f.read(65536)
+                            if not chunk:
+                                break
+                            sha.update(chunk)
+            return sha.hexdigest()
+        finally:
+            self.hashing_strategy = original_strategy
 
     def _is_zarr_store(self, path: Path) -> bool:
         if path.suffix == ".zarr":
