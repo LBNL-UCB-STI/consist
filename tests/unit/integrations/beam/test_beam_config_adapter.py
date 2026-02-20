@@ -2,6 +2,7 @@ import logging
 import importlib
 from pathlib import Path
 
+import pytest
 from sqlalchemy import func, select
 from sqlmodel import Session, SQLModel
 
@@ -233,3 +234,78 @@ def test_beam_run_with_config_overrides_supports_custom_runtime_kwarg_mapping(
     )
 
     assert len(seen) == 1
+
+
+def test_beam_run_with_config_overrides_merges_top_level_runtime_kwargs(
+    tracker, tmp_path: Path
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path / "base_case_alias")
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+
+    base_run = tracker.begin_run(
+        "beam_override_base_alias",
+        "beam",
+        cache_mode="overwrite",
+    )
+    tracker.canonicalize_config(adapter, [case_dir])
+    tracker.end_run()
+
+    runtime_output_dir = tmp_path / "runtime_output_dir"
+    seen: list[tuple[Path, Path]] = []
+
+    def step(config_dir: Path, output_dir: Path) -> None:
+        seen.append((config_dir, output_dir))
+
+    tracker.run_with_config_overrides(
+        adapter=BeamConfigAdapter(),
+        base_run_id=base_run.id,
+        overrides=BeamConfigOverrides(
+            values={"beam.agentsim.agentSampleSizeAsFractionOfPopulation": 0.21}
+        ),
+        output_dir=tmp_path / "materialized_runtime_alias",
+        fn=step,
+        name="beam_override_runtime_alias",
+        model="beam",
+        runtime_kwargs={"output_dir": runtime_output_dir},
+    )
+
+    assert len(seen) == 1
+    assert seen[0][1] == runtime_output_dir
+    assert (seen[0][0] / "overlay.conf").exists()
+
+
+def test_beam_run_with_config_overrides_rejects_dual_runtime_kwargs_sources(
+    tracker, tmp_path: Path
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(
+        tmp_path / "base_case_runtime_conflict"
+    )
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+
+    base_run = tracker.begin_run(
+        "beam_override_base_runtime_conflict",
+        "beam",
+        cache_mode="overwrite",
+    )
+    tracker.canonicalize_config(adapter, [case_dir])
+    tracker.end_run()
+
+    with pytest.raises(
+        ValueError,
+        match="runtime_kwargs= and execution_options.runtime_kwargs=",
+    ):
+        tracker.run_with_config_overrides(
+            adapter=BeamConfigAdapter(),
+            base_run_id=base_run.id,
+            overrides=BeamConfigOverrides(
+                values={"beam.agentsim.agentSampleSizeAsFractionOfPopulation": 0.2}
+            ),
+            output_dir=tmp_path / "materialized_runtime_conflict",
+            fn=lambda: None,
+            name="beam_override_runtime_conflict",
+            model="beam",
+            runtime_kwargs={"output_dir": tmp_path / "out_a"},
+            execution_options=ExecutionOptions(
+                runtime_kwargs={"output_dir": tmp_path / "out_b"}
+            ),
+        )

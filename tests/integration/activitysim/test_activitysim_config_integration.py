@@ -415,3 +415,77 @@ def test_run_with_config_overrides_supports_custom_runtime_kwarg_mapping(
         (seen[0] / file_name).exists()
         for file_name in ("settings.yaml", "settings_local.yaml")
     )
+
+
+def test_run_with_config_overrides_merges_top_level_runtime_kwargs(
+    tracker, tmp_path: Path
+):
+    adapter = ActivitySimConfigAdapter()
+    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path / "base_case_alias")
+
+    base_run = tracker.begin_run(
+        "activitysim_override_base_alias",
+        "activitysim",
+        cache_mode="overwrite",
+    )
+    tracker.canonicalize_config(adapter, [overlay_dir, base_dir], strict=True)
+    tracker.end_run()
+
+    runtime_output_dir = tmp_path / "runtime_output_dir"
+    seen: list[tuple[Path, Path]] = []
+
+    def step(config_dir: Path, output_dir: Path) -> None:
+        seen.append((config_dir, output_dir))
+
+    tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_run_id=base_run.id,
+        overrides=ConfigOverrides(),
+        output_dir=tmp_path / "materialized_runtime_alias",
+        fn=step,
+        name="activitysim_override_runtime_alias",
+        model="activitysim",
+        runtime_kwargs={"output_dir": runtime_output_dir},
+    )
+
+    assert len(seen) == 1
+    assert seen[0][1] == runtime_output_dir
+    assert any(
+        (seen[0][0] / file_name).exists()
+        for file_name in ("settings.yaml", "settings_local.yaml")
+    )
+
+
+def test_run_with_config_overrides_rejects_dual_runtime_kwargs_sources(
+    tracker, tmp_path: Path
+):
+    adapter = ActivitySimConfigAdapter()
+    base_dir, overlay_dir = build_activitysim_test_configs(
+        tmp_path / "base_case_runtime_conflict"
+    )
+
+    base_run = tracker.begin_run(
+        "activitysim_override_base_runtime_conflict",
+        "activitysim",
+        cache_mode="overwrite",
+    )
+    tracker.canonicalize_config(adapter, [overlay_dir, base_dir], strict=True)
+    tracker.end_run()
+
+    with pytest.raises(
+        ValueError,
+        match="runtime_kwargs= and execution_options.runtime_kwargs=",
+    ):
+        tracker.run_with_config_overrides(
+            adapter=adapter,
+            base_run_id=base_run.id,
+            overrides=ConfigOverrides(),
+            output_dir=tmp_path / "materialized_runtime_conflict",
+            fn=lambda: None,
+            name="activitysim_override_runtime_conflict",
+            model="activitysim",
+            runtime_kwargs={"output_dir": tmp_path / "out_a"},
+            execution_options=ExecutionOptions(
+                runtime_kwargs={"output_dir": tmp_path / "out_b"}
+            ),
+        )

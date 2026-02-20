@@ -775,6 +775,19 @@ class ActivitySimConfigAdapter:
                     "run_with_config_overrides does not accept "
                     f"{forbidden}= in run kwargs."
                 )
+        runtime_kwargs = run_kwargs.pop("runtime_kwargs", None)
+        if (
+            runtime_kwargs is not None
+            and execution_options is not None
+            and execution_options.runtime_kwargs is not None
+        ):
+            raise ValueError(
+                "run_with_config_overrides received runtime kwargs in both "
+                "runtime_kwargs= and execution_options.runtime_kwargs=. "
+                "Use exactly one runtime kwargs source, and use "
+                "override_runtime_kwargs=... to map adapter-derived override "
+                "roots (for example selected_root_dir) into callable kwargs."
+            )
         if not identity_label or not identity_label.strip():
             raise ValueError("identity_label must be a non-empty string.")
         if output_dir.exists() and not output_dir.is_dir():
@@ -800,21 +813,24 @@ class ActivitySimConfigAdapter:
         )
         selected_root = self.select_root_dir(materialized)
         run_adapter = replace(self, root_dirs=list(materialized.root_dirs))
+        existing_runtime_kwargs = (
+            runtime_kwargs
+            if runtime_kwargs is not None
+            else (execution_options.runtime_kwargs if execution_options else None)
+        )
         injected_runtime_kwargs = self._build_override_runtime_kwargs(
             fn=fn,
             selected_root=selected_root,
             root_dirs=materialized.root_dirs,
             explicit_mapping=override_runtime_kwargs,
-            existing_runtime_kwargs=(
-                execution_options.runtime_kwargs if execution_options else None
-            ),
+            existing_runtime_kwargs=existing_runtime_kwargs,
         )
+        merged_runtime_kwargs: dict[str, Any] = {}
+        if existing_runtime_kwargs is not None:
+            merged_runtime_kwargs.update(existing_runtime_kwargs)
+        merged_runtime_kwargs.update(injected_runtime_kwargs)
         resolved_execution_options = execution_options
-        if injected_runtime_kwargs:
-            merged_runtime_kwargs: dict[str, Any] = {}
-            if execution_options is not None and execution_options.runtime_kwargs:
-                merged_runtime_kwargs.update(execution_options.runtime_kwargs)
-            merged_runtime_kwargs.update(injected_runtime_kwargs)
+        if runtime_kwargs is not None or injected_runtime_kwargs:
             if execution_options is None:
                 from consist.types import ExecutionOptions
 
