@@ -137,6 +137,81 @@ def test_run_with_config_overrides_requires_supporting_adapter(tracker, tmp_path
         )
 
 
+def test_run_with_config_overrides_rejects_multiple_base_selectors(tracker, tmp_path):
+    class _Adapter:
+        def run_with_config_overrides(
+            self, **kwargs
+        ):  # pragma: no cover - should not be called
+            raise AssertionError("adapter delegation should not occur")
+
+    with pytest.raises(ValueError, match="exactly one base selector"):
+        tracker.run_with_config_overrides(
+            adapter=_Adapter(),
+            base_run_id="baseline",
+            base_config_dirs=[tmp_path],
+            overrides={},
+            output_dir=tmp_path / "materialized",
+            fn=lambda: None,
+            name="override_step_dual_selector",
+        )
+
+
+def test_run_with_config_overrides_requires_base_selector(tracker, tmp_path):
+    class _Adapter:
+        def run_with_config_overrides(
+            self, **kwargs
+        ):  # pragma: no cover - should not be called
+            raise AssertionError("adapter delegation should not occur")
+
+    with pytest.raises(ValueError, match="requires a base selector"):
+        tracker.run_with_config_overrides(
+            adapter=_Adapter(),
+            overrides={},
+            output_dir=tmp_path / "materialized_missing_selector",
+            fn=lambda: None,
+            name="override_step_missing_selector",
+        )
+
+
+def test_run_with_config_overrides_rejects_blank_base_run_id(tracker, tmp_path):
+    class _Adapter:
+        def run_with_config_overrides(
+            self, **kwargs
+        ):  # pragma: no cover - should not be called
+            raise AssertionError("adapter delegation should not occur")
+
+    with pytest.raises(ValueError, match="base_run_id must be a non-empty string"):
+        tracker.run_with_config_overrides(
+            adapter=_Adapter(),
+            base_run_id="   ",
+            overrides={},
+            output_dir=tmp_path / "materialized_blank_run_id",
+            fn=lambda: None,
+            name="override_step_blank_run_id",
+        )
+
+
+def test_run_with_config_overrides_rejects_empty_base_config_dirs(tracker, tmp_path):
+    class _Adapter:
+        def run_with_config_overrides(
+            self, **kwargs
+        ):  # pragma: no cover - should not be called
+            raise AssertionError("adapter delegation should not occur")
+
+    with pytest.raises(
+        ValueError,
+        match="base_config_dirs must contain at least one directory",
+    ):
+        tracker.run_with_config_overrides(
+            adapter=_Adapter(),
+            base_config_dirs=[],
+            overrides={},
+            output_dir=tmp_path / "materialized_empty_base_config_dirs",
+            fn=lambda: None,
+            name="override_step_empty_base_config_dirs",
+        )
+
+
 def test_tracker_run_rejects_removed_config_plan_kwarg(tracker, tmp_path):
     @tracker.define_step(adapter=object())
     def step() -> None:

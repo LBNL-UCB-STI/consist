@@ -247,14 +247,6 @@ def test_run_with_config_overrides_hit_miss_behavior(tracker, tmp_path: Path):
     adapter = ActivitySimConfigAdapter()
     base_dir, overlay_dir = build_activitysim_test_configs(tmp_path / "base_case")
 
-    base_run = tracker.begin_run(
-        "activitysim_override_base",
-        "activitysim",
-        cache_mode="overwrite",
-    )
-    tracker.canonicalize_config(adapter, [overlay_dir, base_dir], strict=True)
-    tracker.end_run()
-
     calls: list[Path] = []
 
     def step(config_dir: Path) -> None:
@@ -267,7 +259,8 @@ def test_run_with_config_overrides_hit_miss_behavior(tracker, tmp_path: Path):
 
     run_a = tracker.run_with_config_overrides(
         adapter=adapter,
-        base_run_id=base_run.id,
+        base_config_dirs=[overlay_dir, base_dir],
+        base_primary_config=Path("settings.yaml"),
         overrides=ConfigOverrides(
             coefficients={("accessibility_coefficients.csv", "time", ""): 1.1}
         ),
@@ -280,7 +273,8 @@ def test_run_with_config_overrides_hit_miss_behavior(tracker, tmp_path: Path):
     )
     run_b = tracker.run_with_config_overrides(
         adapter=adapter,
-        base_run_id=base_run.id,
+        base_config_dirs=[overlay_dir, base_dir],
+        base_primary_config=Path("./settings.yaml"),
         overrides=ConfigOverrides(
             coefficients={("accessibility_coefficients.csv", "time", ""): 1.1}
         ),
@@ -293,7 +287,8 @@ def test_run_with_config_overrides_hit_miss_behavior(tracker, tmp_path: Path):
     )
     run_c = tracker.run_with_config_overrides(
         adapter=adapter,
-        base_run_id=base_run.id,
+        base_config_dirs=[overlay_dir, base_dir],
+        base_primary_config=Path("settings.yaml"),
         overrides=ConfigOverrides(
             coefficients={("accessibility_coefficients.csv", "time", ""): 2.3}
         ),
@@ -310,6 +305,52 @@ def test_run_with_config_overrides_hit_miss_behavior(tracker, tmp_path: Path):
     assert run_c.cache_hit is False
     assert len(calls) == 2
     assert run_c.run.meta.get("config_adapter") == "activitysim"
+    bundle = tracker.get_config_bundle(run_a.run.id)
+    assert bundle is not None
+    assert bundle.exists()
+
+
+def test_run_with_config_overrides_rejects_multiple_base_selectors(
+    tracker, tmp_path: Path
+):
+    adapter = ActivitySimConfigAdapter()
+    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path / "base_case_dual")
+
+    with pytest.raises(ValueError, match="exactly one base selector"):
+        tracker.run_with_config_overrides(
+            adapter=adapter,
+            base_run_id="baseline",
+            base_config_dirs=[overlay_dir, base_dir],
+            overrides=ConfigOverrides(),
+            output_dir=tmp_path / "materialized_dual_selector",
+            fn=lambda: None,
+            name="activitysim_override_dual_selector",
+            model="activitysim",
+        )
+
+
+def test_run_with_config_overrides_rejects_missing_base_primary_config_hint(
+    tracker, tmp_path: Path
+):
+    adapter = ActivitySimConfigAdapter()
+    base_dir, overlay_dir = build_activitysim_test_configs(
+        tmp_path / "base_case_missing_primary"
+    )
+
+    with pytest.raises(
+        FileNotFoundError,
+        match="base_primary_config was not found under base_config_dirs",
+    ):
+        tracker.run_with_config_overrides(
+            adapter=adapter,
+            base_config_dirs=[overlay_dir, base_dir],
+            base_primary_config=Path("missing-settings.yaml"),
+            overrides=ConfigOverrides(),
+            output_dir=tmp_path / "materialized_missing_primary",
+            fn=lambda: None,
+            name="activitysim_override_missing_primary",
+            model="activitysim",
+        )
 
 
 def test_run_with_config_overrides_rejects_manual_identity_kwargs(

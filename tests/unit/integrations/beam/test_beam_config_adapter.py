@@ -95,17 +95,8 @@ def test_beam_materialize_from_plan_uses_config_dirs(tracker, tmp_path: Path):
 
 
 def test_beam_run_with_config_overrides_hit_miss_behavior(tracker, tmp_path: Path):
-    adapter = BeamConfigAdapter()
+    adapter = BeamConfigAdapter(primary_config=Path("overlay.conf"))
     case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path / "base_case")
-
-    base_adapter = BeamConfigAdapter(primary_config=overlay_conf)
-    base_run = tracker.begin_run(
-        "beam_override_base",
-        "beam",
-        cache_mode="overwrite",
-    )
-    tracker.canonicalize_config(base_adapter, [case_dir])
-    tracker.end_run()
 
     calls: list[Path] = []
 
@@ -117,7 +108,8 @@ def test_beam_run_with_config_overrides_hit_miss_behavior(tracker, tmp_path: Pat
 
     run_a = tracker.run_with_config_overrides(
         adapter=adapter,
-        base_run_id=base_run.id,
+        base_config_dirs=[case_dir],
+        base_primary_config=overlay_conf,
         overrides=BeamConfigOverrides(
             values={"beam.agentsim.agentSampleSizeAsFractionOfPopulation": 0.35}
         ),
@@ -130,7 +122,8 @@ def test_beam_run_with_config_overrides_hit_miss_behavior(tracker, tmp_path: Pat
     )
     run_b = tracker.run_with_config_overrides(
         adapter=adapter,
-        base_run_id=base_run.id,
+        base_config_dirs=[case_dir],
+        base_primary_config=overlay_conf,
         overrides=BeamConfigOverrides(
             values={"beam.agentsim.agentSampleSizeAsFractionOfPopulation": 0.35}
         ),
@@ -143,7 +136,8 @@ def test_beam_run_with_config_overrides_hit_miss_behavior(tracker, tmp_path: Pat
     )
     run_c = tracker.run_with_config_overrides(
         adapter=adapter,
-        base_run_id=base_run.id,
+        base_config_dirs=[case_dir],
+        base_primary_config=overlay_conf,
         overrides=BeamConfigOverrides(
             values={"beam.agentsim.agentSampleSizeAsFractionOfPopulation": 0.7}
         ),
@@ -159,6 +153,25 @@ def test_beam_run_with_config_overrides_hit_miss_behavior(tracker, tmp_path: Pat
     assert run_b.cache_hit is True
     assert run_c.cache_hit is False
     assert len(calls) == 2
+
+
+def test_beam_run_with_config_overrides_rejects_multiple_base_selectors(
+    tracker, tmp_path: Path
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path / "base_case_dual")
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+
+    with pytest.raises(ValueError, match="exactly one base selector"):
+        tracker.run_with_config_overrides(
+            adapter=adapter,
+            base_run_id="baseline",
+            base_config_dirs=[case_dir],
+            overrides=BeamConfigOverrides(values={}),
+            output_dir=tmp_path / "materialized_dual_selector",
+            fn=lambda: None,
+            name="beam_override_dual_selector",
+            model="beam",
+        )
 
 
 def test_beam_run_with_config_overrides_respects_explicit_runtime_kwargs(

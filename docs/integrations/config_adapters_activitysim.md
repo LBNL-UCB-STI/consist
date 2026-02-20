@@ -172,7 +172,25 @@ coef = adapter.get_coefficient_value(
 )
 ```
 
-For end-to-end override execution, use tracker-level delegation:
+For end-to-end override execution with no prior run, use config roots directly:
+
+```python
+result = tracker.run_with_config_overrides(
+    adapter=adapter,
+    base_config_dirs=[overlay_dir, base_dir],
+    base_primary_config=Path("settings.yaml"),  # optional hint
+    overrides=ConfigOverrides(
+        coefficients={("accessibility_coefficients.csv", "time", ""): 2.3}
+    ),
+    output_dir=Path("temp/materialized"),
+    fn=run_model_step,
+    name="activitysim_calibration_step",
+    model="activitysim",
+    config={"iteration": 2},
+)
+```
+
+You can still use a historical run as the base selector:
 
 ```python
 result = tracker.run_with_config_overrides(

@@ -307,7 +307,9 @@ class BeamConfigAdapter:
         self,
         *,
         tracker: "Tracker",
-        base_run_id: str,
+        base_run_id: str | None = None,
+        base_config_dirs: Sequence[Path] | None = None,
+        base_primary_config: Path | None = None,
         overrides: BeamConfigOverrides,
         output_dir: Path,
         fn: Any,
@@ -345,9 +347,42 @@ class BeamConfigAdapter:
         if output_dir.exists() and not output_dir.is_dir():
             raise ValueError(f"output_dir must be a directory path: {output_dir!s}")
 
+        base_selector = self._resolve_override_base_selector(
+            base_run_id=base_run_id,
+            base_config_dirs=base_config_dirs,
+            base_primary_config=base_primary_config,
+        )
+        selector_identity: dict[str, Any]
+        if base_selector["kind"] == "run_id":
+            selector_identity = {
+                "selector": "base_run_id",
+                "base_run_id": base_selector["run_id"],
+            }
+        else:
+            resolved_dirs = self._resolve_base_config_dirs(base_selector["config_dirs"])
+            resolved_primary = self._resolve_base_primary_config_for_dirs(
+                base_config_dirs=resolved_dirs,
+                base_primary_config=base_primary_config,
+            )
+            base_adapter = replace(
+                self,
+                root_dirs=list(resolved_dirs),
+                primary_config=resolved_primary,
+            )
+            discovered_base = base_adapter.discover(
+                list(resolved_dirs),
+                identity=tracker.identity,
+                strict=strict,
+            )
+            selector_identity = {
+                "selector": "base_config_dirs",
+                "base_config_hash": discovered_base.content_hash,
+                "base_primary_config": str(resolved_primary),
+            }
+
         override_key = tracker.identity.canonical_json_sha256(
             {
-                "base_run_id": base_run_id,
+                "base_selector": selector_identity,
                 "overrides": overrides.to_canonical_dict(),
                 "adapter_version": self.adapter_version,
             }
@@ -356,13 +391,32 @@ class BeamConfigAdapter:
         if staged_output_dir.exists():
             shutil.rmtree(staged_output_dir)
 
-        materialized = self.materialize_from_run(
-            tracker=tracker,
-            run_id=base_run_id,
-            overrides=overrides,
-            output_dir=staged_output_dir,
-            strict=strict,
-        )
+        if base_selector["kind"] == "run_id":
+            materialized = self.materialize_from_run(
+                tracker=tracker,
+                run_id=base_selector["run_id"],
+                overrides=overrides,
+                output_dir=staged_output_dir,
+                strict=strict,
+            )
+        else:
+            resolved_dirs = self._resolve_base_config_dirs(base_selector["config_dirs"])
+            resolved_primary = self._resolve_base_primary_config_for_dirs(
+                base_config_dirs=resolved_dirs,
+                base_primary_config=base_primary_config,
+            )
+            base_adapter = replace(
+                self,
+                root_dirs=list(resolved_dirs),
+                primary_config=resolved_primary,
+            )
+            materialized = base_adapter.materialize(
+                list(resolved_dirs),
+                overrides,
+                output_dir=staged_output_dir,
+                identity=tracker.identity,
+                strict=strict,
+            )
         if not materialized.root_dirs:
             raise ValueError("Materialized BEAM config has no root directories.")
         selected_root = materialized.root_dirs[0]
@@ -459,6 +513,99 @@ class BeamConfigAdapter:
             primary_hint=self.primary_config,
         )
         return root_dirs, primary_config
+
+    @staticmethod
+    def _resolve_override_base_selector(
+        *,
+        base_run_id: str | None,
+        base_config_dirs: Sequence[Path] | None,
+        base_primary_config: Path | None,
+    ) -> dict[str, Any]:
+        if base_run_id is not None and base_config_dirs is not None:
+            raise ValueError(
+                "run_with_config_overrides requires exactly one base selector. "
+                "Provide either base_run_id or base_config_dirs, not both."
+            )
+        if base_run_id is None and base_config_dirs is None:
+            raise ValueError(
+                "run_with_config_overrides requires a base selector. "
+                "Provide either base_run_id or base_config_dirs."
+            )
+        if base_run_id is not None:
+            if base_primary_config is not None:
+                raise ValueError(
+                    "base_primary_config can only be used with base_config_dirs."
+                )
+            resolved_run_id = str(base_run_id).strip()
+            if not resolved_run_id:
+                raise ValueError(
+                    "base_run_id must be a non-empty string when provided."
+                )
+            return {"kind": "run_id", "run_id": resolved_run_id}
+        if base_config_dirs is None or len(base_config_dirs) == 0:
+            raise ValueError(
+                "base_config_dirs must contain at least one directory when provided."
+            )
+        return {"kind": "config_dirs", "config_dirs": list(base_config_dirs)}
+
+    @staticmethod
+    def _resolve_base_config_dirs(base_config_dirs: Sequence[Path]) -> list[Path]:
+        resolved_dirs: list[Path] = []
+        for path_like in base_config_dirs:
+            root_dir = Path(path_like).resolve()
+            if not root_dir.exists():
+                raise FileNotFoundError(
+                    f"Base config directory does not exist: {root_dir!s}"
+                )
+            if not root_dir.is_dir():
+                raise ValueError(
+                    f"base_config_dirs entries must be directories. Got: {root_dir!s}"
+                )
+            resolved_dirs.append(root_dir)
+        if not resolved_dirs:
+            raise ValueError(
+                "base_config_dirs must contain at least one directory when provided."
+            )
+        return resolved_dirs
+
+    def _resolve_base_primary_config_for_dirs(
+        self,
+        *,
+        base_config_dirs: Sequence[Path],
+        base_primary_config: Path | None,
+    ) -> Path:
+        primary_hint = (
+            base_primary_config
+            if base_primary_config is not None
+            else self.primary_config
+        )
+        if primary_hint is None:
+            raise ValueError(
+                "base_primary_config is required when using base_config_dirs unless "
+                "adapter.primary_config is already set."
+            )
+        primary_path = Path(primary_hint)
+        if primary_path.is_absolute():
+            if not primary_path.exists():
+                raise FileNotFoundError(f"BEAM config not found: {primary_path!s}")
+            resolved = primary_path.resolve()
+            if any(
+                resolved.is_relative_to(root_dir.resolve())
+                for root_dir in base_config_dirs
+            ):
+                return resolved
+            raise ValueError(
+                "base_primary_config must be located under base_config_dirs when "
+                "an absolute path is provided."
+            )
+        for root_dir in base_config_dirs:
+            candidate = (root_dir / primary_path).resolve()
+            if candidate.exists():
+                return candidate
+        raise FileNotFoundError(
+            "base_primary_config was not found under base_config_dirs: "
+            f"{primary_hint!s}"
+        )
 
     @staticmethod
     def _build_override_runtime_kwargs(

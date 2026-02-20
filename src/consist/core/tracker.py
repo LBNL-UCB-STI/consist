@@ -21,6 +21,7 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    Sequence,
     TYPE_CHECKING,
     Tuple,
     Type,
@@ -1372,7 +1373,9 @@ class Tracker:
         self,
         *,
         adapter: SupportsRunWithConfigOverrides,
-        base_run_id: str,
+        base_run_id: Optional[str] = None,
+        base_config_dirs: Optional[Sequence[Path]] = None,
+        base_primary_config: Optional[Path] = None,
         overrides: Any,
         output_dir: Path,
         fn: Callable[..., Any],
@@ -1391,6 +1394,11 @@ class Tracker:
 
         The tracker remains adapter-agnostic by forwarding to
         ``adapter.run_with_config_overrides(...)`` when available.
+
+        Exactly one base selector is required:
+        ``base_run_id`` or ``base_config_dirs``.
+        ``base_primary_config`` is optional and only applies to
+        ``base_config_dirs`` flows.
         """
         if not isinstance(adapter, SupportsRunWithConfigOverrides):
             raise TypeError(
@@ -1408,9 +1416,27 @@ class Tracker:
                     ),
                 )
             )
+        if base_run_id is not None and base_config_dirs is not None:
+            raise ValueError(
+                "run_with_config_overrides requires exactly one base selector. "
+                "Provide either base_run_id or base_config_dirs, not both."
+            )
+        if base_run_id is None and base_config_dirs is None:
+            raise ValueError(
+                "run_with_config_overrides requires a base selector. "
+                "Provide either base_run_id or base_config_dirs."
+            )
+        if base_run_id is not None and not str(base_run_id).strip():
+            raise ValueError("base_run_id must be a non-empty string when provided.")
+        if base_config_dirs is not None and len(base_config_dirs) == 0:
+            raise ValueError(
+                "base_config_dirs must contain at least one directory when provided."
+            )
         return adapter.run_with_config_overrides(
             tracker=self,
             base_run_id=base_run_id,
+            base_config_dirs=base_config_dirs,
+            base_primary_config=base_primary_config,
             overrides=overrides,
             output_dir=output_dir,
             fn=fn,

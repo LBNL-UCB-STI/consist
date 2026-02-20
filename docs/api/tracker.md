@@ -58,6 +58,18 @@ with tracker.trace(
 `config_plan` and `hash_inputs` are hidden compatibility kwargs, not the
 recommended public kwargs for new run/trace calls.
 
+## Config Override Selectors
+
+`Tracker.run_with_config_overrides(...)` now supports one-of base selectors:
+
+- `base_run_id="existing_run_id"` for historical bundle/config artifacts
+- `base_config_dirs=[Path("configs"), ...]` for first-run override execution
+
+Use exactly one selector. Passing both raises a `ValueError`.
+
+`base_primary_config=...` is optional and only applies with
+`base_config_dirs` (for adapters that require/accept a primary config hint).
+
 ::: consist.core.tracker.Tracker
     options:
       show_source: false
