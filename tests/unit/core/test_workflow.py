@@ -373,3 +373,22 @@ def test_scenario_run_uses_decorator_config_plan_default(tracker: Tracker) -> No
         record = tracker.last_run
         assert record is not None
         assert record.config["__consist_config_plan__"]["adapter_version"] == "2042"
+
+
+def test_scenario_run_uses_decorator_legacy_hash_inputs_default(
+    tracker: Tracker, tmp_path: Path
+) -> None:
+    dep = tmp_path / "scenario_identity_dep.yaml"
+    dep.write_text("mode=test\n")
+
+    @tracker.define_step(hash_inputs=[dep])
+    def step() -> None:
+        return None
+
+    with tracker.scenario("scen_hash_inputs_default") as sc:
+        sc.run(fn=step, cache_options=CacheOptions(cache_mode="overwrite"))
+        record = tracker.last_run
+        assert record is not None
+        digest_map = record.run.meta.get("consist_hash_inputs")
+        assert isinstance(digest_map, dict)
+        assert len(digest_map) == 1

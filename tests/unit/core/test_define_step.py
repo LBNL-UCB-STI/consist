@@ -1,6 +1,9 @@
 from typing import Any, cast
 
+import pytest
+
 from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
+from consist.core.decorators import define_step
 from consist.core.tracker import Tracker
 from consist.types import CacheOptions, ExecutionOptions
 
@@ -147,3 +150,57 @@ def test_define_step_config_plan_prepare_config_resolver(
     assert record.config["__consist_config_plan__"]["adapter_version"] == "resolver"
     assert record.config["__consist_config_plan__"]["hash"] == "h_res"
     assert list(captured["config_dirs"]) == ["configs/base", "configs/overlay"]
+
+
+def test_define_step_adapter_identity_inputs_metadata_stored() -> None:
+    adapter = object()
+
+    @define_step(adapter=adapter, identity_inputs=["dep.yaml"])
+    def step() -> None:
+        return None
+
+    metadata = getattr(step, "__consist_step__")
+    assert metadata.adapter is adapter
+    assert metadata.identity_inputs == ["dep.yaml"]
+
+
+def test_define_step_identity_inputs_default_applied(
+    tracker: Tracker, tmp_path
+) -> None:
+    dep = tmp_path / "identity_dep.yaml"
+    dep.write_text("threshold: 0.5\n")
+
+    @tracker.define_step(identity_inputs=[dep])
+    def step() -> None:
+        return None
+
+    tracker.run(
+        fn=step,
+        name="identity_metadata_step",
+        cache_options=CacheOptions(cache_mode="overwrite"),
+    )
+
+    record = tracker.last_run
+    assert record is not None
+    digest_map = record.run.meta.get("consist_hash_inputs")
+    assert isinstance(digest_map, dict)
+    assert len(digest_map) == 1
+
+
+def test_define_step_legacy_metadata_warns() -> None:
+    with pytest.warns(DeprecationWarning, match="define_step\\(config_plan"):
+
+        @define_step(
+            config_plan=_dummy_config_plan(adapter_version="1.0", content_hash="h1")
+        )
+        def step_config_plan() -> None:
+            return None
+
+    with pytest.warns(DeprecationWarning, match="define_step\\(hash_inputs"):
+
+        @define_step(hash_inputs=["dep.yaml"])
+        def step_hash_inputs() -> None:
+            return None
+
+    assert step_config_plan is not None
+    assert step_hash_inputs is not None

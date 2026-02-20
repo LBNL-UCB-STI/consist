@@ -121,6 +121,59 @@ def test_run_context_run_dir_is_created(tracker):
     assert result.outputs["out"].path.exists()
 
 
+def test_tracker_run_rejects_mixed_metadata_adapter_with_invocation_config_plan(
+    tracker, tmp_path
+):
+    config_root = tmp_path / "tracker_mixed_cfg_metadata"
+    config_root.mkdir(parents=True, exist_ok=True)
+    plan = ConfigPlan(
+        adapter_name="dummy",
+        adapter_version="1.0",
+        canonical=CanonicalConfig(
+            root_dirs=[config_root],
+            primary_config=None,
+            config_files=[],
+            external_files=[],
+            content_hash="hash",
+        ),
+        artifacts=[],
+        ingestables=[],
+    )
+
+    @tracker.define_step(adapter=object())
+    def step() -> None:
+        return None
+
+    with pytest.raises(ValueError) as excinfo:
+        tracker.run(fn=step, name="step", config_plan=plan)
+
+    message = str(excinfo.value)
+    assert "Problem:" in message
+    assert "Cause:" in message
+    assert "Fix:" in message
+    assert "adapter= or config_plan=" in message
+
+
+def test_tracker_run_rejects_mixed_metadata_identity_with_invocation_hash_inputs(
+    tracker, tmp_path
+):
+    dep = tmp_path / "tracker_identity_dep.yaml"
+    dep.write_text("mode=test\n")
+
+    @tracker.define_step(identity_inputs=[dep])
+    def step() -> None:
+        return None
+
+    with pytest.raises(ValueError) as excinfo:
+        tracker.run(fn=step, name="step", hash_inputs=[dep])
+
+    message = str(excinfo.value)
+    assert "Problem:" in message
+    assert "Cause:" in message
+    assert "Fix:" in message
+    assert "identity_inputs= or hash_inputs=" in message
+
+
 def test_start_run_overwrite_updates_cache_index(tracker, tmp_path):
     input_path = tmp_path / "input.txt"
     input_path.write_text("payload")

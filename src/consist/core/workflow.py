@@ -772,6 +772,7 @@ class ScenarioContext:
         if fn is None and name is None:
             raise ValueError("ScenarioContext.run requires name when fn is None.")
 
+        # TODO(v0.1.0): Remove legacy compatibility kwargs (config_plan/hash_inputs).
         legacy_config_plan = legacy_kwargs.pop("config_plan", None)
         legacy_hash_inputs = legacy_kwargs.pop("hash_inputs", None)
         _raise_unexpected_kwargs(legacy_kwargs)
@@ -789,9 +790,6 @@ class ScenarioContext:
                     ),
                 )
             )
-        resolved_identity_inputs = (
-            identity_inputs if identity_inputs is not None else legacy_hash_inputs
-        )
         if adapter is not None and legacy_config_plan is not None:
             raise ValueError(
                 format_problem_cause_fix(
@@ -814,6 +812,8 @@ class ScenarioContext:
             model=model,
             description=description,
             config=config,
+            adapter=adapter,
+            identity_inputs=identity_inputs,
             config_plan=config_plan,
             inputs=inputs,
             input_keys=input_keys,
@@ -823,7 +823,7 @@ class ScenarioContext:
             facet_from=facet_from,
             facet_schema_version=facet_schema_version,
             facet_index=facet_index,
-            hash_inputs=resolved_identity_inputs,
+            hash_inputs=legacy_hash_inputs,
             year=year,
             iteration=iteration,
             phase=phase,
@@ -847,6 +847,8 @@ class ScenarioContext:
         resolved_model = resolved_invocation.model
         resolved_description = resolved_invocation.description
         resolved_config = resolved_invocation.config
+        resolved_adapter = resolved_invocation.adapter
+        resolved_identity_inputs = resolved_invocation.identity_inputs
         resolved_config_plan = resolved_invocation.config_plan
         resolved_tags = resolved_invocation.tags
         resolved_facet = resolved_invocation.facet
@@ -858,7 +860,6 @@ class ScenarioContext:
         resolved_optional_input_keys = resolved_invocation.optional_input_keys
         resolved_facet_from = resolved_invocation.facet_from
         resolved_facet_schema_version = resolved_invocation.facet_schema_version
-        resolved_hash_inputs = resolved_invocation.hash_inputs
         resolved_cache_mode = resolved_invocation.cache_mode
         resolved_cache_hydration = resolved_invocation.cache_hydration
         resolved_cache_version = resolved_invocation.cache_version
@@ -905,7 +906,7 @@ class ScenarioContext:
         )
 
         run_adapter: Optional["ConfigAdapter"] = (
-            None if resolved_config_plan is not None else adapter
+            None if resolved_config_plan is not None else resolved_adapter
         )
 
         result = self.tracker.run(
@@ -927,7 +928,7 @@ class ScenarioContext:
             facet_from=resolved_facet_from,
             facet_schema_version=resolved_facet_schema_version,
             facet_index=resolved_facet_index,
-            identity_inputs=resolved_hash_inputs,
+            identity_inputs=resolved_identity_inputs,
             year=year,
             iteration=iteration,
             phase=phase,

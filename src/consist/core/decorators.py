@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import warnings
 from typing import (
     Any,
     Callable,
@@ -13,9 +14,10 @@ from typing import (
 )
 
 from consist.core.step_context import StepContext
+from consist.types import IdentityInputs
 
 if TYPE_CHECKING:
-    from consist.core.config_canonicalization import ConfigPlan
+    from consist.core.config_canonicalization import ConfigAdapter, ConfigPlan
 
 T = TypeVar("T")
 MetaValue = Union[T, Callable[[StepContext], T]]
@@ -42,6 +44,9 @@ class StepDefinition:
 
     # Config & facets
     config: Optional[MetaValue[Dict[str, Any]]] = None
+    adapter: Optional[MetaValue["ConfigAdapter"]] = None
+    identity_inputs: Optional[MetaValue[IdentityInputs]] = None
+    # TODO(v0.1.0): Remove legacy define_step identity aliases.
     config_plan: Optional[MetaValue["ConfigPlan"]] = None
     facet: Optional[MetaValue[Any]] = None
     facet_index: Optional[MetaValue[bool]] = None
@@ -54,6 +59,7 @@ class StepDefinition:
 
     # Runtime
     load_inputs: Optional[MetaValue[bool]] = None
+    # TODO(v0.1.0): Remove legacy define_step identity aliases.
     hash_inputs: Optional[MetaValue[Any]] = None
 
     # Metadata
@@ -76,6 +82,8 @@ def define_step(
     input_keys: Optional[MetaValue[Union[Iterable[str], str]]] = None,
     optional_input_keys: Optional[MetaValue[Union[Iterable[str], str]]] = None,
     config: Optional[MetaValue[Dict[str, Any]]] = None,
+    adapter: Optional[MetaValue["ConfigAdapter"]] = None,
+    identity_inputs: Optional[MetaValue[IdentityInputs]] = None,
     config_plan: Optional[MetaValue["ConfigPlan"]] = None,
     facet: Optional[MetaValue[Any]] = None,
     facet_index: Optional[MetaValue[bool]] = None,
@@ -97,6 +105,21 @@ def define_step(
     This is used by Tracker.run/ScenarioContext.run to infer defaults. Callable
     values are resolved at runtime with a StepContext.
     """
+    # TODO(v0.1.0): Remove legacy define_step kwargs and warnings below.
+    if config_plan is not None:
+        warnings.warn(
+            "define_step(config_plan=...) is deprecated; use define_step(adapter=...) "
+            "on the recommended path.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    if hash_inputs is not None:
+        warnings.warn(
+            "define_step(hash_inputs=...) is deprecated; use "
+            "define_step(identity_inputs=...) on the recommended path.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     def decorator(func: Callable) -> Callable:
         setattr(
@@ -113,6 +136,8 @@ def define_step(
                 input_keys=input_keys,
                 optional_input_keys=optional_input_keys,
                 config=config,
+                adapter=adapter,
+                identity_inputs=identity_inputs,
                 config_plan=config_plan,
                 facet=facet,
                 facet_index=facet_index,

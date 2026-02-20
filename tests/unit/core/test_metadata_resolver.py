@@ -6,6 +6,7 @@ on these guarantees to keep execution logic consistent.
 
 from __future__ import annotations
 
+from pathlib import Path
 
 import pytest
 
@@ -524,3 +525,218 @@ def test_resolver_config_plan_callable_and_explicit_override() -> None:
         missing_name_error="missing",
     )
     assert resolved_override.config_plan is explicit_plan
+
+
+def test_resolver_prefers_explicit_recommended_identity_fields() -> None:
+    decorator_adapter = object()
+    explicit_adapter = object()
+    decorator_dep = Path("decorator_identity.yaml")
+    explicit_dep = Path("explicit_identity.yaml")
+
+    @define_step(adapter=decorator_adapter, identity_inputs=[decorator_dep])
+    def step() -> None:
+        return None
+
+    resolver = MetadataResolver()
+    resolved = resolver.resolve(
+        fn=step,
+        name=None,
+        model=None,
+        description=None,
+        config=None,
+        config_plan=None,
+        inputs=None,
+        input_keys=None,
+        optional_input_keys=None,
+        tags=None,
+        facet=None,
+        facet_from=None,
+        facet_schema_version=None,
+        facet_index=None,
+        hash_inputs=None,
+        year=None,
+        iteration=None,
+        phase=None,
+        stage=None,
+        consist_settings=None,
+        consist_workspace=None,
+        consist_state=None,
+        runtime_kwargs=None,
+        outputs=None,
+        output_paths=None,
+        cache_mode=None,
+        cache_hydration=None,
+        cache_version=None,
+        validate_cached_outputs=None,
+        load_inputs=None,
+        missing_name_error="missing",
+        adapter=explicit_adapter,
+        identity_inputs=[explicit_dep],
+    )
+
+    assert resolved.adapter is explicit_adapter
+    assert resolved.identity_inputs == [explicit_dep]
+    assert resolved.hash_inputs == [explicit_dep]
+    assert resolved.config_plan is None
+
+
+def test_resolver_uses_legacy_aliases_when_recommended_absent_with_callables() -> None:
+    @define_step(
+        adapter=lambda ctx: None,
+        identity_inputs=lambda ctx: None,
+        config_plan=lambda ctx: _dummy_config_plan(
+            adapter_version=str(ctx.year),
+            content_hash=f"legacy_hash_{ctx.year}",
+        ),
+        hash_inputs=lambda ctx: [Path(f"legacy_dep_{ctx.year}.yaml")],
+    )
+    def step() -> None:
+        return None
+
+    resolver = MetadataResolver()
+    resolved = resolver.resolve(
+        fn=step,
+        name=None,
+        model=None,
+        description=None,
+        config=None,
+        config_plan=None,
+        inputs=None,
+        input_keys=None,
+        optional_input_keys=None,
+        tags=None,
+        facet=None,
+        facet_from=None,
+        facet_schema_version=None,
+        facet_index=None,
+        hash_inputs=None,
+        year=2036,
+        iteration=None,
+        phase=None,
+        stage=None,
+        consist_settings=None,
+        consist_workspace=None,
+        consist_state=None,
+        runtime_kwargs=None,
+        outputs=None,
+        output_paths=None,
+        cache_mode=None,
+        cache_hydration=None,
+        cache_version=None,
+        validate_cached_outputs=None,
+        load_inputs=None,
+        missing_name_error="missing",
+        adapter=None,
+        identity_inputs=None,
+    )
+
+    assert resolved.adapter is None
+    assert resolved.config_plan is not None
+    assert resolved.config_plan.adapter_version == "2036"
+    assert resolved.identity_inputs == [Path("legacy_dep_2036.yaml")]
+    assert resolved.hash_inputs == [Path("legacy_dep_2036.yaml")]
+
+
+def test_resolver_rejects_mixed_metadata_adapter_and_invocation_config_plan() -> None:
+    explicit_plan = _dummy_config_plan(
+        adapter_version="explicit",
+        content_hash="explicit_h",
+    )
+
+    @define_step(adapter=object())
+    def step() -> None:
+        return None
+
+    resolver = MetadataResolver()
+    with pytest.raises(ValueError) as excinfo:
+        resolver.resolve(
+            fn=step,
+            name=None,
+            model=None,
+            description=None,
+            config=None,
+            config_plan=explicit_plan,
+            inputs=None,
+            input_keys=None,
+            optional_input_keys=None,
+            tags=None,
+            facet=None,
+            facet_from=None,
+            facet_schema_version=None,
+            facet_index=None,
+            hash_inputs=None,
+            year=None,
+            iteration=None,
+            phase=None,
+            stage=None,
+            consist_settings=None,
+            consist_workspace=None,
+            consist_state=None,
+            runtime_kwargs=None,
+            outputs=None,
+            output_paths=None,
+            cache_mode=None,
+            cache_hydration=None,
+            cache_version=None,
+            validate_cached_outputs=None,
+            load_inputs=None,
+            missing_name_error="missing",
+            adapter=None,
+            identity_inputs=None,
+        )
+
+    message = str(excinfo.value)
+    assert "Problem:" in message
+    assert "Cause:" in message
+    assert "Fix:" in message
+    assert "adapter= or config_plan=" in message
+
+
+def test_resolver_rejects_mixed_metadata_identity_and_invocation_hash_inputs() -> None:
+    @define_step(identity_inputs=[Path("decorator_identity.yaml")])
+    def step() -> None:
+        return None
+
+    resolver = MetadataResolver()
+    with pytest.raises(ValueError) as excinfo:
+        resolver.resolve(
+            fn=step,
+            name=None,
+            model=None,
+            description=None,
+            config=None,
+            config_plan=None,
+            inputs=None,
+            input_keys=None,
+            optional_input_keys=None,
+            tags=None,
+            facet=None,
+            facet_from=None,
+            facet_schema_version=None,
+            facet_index=None,
+            hash_inputs=[Path("legacy_identity.yaml")],
+            year=None,
+            iteration=None,
+            phase=None,
+            stage=None,
+            consist_settings=None,
+            consist_workspace=None,
+            consist_state=None,
+            runtime_kwargs=None,
+            outputs=None,
+            output_paths=None,
+            cache_mode=None,
+            cache_hydration=None,
+            cache_version=None,
+            validate_cached_outputs=None,
+            load_inputs=None,
+            missing_name_error="missing",
+            adapter=None,
+            identity_inputs=None,
+        )
+
+    message = str(excinfo.value)
+    assert "Problem:" in message
+    assert "Cause:" in message
+    assert "Fix:" in message
+    assert "identity_inputs= or hash_inputs=" in message

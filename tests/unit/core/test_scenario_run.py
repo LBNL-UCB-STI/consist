@@ -8,6 +8,12 @@ from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
 from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
 
 
+def _assert_problem_cause_fix(message: str) -> None:
+    assert "Problem:" in message
+    assert "Cause:" in message
+    assert "Fix:" in message
+
+
 def test_scenario_run_updates_coupler_and_cache_hit(tracker):
     calls: list[str] = []
 
@@ -177,6 +183,164 @@ def test_scenario_run_accepts_adapter_identity_flow(tracker, tmp_path, monkeypat
     assert result.cache_hit is False
     assert calls == [[str(config_root)]]
     assert result.run.meta["config_adapter"] == "scenario_adapter"
+
+
+def test_scenario_run_forwards_define_step_adapter_identity_metadata(
+    tracker, tmp_path, monkeypatch
+):
+    dep_file = tmp_path / "identity_dep.yaml"
+    dep_file.write_text("mode: test\n")
+
+    config_root = tmp_path / "sc_adapter_metadata"
+    config_root.mkdir(parents=True, exist_ok=True)
+
+    adapter_plan = ConfigPlan(
+        adapter_name="scenario_adapter_metadata",
+        adapter_version="1.1",
+        canonical=CanonicalConfig(
+            root_dirs=[config_root],
+            primary_config=None,
+            config_files=[],
+            external_files=[],
+            content_hash="scenario_adapter_metadata_hash",
+        ),
+        artifacts=[],
+        ingestables=[],
+    )
+
+    class DummyAdapter:
+        model_name = "scenario_adapter_metadata"
+        root_dirs = [config_root]
+
+    dummy_adapter = DummyAdapter()
+    calls: list[list[str]] = []
+
+    def fake_prepare_config(adapter, config_dirs, **kwargs):
+        del kwargs
+        assert adapter is dummy_adapter
+        calls.append([str(p) for p in config_dirs])
+        return adapter_plan
+
+    monkeypatch.setattr(tracker, "prepare_config", fake_prepare_config)
+
+    @tracker.define_step(adapter=dummy_adapter, identity_inputs=[dep_file])
+    def step() -> None:
+        return None
+
+    with tracker.scenario("scen_adapter_metadata_flow") as sc:
+        result = sc.run(
+            fn=step,
+            cache_options=CacheOptions(cache_mode="overwrite"),
+        )
+
+    assert result.cache_hit is False
+    assert calls == [[str(config_root)]]
+    assert result.run.meta["config_adapter"] == "scenario_adapter_metadata"
+    digest_map = result.run.meta.get("consist_hash_inputs")
+    assert isinstance(digest_map, dict)
+    assert len(digest_map) == 1
+
+
+def test_scenario_run_rejects_mixed_identity_kwargs_error_shape(tracker):
+    with tracker.scenario("scen_mixed_identity_kwargs") as sc:
+        with pytest.raises(ValueError) as excinfo:
+            sc.run(
+                fn=lambda: None,
+                name="step",
+                identity_inputs=[],
+                hash_inputs=[],
+            )
+
+    message = str(excinfo.value)
+    _assert_problem_cause_fix(message)
+    assert "identity_inputs= or hash_inputs=" in message
+
+
+def test_scenario_run_rejects_mixed_adapter_and_config_plan_error_shape(
+    tracker, tmp_path
+):
+    config_root = tmp_path / "scenario_mixed_cfg"
+    config_root.mkdir(parents=True, exist_ok=True)
+    plan = ConfigPlan(
+        adapter_name="dummy",
+        adapter_version="1.0",
+        canonical=CanonicalConfig(
+            root_dirs=[config_root],
+            primary_config=None,
+            config_files=[],
+            external_files=[],
+            content_hash="hash",
+        ),
+        artifacts=[],
+        ingestables=[],
+    )
+
+    class DummyAdapter:
+        root_dirs = [config_root]
+
+    with tracker.scenario("scen_mixed_adapter_kwargs") as sc:
+        with pytest.raises(ValueError) as excinfo:
+            sc.run(
+                fn=lambda: None,
+                name="step",
+                adapter=DummyAdapter(),
+                config_plan=plan,
+            )
+
+    message = str(excinfo.value)
+    _assert_problem_cause_fix(message)
+    assert "adapter= or config_plan=" in message
+
+
+def test_scenario_run_rejects_mixed_metadata_adapter_with_invocation_config_plan(
+    tracker, tmp_path
+):
+    config_root = tmp_path / "scenario_mixed_cfg_metadata"
+    config_root.mkdir(parents=True, exist_ok=True)
+    plan = ConfigPlan(
+        adapter_name="dummy",
+        adapter_version="1.0",
+        canonical=CanonicalConfig(
+            root_dirs=[config_root],
+            primary_config=None,
+            config_files=[],
+            external_files=[],
+            content_hash="hash",
+        ),
+        artifacts=[],
+        ingestables=[],
+    )
+
+    @tracker.define_step(adapter=object())
+    def step() -> None:
+        return None
+
+    with tracker.scenario("scen_mixed_adapter_metadata_kwargs") as sc:
+        with pytest.raises(ValueError) as excinfo:
+            sc.run(fn=step, config_plan=plan)
+
+    message = str(excinfo.value)
+    _assert_problem_cause_fix(message)
+    assert "adapter= or config_plan=" in message
+
+
+def test_scenario_run_rejects_mixed_metadata_identity_with_invocation_hash_inputs(
+    tracker, tmp_path
+):
+    dep_file = tmp_path / "identity_dep.yaml"
+    dep_file.write_text("mode: test\n")
+
+    @tracker.define_step(identity_inputs=[dep_file])
+    def step() -> None:
+        return None
+
+    with tracker.scenario("scen_mixed_identity_metadata_kwargs") as sc:
+        with pytest.raises(ValueError) as excinfo:
+            sc.run(fn=step, hash_inputs=[dep_file])
+
+    message = str(excinfo.value)
+    _assert_problem_cause_fix(message)
+    assert "identity_inputs= or hash_inputs=" in message
 
 
 def test_scenario_run_accepts_ref_and_single_output_run_result(tracker):
