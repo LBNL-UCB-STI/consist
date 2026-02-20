@@ -17,6 +17,16 @@ The format is based on [Keep a Changelog], and this project adheres to
 - Add Workstream 2 migration coverage tests for adapter handoff, run/trace
   identity kwargs parity, and identity-summary behavior
   by @zneedell (PR link TBD).
+- Add one-line output accessors for run/artifact ergonomics:
+  `RunResult.output_path(...)`, `Artifact.as_path(...)`, and
+  `Artifact.as_df(...)` (with attached-tracker behavior and explicit-tracker
+  fallback) by @zneedell (PR link TBD).
+- Add top-level `runtime_kwargs={...}` alias on `run(...)`, normalized to
+  `ExecutionOptions.runtime_kwargs` with explicit conflict validation
+  by @zneedell (PR link TBD).
+- Add a new "Building a Domain Tracker" guide and docs navigation entry,
+  including wrapper patterns and direct-vs-wrapper guidance
+  by @zneedell (PR link TBD).
 
 ### Changed
 
@@ -39,7 +49,15 @@ The format is based on [Keep a Changelog], and this project adheres to
 - Remove deprecated `config_plan`/`hash_inputs` kwargs from run/trace/scenario
   and `define_step`, and add adapter-driven config override helpers
   (`run_with_config_overrides`, `get_config_bundle`, and new ActivitySim
-  materialization/lookup helpers) by @zneedell (PR link TBD).
+  materialization/lookup helpers). Follow-up ergonomics now support
+  `run_with_config_overrides(...)` runtime-kwarg auto-injection from
+  materialized override roots (ActivitySim + BEAM), with
+  `override_runtime_kwargs` customization and explicit runtime kwargs
+  precedence by @zneedell (PR link TBD).
+- Clarify concise and explicit input-linking forms in docs/examples:
+  `consist.refs(run_result)` / aliased refs mappings and bare-path vs labeled
+  tuple forms for `identity_inputs`
+  by @zneedell (PR link TBD).
 
 ### Fixed
 
