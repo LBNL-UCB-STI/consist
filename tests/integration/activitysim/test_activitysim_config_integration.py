@@ -191,20 +191,14 @@ def test_activitysim_config_plan_apply(tracker, tmp_path: Path):
 
 
 def test_activitysim_config_plan_run_applies_ingest(tracker, tmp_path: Path):
-    adapter = ActivitySimConfigAdapter()
     base_dir, overlay_dir = build_activitysim_test_configs(tmp_path)
-
-    plan = tracker.prepare_config(
-        adapter,
-        [overlay_dir, base_dir],
-        strict=True,
-    )
+    adapter = ActivitySimConfigAdapter(root_dirs=[overlay_dir, base_dir])
 
     tracker.run(
         fn=lambda: None,
         name="activitysim_plan_run",
         model="activitysim",
-        config_plan=plan,
+        adapter=adapter,
         cache_options=CacheOptions(cache_mode="overwrite"),
     )
 
@@ -313,7 +307,9 @@ def test_run_with_config_overrides_hit_miss_behavior(tracker, tmp_path: Path):
     assert run_c.run.meta.get("config_adapter") == "activitysim"
 
 
-def test_run_with_config_overrides_rejects_manual_identity_kwargs(tracker, tmp_path: Path):
+def test_run_with_config_overrides_rejects_manual_identity_kwargs(
+    tracker, tmp_path: Path
+):
     adapter = ActivitySimConfigAdapter()
     base_dir, overlay_dir = build_activitysim_test_configs(tmp_path / "base_case_error")
 

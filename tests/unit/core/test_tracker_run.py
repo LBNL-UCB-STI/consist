@@ -135,42 +135,16 @@ def test_run_with_config_overrides_requires_supporting_adapter(tracker, tmp_path
         )
 
 
-def test_tracker_run_rejects_mixed_metadata_adapter_with_invocation_config_plan(
-    tracker, tmp_path
-):
-    config_root = tmp_path / "tracker_mixed_cfg_metadata"
-    config_root.mkdir(parents=True, exist_ok=True)
-    plan = ConfigPlan(
-        adapter_name="dummy",
-        adapter_version="1.0",
-        canonical=CanonicalConfig(
-            root_dirs=[config_root],
-            primary_config=None,
-            config_files=[],
-            external_files=[],
-            content_hash="hash",
-        ),
-        artifacts=[],
-        ingestables=[],
-    )
-
+def test_tracker_run_rejects_removed_config_plan_kwarg(tracker, tmp_path):
     @tracker.define_step(adapter=object())
     def step() -> None:
         return None
 
-    with pytest.raises(ValueError) as excinfo:
-        tracker.run(fn=step, name="step", config_plan=plan)
-
-    message = str(excinfo.value)
-    assert "Problem:" in message
-    assert "Cause:" in message
-    assert "Fix:" in message
-    assert "adapter= or config_plan=" in message
+    with pytest.raises(TypeError, match="unexpected keyword argument 'config_plan'"):
+        tracker.run(fn=step, name="step", config_plan=object())
 
 
-def test_tracker_run_rejects_mixed_metadata_identity_with_invocation_hash_inputs(
-    tracker, tmp_path
-):
+def test_tracker_run_rejects_removed_hash_inputs_kwarg(tracker, tmp_path):
     dep = tmp_path / "tracker_identity_dep.yaml"
     dep.write_text("mode=test\n")
 
@@ -178,14 +152,8 @@ def test_tracker_run_rejects_mixed_metadata_identity_with_invocation_hash_inputs
     def step() -> None:
         return None
 
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(TypeError, match="unexpected keyword argument 'hash_inputs'"):
         tracker.run(fn=step, name="step", hash_inputs=[dep])
-
-    message = str(excinfo.value)
-    assert "Problem:" in message
-    assert "Cause:" in message
-    assert "Fix:" in message
-    assert "identity_inputs= or hash_inputs=" in message
 
 
 def test_start_run_overwrite_updates_cache_index(tracker, tmp_path):
@@ -736,9 +704,7 @@ def test_cache_version_affects_config_hash(tracker):
     assert hash_v1 != hash_v2
 
 
-def test_tracker_run_adapter_identity_matches_legacy_config_plan(
-    tracker, tmp_path, monkeypatch
-):
+def test_tracker_run_adapter_identity_populates_meta(tracker, tmp_path, monkeypatch):
     dep_path = tmp_path / "identity_dep.yaml"
     dep_path.write_text("threshold: 0.5\n")
 
@@ -786,16 +752,7 @@ def test_tracker_run_adapter_identity_matches_legacy_config_plan(
         identity_inputs=[dep_path],
         cache_options=CacheOptions(cache_mode="overwrite"),
     )
-    legacy_run = tracker.run(
-        fn=step,
-        name="identity_step",
-        config_plan=adapter_plan,
-        hash_inputs=[dep_path],
-        cache_options=CacheOptions(cache_mode="overwrite"),
-    )
-
     assert calls == [[config_root]]
-    assert adapter_run.run.config_hash == legacy_run.run.config_hash
     assert adapter_run.run.meta["config_adapter"] == "dummy_adapter"
     assert adapter_run.run.meta["config_bundle_hash"] == "adapter_identity_hash"
     assert adapter_run.run.meta["consist_hash_inputs"]

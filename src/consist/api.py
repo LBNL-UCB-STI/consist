@@ -64,7 +64,7 @@ from consist.types import (
 )
 
 if TYPE_CHECKING:
-    from consist.core.config_canonicalization import ConfigAdapter, ConfigPlan
+    from consist.core.config_canonicalization import ConfigAdapter
     from consist.core.step_context import StepContext
 
 GeoDataFrameType = Any
@@ -302,9 +302,10 @@ def define_step(
     input_keys: Optional[Union[Iterable[str], str]] = None,
     optional_input_keys: Optional[Union[Iterable[str], str]] = None,
     config: Optional[Dict[str, Any]] = None,
-    config_plan: Optional[
-        Union["ConfigPlan", Callable[["StepContext"], "ConfigPlan"]]
+    adapter: Optional[
+        Union["ConfigAdapter", Callable[["StepContext"], "ConfigAdapter"]]
     ] = None,
+    identity_inputs: Optional[IdentityInputs] = None,
     facet: Optional[Any] = None,
     facet_index: Optional[bool] = None,
     cache_mode: Optional[str] = None,
@@ -312,7 +313,6 @@ def define_step(
     cache_version: Optional[int] = None,
     validate_cached_outputs: Optional[str] = None,
     load_inputs: Optional[bool] = None,
-    hash_inputs: Optional[Any] = None,
     tags: Optional[list[str]] = None,
     facet_from: Optional[list[str]] = None,
     facet_schema_version: Optional[Union[str, int]] = None,
@@ -336,7 +336,8 @@ def define_step(
         input_keys=input_keys,
         optional_input_keys=optional_input_keys,
         config=config,
-        config_plan=config_plan,
+        adapter=adapter,
+        identity_inputs=identity_inputs,
         facet=facet,
         facet_index=facet_index,
         cache_mode=cache_mode,
@@ -344,7 +345,6 @@ def define_step(
         cache_version=cache_version,
         validate_cached_outputs=validate_cached_outputs,
         load_inputs=load_inputs,
-        hash_inputs=hash_inputs,
         tags=tags,
         facet_from=facet_from,
         facet_schema_version=facet_schema_version,

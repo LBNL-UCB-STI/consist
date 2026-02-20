@@ -1,4 +1,4 @@
-from typing import Any, cast
+from pathlib import Path
 
 import pytest
 
@@ -6,23 +6,6 @@ from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
 from consist.core.decorators import define_step
 from consist.core.tracker import Tracker
 from consist.types import CacheOptions, ExecutionOptions
-
-
-def _dummy_config_plan(*, adapter_version: str, content_hash: str) -> ConfigPlan:
-    canonical = CanonicalConfig(
-        root_dirs=[],
-        primary_config=None,
-        config_files=[],
-        external_files=[],
-        content_hash=content_hash,
-    )
-    return ConfigPlan(
-        adapter_name="dummy",
-        adapter_version=adapter_version,
-        canonical=canonical,
-        artifacts=[],
-        ingestables=[],
-    )
 
 
 def test_define_step_metadata_applied(tracker: Tracker) -> None:
@@ -69,13 +52,40 @@ def test_define_step_name_template_and_callable_metadata(tracker: Tracker) -> No
     assert run.description == "year:2030"
 
 
-def test_define_step_config_plan_default_applied(tracker: Tracker) -> None:
-    @tracker.define_step(
-        config_plan=lambda ctx: _dummy_config_plan(
-            adapter_version=str(ctx.year),
-            content_hash=f"hash_{ctx.year}",
+def test_define_step_adapter_default_applied(
+    tracker: Tracker, tmp_path, monkeypatch
+) -> None:
+    config_root = tmp_path / "adapter_cfg"
+    config_root.mkdir(parents=True, exist_ok=True)
+
+    class DummyAdapter:
+        root_dirs = [config_root]
+
+    adapter = DummyAdapter()
+    captured: list[Path] = []
+
+    def fake_prepare_config(*, adapter, config_dirs, **kwargs):
+        del kwargs
+        assert adapter is not None
+        captured.extend(Path(p) for p in config_dirs)
+        return ConfigPlan(
+            adapter_name="dummy",
+            adapter_version="1.0",
+            canonical=CanonicalConfig(
+                root_dirs=[Path(p) for p in config_dirs],
+                primary_config=None,
+                config_files=[],
+                external_files=[],
+                content_hash="hash_a",
+            ),
+            artifacts=[],
+            ingestables=[],
         )
-    )
+
+    # Keep behavior realistic while still asserting adapter resolution path.
+    monkeypatch.setattr(tracker, "prepare_config", fake_prepare_config)
+
+    @tracker.define_step(adapter=adapter)
     def step() -> None:
         return None
 
@@ -87,69 +97,59 @@ def test_define_step_config_plan_default_applied(tracker: Tracker) -> None:
 
     record = tracker.last_run
     assert record is not None
-    assert record.config["__consist_config_plan__"]["adapter_version"] == "2035"
-    assert record.config["__consist_config_plan__"]["hash"] == "hash_2035"
+    assert record.config["__consist_config_plan__"]["adapter"]
+    assert captured == [config_root]
 
 
-def test_define_step_config_plan_explicit_override(tracker: Tracker) -> None:
-    decorator_plan = _dummy_config_plan(
-        adapter_version="decorator", content_hash="h_dec"
-    )
-    explicit_plan = _dummy_config_plan(adapter_version="explicit", content_hash="h_exp")
+def test_define_step_adapter_explicit_override(
+    tracker: Tracker, tmp_path, monkeypatch
+) -> None:
+    root_a = tmp_path / "cfg_a"
+    root_b = tmp_path / "cfg_b"
+    root_a.mkdir(parents=True, exist_ok=True)
+    root_b.mkdir(parents=True, exist_ok=True)
 
-    @tracker.define_step(config_plan=decorator_plan)
+    class AdapterA:
+        root_dirs = [root_a]
+
+    class AdapterB:
+        root_dirs = [root_b]
+
+    decorator_adapter = AdapterA()
+    explicit_adapter = AdapterB()
+
+    called: list[Path] = []
+
+    def fake_prepare_config(*, adapter, config_dirs, **kwargs):
+        del adapter, kwargs
+        called.extend(Path(p) for p in config_dirs)
+        return ConfigPlan(
+            adapter_name="dummy",
+            adapter_version="1.0",
+            canonical=CanonicalConfig(
+                root_dirs=[Path(p) for p in config_dirs],
+                primary_config=None,
+                config_files=[],
+                external_files=[],
+                content_hash="hash_b",
+            ),
+            artifacts=[],
+            ingestables=[],
+        )
+
+    monkeypatch.setattr(tracker, "prepare_config", fake_prepare_config)
+
+    @tracker.define_step(adapter=decorator_adapter)
     def step() -> None:
         return None
 
     tracker.run(
         fn=step,
-        config_plan=explicit_plan,
+        adapter=explicit_adapter,
         cache_options=CacheOptions(cache_mode="overwrite"),
     )
 
-    record = tracker.last_run
-    assert record is not None
-    assert record.config["__consist_config_plan__"]["adapter_version"] == "explicit"
-    assert record.config["__consist_config_plan__"]["hash"] == "h_exp"
-
-
-def test_define_step_config_plan_prepare_config_resolver(
-    monkeypatch, tracker: Tracker
-) -> None:
-    resolved_plan = _dummy_config_plan(adapter_version="resolver", content_hash="h_res")
-    captured: dict[str, object] = {}
-
-    def fake_prepare_config(**kwargs):
-        captured.update(kwargs)
-        return resolved_plan
-
-    monkeypatch.setattr(tracker, "prepare_config", fake_prepare_config)
-
-    @tracker.define_step(
-        config_plan=tracker.prepare_config_resolver(
-            adapter=cast(Any, "activitysim"),
-            config_dirs_from="settings.config_dirs",
-        )
-    )
-    def step(settings) -> None:
-        assert settings is not None
-        return None
-
-    tracker.run(
-        fn=step,
-        execution_options=ExecutionOptions(
-            runtime_kwargs={
-                "settings": {"config_dirs": ["configs/base", "configs/overlay"]}
-            }
-        ),
-        cache_options=CacheOptions(cache_mode="overwrite"),
-    )
-
-    record = tracker.last_run
-    assert record is not None
-    assert record.config["__consist_config_plan__"]["adapter_version"] == "resolver"
-    assert record.config["__consist_config_plan__"]["hash"] == "h_res"
-    assert list(captured["config_dirs"]) == ["configs/base", "configs/overlay"]
+    assert called == [root_b]
 
 
 def test_define_step_adapter_identity_inputs_metadata_stored() -> None:
@@ -187,20 +187,17 @@ def test_define_step_identity_inputs_default_applied(
     assert len(digest_map) == 1
 
 
-def test_define_step_legacy_metadata_warns() -> None:
-    with pytest.warns(DeprecationWarning, match="define_step\\(config_plan"):
+def test_define_step_legacy_metadata_removed() -> None:
+    with pytest.raises(TypeError, match="unexpected keyword argument 'config_plan'"):
 
-        @define_step(
-            config_plan=_dummy_config_plan(adapter_version="1.0", content_hash="h1")
-        )
+        @define_step(config_plan=object())
         def step_config_plan() -> None:
             return None
 
-    with pytest.warns(DeprecationWarning, match="define_step\\(hash_inputs"):
+    with pytest.raises(TypeError, match="unexpected keyword argument 'hash_inputs'"):
 
         @define_step(hash_inputs=["dep.yaml"])
         def step_hash_inputs() -> None:
             return None
 
-    assert step_config_plan is not None
-    assert step_hash_inputs is not None
+    assert True

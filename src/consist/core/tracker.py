@@ -1198,7 +1198,6 @@ class Tracker:
         cache_options: Optional[CacheOptions] = None,
         output_policy: Optional[OutputPolicyOptions] = None,
         execution_options: Optional[ExecutionOptions] = None,
-        **legacy_kwargs: Any,
     ) -> RunResult:
         """
         Execute a function-shaped run with caching and output handling.
@@ -1283,11 +1282,6 @@ class Tracker:
             Grouped execution controls (`load_inputs`, `executor`, `container`,
             `runtime_kwargs`, `inject_context`).
 
-        **legacy_kwargs : Any
-            Hidden backwards-compatibility kwargs. ``config_plan`` and
-            ``hash_inputs`` are still accepted, but ``adapter`` and
-            ``identity_inputs`` are the public API.
-
         Returns
         -------
         RunResult
@@ -1366,7 +1360,6 @@ class Tracker:
             cache_options=cache_options,
             output_policy=output_policy,
             execution_options=execution_options,
-            **legacy_kwargs,
         )
 
     def run_with_config_overrides(
@@ -1464,7 +1457,6 @@ class Tracker:
         code_identity_extra_deps: Optional[List[str]] = None,
         output_mismatch: str = "warn",
         output_missing: str = "warn",
-        **legacy_kwargs: Any,
     ) -> Iterator["Tracker"]:
         """
         Context manager for inline tracing of a run with inline execution.
@@ -1561,11 +1553,6 @@ class Tracker:
         output_missing : str, default "warn"
             Behavior when expected outputs are missing: "warn", "error", or "ignore".
 
-        **legacy_kwargs : Any
-            Hidden backwards-compatibility kwargs. ``config_plan`` and
-            ``hash_inputs`` are still accepted, but ``adapter`` and
-            ``identity_inputs`` are the public API.
-
         Yields
         ------
         Tracker
@@ -1652,7 +1639,6 @@ class Tracker:
             code_identity_extra_deps=code_identity_extra_deps,
             output_mismatch=output_mismatch,
             output_missing=output_missing,
-            **legacy_kwargs,
         ) as active_tracker:
             yield active_tracker
 
@@ -3105,7 +3091,7 @@ class Tracker:
         facet_index: Optional[bool] = None,
     ) -> Callable[["StepContext"], ConfigPlan]:
         """
-        Build a StepContext resolver for use with `@define_step(config_plan=...)`.
+        Build a StepContext resolver for use with `@define_step(adapter=...)`.
 
         Exactly one config-directory source must be provided:
         - `config_dirs`: static iterable of directories.

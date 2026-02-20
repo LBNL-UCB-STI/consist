@@ -69,8 +69,8 @@ def test_pre_pilates_adapter_and_identity_inputs_surface(
     assert "dep_cfg" in summary["identity_inputs"]
 
 
-def test_pre_pilates_mixed_identity_kwargs_error_shape(tracker) -> None:
-    with pytest.raises(ValueError) as excinfo:
+def test_pre_pilates_rejects_removed_hash_inputs_kwarg(tracker) -> None:
+    with pytest.raises(TypeError) as excinfo:
         tracker.run(
             fn=lambda: None,
             name="pilates_mixed_identity_kwargs",
@@ -79,8 +79,7 @@ def test_pre_pilates_mixed_identity_kwargs_error_shape(tracker) -> None:
         )
 
     message = str(excinfo.value)
-    _assert_problem_cause_fix(message)
-    assert "identity_inputs= or hash_inputs=" in message
+    assert "unexpected keyword argument 'hash_inputs'" in message
 
 
 def test_pre_pilates_missing_identity_path_error_shape(tracker, tmp_path: Path) -> None:

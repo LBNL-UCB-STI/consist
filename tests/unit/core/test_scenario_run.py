@@ -241,9 +241,11 @@ def test_scenario_run_forwards_define_step_adapter_identity_metadata(
     assert len(digest_map) == 1
 
 
-def test_scenario_run_rejects_mixed_identity_kwargs_error_shape(tracker):
+def test_scenario_run_rejects_removed_hash_inputs_kwarg(tracker):
     with tracker.scenario("scen_mixed_identity_kwargs") as sc:
-        with pytest.raises(ValueError) as excinfo:
+        with pytest.raises(
+            TypeError, match="unexpected keyword argument 'hash_inputs'"
+        ):
             sc.run(
                 fn=lambda: None,
                 name="step",
@@ -251,80 +253,35 @@ def test_scenario_run_rejects_mixed_identity_kwargs_error_shape(tracker):
                 hash_inputs=[],
             )
 
-    message = str(excinfo.value)
-    _assert_problem_cause_fix(message)
-    assert "identity_inputs= or hash_inputs=" in message
 
-
-def test_scenario_run_rejects_mixed_adapter_and_config_plan_error_shape(
-    tracker, tmp_path
-):
-    config_root = tmp_path / "scenario_mixed_cfg"
-    config_root.mkdir(parents=True, exist_ok=True)
-    plan = ConfigPlan(
-        adapter_name="dummy",
-        adapter_version="1.0",
-        canonical=CanonicalConfig(
-            root_dirs=[config_root],
-            primary_config=None,
-            config_files=[],
-            external_files=[],
-            content_hash="hash",
-        ),
-        artifacts=[],
-        ingestables=[],
-    )
-
-    class DummyAdapter:
-        root_dirs = [config_root]
-
+def test_scenario_run_rejects_removed_config_plan_kwarg(tracker):
     with tracker.scenario("scen_mixed_adapter_kwargs") as sc:
-        with pytest.raises(ValueError) as excinfo:
+        with pytest.raises(
+            TypeError, match="unexpected keyword argument 'config_plan'"
+        ):
             sc.run(
                 fn=lambda: None,
                 name="step",
-                adapter=DummyAdapter(),
-                config_plan=plan,
+                adapter=object(),
+                config_plan=object(),
             )
 
-    message = str(excinfo.value)
-    _assert_problem_cause_fix(message)
-    assert "adapter= or config_plan=" in message
 
-
-def test_scenario_run_rejects_mixed_metadata_adapter_with_invocation_config_plan(
-    tracker, tmp_path
+def test_scenario_run_rejects_removed_config_plan_kwarg_with_decorator_metadata(
+    tracker,
 ):
-    config_root = tmp_path / "scenario_mixed_cfg_metadata"
-    config_root.mkdir(parents=True, exist_ok=True)
-    plan = ConfigPlan(
-        adapter_name="dummy",
-        adapter_version="1.0",
-        canonical=CanonicalConfig(
-            root_dirs=[config_root],
-            primary_config=None,
-            config_files=[],
-            external_files=[],
-            content_hash="hash",
-        ),
-        artifacts=[],
-        ingestables=[],
-    )
-
     @tracker.define_step(adapter=object())
     def step() -> None:
         return None
 
     with tracker.scenario("scen_mixed_adapter_metadata_kwargs") as sc:
-        with pytest.raises(ValueError) as excinfo:
-            sc.run(fn=step, config_plan=plan)
-
-    message = str(excinfo.value)
-    _assert_problem_cause_fix(message)
-    assert "adapter= or config_plan=" in message
+        with pytest.raises(
+            TypeError, match="unexpected keyword argument 'config_plan'"
+        ):
+            sc.run(fn=step, config_plan=object())
 
 
-def test_scenario_run_rejects_mixed_metadata_identity_with_invocation_hash_inputs(
+def test_scenario_run_rejects_removed_hash_inputs_kwarg_with_decorator_metadata(
     tracker, tmp_path
 ):
     dep_file = tmp_path / "identity_dep.yaml"
@@ -335,12 +292,10 @@ def test_scenario_run_rejects_mixed_metadata_identity_with_invocation_hash_input
         return None
 
     with tracker.scenario("scen_mixed_identity_metadata_kwargs") as sc:
-        with pytest.raises(ValueError) as excinfo:
+        with pytest.raises(
+            TypeError, match="unexpected keyword argument 'hash_inputs'"
+        ):
             sc.run(fn=step, hash_inputs=[dep_file])
-
-    message = str(excinfo.value)
-    _assert_problem_cause_fix(message)
-    assert "identity_inputs= or hash_inputs=" in message
 
 
 def test_scenario_run_accepts_ref_and_single_output_run_result(tracker):

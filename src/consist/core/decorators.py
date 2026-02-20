@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-import warnings
 from typing import (
     Any,
     Callable,
@@ -17,7 +16,7 @@ from consist.core.step_context import StepContext
 from consist.types import IdentityInputs
 
 if TYPE_CHECKING:
-    from consist.core.config_canonicalization import ConfigAdapter, ConfigPlan
+    from consist.core.config_canonicalization import ConfigAdapter
 
 T = TypeVar("T")
 MetaValue = Union[T, Callable[[StepContext], T]]
@@ -46,8 +45,6 @@ class StepDefinition:
     config: Optional[MetaValue[Dict[str, Any]]] = None
     adapter: Optional[MetaValue["ConfigAdapter"]] = None
     identity_inputs: Optional[MetaValue[IdentityInputs]] = None
-    # TODO(v0.1.0): Remove legacy define_step identity aliases.
-    config_plan: Optional[MetaValue["ConfigPlan"]] = None
     facet: Optional[MetaValue[Any]] = None
     facet_index: Optional[MetaValue[bool]] = None
 
@@ -59,8 +56,6 @@ class StepDefinition:
 
     # Runtime
     load_inputs: Optional[MetaValue[bool]] = None
-    # TODO(v0.1.0): Remove legacy define_step identity aliases.
-    hash_inputs: Optional[MetaValue[Any]] = None
 
     # Metadata
     tags: Optional[MetaValue[List[str]]] = None
@@ -84,7 +79,6 @@ def define_step(
     config: Optional[MetaValue[Dict[str, Any]]] = None,
     adapter: Optional[MetaValue["ConfigAdapter"]] = None,
     identity_inputs: Optional[MetaValue[IdentityInputs]] = None,
-    config_plan: Optional[MetaValue["ConfigPlan"]] = None,
     facet: Optional[MetaValue[Any]] = None,
     facet_index: Optional[MetaValue[bool]] = None,
     cache_mode: Optional[MetaValue[str]] = None,
@@ -92,7 +86,6 @@ def define_step(
     cache_version: Optional[MetaValue[int]] = None,
     validate_cached_outputs: Optional[MetaValue[str]] = None,
     load_inputs: Optional[MetaValue[bool]] = None,
-    hash_inputs: Optional[MetaValue[Any]] = None,
     tags: Optional[MetaValue[List[str]]] = None,
     facet_from: Optional[MetaValue[List[str]]] = None,
     facet_schema_version: Optional[MetaValue[Union[str, int]]] = None,
@@ -105,21 +98,12 @@ def define_step(
     This is used by Tracker.run/ScenarioContext.run to infer defaults. Callable
     values are resolved at runtime with a StepContext.
     """
-    # TODO(v0.1.0): Remove legacy define_step kwargs and warnings below.
-    if config_plan is not None:
-        warnings.warn(
-            "define_step(config_plan=...) is deprecated; use define_step(adapter=...) "
-            "on the recommended path.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-    if hash_inputs is not None:
-        warnings.warn(
-            "define_step(hash_inputs=...) is deprecated; use "
-            "define_step(identity_inputs=...) on the recommended path.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+    removed_kwargs = [name for name in ("config_plan", "hash_inputs") if name in extra]
+    if removed_kwargs:
+        if len(removed_kwargs) == 1:
+            raise TypeError(f"unexpected keyword argument '{removed_kwargs[0]}'")
+        joined = "', '".join(sorted(removed_kwargs))
+        raise TypeError(f"unexpected keyword arguments '{joined}'")
 
     def decorator(func: Callable) -> Callable:
         setattr(
@@ -138,7 +122,6 @@ def define_step(
                 config=config,
                 adapter=adapter,
                 identity_inputs=identity_inputs,
-                config_plan=config_plan,
                 facet=facet,
                 facet_index=facet_index,
                 cache_mode=cache_mode,
@@ -146,7 +129,6 @@ def define_step(
                 cache_version=cache_version,
                 validate_cached_outputs=validate_cached_outputs,
                 load_inputs=load_inputs,
-                hash_inputs=hash_inputs,
                 tags=tags,
                 facet_from=facet_from,
                 facet_schema_version=facet_schema_version,

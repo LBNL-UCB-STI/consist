@@ -704,7 +704,9 @@ class ActivitySimConfigAdapter:
         base_bundle = tracker.get_config_bundle(
             run_id, adapter="activitysim", allow_missing=True
         )
-        if base_bundle is None and (run_adapter is None or run_adapter == "activitysim"):
+        if base_bundle is None and (
+            run_adapter is None or run_adapter == "activitysim"
+        ):
             base_bundle = tracker.get_config_bundle(run_id, allow_missing=True)
         if base_bundle is None:
             adapter_hint = (
@@ -1583,7 +1585,7 @@ def _resolve_model_yamls(models: Any, config_dirs: Sequence[Path]) -> list[Path]
         yaml_files: Set[str] = set()
         for config_dir in config_dirs:
             yaml_files.update(p.name for p in config_dir.glob("*.yaml") if p.is_file())
-        logging.warning(
+        logging.debug(
             "[Consist][ActivitySim] Unmatched model YAMLs for %s. Available YAMLs: %s",
             unmatched,
             sorted(yaml_files),
@@ -1691,7 +1693,7 @@ def _collect_referenced_csvs(
                 message = f"[Consist][ActivitySim] Missing referenced CSV {ref} in {path.name}"
                 if strict:
                     raise FileNotFoundError(message)
-                logging.warning(message)
+                logging.debug(message)
                 continue
             if csv_path not in seen:
                 referenced.append(csv_path)
