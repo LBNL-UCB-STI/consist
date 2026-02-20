@@ -5,6 +5,7 @@ import hashlib
 import gzip
 import json
 import logging
+import tempfile
 import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -678,6 +679,186 @@ class ActivitySimConfigAdapter:
             external_files=discovered.external_files,
             content_hash=content_hash,
         )
+
+    def materialize_from_run(
+        self,
+        tracker: "Tracker",
+        run_id: str,
+        overrides: "ConfigOverrides",
+        output_dir: Path,
+        strict: bool = True,
+    ) -> CanonicalConfig:
+        """
+        Materialize an ActivitySim config bundle directly from a historical run.
+        """
+        run = tracker.get_run(run_id)
+        run_adapter: str | None = None
+        if run is not None and isinstance(run.meta, dict):
+            adapter_value = run.meta.get("config_adapter")
+            if isinstance(adapter_value, str) and adapter_value:
+                run_adapter = adapter_value
+
+        base_bundle = tracker.get_config_bundle(
+            run_id, adapter="activitysim", allow_missing=True
+        )
+        if base_bundle is None and (run_adapter is None or run_adapter == "activitysim"):
+            base_bundle = tracker.get_config_bundle(run_id, allow_missing=True)
+        if base_bundle is None:
+            adapter_hint = (
+                f" detected run adapter={run_adapter!r}."
+                if run_adapter is not None
+                else ""
+            )
+            raise FileNotFoundError(
+                "No ActivitySim config bundle found for "
+                f"run_id={run_id!r}. Ensure the run logged an input artifact with "
+                f"meta['config_role'] == 'bundle'.{adapter_hint}"
+            )
+        canonical = self.materialize(
+            base_bundle,
+            overrides,
+            output_dir=output_dir,
+            identity=tracker.identity,
+            strict=strict,
+        )
+        ordered_roots = self._ordered_root_dirs(canonical)
+        if ordered_roots == canonical.root_dirs:
+            return canonical
+        return CanonicalConfig(
+            root_dirs=ordered_roots,
+            primary_config=canonical.primary_config,
+            config_files=canonical.config_files,
+            external_files=canonical.external_files,
+            content_hash=canonical.content_hash,
+        )
+
+    def select_root_dir(
+        self,
+        canonical: CanonicalConfig,
+        required_file: str | Path | None = None,
+    ) -> Path:
+        """
+        Select the preferred root directory for downstream readers.
+
+        Parameters
+        ----------
+        canonical : CanonicalConfig
+            Canonical config to inspect.
+        required_file : str | Path | None, optional
+            Optional file that must exist under the returned root.
+        """
+        if not canonical.root_dirs:
+            raise ValueError("CanonicalConfig.root_dirs is empty.")
+
+        if required_file is not None:
+            rel_path = Path(required_file)
+            candidates = [
+                root for root in canonical.root_dirs if (root / rel_path).exists()
+            ]
+            if not candidates:
+                raise FileNotFoundError(
+                    "Required config file was not found under any root directory: "
+                    f"{required_file!s}. roots={[str(path) for path in canonical.root_dirs]}"
+                )
+        else:
+            candidates = list(canonical.root_dirs)
+
+        if canonical.primary_config is not None:
+            primary = canonical.primary_config.resolve()
+            for root in candidates:
+                resolved_root = root.resolve()
+                if primary.is_relative_to(resolved_root):
+                    return root
+
+        return sorted(candidates, key=lambda path: (path.name, path.as_posix()))[0]
+
+    def get_coefficient_value(
+        self,
+        config_dirs: list[Path] | None = None,
+        run_id: str | None = None,
+        tracker: "Tracker" | None = None,
+        file_name: str = "",
+        coefficient_name: str = "",
+        segment: str = "",
+    ) -> float:
+        """
+        Return a coefficient value from an ActivitySim coefficient CSV.
+        """
+        if config_dirs is not None and (run_id is not None or tracker is not None):
+            raise ValueError(
+                "Provide either config_dirs or (run_id + tracker), not both."
+            )
+        if not file_name:
+            raise ValueError("file_name must be provided.")
+        if not coefficient_name:
+            raise ValueError("coefficient_name must be provided.")
+
+        resolved_dirs: list[Path]
+        if config_dirs is not None:
+            resolved_dirs = list(config_dirs)
+        else:
+            if run_id is None or tracker is None:
+                raise ValueError(
+                    "Provide config_dirs or both run_id and tracker for lookup."
+                )
+            with tempfile.TemporaryDirectory(
+                prefix=f"consist_activitysim_coeff_{run_id}_"
+            ) as temp_dir:
+                canonical = self.materialize_from_run(
+                    tracker=tracker,
+                    run_id=run_id,
+                    overrides=ConfigOverrides(),
+                    output_dir=Path(temp_dir),
+                    strict=True,
+                )
+                csv_path, _ = _resolve_csv_reference(file_name, canonical.root_dirs)
+                if csv_path is None:
+                    raise KeyError(
+                        f"Coefficient file not found: {file_name!r} for run_id={run_id!r}."
+                    )
+                value = _find_coefficient_value(
+                    csv_path=csv_path,
+                    file_name=file_name,
+                    coefficient_name=coefficient_name,
+                    segment=segment,
+                )
+                parsed = _parse_float(value)
+                if parsed is None:
+                    raise ValueError(
+                        "Coefficient value is not numeric: "
+                        f"file={file_name!r}, coefficient={coefficient_name!r}, "
+                        f"segment={segment!r}, value={value!r}"
+                    )
+                return parsed
+
+        csv_path, _ = _resolve_csv_reference(file_name, resolved_dirs)
+        if csv_path is None:
+            raise KeyError(
+                "Coefficient file not found: "
+                f"{file_name!r}. config_dirs={[str(path) for path in resolved_dirs]}"
+            )
+        value = _find_coefficient_value(
+            csv_path=csv_path,
+            file_name=file_name,
+            coefficient_name=coefficient_name,
+            segment=segment,
+        )
+        parsed = _parse_float(value)
+        if parsed is None:
+            raise ValueError(
+                "Coefficient value is not numeric: "
+                f"file={file_name!r}, coefficient={coefficient_name!r}, "
+                f"segment={segment!r}, value={value!r}"
+            )
+        return parsed
+
+    def _ordered_root_dirs(self, canonical: CanonicalConfig) -> list[Path]:
+        preferred = self.select_root_dir(canonical)
+        remainder = [root for root in canonical.root_dirs if root != preferred]
+        ordered_remainder = sorted(
+            remainder, key=lambda path: (path.name, path.as_posix())
+        )
+        return [preferred, *ordered_remainder]
 
     def build_facet(
         self, config: CanonicalConfig, *, facet_spec: dict[str, Any]
@@ -2001,29 +2182,62 @@ def _read_coefficient_value(
 ) -> Optional[str]:
     if path is None:
         return None
-    with _open_csv(path) as handle:
-        reader = csv.DictReader(handle)
-        if reader.fieldnames is None:
-            return None
-        fieldnames = [name or "" for name in reader.fieldnames]
-        coeff_key = (
-            "coefficient_name"
-            if "coefficient_name" in fieldnames
-            else "coefficient"
-            if "coefficient" in fieldnames
-            else None
-        )
-        if coeff_key is None:
-            return None
-        value_key = "value" if "value" in fieldnames else None
-        for row in reader:
-            name = (row.get(coeff_key) or "").strip()
-            if name != coefficient_name:
-                continue
-            if value_key:
-                return (row.get(value_key) or "").strip() or None
-            return None
+    for row in _iter_coefficients_rows(path, run_id="lookup", strict=False):
+        if row["coefficient_name"] != coefficient_name:
+            continue
+        if row["segment"] != "":
+            continue
+        raw = row.get("value_raw")
+        if isinstance(raw, str):
+            stripped = raw.strip()
+            return stripped or None
+        return None
     return None
+
+
+def _find_coefficient_value(
+    *,
+    csv_path: Path,
+    file_name: str,
+    coefficient_name: str,
+    segment: str,
+) -> str:
+    normalized_segment = segment.strip()
+    seen_segments: set[str] = set()
+
+    for row in _iter_coefficients_rows(csv_path, run_id="lookup", strict=True):
+        if row["coefficient_name"] != coefficient_name:
+            continue
+        row_segment = str(row.get("segment") or "")
+        seen_segments.add(row_segment)
+        if row_segment != normalized_segment:
+            continue
+        raw = row.get("value_raw")
+        if isinstance(raw, str):
+            return raw.strip()
+        return ""
+
+    if seen_segments and normalized_segment:
+        choices = ", ".join(repr(value) for value in sorted(seen_segments))
+        raise KeyError(
+            "Coefficient segment not found: "
+            f"file={file_name!r}, coefficient={coefficient_name!r}, "
+            f"segment={normalized_segment!r}, available_segments=[{choices}]"
+        )
+
+    if seen_segments and normalized_segment == "":
+        choices = ", ".join(repr(value) for value in sorted(seen_segments))
+        raise KeyError(
+            "Coefficient exists but requires a segment: "
+            f"file={file_name!r}, coefficient={coefficient_name!r}, "
+            f"available_segments=[{choices}]"
+        )
+
+    raise KeyError(
+        "Coefficient not found: "
+        f"file={file_name!r}, coefficient={coefficient_name!r}, "
+        f"segment={normalized_segment!r}"
+    )
 
 
 def _parse_float(value: str) -> Optional[float]:

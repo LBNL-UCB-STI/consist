@@ -147,6 +147,31 @@ tracker.canonicalize_config(adapter, materialized.root_dirs, ingest=True)
 tracker.end_run()
 ```
 
+For historical runs, you can skip manual bundle lookup:
+
+```python
+materialized = adapter.materialize_from_run(
+    tracker=tracker,
+    run_id="baseline_run_id",
+    overrides=ConfigOverrides(constants={("settings.yaml", "sample_rate"): 0.1}),
+    output_dir=Path("temp/materialized"),
+)
+
+# Choose a deterministic preferred root (optionally enforce a required file).
+root_dir = adapter.select_root_dir(materialized, required_file="settings.yaml")
+```
+
+For one-off coefficient reads, use either config directories or a historical run:
+
+```python
+coef = adapter.get_coefficient_value(
+    run_id="baseline_run_id",
+    tracker=tracker,
+    file_name="accessibility_coefficients.csv",
+    coefficient_name="time",
+)
+```
+
 ## Discovery and Canonicalization Workflow
 
 ### Discovery Phase (`adapter.discover()`)

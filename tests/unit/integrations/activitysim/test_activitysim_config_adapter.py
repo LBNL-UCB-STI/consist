@@ -506,3 +506,148 @@ def test_materialize_hash_changes_with_overrides(tracker, tmp_path: Path):
     )
 
     assert staged_a.content_hash != staged_b.content_hash
+
+
+def test_materialize_from_run_resolves_bundle_and_stabilizes_roots(
+    tracker, tmp_path: Path
+):
+    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path)
+    adapter = ActivitySimConfigAdapter()
+
+    run = tracker.begin_run("activitysim_materialize_from_run", "activitysim")
+    tracker.canonicalize_config(adapter, [overlay_dir, base_dir], strict=True)
+    tracker.end_run()
+
+    staged_a = adapter.materialize_from_run(
+        tracker=tracker,
+        run_id=run.id,
+        overrides=ConfigOverrides(),
+        output_dir=tmp_path / "materialized_from_run_a",
+    )
+    staged_b = adapter.materialize_from_run(
+        tracker=tracker,
+        run_id=run.id,
+        overrides=ConfigOverrides(),
+        output_dir=tmp_path / "materialized_from_run_b",
+    )
+
+    assert [root.name for root in staged_a.root_dirs] == [
+        root.name for root in staged_b.root_dirs
+    ]
+    assert staged_a.primary_config is not None
+    primary_root = adapter.select_root_dir(staged_a)
+    assert staged_a.primary_config.is_relative_to(primary_root)
+
+
+def test_get_coefficient_value_supports_bom_headers(tmp_path: Path):
+    adapter = ActivitySimConfigAdapter()
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    coeff_path = config_dir / "bom_coefficients.csv"
+    coeff_path.write_text(
+        "coefficient_name,value\ntime,1.23\n",
+        encoding="utf-8-sig",
+    )
+
+    value = adapter.get_coefficient_value(
+        config_dirs=[config_dir],
+        file_name="bom_coefficients.csv",
+        coefficient_name="time",
+    )
+    assert value == 1.23
+
+
+def test_get_coefficient_value_supports_run_lookup(tracker, tmp_path: Path):
+    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path)
+    adapter = ActivitySimConfigAdapter()
+
+    run = tracker.begin_run("activitysim_get_coeff_run", "activitysim")
+    tracker.canonicalize_config(adapter, [overlay_dir, base_dir], strict=True)
+    tracker.end_run()
+
+    value = adapter.get_coefficient_value(
+        run_id=run.id,
+        tracker=tracker,
+        file_name="accessibility_coefficients.csv",
+        coefficient_name="time",
+    )
+    assert value == 1.1
+
+
+def test_get_coefficient_value_missing_raises_key_error(tmp_path: Path):
+    adapter = ActivitySimConfigAdapter()
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    coeff_path = config_dir / "coefficients.csv"
+    coeff_path.write_text(
+        "coefficient_name,value\ntime,1.23\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(KeyError, match="Coefficient not found"):
+        adapter.get_coefficient_value(
+            config_dirs=[config_dir],
+            file_name="coefficients.csv",
+            coefficient_name="cost",
+        )
+
+
+def test_get_coefficient_value_non_numeric_raises_value_error(tmp_path: Path):
+    adapter = ActivitySimConfigAdapter()
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    coeff_path = config_dir / "coefficients.csv"
+    coeff_path.write_text(
+        "coefficient_name,value\ntime,ref_time\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="not numeric"):
+        adapter.get_coefficient_value(
+            config_dirs=[config_dir],
+            file_name="coefficients.csv",
+            coefficient_name="time",
+        )
+
+
+def test_materialize_from_run_rejects_non_activitysim_run(tracker, tmp_path: Path):
+    adapter = ActivitySimConfigAdapter()
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    bundle_path = config_dir / "config_bundle.tar.gz"
+    bundle_path.write_text("not-a-bundle", encoding="utf-8")
+
+    run = tracker.begin_run("non_activitysim_run", "other")
+    tracker.log_meta(config_adapter="beam")
+    tracker.log_artifact(
+        bundle_path,
+        key="config_bundle",
+        direction="input",
+        config_role="bundle",
+    )
+    tracker.end_run()
+
+    with pytest.raises(FileNotFoundError, match="detected run adapter='beam'"):
+        adapter.materialize_from_run(
+            tracker=tracker,
+            run_id=run.id,
+            overrides=ConfigOverrides(),
+            output_dir=tmp_path / "materialized_non_activitysim",
+        )
+
+
+def test_select_root_dir_supports_required_file_guard(tracker, tmp_path: Path):
+    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path)
+    adapter = ActivitySimConfigAdapter()
+    canonical = adapter.discover(
+        [overlay_dir, base_dir], identity=tracker.identity, strict=True
+    )
+
+    assert adapter.select_root_dir(canonical) == overlay_dir
+    assert (
+        adapter.select_root_dir(canonical, required_file="settings_local.yaml")
+        == base_dir
+    )
+
+    with pytest.raises(FileNotFoundError, match="Required config file"):
+        adapter.select_root_dir(canonical, required_file="missing.yaml")
