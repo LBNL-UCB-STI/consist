@@ -190,6 +190,28 @@ result = tracker.run_with_config_overrides(
 )
 ```
 
+`run_with_config_overrides(...)` supports additive manual identity inputs:
+
+```python
+result = tracker.run_with_config_overrides(
+    adapter=adapter,
+    base_config_dirs=[overlay_dir, base_dir],
+    overrides=ConfigOverrides(),
+    output_dir=Path("temp/materialized"),
+    fn=run_model_step,
+    name="activitysim_calibration_step",
+    identity_inputs=[("manual_context", Path("calibration_notes.yaml"))],
+)
+```
+
+By default, the adapter also auto-adds the selected resolved config root to
+identity hashing (`resolved_config_identity="auto"`). To disable this escape
+hatch, pass `resolved_config_identity="off"` and only your manual
+`identity_inputs` are used.
+
+Each override run stores `run.meta["resolved_config_identity"]` with:
+`mode`, `adapter`, `label`, `path`, and `digest`.
+
 You can still use a historical run as the base selector:
 
 ```python

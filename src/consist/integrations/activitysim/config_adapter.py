@@ -51,7 +51,7 @@ from consist.models.run import Run
 if TYPE_CHECKING:  # pragma: no cover
     from consist.core.tracker import Tracker
     from consist.models.run import RunResult
-    from consist.types import ExecutionOptions
+    from consist.types import ExecutionOptions, IdentityInputs
 
 try:
     import yaml
@@ -825,6 +825,8 @@ class ActivitySimConfigAdapter:
         outputs: list[str] | None = None,
         execution_options: "ExecutionOptions" | None = None,
         strict: bool = True,
+        identity_inputs: "IdentityInputs" = None,
+        resolved_config_identity: Literal["auto", "off"] = "auto",
         identity_label: str = "activitysim_config",
         override_runtime_kwargs: Mapping[str, Any] | None = None,
         **run_kwargs: Any,
@@ -837,7 +839,7 @@ class ActivitySimConfigAdapter:
         By default, selected override roots are injected into runtime kwargs
         (``config_dir`` -> selected root) when the callable accepts them.
         """
-        for forbidden in ("adapter", "identity_inputs", "config_plan", "hash_inputs"):
+        for forbidden in ("adapter", "config_plan", "hash_inputs"):
             if forbidden in run_kwargs:
                 raise ValueError(
                     "run_with_config_overrides does not accept "
@@ -858,6 +860,11 @@ class ActivitySimConfigAdapter:
             )
         if not identity_label or not identity_label.strip():
             raise ValueError("identity_label must be a non-empty string.")
+        if resolved_config_identity not in {"auto", "off"}:
+            raise ValueError(
+                "resolved_config_identity must be either 'auto' or 'off'. "
+                f"Got {resolved_config_identity!r}."
+            )
         if output_dir.exists() and not output_dir.is_dir():
             raise ValueError(f"output_dir must be a directory path: {output_dir!s}")
 
@@ -957,17 +964,49 @@ class ActivitySimConfigAdapter:
                     runtime_kwargs=merged_runtime_kwargs,
                 )
 
-        return tracker.run(
+        auto_identity_label = identity_label.strip()
+        merged_identity_inputs: list[Any] = list(identity_inputs or [])
+        auto_identity_path: Path | None = None
+        if resolved_config_identity == "auto":
+            auto_identity_path = selected_root
+            merged_identity_inputs.append((auto_identity_label, selected_root))
+        resolved_identity_inputs = merged_identity_inputs or None
+
+        run_result = tracker.run(
             fn=fn,
             name=name,
             model=model,
             config=config,
             adapter=run_adapter,
-            identity_inputs=[(identity_label.strip(), selected_root)],
+            identity_inputs=resolved_identity_inputs,
             outputs=outputs,
             execution_options=resolved_execution_options,
             **run_kwargs,
         )
+        auto_digest: str | None = None
+        if resolved_config_identity == "auto":
+            consist_hash_inputs = (
+                run_result.run.meta.get("consist_hash_inputs")
+                if isinstance(run_result.run.meta, dict)
+                else None
+            )
+            if isinstance(consist_hash_inputs, dict):
+                resolved_digest = consist_hash_inputs.get(auto_identity_label)
+                if isinstance(resolved_digest, str):
+                    auto_digest = resolved_digest
+
+        if run_result.run.meta is None:
+            run_result.run.meta = {}
+        run_result.run.meta["resolved_config_identity"] = {
+            "mode": resolved_config_identity,
+            "adapter": run_adapter.model_name,
+            "label": auto_identity_label,
+            "path": str(auto_identity_path) if auto_identity_path is not None else None,
+            "digest": auto_digest,
+        }
+        tracker._flush_run_snapshot(run_result.run)
+        tracker._sync_run_to_db(run_result.run)
+        return run_result
 
     @staticmethod
     def _resolve_override_base_selector(

@@ -1385,6 +1385,8 @@ class Tracker:
         outputs: Optional[List[str]] = None,
         execution_options: Optional[ExecutionOptions] = None,
         strict: bool = True,
+        identity_inputs: IdentityInputs = None,
+        resolved_config_identity: Literal["auto", "off"] = "auto",
         identity_label: str = "activitysim_config",
         override_runtime_kwargs: Optional[Mapping[str, Any]] = None,
         **run_kwargs: Any,
@@ -1432,6 +1434,11 @@ class Tracker:
             raise ValueError(
                 "base_config_dirs must contain at least one directory when provided."
             )
+        if resolved_config_identity not in {"auto", "off"}:
+            raise ValueError(
+                "resolved_config_identity must be either 'auto' or 'off'. "
+                f"Got {resolved_config_identity!r}."
+            )
         return adapter.run_with_config_overrides(
             tracker=self,
             base_run_id=base_run_id,
@@ -1446,6 +1453,8 @@ class Tracker:
             outputs=outputs,
             execution_options=execution_options,
             strict=strict,
+            identity_inputs=identity_inputs,
+            resolved_config_identity=resolved_config_identity,
             identity_label=identity_label,
             override_runtime_kwargs=override_runtime_kwargs,
             **run_kwargs,
@@ -4866,6 +4875,19 @@ class Tracker:
         even if the subsequent database synchronization fails.
         """
         self.persistence.flush_json()
+
+    def _flush_run_snapshot(self, run: Run) -> None:
+        """
+        Flush JSON snapshots for a specific run record.
+
+        This supports post-run metadata updates (for example adapter-managed
+        identity metadata) when no active run context exists.
+        """
+        if self.current_consist is not None and self.current_consist.run.id == run.id:
+            self._flush_json()
+            return
+        if self._last_consist is not None and self._last_consist.run.id == run.id:
+            self.persistence.flush_record_json(self._last_consist)
 
     def _sync_run_to_db(self, run: Run) -> None:
         """

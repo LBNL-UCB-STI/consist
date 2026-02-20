@@ -22,6 +22,7 @@ from sqlmodel import SQLModel
 
 from consist.core.identity import IdentityManager
 from consist.models.run import Run
+from consist.types import IdentityInputs
 
 RowFactory = Callable[[str], Iterable[dict[str, Any]]]
 RowSource = Union[Iterable[dict[str, Any]], RowFactory]
@@ -394,6 +395,8 @@ class SupportsRunWithConfigOverrides(Protocol):
         outputs: Optional[list[str]] = None,
         execution_options: Any = None,
         strict: bool = True,
+        identity_inputs: IdentityInputs = None,
+        resolved_config_identity: Literal["auto", "off"] = "auto",
         identity_label: str = "activitysim_config",
         override_runtime_kwargs: Optional[Mapping[str, Any]] = None,
         **run_kwargs: Any,

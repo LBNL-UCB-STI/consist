@@ -205,6 +205,33 @@ materialized = adapter.materialize_from_plan(
 )
 ```
 
+## Override Execution with `run_with_config_overrides`
+
+```python
+result = tracker.run_with_config_overrides(
+    adapter=BeamConfigAdapter(primary_config=Path("overlay.conf")),
+    base_config_dirs=[config_root],
+    base_primary_config=config_root / "overlay.conf",
+    overrides=BeamConfigOverrides(values={"beam.agentsim.lastIteration": 5}),
+    output_dir=Path("tmp/beam_override_runs"),
+    fn=run_beam,
+    name="beam_override_step",
+    model="beam",
+    identity_inputs=[("manual_context", Path("scenario_flags.txt"))],
+)
+```
+
+Identity behavior:
+- `identity_inputs` are additive and merged with auto resolved-config identity
+  by default.
+- `resolved_config_identity="auto"` (default) injects the selected resolved
+  config root under `identity_label` (default: `"beam_config"`).
+- `resolved_config_identity="off"` disables that auto injection and keeps only
+  manual `identity_inputs`.
+
+Override runs persist `run.meta["resolved_config_identity"]` with `mode`,
+`adapter`, `label`, `path`, and `digest`.
+
 ## API Reference
 
 For detailed method signatures, parameters, and return types, see:

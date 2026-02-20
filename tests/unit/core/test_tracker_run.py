@@ -212,6 +212,30 @@ def test_run_with_config_overrides_rejects_empty_base_config_dirs(tracker, tmp_p
         )
 
 
+def test_run_with_config_overrides_rejects_invalid_resolved_config_identity(
+    tracker, tmp_path
+):
+    class _Adapter:
+        def run_with_config_overrides(
+            self, **kwargs
+        ):  # pragma: no cover - should not be called
+            raise AssertionError("adapter delegation should not occur")
+
+    with pytest.raises(
+        ValueError,
+        match="resolved_config_identity must be either 'auto' or 'off'",
+    ):
+        tracker.run_with_config_overrides(
+            adapter=_Adapter(),
+            base_run_id="baseline",
+            overrides={},
+            output_dir=tmp_path / "materialized_invalid_identity_mode",
+            fn=lambda: None,
+            name="override_step_invalid_identity_mode",
+            resolved_config_identity="invalid",
+        )
+
+
 def test_tracker_run_rejects_removed_config_plan_kwarg(tracker, tmp_path):
     @tracker.define_step(adapter=object())
     def step() -> None:

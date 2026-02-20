@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -353,30 +354,73 @@ def test_run_with_config_overrides_rejects_missing_base_primary_config_hint(
         )
 
 
-def test_run_with_config_overrides_rejects_manual_identity_kwargs(
+def test_run_with_config_overrides_adds_manual_identity_inputs_and_auto_identity(
     tracker, tmp_path: Path
 ):
     adapter = ActivitySimConfigAdapter()
-    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path / "base_case_error")
+    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path / "base_case_auto")
+    manual_dep = tmp_path / "manual_identity_dep.yaml"
+    manual_dep.write_text("mode: auto\n", encoding="utf-8")
+    calls: list[Path] = []
 
-    base_run = tracker.begin_run(
-        "activitysim_override_base_error",
-        "activitysim",
-        cache_mode="overwrite",
+    def step(config_dir: Path) -> None:
+        calls.append(config_dir)
+        assert config_dir.is_dir()
+
+    run_a = tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_config_dirs=[overlay_dir, base_dir],
+        base_primary_config=Path("settings.yaml"),
+        overrides=ConfigOverrides(),
+        output_dir=tmp_path / "materialized_auto",
+        fn=step,
+        name="activitysim_override_auto_identity",
+        model="activitysim",
+        identity_inputs=[("manual_dep", manual_dep)],
+        cache_options=CacheOptions(cache_mode="reuse"),
     )
-    tracker.canonicalize_config(adapter, [overlay_dir, base_dir], strict=True)
-    tracker.end_run()
+    run_b = tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_config_dirs=[overlay_dir, base_dir],
+        base_primary_config=Path("settings.yaml"),
+        overrides=ConfigOverrides(),
+        output_dir=tmp_path / "materialized_auto",
+        fn=step,
+        name="activitysim_override_auto_identity",
+        model="activitysim",
+        identity_inputs=[("manual_dep", manual_dep)],
+        cache_options=CacheOptions(cache_mode="reuse"),
+    )
 
-    with pytest.raises(ValueError, match="does not accept identity_inputs"):
-        tracker.run_with_config_overrides(
-            adapter=adapter,
-            base_run_id=base_run.id,
-            overrides=ConfigOverrides(),
-            output_dir=tmp_path / "materialized_error",
-            fn=lambda: None,
-            name="activitysim_override_error",
-            identity_inputs=[],
-        )
+    assert run_a.cache_hit is False
+    assert run_b.cache_hit is True
+    assert len(calls) == 1
+
+    for result in (run_a, run_b):
+        digest_map = result.run.meta.get("consist_hash_inputs")
+        assert isinstance(digest_map, dict)
+        assert "manual_dep" in digest_map
+        assert "activitysim_config" in digest_map
+        metadata = result.run.meta.get("resolved_config_identity")
+        assert metadata == {
+            "mode": "auto",
+            "adapter": "activitysim",
+            "label": "activitysim_config",
+            "path": metadata["path"],
+            "digest": digest_map["activitysim_config"],
+        }
+        assert isinstance(metadata["path"], str)
+        assert Path(metadata["path"]).is_dir()
+        record = tracker.get_run_record(result.run.id)
+        assert record is not None
+        assert record.run.meta.get("resolved_config_identity") == metadata
+
+    latest_snapshot = tracker.fs.run_dir / "consist.json"
+    latest_payload = json.loads(latest_snapshot.read_text(encoding="utf-8"))
+    latest_meta = (latest_payload.get("run") or {}).get("meta") or {}
+    assert latest_meta.get("resolved_config_identity") == run_b.run.meta.get(
+        "resolved_config_identity"
+    )
 
 
 def test_run_with_config_overrides_respects_explicit_runtime_kwargs(
@@ -495,6 +539,115 @@ def test_run_with_config_overrides_merges_top_level_runtime_kwargs(
         (seen[0][0] / file_name).exists()
         for file_name in ("settings.yaml", "settings_local.yaml")
     )
+
+
+def test_run_with_config_overrides_off_mode_and_runtime_kwargs_identity_behavior(
+    tracker, tmp_path: Path
+):
+    adapter = ActivitySimConfigAdapter()
+    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path / "base_case_off")
+    manual_dep = tmp_path / "manual_identity_off.yaml"
+    manual_dep.write_text("mode: off\n", encoding="utf-8")
+
+    runtime_output_a = tmp_path / "runtime_identity_off_a"
+    runtime_output_b = tmp_path / "runtime_identity_off_b"
+    runtime_output_c = tmp_path / "runtime_identity_on_c"
+    runtime_output_d = tmp_path / "runtime_identity_on_d"
+    runtime_output_a.mkdir(parents=True)
+    runtime_output_b.mkdir(parents=True)
+    runtime_output_c.mkdir(parents=True)
+    runtime_output_d.mkdir(parents=True)
+    (runtime_output_c / "identity.txt").write_text("c\n", encoding="utf-8")
+    (runtime_output_d / "identity.txt").write_text("d\n", encoding="utf-8")
+
+    calls: list[tuple[Path, Path]] = []
+
+    def step(config_dir: Path, output_dir: Path) -> None:
+        calls.append((config_dir, output_dir))
+        assert config_dir.is_dir()
+
+    run_a = tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_config_dirs=[overlay_dir, base_dir],
+        base_primary_config=Path("settings.yaml"),
+        overrides=ConfigOverrides(),
+        output_dir=tmp_path / "materialized_off",
+        fn=step,
+        name="activitysim_override_off_identity",
+        model="activitysim",
+        identity_inputs=[("manual_dep", manual_dep)],
+        resolved_config_identity="off",
+        runtime_kwargs={"output_dir": runtime_output_a},
+        cache_options=CacheOptions(cache_mode="reuse"),
+    )
+    run_b = tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_config_dirs=[overlay_dir, base_dir],
+        base_primary_config=Path("settings.yaml"),
+        overrides=ConfigOverrides(),
+        output_dir=tmp_path / "materialized_off",
+        fn=step,
+        name="activitysim_override_off_identity",
+        model="activitysim",
+        identity_inputs=[("manual_dep", manual_dep)],
+        resolved_config_identity="off",
+        runtime_kwargs={"output_dir": runtime_output_b},
+        cache_options=CacheOptions(cache_mode="reuse"),
+    )
+    run_c = tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_config_dirs=[overlay_dir, base_dir],
+        base_primary_config=Path("settings.yaml"),
+        overrides=ConfigOverrides(),
+        output_dir=tmp_path / "materialized_off",
+        fn=step,
+        name="activitysim_override_off_identity",
+        model="activitysim",
+        identity_inputs=[
+            ("manual_dep", manual_dep),
+            ("runtime_output_dir", runtime_output_c),
+        ],
+        resolved_config_identity="off",
+        runtime_kwargs={"output_dir": runtime_output_c},
+        cache_options=CacheOptions(cache_mode="reuse"),
+    )
+    run_d = tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_config_dirs=[overlay_dir, base_dir],
+        base_primary_config=Path("settings.yaml"),
+        overrides=ConfigOverrides(),
+        output_dir=tmp_path / "materialized_off",
+        fn=step,
+        name="activitysim_override_off_identity",
+        model="activitysim",
+        identity_inputs=[
+            ("manual_dep", manual_dep),
+            ("runtime_output_dir", runtime_output_d),
+        ],
+        resolved_config_identity="off",
+        runtime_kwargs={"output_dir": runtime_output_d},
+        cache_options=CacheOptions(cache_mode="reuse"),
+    )
+
+    assert run_a.cache_hit is False
+    assert run_b.cache_hit is True
+    assert run_c.cache_hit is False
+    assert run_d.cache_hit is False
+    assert len(calls) == 3
+
+    for result in (run_a, run_b, run_c, run_d):
+        digest_map = result.run.meta.get("consist_hash_inputs")
+        assert isinstance(digest_map, dict)
+        assert "manual_dep" in digest_map
+        assert "activitysim_config" not in digest_map
+        metadata = result.run.meta.get("resolved_config_identity")
+        assert metadata == {
+            "mode": "off",
+            "adapter": "activitysim",
+            "label": "activitysim_config",
+            "path": None,
+            "digest": None,
+        }
 
 
 def test_run_with_config_overrides_rejects_dual_runtime_kwargs_sources(

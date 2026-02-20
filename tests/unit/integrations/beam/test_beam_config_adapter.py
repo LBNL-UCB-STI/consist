@@ -1,5 +1,6 @@
 import logging
 import importlib
+import json
 from pathlib import Path
 
 import pytest
@@ -153,6 +154,190 @@ def test_beam_run_with_config_overrides_hit_miss_behavior(tracker, tmp_path: Pat
     assert run_b.cache_hit is True
     assert run_c.cache_hit is False
     assert len(calls) == 2
+
+
+def test_beam_run_with_config_overrides_additive_identity_inputs_and_auto_metadata(
+    tracker, tmp_path: Path
+):
+    adapter = BeamConfigAdapter(primary_config=Path("overlay.conf"))
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path / "base_case_auto")
+    manual_dep = tmp_path / "beam_manual_identity.txt"
+    manual_dep.write_text("beam=true\n", encoding="utf-8")
+    calls: list[Path] = []
+
+    def step(config_dir: Path) -> None:
+        calls.append(config_dir)
+        assert (config_dir / "overlay.conf").exists()
+
+    run_a = tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_config_dirs=[case_dir],
+        base_primary_config=overlay_conf,
+        overrides=BeamConfigOverrides(values={}),
+        output_dir=tmp_path / "materialized_auto",
+        fn=step,
+        name="beam_override_auto_identity",
+        model="beam",
+        identity_inputs=[("manual_dep", manual_dep)],
+        identity_label="beam_config",
+        cache_options=CacheOptions(cache_mode="reuse"),
+    )
+    run_b = tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_config_dirs=[case_dir],
+        base_primary_config=overlay_conf,
+        overrides=BeamConfigOverrides(values={}),
+        output_dir=tmp_path / "materialized_auto",
+        fn=step,
+        name="beam_override_auto_identity",
+        model="beam",
+        identity_inputs=[("manual_dep", manual_dep)],
+        identity_label="beam_config",
+        cache_options=CacheOptions(cache_mode="reuse"),
+    )
+
+    assert run_a.cache_hit is False
+    assert run_b.cache_hit is True
+    assert len(calls) == 1
+
+    for result in (run_a, run_b):
+        digest_map = result.run.meta.get("consist_hash_inputs")
+        assert isinstance(digest_map, dict)
+        assert "manual_dep" in digest_map
+        assert "beam_config" in digest_map
+        metadata = result.run.meta.get("resolved_config_identity")
+        assert metadata == {
+            "mode": "auto",
+            "adapter": "beam",
+            "label": "beam_config",
+            "path": metadata["path"],
+            "digest": digest_map["beam_config"],
+        }
+        assert isinstance(metadata["path"], str)
+        assert Path(metadata["path"]).is_dir()
+        record = tracker.get_run_record(result.run.id)
+        assert record is not None
+        assert record.run.meta.get("resolved_config_identity") == metadata
+
+    latest_snapshot = tracker.fs.run_dir / "consist.json"
+    latest_payload = json.loads(latest_snapshot.read_text(encoding="utf-8"))
+    latest_meta = (latest_payload.get("run") or {}).get("meta") or {}
+    assert latest_meta.get("resolved_config_identity") == run_b.run.meta.get(
+        "resolved_config_identity"
+    )
+
+
+def test_beam_run_with_config_overrides_off_mode_runtime_kwargs_identity_behavior(
+    tracker, tmp_path: Path
+):
+    adapter = BeamConfigAdapter(primary_config=Path("overlay.conf"))
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path / "base_case_off")
+    manual_dep = tmp_path / "beam_manual_identity_off.txt"
+    manual_dep.write_text("beam=off\n", encoding="utf-8")
+
+    runtime_output_a = tmp_path / "beam_runtime_identity_off_a"
+    runtime_output_b = tmp_path / "beam_runtime_identity_off_b"
+    runtime_output_c = tmp_path / "beam_runtime_identity_on_c"
+    runtime_output_d = tmp_path / "beam_runtime_identity_on_d"
+    runtime_output_a.mkdir(parents=True)
+    runtime_output_b.mkdir(parents=True)
+    runtime_output_c.mkdir(parents=True)
+    runtime_output_d.mkdir(parents=True)
+    (runtime_output_c / "identity.txt").write_text("c\n", encoding="utf-8")
+    (runtime_output_d / "identity.txt").write_text("d\n", encoding="utf-8")
+
+    calls: list[tuple[Path, Path]] = []
+
+    def step(config_dir: Path, output_dir: Path) -> None:
+        calls.append((config_dir, output_dir))
+        assert (config_dir / "overlay.conf").exists()
+
+    run_a = tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_config_dirs=[case_dir],
+        base_primary_config=overlay_conf,
+        overrides=BeamConfigOverrides(values={}),
+        output_dir=tmp_path / "materialized_off",
+        fn=step,
+        name="beam_override_off_identity",
+        model="beam",
+        identity_inputs=[("manual_dep", manual_dep)],
+        resolved_config_identity="off",
+        identity_label="beam_config",
+        runtime_kwargs={"output_dir": runtime_output_a},
+        cache_options=CacheOptions(cache_mode="reuse"),
+    )
+    run_b = tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_config_dirs=[case_dir],
+        base_primary_config=overlay_conf,
+        overrides=BeamConfigOverrides(values={}),
+        output_dir=tmp_path / "materialized_off",
+        fn=step,
+        name="beam_override_off_identity",
+        model="beam",
+        identity_inputs=[("manual_dep", manual_dep)],
+        resolved_config_identity="off",
+        identity_label="beam_config",
+        runtime_kwargs={"output_dir": runtime_output_b},
+        cache_options=CacheOptions(cache_mode="reuse"),
+    )
+    run_c = tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_config_dirs=[case_dir],
+        base_primary_config=overlay_conf,
+        overrides=BeamConfigOverrides(values={}),
+        output_dir=tmp_path / "materialized_off",
+        fn=step,
+        name="beam_override_off_identity",
+        model="beam",
+        identity_inputs=[
+            ("manual_dep", manual_dep),
+            ("runtime_output_dir", runtime_output_c),
+        ],
+        resolved_config_identity="off",
+        identity_label="beam_config",
+        runtime_kwargs={"output_dir": runtime_output_c},
+        cache_options=CacheOptions(cache_mode="reuse"),
+    )
+    run_d = tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_config_dirs=[case_dir],
+        base_primary_config=overlay_conf,
+        overrides=BeamConfigOverrides(values={}),
+        output_dir=tmp_path / "materialized_off",
+        fn=step,
+        name="beam_override_off_identity",
+        model="beam",
+        identity_inputs=[
+            ("manual_dep", manual_dep),
+            ("runtime_output_dir", runtime_output_d),
+        ],
+        resolved_config_identity="off",
+        identity_label="beam_config",
+        runtime_kwargs={"output_dir": runtime_output_d},
+        cache_options=CacheOptions(cache_mode="reuse"),
+    )
+
+    assert run_a.cache_hit is False
+    assert run_b.cache_hit is True
+    assert run_c.cache_hit is False
+    assert run_d.cache_hit is False
+    assert len(calls) == 3
+
+    for result in (run_a, run_b, run_c, run_d):
+        digest_map = result.run.meta.get("consist_hash_inputs")
+        assert isinstance(digest_map, dict)
+        assert "manual_dep" in digest_map
+        assert "beam_config" not in digest_map
+        metadata = result.run.meta.get("resolved_config_identity")
+        assert metadata == {
+            "mode": "off",
+            "adapter": "beam",
+            "label": "beam_config",
+            "path": None,
+            "digest": None,
+        }
 
 
 def test_beam_run_with_config_overrides_rejects_multiple_base_selectors(

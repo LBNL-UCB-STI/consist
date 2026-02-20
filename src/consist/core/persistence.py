@@ -44,6 +44,7 @@ from consist.models.run_config_kv import RunConfigKV
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
     from consist.models.artifact import Artifact
+    from consist.models.run import ConsistRecord
     from consist.models.run import Run as RunModel
 
 
@@ -2299,9 +2300,23 @@ class ProvenanceWriter:
         tracker = self._tracker
         if not tracker.current_consist:
             return
-        json_str = tracker.current_consist.model_dump_json(indent=2)
+        self._write_record_json(tracker.current_consist)
 
-        run_id = tracker.current_consist.run.id
+    def flush_record_json(self, record: "ConsistRecord") -> None:
+        """
+        Flush a specific run snapshot record to JSON files on disk.
+
+        This is used when metadata is updated after run execution has ended and
+        there is no active ``current_consist`` context.
+        """
+        self._write_record_json(record)
+
+    def _write_record_json(self, record: "ConsistRecord") -> None:
+        """Write per-run and latest JSON snapshots for a record atomically."""
+        tracker = self._tracker
+        json_str = record.model_dump_json(indent=2)
+
+        run_id = record.run.id
         safe_run_id = "".join(
             c if (c.isalnum() or c in ("-", "_", ".")) else "_" for c in run_id
         )
