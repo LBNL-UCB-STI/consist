@@ -89,10 +89,7 @@ def resolve_runtime_kwargs_alias(
     if runtime_kwargs is None:
         return execution_options
 
-    if (
-        execution_options is not None
-        and execution_options.runtime_kwargs is not None
-    ):
+    if execution_options is not None and execution_options.runtime_kwargs is not None:
         raise ValueError(
             format_problem_cause_fix(
                 problem=(

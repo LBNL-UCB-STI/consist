@@ -50,10 +50,7 @@ def test_runtime_kwargs_alias_conflicts_with_execution_options(tracker):
 
     with pytest.raises(
         ValueError,
-        match=(
-            "both top-level runtime_kwargs and "
-            "execution_options\\.runtime_kwargs"
-        ),
+        match=("both top-level runtime_kwargs and execution_options\\.runtime_kwargs"),
     ):
         tracker.run(
             fn=run_step,

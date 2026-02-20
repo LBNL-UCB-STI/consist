@@ -78,10 +78,7 @@ def test_resolve_runtime_kwargs_alias_merges_into_execution_options() -> None:
 def test_resolve_runtime_kwargs_alias_rejects_conflicting_values() -> None:
     with pytest.raises(
         ValueError,
-        match=(
-            "both top-level runtime_kwargs and "
-            "execution_options\\.runtime_kwargs"
-        ),
+        match=("both top-level runtime_kwargs and execution_options\\.runtime_kwargs"),
     ):
         resolve_runtime_kwargs_alias(
             api_name="Tracker.run",
