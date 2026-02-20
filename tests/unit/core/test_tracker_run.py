@@ -121,6 +121,20 @@ def test_run_context_run_dir_is_created(tracker):
     assert result.outputs["out"].path.exists()
 
 
+def test_run_with_config_overrides_requires_supporting_adapter(tracker, tmp_path):
+    with pytest.raises(
+        TypeError, match="does not support run_with_config_overrides delegation"
+    ):
+        tracker.run_with_config_overrides(
+            adapter=object(),
+            base_run_id="missing_run",
+            overrides={},
+            output_dir=tmp_path / "materialized",
+            fn=lambda: None,
+            name="override_step",
+        )
+
+
 def test_tracker_run_rejects_mixed_metadata_adapter_with_invocation_config_plan(
     tracker, tmp_path
 ):

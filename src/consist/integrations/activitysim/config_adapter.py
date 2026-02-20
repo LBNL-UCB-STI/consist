@@ -5,9 +5,10 @@ import hashlib
 import gzip
 import json
 import logging
+import shutil
 import tempfile
 import tarfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import (
     IO,
@@ -47,6 +48,8 @@ from consist.models.run import Run
 
 if TYPE_CHECKING:  # pragma: no cover
     from consist.core.tracker import Tracker
+    from consist.models.run import RunResult
+    from consist.types import ExecutionOptions
 
 try:
     import yaml
@@ -730,6 +733,73 @@ class ActivitySimConfigAdapter:
             config_files=canonical.config_files,
             external_files=canonical.external_files,
             content_hash=canonical.content_hash,
+        )
+
+    def run_with_config_overrides(
+        self,
+        *,
+        tracker: "Tracker",
+        base_run_id: str,
+        overrides: "ConfigOverrides",
+        output_dir: Path,
+        fn: Any,
+        name: str,
+        model: str | None = None,
+        config: dict[str, Any] | None = None,
+        outputs: list[str] | None = None,
+        execution_options: "ExecutionOptions" | None = None,
+        strict: bool = True,
+        identity_label: str = "activitysim_config",
+        **run_kwargs: Any,
+    ) -> "RunResult":
+        """
+        Materialize override configs and execute a tracker run with identity wiring.
+
+        The staged config directory is deterministic for a (base run, overrides)
+        combination so repeated invocations preserve adapter identity and cache hits.
+        """
+        for forbidden in ("adapter", "identity_inputs", "config_plan", "hash_inputs"):
+            if forbidden in run_kwargs:
+                raise ValueError(
+                    "run_with_config_overrides does not accept "
+                    f"{forbidden}= in run kwargs."
+                )
+        if not identity_label or not identity_label.strip():
+            raise ValueError("identity_label must be a non-empty string.")
+        if output_dir.exists() and not output_dir.is_dir():
+            raise ValueError(f"output_dir must be a directory path: {output_dir!s}")
+
+        override_key = tracker.identity.canonical_json_sha256(
+            {
+                "base_run_id": base_run_id,
+                "overrides": overrides.to_canonical_dict(),
+                "adapter_version": self.adapter_version,
+            }
+        )
+        staged_output_dir = output_dir / f"override_{override_key[:16]}"
+        if staged_output_dir.exists():
+            shutil.rmtree(staged_output_dir)
+
+        materialized = self.materialize_from_run(
+            tracker=tracker,
+            run_id=base_run_id,
+            overrides=overrides,
+            output_dir=staged_output_dir,
+            strict=strict,
+        )
+        selected_root = self.select_root_dir(materialized)
+        run_adapter = replace(self, root_dirs=list(materialized.root_dirs))
+
+        return tracker.run(
+            fn=fn,
+            name=name,
+            model=model,
+            config=config,
+            adapter=run_adapter,
+            identity_inputs=[(identity_label.strip(), selected_root)],
+            outputs=outputs,
+            execution_options=execution_options,
+            **run_kwargs,
         )
 
     def select_root_dir(

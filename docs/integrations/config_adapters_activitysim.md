@@ -172,6 +172,23 @@ coef = adapter.get_coefficient_value(
 )
 ```
 
+For end-to-end override execution, use tracker-level delegation:
+
+```python
+result = tracker.run_with_config_overrides(
+    adapter=adapter,
+    base_run_id="baseline_run_id",
+    overrides=ConfigOverrides(
+        coefficients={("accessibility_coefficients.csv", "time", ""): 2.3}
+    ),
+    output_dir=Path("temp/materialized"),
+    fn=run_model_step,
+    name="activitysim_calibration_step",
+    model="activitysim",
+    config={"iteration": 2},
+)
+```
+
 ## Discovery and Canonicalization Workflow
 
 ### Discovery Phase (`adapter.discover()`)

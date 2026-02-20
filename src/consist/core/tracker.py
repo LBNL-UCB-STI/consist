@@ -49,6 +49,7 @@ from consist.core.config_canonicalization import (
     CanonicalizationResult,
     ConfigContribution,
     ConfigPlan,
+    SupportsRunWithConfigOverrides,
     validate_config_plan,
 )
 from consist.core.config_facets import ConfigFacetManager
@@ -1366,6 +1367,61 @@ class Tracker:
             output_policy=output_policy,
             execution_options=execution_options,
             **legacy_kwargs,
+        )
+
+    def run_with_config_overrides(
+        self,
+        *,
+        adapter: SupportsRunWithConfigOverrides,
+        base_run_id: str,
+        overrides: Any,
+        output_dir: Path,
+        fn: Callable[..., Any],
+        name: str,
+        model: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+        outputs: Optional[List[str]] = None,
+        execution_options: Optional[ExecutionOptions] = None,
+        strict: bool = True,
+        identity_label: str = "activitysim_config",
+        **run_kwargs: Any,
+    ) -> RunResult:
+        """
+        Delegate config-override execution to an adapter-specific implementation.
+
+        The tracker remains adapter-agnostic by forwarding to
+        ``adapter.run_with_config_overrides(...)`` when available.
+        """
+        if not isinstance(adapter, SupportsRunWithConfigOverrides):
+            raise TypeError(
+                format_problem_cause_fix(
+                    problem=(
+                        "Adapter does not support run_with_config_overrides delegation."
+                    ),
+                    cause=(
+                        "The provided adapter does not implement "
+                        "run_with_config_overrides(...)."
+                    ),
+                    fix=(
+                        "Use an adapter that implements override execution, or "
+                        "materialize configs manually then call tracker.run(...)."
+                    ),
+                )
+            )
+        return adapter.run_with_config_overrides(
+            tracker=self,
+            base_run_id=base_run_id,
+            overrides=overrides,
+            output_dir=output_dir,
+            fn=fn,
+            name=name,
+            model=model,
+            config=config,
+            outputs=outputs,
+            execution_options=execution_options,
+            strict=strict,
+            identity_label=identity_label,
+            **run_kwargs,
         )
 
     @contextmanager

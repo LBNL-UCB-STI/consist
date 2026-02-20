@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from sqlmodel import Session, select
 
-from consist.integrations.activitysim import ActivitySimConfigAdapter
+from consist.integrations.activitysim import ActivitySimConfigAdapter, ConfigOverrides
 from consist.models.activitysim import ActivitySimConstantsCache
 from consist.types import CacheOptions
 from tests.helpers.activitysim_fixtures import build_activitysim_test_configs
@@ -246,3 +247,91 @@ def test_activitysim_template_refs_ingested(tracker, tmp_path: Path):
         ).all()
 
     assert rows, "Expected template reference rows to be ingested."
+
+
+def test_run_with_config_overrides_hit_miss_behavior(tracker, tmp_path: Path):
+    adapter = ActivitySimConfigAdapter()
+    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path / "base_case")
+
+    base_run = tracker.begin_run(
+        "activitysim_override_base",
+        "activitysim",
+        cache_mode="overwrite",
+    )
+    tracker.canonicalize_config(adapter, [overlay_dir, base_dir], strict=True)
+    tracker.end_run()
+
+    calls: list[str] = []
+
+    def step() -> None:
+        calls.append("called")
+
+    run_a = tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_run_id=base_run.id,
+        overrides=ConfigOverrides(
+            coefficients={("accessibility_coefficients.csv", "time", ""): 1.1}
+        ),
+        output_dir=tmp_path / "materialized_overrides",
+        fn=step,
+        name="activitysim_override_run",
+        model="activitysim",
+        config={"calibration_step": "time"},
+        cache_options=CacheOptions(cache_mode="reuse"),
+    )
+    run_b = tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_run_id=base_run.id,
+        overrides=ConfigOverrides(
+            coefficients={("accessibility_coefficients.csv", "time", ""): 1.1}
+        ),
+        output_dir=tmp_path / "materialized_overrides",
+        fn=step,
+        name="activitysim_override_run",
+        model="activitysim",
+        config={"calibration_step": "time"},
+        cache_options=CacheOptions(cache_mode="reuse"),
+    )
+    run_c = tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_run_id=base_run.id,
+        overrides=ConfigOverrides(
+            coefficients={("accessibility_coefficients.csv", "time", ""): 2.3}
+        ),
+        output_dir=tmp_path / "materialized_overrides",
+        fn=step,
+        name="activitysim_override_run",
+        model="activitysim",
+        config={"calibration_step": "time"},
+        cache_options=CacheOptions(cache_mode="reuse"),
+    )
+
+    assert run_a.cache_hit is False
+    assert run_b.cache_hit is True
+    assert run_c.cache_hit is False
+    assert calls == ["called", "called"]
+    assert run_c.run.meta.get("config_adapter") == "activitysim"
+
+
+def test_run_with_config_overrides_rejects_manual_identity_kwargs(tracker, tmp_path: Path):
+    adapter = ActivitySimConfigAdapter()
+    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path / "base_case_error")
+
+    base_run = tracker.begin_run(
+        "activitysim_override_base_error",
+        "activitysim",
+        cache_mode="overwrite",
+    )
+    tracker.canonicalize_config(adapter, [overlay_dir, base_dir], strict=True)
+    tracker.end_run()
+
+    with pytest.raises(ValueError, match="does not accept identity_inputs"):
+        tracker.run_with_config_overrides(
+            adapter=adapter,
+            base_run_id=base_run.id,
+            overrides=ConfigOverrides(),
+            output_dir=tmp_path / "materialized_error",
+            fn=lambda: None,
+            name="activitysim_override_error",
+            identity_inputs=[],
+        )

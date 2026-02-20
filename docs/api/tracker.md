@@ -68,6 +68,7 @@ recommended public kwargs for new run/trace calls.
         - begin_run
         - start_run
         - run
+        - run_with_config_overrides
         - trace
         - scenario
         - end_run
