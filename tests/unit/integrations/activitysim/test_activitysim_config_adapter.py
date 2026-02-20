@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 from pathlib import Path
 
 import yaml
@@ -242,12 +243,13 @@ def test_missing_csv_lenient_logs_warning(tracker, tmp_path: Path, caplog):
     _append_model(overlay_dir / "settings.yaml", "missing_model")
 
     adapter = ActivitySimConfigAdapter()
-    run = tracker.begin_run("activitysim_missing_lenient", "activitysim")
-    canonical = adapter.discover(
-        [overlay_dir, base_dir], identity=tracker.identity, strict=False
-    )
-    adapter.canonicalize(canonical, run=run, tracker=tracker, strict=False)
-    tracker.end_run()
+    with caplog.at_level(logging.DEBUG):
+        run = tracker.begin_run("activitysim_missing_lenient", "activitysim")
+        canonical = adapter.discover(
+            [overlay_dir, base_dir], identity=tracker.identity, strict=False
+        )
+        adapter.canonicalize(canonical, run=run, tracker=tracker, strict=False)
+        tracker.end_run()
 
     assert any("Missing referenced CSV" in record.message for record in caplog.records)
 
