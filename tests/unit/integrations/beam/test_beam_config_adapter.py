@@ -7,6 +7,7 @@ from sqlmodel import Session, SQLModel
 
 from consist.integrations.beam import BeamConfigAdapter, BeamConfigOverrides
 from consist.models.beam import BeamConfigCache, BeamConfigIngestRunLink
+from consist.types import CacheOptions, ExecutionOptions
 from tests.helpers.beam_fixtures import build_beam_test_configs
 
 
@@ -90,3 +91,145 @@ def test_beam_materialize_from_plan_uses_config_dirs(tracker, tmp_path: Path):
     )
     config = ConfigFactory.parse_file(str(canonical.primary_config), resolve=True)
     assert config.get("beam.agentsim.agentSampleSizeAsFractionOfPopulation") == 0.9
+
+
+def test_beam_run_with_config_overrides_hit_miss_behavior(tracker, tmp_path: Path):
+    adapter = BeamConfigAdapter()
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path / "base_case")
+
+    base_adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    base_run = tracker.begin_run(
+        "beam_override_base",
+        "beam",
+        cache_mode="overwrite",
+    )
+    tracker.canonicalize_config(base_adapter, [case_dir])
+    tracker.end_run()
+
+    calls: list[Path] = []
+
+    def step(config_dir: Path) -> None:
+        calls.append(config_dir)
+        assert config_dir.is_dir()
+        assert (config_dir / "overlay.conf").exists()
+        assert (config_dir / "base.conf").exists()
+
+    run_a = tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_run_id=base_run.id,
+        overrides=BeamConfigOverrides(
+            values={"beam.agentsim.agentSampleSizeAsFractionOfPopulation": 0.35}
+        ),
+        output_dir=tmp_path / "materialized_overrides",
+        fn=step,
+        name="beam_override_run",
+        model="beam",
+        config={"calibration_step": "sample_size"},
+        cache_options=CacheOptions(cache_mode="reuse"),
+    )
+    run_b = tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_run_id=base_run.id,
+        overrides=BeamConfigOverrides(
+            values={"beam.agentsim.agentSampleSizeAsFractionOfPopulation": 0.35}
+        ),
+        output_dir=tmp_path / "materialized_overrides",
+        fn=step,
+        name="beam_override_run",
+        model="beam",
+        config={"calibration_step": "sample_size"},
+        cache_options=CacheOptions(cache_mode="reuse"),
+    )
+    run_c = tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_run_id=base_run.id,
+        overrides=BeamConfigOverrides(
+            values={"beam.agentsim.agentSampleSizeAsFractionOfPopulation": 0.7}
+        ),
+        output_dir=tmp_path / "materialized_overrides",
+        fn=step,
+        name="beam_override_run",
+        model="beam",
+        config={"calibration_step": "sample_size"},
+        cache_options=CacheOptions(cache_mode="reuse"),
+    )
+
+    assert run_a.cache_hit is False
+    assert run_b.cache_hit is True
+    assert run_c.cache_hit is False
+    assert len(calls) == 2
+
+
+def test_beam_run_with_config_overrides_respects_explicit_runtime_kwargs(
+    tracker, tmp_path: Path
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path / "base_case_manual")
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+
+    base_run = tracker.begin_run(
+        "beam_override_base_manual",
+        "beam",
+        cache_mode="overwrite",
+    )
+    tracker.canonicalize_config(adapter, [case_dir])
+    tracker.end_run()
+
+    explicit_config_dir = tmp_path / "manual_runtime_config"
+    explicit_config_dir.mkdir(parents=True)
+    seen: list[Path] = []
+
+    def step(config_dir: Path) -> None:
+        seen.append(config_dir)
+
+    tracker.run_with_config_overrides(
+        adapter=BeamConfigAdapter(),
+        base_run_id=base_run.id,
+        overrides=BeamConfigOverrides(
+            values={"beam.agentsim.agentSampleSizeAsFractionOfPopulation": 0.2}
+        ),
+        output_dir=tmp_path / "materialized_manual_runtime",
+        fn=step,
+        name="beam_override_manual_runtime",
+        model="beam",
+        execution_options=ExecutionOptions(
+            runtime_kwargs={"config_dir": explicit_config_dir}
+        ),
+    )
+
+    assert seen == [explicit_config_dir]
+
+
+def test_beam_run_with_config_overrides_supports_custom_runtime_kwarg_mapping(
+    tracker, tmp_path: Path
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path / "base_case_custom")
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+
+    base_run = tracker.begin_run(
+        "beam_override_base_custom",
+        "beam",
+        cache_mode="overwrite",
+    )
+    tracker.canonicalize_config(adapter, [case_dir])
+    tracker.end_run()
+
+    seen: list[Path] = []
+
+    def step(config_root: Path) -> None:
+        seen.append(config_root)
+        assert (config_root / "overlay.conf").exists()
+
+    tracker.run_with_config_overrides(
+        adapter=BeamConfigAdapter(),
+        base_run_id=base_run.id,
+        overrides=BeamConfigOverrides(
+            values={"beam.agentsim.agentSampleSizeAsFractionOfPopulation": 0.15}
+        ),
+        output_dir=tmp_path / "materialized_custom_runtime",
+        fn=step,
+        name="beam_override_custom_runtime",
+        model="beam",
+        override_runtime_kwargs={"config_root": "selected_root_dir"},
+    )
+
+    assert len(seen) == 1

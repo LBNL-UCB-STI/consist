@@ -7,7 +7,7 @@ from sqlmodel import Session, select
 
 from consist.integrations.activitysim import ActivitySimConfigAdapter, ConfigOverrides
 from consist.models.activitysim import ActivitySimConstantsCache
-from consist.types import CacheOptions
+from consist.types import CacheOptions, ExecutionOptions
 from tests.helpers.activitysim_fixtures import build_activitysim_test_configs
 
 
@@ -255,10 +255,15 @@ def test_run_with_config_overrides_hit_miss_behavior(tracker, tmp_path: Path):
     tracker.canonicalize_config(adapter, [overlay_dir, base_dir], strict=True)
     tracker.end_run()
 
-    calls: list[str] = []
+    calls: list[Path] = []
 
-    def step() -> None:
-        calls.append("called")
+    def step(config_dir: Path) -> None:
+        calls.append(config_dir)
+        assert config_dir.is_dir()
+        assert any(
+            (config_dir / file_name).exists()
+            for file_name in ("settings.yaml", "settings_local.yaml")
+        )
 
     run_a = tracker.run_with_config_overrides(
         adapter=adapter,
@@ -303,7 +308,7 @@ def test_run_with_config_overrides_hit_miss_behavior(tracker, tmp_path: Path):
     assert run_a.cache_hit is False
     assert run_b.cache_hit is True
     assert run_c.cache_hit is False
-    assert calls == ["called", "called"]
+    assert len(calls) == 2
     assert run_c.run.meta.get("config_adapter") == "activitysim"
 
 
@@ -331,3 +336,82 @@ def test_run_with_config_overrides_rejects_manual_identity_kwargs(
             name="activitysim_override_error",
             identity_inputs=[],
         )
+
+
+def test_run_with_config_overrides_respects_explicit_runtime_kwargs(
+    tracker, tmp_path: Path
+):
+    adapter = ActivitySimConfigAdapter()
+    base_dir, overlay_dir = build_activitysim_test_configs(
+        tmp_path / "base_case_manual"
+    )
+
+    base_run = tracker.begin_run(
+        "activitysim_override_base_manual",
+        "activitysim",
+        cache_mode="overwrite",
+    )
+    tracker.canonicalize_config(adapter, [overlay_dir, base_dir], strict=True)
+    tracker.end_run()
+
+    explicit_config_dir = tmp_path / "manual_runtime_config"
+    explicit_config_dir.mkdir(parents=True)
+    seen: list[Path] = []
+
+    def step(config_dir: Path) -> None:
+        seen.append(config_dir)
+
+    tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_run_id=base_run.id,
+        overrides=ConfigOverrides(),
+        output_dir=tmp_path / "materialized_manual_runtime",
+        fn=step,
+        name="activitysim_override_manual_runtime",
+        model="activitysim",
+        execution_options=ExecutionOptions(
+            runtime_kwargs={"config_dir": explicit_config_dir}
+        ),
+    )
+
+    assert seen == [explicit_config_dir]
+
+
+def test_run_with_config_overrides_supports_custom_runtime_kwarg_mapping(
+    tracker, tmp_path: Path
+):
+    adapter = ActivitySimConfigAdapter()
+    base_dir, overlay_dir = build_activitysim_test_configs(
+        tmp_path / "base_case_custom"
+    )
+
+    base_run = tracker.begin_run(
+        "activitysim_override_base_custom",
+        "activitysim",
+        cache_mode="overwrite",
+    )
+    tracker.canonicalize_config(adapter, [overlay_dir, base_dir], strict=True)
+    tracker.end_run()
+
+    seen: list[Path] = []
+
+    def step(config_root: Path) -> None:
+        seen.append(config_root)
+        assert config_root.is_dir()
+
+    tracker.run_with_config_overrides(
+        adapter=adapter,
+        base_run_id=base_run.id,
+        overrides=ConfigOverrides(),
+        output_dir=tmp_path / "materialized_custom_runtime",
+        fn=step,
+        name="activitysim_override_custom_runtime",
+        model="activitysim",
+        override_runtime_kwargs={"config_root": "selected_root_dir"},
+    )
+
+    assert len(seen) == 1
+    assert any(
+        (seen[0] / file_name).exists()
+        for file_name in ("settings.yaml", "settings_local.yaml")
+    )

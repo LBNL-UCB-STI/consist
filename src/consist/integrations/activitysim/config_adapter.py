@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import gzip
+import inspect
 import json
 import logging
 import shutil
@@ -16,6 +17,7 @@ from typing import (
     Dict,
     Iterable,
     Literal,
+    Mapping,
     Optional,
     Sequence,
     Set,
@@ -98,6 +100,10 @@ _PROBABILITIES_META_KEYS = {
     "tour_hour",
     "trip_num",
     "vehicle_year",
+}
+
+_DEFAULT_OVERRIDE_RUNTIME_KWARGS: dict[str, str] = {
+    "config_dir": "selected_root_dir",
 }
 
 
@@ -752,6 +758,7 @@ class ActivitySimConfigAdapter:
         execution_options: "ExecutionOptions" | None = None,
         strict: bool = True,
         identity_label: str = "activitysim_config",
+        override_runtime_kwargs: Mapping[str, Any] | None = None,
         **run_kwargs: Any,
     ) -> "RunResult":
         """
@@ -759,6 +766,8 @@ class ActivitySimConfigAdapter:
 
         The staged config directory is deterministic for a (base run, overrides)
         combination so repeated invocations preserve adapter identity and cache hits.
+        By default, selected override roots are injected into runtime kwargs
+        (``config_dir`` -> selected root) when the callable accepts them.
         """
         for forbidden in ("adapter", "identity_inputs", "config_plan", "hash_inputs"):
             if forbidden in run_kwargs:
@@ -791,6 +800,32 @@ class ActivitySimConfigAdapter:
         )
         selected_root = self.select_root_dir(materialized)
         run_adapter = replace(self, root_dirs=list(materialized.root_dirs))
+        injected_runtime_kwargs = self._build_override_runtime_kwargs(
+            fn=fn,
+            selected_root=selected_root,
+            root_dirs=materialized.root_dirs,
+            explicit_mapping=override_runtime_kwargs,
+            existing_runtime_kwargs=(
+                execution_options.runtime_kwargs if execution_options else None
+            ),
+        )
+        resolved_execution_options = execution_options
+        if injected_runtime_kwargs:
+            merged_runtime_kwargs: dict[str, Any] = {}
+            if execution_options is not None and execution_options.runtime_kwargs:
+                merged_runtime_kwargs.update(execution_options.runtime_kwargs)
+            merged_runtime_kwargs.update(injected_runtime_kwargs)
+            if execution_options is None:
+                from consist.types import ExecutionOptions
+
+                resolved_execution_options = ExecutionOptions(
+                    runtime_kwargs=merged_runtime_kwargs
+                )
+            else:
+                resolved_execution_options = replace(
+                    execution_options,
+                    runtime_kwargs=merged_runtime_kwargs,
+                )
 
         return tracker.run(
             fn=fn,
@@ -800,8 +835,52 @@ class ActivitySimConfigAdapter:
             adapter=run_adapter,
             identity_inputs=[(identity_label.strip(), selected_root)],
             outputs=outputs,
-            execution_options=execution_options,
+            execution_options=resolved_execution_options,
             **run_kwargs,
+        )
+
+    @staticmethod
+    def _build_override_runtime_kwargs(
+        *,
+        fn: Any,
+        selected_root: Path,
+        root_dirs: Sequence[Path],
+        explicit_mapping: Mapping[str, Any] | None,
+        existing_runtime_kwargs: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        mapping = (
+            dict(explicit_mapping)
+            if explicit_mapping is not None
+            else dict(_DEFAULT_OVERRIDE_RUNTIME_KWARGS)
+        )
+        existing = dict(existing_runtime_kwargs or {})
+        resolved_sources: dict[str, Any] = {
+            "selected_root_dir": selected_root,
+            "root_dirs": list(root_dirs),
+        }
+        injected: dict[str, Any] = {}
+        for runtime_key, source in mapping.items():
+            if runtime_key in existing:
+                continue
+            if not ActivitySimConfigAdapter._callable_accepts_kwarg(fn, runtime_key):
+                continue
+            if isinstance(source, str) and source in resolved_sources:
+                injected[runtime_key] = resolved_sources[source]
+            else:
+                injected[runtime_key] = source
+        return injected
+
+    @staticmethod
+    def _callable_accepts_kwarg(fn: Any, runtime_key: str) -> bool:
+        try:
+            signature = inspect.signature(fn)
+        except (TypeError, ValueError):
+            return False
+        if runtime_key in signature.parameters:
+            return True
+        return any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
         )
 
     def select_root_dir(

@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import inspect
 import json
 import logging
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import shutil
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence, TYPE_CHECKING
+from typing import Any, Iterable, Mapping, Optional, Sequence, TYPE_CHECKING
 
 from sqlmodel import SQLModel
 
@@ -27,6 +28,8 @@ from consist.models.run import Run
 
 if TYPE_CHECKING:  # pragma: no cover
     from consist.core.tracker import Tracker
+    from consist.models.run import RunResult
+    from consist.types import ExecutionOptions
 
 try:
     _pyhocon = importlib.import_module("pyhocon")
@@ -41,6 +44,10 @@ except ImportError:  # pragma: no cover
 
 
 _INCLUDE_RE = re.compile(r"^\s*include\s+(?:\"([^\"]+)\"|file\(\"([^\"]+)\"\))")
+
+_DEFAULT_OVERRIDE_RUNTIME_KWARGS: dict[str, str] = {
+    "config_dir": "selected_root_dir",
+}
 
 
 @dataclass(frozen=True)
@@ -262,6 +269,223 @@ class BeamConfigAdapter:
             output_dir=output_dir,
             identity=identity,
             strict=strict,
+        )
+
+    def materialize_from_run(
+        self,
+        tracker: "Tracker",
+        run_id: str,
+        overrides: BeamConfigOverrides,
+        output_dir: Path,
+        strict: bool = True,
+    ) -> CanonicalConfig:
+        run = tracker.get_run(run_id)
+        run_adapter: str | None = None
+        if run is not None and isinstance(run.meta, dict):
+            adapter_value = run.meta.get("config_adapter")
+            if isinstance(adapter_value, str) and adapter_value:
+                run_adapter = adapter_value
+        if run_adapter is not None and run_adapter != self.model_name:
+            raise ValueError(
+                "Base run is not a BEAM config run: "
+                f"run_id={run_id!r}, config_adapter={run_adapter!r}."
+            )
+
+        root_dirs, primary_config = self._resolve_base_config_from_run(tracker, run_id)
+        run_adapter_obj = replace(
+            self, root_dirs=list(root_dirs), primary_config=primary_config
+        )
+        return run_adapter_obj.materialize(
+            list(root_dirs),
+            overrides,
+            output_dir=output_dir,
+            identity=tracker.identity,
+            strict=strict,
+        )
+
+    def run_with_config_overrides(
+        self,
+        *,
+        tracker: "Tracker",
+        base_run_id: str,
+        overrides: BeamConfigOverrides,
+        output_dir: Path,
+        fn: Any,
+        name: str,
+        model: str | None = None,
+        config: dict[str, Any] | None = None,
+        outputs: list[str] | None = None,
+        execution_options: "ExecutionOptions" | None = None,
+        strict: bool = True,
+        identity_label: str = "beam_config",
+        override_runtime_kwargs: Mapping[str, Any] | None = None,
+        **run_kwargs: Any,
+    ) -> "RunResult":
+        for forbidden in ("adapter", "identity_inputs", "config_plan", "hash_inputs"):
+            if forbidden in run_kwargs:
+                raise ValueError(
+                    "run_with_config_overrides does not accept "
+                    f"{forbidden}= in run kwargs."
+                )
+        if not identity_label or not identity_label.strip():
+            raise ValueError("identity_label must be a non-empty string.")
+        if output_dir.exists() and not output_dir.is_dir():
+            raise ValueError(f"output_dir must be a directory path: {output_dir!s}")
+
+        override_key = tracker.identity.canonical_json_sha256(
+            {
+                "base_run_id": base_run_id,
+                "overrides": overrides.to_canonical_dict(),
+                "adapter_version": self.adapter_version,
+            }
+        )
+        staged_output_dir = output_dir / f"override_{override_key[:16]}"
+        if staged_output_dir.exists():
+            shutil.rmtree(staged_output_dir)
+
+        materialized = self.materialize_from_run(
+            tracker=tracker,
+            run_id=base_run_id,
+            overrides=overrides,
+            output_dir=staged_output_dir,
+            strict=strict,
+        )
+        if not materialized.root_dirs:
+            raise ValueError("Materialized BEAM config has no root directories.")
+        selected_root = materialized.root_dirs[0]
+        run_adapter = replace(
+            self,
+            root_dirs=list(materialized.root_dirs),
+            primary_config=materialized.primary_config,
+        )
+
+        injected_runtime_kwargs = self._build_override_runtime_kwargs(
+            fn=fn,
+            selected_root=selected_root,
+            root_dirs=materialized.root_dirs,
+            explicit_mapping=override_runtime_kwargs,
+            existing_runtime_kwargs=(
+                execution_options.runtime_kwargs if execution_options else None
+            ),
+        )
+        resolved_execution_options = execution_options
+        if injected_runtime_kwargs:
+            merged_runtime_kwargs: dict[str, Any] = {}
+            if execution_options is not None and execution_options.runtime_kwargs:
+                merged_runtime_kwargs.update(execution_options.runtime_kwargs)
+            merged_runtime_kwargs.update(injected_runtime_kwargs)
+            if execution_options is None:
+                from consist.types import ExecutionOptions
+
+                resolved_execution_options = ExecutionOptions(
+                    runtime_kwargs=merged_runtime_kwargs
+                )
+            else:
+                resolved_execution_options = replace(
+                    execution_options,
+                    runtime_kwargs=merged_runtime_kwargs,
+                )
+
+        return tracker.run(
+            fn=fn,
+            name=name,
+            model=model,
+            config=config,
+            adapter=run_adapter,
+            identity_inputs=[(identity_label.strip(), selected_root)],
+            outputs=outputs,
+            execution_options=resolved_execution_options,
+            **run_kwargs,
+        )
+
+    def _resolve_base_config_from_run(
+        self, tracker: "Tracker", run_id: str
+    ) -> tuple[list[Path], Path]:
+        artifacts = tracker.get_artifacts_for_run(run_id)
+        conf_artifacts = [
+            artifact
+            for artifact in artifacts.inputs.values()
+            if isinstance(artifact.meta, dict)
+            and artifact.meta.get("config_role") == "conf"
+        ]
+        if not conf_artifacts:
+            raise FileNotFoundError(
+                "No BEAM config artifacts found for "
+                f"run_id={run_id!r}. Expected input artifacts with "
+                "meta['config_role'] == 'conf'."
+            )
+
+        ordered_conf = sorted(
+            conf_artifacts,
+            key=lambda artifact: (
+                artifact.key,
+                artifact.created_at.isoformat() if artifact.created_at else "",
+                str(artifact.id),
+            ),
+        )
+
+        root_dirs: list[Path] = []
+        resolved_conf_paths: list[Path] = []
+        for artifact in ordered_conf:
+            resolved = Path(tracker.resolve_uri(artifact.container_uri))
+            if not resolved.exists():
+                raise FileNotFoundError(
+                    "Config artifact exists in metadata but file is missing for "
+                    f"run_id={run_id!r}, key={artifact.key!r}: {resolved!s}"
+                )
+            resolved_conf_paths.append(resolved)
+            root = _infer_root_dir_from_config_artifact(artifact.key, resolved)
+            if root not in root_dirs:
+                root_dirs.append(root)
+
+        primary_config = _select_primary_config_from_artifacts(
+            resolved_conf_paths,
+            primary_hint=self.primary_config,
+        )
+        return root_dirs, primary_config
+
+    @staticmethod
+    def _build_override_runtime_kwargs(
+        *,
+        fn: Any,
+        selected_root: Path,
+        root_dirs: Sequence[Path],
+        explicit_mapping: Mapping[str, Any] | None,
+        existing_runtime_kwargs: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        mapping = (
+            dict(explicit_mapping)
+            if explicit_mapping is not None
+            else dict(_DEFAULT_OVERRIDE_RUNTIME_KWARGS)
+        )
+        existing = dict(existing_runtime_kwargs or {})
+        resolved_sources: dict[str, Any] = {
+            "selected_root_dir": selected_root,
+            "root_dirs": list(root_dirs),
+        }
+        injected: dict[str, Any] = {}
+        for runtime_key, source in mapping.items():
+            if runtime_key in existing:
+                continue
+            if not BeamConfigAdapter._callable_accepts_kwarg(fn, runtime_key):
+                continue
+            if isinstance(source, str) and source in resolved_sources:
+                injected[runtime_key] = resolved_sources[source]
+            else:
+                injected[runtime_key] = source
+        return injected
+
+    @staticmethod
+    def _callable_accepts_kwarg(fn: Any, runtime_key: str) -> bool:
+        try:
+            signature = inspect.signature(fn)
+        except (TypeError, ValueError):
+            return False
+        if runtime_key in signature.parameters:
+            return True
+        return any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
         )
 
     def build_facet(
@@ -533,6 +757,60 @@ def _add_artifact(
         direction="input",
         meta=data,
     )
+
+
+def _parse_config_key_root_and_rel(key: str) -> tuple[str, Path] | None:
+    if not key.startswith("config:"):
+        return None
+    suffix = key[len("config:") :]
+    if "/" not in suffix:
+        return None
+    root_name, rel = suffix.split("/", 1)
+    if not root_name or not rel:
+        return None
+    return root_name, Path(rel)
+
+
+def _infer_root_dir_from_config_artifact(key: str, resolved_path: Path) -> Path:
+    parsed = _parse_config_key_root_and_rel(key)
+    if parsed is None:
+        return resolved_path.parent.resolve()
+
+    root_name, rel_path = parsed
+    depth = len(rel_path.parts)
+    candidate = resolved_path
+    for _ in range(depth):
+        candidate = candidate.parent
+    candidate = candidate.resolve()
+    if candidate.name == root_name:
+        return candidate
+
+    for parent in resolved_path.parents:
+        if parent.name == root_name:
+            return parent.resolve()
+    return candidate
+
+
+def _select_primary_config_from_artifacts(
+    conf_paths: Sequence[Path], *, primary_hint: Path | None
+) -> Path:
+    if not conf_paths:
+        raise ValueError("Cannot resolve primary config from an empty artifact list.")
+
+    if primary_hint is None:
+        return conf_paths[0]
+
+    hint = Path(primary_hint)
+    hint_name = hint.name
+    hint_posix = hint.as_posix()
+
+    for path in conf_paths:
+        if path.name == hint_name:
+            return path
+    for path in conf_paths:
+        if path.as_posix().endswith(hint_posix):
+            return path
+    return conf_paths[0]
 
 
 def _is_in_roots(path: Path, root_dirs: Sequence[Path]) -> bool:

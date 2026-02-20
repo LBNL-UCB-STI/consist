@@ -1377,6 +1377,7 @@ class Tracker:
         execution_options: Optional[ExecutionOptions] = None,
         strict: bool = True,
         identity_label: str = "activitysim_config",
+        override_runtime_kwargs: Optional[Mapping[str, Any]] = None,
         **run_kwargs: Any,
     ) -> RunResult:
         """
@@ -1414,6 +1415,7 @@ class Tracker:
             execution_options=execution_options,
             strict=strict,
             identity_label=identity_label,
+            override_runtime_kwargs=override_runtime_kwargs,
             **run_kwargs,
         )
 

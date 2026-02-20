@@ -36,6 +36,10 @@ The format is based on [Keep a Changelog], and this project adheres to
 - Update user-facing docs for the unified identity model (`identity_inputs`,
   adapter handoff, and `run.identity_summary`)
   by @zneedell (PR link TBD).
+- Remove deprecated `config_plan`/`hash_inputs` kwargs from run/trace/scenario
+  and `define_step`, and add adapter-driven config override helpers
+  (`run_with_config_overrides`, `get_config_bundle`, and new ActivitySim
+  materialization/lookup helpers) by @zneedell (PR link TBD).
 
 ### Fixed
 

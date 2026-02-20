@@ -8,6 +8,7 @@ from typing import (
     Callable,
     Iterable,
     Literal,
+    Mapping,
     NamedTuple,
     Optional,
     Protocol,
@@ -391,6 +392,7 @@ class SupportsRunWithConfigOverrides(Protocol):
         execution_options: Any = None,
         strict: bool = True,
         identity_label: str = "activitysim_config",
+        override_runtime_kwargs: Optional[Mapping[str, Any]] = None,
         **run_kwargs: Any,
     ) -> Any: ...
 
