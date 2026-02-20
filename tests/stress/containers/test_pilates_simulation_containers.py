@@ -222,7 +222,7 @@ def run_simulation_scenario(
                         "base_trips": base_trips_by_year.get(year, base_trips),
                     },
                     facet_from=["base_trips"],
-                    hash_inputs=[("generate_trips_config", external_cfg_dir)],
+                    identity_inputs=[("generate_trips_config", external_cfg_dir)],
                     inputs=[advanced_person_art],
                     output_paths={"persons": output_path},
                     cache_options=CacheOptions(
