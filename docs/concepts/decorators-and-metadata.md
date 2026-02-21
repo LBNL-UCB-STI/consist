@@ -6,8 +6,8 @@ so you can reduce boilerplate without losing clarity or cache correctness.
 !!! note "Recommended path"
     This page is centered on metadata used with the recommended path:
     `consist.run(...)`, `consist.trace(...)`, and `consist.scenario(...)`.
-    Any `config_plan` resolver examples are advanced integration patterns, not the
-    default run surface.
+    Adapter/identity metadata examples here are advanced integration patterns,
+    not the default onboarding run surface.
 
 ---
 
@@ -112,30 +112,31 @@ def simulate(...):
     ...
 ```
 
-Runtime-aware `hash_inputs`:
+Runtime-aware `identity_inputs`:
 
 ```python
 @define_step(
-    hash_inputs=lambda ctx: "full"
-    if ctx.get_runtime("settings", {}).get("strict_hashing")
-    else "fast"
+    identity_inputs=lambda ctx: [
+        ("asim_config", ctx.require_runtime("settings")["config_dir"])
+    ]
 )
 def load_inputs(...):
     ...
 ```
 
-Declarative `config_plan` with a built-in resolver helper:
+Declarative adapter handoff metadata:
 
 !!! note "Advanced integration pattern"
-    `config_plan` resolver usage is a low-level/advanced option for integration
-    workflows. Keep typical runs on the recommended path (`run`/`trace`/`scenario`).
+    Adapter metadata on `@define_step` is a low-level/advanced option for
+    integration workflows. Keep typical runs on the recommended path
+    (`run`/`trace`/`scenario`).
 
 ```python
 @define_step(
-    config_plan=tracker.prepare_config_resolver(
-        adapter=activitysim_adapter,
-        config_dirs_from="settings.config_dirs",
-    ),
+    adapter=lambda ctx: ctx.require_runtime("activitysim_adapter"),
+    identity_inputs=lambda ctx: [
+        ("asim_config", ctx.require_runtime("settings")["config_dir"])
+    ],
 )
 def run_model(...):
     ...

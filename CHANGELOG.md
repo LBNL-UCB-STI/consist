@@ -14,7 +14,7 @@ The format is based on [Keep a Changelog], and this project adheres to
 - Add `Run.identity_summary` for cache-identity debugging (hash components,
   adapter contribution, identity-input digests, and run identity fields)
   by @zneedell (PR link TBD).
-- Add Workstream 2 migration coverage tests for adapter handoff, run/trace
+- Add migration coverage tests for adapter handoff, run/trace
   identity kwargs parity, and identity-summary behavior
   by @zneedell (PR link TBD).
 - Add one-line output accessors for run/artifact ergonomics:
@@ -148,9 +148,15 @@ The format is based on [Keep a Changelog], and this project adheres to
   handling, and cross-platform test execution.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
+
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
+
 [Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.0-beta.3...HEAD
+
 [0.1.0]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.0-beta.3...v0.1.0
+
 [0.1.0-beta.3]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.0-beta.2...v0.1.0-beta.3
+
 [0.1.0-beta.2]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.0-beta.1...v0.1.0-beta.2
+
 [0.1.0-beta.1]: https://github.com/LBNL-UCB-STI/consist/releases/tag/v0.1.0-beta.1

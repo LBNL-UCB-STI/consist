@@ -55,8 +55,8 @@ with tracker.trace(
     simulate_inline()
 ```
 
-`config_plan` and `hash_inputs` are hidden compatibility kwargs, not the
-recommended public kwargs for new run/trace calls.
+`config_plan` and `hash_inputs` are not accepted on `Tracker.run(...)` and
+`Tracker.trace(...)`. Use `adapter` and `identity_inputs`.
 
 ## Config Override Selectors
 

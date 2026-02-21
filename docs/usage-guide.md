@@ -1060,7 +1060,7 @@ A baseline scenario and 8 future scenarios all share the same network preprocess
 ## Querying Results
 
 ### Finding Runs
-See: [Example notebooks](examples.md#tutorial-series).
+See: [Example notebooks](examples.md).
 
 ``` python
 import consist
@@ -1084,7 +1084,7 @@ result_2030 = runs_by_year[2030]
 1. Filter by scenario ID.
 
 ### Loading Artifacts
-See: [Example notebooks](examples.md#tutorial-series).
+See: [Example notebooks](examples.md).
 
 ``` python
 artifacts = tracker.get_artifacts_for_run(run.id)
@@ -1096,7 +1096,7 @@ df = consist.load_df(persons_artifact)  # (1)!
 1. Load the artifact data into a DataFrame.
 
 ### Cross-Run Queries with Views
-See: [Example notebooks](examples.md#tutorial-series).
+See: [Example notebooks](examples.md).
 
 Register schemas to enable SQL queries across all runs:
 

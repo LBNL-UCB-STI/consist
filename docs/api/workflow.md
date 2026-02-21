@@ -43,9 +43,8 @@ with tracker.scenario("baseline") as sc:
         analyze_inline(step.outputs["prepared"])
 ```
 
-`config_plan` and `hash_inputs` remain accepted as hidden compatibility kwargs,
-but `adapter` and `identity_inputs` are the public kwargs for run/trace
-identity.
+`config_plan` and `hash_inputs` are not accepted on scenario step run/trace
+surfaces. Use `adapter` and `identity_inputs`.
 
 ## Minimal runnable scenario example
 

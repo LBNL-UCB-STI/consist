@@ -6,12 +6,12 @@ This project uses semantic versioning. Until `1.0.0`, breaking changes may occur
 
 - License is set (`LICENSE` exists) and `README.md` reflects it.
 - CI is green: `pytest`, `ruff`, and `zensical serve`.
-- Docs site metadata is updated in `zensical.yaml` (`site_url`, `repo_url`, `repo_name`).
+- Docs site metadata is updated in `zensical.toml` (`site_url`, `repo_url`, `repo_name`).
 - Changelog is updated for the release.
 - Public API changes are reviewed:
-  - Python exports in `src/consist/__init__.py`
-  - CLI flags/output in `src/consist/cli.py`
-  - DuckDB schema/provenance semantics (Runs/Artifacts, signatures, scenario linkage)
+    - Python exports in `src/consist/__init__.py`
+    - CLI flags/output in `src/consist/cli.py`
+    - DuckDB schema/provenance semantics (Runs/Artifacts, signatures, scenario linkage)
 
 ## Tagging a release
 
@@ -24,4 +24,3 @@ This project uses semantic versioning. Until `1.0.0`, breaking changes may occur
 - Build: `python -m build`.
 - Smoke-test install from the built artifacts in a clean env.
 - Publish (once configured): `python -m twine upload dist/*`.
-

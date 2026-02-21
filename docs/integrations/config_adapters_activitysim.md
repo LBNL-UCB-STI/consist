@@ -88,8 +88,8 @@ with use_tracker(tracker):
         run_activitysim()
 ```
 
-`config_plan` is still accepted as a compatibility kwarg, but it is not the
-recommended public run/trace surface.
+`config_plan` is not accepted on run/trace public surfaces. Use `adapter=...`
+and `identity_inputs=...`.
 
 You can still precompute plans for validation and orchestration workflows:
 

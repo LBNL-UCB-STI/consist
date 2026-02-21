@@ -23,9 +23,8 @@ Public identity kwargs for `consist.run(...)`, `consist.trace(...)`,
 - `adapter=...`
 - `identity_inputs=[...]`
 
-`config_plan=` and `hash_inputs=` are hidden compatibility kwargs. They remain
-accepted for migration compatibility, but they are not the recommended public
-surface for new code.
+`config_plan=` and `hash_inputs=` are not accepted on these run/trace surfaces.
+Passing them raises `TypeError` (`unexpected keyword argument ...`).
 
 Run/trace parity is implemented through a shared invocation-resolution path
 (`resolve_run_invocation`), so identity and cache-option validation rules are

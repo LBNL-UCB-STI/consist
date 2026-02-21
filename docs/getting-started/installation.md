@@ -5,24 +5,34 @@
 - Python 3.11 or newer
 - Git (for source installation and code version tracking)
 
-## Install from PyPI
+## Install from GitHub (Current)
 
 ```bash
-pip install consist
+pip install git+https://github.com/LBNL-UCB-STI/consist.git
 ```
 
+> We are currently preparing our initial PyPI release. Until then, install from
+> GitHub.
+
 ### Optional Extras
+
+If you have a local clone and want optional extras in editable mode:
+
+```bash
+git clone https://github.com/LBNL-UCB-STI/consist.git
+cd consist
+```
 
 Install with DLT for data ingestion into DuckDB:
 
 ```bash
-pip install "consist[ingest]"
+pip install -e ".[ingest]"
 ```
 
 Install with example notebook dependencies:
 
 ```bash
-pip install "consist[examples]"
+pip install -e ".[examples]"
 ```
 
 ## Install from Source
@@ -58,10 +68,11 @@ tutorials.
 
 The [First Workflow](first-workflow.md) tutorial writes Parquet output via
 `pandas.DataFrame.to_parquet(...)`, which requires a Parquet engine such as
-`pyarrow`. Install the optional Parquet extra before running that tutorial:
+`pyarrow`. From a local clone, install the optional Parquet extra before running
+that tutorial:
 
 ```bash
-pip install "consist[parquet]"
+pip install -e ".[parquet]"
 ```
 
 ## Next Steps

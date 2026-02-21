@@ -9,17 +9,17 @@ Examples are grouped into two tiers:
 
 ## Essentials
 
-| Example | Quick Links | Key Learning Outcomes |
-|:--|:--:|:--|
-| **00 Quickstart**<br>A 5-minute introduction to the core API. | [📖 View on GitHub](https://github.com/LBNL-UCB-STI/consist/blob/main/examples/00_quickstart.ipynb)<br>[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/LBNL-UCB-STI/consist/blob/main/examples/00_quickstart.ipynb) | • Create a tracked run<br>• Observe cache hits on repeated runs<br>• Query run history |
+| Example                                                                                         |                                                                                                                                                         Quick Links                                                                                                                                                         | Key Learning Outcomes                                                                                  |
+|:------------------------------------------------------------------------------------------------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------:|:-------------------------------------------------------------------------------------------------------|
+| **00 Quickstart**<br>A 5-minute introduction to the core API.                                   |                  [📖 View on GitHub](https://github.com/LBNL-UCB-STI/consist/blob/main/examples/00_quickstart.ipynb)<br>[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/LBNL-UCB-STI/consist/blob/main/examples/00_quickstart.ipynb)                  | • Create a tracked run<br>• Observe cache hits on repeated runs<br>• Query run history                 |
 | **01 Monte Carlo Sweeps**<br>Recommended path `scenario + run + trace` usage at moderate scale. | [📖 View on GitHub](https://github.com/LBNL-UCB-STI/consist/blob/main/examples/01_parameter_sweep_monte_carlo.ipynb)<br>[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/LBNL-UCB-STI/consist/blob/main/examples/01_parameter_sweep_monte_carlo.ipynb) | • Parameter sweeps with provenance<br>• Mixed `run` and `trace` step styles<br>• Hybrid query workflow |
 
 ## Advanced
 
-| Example | Quick Links | Key Learning Outcomes |
-|:--|:--:|:--|
-| **02 Iterative Workflows**<br>Scenario workflows with feedback loops. | [📖 View on GitHub](https://github.com/LBNL-UCB-STI/consist/blob/main/examples/02_iterative_workflows.ipynb)<br>[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/LBNL-UCB-STI/consist/blob/main/examples/02_iterative_workflows.ipynb) | • Iterative scenario loops<br>• Cache hydration choices across iterations<br>• Provenance queries for extension runs |
-| **03 Demand Modeling**<br>End-to-end transportation simulation. | [📖 View on GitHub](https://github.com/LBNL-UCB-STI/consist/blob/main/examples/03_transportation_demand_modeling.ipynb)<br>[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/LBNL-UCB-STI/consist/blob/main/examples/03_transportation_demand_modeling.ipynb) | • Multi-step model pipelines<br>• Scenario comparison and lineage tracing<br>• Matrix-style downstream analysis |
+| Example                                                               |                                                                                                                                                            Quick Links                                                                                                                                                            | Key Learning Outcomes                                                                                                |
+|:----------------------------------------------------------------------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------:|:---------------------------------------------------------------------------------------------------------------------|
+| **02 Iterative Workflows**<br>Scenario workflows with feedback loops. |            [📖 View on GitHub](https://github.com/LBNL-UCB-STI/consist/blob/main/examples/02_iterative_workflows.ipynb)<br>[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/LBNL-UCB-STI/consist/blob/main/examples/02_iterative_workflows.ipynb)            | • Iterative scenario loops<br>• Cache hydration choices across iterations<br>• Provenance queries for extension runs |
+| **03 Demand Modeling**<br>End-to-end transportation simulation.       | [📖 View on GitHub](https://github.com/LBNL-UCB-STI/consist/blob/main/examples/03_transportation_demand_modeling.ipynb)<br>[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/LBNL-UCB-STI/consist/blob/main/examples/03_transportation_demand_modeling.ipynb) | • Multi-step model pipelines<br>• Scenario comparison and lineage tracing<br>• Matrix-style downstream analysis      |
 
 For non-recommended lifecycle/decorator APIs, see
 [Advanced Usage](advanced/index.md), especially
@@ -32,7 +32,12 @@ For non-recommended lifecycle/decorator APIs, see
 
 ```bash
 pip install git+https://github.com/LBNL-UCB-STI/consist.git
-pip install -e ".[dev]"
+```
+
+If you are running notebooks from a local clone and need notebook tooling:
+
+```bash
+pip install -e ".[examples]"
 ```
 
 For notebook/module layout details, see

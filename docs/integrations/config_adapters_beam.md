@@ -63,8 +63,8 @@ with use_tracker(tracker):
         run_beam()
 ```
 
-`config_plan` is still accepted as a hidden compatibility kwarg, but it is not
-the recommended public run/trace surface.
+`config_plan` is not accepted on run/trace public surfaces. Use `adapter=...`
+and `identity_inputs=...`.
 
 ## Facets
 

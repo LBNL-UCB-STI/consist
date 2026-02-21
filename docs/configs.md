@@ -34,9 +34,8 @@ Relevant arguments:
 - `facet_schema_version: str|int|None`
 - `facet_index: bool` (default `True`)
 
-`config_plan` and `hash_inputs` are hidden compatibility kwargs for migration;
-they are still accepted, but they are not the recommended public run/trace
-surface.
+`config_plan` and `hash_inputs` are not accepted on these run/trace surfaces.
+Use `adapter` and `identity_inputs`.
 
 ## Identity Hashing
 
