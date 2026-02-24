@@ -507,6 +507,205 @@ class RunTraceCoordinator:
             start_kwargs=start_kwargs,
         )
 
+    @staticmethod
+    def _apply_missing_output_policy(
+        label: str,
+        missing: List[str],
+        *,
+        policy: Literal["warn", "error", "ignore"],
+    ) -> None:
+        if not missing:
+            return
+        msg = f"{label} missing outputs: {missing}"
+        if policy == "error":
+            raise RuntimeError(msg)
+        if policy == "warn":
+            logging.warning("[Consist] %s", msg)
+
+    @staticmethod
+    def _apply_output_mismatch_policy(
+        msg: str,
+        *,
+        policy: Literal["warn", "error", "ignore"],
+    ) -> bool:
+        if policy == "error":
+            raise RuntimeError(msg)
+        if policy == "warn":
+            logging.warning("[Consist] %s", msg)
+        return False
+
+    @staticmethod
+    def _log_output_value(
+        tracker: "Tracker",
+        output_key: str,
+        output_value: Optional[ArtifactRef],
+    ) -> Optional[Artifact]:
+        if output_value is None:
+            return None
+        return tracker.log_artifact(
+            output_value,
+            key=output_key,
+            direction="output",
+        )
+
+    def _log_declared_output_paths(
+        self,
+        *,
+        tracker: "Tracker",
+        resolved_name: str,
+        output_paths: Optional[Mapping[str, ArtifactRef]],
+        output_base_dir: Path,
+        on_missing_outputs: Callable[[str, List[str]], None],
+    ) -> Dict[str, Artifact]:
+        outputs_map: Dict[str, Artifact] = {}
+        if output_paths is None:
+            return outputs_map
+
+        for output_key, ref in output_paths.items():
+            ref_path = self._helpers.resolve_output_path(tracker, ref, output_base_dir)
+            if not ref_path.exists():
+                on_missing_outputs(f"Run {resolved_name!r}", [str(output_key)])
+                continue
+            if isinstance(ref, Artifact):
+                outputs_map[output_key] = tracker.log_artifact(
+                    ref,
+                    key=output_key,
+                    direction="output",
+                )
+            else:
+                outputs_map[output_key] = tracker.log_artifact(
+                    ref_path,
+                    key=output_key,
+                    direction="output",
+                )
+        return outputs_map
+
+    def _normalize_run_outputs(
+        self,
+        *,
+        tracker: "Tracker",
+        current_consist: Any,
+        resolved_name: str,
+        outputs: Optional[List[str]],
+        output_paths: Optional[Mapping[str, ArtifactRef]],
+        result: Any,
+        captured_outputs: Mapping[str, Artifact],
+        on_missing_outputs: Callable[[str, List[str]], None],
+        on_output_mismatch: Callable[[str], bool],
+    ) -> Dict[str, Artifact]:
+        output_base_dir = tracker.run_artifact_dir()
+        outputs_map = self._log_declared_output_paths(
+            tracker=tracker,
+            resolved_name=resolved_name,
+            output_paths=output_paths,
+            output_base_dir=output_base_dir,
+            on_missing_outputs=on_missing_outputs,
+        )
+
+        if outputs:
+            if result is None:
+                pass
+            elif isinstance(result, dict):
+                for output_key, output_value in result.items():
+                    logged = self._log_output_value(
+                        tracker,
+                        str(output_key),
+                        cast(Optional[ArtifactRef], output_value),
+                    )
+                    if logged is not None:
+                        outputs_map[str(output_key)] = logged
+            elif isinstance(result, (list, tuple)):
+                if len(result) != len(outputs):
+                    on_output_mismatch(
+                        "Output list length does not match declared outputs."
+                    )
+                else:
+                    for output_key, output_value in zip(outputs, result):
+                        logged = self._log_output_value(
+                            tracker,
+                            output_key,
+                            cast(Optional[ArtifactRef], output_value),
+                        )
+                        if logged is not None:
+                            outputs_map[output_key] = logged
+            elif isinstance(result, pd.DataFrame):
+                if len(outputs) != 1:
+                    on_output_mismatch(
+                        "Single return value does not match declared outputs."
+                    )
+                else:
+                    outputs_map[outputs[0]] = tracker.log_dataframe(
+                        result,
+                        key=outputs[0],
+                    )
+            elif isinstance(result, pd.Series):
+                if len(outputs) != 1:
+                    on_output_mismatch(
+                        "Single return value does not match declared outputs."
+                    )
+                else:
+                    outputs_map[outputs[0]] = tracker.log_dataframe(
+                        result.to_frame(name=outputs[0]),
+                        key=outputs[0],
+                    )
+            elif self._helpers.is_xarray_dataset(result):
+                if len(outputs) != 1:
+                    on_output_mismatch(
+                        "Single return value does not match declared outputs."
+                    )
+                else:
+                    key_name = outputs[0]
+                    output_path = output_base_dir / f"{key_name}.zarr"
+                    self._helpers.write_xarray_dataset(result, output_path)
+                    outputs_map[key_name] = tracker.log_artifact(
+                        output_path,
+                        key=key_name,
+                        direction="output",
+                        driver="zarr",
+                    )
+            elif isinstance(result, (Artifact, str, Path)):
+                if len(outputs) != 1:
+                    on_output_mismatch(
+                        "Single return value does not match declared outputs."
+                    )
+                else:
+                    logged = self._log_output_value(
+                        tracker,
+                        outputs[0],
+                        cast(Optional[ArtifactRef], result),
+                    )
+                    if logged is not None:
+                        outputs_map[outputs[0]] = logged
+            else:
+                raise TypeError(f"Run returned unsupported type {type(result)}")
+        elif result is not None:
+            logging.warning(
+                "[Consist] Run %r returned a value but no outputs were declared; ignoring return value.",
+                resolved_name,
+            )
+
+        if captured_outputs:
+            for output_key, artifact in captured_outputs.items():
+                outputs_map.setdefault(output_key, artifact)
+
+        logged_outputs = {
+            artifact.key: artifact for artifact in current_consist.outputs
+        }
+        if outputs:
+            missing_keys = [
+                output_key
+                for output_key in outputs
+                if output_key not in outputs_map and output_key not in logged_outputs
+            ]
+            on_missing_outputs(f"Run {resolved_name!r}", missing_keys)
+            for output_key in outputs:
+                if output_key not in outputs_map and output_key in logged_outputs:
+                    outputs_map[output_key] = logged_outputs[output_key]
+        elif not outputs_map and logged_outputs:
+            outputs_map = logged_outputs
+
+        return outputs_map
+
     def _execute_container_run(
         self,
         *,
@@ -955,20 +1154,17 @@ class RunTraceCoordinator:
         start_kwargs = context.start_kwargs
 
         def _handle_missing_outputs(label: str, missing: List[str]) -> None:
-            if not missing:
-                return
-            msg = f"{label} missing outputs: {missing}"
-            if output_missing == "error":
-                raise RuntimeError(msg)
-            if output_missing == "warn":
-                logging.warning("[Consist] %s", msg)
+            self._apply_missing_output_policy(
+                label,
+                missing,
+                policy=output_missing,
+            )
 
         def _handle_output_mismatch(msg: str) -> bool:
-            if output_mismatch == "error":
-                raise RuntimeError(msg)
-            if output_mismatch == "warn":
-                logging.warning("[Consist] %s", msg)
-            return False
+            return self._apply_output_mismatch_policy(
+                msg,
+                policy=output_mismatch,
+            )
 
         with tracker.start_run(**start_kwargs) as active_tracker:
             current_consist = active_tracker.current_consist
@@ -1032,131 +1228,17 @@ class RunTraceCoordinator:
                 capture_pattern=capture_pattern,
             )
 
-            outputs_map: Dict[str, Artifact] = {}
-            output_base_dir = tracker.run_artifact_dir()
-
-            def _log_output_value(
-                output_key: str, output_value: ArtifactRef
-            ) -> Optional[Artifact]:
-                if output_value is None:
-                    return None
-                return tracker.log_artifact(
-                    output_value, key=output_key, direction="output"
-                )
-
-            if output_paths is not None:
-                for output_key, ref in output_paths.items():
-                    ref_path = self._helpers.resolve_output_path(
-                        tracker, ref, output_base_dir
-                    )
-                    if not ref_path.exists():
-                        _handle_missing_outputs(
-                            f"Run {resolved_name!r}", [str(output_key)]
-                        )
-                        continue
-                    if isinstance(ref, Artifact):
-                        outputs_map[output_key] = tracker.log_artifact(
-                            ref,
-                            key=output_key,
-                            direction="output",
-                        )
-                    else:
-                        outputs_map[output_key] = tracker.log_artifact(
-                            ref_path,
-                            key=output_key,
-                            direction="output",
-                        )
-
-            if outputs:
-                if result is None:
-                    pass
-                elif isinstance(result, dict):
-                    for output_key, output_value in result.items():
-                        logged = _log_output_value(str(output_key), output_value)
-                        if logged is not None:
-                            outputs_map[str(output_key)] = logged
-                elif isinstance(result, (list, tuple)):
-                    if len(result) != len(outputs):
-                        _handle_output_mismatch(
-                            "Output list length does not match declared outputs."
-                        )
-                    else:
-                        for output_key, output_value in zip(outputs, result):
-                            logged = _log_output_value(output_key, output_value)
-                            if logged is not None:
-                                outputs_map[output_key] = logged
-                elif isinstance(result, pd.DataFrame):
-                    if len(outputs) != 1:
-                        _handle_output_mismatch(
-                            "Single return value does not match declared outputs."
-                        )
-                    else:
-                        outputs_map[outputs[0]] = tracker.log_dataframe(
-                            result,
-                            key=outputs[0],
-                        )
-                elif isinstance(result, pd.Series):
-                    if len(outputs) != 1:
-                        _handle_output_mismatch(
-                            "Single return value does not match declared outputs."
-                        )
-                    else:
-                        outputs_map[outputs[0]] = tracker.log_dataframe(
-                            result.to_frame(name=outputs[0]),
-                            key=outputs[0],
-                        )
-                elif self._helpers.is_xarray_dataset(result):
-                    if len(outputs) != 1:
-                        _handle_output_mismatch(
-                            "Single return value does not match declared outputs."
-                        )
-                    else:
-                        key_name = outputs[0]
-                        output_path = output_base_dir / f"{key_name}.zarr"
-                        self._helpers.write_xarray_dataset(result, output_path)
-                        outputs_map[key_name] = tracker.log_artifact(
-                            output_path,
-                            key=key_name,
-                            direction="output",
-                            driver="zarr",
-                        )
-                elif isinstance(result, (Artifact, str, Path)):
-                    if len(outputs) != 1:
-                        _handle_output_mismatch(
-                            "Single return value does not match declared outputs."
-                        )
-                    else:
-                        logged = _log_output_value(outputs[0], result)
-                        if logged is not None:
-                            outputs_map[outputs[0]] = logged
-                else:
-                    raise TypeError(f"Run returned unsupported type {type(result)}")
-            elif result is not None:
-                logging.warning(
-                    "[Consist] Run %r returned a value but no outputs were declared; ignoring return value.",
-                    resolved_name,
-                )
-
-            if captured_outputs:
-                for output_key, artifact in captured_outputs.items():
-                    outputs_map.setdefault(output_key, artifact)
-
-            logged_outputs = {
-                artifact.key: artifact for artifact in current_consist.outputs
-            }
-            if outputs:
-                missing_keys = [
-                    output_key
-                    for output_key in outputs
-                    if output_key not in outputs_map
-                    and output_key not in logged_outputs
-                ]
-                _handle_missing_outputs(f"Run {resolved_name!r}", missing_keys)
-                for output_key in outputs:
-                    if output_key not in outputs_map and output_key in logged_outputs:
-                        outputs_map[output_key] = logged_outputs[output_key]
-            elif not outputs_map and logged_outputs:
-                outputs_map = logged_outputs
+            outputs_map = self._normalize_run_outputs(
+                tracker=tracker,
+                current_consist=current_consist,
+                resolved_name=resolved_name,
+                outputs=outputs,
+                output_paths=output_paths,
+                result=result,
+                captured_outputs=captured_outputs,
+                on_missing_outputs=_handle_missing_outputs,
+                on_output_mismatch=_handle_output_mismatch,
+            )
 
             return RunResult(
                 run=current_consist.run,
@@ -1493,13 +1575,11 @@ class RunTraceCoordinator:
             )
 
         def _handle_missing_outputs(label: str, missing: List[str]) -> None:
-            if not missing:
-                return
-            msg = f"{label} missing outputs: {missing}"
-            if output_missing == "error":
-                raise RuntimeError(msg)
-            if output_missing == "warn":
-                logging.warning("[Consist] %s", msg)
+            self._apply_missing_output_policy(
+                label,
+                missing,
+                policy=output_missing,
+            )
 
         with tracker.start_run(**start_kwargs) as active_tracker:
             current_consist = active_tracker.current_consist
@@ -1524,28 +1604,13 @@ class RunTraceCoordinator:
                 else:
                     yield active_tracker
             finally:
-                if output_paths is not None:
-                    for output_key, ref in output_paths.items():
-                        ref_path = self._helpers.resolve_output_path(
-                            tracker,
-                            ref,
-                            output_base_dir,
-                        )
-                        if not ref_path.exists():
-                            _handle_missing_outputs(
-                                f"Run {resolved_name!r}", [str(output_key)]
-                            )
-                            continue
-                        if isinstance(ref, Artifact):
-                            tracker.log_artifact(
-                                ref, key=output_key, direction="output"
-                            )
-                        else:
-                            tracker.log_artifact(
-                                ref_path,
-                                key=output_key,
-                                direction="output",
-                            )
+                self._log_declared_output_paths(
+                    tracker=tracker,
+                    resolved_name=resolved_name,
+                    output_paths=output_paths,
+                    output_base_dir=output_base_dir,
+                    on_missing_outputs=_handle_missing_outputs,
+                )
 
                 if outputs:
                     logged_outputs = {
