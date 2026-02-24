@@ -1732,6 +1732,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#runtrace-identity-kwargs-public-surface" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run/trace identity kwargs (public surface)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#minimal-runnable-comparison" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2254,6 +2265,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#runtrace-identity-kwargs-public-surface" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run/trace identity kwargs (public surface)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#minimal-runnable-comparison" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2513,9 +2535,19 @@ more verbose, lower-level, or easier to misuse.</p>
 <td>Convenience wrapper around <code>Tracker.run</code></td>
 </tr>
 <tr>
+<td><a href="../api_helpers/#consist.api.trace"><code>consist.trace</code></a></td>
+<td>You need inline <code>with</code>-block execution with run recording</td>
+<td>Convenience wrapper around <code>Tracker.trace</code></td>
+</tr>
+<tr>
 <td><a href="../tracker/#consist.core.tracker.Tracker.run"><code>Tracker.run</code></a></td>
 <td>You want explicit tracker ownership in app/library code</td>
 <td>Same core behavior as <code>consist.run</code></td>
+</tr>
+<tr>
+<td><a href="../tracker/#consist.core.tracker.Tracker.trace"><code>Tracker.trace</code></a></td>
+<td>You need inline execution with explicit tracker control</td>
+<td>Block executes every time</td>
 </tr>
 <tr>
 <td><a href="../api_helpers/#consist.api.scenario"><code>consist.scenario</code></a></td>
@@ -2527,6 +2559,11 @@ more verbose, lower-level, or easier to misuse.</p>
 <td>You are inside a scenario and want cache-aware steps</td>
 <td>Step-level equivalent of <code>Tracker.run</code></td>
 </tr>
+<tr>
+<td><a href="../workflow/#consist.core.workflow.ScenarioContext.trace"><code>ScenarioContext.trace</code></a></td>
+<td>You are inside a scenario and need inline step execution</td>
+<td>Step-level equivalent of <code>Tracker.trace</code></td>
+</tr>
 </tbody>
 </table>
 <h2 id="relationship-consistscenario-consistrun-and-trackerrun">Relationship: <code>consist.scenario</code>, <code>consist.run</code>, and <code>Tracker.run</code><a class="headerlink" href="#relationship-consistscenario-consistrun-and-trackerrun" title="Permanent link">&para;</a></h2>
@@ -2536,6 +2573,22 @@ more verbose, lower-level, or easier to misuse.</p>
 <li><code>consist.scenario(...)</code> creates a scenario context; inside it, call <code>sc.run(...)</code>
   for cache-aware steps or <code>sc.trace(...)</code> for inline blocks that execute each time.</li>
 </ul>
+<h2 id="runtrace-identity-kwargs-public-surface">Run/trace identity kwargs (public surface)<a class="headerlink" href="#runtrace-identity-kwargs-public-surface" title="Permanent link">&para;</a></h2>
+<p>Run/trace APIs share these public identity kwargs:</p>
+<ul>
+<li><code>adapter=...</code></li>
+<li><code>identity_inputs=[...]</code></li>
+</ul>
+<p>This applies to:</p>
+<ul>
+<li><code>consist.run(...)</code> / <code>consist.trace(...)</code></li>
+<li><code>Tracker.run(...)</code> / <code>Tracker.trace(...)</code></li>
+<li><code>ScenarioContext.run(...)</code> / <code>ScenarioContext.trace(...)</code></li>
+</ul>
+<p><code>config_plan=</code> and <code>hash_inputs=</code> are hidden compatibility kwargs. They remain
+accepted for migration compatibility but are not part of the recommended public
+surface for new docs/examples.</p>
+<p>For cache identity debugging, use <code>run.identity_summary</code>.</p>
 <h2 id="minimal-runnable-comparison">Minimal runnable comparison<a class="headerlink" href="#minimal-runnable-comparison" title="Permanent link">&para;</a></h2>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
 </span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>

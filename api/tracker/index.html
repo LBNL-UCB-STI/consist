@@ -1788,6 +1788,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#public-identity-kwargs-run-trace" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Public identity kwargs (run / trace)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#consist.core.tracker.Tracker.last_run" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2924,6 +2935,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#public-identity-kwargs-run-trace" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Public identity kwargs (run / trace)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#consist.core.tracker.Tracker.last_run" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3864,6 +3886,24 @@ executed, start here.</p>
 </span></code></pre></div>
 <p>For top-level wrappers around these methods, see <a href="../api_helpers/">API Helpers</a>.
 For grouped workflows, see <a href="../workflow/">Workflow Contexts</a>.</p>
+<h2 id="public-identity-kwargs-run-trace">Public identity kwargs (<code>run</code> / <code>trace</code>)<a class="headerlink" href="#public-identity-kwargs-run-trace" title="Permanent link">&para;</a></h2>
+<p>Use <code>adapter</code> and <code>identity_inputs</code> on <code>Tracker.run(...)</code> and
+<code>Tracker.trace(...)</code>:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">result</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>    <span class="n">fn</span><span class="o">=</span><span class="n">simulate</span><span class="p">,</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>    <span class="n">adapter</span><span class="o">=</span><span class="n">activitysim_adapter</span><span class="p">,</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>    <span class="n">identity_inputs</span><span class="o">=</span><span class="p">[(</span><span class="s2">&quot;asim_config&quot;</span><span class="p">,</span> <span class="n">asim_config_dir</span><span class="p">)],</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="p">)</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">trace</span><span class="p">(</span>
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>    <span class="s2">&quot;simulate_trace&quot;</span><span class="p">,</span>
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>    <span class="n">adapter</span><span class="o">=</span><span class="n">activitysim_adapter</span><span class="p">,</span>
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>    <span class="n">identity_inputs</span><span class="o">=</span><span class="p">[(</span><span class="s2">&quot;asim_config&quot;</span><span class="p">,</span> <span class="n">asim_config_dir</span><span class="p">)],</span>
+</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="p">):</span>
+</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a>    <span class="n">simulate_inline</span><span class="p">()</span>
+</span></code></pre></div>
+<p><code>config_plan</code> and <code>hash_inputs</code> are hidden compatibility kwargs, not the
+recommended public kwargs for new run/trace calls.</p>
 
 
 <div class="doc doc-object doc-class">
@@ -4662,7 +4702,7 @@ end_run : Imperative alternative for ending runs.</p>
 
 
 <h2 id="consist.core.tracker.Tracker.run" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">run</span><span class="p">(</span><span class="n">fn</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">run_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config_plan</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config_plan_ingest</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">config_plan_profile_schema</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">input_keys</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">optional_input_keys</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">depends_on</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">tags</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_from</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_schema_version</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_index</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">hash_inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">year</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">iteration</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">phase</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">stage</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">parent_run_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">outputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">output_paths</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">capture_dir</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">capture_pattern</span><span class="o">=</span><span class="s1">&#39;*&#39;</span><span class="p">,</span> <span class="n">cache_options</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">output_policy</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">execution_options</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+            <code class="highlight language-python"><span class="n">run</span><span class="p">(</span><span class="n">fn</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">run_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">adapter</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config_plan_ingest</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">config_plan_profile_schema</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">input_keys</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">optional_input_keys</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">depends_on</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">tags</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_from</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_schema_version</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_index</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">identity_inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">year</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">iteration</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">phase</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">stage</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">parent_run_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">outputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">output_paths</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">capture_dir</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">capture_pattern</span><span class="o">=</span><span class="s1">&#39;*&#39;</span><span class="p">,</span> <span class="n">cache_options</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">output_policy</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">execution_options</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">legacy_kwargs</span><span class="p">)</span></code>
 
 <a href="#consist.core.tracker.Tracker.run" class="headerlink" title="Permanent link">&para;</a></h2>
 
@@ -4783,15 +4823,14 @@ intelligent caching based on code+config+inputs, and artifact logging.</p>
           </tr>
           <tr class="doc-section-item">
             <td>
-                <code>config_plan</code>
+                <code>adapter</code>
             </td>
             <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<span title="consist.core.config_canonicalization.ConfigPlan">ConfigPlan</span>]</code>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<span title="consist.core.config_canonicalization.ConfigAdapter">ConfigAdapter</span>]</code>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Precomputed config plan (e.g., from ActivitySim adapter). The plan's identity hash
-is folded into the run config hash and its artifacts/ingestables are applied on cache miss.</p>
+                <p>Config adapter used to derive a config plan before execution.</p>
               </div>
             </td>
             <td>
@@ -4978,14 +5017,16 @@ is folded into the run config hash and its artifacts/ingestables are applied on 
           </tr>
           <tr class="doc-section-item">
             <td>
-                <code>hash_inputs</code>
+                <code>identity_inputs</code>
             </td>
             <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<span title="consist.types.HashInputs">HashInputs</span>]</code>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<span title="consist.types.IdentityInputs">IdentityInputs</span>]</code>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Strategy for hashing inputs: "fast" (mtime), "full" (content), or None (auto-detect).</p>
+                <p>Additional hash-only identity inputs (for example config files or
+directories) that should affect cache keys without being logged as
+run inputs.</p>
               </div>
             </td>
             <td>
@@ -5188,6 +5229,24 @@ Maps artifact key to ingested table name.</p>
                   <code>None</code>
             </td>
           </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>**legacy_kwargs</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Any" href="https://docs.python.org/3/library/typing.html#typing.Any">Any</a></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Hidden backwards-compatibility kwargs. <code>config_plan</code> and
+<code>hash_inputs</code> are still accepted, but <code>adapter</code> and
+<code>identity_inputs</code> are the public API.</p>
+              </div>
+            </td>
+            <td>
+                  <code>{}</code>
+            </td>
+          </tr>
       </tbody>
     </table>
 
@@ -5286,7 +5345,7 @@ trace : Context manager alternative (always executes, even on cache hit)</p>
 
 
 <h2 id="consist.core.tracker.Tracker.trace" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">trace</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">run_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config_plan</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config_plan_ingest</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">config_plan_profile_schema</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">input_keys</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">optional_input_keys</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">depends_on</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">tags</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_from</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_schema_version</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_index</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">hash_inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">year</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">iteration</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">parent_run_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">outputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">output_paths</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">capture_dir</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">capture_pattern</span><span class="o">=</span><span class="s1">&#39;*&#39;</span><span class="p">,</span> <span class="n">cache_mode</span><span class="o">=</span><span class="s1">&#39;reuse&#39;</span><span class="p">,</span> <span class="n">cache_hydration</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">validate_cached_outputs</span><span class="o">=</span><span class="s1">&#39;lazy&#39;</span><span class="p">,</span> <span class="n">output_mismatch</span><span class="o">=</span><span class="s1">&#39;warn&#39;</span><span class="p">,</span> <span class="n">output_missing</span><span class="o">=</span><span class="s1">&#39;warn&#39;</span><span class="p">)</span></code>
+            <code class="highlight language-python"><span class="n">trace</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">run_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">adapter</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config_plan_ingest</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">config_plan_profile_schema</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">input_keys</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">optional_input_keys</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">depends_on</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">tags</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_from</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_schema_version</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_index</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">identity_inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">year</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">iteration</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">parent_run_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">outputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">output_paths</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">capture_dir</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">capture_pattern</span><span class="o">=</span><span class="s1">&#39;*&#39;</span><span class="p">,</span> <span class="n">cache_mode</span><span class="o">=</span><span class="s1">&#39;reuse&#39;</span><span class="p">,</span> <span class="n">cache_hydration</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">cache_version</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">cache_epoch</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">validate_cached_outputs</span><span class="o">=</span><span class="s1">&#39;lazy&#39;</span><span class="p">,</span> <span class="n">code_identity</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">code_identity_extra_deps</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">output_mismatch</span><span class="o">=</span><span class="s1">&#39;warn&#39;</span><span class="p">,</span> <span class="n">output_missing</span><span class="o">=</span><span class="s1">&#39;warn&#39;</span><span class="p">,</span> <span class="o">**</span><span class="n">legacy_kwargs</span><span class="p">)</span></code>
 
 <a href="#consist.core.tracker.Tracker.trace" class="headerlink" title="Permanent link">&para;</a></h2>
 
@@ -5394,15 +5453,14 @@ integrations that require code execution regardless of cache state.</p>
           </tr>
           <tr class="doc-section-item">
             <td>
-                <code>config_plan</code>
+                <code>adapter</code>
             </td>
             <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<span title="consist.core.config_canonicalization.ConfigPlan">ConfigPlan</span>]</code>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<span title="consist.core.config_canonicalization.ConfigAdapter">ConfigAdapter</span>]</code>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Precomputed config plan (e.g., from ActivitySim adapter). The plan's identity hash
-is folded into the run config hash and its artifacts/ingestables are applied on cache miss.</p>
+                <p>Config adapter used to derive a config plan before execution.</p>
               </div>
             </td>
             <td>
@@ -5589,14 +5647,16 @@ is folded into the run config hash and its artifacts/ingestables are applied on 
           </tr>
           <tr class="doc-section-item">
             <td>
-                <code>hash_inputs</code>
+                <code>identity_inputs</code>
             </td>
             <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<span title="consist.types.HashInputs">HashInputs</span>]</code>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<span title="consist.types.IdentityInputs">IdentityInputs</span>]</code>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Strategy for hashing inputs: "fast" (mtime), "full" (content), or None (auto-detect).</p>
+                <p>Additional hash-only identity inputs (for example config files or
+directories) that should affect cache keys without being logged as
+run inputs.</p>
               </div>
             </td>
             <td>
@@ -5752,6 +5812,38 @@ is folded into the run config hash and its artifacts/ingestables are applied on 
           </tr>
           <tr class="doc-section-item">
             <td>
+                <code>cache_version</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/functions.html#int">int</a>]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Optional cache-version discriminator folded into run identity.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>cache_epoch</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/functions.html#int">int</a>]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Optional cache-epoch discriminator folded into run identity.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
                 <code>validate_cached_outputs</code>
             </td>
             <td>
@@ -5764,6 +5856,38 @@ is folded into the run config hash and its artifacts/ingestables are applied on 
             </td>
             <td>
                   <code>&#34;lazy&#34;</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>code_identity</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<span title="consist.types.CodeIdentityMode">CodeIdentityMode</span>]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Strategy for hashing code identity in cache keys.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>code_identity_extra_deps</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" title="typing.List" href="https://docs.python.org/3/library/typing.html#typing.List">List</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Extra dependency file paths folded into code identity hashing.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
             </td>
           </tr>
           <tr class="doc-section-item">
@@ -5796,6 +5920,24 @@ is folded into the run config hash and its artifacts/ingestables are applied on 
             </td>
             <td>
                   <code>&#34;warn&#34;</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>**legacy_kwargs</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Any" href="https://docs.python.org/3/library/typing.html#typing.Any">Any</a></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Hidden backwards-compatibility kwargs. <code>config_plan</code> and
+<code>hash_inputs</code> are still accepted, but <code>adapter</code> and
+<code>identity_inputs</code> are the public API.</p>
+              </div>
+            </td>
+            <td>
+                  <code>{}</code>
             </td>
           </tr>
       </tbody>

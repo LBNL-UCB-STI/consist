@@ -1861,6 +1861,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#identity-kwargs-for-runtrace-surfaces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Identity kwargs for run/trace surfaces
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#run-model" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1876,6 +1887,17 @@
     <span class="md-ellipsis">
       
         duration_seconds
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consist.models.run.Run.identity_summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        identity_summary
       
     </span>
   </a>
@@ -2077,6 +2099,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#identity-kwargs-for-runtrace-surfaces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Identity kwargs for run/trace surfaces
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#run-model" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2092,6 +2125,17 @@
     <span class="md-ellipsis">
       
         duration_seconds
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consist.models.run.Run.identity_summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        identity_summary
       
     </span>
   </a>
@@ -2173,6 +2217,17 @@
 </ul>
 <p>For migration details, see
 <a href="../../migrations/options-objects-migration-guide/">Options Objects Migration Guide</a>.</p>
+<h2 id="identity-kwargs-for-runtrace-surfaces">Identity kwargs for run/trace surfaces<a class="headerlink" href="#identity-kwargs-for-runtrace-surfaces" title="Permanent link">&para;</a></h2>
+<p>Public identity kwargs for <code>consist.run(...)</code>, <code>consist.trace(...)</code>,
+<code>Tracker.run(...)</code>, <code>Tracker.trace(...)</code>, <code>ScenarioContext.run(...)</code>, and
+<code>ScenarioContext.trace(...)</code> are:</p>
+<ul>
+<li><code>adapter=...</code></li>
+<li><code>identity_inputs=[...]</code></li>
+</ul>
+<p><code>config_plan=</code> and <code>hash_inputs=</code> are hidden compatibility kwargs. They remain
+accepted for migration compatibility, but they are not the recommended public
+surface for new code.</p>
 
 
 <div class="doc doc-object doc-function">
@@ -2244,6 +2299,38 @@ and result persistence.</p>
               <div class="doc-md-description">
                 <p>The Tracker instance responsible for provenance and caching.
 If None, the active global tracker is resolved.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>adapter</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<span title="consist.core.config_canonicalization.ConfigAdapter">ConfigAdapter</span>]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Config adapter used to derive a config plan before execution.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>identity_inputs</code>
+            </td>
+            <td>
+                  <code><span title="consist.types.IdentityInputs">IdentityInputs</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Additional hash-only identity inputs that contribute to cache keys.</p>
               </div>
             </td>
             <td>
@@ -2375,6 +2462,9 @@ via options objects.</p>
     </div>
 
 </div><h2 id="run-model"><code>Run</code> model<a class="headerlink" href="#run-model" title="Permanent link">&para;</a></h2>
+<p>Use <code>run.identity_summary</code> to debug cache identity composition
+(<code>config_hash</code>, <code>input_hash</code>, <code>code_hash</code>, adapter metadata, and
+<code>identity_inputs</code> digests).</p>
 
 
 <div class="doc doc-object doc-class">
@@ -2470,6 +2560,31 @@ otherwise returns None (e.g., if the run is still in progress).</p>
           </tr>
       </tbody>
     </table>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-attribute">
+
+
+
+<h2 id="consist.models.run.Run.identity_summary" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">identity_summary</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-property"><code>property</code></small>
+  </span>
+
+<a href="#consist.models.run.Run.identity_summary" class="headerlink" title="Permanent link">&para;</a></h2>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Return a structured cache-identity breakdown for this run.</p>
+<p>The summary is intended for debugging cache behavior and explains the
+component hashes that form the run signature, plus identity-relevant
+metadata persisted on the run.</p>
 
     </div>
 

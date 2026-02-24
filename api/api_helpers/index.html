@@ -3540,7 +3540,7 @@ by logging functions like consist.log_artifact().</p>
 
 
 <h2 id="consist.api.run" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">run</span><span class="p">(</span><span class="n">fn</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">tracker</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">cache_options</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">output_policy</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">execution_options</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span></code>
+            <code class="highlight language-python"><span class="n">run</span><span class="p">(</span><span class="n">fn</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">tracker</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">adapter</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">identity_inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">cache_options</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">output_policy</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">execution_options</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span></code>
 
 <a href="#consist.api.run" class="headerlink" title="Permanent link">&para;</a></h2>
 
@@ -3609,6 +3609,38 @@ and result persistence.</p>
               <div class="doc-md-description">
                 <p>The Tracker instance responsible for provenance and caching.
 If None, the active global tracker is resolved.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>adapter</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<span title="consist.core.config_canonicalization.ConfigAdapter">ConfigAdapter</span>]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Config adapter used to derive a config plan before execution.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>identity_inputs</code>
+            </td>
+            <td>
+                  <code><span title="consist.types.IdentityInputs">IdentityInputs</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Additional hash-only identity inputs that contribute to cache keys.</p>
               </div>
             </td>
             <td>
@@ -3901,7 +3933,7 @@ supported. Provide a <code>RunResult</code> context via positional or keyword fo
 
 
 <h2 id="consist.api.trace" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">trace</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">tracker</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span></code>
+            <code class="highlight language-python"><span class="n">trace</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">tracker</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">adapter</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">identity_inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span></code>
 
 <a href="#consist.api.trace" class="headerlink" title="Permanent link">&para;</a></h2>
 
@@ -3950,6 +3982,38 @@ traced step is recorded as a sub-run with its own inputs and outputs.</p>
             <td>
               <div class="doc-md-description">
                 <p>The tracker instance to use.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>adapter</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<span title="consist.core.config_canonicalization.ConfigAdapter">ConfigAdapter</span>]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Config adapter used to derive a config plan before execution.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>identity_inputs</code>
+            </td>
+            <td>
+                  <code><span title="consist.types.IdentityInputs">IdentityInputs</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Additional hash-only identity inputs that contribute to cache keys.</p>
               </div>
             </td>
             <td>

@@ -1023,22 +1023,22 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#hash-only-inputs-hash_inputs" class="md-nav__link">
+  <a href="#identity-inputs-identity_inputs" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Hash-Only Inputs (hash_inputs)
+        Identity Inputs (identity_inputs)
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Hash-Only Inputs (hash_inputs)">
+    <nav class="md-nav" aria-label="Identity Inputs (identity_inputs)">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#when-to-use-hash-only-inputs" class="md-nav__link">
+  <a href="#when-to-use-identity-inputs" class="md-nav__link">
     <span class="md-ellipsis">
       
-        When to Use Hash-Only Inputs
+        When to Use Identity Inputs
       
     </span>
   </a>
@@ -1113,10 +1113,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#consistrun-with-config_plan-config-adapters" class="md-nav__link">
+  <a href="#consistrun-with-adapter-config-adapters" class="md-nav__link">
     <span class="md-ellipsis">
       
-        consist.run with config_plan (config adapters)
+        consist.run with adapter (config adapters)
       
     </span>
   </a>
@@ -2260,22 +2260,22 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#hash-only-inputs-hash_inputs" class="md-nav__link">
+  <a href="#identity-inputs-identity_inputs" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Hash-Only Inputs (hash_inputs)
+        Identity Inputs (identity_inputs)
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Hash-Only Inputs (hash_inputs)">
+    <nav class="md-nav" aria-label="Identity Inputs (identity_inputs)">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#when-to-use-hash-only-inputs" class="md-nav__link">
+  <a href="#when-to-use-identity-inputs" class="md-nav__link">
     <span class="md-ellipsis">
       
-        When to Use Hash-Only Inputs
+        When to Use Identity Inputs
       
     </span>
   </a>
@@ -2350,10 +2350,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#consistrun-with-config_plan-config-adapters" class="md-nav__link">
+  <a href="#consistrun-with-adapter-config-adapters" class="md-nav__link">
     <span class="md-ellipsis">
       
-        consist.run with config_plan (config adapters)
+        consist.run with adapter (config adapters)
       
     </span>
   </a>
@@ -2447,10 +2447,10 @@ run identity hashing, and how to make config data queryable in the database.</p>
 <ol>
 <li><strong>Identity config</strong>: <code>config=...</code> (hashed into the run signature)</li>
 <li><strong>Queryable facet</strong>: <code>facet=...</code> (persisted in DuckDB and optionally indexed)</li>
-<li><strong>Hash-only inputs</strong>: <code>hash_inputs=[...]</code> (file/dir digests folded into identity)</li>
+<li><strong>Identity inputs</strong>: <code>identity_inputs=[...]</code> (file/dir digests folded into identity)</li>
 </ol>
 <p>Use <code>config</code> for the full run configuration, <code>facet</code> for a small subset of
-fields you want to query, and <code>hash_inputs</code> for external config trees or
+fields you want to query, and <code>identity_inputs</code> for external config trees or
 files that should affect caching without being stored as structured metadata.</p>
 <h2 id="api-summary">API Summary<a class="headerlink" href="#api-summary" title="Permanent link">&para;</a></h2>
 <p>You can pass config parameters via the high-level APIs:</p>
@@ -2463,13 +2463,16 @@ files that should affect caching without being stored as structured metadata.</p
 <p>Relevant arguments:</p>
 <ul>
 <li><code>config: dict | BaseModel | None</code></li>
-<li><code>config_plan: ConfigPlan | None</code></li>
+<li><code>adapter: ConfigAdapter | None</code></li>
 <li><code>facet: dict | BaseModel | None</code></li>
 <li><code>facet_from: list[str] | None</code></li>
-<li><code>hash_inputs: list[Path | str | (label, Path|str)] | None</code></li>
+<li><code>identity_inputs: list[Path | str | (label, Path|str)] | None</code></li>
 <li><code>facet_schema_version: str|int|None</code></li>
 <li><code>facet_index: bool</code> (default <code>True</code>)</li>
 </ul>
+<p><code>config_plan</code> and <code>hash_inputs</code> are hidden compatibility kwargs for migration;
+they are still accepted, but they are not the recommended public run/trace
+surface.</p>
 <h2 id="identity-hashing">Identity Hashing<a class="headerlink" href="#identity-hashing" title="Permanent link">&para;</a></h2>
 <p>A run signature is derived from:</p>
 <ul>
@@ -2531,15 +2534,15 @@ They are intended to be small, stable, and useful for filtering.</p>
 </tr>
 </tbody>
 </table>
-<h2 id="hash-only-inputs-hash_inputs">Hash-Only Inputs (<code>hash_inputs</code>)<a class="headerlink" href="#hash-only-inputs-hash_inputs" title="Permanent link">&para;</a></h2>
-<p>Use <code>hash_inputs</code> to include file or directory content in identity hashing
+<h2 id="identity-inputs-identity_inputs">Identity Inputs (<code>identity_inputs</code>)<a class="headerlink" href="#identity-inputs-identity_inputs" title="Permanent link">&para;</a></h2>
+<p>Use <code>identity_inputs</code> to include file or directory content in identity hashing
 without logging inputs in provenance.</p>
 <ul>
 <li>Files are hashed via the configured <code>hashing_strategy</code>.</li>
 <li>Directories are hashed deterministically via a sorted walk.</li>
 <li>Dotfiles are ignored by default.</li>
 </ul>
-<p><code>hash_inputs</code> is <strong>path-only</strong> (files or directories). Artifacts are
+<p><code>identity_inputs</code> is <strong>path-only</strong> (files or directories). Artifacts are
 intentionally excluded to keep identity hashing deterministic and avoid
 implicit hydration.</p>
 <p>Digests are recorded in:</p>
@@ -2547,15 +2550,15 @@ implicit hydration.</p>
 <li><code>config["__consist_hash_inputs__"]</code> (identity-only payload)</li>
 <li><code>run.meta["consist_hash_inputs"]</code> (audit/debugging)</li>
 </ul>
-<h3 id="when-to-use-hash-only-inputs">When to Use Hash-Only Inputs<a class="headerlink" href="#when-to-use-hash-only-inputs" title="Permanent link">&para;</a></h3>
-<p><code>hash_inputs</code> solves a specific problem: <strong>Configuration files that must affect the cache key but are too large or unstructured to query in the database.</strong></p>
+<h3 id="when-to-use-identity-inputs">When to Use Identity Inputs<a class="headerlink" href="#when-to-use-identity-inputs" title="Permanent link">&para;</a></h3>
+<p><code>identity_inputs</code> solves a specific problem: <strong>Configuration files that must affect the cache key but are too large or unstructured to query in the database.</strong></p>
 <p><strong>The Trade-off</strong></p>
 <p>Normally, you pass configuration two ways:</p>
 <ol>
 <li><strong>Via <code>config=</code></strong> — Stored in the JSON run snapshot and hashed into identity, but not queryable by default.</li>
 <li><strong>Not tracked</strong> — Smaller footprint, but changes to external files don't invalidate the cache, risking incorrect cache hits.</li>
 </ol>
-<p><code>hash_inputs</code> is the middle ground: <strong>Hash the files so cache keys change when they do, but don't store the content.</strong></p>
+<p><code>identity_inputs</code> is the middle ground: <strong>Hash the files so cache keys change when they do, but don't store the content.</strong></p>
 <p><strong>Example: ActivitySim Configuration</strong></p>
 <p>ActivitySim projects use a 5MB+ directory of YAML and csv configuration files. The config affects simulation output, so it must change the cache signature. But the YAML is:
 - Too large to store as a queryable facet (exceeds the 16 KB limit)
@@ -2574,7 +2577,7 @@ implicit hydration.</p>
 </span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>        <span class="n">fn</span><span class="o">=</span><span class="n">run_activitysim</span><span class="p">,</span>
 </span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;asim_baseline&quot;</span><span class="p">,</span>
 </span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>        <span class="n">config</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;scenario&quot;</span><span class="p">:</span> <span class="s2">&quot;baseline&quot;</span><span class="p">},</span>
-</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>        <span class="n">hash_inputs</span><span class="o">=</span><span class="p">[(</span><span class="s2">&quot;asim_config&quot;</span><span class="p">,</span> <span class="n">asim_config_dir</span><span class="p">)],</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>        <span class="n">identity_inputs</span><span class="o">=</span><span class="p">[(</span><span class="s2">&quot;asim_config&quot;</span><span class="p">,</span> <span class="n">asim_config_dir</span><span class="p">)],</span>
 </span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>    <span class="p">)</span>
 </span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>
 </span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="c1"># Later: You edit the YAML config (change a parameter)</span>
@@ -2586,11 +2589,11 @@ implicit hydration.</p>
 </span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>        <span class="n">fn</span><span class="o">=</span><span class="n">run_activitysim</span><span class="p">,</span>
 </span><span id="__span-0-23"><a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;asim_baseline&quot;</span><span class="p">,</span>
 </span><span id="__span-0-24"><a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a>        <span class="n">config</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;scenario&quot;</span><span class="p">:</span> <span class="s2">&quot;baseline&quot;</span><span class="p">},</span>  <span class="c1"># Same config dict</span>
-</span><span id="__span-0-25"><a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a>        <span class="n">hash_inputs</span><span class="o">=</span><span class="p">[(</span><span class="s2">&quot;asim_config&quot;</span><span class="p">,</span> <span class="n">asim_config_dir</span><span class="p">)],</span>  <span class="c1"># Different hash</span>
+</span><span id="__span-0-25"><a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a>        <span class="n">identity_inputs</span><span class="o">=</span><span class="p">[(</span><span class="s2">&quot;asim_config&quot;</span><span class="p">,</span> <span class="n">asim_config_dir</span><span class="p">)],</span>  <span class="c1"># Different hash</span>
 </span><span id="__span-0-26"><a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a>    <span class="p">)</span>
-</span><span id="__span-0-27"><a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a><span class="c1"># Different signature (hash_inputs changed) → fresh run</span>
+</span><span id="__span-0-27"><a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a><span class="c1"># Different signature (identity_inputs changed) → fresh run</span>
 </span></code></pre></div>
-<p><strong>Comparison: config vs hash_inputs</strong></p>
+<p><strong>Comparison: config vs identity_inputs</strong></p>
 <table>
 <thead>
 <tr>
@@ -2608,7 +2611,7 @@ implicit hydration.</p>
 <td>Cache respects changes</td>
 </tr>
 <tr>
-<td><code>hash_inputs=[path]</code></td>
+<td><code>identity_inputs=[path]</code></td>
 <td>Minimal</td>
 <td>No</td>
 <td>Cache respects changes</td>
@@ -2621,12 +2624,13 @@ implicit hydration.</p>
 </tr>
 </tbody>
 </table>
-<p>For large, unstructured configs like ActivitySim YAML, use <code>hash_inputs</code>.</p>
+<p>For large, unstructured configs like ActivitySim YAML, use <code>identity_inputs</code>.</p>
 <p><strong>Audit Trail</strong></p>
 <p>Even though the file content isn't stored, Consist records the hash for debugging:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">run</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">get_run</span><span class="p">(</span><span class="s2">&quot;asim_baseline_001&quot;</span><span class="p">)</span>
 </span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="nb">print</span><span class="p">(</span><span class="n">run</span><span class="o">.</span><span class="n">meta</span><span class="p">[</span><span class="s2">&quot;consist_hash_inputs&quot;</span><span class="p">])</span>
 </span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="c1"># Output: {&quot;asim_config&quot;: &quot;sha256:a1b2c3...&quot;}</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="nb">print</span><span class="p">(</span><span class="n">run</span><span class="o">.</span><span class="n">identity_summary</span><span class="p">[</span><span class="s2">&quot;identity_inputs&quot;</span><span class="p">])</span>
 </span></code></pre></div>
 <p>This lets you correlate runs with specific configuration states without storing the full config.</p>
 <h2 id="querying-facets-in-duckdb">Querying Facets in DuckDB<a class="headerlink" href="#querying-facets-in-duckdb" title="Permanent link">&para;</a></h2>
@@ -2679,7 +2683,7 @@ to add new model types without coupling them to the framework.</p>
 <h2 id="examples">Examples<a class="headerlink" href="#examples" title="Permanent link">&para;</a></h2>
 <h3 id="consistrun-with-config-facet">consist.run with config + facet<a class="headerlink" href="#consistrun-with-config-facet" title="Permanent link">&para;</a></h3>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
-</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">CacheOptions</span><span class="p">,</span> <span class="n">use_tracker</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">use_tracker</span>
 </span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>
 </span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="k">with</span> <span class="n">use_tracker</span><span class="p">(</span><span class="n">tracker</span><span class="p">):</span>
 </span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>    <span class="n">consist</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
@@ -2687,24 +2691,24 @@ to add new model types without coupling them to the framework.</p>
 </span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;beam&quot;</span><span class="p">,</span>
 </span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a>        <span class="n">config</span><span class="o">=</span><span class="n">beam_cfg</span><span class="p">,</span>
 </span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>        <span class="n">facet</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;memory_gb&quot;</span><span class="p">:</span> <span class="n">beam_cfg</span><span class="o">.</span><span class="n">memory_gb</span><span class="p">},</span>
-</span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a>        <span class="n">hash_inputs</span><span class="o">=</span><span class="p">[(</span><span class="s2">&quot;beam_hocon&quot;</span><span class="p">,</span> <span class="n">beam_cfg_path</span><span class="p">)],</span>
+</span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a>        <span class="n">identity_inputs</span><span class="o">=</span><span class="p">[(</span><span class="s2">&quot;beam_hocon&quot;</span><span class="p">,</span> <span class="n">beam_cfg_path</span><span class="p">)],</span>
 </span><span id="__span-4-11"><a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a>    <span class="p">)</span>
 </span></code></pre></div>
-<h3 id="consistrun-with-config_plan-config-adapters">consist.run with config_plan (config adapters)<a class="headerlink" href="#consistrun-with-config_plan-config-adapters" title="Permanent link">&para;</a></h3>
+<h3 id="consistrun-with-adapter-config-adapters">consist.run with adapter (config adapters)<a class="headerlink" href="#consistrun-with-adapter-config-adapters" title="Permanent link">&para;</a></h3>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist.integrations.activitysim</span><span class="w"> </span><span class="kn">import</span> <span class="n">ActivitySimConfigAdapter</span>
 </span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>
 </span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
-</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">use_tracker</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">CacheOptions</span><span class="p">,</span> <span class="n">use_tracker</span>
 </span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>
 </span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="n">adapter</span> <span class="o">=</span> <span class="n">ActivitySimConfigAdapter</span><span class="p">()</span>
-</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="n">plan</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">prepare_config</span><span class="p">(</span><span class="n">adapter</span><span class="p">,</span> <span class="p">[</span><span class="n">overlay_dir</span><span class="p">,</span> <span class="n">base_dir</span><span class="p">])</span>
-</span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>
-</span><span id="__span-5-9"><a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="k">with</span> <span class="n">use_tracker</span><span class="p">(</span><span class="n">tracker</span><span class="p">):</span>
-</span><span id="__span-5-10"><a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a>    <span class="n">consist</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
-</span><span id="__span-5-11"><a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a>        <span class="n">fn</span><span class="o">=</span><span class="n">run_activitysim</span><span class="p">,</span>
-</span><span id="__span-5-12"><a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;activitysim&quot;</span><span class="p">,</span>
-</span><span id="__span-5-13"><a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a>        <span class="n">config</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;scenario&quot;</span><span class="p">:</span> <span class="s2">&quot;baseline&quot;</span><span class="p">},</span>
-</span><span id="__span-5-14"><a id="__codelineno-5-14" name="__codelineno-5-14" href="#__codelineno-5-14"></a>        <span class="n">config_plan</span><span class="o">=</span><span class="n">plan</span><span class="p">,</span>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>
+</span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a><span class="k">with</span> <span class="n">use_tracker</span><span class="p">(</span><span class="n">tracker</span><span class="p">):</span>
+</span><span id="__span-5-9"><a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a>    <span class="n">consist</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-5-10"><a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a>        <span class="n">fn</span><span class="o">=</span><span class="n">run_activitysim</span><span class="p">,</span>
+</span><span id="__span-5-11"><a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;activitysim&quot;</span><span class="p">,</span>
+</span><span id="__span-5-12"><a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a>        <span class="n">config</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;scenario&quot;</span><span class="p">:</span> <span class="s2">&quot;baseline&quot;</span><span class="p">},</span>
+</span><span id="__span-5-13"><a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a>        <span class="n">adapter</span><span class="o">=</span><span class="n">adapter</span><span class="p">,</span>
+</span><span id="__span-5-14"><a id="__codelineno-5-14" name="__codelineno-5-14" href="#__codelineno-5-14"></a>        <span class="n">identity_inputs</span><span class="o">=</span><span class="p">[(</span><span class="s2">&quot;asim_config&quot;</span><span class="p">,</span> <span class="n">overlay_dir</span><span class="p">)],</span>
 </span><span id="__span-5-15"><a id="__codelineno-5-15" name="__codelineno-5-15" href="#__codelineno-5-15"></a>        <span class="n">cache_options</span><span class="o">=</span><span class="n">CacheOptions</span><span class="p">(</span><span class="n">cache_mode</span><span class="o">=</span><span class="s2">&quot;reuse&quot;</span><span class="p">),</span>
 </span><span id="__span-5-16"><a id="__codelineno-5-16" name="__codelineno-5-16" href="#__codelineno-5-16"></a>    <span class="p">)</span>
 </span></code></pre></div>
@@ -2719,7 +2723,7 @@ to add new model types without coupling them to the framework.</p>
 </span><span id="__span-6-8"><a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>            <span class="n">name</span><span class="o">=</span><span class="s2">&quot;activitysim&quot;</span><span class="p">,</span>
 </span><span id="__span-6-9"><a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a>            <span class="n">config</span><span class="o">=</span><span class="n">asim_cfg</span><span class="p">,</span>
 </span><span id="__span-6-10"><a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a>            <span class="n">facet_from</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;scenario&quot;</span><span class="p">,</span> <span class="s2">&quot;sample_rate&quot;</span><span class="p">],</span>
-</span><span id="__span-6-11"><a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a>            <span class="n">hash_inputs</span><span class="o">=</span><span class="p">[(</span><span class="s2">&quot;asim_yaml&quot;</span><span class="p">,</span> <span class="n">asim_config_dir</span><span class="p">)],</span>
+</span><span id="__span-6-11"><a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a>            <span class="n">identity_inputs</span><span class="o">=</span><span class="p">[(</span><span class="s2">&quot;asim_yaml&quot;</span><span class="p">,</span> <span class="n">asim_config_dir</span><span class="p">)],</span>
 </span><span id="__span-6-12"><a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a>        <span class="p">)</span>
 </span></code></pre></div>
 
