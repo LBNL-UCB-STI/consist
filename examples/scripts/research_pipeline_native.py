@@ -4,7 +4,7 @@ import consist
 import pandas as pd
 import xarray as xr
 
-from consist import Tracker, define_step
+from consist import Tracker
 from consist.types import ExecutionOptions
 
 # ---------------------------------------------------------------------------------
@@ -15,9 +15,7 @@ from consist.types import ExecutionOptions
 # ---------------------------------------------------------------------------------
 
 
-# 1. Define your analysis steps using @define_step
-# This automatically handles input/output logging and caching.
-@define_step(outputs=["clean_data"])
+# 1. Define plain Python callables (recommended path).
 def preprocess(raw_data_path: Path) -> pd.DataFrame:
     """Cleans and prepares raw simulation inputs."""
     df = pd.read_csv(raw_data_path)
@@ -25,7 +23,6 @@ def preprocess(raw_data_path: Path) -> pd.DataFrame:
     return df
 
 
-@define_step(outputs=["run_simulation"])
 def simulate(clean_data: pd.DataFrame, params: dict) -> xr.Dataset:
     """Runs a core simulation producing multidimensional results (Xarray)."""
     # Consist knows how to handle Xarray Datasets natively
@@ -56,6 +53,7 @@ def main():
         preprocess_result = sc.run(
             preprocess,
             inputs={"raw_data": raw_path},
+            outputs=["clean_data"],
             execution_options=ExecutionOptions(
                 runtime_kwargs={"raw_data_path": raw_path}
             ),
@@ -67,6 +65,7 @@ def main():
         sc.run(
             simulate,
             inputs={"clean_data": consist.ref(preprocess_result, key="clean_data")},
+            outputs=["run_simulation"],
             execution_options=ExecutionOptions(
                 load_inputs=True,
                 runtime_kwargs={"params": {"resolution": "high", "seed": 42}},

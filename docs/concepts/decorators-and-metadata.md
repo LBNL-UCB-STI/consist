@@ -3,6 +3,12 @@
 This page explains how `@define_step` metadata, templates, and resolver defaults work
 so you can reduce boilerplate without losing clarity or cache correctness.
 
+!!! note "Recommended path"
+    This page is centered on metadata used with the recommended path:
+    `consist.run(...)`, `consist.trace(...)`, and `consist.scenario(...)`.
+    Any `config_plan` resolver examples are advanced integration patterns, not the
+    default run surface.
+
 ---
 
 ## Decorator Defaults
@@ -119,6 +125,10 @@ def load_inputs(...):
 ```
 
 Declarative `config_plan` with a built-in resolver helper:
+
+!!! note "Advanced integration pattern"
+    `config_plan` resolver usage is a low-level/advanced option for integration
+    workflows. Keep typical runs on the recommended path (`run`/`trace`/`scenario`).
 
 ```python
 @define_step(

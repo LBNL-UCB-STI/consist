@@ -27,6 +27,10 @@ Public identity kwargs for `consist.run(...)`, `consist.trace(...)`,
 accepted for migration compatibility, but they are not the recommended public
 surface for new code.
 
+Run/trace parity is implemented through a shared invocation-resolution path
+(`resolve_run_invocation`), so identity and cache-option validation rules are
+consistent across both execution styles.
+
 ::: consist.api.run
     options:
       show_source: false

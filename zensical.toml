@@ -56,8 +56,9 @@ nav = [
   { "Guides" = ["usage-guide.md", "configs.md", "dlt-loader-guide.md", "containers-guide.md", "mounts-and-portability.md", "schema-export.md"] },
   { "Integrations" = ["integrations/index.md", "integrations/containers.md", "integrations/dlt_loader.md", { "Config Adapters" = [{ "Overview" = "integrations/config_adapters.md" }, { "BEAM" = "integrations/config_adapters_beam.md" }, { "ActivitySim" = "integrations/config_adapters_activitysim.md" }] }] },
   { "Examples" = "examples.md" },
+  { "Advanced" = ["advanced/index.md", "advanced/execution-style-decision-tree.md", "advanced/manual-lifecycle-and-decorators.md"] },
   { "Support & Reference" = ["troubleshooting.md", "cli-error-style.md", "glossary.md", "architecture.md"] },
-  { "API Reference" = ["api/index.md", "api/public_api.md", "api/api_helpers.md", "api/tracker.md", "api/workflow.md", "api/artifact.md", "api/run.md", "api/indexing.md", "api/identity.md", "api/views.md", "api/matrix.md", "api/materialize.md"] },
+  { "API Reference" = ["api/index.md", "api/essentials.md", "api/advanced.md", "api/public_api.md", "api/api_helpers.md", "api/tracker.md", "api/workflow.md", "api/artifact.md", "api/run.md", "api/indexing.md", "api/identity.md", "api/views.md", "api/matrix.md", "api/materialize.md"] },
 ]
 
 # With the "extra_css" option you can add your own CSS styling to customizeo
