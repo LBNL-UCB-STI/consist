@@ -119,6 +119,27 @@ class RunTraceHelpers:
     write_xarray_dataset: Callable[[Any, Path], None]
 
 
+@dataclass(frozen=True)
+class RunInvocationContext:
+    resolved_name: str
+    config: Optional[Union[Dict[str, Any], BaseModel]]
+    config_plan: Optional["ConfigPlan"]
+    outputs: Optional[List[str]]
+    output_paths: Optional[Mapping[str, ArtifactRef]]
+    inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]]
+    output_mismatch: Literal["warn", "error", "ignore"]
+    output_missing: Literal["warn", "error", "ignore"]
+    executor: Literal["python", "container"]
+    container: Any
+    runtime_kwargs: Optional[Mapping[str, Any]]
+    inject_context: Optional[Union[bool, str]]
+    load_inputs: bool
+    resolved_inputs: List[ArtifactRef]
+    input_artifacts_by_key: Dict[str, Artifact]
+    run_id: str
+    start_kwargs: Dict[str, Any]
+
+
 class RunTraceCoordinator:
     """Coordinate internal ``Tracker.run`` and ``Tracker.trace`` workflows."""
 
@@ -199,128 +220,40 @@ class RunTraceCoordinator:
             config_dirs=self._resolve_adapter_config_dirs(adapter),
         )
 
-    def run(
+    def _prepare_run_invocation_context(
         self,
-        fn: Optional[Callable[..., Any]] = None,
-        name: Optional[str] = None,
         *,
-        run_id: Optional[str] = None,
-        model: Optional[str] = None,
-        description: Optional[str] = None,
-        config: Optional[Dict[str, Any]] = None,
-        adapter: Optional["ConfigAdapter"] = None,
-        config_plan_ingest: bool = True,
-        config_plan_profile_schema: bool = False,
+        fn: Optional[Callable[..., Any]],
+        name: Optional[str],
+        run_id: Optional[str],
+        model: Optional[str],
+        description: Optional[str],
+        config: Optional[Dict[str, Any]],
+        adapter: Optional["ConfigAdapter"],
         inputs: Optional[
             Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]
-        ] = None,
-        input_keys: Optional[Iterable[str] | str] = None,
-        optional_input_keys: Optional[Iterable[str] | str] = None,
-        depends_on: Optional[List[RunInputRef]] = None,
-        tags: Optional[List[str]] = None,
-        facet: Optional[FacetLike] = None,
-        facet_from: Optional[List[str]] = None,
-        facet_schema_version: Optional[Union[str, int]] = None,
-        facet_index: Optional[bool] = None,
-        identity_inputs: IdentityInputs = None,
-        year: Optional[int] = None,
-        iteration: Optional[int] = None,
-        phase: Optional[str] = None,
-        stage: Optional[str] = None,
-        parent_run_id: Optional[str] = None,
-        outputs: Optional[List[str]] = None,
-        output_paths: Optional[Mapping[str, ArtifactRef]] = None,
-        capture_dir: Optional[Path] = None,
-        capture_pattern: str = "*",
-        cache_options: Optional[CacheOptions] = None,
-        output_policy: Optional[OutputPolicyOptions] = None,
-        execution_options: Optional[ExecutionOptions] = None,
-        runtime_kwargs: Optional[Mapping[str, Any]] = None,
-    ) -> RunResult:
-        """Execute function/container run flow with tracker-level orchestration.
-
-        Parameters
-        ----------
-        fn : Callable[..., Any] | None, optional
-            Python callable for executor='python'. May be ``None`` for
-            executor='container' when ``name`` is provided.
-        name : str | None, optional
-            Run name override.
-        run_id : str | None, optional
-            Explicit run id override.
-        model : str | None, optional
-            Model/component namespace.
-        description : str | None, optional
-            Human-readable run description.
-        config : dict[str, Any] | None, optional
-            Run config payload.
-        adapter : ConfigAdapter | None, optional
-            Config adapter used to derive a config plan before execution.
-        config_plan_ingest : bool, default True
-            Whether config-plan ingestables are ingested.
-        config_plan_profile_schema : bool, default False
-            Whether config-plan ingestables profile schema.
-        inputs : Mapping[str, RunInputRef] | Iterable[RunInputRef] | None, optional
-            Inputs and/or input mapping.
-        input_keys : Iterable[str] | str | None, optional
-            Deprecated key-based input API.
-        optional_input_keys : Iterable[str] | str | None, optional
-            Deprecated key-based optional input API.
-        depends_on : list[RunInputRef] | None, optional
-            Extra hash-only dependencies.
-        tags : list[str] | None, optional
-            Run tags.
-        facet : FacetLike | None, optional
-            Optional run facet payload.
-        facet_from : list[str] | None, optional
-            Optional config keys projected into facet payload.
-        facet_schema_version : str | int | None, optional
-            Optional run facet schema version.
-        facet_index : bool | None, optional
-            Whether run facet key/values are indexed.
-        identity_inputs : IdentityInputs, optional
-            Additional identity hash inputs.
-        year : int | None, optional
-            Run year metadata.
-        iteration : int | None, optional
-            Run iteration metadata.
-        phase : str | None, optional
-            Run phase metadata.
-        stage : str | None, optional
-            Run stage metadata.
-        parent_run_id : str | None, optional
-            Parent run id for lineage/scenario linkage.
-        outputs : list[str] | None, optional
-            Declared output keys.
-        output_paths : Mapping[str, ArtifactRef] | None, optional
-            Explicit output path mapping.
-        capture_dir : Path | None, optional
-            Output-capture directory.
-        capture_pattern : str, default "*"
-            Capture glob for capture mode.
-        cache_options : CacheOptions | None, optional
-            Grouped cache controls.
-        output_policy : OutputPolicyOptions | None, optional
-            Grouped output mismatch/missing policy controls.
-        execution_options : ExecutionOptions | None, optional
-            Grouped execution controls.
-        runtime_kwargs : Mapping[str, Any] | None, optional
-            Top-level alias for ``execution_options.runtime_kwargs``.
-            This is mutually exclusive with
-            ``execution_options=ExecutionOptions(runtime_kwargs=...)``.
-
-        Returns
-        -------
-        RunResult
-            Run metadata plus resolved output artifacts.
-
-        Notes
-        -----
-        This method currently performs both metadata resolution and execution-time
-        validation. Future cleanup should split those responsibilities into
-        independent phases/components.
-
-        """
+        ],
+        input_keys: Optional[Iterable[str] | str],
+        optional_input_keys: Optional[Iterable[str] | str],
+        depends_on: Optional[List[RunInputRef]],
+        tags: Optional[List[str]],
+        facet: Optional[FacetLike],
+        facet_from: Optional[List[str]],
+        facet_schema_version: Optional[Union[str, int]],
+        facet_index: Optional[bool],
+        identity_inputs: IdentityInputs,
+        year: Optional[int],
+        iteration: Optional[int],
+        phase: Optional[str],
+        stage: Optional[str],
+        parent_run_id: Optional[str],
+        outputs: Optional[List[str]],
+        output_paths: Optional[Mapping[str, ArtifactRef]],
+        cache_options: Optional[CacheOptions],
+        output_policy: Optional[OutputPolicyOptions],
+        execution_options: Optional[ExecutionOptions],
+        runtime_kwargs: Optional[Mapping[str, Any]],
+    ) -> RunInvocationContext:
         tracker = self._tracker
         execution_options = resolve_runtime_kwargs_alias(
             api_name="Tracker.run",
@@ -553,6 +486,197 @@ class RunTraceCoordinator:
             start_kwargs["materialize_cached_outputs_dir"] = (
                 materialize_cached_outputs_dir
             )
+
+        return RunInvocationContext(
+            resolved_name=resolved_name,
+            config=config,
+            config_plan=config_plan,
+            outputs=outputs,
+            output_paths=output_paths,
+            inputs=inputs,
+            output_mismatch=output_mismatch,
+            output_missing=output_missing,
+            executor=executor,
+            container=container,
+            runtime_kwargs=runtime_kwargs_dict,
+            inject_context=inject_context,
+            load_inputs=load_inputs,
+            resolved_inputs=resolved_inputs,
+            input_artifacts_by_key=input_artifacts_by_key,
+            run_id=run_id,
+            start_kwargs=start_kwargs,
+        )
+
+    def run(
+        self,
+        fn: Optional[Callable[..., Any]] = None,
+        name: Optional[str] = None,
+        *,
+        run_id: Optional[str] = None,
+        model: Optional[str] = None,
+        description: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+        adapter: Optional["ConfigAdapter"] = None,
+        config_plan_ingest: bool = True,
+        config_plan_profile_schema: bool = False,
+        inputs: Optional[
+            Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]
+        ] = None,
+        input_keys: Optional[Iterable[str] | str] = None,
+        optional_input_keys: Optional[Iterable[str] | str] = None,
+        depends_on: Optional[List[RunInputRef]] = None,
+        tags: Optional[List[str]] = None,
+        facet: Optional[FacetLike] = None,
+        facet_from: Optional[List[str]] = None,
+        facet_schema_version: Optional[Union[str, int]] = None,
+        facet_index: Optional[bool] = None,
+        identity_inputs: IdentityInputs = None,
+        year: Optional[int] = None,
+        iteration: Optional[int] = None,
+        phase: Optional[str] = None,
+        stage: Optional[str] = None,
+        parent_run_id: Optional[str] = None,
+        outputs: Optional[List[str]] = None,
+        output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        capture_dir: Optional[Path] = None,
+        capture_pattern: str = "*",
+        cache_options: Optional[CacheOptions] = None,
+        output_policy: Optional[OutputPolicyOptions] = None,
+        execution_options: Optional[ExecutionOptions] = None,
+        runtime_kwargs: Optional[Mapping[str, Any]] = None,
+    ) -> RunResult:
+        """Execute function/container run flow with tracker-level orchestration.
+
+        Parameters
+        ----------
+        fn : Callable[..., Any] | None, optional
+            Python callable for executor='python'. May be ``None`` for
+            executor='container' when ``name`` is provided.
+        name : str | None, optional
+            Run name override.
+        run_id : str | None, optional
+            Explicit run id override.
+        model : str | None, optional
+            Model/component namespace.
+        description : str | None, optional
+            Human-readable run description.
+        config : dict[str, Any] | None, optional
+            Run config payload.
+        adapter : ConfigAdapter | None, optional
+            Config adapter used to derive a config plan before execution.
+        config_plan_ingest : bool, default True
+            Whether config-plan ingestables are ingested.
+        config_plan_profile_schema : bool, default False
+            Whether config-plan ingestables profile schema.
+        inputs : Mapping[str, RunInputRef] | Iterable[RunInputRef] | None, optional
+            Inputs and/or input mapping.
+        input_keys : Iterable[str] | str | None, optional
+            Deprecated key-based input API.
+        optional_input_keys : Iterable[str] | str | None, optional
+            Deprecated key-based optional input API.
+        depends_on : list[RunInputRef] | None, optional
+            Extra hash-only dependencies.
+        tags : list[str] | None, optional
+            Run tags.
+        facet : FacetLike | None, optional
+            Optional run facet payload.
+        facet_from : list[str] | None, optional
+            Optional config keys projected into facet payload.
+        facet_schema_version : str | int | None, optional
+            Optional run facet schema version.
+        facet_index : bool | None, optional
+            Whether run facet key/values are indexed.
+        identity_inputs : IdentityInputs, optional
+            Additional identity hash inputs.
+        year : int | None, optional
+            Run year metadata.
+        iteration : int | None, optional
+            Run iteration metadata.
+        phase : str | None, optional
+            Run phase metadata.
+        stage : str | None, optional
+            Run stage metadata.
+        parent_run_id : str | None, optional
+            Parent run id for lineage/scenario linkage.
+        outputs : list[str] | None, optional
+            Declared output keys.
+        output_paths : Mapping[str, ArtifactRef] | None, optional
+            Explicit output path mapping.
+        capture_dir : Path | None, optional
+            Output-capture directory.
+        capture_pattern : str, default "*"
+            Capture glob for capture mode.
+        cache_options : CacheOptions | None, optional
+            Grouped cache controls.
+        output_policy : OutputPolicyOptions | None, optional
+            Grouped output mismatch/missing policy controls.
+        execution_options : ExecutionOptions | None, optional
+            Grouped execution controls.
+        runtime_kwargs : Mapping[str, Any] | None, optional
+            Top-level alias for ``execution_options.runtime_kwargs``.
+            This is mutually exclusive with
+            ``execution_options=ExecutionOptions(runtime_kwargs=...)``.
+
+        Returns
+        -------
+        RunResult
+            Run metadata plus resolved output artifacts.
+
+        Notes
+        -----
+        This method currently performs both metadata resolution and execution-time
+        validation. Future cleanup should split those responsibilities into
+        independent phases/components.
+
+        """
+        tracker = self._tracker
+        context = self._prepare_run_invocation_context(
+            fn=fn,
+            name=name,
+            run_id=run_id,
+            model=model,
+            description=description,
+            config=config,
+            adapter=adapter,
+            inputs=inputs,
+            input_keys=input_keys,
+            optional_input_keys=optional_input_keys,
+            depends_on=depends_on,
+            tags=tags,
+            facet=facet,
+            facet_from=facet_from,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
+            identity_inputs=identity_inputs,
+            year=year,
+            iteration=iteration,
+            phase=phase,
+            stage=stage,
+            parent_run_id=parent_run_id,
+            outputs=outputs,
+            output_paths=output_paths,
+            cache_options=cache_options,
+            output_policy=output_policy,
+            execution_options=execution_options,
+            runtime_kwargs=runtime_kwargs,
+        )
+        resolved_name = context.resolved_name
+        config = context.config
+        config_plan = context.config_plan
+        outputs = context.outputs
+        output_paths = context.output_paths
+        inputs = context.inputs
+        output_mismatch = context.output_mismatch
+        output_missing = context.output_missing
+        executor = context.executor
+        container = context.container
+        runtime_kwargs_dict = context.runtime_kwargs
+        inject_context = context.inject_context
+        load_inputs = context.load_inputs
+        resolved_inputs = context.resolved_inputs
+        input_artifacts_by_key = context.input_artifacts_by_key
+        run_id = context.run_id
+        start_kwargs = context.start_kwargs
 
         def _handle_missing_outputs(label: str, missing: List[str]) -> None:
             if not missing:
