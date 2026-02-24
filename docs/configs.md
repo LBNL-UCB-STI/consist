@@ -9,10 +9,10 @@ Consist supports three complementary configuration channels per run:
 
 1. **Identity config**: `config=...` (hashed into the run signature)
 2. **Queryable facet**: `facet=...` (persisted in DuckDB and optionally indexed)
-3. **Hash-only inputs**: `hash_inputs=[...]` (file/dir digests folded into identity)
+3. **Identity inputs**: `identity_inputs=[...]` (file/dir digests folded into identity)
 
 Use `config` for the full run configuration, `facet` for a small subset of
-fields you want to query, and `hash_inputs` for external config trees or
+fields you want to query, and `identity_inputs` for external config trees or
 files that should affect caching without being stored as structured metadata.
 
 ## API Summary
@@ -27,12 +27,16 @@ You can pass config parameters via the high-level APIs:
 Relevant arguments:
 
 - `config: dict | BaseModel | None`
-- `config_plan: ConfigPlan | None`
+- `adapter: ConfigAdapter | None`
 - `facet: dict | BaseModel | None`
 - `facet_from: list[str] | None`
-- `hash_inputs: list[Path | str | (label, Path|str)] | None`
+- `identity_inputs: list[Path | str | (label, Path|str)] | None`
 - `facet_schema_version: str|int|None`
 - `facet_index: bool` (default `True`)
+
+`config_plan` and `hash_inputs` are hidden compatibility kwargs for migration;
+they are still accepted, but they are not the recommended public run/trace
+surface.
 
 ## Identity Hashing
 
@@ -88,16 +92,16 @@ Behavior notes:
 | Facet > 16 KB (canonical JSON) | Facet not persisted; run continues |
 | Facet > 500 KV rows | Facet not indexed; run continues |
 
-## Hash-Only Inputs (`hash_inputs`)
+## Identity Inputs (`identity_inputs`)
 
-Use `hash_inputs` to include file or directory content in identity hashing
+Use `identity_inputs` to include file or directory content in identity hashing
 without logging inputs in provenance.
 
 - Files are hashed via the configured `hashing_strategy`.
 - Directories are hashed deterministically via a sorted walk.
 - Dotfiles are ignored by default.
 
-`hash_inputs` is **path-only** (files or directories). Artifacts are
+`identity_inputs` is **path-only** (files or directories). Artifacts are
 intentionally excluded to keep identity hashing deterministic and avoid
 implicit hydration.
 
@@ -106,9 +110,9 @@ Digests are recorded in:
 - `config["__consist_hash_inputs__"]` (identity-only payload)
 - `run.meta["consist_hash_inputs"]` (audit/debugging)
 
-### When to Use Hash-Only Inputs
+### When to Use Identity Inputs
 
-`hash_inputs` solves a specific problem: **Configuration files that must affect the cache key but are too large or unstructured to query in the database.**
+`identity_inputs` solves a specific problem: **Configuration files that must affect the cache key but are too large or unstructured to query in the database.**
 
 **The Trade-off**
 
@@ -117,7 +121,7 @@ Normally, you pass configuration two ways:
 1. **Via `config=`** — Stored in the JSON run snapshot and hashed into identity, but not queryable by default.
 2. **Not tracked** — Smaller footprint, but changes to external files don't invalidate the cache, risking incorrect cache hits.
 
-`hash_inputs` is the middle ground: **Hash the files so cache keys change when they do, but don't store the content.**
+`identity_inputs` is the middle ground: **Hash the files so cache keys change when they do, but don't store the content.**
 
 **Example: ActivitySim Configuration**
 
@@ -141,7 +145,7 @@ with use_tracker(tracker):
         fn=run_activitysim,
         name="asim_baseline",
         config={"scenario": "baseline"},
-        hash_inputs=[("asim_config", asim_config_dir)],
+        identity_inputs=[("asim_config", asim_config_dir)],
     )
 
 # Later: You edit the YAML config (change a parameter)
@@ -153,20 +157,20 @@ with use_tracker(tracker):
         fn=run_activitysim,
         name="asim_baseline",
         config={"scenario": "baseline"},  # Same config dict
-        hash_inputs=[("asim_config", asim_config_dir)],  # Different hash
+        identity_inputs=[("asim_config", asim_config_dir)],  # Different hash
     )
-# Different signature (hash_inputs changed) → fresh run
+# Different signature (identity_inputs changed) → fresh run
 ```
 
-**Comparison: config vs hash_inputs**
+**Comparison: config vs identity_inputs**
 
 | Approach | Space | Queryable | Cache Behavior |
 |---|---|---|---|
 | `config={"yaml": large_dict}` | JSON snapshot only | No (by default) | Cache respects changes |
-| `hash_inputs=[path]` | Minimal | No | Cache respects changes |
+| `identity_inputs=[path]` | Minimal | No | Cache respects changes |
 | Ignore files | Minimal | N/A | Cache miss if files change (BAD) |
 
-For large, unstructured configs like ActivitySim YAML, use `hash_inputs`.
+For large, unstructured configs like ActivitySim YAML, use `identity_inputs`.
 
 **Audit Trail**
 
@@ -176,6 +180,7 @@ Even though the file content isn't stored, Consist records the hash for debuggin
 run = tracker.get_run("asim_baseline_001")
 print(run.meta["consist_hash_inputs"])
 # Output: {"asim_config": "sha256:a1b2c3..."}
+print(run.identity_summary["identity_inputs"])
 ```
 
 This lets you correlate runs with specific configuration states without storing the full config.
@@ -250,7 +255,7 @@ For detailed usage and API reference, see the [Config Adapters Integration Guide
 
 ```python
 import consist
-from consist import CacheOptions, use_tracker
+from consist import use_tracker
 
 with use_tracker(tracker):
     consist.run(
@@ -258,27 +263,27 @@ with use_tracker(tracker):
         name="beam",
         config=beam_cfg,
         facet={"memory_gb": beam_cfg.memory_gb},
-        hash_inputs=[("beam_hocon", beam_cfg_path)],
+        identity_inputs=[("beam_hocon", beam_cfg_path)],
     )
 ```
 
-### consist.run with config_plan (config adapters)
+### consist.run with adapter (config adapters)
 
 ```python
 from consist.integrations.activitysim import ActivitySimConfigAdapter
 
 import consist
-from consist import use_tracker
+from consist import CacheOptions, use_tracker
 
 adapter = ActivitySimConfigAdapter()
-plan = tracker.prepare_config(adapter, [overlay_dir, base_dir])
 
 with use_tracker(tracker):
     consist.run(
         fn=run_activitysim,
         name="activitysim",
         config={"scenario": "baseline"},
-        config_plan=plan,
+        adapter=adapter,
+        identity_inputs=[("asim_config", overlay_dir)],
         cache_options=CacheOptions(cache_mode="reuse"),
     )
 ```
@@ -296,6 +301,6 @@ with use_tracker(tracker):
             name="activitysim",
             config=asim_cfg,
             facet_from=["scenario", "sample_rate"],
-            hash_inputs=[("asim_yaml", asim_config_dir)],
+            identity_inputs=[("asim_yaml", asim_config_dir)],
         )
 ```

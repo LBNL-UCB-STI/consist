@@ -264,6 +264,7 @@ class ActivitySimConfigAdapter:
     bundle_configs: bool = True
     bundle_cache_dir: Optional[Path] = None
     check_probabilities: bool = False
+    root_dirs: Optional[list[Path]] = None
 
     def discover(
         self,

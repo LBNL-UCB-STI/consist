@@ -35,6 +35,29 @@ print(latest.id if latest else None)
 For top-level wrappers around these methods, see [API Helpers](api_helpers.md).
 For grouped workflows, see [Workflow Contexts](workflow.md).
 
+## Public identity kwargs (`run` / `trace`)
+
+Use `adapter` and `identity_inputs` on `Tracker.run(...)` and
+`Tracker.trace(...)`:
+
+```python
+result = tracker.run(
+    fn=simulate,
+    adapter=activitysim_adapter,
+    identity_inputs=[("asim_config", asim_config_dir)],
+)
+
+with tracker.trace(
+    "simulate_trace",
+    adapter=activitysim_adapter,
+    identity_inputs=[("asim_config", asim_config_dir)],
+):
+    simulate_inline()
+```
+
+`config_plan` and `hash_inputs` are hidden compatibility kwargs, not the
+recommended public kwargs for new run/trace calls.
+
 ::: consist.core.tracker.Tracker
     options:
       show_source: false

@@ -155,6 +155,81 @@ class Run(SQLModel, table=True):
             return (self.ended_at - self.started_at).total_seconds()
         return None
 
+    @property
+    def identity_summary(self) -> Dict[str, Any]:
+        """
+        Return a structured cache-identity breakdown for this run.
+
+        The summary is intended for debugging cache behavior and explains the
+        component hashes that form the run signature, plus identity-relevant
+        metadata persisted on the run.
+        """
+        meta = self.meta if isinstance(self.meta, dict) else {}
+        identity_input_digests = meta.get("consist_hash_inputs")
+        if not isinstance(identity_input_digests, dict):
+            identity_input_digests = {}
+
+        run_fields = {
+            "model": self.model_name,
+            "year": self.year,
+            "iteration": self.iteration,
+            "phase": meta.get("phase"),
+            "stage": meta.get("stage"),
+            "cache_epoch": meta.get("cache_epoch"),
+            "cache_version": meta.get("cache_version"),
+        }
+
+        adapter = {
+            "name": meta.get("config_adapter"),
+            "hash": meta.get("config_bundle_hash"),
+            "version": meta.get("config_adapter_version"),
+        }
+
+        config_payload = meta.get("config")
+        if not isinstance(config_payload, dict):
+            config_payload = {}
+
+        inputs = meta.get("inputs")
+        if not isinstance(inputs, list):
+            inputs = []
+
+        return {
+            "code_version": self.git_hash,
+            "config": config_payload,
+            "adapter": adapter,
+            "identity_inputs": identity_input_digests,
+            "run_fields": run_fields,
+            "inputs": inputs,
+            "config_hash": self.config_hash,
+            "input_hash": self.input_hash,
+            "code_hash": self.git_hash,
+            "signature": self.signature,
+            "signature_ready": bool(
+                self.config_hash and self.input_hash and self.git_hash
+            ),
+            "components": {
+                "config_hash": self.config_hash,
+                "input_hash": self.input_hash,
+                "code_hash": self.git_hash,
+            },
+            "identity_inputs_count": len(identity_input_digests),
+            "config_adapter": {
+                "name": meta.get("config_adapter"),
+                "version": meta.get("config_adapter_version"),
+                "identity_hash": meta.get("config_bundle_hash"),
+            },
+            "code_identity": {
+                "mode": meta.get("code_identity", "repo_git"),
+                "extra_deps": meta.get("code_identity_extra_deps"),
+            },
+            "cache": {
+                "mode": meta.get("cache_mode"),
+                "hit": meta.get("cache_hit"),
+                "epoch": meta.get("cache_epoch"),
+                "version": meta.get("cache_version"),
+            },
+        }
+
     def __repr__(self):
         status_icon = (
             "🟢"

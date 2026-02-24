@@ -9,9 +9,12 @@ more verbose, lower-level, or easier to misuse.
 | Entry point | Use when | Notes |
 |---|---|---|
 | [`consist.run`](api_helpers.md#consist.api.run) | You want the quickest cache-aware call for one function | Convenience wrapper around `Tracker.run` |
+| [`consist.trace`](api_helpers.md#consist.api.trace) | You need inline `with`-block execution with run recording | Convenience wrapper around `Tracker.trace` |
 | [`Tracker.run`](tracker.md#consist.core.tracker.Tracker.run) | You want explicit tracker ownership in app/library code | Same core behavior as `consist.run` |
+| [`Tracker.trace`](tracker.md#consist.core.tracker.Tracker.trace) | You need inline execution with explicit tracker control | Block executes every time |
 | [`consist.scenario`](api_helpers.md#consist.api.scenario) | You need multi-step workflows with shared scenario context | Returns [`ScenarioContext`](workflow.md#consist.core.workflow.ScenarioContext) |
 | [`ScenarioContext.run`](workflow.md#consist.core.workflow.ScenarioContext.run) | You are inside a scenario and want cache-aware steps | Step-level equivalent of `Tracker.run` |
+| [`ScenarioContext.trace`](workflow.md#consist.core.workflow.ScenarioContext.trace) | You are inside a scenario and need inline step execution | Step-level equivalent of `Tracker.trace` |
 
 ## Relationship: `consist.scenario`, `consist.run`, and `Tracker.run`
 
@@ -19,6 +22,25 @@ more verbose, lower-level, or easier to misuse.
 - `Tracker.run(...)` is the explicit class method for a single cache-aware step.
 - `consist.scenario(...)` creates a scenario context; inside it, call `sc.run(...)`
   for cache-aware steps or `sc.trace(...)` for inline blocks that execute each time.
+
+## Run/trace identity kwargs (public surface)
+
+Run/trace APIs share these public identity kwargs:
+
+- `adapter=...`
+- `identity_inputs=[...]`
+
+This applies to:
+
+- `consist.run(...)` / `consist.trace(...)`
+- `Tracker.run(...)` / `Tracker.trace(...)`
+- `ScenarioContext.run(...)` / `ScenarioContext.trace(...)`
+
+`config_plan=` and `hash_inputs=` are hidden compatibility kwargs. They remain
+accepted for migration compatibility but are not part of the recommended public
+surface for new docs/examples.
+
+For cache identity debugging, use `run.identity_summary`.
 
 ## Minimal runnable comparison
 

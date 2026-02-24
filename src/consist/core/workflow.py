@@ -25,17 +25,28 @@ from consist.core.run_invocation import resolve_run_invocation
 from consist.types import (
     ArtifactRef,
     CacheOptions,
+    CodeIdentityMode,
     ExecutionOptions,
     FacetLike,
-    HashInputs,
+    IdentityInputs,
     OutputPolicyOptions,
     RunInputRef,
 )
 from pathlib import Path
 
 if TYPE_CHECKING:
-    from consist.core.config_canonicalization import ConfigPlan
+    from consist.core.config_canonicalization import ConfigAdapter
     from consist.core.tracker import Tracker
+
+
+def _raise_unexpected_kwargs(kwargs: Mapping[str, Any]) -> None:
+    names = sorted(kwargs.keys())
+    if not names:
+        return
+    if len(names) == 1:
+        raise TypeError(f"unexpected keyword argument '{names[0]}'")
+    joined = "', '".join(names)
+    raise TypeError(f"unexpected keyword arguments '{joined}'")
 
 
 class OutputCapture:
@@ -687,7 +698,7 @@ class ScenarioContext:
         model: Optional[str] = None,
         description: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
-        config_plan: Optional["ConfigPlan"] = None,
+        adapter: Optional["ConfigAdapter"] = None,
         config_plan_ingest: bool = True,
         config_plan_profile_schema: bool = False,
         inputs: Optional[
@@ -701,7 +712,7 @@ class ScenarioContext:
         facet_from: Optional[List[str]] = None,
         facet_schema_version: Optional[Union[str, int]] = None,
         facet_index: Optional[bool] = None,
-        hash_inputs: HashInputs = None,
+        identity_inputs: IdentityInputs = None,
         year: Optional[int] = None,
         iteration: Optional[int] = None,
         phase: Optional[str] = None,
@@ -714,6 +725,7 @@ class ScenarioContext:
         cache_options: Optional[CacheOptions] = None,
         output_policy: Optional[OutputPolicyOptions] = None,
         execution_options: Optional[ExecutionOptions] = None,
+        **legacy_kwargs: Any,
     ) -> RunResult:
         """
         Execute a cached scenario step and update the Coupler with outputs.
@@ -724,6 +736,10 @@ class ScenarioContext:
         `consist.require_runtime_kwargs` to validate required keys.
         Pass policy controls via ``cache_options``, ``output_policy``,
         and ``execution_options``.
+
+        ``adapter`` and ``identity_inputs`` are the public identity-related
+        kwargs. Hidden compatibility kwargs ``config_plan`` and ``hash_inputs``
+        are still accepted.
         """
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
@@ -733,6 +749,18 @@ class ScenarioContext:
             raise ValueError("ScenarioContext.run requires a run name.")
         if fn is None and name is None:
             raise ValueError("ScenarioContext.run requires name when fn is None.")
+
+        legacy_config_plan = legacy_kwargs.pop("config_plan", None)
+        legacy_hash_inputs = legacy_kwargs.pop("hash_inputs", None)
+        _raise_unexpected_kwargs(legacy_kwargs)
+        if identity_inputs is not None and legacy_hash_inputs is not None:
+            raise ValueError("Pass either identity_inputs= or hash_inputs=, not both.")
+        resolved_identity_inputs = (
+            identity_inputs if identity_inputs is not None else legacy_hash_inputs
+        )
+        if adapter is not None and legacy_config_plan is not None:
+            raise ValueError("Pass either adapter= or config_plan=, not both.")
+        config_plan = legacy_config_plan
 
         resolved_invocation = resolve_run_invocation(
             fn=fn,
@@ -749,7 +777,7 @@ class ScenarioContext:
             facet_from=facet_from,
             facet_schema_version=facet_schema_version,
             facet_index=facet_index,
-            hash_inputs=hash_inputs,
+            hash_inputs=resolved_identity_inputs,
             year=year,
             iteration=iteration,
             phase=phase,
@@ -830,6 +858,10 @@ class ScenarioContext:
             )
         )
 
+        run_adapter: Optional["ConfigAdapter"] = (
+            None if resolved_config_plan is not None else adapter
+        )
+
         result = self.tracker.run(
             fn=fn,
             name=resolved_name,
@@ -837,7 +869,7 @@ class ScenarioContext:
             model=resolved_model,
             description=resolved_description,
             config=resolved_config,
-            config_plan=resolved_config_plan,
+            adapter=run_adapter,
             config_plan_ingest=config_plan_ingest,
             config_plan_profile_schema=config_plan_profile_schema,
             inputs=resolved_inputs,
@@ -849,7 +881,7 @@ class ScenarioContext:
             facet_from=resolved_facet_from,
             facet_schema_version=resolved_facet_schema_version,
             facet_index=resolved_facet_index,
-            hash_inputs=resolved_hash_inputs,
+            identity_inputs=resolved_hash_inputs,
             year=year,
             iteration=iteration,
             phase=phase,
@@ -879,6 +911,7 @@ class ScenarioContext:
                 runtime_kwargs=runtime_kwargs_dict,
                 inject_context=resolved_inject_context,
             ),
+            config_plan=resolved_config_plan,
         )
 
         if result.outputs:
@@ -899,7 +932,7 @@ class ScenarioContext:
         model: Optional[str] = None,
         description: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
-        config_plan: Optional["ConfigPlan"] = None,
+        adapter: Optional["ConfigAdapter"] = None,
         config_plan_ingest: bool = True,
         config_plan_profile_schema: bool = False,
         inputs: Optional[
@@ -913,7 +946,7 @@ class ScenarioContext:
         facet_from: Optional[List[str]] = None,
         facet_schema_version: Optional[Union[str, int]] = None,
         facet_index: Optional[bool] = None,
-        hash_inputs: HashInputs = None,
+        identity_inputs: IdentityInputs = None,
         year: Optional[int] = None,
         iteration: Optional[int] = None,
         parent_run_id: Optional[str] = None,
@@ -923,9 +956,14 @@ class ScenarioContext:
         capture_pattern: str = "*",
         cache_mode: str = "reuse",
         cache_hydration: Optional[str] = None,
+        cache_version: Optional[int] = None,
+        cache_epoch: Optional[int] = None,
         validate_cached_outputs: str = "lazy",
+        code_identity: Optional[CodeIdentityMode] = None,
+        code_identity_extra_deps: Optional[List[str]] = None,
         output_mismatch: str = "warn",
         output_missing: str = "warn",
+        **legacy_kwargs: Any,
     ):
         """
         Manual tracing context manager for scenario steps.
@@ -933,6 +971,10 @@ class ScenarioContext:
         This wraps ``Tracker.trace`` to log a step while allowing inline code
         blocks. Use ``ScenarioContext.run`` when you want function execution
         to be skipped on cache hits.
+
+        ``adapter`` and ``identity_inputs`` are the public identity-related
+        kwargs. Hidden compatibility kwargs ``config_plan`` and ``hash_inputs``
+        are still accepted.
         """
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
@@ -959,7 +1001,7 @@ class ScenarioContext:
                 model=resolved_model,
                 description=description,
                 config=config,
-                config_plan=config_plan,
+                adapter=adapter,
                 config_plan_ingest=config_plan_ingest,
                 config_plan_profile_schema=config_plan_profile_schema,
                 inputs=resolved_inputs,
@@ -971,7 +1013,7 @@ class ScenarioContext:
                 facet_from=facet_from,
                 facet_schema_version=facet_schema_version,
                 facet_index=facet_index,
-                hash_inputs=hash_inputs,
+                identity_inputs=identity_inputs,
                 year=year,
                 iteration=iteration,
                 parent_run_id=parent_run_id,
@@ -981,9 +1023,14 @@ class ScenarioContext:
                 capture_pattern=capture_pattern,
                 cache_mode=cache_mode,
                 cache_hydration=effective_cache_hydration,
+                cache_version=cache_version,
+                cache_epoch=cache_epoch,
                 validate_cached_outputs=validate_cached_outputs,
+                code_identity=code_identity,
+                code_identity_extra_deps=code_identity_extra_deps,
                 output_mismatch=output_mismatch,
                 output_missing=output_missing,
+                **legacy_kwargs,
             ) as t:
                 if t.is_cached:
                     current_consist = t.current_consist

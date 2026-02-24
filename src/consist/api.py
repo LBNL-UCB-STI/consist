@@ -59,11 +59,12 @@ from consist.types import (
     CacheOptions,
     DriverType,
     ExecutionOptions,
+    IdentityInputs,
     OutputPolicyOptions,
 )
 
 if TYPE_CHECKING:
-    from consist.core.config_canonicalization import ConfigPlan
+    from consist.core.config_canonicalization import ConfigAdapter, ConfigPlan
     from consist.core.step_context import StepContext
 
 GeoDataFrameType = Any
@@ -502,6 +503,8 @@ def run(
     name: Optional[str] = None,
     *,
     tracker: Optional["Tracker"] = None,
+    adapter: Optional["ConfigAdapter"] = None,
+    identity_inputs: IdentityInputs = None,
     cache_options: Optional[CacheOptions] = None,
     output_policy: Optional[OutputPolicyOptions] = None,
     execution_options: Optional[ExecutionOptions] = None,
@@ -525,6 +528,10 @@ def run(
     tracker : Optional[Tracker]
         The Tracker instance responsible for provenance and caching.
         If None, the active global tracker is resolved.
+    adapter : Optional[ConfigAdapter]
+        Config adapter used to derive a config plan before execution.
+    identity_inputs : IdentityInputs
+        Additional hash-only identity inputs that contribute to cache keys.
     cache_options : Optional[CacheOptions]
         Grouped cache controls for run execution.
     output_policy : Optional[OutputPolicyOptions]
@@ -561,6 +568,8 @@ def run(
     return tr.run(
         fn=fn,
         name=name,
+        adapter=adapter,
+        identity_inputs=identity_inputs,
         cache_options=cache_options,
         output_policy=output_policy,
         execution_options=execution_options,
@@ -757,6 +766,8 @@ def trace(
     name: str,
     *,
     tracker: Optional["Tracker"] = None,
+    adapter: Optional["ConfigAdapter"] = None,
+    identity_inputs: IdentityInputs = None,
     **kwargs: Any,
 ) -> Iterator["Tracker"]:
     """
@@ -771,6 +782,10 @@ def trace(
         Semantic name for this step/trace.
     tracker : Optional[Tracker]
         The tracker instance to use.
+    adapter : Optional[ConfigAdapter]
+        Config adapter used to derive a config plan before execution.
+    identity_inputs : IdentityInputs
+        Additional hash-only identity inputs that contribute to cache keys.
     **kwargs : Any
         Additional metadata or parameters for this trace.
 
@@ -780,7 +795,12 @@ def trace(
         The active tracker instance.
     """
     tr = _resolve_tracker(tracker)
-    with tr.trace(name=name, **kwargs) as active:
+    with tr.trace(
+        name=name,
+        adapter=adapter,
+        identity_inputs=identity_inputs,
+        **kwargs,
+    ) as active:
         yield active
 
 

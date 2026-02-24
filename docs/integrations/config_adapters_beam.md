@@ -26,6 +26,35 @@ tracker.canonicalize_config(adapter, [config_root], ingest=True)
 tracker.end_run()
 ```
 
+## Run/Trace Adapter Handoff (Public Surface)
+
+For `consist.run(...)`, `consist.trace(...)`, `Tracker.run(...)`,
+`Tracker.trace(...)`, `ScenarioContext.run(...)`, and `ScenarioContext.trace(...)`,
+use `adapter=` and `identity_inputs=`:
+
+```python
+import consist
+from consist import use_tracker
+
+with use_tracker(tracker):
+    consist.run(
+        fn=run_beam,
+        name="beam",
+        adapter=adapter,
+        identity_inputs=[("beam_hocon", config_root / "sfbay-pilates-base.conf")],
+    )
+
+    with consist.trace(
+        "beam_trace",
+        adapter=adapter,
+        identity_inputs=[("beam_hocon", config_root / "sfbay-pilates-base.conf")],
+    ):
+        run_beam()
+```
+
+`config_plan` is still accepted as a hidden compatibility kwarg, but it is not
+the recommended public run/trace surface.
+
 ## Facets
 
 ```python
