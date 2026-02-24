@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import logging
 from pathlib import Path
 from typing import Any, cast
@@ -991,3 +992,50 @@ def test_tracker_run_delegates_invocation_defaults_and_validation(tracker, monke
     assert captured["apply_step_defaults"] is None
     assert captured["missing_name_error"] == "Tracker.run requires a run name."
     assert captured["python_missing_fn_error"] == "Tracker.run requires a callable fn."
+
+
+def test_tracker_run_propagates_start_run_optional_kwargs(tracker, monkeypatch):
+    captured_start_kwargs: dict[str, Any] = {}
+    original_start_run = tracker.start_run
+
+    @contextmanager
+    def _spy_start_run(*args, **kwargs):
+        captured_start_kwargs.update(kwargs)
+        with original_start_run(*args, **kwargs) as active_tracker:
+            yield active_tracker
+
+    monkeypatch.setattr(tracker, "start_run", _spy_start_run)
+
+    def step(ctx) -> None:
+        out_path = ctx.run_dir / "out.txt"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("ok\n")
+
+    tracker.run(
+        fn=step,
+        name="run_start_kwargs",
+        model="run_start_kwargs_model",
+        output_paths={"out": "out.txt"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        cache_options=CacheOptions(
+            cache_mode="overwrite",
+            cache_hydration="outputs-requested",
+            cache_version=7,
+        ),
+        facet_schema_version="facet-v1",
+        facet_index=False,
+    )
+
+    assert captured_start_kwargs["cache_version"] == 7
+    assert captured_start_kwargs["cache_hydration"] == "outputs-requested"
+    assert captured_start_kwargs["facet_schema_version"] == "facet-v1"
+    assert captured_start_kwargs["facet_index"] is False
+    assert captured_start_kwargs["_consist_code_identity_callable"] is step
+
+    assert "materialize_cached_outputs_dir" not in captured_start_kwargs
+    assert set(captured_start_kwargs["materialize_cached_output_paths"]) == {"out"}
+    materialize_path = Path(
+        str(captured_start_kwargs["materialize_cached_output_paths"]["out"])
+    )
+    assert materialize_path.name == "out.txt"
+    assert Path(tracker.run_dir) in materialize_path.parents

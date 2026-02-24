@@ -228,6 +228,7 @@ class RunTraceCoordinator:
         config_plan: Optional["ConfigPlan"],
         run_id: str,
     ) -> Optional[Union[Dict[str, Any], BaseModel]]:
+        """Attach config-plan metadata to config when a plan is present."""
         config_for_run = config
         if config_plan is None:
             return config_for_run
@@ -268,6 +269,7 @@ class RunTraceCoordinator:
         materialize_cached_output_paths: Optional[Dict[str, Path]] = None,
         materialize_cached_outputs_dir: Optional[Path] = None,
     ) -> Dict[str, Any]:
+        """Build the kwargs payload passed into ``tracker.start_run``."""
         start_kwargs: Dict[str, Any] = {
             "run_id": run_id,
             "model": invocation.model,
@@ -307,6 +309,72 @@ class RunTraceCoordinator:
             if value is not None:
                 start_kwargs[key] = value
         return start_kwargs
+
+    def _resolve_cache_hydration_targets(
+        self,
+        *,
+        tracker: "Tracker",
+        cache_hydration: Optional[str],
+        output_paths: Optional[Mapping[str, ArtifactRef]],
+        run_id: str,
+        model: str,
+        description: Optional[str],
+        year: Optional[int],
+        iteration: Optional[int],
+        parent_run_id: Optional[str],
+        tags: Optional[List[str]],
+    ) -> tuple[Optional[Dict[str, Path]], Optional[Path]]:
+        """Resolve cache-hydration output materialization targets, if requested."""
+        materialize_cached_output_paths: Optional[Dict[str, Path]] = None
+        materialize_cached_outputs_dir: Optional[Path] = None
+        if cache_hydration == "outputs-requested":
+            if output_paths is None:
+                raise ValueError(
+                    format_problem_cause_fix(
+                        problem=(
+                            "cache_hydration='outputs-requested' requires output_paths."
+                        ),
+                        cause=(
+                            "Requested-output hydration needs explicit destination "
+                            "paths."
+                        ),
+                        fix=(
+                            "Declare output_paths={key: path} when using "
+                            "cache_hydration='outputs-requested'."
+                        ),
+                    )
+                )
+            output_base_dir = self._helpers.preview_run_artifact_dir(
+                tracker,
+                run_id=run_id,
+                model=model,
+                description=description,
+                year=year,
+                iteration=iteration,
+                parent_run_id=parent_run_id,
+                tags=tags,
+            )
+            materialize_cached_output_paths = {
+                str(output_key): self._helpers.resolve_output_path(
+                    tracker,
+                    ref,
+                    output_base_dir,
+                )
+                for output_key, ref in output_paths.items()
+            }
+        elif cache_hydration == "outputs-all":
+            materialize_cached_outputs_dir = self._helpers.preview_run_artifact_dir(
+                tracker,
+                run_id=run_id,
+                model=model,
+                description=description,
+                year=year,
+                iteration=iteration,
+                parent_run_id=parent_run_id,
+                tags=tags,
+            )
+
+        return materialize_cached_output_paths, materialize_cached_outputs_dir
 
     def _prepare_run_invocation_context(
         self,
@@ -433,52 +501,21 @@ class RunTraceCoordinator:
         if run_id is None:
             run_id = f"{resolved_name}_{uuid.uuid4().hex[:8]}"
 
-        materialize_cached_output_paths: Optional[Dict[str, Path]] = None
-        materialize_cached_outputs_dir: Optional[Path] = None
-        if cache_hydration == "outputs-requested":
-            if invocation.output_paths is None:
-                raise ValueError(
-                    format_problem_cause_fix(
-                        problem=(
-                            "cache_hydration='outputs-requested' requires output_paths."
-                        ),
-                        cause=(
-                            "Requested-output hydration needs explicit destination "
-                            "paths."
-                        ),
-                        fix=(
-                            "Declare output_paths={key: path} when using "
-                            "cache_hydration='outputs-requested'."
-                        ),
-                    )
-                )
-            output_base_dir = self._helpers.preview_run_artifact_dir(
-                tracker,
-                run_id=run_id,
-                model=invocation.model,
-                description=invocation.description,
-                year=year,
-                iteration=iteration,
-                parent_run_id=parent_run_id,
-                tags=invocation.tags,
-            )
-            materialize_cached_output_paths = {
-                str(key): self._helpers.resolve_output_path(
-                    tracker, ref, output_base_dir
-                )
-                for key, ref in invocation.output_paths.items()
-            }
-        elif cache_hydration == "outputs-all":
-            materialize_cached_outputs_dir = self._helpers.preview_run_artifact_dir(
-                tracker,
-                run_id=run_id,
-                model=invocation.model,
-                description=invocation.description,
-                year=year,
-                iteration=iteration,
-                parent_run_id=parent_run_id,
-                tags=invocation.tags,
-            )
+        (
+            materialize_cached_output_paths,
+            materialize_cached_outputs_dir,
+        ) = self._resolve_cache_hydration_targets(
+            tracker=tracker,
+            cache_hydration=cache_hydration,
+            output_paths=invocation.output_paths,
+            run_id=run_id,
+            model=invocation.model,
+            description=invocation.description,
+            year=year,
+            iteration=iteration,
+            parent_run_id=parent_run_id,
+            tags=invocation.tags,
+        )
 
         cache_mode = invocation.cache_mode
         if invocation.executor == "container" and cache_mode != "overwrite":
@@ -1482,54 +1519,21 @@ class RunTraceCoordinator:
         if run_id is None:
             run_id = f"{resolved_name}_{uuid.uuid4().hex[:8]}"
 
-        materialize_cached_output_paths: Optional[Dict[str, Path]] = None
-        materialize_cached_outputs_dir: Optional[Path] = None
-        if cache_hydration == "outputs-requested":
-            if resolved_invocation.output_paths is None:
-                raise ValueError(
-                    format_problem_cause_fix(
-                        problem=(
-                            "cache_hydration='outputs-requested' requires output_paths."
-                        ),
-                        cause=(
-                            "Requested-output hydration needs explicit destination "
-                            "paths."
-                        ),
-                        fix=(
-                            "Declare output_paths={key: path} when using "
-                            "cache_hydration='outputs-requested'."
-                        ),
-                    )
-                )
-            output_base_dir = self._helpers.preview_run_artifact_dir(
-                tracker,
-                run_id=run_id,
-                model=resolved_invocation.model,
-                description=resolved_invocation.description,
-                year=year,
-                iteration=iteration,
-                parent_run_id=parent_run_id,
-                tags=resolved_invocation.tags,
-            )
-            materialize_cached_output_paths = {
-                str(output_key): self._helpers.resolve_output_path(
-                    tracker,
-                    ref,
-                    output_base_dir,
-                )
-                for output_key, ref in resolved_invocation.output_paths.items()
-            }
-        elif cache_hydration == "outputs-all":
-            materialize_cached_outputs_dir = self._helpers.preview_run_artifact_dir(
-                tracker,
-                run_id=run_id,
-                model=resolved_invocation.model,
-                description=resolved_invocation.description,
-                year=year,
-                iteration=iteration,
-                parent_run_id=parent_run_id,
-                tags=resolved_invocation.tags,
-            )
+        (
+            materialize_cached_output_paths,
+            materialize_cached_outputs_dir,
+        ) = self._resolve_cache_hydration_targets(
+            tracker=tracker,
+            cache_hydration=cache_hydration,
+            output_paths=resolved_invocation.output_paths,
+            run_id=run_id,
+            model=resolved_invocation.model,
+            description=resolved_invocation.description,
+            year=year,
+            iteration=iteration,
+            parent_run_id=parent_run_id,
+            tags=resolved_invocation.tags,
+        )
 
         resolved_cache_epoch = (
             tracker._cache_epoch
