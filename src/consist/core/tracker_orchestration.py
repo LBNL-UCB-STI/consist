@@ -54,6 +54,7 @@ from consist.types import (
 
 if TYPE_CHECKING:
     from consist.core.config_canonicalization import ConfigAdapter, ConfigPlan
+    from consist.core.run_invocation import ResolvedRunInvocation
     from consist.core.tracker import Tracker
 
 
@@ -220,6 +221,93 @@ class RunTraceCoordinator:
             config_dirs=self._resolve_adapter_config_dirs(adapter),
         )
 
+    @staticmethod
+    def _build_config_for_run(
+        *,
+        config: Optional[Union[Dict[str, Any], BaseModel]],
+        config_plan: Optional["ConfigPlan"],
+        run_id: str,
+    ) -> Optional[Union[Dict[str, Any], BaseModel]]:
+        config_for_run = config
+        if config_plan is None:
+            return config_for_run
+        if config is None:
+            config_for_run = {}
+        elif isinstance(config, BaseModel):
+            config_for_run = config.model_dump()
+        else:
+            config_for_run = dict(config)
+        if "__consist_config_plan__" in config_for_run:
+            logging.warning(
+                "[Consist] Overwriting user-provided '__consist_config_plan__' in config for run %s.",
+                run_id,
+            )
+        config_for_run["__consist_config_plan__"] = {
+            "adapter": config_plan.adapter_name,
+            "hash": config_plan.identity_hash,
+            "adapter_version": config_plan.adapter_version,
+        }
+        return config_for_run
+
+    @staticmethod
+    def _build_start_kwargs(
+        *,
+        invocation: "ResolvedRunInvocation",
+        run_id: str,
+        config_for_run: Optional[Union[Dict[str, Any], BaseModel]],
+        resolved_inputs: List[ArtifactRef],
+        cache_mode: str,
+        cache_hydration: Optional[str],
+        resolved_cache_epoch: int,
+        year: Optional[int],
+        iteration: Optional[int],
+        parent_run_id: Optional[str],
+        phase: Optional[str] = None,
+        stage: Optional[str] = None,
+        code_identity_callable: Optional[Callable[..., Any]] = None,
+        materialize_cached_output_paths: Optional[Dict[str, Path]] = None,
+        materialize_cached_outputs_dir: Optional[Path] = None,
+    ) -> Dict[str, Any]:
+        start_kwargs: Dict[str, Any] = {
+            "run_id": run_id,
+            "model": invocation.model,
+            "config": config_for_run,
+            "inputs": resolved_inputs or None,
+            "tags": invocation.tags,
+            "description": invocation.description,
+            "cache_mode": cache_mode,
+            "facet": invocation.facet,
+            "facet_from": invocation.facet_from,
+            "hash_inputs": invocation.identity_inputs,
+            "year": year,
+            "iteration": iteration,
+            "parent_run_id": parent_run_id,
+            "validate_cached_outputs": invocation.validate_cached_outputs,
+            "cache_epoch": resolved_cache_epoch,
+        }
+        if invocation.code_identity is not None:
+            start_kwargs["code_identity"] = invocation.code_identity
+        if invocation.code_identity_extra_deps is not None:
+            start_kwargs["code_identity_extra_deps"] = list(
+                invocation.code_identity_extra_deps
+            )
+        if code_identity_callable is not None:
+            start_kwargs["_consist_code_identity_callable"] = code_identity_callable
+        optional_values: Dict[str, Any] = {
+            "cache_version": invocation.cache_version,
+            "phase": phase,
+            "stage": stage,
+            "facet_schema_version": invocation.facet_schema_version,
+            "facet_index": invocation.facet_index,
+            "cache_hydration": cache_hydration,
+            "materialize_cached_output_paths": materialize_cached_output_paths,
+            "materialize_cached_outputs_dir": materialize_cached_outputs_dir,
+        }
+        for key, value in optional_values.items():
+            if value is not None:
+                start_kwargs[key] = value
+        return start_kwargs
+
     def _prepare_run_invocation_context(
         self,
         *,
@@ -230,9 +318,7 @@ class RunTraceCoordinator:
         description: Optional[str],
         config: Optional[Dict[str, Any]],
         adapter: Optional["ConfigAdapter"],
-        inputs: Optional[
-            Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]
-        ],
+        inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]],
         input_keys: Optional[Iterable[str] | str],
         optional_input_keys: Optional[Iterable[str] | str],
         depends_on: Optional[List[RunInputRef]],
@@ -261,7 +347,7 @@ class RunTraceCoordinator:
             runtime_kwargs=runtime_kwargs,
         )
 
-        resolved_invocation = resolve_run_invocation(
+        invocation = resolve_run_invocation(
             fn=fn,
             name=name,
             model=model,
@@ -296,43 +382,19 @@ class RunTraceCoordinator:
             python_missing_fn_error="Tracker.run requires a callable fn.",
         )
 
-        resolved_name = resolved_invocation.name
-        resolved_model = resolved_invocation.model
-        description = resolved_invocation.description
-        config = resolved_invocation.config
-        adapter = resolved_invocation.adapter
+        resolved_name = invocation.name
         config_plan = self._prepare_config_plan(
-            adapter=adapter,
+            adapter=invocation.adapter,
         )
-        tags = resolved_invocation.tags
-        facet = resolved_invocation.facet
-        facet_index = resolved_invocation.facet_index
-        outputs = resolved_invocation.outputs
-        output_paths = resolved_invocation.output_paths
-        inputs = resolved_invocation.inputs
-        input_keys = resolved_invocation.input_keys
-        optional_input_keys = resolved_invocation.optional_input_keys
-        cache_mode = resolved_invocation.cache_mode
-        cache_hydration = resolved_invocation.cache_hydration
-        cache_version = resolved_invocation.cache_version
-        validate_cached_outputs = resolved_invocation.validate_cached_outputs
-        load_inputs = resolved_invocation.load_inputs
-        identity_inputs = resolved_invocation.identity_inputs
-        facet_from = resolved_invocation.facet_from
-        facet_schema_version = resolved_invocation.facet_schema_version
-        output_mismatch = resolved_invocation.output_mismatch
-        output_missing = resolved_invocation.output_missing
-        executor = resolved_invocation.executor
-        container = resolved_invocation.container
-        runtime_kwargs_dict = resolved_invocation.runtime_kwargs
-        inject_context = resolved_invocation.inject_context
-        code_identity = resolved_invocation.code_identity
-        code_identity_extra_deps = resolved_invocation.code_identity_extra_deps
-        cache_epoch = resolved_invocation.cache_epoch
+        load_inputs = invocation.load_inputs
 
         if load_inputs is None:
-            load_inputs = isinstance(inputs, Mapping)
-        if load_inputs and inputs is not None and not isinstance(inputs, Mapping):
+            load_inputs = isinstance(invocation.inputs, Mapping)
+        if (
+            load_inputs
+            and invocation.inputs is not None
+            and not isinstance(invocation.inputs, Mapping)
+        ):
             raise ValueError(
                 format_problem_cause_fix(
                     problem="load_inputs=True requires inputs to be a dict.",
@@ -347,10 +409,14 @@ class RunTraceCoordinator:
                 )
             )
 
+        cache_hydration = invocation.cache_hydration
         if cache_hydration is None and load_inputs:
             cache_hydration = "inputs-missing"
 
-        if input_keys is not None or optional_input_keys is not None:
+        if (
+            invocation.input_keys is not None
+            or invocation.optional_input_keys is not None
+        ):
             warnings.warn(
                 "Tracker.run ignores input_keys/optional_input_keys; use inputs mapping instead.",
                 DeprecationWarning,
@@ -359,9 +425,9 @@ class RunTraceCoordinator:
 
         resolved_inputs, input_artifacts_by_key = self._helpers.resolve_input_refs(
             tracker,
-            inputs,
+            invocation.inputs,
             depends_on,
-            include_keyed_artifacts=executor == "python",
+            include_keyed_artifacts=invocation.executor == "python",
         )
 
         if run_id is None:
@@ -370,7 +436,7 @@ class RunTraceCoordinator:
         materialize_cached_output_paths: Optional[Dict[str, Path]] = None
         materialize_cached_outputs_dir: Optional[Path] = None
         if cache_hydration == "outputs-requested":
-            if output_paths is None:
+            if invocation.output_paths is None:
                 raise ValueError(
                     format_problem_cause_fix(
                         problem=(
@@ -389,117 +455,81 @@ class RunTraceCoordinator:
             output_base_dir = self._helpers.preview_run_artifact_dir(
                 tracker,
                 run_id=run_id,
-                model=resolved_model,
-                description=description,
+                model=invocation.model,
+                description=invocation.description,
                 year=year,
                 iteration=iteration,
                 parent_run_id=parent_run_id,
-                tags=tags,
+                tags=invocation.tags,
             )
             materialize_cached_output_paths = {
                 str(key): self._helpers.resolve_output_path(
                     tracker, ref, output_base_dir
                 )
-                for key, ref in output_paths.items()
+                for key, ref in invocation.output_paths.items()
             }
         elif cache_hydration == "outputs-all":
             materialize_cached_outputs_dir = self._helpers.preview_run_artifact_dir(
                 tracker,
                 run_id=run_id,
-                model=resolved_model,
-                description=description,
+                model=invocation.model,
+                description=invocation.description,
                 year=year,
                 iteration=iteration,
                 parent_run_id=parent_run_id,
-                tags=tags,
+                tags=invocation.tags,
             )
 
-        if executor == "container" and cache_mode != "overwrite":
+        cache_mode = invocation.cache_mode
+        if invocation.executor == "container" and cache_mode != "overwrite":
             logging.warning(
                 "[Consist] executor='container' uses container-level caching; forcing cache_mode='overwrite'."
             )
             cache_mode = "overwrite"
 
         resolved_cache_epoch = (
-            tracker._cache_epoch if cache_epoch is None else cache_epoch
+            tracker._cache_epoch
+            if invocation.cache_epoch is None
+            else invocation.cache_epoch
         )
-
-        config_for_run = config
-        if config_plan is not None:
-            if config is None:
-                config_for_run = {}
-            elif isinstance(config, BaseModel):
-                config_for_run = config.model_dump()
-            else:
-                config_for_run = dict(config)
-            if "__consist_config_plan__" in config_for_run:
-                logging.warning(
-                    "[Consist] Overwriting user-provided '__consist_config_plan__' in config for run %s.",
-                    run_id,
-                )
-            config_for_run["__consist_config_plan__"] = {
-                "adapter": config_plan.adapter_name,
-                "hash": config_plan.identity_hash,
-                "adapter_version": config_plan.adapter_version,
-            }
-
-        start_kwargs: Dict[str, Any] = {
-            "run_id": run_id,
-            "model": resolved_model,
-            "config": config_for_run,
-            "inputs": resolved_inputs or None,
-            "tags": tags,
-            "description": description,
-            "cache_mode": cache_mode,
-            "facet": facet,
-            "facet_from": facet_from,
-            "hash_inputs": identity_inputs,
-            "year": year,
-            "iteration": iteration,
-            "parent_run_id": parent_run_id,
-            "validate_cached_outputs": validate_cached_outputs,
-            "cache_epoch": resolved_cache_epoch,
-        }
-        if code_identity is not None:
-            start_kwargs["code_identity"] = code_identity
-        if code_identity_extra_deps is not None:
-            start_kwargs["code_identity_extra_deps"] = list(code_identity_extra_deps)
-        if executor == "python" and fn is not None:
-            start_kwargs["_consist_code_identity_callable"] = fn
-        if cache_version is not None:
-            start_kwargs["cache_version"] = cache_version
-        if phase is not None:
-            start_kwargs["phase"] = phase
-        if stage is not None:
-            start_kwargs["stage"] = stage
-        if facet_schema_version is not None:
-            start_kwargs["facet_schema_version"] = facet_schema_version
-        if facet_index is not None:
-            start_kwargs["facet_index"] = facet_index
-        if cache_hydration is not None:
-            start_kwargs["cache_hydration"] = cache_hydration
-        if materialize_cached_output_paths is not None:
-            start_kwargs["materialize_cached_output_paths"] = (
-                materialize_cached_output_paths
-            )
-        if materialize_cached_outputs_dir is not None:
-            start_kwargs["materialize_cached_outputs_dir"] = (
-                materialize_cached_outputs_dir
-            )
+        config_for_run = self._build_config_for_run(
+            config=invocation.config,
+            config_plan=config_plan,
+            run_id=run_id,
+        )
+        start_kwargs = self._build_start_kwargs(
+            invocation=invocation,
+            run_id=run_id,
+            config_for_run=config_for_run,
+            resolved_inputs=resolved_inputs,
+            cache_mode=cache_mode,
+            cache_hydration=cache_hydration,
+            resolved_cache_epoch=resolved_cache_epoch,
+            year=year,
+            iteration=iteration,
+            parent_run_id=parent_run_id,
+            phase=phase,
+            stage=stage,
+            code_identity_callable=(
+                fn if invocation.executor == "python" and fn is not None else None
+            ),
+            materialize_cached_output_paths=materialize_cached_output_paths,
+            materialize_cached_outputs_dir=materialize_cached_outputs_dir,
+        )
 
         return RunInvocationContext(
             resolved_name=resolved_name,
-            config=config,
+            config=invocation.config,
             config_plan=config_plan,
-            outputs=outputs,
-            output_paths=output_paths,
-            inputs=inputs,
-            output_mismatch=output_mismatch,
-            output_missing=output_missing,
-            executor=executor,
-            container=container,
-            runtime_kwargs=runtime_kwargs_dict,
-            inject_context=inject_context,
+            outputs=invocation.outputs,
+            output_paths=invocation.output_paths,
+            inputs=invocation.inputs,
+            output_mismatch=invocation.output_mismatch,
+            output_missing=invocation.output_missing,
+            executor=invocation.executor,
+            container=invocation.container,
+            runtime_kwargs=invocation.runtime_kwargs,
+            inject_context=invocation.inject_context,
             load_inputs=load_inputs,
             resolved_inputs=resolved_inputs,
             input_artifacts_by_key=input_artifacts_by_key,
@@ -720,7 +750,9 @@ class RunTraceCoordinator:
         on_missing_outputs: Callable[[str, List[str]], None],
     ) -> RunResult:
         if container is None or output_paths is None:
-            raise RuntimeError("Container execution requires container and output_paths.")
+            raise RuntimeError(
+                "Container execution requires container and output_paths."
+            )
         if load_inputs:
             raise ValueError(
                 format_problem_cause_fix(
@@ -785,8 +817,7 @@ class RunTraceCoordinator:
                 format_problem_cause_fix(
                     problem="container spec must include image and command.",
                     cause=(
-                        "Container execution cannot start without an image and "
-                        "command."
+                        "Container execution cannot start without an image and command."
                     ),
                     fix=(
                         "Set container={'image': '...', 'command': [...]} in "
@@ -899,7 +930,9 @@ class RunTraceCoordinator:
         call_kwargs: Dict[str, Any] = {}
 
         if "config" in params and "config" not in runtime_kwargs and config is not None:
-            call_kwargs["config"] = config if isinstance(config, BaseModel) else config_dict
+            call_kwargs["config"] = (
+                config if isinstance(config, BaseModel) else config_dict
+            )
 
         for param_name, param in params.items():
             if param.kind in (
@@ -937,7 +970,9 @@ class RunTraceCoordinator:
                 call_kwargs[runtime_key] = runtime_value
 
         if inject_context:
-            ctx_name = inject_context if isinstance(inject_context, str) else "_consist_ctx"
+            ctx_name = (
+                inject_context if isinstance(inject_context, str) else "_consist_ctx"
+            )
             if ctx_name not in call_kwargs:
                 if ctx_name in params or has_var_kw:
                     call_kwargs[ctx_name] = RunContext(tracker)
@@ -969,7 +1004,9 @@ class RunTraceCoordinator:
 
         captured_outputs: Dict[str, Artifact] = {}
         if capture_dir is not None:
-            with active_tracker.capture_outputs(capture_dir, pattern=capture_pattern) as cap:
+            with active_tracker.capture_outputs(
+                capture_dir, pattern=capture_pattern
+            ) as cap:
                 result = fn_callable(**call_kwargs)
             if result is not None:
                 raise ValueError(
@@ -1136,7 +1173,6 @@ class RunTraceCoordinator:
             runtime_kwargs=runtime_kwargs,
         )
         resolved_name = context.resolved_name
-        config = context.config
         config_plan = context.config_plan
         outputs = context.outputs
         output_paths = context.output_paths
@@ -1218,7 +1254,7 @@ class RunTraceCoordinator:
                 active_tracker=active_tracker,
                 fn=fn,
                 resolved_name=resolved_name,
-                config=config,
+                config=context.config,
                 inputs=inputs,
                 runtime_kwargs_dict=runtime_kwargs_dict,
                 inject_context=inject_context,
@@ -1420,34 +1456,16 @@ class RunTraceCoordinator:
         )
 
         resolved_name = resolved_invocation.name
-        resolved_model = resolved_invocation.model
-        description = resolved_invocation.description
-        config = resolved_invocation.config
-        adapter = resolved_invocation.adapter
         config_plan = self._prepare_config_plan(
-            adapter=adapter,
+            adapter=resolved_invocation.adapter,
         )
-        tags = resolved_invocation.tags
-        facet = resolved_invocation.facet
-        facet_index = resolved_invocation.facet_index
-        outputs = resolved_invocation.outputs
-        output_paths = resolved_invocation.output_paths
-        inputs = resolved_invocation.inputs
-        input_keys = resolved_invocation.input_keys
-        optional_input_keys = resolved_invocation.optional_input_keys
-        cache_mode = resolved_invocation.cache_mode
         cache_hydration = resolved_invocation.cache_hydration
-        cache_version = resolved_invocation.cache_version
-        validate_cached_outputs = resolved_invocation.validate_cached_outputs
-        identity_inputs = resolved_invocation.identity_inputs
-        facet_from = resolved_invocation.facet_from
-        facet_schema_version = resolved_invocation.facet_schema_version
         output_missing = resolved_invocation.output_missing
-        code_identity = resolved_invocation.code_identity
-        code_identity_extra_deps = resolved_invocation.code_identity_extra_deps
-        cache_epoch = resolved_invocation.cache_epoch
 
-        if input_keys is not None or optional_input_keys is not None:
+        if (
+            resolved_invocation.input_keys is not None
+            or resolved_invocation.optional_input_keys is not None
+        ):
             warnings.warn(
                 "Tracker.trace ignores input_keys/optional_input_keys; use inputs mapping instead.",
                 DeprecationWarning,
@@ -1456,7 +1474,7 @@ class RunTraceCoordinator:
 
         resolved_inputs, _ = self._helpers.resolve_input_refs(
             tracker,
-            inputs,
+            resolved_invocation.inputs,
             depends_on,
             include_keyed_artifacts=False,
         )
@@ -1467,7 +1485,7 @@ class RunTraceCoordinator:
         materialize_cached_output_paths: Optional[Dict[str, Path]] = None
         materialize_cached_outputs_dir: Optional[Path] = None
         if cache_hydration == "outputs-requested":
-            if output_paths is None:
+            if resolved_invocation.output_paths is None:
                 raise ValueError(
                     format_problem_cause_fix(
                         problem=(
@@ -1486,12 +1504,12 @@ class RunTraceCoordinator:
             output_base_dir = self._helpers.preview_run_artifact_dir(
                 tracker,
                 run_id=run_id,
-                model=resolved_model,
-                description=description,
+                model=resolved_invocation.model,
+                description=resolved_invocation.description,
                 year=year,
                 iteration=iteration,
                 parent_run_id=parent_run_id,
-                tags=tags,
+                tags=resolved_invocation.tags,
             )
             materialize_cached_output_paths = {
                 str(output_key): self._helpers.resolve_output_path(
@@ -1499,80 +1517,44 @@ class RunTraceCoordinator:
                     ref,
                     output_base_dir,
                 )
-                for output_key, ref in output_paths.items()
+                for output_key, ref in resolved_invocation.output_paths.items()
             }
         elif cache_hydration == "outputs-all":
             materialize_cached_outputs_dir = self._helpers.preview_run_artifact_dir(
                 tracker,
                 run_id=run_id,
-                model=resolved_model,
-                description=description,
+                model=resolved_invocation.model,
+                description=resolved_invocation.description,
                 year=year,
                 iteration=iteration,
                 parent_run_id=parent_run_id,
-                tags=tags,
+                tags=resolved_invocation.tags,
             )
-
-        config_for_run = config
-        if config_plan is not None:
-            if config is None:
-                config_for_run = {}
-            elif isinstance(config, BaseModel):
-                config_for_run = config.model_dump()
-            else:
-                config_for_run = dict(config)
-            if "__consist_config_plan__" in config_for_run:
-                logging.warning(
-                    "[Consist] Overwriting user-provided '__consist_config_plan__' in config for run %s.",
-                    run_id,
-                )
-            config_for_run["__consist_config_plan__"] = {
-                "adapter": config_plan.adapter_name,
-                "hash": config_plan.identity_hash,
-                "adapter_version": config_plan.adapter_version,
-            }
 
         resolved_cache_epoch = (
-            tracker._cache_epoch if cache_epoch is None else cache_epoch
+            tracker._cache_epoch
+            if resolved_invocation.cache_epoch is None
+            else resolved_invocation.cache_epoch
         )
-
-        start_kwargs: Dict[str, Any] = {
-            "run_id": run_id,
-            "model": resolved_model,
-            "config": config_for_run,
-            "inputs": resolved_inputs or None,
-            "tags": tags,
-            "description": description,
-            "cache_mode": cache_mode,
-            "facet": facet,
-            "facet_from": facet_from,
-            "hash_inputs": identity_inputs,
-            "year": year,
-            "iteration": iteration,
-            "parent_run_id": parent_run_id,
-            "validate_cached_outputs": validate_cached_outputs,
-            "cache_epoch": resolved_cache_epoch,
-        }
-        if code_identity is not None:
-            start_kwargs["code_identity"] = code_identity
-        if code_identity_extra_deps is not None:
-            start_kwargs["code_identity_extra_deps"] = list(code_identity_extra_deps)
-        if cache_version is not None:
-            start_kwargs["cache_version"] = cache_version
-        if facet_schema_version is not None:
-            start_kwargs["facet_schema_version"] = facet_schema_version
-        if facet_index is not None:
-            start_kwargs["facet_index"] = facet_index
-        if cache_hydration is not None:
-            start_kwargs["cache_hydration"] = cache_hydration
-        if materialize_cached_output_paths is not None:
-            start_kwargs["materialize_cached_output_paths"] = (
-                materialize_cached_output_paths
-            )
-        if materialize_cached_outputs_dir is not None:
-            start_kwargs["materialize_cached_outputs_dir"] = (
-                materialize_cached_outputs_dir
-            )
+        config_for_run = self._build_config_for_run(
+            config=resolved_invocation.config,
+            config_plan=config_plan,
+            run_id=run_id,
+        )
+        start_kwargs = self._build_start_kwargs(
+            invocation=resolved_invocation,
+            run_id=run_id,
+            config_for_run=config_for_run,
+            resolved_inputs=resolved_inputs,
+            cache_mode=resolved_invocation.cache_mode,
+            cache_hydration=cache_hydration,
+            resolved_cache_epoch=resolved_cache_epoch,
+            year=year,
+            iteration=iteration,
+            parent_run_id=parent_run_id,
+            materialize_cached_output_paths=materialize_cached_output_paths,
+            materialize_cached_outputs_dir=materialize_cached_outputs_dir,
+        )
 
         def _handle_missing_outputs(label: str, missing: List[str]) -> None:
             self._apply_missing_output_policy(
@@ -1607,18 +1589,18 @@ class RunTraceCoordinator:
                 self._log_declared_output_paths(
                     tracker=tracker,
                     resolved_name=resolved_name,
-                    output_paths=output_paths,
+                    output_paths=resolved_invocation.output_paths,
                     output_base_dir=output_base_dir,
                     on_missing_outputs=_handle_missing_outputs,
                 )
 
-                if outputs:
+                if resolved_invocation.outputs:
                     logged_outputs = {
                         artifact.key: artifact for artifact in current_consist.outputs
                     }
                     missing_keys = [
                         output_key
-                        for output_key in outputs
+                        for output_key in resolved_invocation.outputs
                         if output_key not in logged_outputs
                     ]
                     _handle_missing_outputs(f"Run {resolved_name!r}", missing_keys)
