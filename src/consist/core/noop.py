@@ -5,10 +5,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import inspect
 import logging
-import warnings
 from typing import Any, Dict, Iterator, Mapping, Optional, Sequence, Union
 import uuid
 
+from consist.core._coupler_shared import CouplerMapMixin
 from consist.core.coupler import CouplerView, DeclaredOutput
 from consist.core.validation import validate_artifact_key
 from consist.protocols import TrackerLike
@@ -60,7 +60,7 @@ class NoopRunResult:
         return dict(self.outputs)
 
 
-class NoopCoupler:
+class NoopCoupler(CouplerMapMixin[Any, DeclaredOutput]):
     """
     Coupler-compatible helper for noop mode.
     """
@@ -72,24 +72,17 @@ class NoopCoupler:
         self._undefined_keys: set[str] = set()
         self._output_descriptions: Dict[str, str] = {}
 
-    def _maybe_warn_undefined(self, key: str) -> None:
-        if not self._warn_undefined:
-            return
-        if key in self._declared_outputs or key in self._undefined_keys:
-            return
-        self._undefined_keys.add(key)
-        warnings.warn(
-            f"Setting undefined coupler key '{key}'. "
-            f"Declared outputs: {sorted(self._declared_outputs)}",
-            UserWarning,
-            stacklevel=2,
-        )
+    def _validate_artifact_key(self, key: str) -> None:
+        validate_artifact_key(key)
+
+    def _create_declared_output(self) -> DeclaredOutput:
+        return DeclaredOutput()
+
+    def _collect_validate_key(self) -> None:
+        return None
 
     def set(self, key: str, artifact: Any) -> Any:
-        validate_artifact_key(key)
-        self._maybe_warn_undefined(key)
-        self._artifacts[key] = artifact
-        return artifact
+        return self._store_artifact(key, artifact)
 
     def set_from_artifact(self, key: str, value: Any) -> Any:
         """
@@ -100,33 +93,7 @@ class NoopCoupler:
 
         All forms are stored in the coupler and can be retrieved with get() or require().
         """
-        self._maybe_warn_undefined(key)
-        self._artifacts[key] = value
-        return value
-
-    def update(
-        self, artifacts: Optional[Dict[str, Any]] = None, /, **kwargs: Any
-    ) -> None:
-        if artifacts:
-            for key, artifact in artifacts.items():
-                self.set(key, artifact)
-        if kwargs:
-            for key, artifact in kwargs.items():
-                self.set(key, artifact)
-
-    def get(self, key: str) -> Optional[Any]:
-        validate_artifact_key(key)
-        return self._artifacts.get(key)
-
-    def require(self, key: str) -> Any:
-        artifact = self.get(key)
-        if artifact is None:
-            available = ", ".join(sorted(self._artifacts.keys())) or "<none>"
-            raise KeyError(
-                f"Coupler missing key={key!r}. Available keys: {available}. "
-                f"Did you forget to call coupler.set({key!r}, ...)?"
-            )
-        return artifact
+        return self._store_artifact(key, value, validate_key=False)
 
     def keys(self) -> Sequence[str]:
         return list(self._artifacts.keys())
@@ -166,84 +133,6 @@ class NoopCoupler:
         if hasattr(artifact, "container_uri"):
             return Path(artifact.container_uri)
         return None
-
-    def declare_outputs(
-        self,
-        *names: str,
-        required: bool | Mapping[str, bool] = False,
-        warn_undefined: bool = False,
-        description: Optional[Mapping[str, str]] = None,
-    ) -> None:
-        # NOTE: Keep in sync with Coupler.declare_outputs.
-        if not names:
-            return
-        if warn_undefined:
-            self._warn_undefined = True
-        if isinstance(required, Mapping):
-            required_map = {str(k): bool(v) for k, v in required.items()}
-            default_required = False
-        else:
-            required_map = {}
-            default_required = bool(required)
-        description_map = {str(k): v for k, v in (description or {}).items()}
-        for name in names:
-            if not isinstance(name, str):
-                raise TypeError("Coupler output names must be strings.")
-            key = name.strip()
-            if not key:
-                raise ValueError("Coupler output names cannot be empty.")
-            validate_artifact_key(key)
-            entry = self._declared_outputs.get(key, DeclaredOutput())
-            entry.required = entry.required or required_map.get(key, default_required)
-            if key in description_map:
-                entry.description = description_map[key]
-                self._output_descriptions[key] = description_map[key]
-            self._declared_outputs[key] = entry
-
-    def missing_declared_outputs(self) -> list[str]:
-        return sorted(
-            [
-                key
-                for key, entry in self._declared_outputs.items()
-                if entry.required
-                and (key not in self._artifacts or self._artifacts[key] is None)
-            ]
-        )
-
-    def require_outputs(
-        self,
-        *names: str,
-        required: bool | Mapping[str, bool] = True,
-        warn_undefined: bool = False,
-        description: Optional[Mapping[str, str]] = None,
-    ) -> None:
-        self.declare_outputs(
-            *names,
-            required=required,
-            warn_undefined=warn_undefined,
-            description=description,
-        )
-
-    def collect_by_keys(
-        self, artifacts: Mapping[str, Any], *keys: str, prefix: str = ""
-    ) -> Dict[str, Any]:
-        if not isinstance(artifacts, Mapping):
-            raise TypeError("collect_by_keys expects a mapping of artifacts.")
-        collected: Dict[str, Any] = {}
-        for key in keys:
-            if not isinstance(key, str):
-                raise TypeError("collect_by_keys keys must be strings.")
-            if key not in artifacts:
-                raise KeyError(f"Missing artifact for key {key!r}.")
-            coupler_key = f"{prefix}{key}"
-            artifact = artifacts[key]
-            self.set(coupler_key, artifact)
-            collected[coupler_key] = artifact
-        return collected
-
-    def describe_outputs(self) -> Dict[str, str]:
-        """Return descriptions of declared outputs (for documentation/introspection)."""
-        return dict(self._output_descriptions)
 
 
 class NoopRunContext:

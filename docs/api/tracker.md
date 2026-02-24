@@ -35,6 +35,19 @@ print(latest.id if latest else None)
 For top-level wrappers around these methods, see [API Helpers](api_helpers.md).
 For grouped workflows, see [Workflow Contexts](workflow.md).
 
+## Constructing with `TrackerConfig`
+
+Use `Tracker.from_config(...)` when you want a typed configuration object for
+tracker construction.
+
+```python
+from consist.core.tracker import Tracker
+from consist.core.tracker_config import TrackerConfig
+
+config = TrackerConfig(run_dir="./runs", db_path="./provenance.duckdb")
+tracker = Tracker.from_config(config)
+```
+
 ## Public identity kwargs (`run` / `trace`)
 
 Use `adapter` and `identity_inputs` on `Tracker.run(...)` and
@@ -90,6 +103,7 @@ and `digest`.
       show_root_heading: false
       show_root_toc_entry: false
       members:
+        - from_config
         # Core lifecycle
         - begin_run
         - start_run
