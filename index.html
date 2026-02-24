@@ -966,6 +966,8 @@
       
         
       
+        
+      
     
     
     
@@ -1028,6 +1030,34 @@
     
   
     Usage Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./building-domain-tracker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building a Domain Tracker
   
 
     
@@ -2453,15 +2483,16 @@ pipeline, then into deeper usage patterns.</p>
 <h2 id="prerequisites">Prerequisites<a class="headerlink" href="#prerequisites" title="Permanent link">&para;</a></h2>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
+</div>
 <ul>
 <li>Python 3.11+</li>
-<li>Base install: <code>pip install consist</code></li>
+<li>Base install:
+<code>pip install git+https://github.com/LBNL-UCB-STI/consist.git</code></li>
 <li>For the first workflow tutorial (Parquet writes):
-  <code>pip install "consist[parquet]"</code></li>
+from a local clone, run <code>pip install -e ".[parquet]"</code></li>
 <li>See <a href="getting-started/installation/">Installation</a> for complete options,
-  including source installs and optional extras.</li>
+including source installs and optional extras.</li>
 </ul>
-</div>
 <hr />
 <h2 id="what-is-consist">What is Consist?<a class="headerlink" href="#what-is-consist" title="Permanent link">&para;</a></h2>
 <p>Consist is a Python library for <strong>automatic provenance tracking and intelligent
@@ -2552,14 +2583,19 @@ deeper work.</p>
 <h2 id="built-on-open-standards">Built on Open Standards<a class="headerlink" href="#built-on-open-standards" title="Permanent link">&para;</a></h2>
 <p>Consist relies on modern, high-performance data engineering tools:</p>
 <ul>
-<li><strong><a href="https://duckdb.org/">DuckDB</a></strong>: The "SQLite for Analytics" powers our lightning-fast provenance queries and data virtualization.</li>
-<li><strong><a href="https://sqlmodel.tiangolo.com/">SQLModel</a></strong>: Combines SQLAlchemy and Pydantic for robust, type-safe data modeling and schema validation.</li>
-<li><strong><a href="https://dlthub.com/">DLT (Data Load Tool)</a></strong>: Handles robust, schema-aware data ingestion from diverse sources into your provenance database.</li>
-<li><strong><a href="https://parquet.apache.org/">Apache Parquet &amp; Zarr</a></strong>: Industry-standard formats for efficient, compressed storage of tabular and multi-dimensional scientific data.</li>
+<li><strong><a href="https://duckdb.org/">DuckDB</a></strong>: The "SQLite for Analytics" powers our lightning-fast provenance queries and data
+  virtualization.</li>
+<li><strong><a href="https://sqlmodel.tiangolo.com/">SQLModel</a></strong>: Combines SQLAlchemy and Pydantic for robust, type-safe data modeling
+  and schema validation.</li>
+<li><strong><a href="https://dlthub.com/">DLT (Data Load Tool)</a></strong>: Handles robust, schema-aware data ingestion from diverse sources into
+  your provenance database.</li>
+<li><strong><a href="https://parquet.apache.org/">Apache Parquet &amp; Zarr</a></strong>: Industry-standard formats for efficient, compressed storage
+  of tabular and multi-dimensional scientific data.</li>
 </ul>
 <hr />
 <h2 id="learn-more">Learn More<a class="headerlink" href="#learn-more" title="Permanent link">&para;</a></h2>
-<p>See <a href="concepts/overview/">Core Concepts</a> for a complete mental model, or <a href="glossary/">Glossary</a> for quick term definitions.</p>
+<p>See <a href="concepts/overview/">Core Concepts</a> for a complete mental model, or <a href="glossary/">Glossary</a> for quick term
+definitions.</p>
 
   
 

@@ -841,6 +841,8 @@
       
         
       
+        
+      
     
     
     
@@ -903,6 +905,34 @@
     
   
     Usage Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../building-domain-tracker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building a Domain Tracker
   
 
     
@@ -1665,10 +1695,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#pass-either-identity_inputs-or-hash_inputs-not-both" class="md-nav__link">
+  <a href="#unexpected-keyword-argument-hash_inputs" class="md-nav__link">
     <span class="md-ellipsis">
       
-        "Pass either identity_inputs= or hash_inputs=, not both."
+        "unexpected keyword argument 'hash_inputs'"
       
     </span>
   </a>
@@ -1676,10 +1706,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#pass-either-adapter-or-config_plan-not-both" class="md-nav__link">
+  <a href="#unexpected-keyword-argument-config_plan" class="md-nav__link">
     <span class="md-ellipsis">
       
-        "Pass either adapter= or config_plan=, not both."
+        "unexpected keyword argument 'config_plan'"
       
     </span>
   </a>
@@ -2764,10 +2794,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#pass-either-identity_inputs-or-hash_inputs-not-both" class="md-nav__link">
+  <a href="#unexpected-keyword-argument-hash_inputs" class="md-nav__link">
     <span class="md-ellipsis">
       
-        "Pass either identity_inputs= or hash_inputs=, not both."
+        "unexpected keyword argument 'hash_inputs'"
       
     </span>
   </a>
@@ -2775,10 +2805,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#pass-either-adapter-or-config_plan-not-both" class="md-nav__link">
+  <a href="#unexpected-keyword-argument-config_plan" class="md-nav__link">
     <span class="md-ellipsis">
       
-        "Pass either adapter= or config_plan=, not both."
+        "unexpected keyword argument 'config_plan'"
       
     </span>
   </a>
@@ -3341,15 +3371,15 @@ and manual materialization helpers) to isolate specific failure modes.</p>
 <li><code>Fix</code>: the concrete remediation</li>
 </ul>
 <p>Common messages and fixes:</p>
-<h3 id="pass-either-identity_inputs-or-hash_inputs-not-both">"Pass either identity_inputs= or hash_inputs=, not both."<a class="headerlink" href="#pass-either-identity_inputs-or-hash_inputs-not-both" title="Permanent link">&para;</a></h3>
+<h3 id="unexpected-keyword-argument-hash_inputs">"unexpected keyword argument 'hash_inputs'"<a class="headerlink" href="#unexpected-keyword-argument-hash_inputs" title="Permanent link">&para;</a></h3>
 <ul>
-<li><code>Cause</code>: both new (<code>identity_inputs</code>) and legacy (<code>hash_inputs</code>) identity kwargs were provided.</li>
-<li><code>Fix</code>: use the recommended path and keep only <code>identity_inputs=...</code>.</li>
+<li><code>Cause</code>: <code>hash_inputs</code> is no longer accepted on run/trace/scenario public surfaces.</li>
+<li><code>Fix</code>: use <code>identity_inputs=[...]</code>.</li>
 </ul>
-<h3 id="pass-either-adapter-or-config_plan-not-both">"Pass either adapter= or config_plan=, not both."<a class="headerlink" href="#pass-either-adapter-or-config_plan-not-both" title="Permanent link">&para;</a></h3>
+<h3 id="unexpected-keyword-argument-config_plan">"unexpected keyword argument 'config_plan'"<a class="headerlink" href="#unexpected-keyword-argument-config_plan" title="Permanent link">&para;</a></h3>
 <ul>
-<li><code>Cause</code>: both adapter-driven identity and legacy config-plan identity were provided.</li>
-<li><code>Fix</code>: use the recommended path and keep only <code>adapter=...</code>.</li>
+<li><code>Cause</code>: <code>config_plan</code> is no longer accepted on run/trace/scenario public surfaces.</li>
+<li><code>Fix</code>: pass <code>adapter=...</code> (and optional <code>identity_inputs=[...]</code>) instead.</li>
 </ul>
 <h3 id="identity_inputshash_inputs-must-be-a-list-of-paths">"identity_inputs/hash_inputs must be a list of paths."<a class="headerlink" href="#identity_inputshash_inputs-must-be-a-list-of-paths" title="Permanent link">&para;</a></h3>
 <ul>

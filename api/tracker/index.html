@@ -841,6 +841,8 @@
       
         
       
+        
+      
     
     
     
@@ -903,6 +905,34 @@
     
   
     Usage Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../building-domain-tracker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building a Domain Tracker
   
 
     
@@ -2007,6 +2037,17 @@
     <span class="md-ellipsis">
       
         Public identity kwargs (run / trace)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#config-override-selectors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Config Override Selectors
       
     </span>
   </a>
@@ -3183,6 +3224,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#config-override-selectors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Config Override Selectors
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#consist.core.tracker.Tracker.last_run" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4161,8 +4213,30 @@ For grouped workflows, see <a href="../workflow/">Workflow Contexts</a>.</p>
 </span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="p">):</span>
 </span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a>    <span class="n">simulate_inline</span><span class="p">()</span>
 </span></code></pre></div>
-<p><code>config_plan</code> and <code>hash_inputs</code> are hidden compatibility kwargs, not the
-recommended public kwargs for new run/trace calls.</p>
+<p><code>config_plan</code> and <code>hash_inputs</code> are not accepted on <code>Tracker.run(...)</code> and
+<code>Tracker.trace(...)</code>. Use <code>adapter</code> and <code>identity_inputs</code>.</p>
+<h2 id="config-override-selectors">Config Override Selectors<a class="headerlink" href="#config-override-selectors" title="Permanent link">&para;</a></h2>
+<p><code>Tracker.run_with_config_overrides(...)</code> now supports one-of base selectors:</p>
+<ul>
+<li><code>base_run_id="existing_run_id"</code> for historical bundle/config artifacts</li>
+<li><code>base_config_dirs=[Path("configs"), ...]</code> for first-run override execution</li>
+</ul>
+<p>Use exactly one selector. Passing both raises a <code>ValueError</code>.</p>
+<p><code>base_primary_config=...</code> is optional and only applies with
+<code>base_config_dirs</code> (for adapters that require/accept a primary config hint).</p>
+<p><code>run_with_config_overrides(...)</code> also accepts:</p>
+<ul>
+<li><code>identity_inputs=[...]</code>: additive hash-only inputs. These are merged with the
+  adapter-resolved config identity when enabled.</li>
+<li><code>resolved_config_identity="auto" | "off"</code>:</li>
+<li><code>"auto"</code> (default) injects the adapter-selected resolved config root into
+    identity hashing using <code>identity_label</code>.</li>
+<li><code>"off"</code> disables that auto injection and keeps only user-provided
+    <code>identity_inputs</code>.</li>
+</ul>
+<p>For override runs, Consist persists standardized run metadata:
+<code>run.meta["resolved_config_identity"]</code> with <code>mode</code>, <code>adapter</code>, <code>label</code>, <code>path</code>,
+and <code>digest</code>.</p>
 
 
 <div class="doc doc-object doc-class">
@@ -4961,7 +5035,7 @@ end_run : Imperative alternative for ending runs.</p>
 
 
 <h2 id="consist.core.tracker.Tracker.run" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">run</span><span class="p">(</span><span class="n">fn</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">run_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">adapter</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config_plan_ingest</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">config_plan_profile_schema</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">input_keys</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">optional_input_keys</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">depends_on</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">tags</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_from</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_schema_version</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_index</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">identity_inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">year</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">iteration</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">phase</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">stage</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">parent_run_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">outputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">output_paths</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">capture_dir</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">capture_pattern</span><span class="o">=</span><span class="s1">&#39;*&#39;</span><span class="p">,</span> <span class="n">cache_options</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">output_policy</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">execution_options</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+            <code class="highlight language-python"><span class="n">run</span><span class="p">(</span><span class="n">fn</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">run_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">adapter</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config_plan_ingest</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">config_plan_profile_schema</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">input_keys</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">optional_input_keys</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">depends_on</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">tags</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_from</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_schema_version</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">facet_index</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">identity_inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">year</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">iteration</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">phase</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">stage</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">parent_run_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">outputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">output_paths</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">capture_dir</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">capture_pattern</span><span class="o">=</span><span class="s1">&#39;*&#39;</span><span class="p">,</span> <span class="n">cache_options</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">output_policy</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">execution_options</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">runtime_kwargs</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
 
 <a href="#consist.core.tracker.Tracker.run" class="headerlink" title="Permanent link">&para;</a></h2>
 
@@ -5488,6 +5562,24 @@ Maps artifact key to ingested table name.</p>
                   <code>None</code>
             </td>
           </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>runtime_kwargs</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" title="typing.Mapping" href="https://docs.python.org/3/library/typing.html#typing.Mapping">Mapping</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>, <a class="autorefs autorefs-external" title="typing.Any" href="https://docs.python.org/3/library/typing.html#typing.Any">Any</a>]]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Top-level alias for <code>execution_options.runtime_kwargs</code>. This is
+mutually exclusive with
+<code>execution_options=ExecutionOptions(runtime_kwargs=...)</code>.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
       </tbody>
     </table>
 
@@ -5586,7 +5678,7 @@ trace : Context manager alternative (always executes, even on cache hit)</p>
 
 
 <h2 id="consist.core.tracker.Tracker.run_with_config_overrides" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">run_with_config_overrides</span><span class="p">(</span><span class="o">*</span><span class="p">,</span> <span class="n">adapter</span><span class="p">,</span> <span class="n">base_run_id</span><span class="p">,</span> <span class="n">overrides</span><span class="p">,</span> <span class="n">output_dir</span><span class="p">,</span> <span class="n">fn</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">outputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">execution_options</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">strict</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">identity_label</span><span class="o">=</span><span class="s1">&#39;activitysim_config&#39;</span><span class="p">,</span> <span class="o">**</span><span class="n">run_kwargs</span><span class="p">)</span></code>
+            <code class="highlight language-python"><span class="n">run_with_config_overrides</span><span class="p">(</span><span class="o">*</span><span class="p">,</span> <span class="n">adapter</span><span class="p">,</span> <span class="n">base_run_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">base_config_dirs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">base_primary_config</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">overrides</span><span class="p">,</span> <span class="n">output_dir</span><span class="p">,</span> <span class="n">fn</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">outputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">execution_options</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">strict</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">identity_inputs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">resolved_config_identity</span><span class="o">=</span><span class="s1">&#39;auto&#39;</span><span class="p">,</span> <span class="n">identity_label</span><span class="o">=</span><span class="s1">&#39;activitysim_config&#39;</span><span class="p">,</span> <span class="n">override_runtime_kwargs</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">run_kwargs</span><span class="p">)</span></code>
 
 <a href="#consist.core.tracker.Tracker.run_with_config_overrides" class="headerlink" title="Permanent link">&para;</a></h2>
 
@@ -5596,6 +5688,10 @@ trace : Context manager alternative (always executes, even on cache hit)</p>
         <p>Delegate config-override execution to an adapter-specific implementation.</p>
 <p>The tracker remains adapter-agnostic by forwarding to
 <code>adapter.run_with_config_overrides(...)</code> when available.</p>
+<p>Exactly one base selector is required:
+<code>base_run_id</code> or <code>base_config_dirs</code>.
+<code>base_primary_config</code> is optional and only applies to
+<code>base_config_dirs</code> flows.</p>
 
 
     </div>

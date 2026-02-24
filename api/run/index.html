@@ -841,6 +841,8 @@
       
         
       
+        
+      
     
     
     
@@ -903,6 +905,34 @@
     
   
     Usage Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../building-domain-tracker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building a Domain Tracker
   
 
     
@@ -2440,9 +2470,8 @@
 <li><code>adapter=...</code></li>
 <li><code>identity_inputs=[...]</code></li>
 </ul>
-<p><code>config_plan=</code> and <code>hash_inputs=</code> are hidden compatibility kwargs. They remain
-accepted for migration compatibility, but they are not the recommended public
-surface for new code.</p>
+<p><code>config_plan=</code> and <code>hash_inputs=</code> are not accepted on these run/trace surfaces.
+Passing them raises <code>TypeError</code> (<code>unexpected keyword argument ...</code>).</p>
 <p>Run/trace parity is implemented through a shared invocation-resolution path
 (<code>resolve_run_invocation</code>), so identity and cache-option validation rules are
 consistent across both execution styles.</p>
@@ -2532,7 +2561,7 @@ If None, the active global tracker is resolved.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Config adapter used to derive a config plan before execution.</p>
+                <p>Config adapter used to resolve adapter-driven identity for the run.</p>
               </div>
             </td>
             <td>

@@ -841,6 +841,8 @@
       
         
       
+        
+      
     
     
     
@@ -903,6 +905,34 @@
     
   
     Usage Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../building-domain-tracker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building a Domain Tracker
   
 
     
@@ -1456,6 +1486,17 @@
     <span class="md-ellipsis">
       
         Materialize Overrides
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#override-execution-with-run_with_config_overrides" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Override Execution with run_with_config_overrides
       
     </span>
   </a>
@@ -2472,6 +2513,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#override-execution-with-run_with_config_overrides" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Override Execution with run_with_config_overrides
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#api-reference" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2620,8 +2672,8 @@ use <code>adapter=</code> and <code>identity_inputs=</code>:</p>
 </span><span id="__span-1-16"><a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a>    <span class="p">):</span>
 </span><span id="__span-1-17"><a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a>        <span class="n">run_beam</span><span class="p">()</span>
 </span></code></pre></div>
-<p><code>config_plan</code> is still accepted as a hidden compatibility kwarg, but it is not
-the recommended public run/trace surface.</p>
+<p><code>config_plan</code> is not accepted on run/trace public surfaces. Use <code>adapter=...</code>
+and <code>identity_inputs=...</code>.</p>
 <h2 id="facets">Facets<a class="headerlink" href="#facets" title="Permanent link">&para;</a></h2>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="n">plan</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">prepare_config</span><span class="p">(</span>
 </span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>    <span class="n">adapter</span><span class="p">,</span>
@@ -2800,6 +2852,28 @@ the recommended public run/trace surface.</p>
 </span><span id="__span-6-6"><a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>    <span class="n">identity</span><span class="o">=</span><span class="n">tracker</span><span class="o">.</span><span class="n">identity</span><span class="p">,</span>
 </span><span id="__span-6-7"><a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="p">)</span>
 </span></code></pre></div>
+<h2 id="override-execution-with-run_with_config_overrides">Override Execution with <code>run_with_config_overrides</code><a class="headerlink" href="#override-execution-with-run_with_config_overrides" title="Permanent link">&para;</a></h2>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="n">result</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">run_with_config_overrides</span><span class="p">(</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>    <span class="n">adapter</span><span class="o">=</span><span class="n">BeamConfigAdapter</span><span class="p">(</span><span class="n">primary_config</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;overlay.conf&quot;</span><span class="p">)),</span>
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>    <span class="n">base_config_dirs</span><span class="o">=</span><span class="p">[</span><span class="n">config_root</span><span class="p">],</span>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>    <span class="n">base_primary_config</span><span class="o">=</span><span class="n">config_root</span> <span class="o">/</span> <span class="s2">&quot;overlay.conf&quot;</span><span class="p">,</span>
+</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>    <span class="n">overrides</span><span class="o">=</span><span class="n">BeamConfigOverrides</span><span class="p">(</span><span class="n">values</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;beam.agentsim.lastIteration&quot;</span><span class="p">:</span> <span class="mi">5</span><span class="p">}),</span>
+</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>    <span class="n">output_dir</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;tmp/beam_override_runs&quot;</span><span class="p">),</span>
+</span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>    <span class="n">fn</span><span class="o">=</span><span class="n">run_beam</span><span class="p">,</span>
+</span><span id="__span-7-8"><a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;beam_override_step&quot;</span><span class="p">,</span>
+</span><span id="__span-7-9"><a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;beam&quot;</span><span class="p">,</span>
+</span><span id="__span-7-10"><a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a>    <span class="n">identity_inputs</span><span class="o">=</span><span class="p">[(</span><span class="s2">&quot;manual_context&quot;</span><span class="p">,</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;scenario_flags.txt&quot;</span><span class="p">))],</span>
+</span><span id="__span-7-11"><a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>Identity behavior:
+- <code>identity_inputs</code> are additive and merged with auto resolved-config identity
+  by default.
+- <code>resolved_config_identity="auto"</code> (default) injects the selected resolved
+  config root under <code>identity_label</code> (default: <code>"beam_config"</code>).
+- <code>resolved_config_identity="off"</code> disables that auto injection and keeps only
+  manual <code>identity_inputs</code>.</p>
+<p>Override runs persist <code>run.meta["resolved_config_identity"]</code> with <code>mode</code>,
+<code>adapter</code>, <code>label</code>, <code>path</code>, and <code>digest</code>.</p>
 <h2 id="api-reference">API Reference<a class="headerlink" href="#api-reference" title="Permanent link">&para;</a></h2>
 <p>For detailed method signatures, parameters, and return types, see:</p>
 <ul>

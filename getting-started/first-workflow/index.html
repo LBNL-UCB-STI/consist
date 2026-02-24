@@ -980,6 +980,8 @@
       
         
       
+        
+      
     
     
     
@@ -1042,6 +1044,34 @@
     
   
     Usage Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../building-domain-tracker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building a Domain Tracker
   
 
     
@@ -2492,7 +2522,8 @@
 <p>Install Consist first and ensure your environment can write Parquet files:</p>
 <ul>
 <li>Base installation instructions: <a href="../installation/">Installation</a></li>
-<li>Parquet engine required for this tutorial: <code>pip install "consist[parquet]"</code></li>
+<li>Parquet engine required for this tutorial (from a local clone):
+  <code>pip install -e ".[parquet]"</code></li>
 </ul>
 <h2 id="create-input-data">Create Input Data<a class="headerlink" href="#create-input-data" title="Permanent link">&para;</a></h2>
 <p>Save this as <code>setup_data.py</code> and run it once:</p>
@@ -2622,6 +2653,7 @@ when there is exactly one output.</p>
 <li><strong><a href="../../concepts/config-management/">Config Management</a></strong> — Control which parameters affect caching</li>
 <li><strong><a href="../../concepts/caching-and-hydration/">Caching &amp; Hydration</a></strong> — Advanced cache strategies and data recovery</li>
 <li><strong><a href="../../concepts/data-materialization/">Data Materialization</a></strong> — Ingest artifacts for SQL analysis</li>
+<li><strong><a href="../../building-domain-tracker/">Building a Domain Tracker</a></strong> — Wrap Consist behind domain verbs</li>
 </ul>
 
 

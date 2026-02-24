@@ -1008,6 +1008,8 @@
       
         
       
+        
+      
     
     
     
@@ -1070,6 +1072,34 @@
     
   
     Usage Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../building-domain-tracker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building a Domain Tracker
   
 
     
@@ -2549,8 +2579,8 @@ so you can reduce boilerplate without losing clarity or cache correctness.</p>
 <p class="admonition-title">Recommended path</p>
 <p>This page is centered on metadata used with the recommended path:
 <code>consist.run(...)</code>, <code>consist.trace(...)</code>, and <code>consist.scenario(...)</code>.
-Any <code>config_plan</code> resolver examples are advanced integration patterns, not the
-default run surface.</p>
+Adapter/identity metadata examples here are advanced integration patterns,
+not the default onboarding run surface.</p>
 </div>
 <hr />
 <h2 id="decorator-defaults">Decorator Defaults<a class="headerlink" href="#decorator-defaults" title="Permanent link">&para;</a></h2>
@@ -2630,26 +2660,27 @@ For workflow/business metadata, prefer <code>runtime_*</code> fields.</p>
 </span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="k">def</span><span class="w"> </span><span class="nf">simulate</span><span class="p">(</span><span class="o">...</span><span class="p">):</span>
 </span><span id="__span-3-8"><a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>    <span class="o">...</span>
 </span></code></pre></div>
-<p>Runtime-aware <code>hash_inputs</code>:</p>
+<p>Runtime-aware <code>identity_inputs</code>:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nd">@define_step</span><span class="p">(</span>
-</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>    <span class="n">hash_inputs</span><span class="o">=</span><span class="k">lambda</span> <span class="n">ctx</span><span class="p">:</span> <span class="s2">&quot;full&quot;</span>
-</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>    <span class="k">if</span> <span class="n">ctx</span><span class="o">.</span><span class="n">get_runtime</span><span class="p">(</span><span class="s2">&quot;settings&quot;</span><span class="p">,</span> <span class="p">{})</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;strict_hashing&quot;</span><span class="p">)</span>
-</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>    <span class="k">else</span> <span class="s2">&quot;fast&quot;</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>    <span class="n">identity_inputs</span><span class="o">=</span><span class="k">lambda</span> <span class="n">ctx</span><span class="p">:</span> <span class="p">[</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>        <span class="p">(</span><span class="s2">&quot;asim_config&quot;</span><span class="p">,</span> <span class="n">ctx</span><span class="o">.</span><span class="n">require_runtime</span><span class="p">(</span><span class="s2">&quot;settings&quot;</span><span class="p">)[</span><span class="s2">&quot;config_dir&quot;</span><span class="p">])</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>    <span class="p">]</span>
 </span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="p">)</span>
 </span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="k">def</span><span class="w"> </span><span class="nf">load_inputs</span><span class="p">(</span><span class="o">...</span><span class="p">):</span>
 </span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>    <span class="o">...</span>
 </span></code></pre></div>
-<p>Declarative <code>config_plan</code> with a built-in resolver helper:</p>
+<p>Declarative adapter handoff metadata:</p>
 <div class="admonition note">
 <p class="admonition-title">Advanced integration pattern</p>
-<p><code>config_plan</code> resolver usage is a low-level/advanced option for integration
-workflows. Keep typical runs on the recommended path (<code>run</code>/<code>trace</code>/<code>scenario</code>).</p>
+<p>Adapter metadata on <code>@define_step</code> is a low-level/advanced option for
+integration workflows. Keep typical runs on the recommended path
+(<code>run</code>/<code>trace</code>/<code>scenario</code>).</p>
 </div>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="nd">@define_step</span><span class="p">(</span>
-</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>    <span class="n">config_plan</span><span class="o">=</span><span class="n">tracker</span><span class="o">.</span><span class="n">prepare_config_resolver</span><span class="p">(</span>
-</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>        <span class="n">adapter</span><span class="o">=</span><span class="n">activitysim_adapter</span><span class="p">,</span>
-</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>        <span class="n">config_dirs_from</span><span class="o">=</span><span class="s2">&quot;settings.config_dirs&quot;</span><span class="p">,</span>
-</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>    <span class="p">),</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>    <span class="n">adapter</span><span class="o">=</span><span class="k">lambda</span> <span class="n">ctx</span><span class="p">:</span> <span class="n">ctx</span><span class="o">.</span><span class="n">require_runtime</span><span class="p">(</span><span class="s2">&quot;activitysim_adapter&quot;</span><span class="p">),</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>    <span class="n">identity_inputs</span><span class="o">=</span><span class="k">lambda</span> <span class="n">ctx</span><span class="p">:</span> <span class="p">[</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>        <span class="p">(</span><span class="s2">&quot;asim_config&quot;</span><span class="p">,</span> <span class="n">ctx</span><span class="o">.</span><span class="n">require_runtime</span><span class="p">(</span><span class="s2">&quot;settings&quot;</span><span class="p">)[</span><span class="s2">&quot;config_dir&quot;</span><span class="p">])</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>    <span class="p">],</span>
 </span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="p">)</span>
 </span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="k">def</span><span class="w"> </span><span class="nf">run_model</span><span class="p">(</span><span class="o">...</span><span class="p">):</span>
 </span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>    <span class="o">...</span>

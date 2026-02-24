@@ -843,6 +843,8 @@
       
         
       
+        
+      
     
     
     
@@ -906,6 +908,34 @@
     
   
     Usage Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../building-domain-tracker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building a Domain Tracker
   
 
     
@@ -3410,8 +3440,9 @@
 
 <h1 id="dlt-loader-integration-guide">DLT Loader Integration Guide<a class="headerlink" href="#dlt-loader-integration-guide" title="Permanent link">&para;</a></h1>
 <p>The DLT (Data Load Tool) integration enables robust, schema-validated ingestion of data into DuckDB with automatic provenance column injection. This guide covers when to use DLT, how to configure schemas, and best practices for data quality.</p>
-<p>Requires the optional <code>ingest</code> extra before using DLT features:</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;consist[ingest]&quot;</span>
+<p>Requires the optional <code>ingest</code> extra before using DLT features
+(from a local clone):</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span><span class="s2">&quot;.[ingest]&quot;</span>
 </span></code></pre></div>
 <hr />
 <h2 id="what-is-dlt">What is DLT?<a class="headerlink" href="#what-is-dlt" title="Permanent link">&para;</a></h2>
@@ -3925,8 +3956,8 @@ name is the same</strong> (for example, when you pass <code>schema=MySchema</cod
 <h3 id="dlt-not-installed">DLT Not Installed<a class="headerlink" href="#dlt-not-installed" title="Permanent link">&para;</a></h3>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-39-1"><a id="__codelineno-39-1" name="__codelineno-39-1" href="#__codelineno-39-1"></a>ImportError: No module named &#39;dlt&#39;
 </span></code></pre></div>
-<p><strong>Fix:</strong> Install the ingest extras:
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-40-1"><a id="__codelineno-40-1" name="__codelineno-40-1" href="#__codelineno-40-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;consist[ingest]&quot;</span>
+<p><strong>Fix:</strong> Install the ingest extras from a local clone:
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-40-1"><a id="__codelineno-40-1" name="__codelineno-40-1" href="#__codelineno-40-1"></a>pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span><span class="s2">&quot;.[ingest]&quot;</span>
 </span></code></pre></div></p>
 <h3 id="null-in-non-optional-field">Null in Non-Optional Field<a class="headerlink" href="#null-in-non-optional-field" title="Permanent link">&para;</a></h3>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-41-1"><a id="__codelineno-41-1" name="__codelineno-41-1" href="#__codelineno-41-1"></a>Warning: Null value in non-optional field &#39;age&#39;
