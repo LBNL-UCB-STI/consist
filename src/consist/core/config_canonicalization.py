@@ -13,6 +13,7 @@ from typing import (
     Protocol,
     TYPE_CHECKING,
     Union,
+    runtime_checkable,
 )
 
 from sqlmodel import SQLModel
@@ -369,6 +370,31 @@ class ConfigAdapter(Protocol):
         return None
 
 
+@runtime_checkable
+class SupportsRunWithConfigOverrides(Protocol):
+    """
+    Optional protocol for adapters that support override-driven run execution.
+    """
+
+    def run_with_config_overrides(
+        self,
+        *,
+        tracker: "Tracker",
+        base_run_id: str,
+        overrides: Any,
+        output_dir: Path,
+        fn: Callable[..., Any],
+        name: str,
+        model: Optional[str] = None,
+        config: Optional[dict[str, Any]] = None,
+        outputs: Optional[list[str]] = None,
+        execution_options: Any = None,
+        strict: bool = True,
+        identity_label: str = "activitysim_config",
+        **run_kwargs: Any,
+    ) -> Any: ...
+
+
 def _ingestable_df(
     ingestables: Iterable[IngestSpec],
     table_names: str | Iterable[str],
@@ -464,6 +490,7 @@ __all__ = [
     "ConfigContribution",
     "ConfigPlan",
     "ConfigAdapter",
+    "SupportsRunWithConfigOverrides",
     "RowFactory",
     "RowSource",
     "compute_config_pack_hash",

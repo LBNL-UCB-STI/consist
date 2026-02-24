@@ -15,8 +15,8 @@ def _assert_problem_cause_fix(message: str) -> None:
     assert "Fix:" in message
 
 
-def test_run_rejects_mixed_identity_inputs_and_hash_inputs(tracker) -> None:
-    with pytest.raises(ValueError) as excinfo:
+def test_run_rejects_removed_hash_inputs_kwarg(tracker) -> None:
+    with pytest.raises(TypeError) as excinfo:
         tracker.run(
             fn=lambda: None,
             name="identity_mix",
@@ -25,12 +25,11 @@ def test_run_rejects_mixed_identity_inputs_and_hash_inputs(tracker) -> None:
         )
 
     message = str(excinfo.value)
-    _assert_problem_cause_fix(message)
-    assert "identity_inputs= or hash_inputs=" in message
+    assert "unexpected keyword argument 'hash_inputs'" in message
 
 
-def test_trace_rejects_mixed_identity_inputs_and_hash_inputs(tracker) -> None:
-    with pytest.raises(ValueError) as excinfo:
+def test_trace_rejects_removed_hash_inputs_kwarg(tracker) -> None:
+    with pytest.raises(TypeError) as excinfo:
         with tracker.trace(
             name="trace_identity_mix",
             identity_inputs=[],
@@ -39,11 +38,10 @@ def test_trace_rejects_mixed_identity_inputs_and_hash_inputs(tracker) -> None:
             pass
 
     message = str(excinfo.value)
-    _assert_problem_cause_fix(message)
-    assert "identity_inputs= or hash_inputs=" in message
+    assert "unexpected keyword argument 'hash_inputs'" in message
 
 
-def test_run_rejects_mixed_adapter_and_config_plan(tracker, tmp_path: Path) -> None:
+def test_run_rejects_removed_config_plan_kwarg(tracker, tmp_path: Path) -> None:
     config_root = tmp_path / "cfg"
     config_root.mkdir(parents=True, exist_ok=True)
 
@@ -64,7 +62,7 @@ def test_run_rejects_mixed_adapter_and_config_plan(tracker, tmp_path: Path) -> N
     class DummyAdapter:
         root_dirs = [config_root]
 
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(TypeError) as excinfo:
         tracker.run(
             fn=lambda: None,
             name="mixed_adapter_config_plan",
@@ -73,8 +71,7 @@ def test_run_rejects_mixed_adapter_and_config_plan(tracker, tmp_path: Path) -> N
         )
 
     message = str(excinfo.value)
-    _assert_problem_cause_fix(message)
-    assert "adapter= or config_plan=" in message
+    assert "unexpected keyword argument 'config_plan'" in message
 
 
 def test_run_rejects_load_inputs_true_with_non_mapping_inputs(tracker) -> None:

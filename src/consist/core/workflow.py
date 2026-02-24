@@ -747,7 +747,6 @@ class ScenarioContext:
         cache_options: Optional[CacheOptions] = None,
         output_policy: Optional[OutputPolicyOptions] = None,
         execution_options: Optional[ExecutionOptions] = None,
-        **legacy_kwargs: Any,
     ) -> RunResult:
         """
         Execute a cached scenario step and update the Coupler with outputs.
@@ -760,8 +759,7 @@ class ScenarioContext:
         and ``execution_options``.
 
         ``adapter`` and ``identity_inputs`` are the public identity-related
-        kwargs. Hidden compatibility kwargs ``config_plan`` and ``hash_inputs``
-        are still accepted.
+        kwargs.
         """
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
@@ -772,49 +770,14 @@ class ScenarioContext:
         if fn is None and name is None:
             raise ValueError("ScenarioContext.run requires name when fn is None.")
 
-        legacy_config_plan = legacy_kwargs.pop("config_plan", None)
-        legacy_hash_inputs = legacy_kwargs.pop("hash_inputs", None)
-        _raise_unexpected_kwargs(legacy_kwargs)
-        if identity_inputs is not None and legacy_hash_inputs is not None:
-            raise ValueError(
-                format_problem_cause_fix(
-                    problem="Pass either identity_inputs= or hash_inputs=, not both.",
-                    cause=(
-                        "Both new and legacy identity input options were provided, "
-                        "which makes step identity ambiguous."
-                    ),
-                    fix=(
-                        "Use the recommended path with identity_inputs=... and remove "
-                        "hash_inputs=."
-                    ),
-                )
-            )
-        resolved_identity_inputs = (
-            identity_inputs if identity_inputs is not None else legacy_hash_inputs
-        )
-        if adapter is not None and legacy_config_plan is not None:
-            raise ValueError(
-                format_problem_cause_fix(
-                    problem="Pass either adapter= or config_plan=, not both.",
-                    cause=(
-                        "Both identity/config sources were provided, which makes step "
-                        "configuration ambiguous."
-                    ),
-                    fix=(
-                        "Use the recommended path with adapter=... and remove "
-                        "config_plan=."
-                    ),
-                )
-            )
-        config_plan = legacy_config_plan
-
         resolved_invocation = resolve_run_invocation(
             fn=fn,
             name=name,
             model=model,
             description=description,
             config=config,
-            config_plan=config_plan,
+            adapter=adapter,
+            identity_inputs=identity_inputs,
             inputs=inputs,
             input_keys=input_keys,
             optional_input_keys=optional_input_keys,
@@ -823,7 +786,6 @@ class ScenarioContext:
             facet_from=facet_from,
             facet_schema_version=facet_schema_version,
             facet_index=facet_index,
-            hash_inputs=resolved_identity_inputs,
             year=year,
             iteration=iteration,
             phase=phase,
@@ -847,7 +809,8 @@ class ScenarioContext:
         resolved_model = resolved_invocation.model
         resolved_description = resolved_invocation.description
         resolved_config = resolved_invocation.config
-        resolved_config_plan = resolved_invocation.config_plan
+        resolved_adapter = resolved_invocation.adapter
+        resolved_identity_inputs = resolved_invocation.identity_inputs
         resolved_tags = resolved_invocation.tags
         resolved_facet = resolved_invocation.facet
         resolved_facet_index = resolved_invocation.facet_index
@@ -858,7 +821,6 @@ class ScenarioContext:
         resolved_optional_input_keys = resolved_invocation.optional_input_keys
         resolved_facet_from = resolved_invocation.facet_from
         resolved_facet_schema_version = resolved_invocation.facet_schema_version
-        resolved_hash_inputs = resolved_invocation.hash_inputs
         resolved_cache_mode = resolved_invocation.cache_mode
         resolved_cache_hydration = resolved_invocation.cache_hydration
         resolved_cache_version = resolved_invocation.cache_version
@@ -904,10 +866,6 @@ class ScenarioContext:
             )
         )
 
-        run_adapter: Optional["ConfigAdapter"] = (
-            None if resolved_config_plan is not None else adapter
-        )
-
         result = self.tracker.run(
             fn=fn,
             name=resolved_name,
@@ -915,7 +873,7 @@ class ScenarioContext:
             model=resolved_model,
             description=resolved_description,
             config=resolved_config,
-            adapter=run_adapter,
+            adapter=resolved_adapter,
             config_plan_ingest=config_plan_ingest,
             config_plan_profile_schema=config_plan_profile_schema,
             inputs=resolved_inputs,
@@ -927,7 +885,7 @@ class ScenarioContext:
             facet_from=resolved_facet_from,
             facet_schema_version=resolved_facet_schema_version,
             facet_index=resolved_facet_index,
-            identity_inputs=resolved_hash_inputs,
+            identity_inputs=resolved_identity_inputs,
             year=year,
             iteration=iteration,
             phase=phase,
@@ -957,7 +915,6 @@ class ScenarioContext:
                 runtime_kwargs=runtime_kwargs_dict,
                 inject_context=resolved_inject_context,
             ),
-            config_plan=resolved_config_plan,
         )
 
         if result.outputs:
@@ -1009,7 +966,6 @@ class ScenarioContext:
         code_identity_extra_deps: Optional[List[str]] = None,
         output_mismatch: str = "warn",
         output_missing: str = "warn",
-        **legacy_kwargs: Any,
     ):
         """
         Manual tracing context manager for scenario steps.
@@ -1019,8 +975,7 @@ class ScenarioContext:
         to be skipped on cache hits.
 
         ``adapter`` and ``identity_inputs`` are the public identity-related
-        kwargs. Hidden compatibility kwargs ``config_plan`` and ``hash_inputs``
-        are still accepted.
+        kwargs.
         """
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
@@ -1076,7 +1031,6 @@ class ScenarioContext:
                 code_identity_extra_deps=code_identity_extra_deps,
                 output_mismatch=output_mismatch,
                 output_missing=output_missing,
-                **legacy_kwargs,
             ) as t:
                 if t.is_cached:
                     current_consist = t.current_consist

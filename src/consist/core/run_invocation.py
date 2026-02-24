@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Union, cast
 
-from consist.core.config_canonicalization import ConfigPlan
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.metadata_resolver import MetadataResolver
 from consist.core.run_options import merge_run_options
@@ -23,7 +22,7 @@ from consist.types import (
     CodeIdentityMode,
     ExecutionOptions,
     FacetLike,
-    HashInputs,
+    IdentityInputs,
     OutputPolicyOptions,
     RunInputRef,
 )
@@ -48,8 +47,10 @@ class ResolvedRunInvocation:
         Resolved run description.
     config : Optional[Dict[str, Any]]
         Resolved configuration payload.
-    config_plan : Optional[ConfigPlan]
-        Resolved config plan to apply during execution.
+    adapter : Optional[Any]
+        Resolved adapter metadata on the recommended path.
+    identity_inputs : IdentityInputs
+        Resolved identity inputs after recommended/legacy precedence.
     tags : Optional[List[str]]
         Resolved run tags.
     facet : Optional[FacetLike]
@@ -60,8 +61,6 @@ class ResolvedRunInvocation:
         Resolved facet schema version.
     facet_index : Optional[bool]
         Resolved facet indexing preference.
-    hash_inputs : HashInputs
-        Resolved input hashing mode.
     inputs : Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]]
         Resolved input references before tracker-level input materialization.
     input_keys : Optional[Iterable[str] | str]
@@ -106,13 +105,13 @@ class ResolvedRunInvocation:
     model: str
     description: Optional[str]
     config: Optional[Dict[str, Any]]
-    config_plan: Optional[ConfigPlan]
+    adapter: Optional[Any]
+    identity_inputs: IdentityInputs
     tags: Optional[List[str]]
     facet: Optional[FacetLike]
     facet_from: Optional[List[str]]
     facet_schema_version: Optional[Union[str, int]]
     facet_index: Optional[bool]
-    hash_inputs: HashInputs
     inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]]
     input_keys: Optional[Iterable[str] | str]
     optional_input_keys: Optional[Iterable[str] | str]
@@ -141,7 +140,8 @@ def resolve_run_invocation(
     model: Optional[str],
     description: Optional[str],
     config: Optional[Dict[str, Any]],
-    config_plan: Optional[ConfigPlan],
+    adapter: Optional[Any] = None,
+    identity_inputs: IdentityInputs = None,
     inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]],
     input_keys: Optional[Iterable[str] | str],
     optional_input_keys: Optional[Iterable[str] | str],
@@ -150,7 +150,6 @@ def resolve_run_invocation(
     facet_from: Optional[List[str]],
     facet_schema_version: Optional[Union[str, int]],
     facet_index: Optional[bool],
-    hash_inputs: HashInputs,
     year: Optional[int],
     iteration: Optional[int],
     phase: Optional[str],
@@ -192,8 +191,10 @@ def resolve_run_invocation(
         Explicit description override.
     config : Optional[Dict[str, Any]]
         Optional configuration payload.
-    config_plan : Optional[ConfigPlan]
-        Optional canonicalized config plan.
+    adapter : Optional[Any]
+        Optional config adapter on the recommended path.
+    identity_inputs : IdentityInputs
+        Optional identity inputs on the recommended path.
     inputs : Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]]
         Optional input references prior to tracker-level coercion/materialization.
     input_keys : Optional[Iterable[str] | str]
@@ -210,8 +211,6 @@ def resolve_run_invocation(
         Optional facet schema version.
     facet_index : Optional[bool]
         Optional facet indexing preference.
-    hash_inputs : HashInputs
-        Input hashing mode.
     year : Optional[int]
         Optional year metadata.
     iteration : Optional[int]
@@ -456,7 +455,8 @@ def resolve_run_invocation(
         model=model,
         description=description,
         config=config,
-        config_plan=config_plan,
+        adapter=adapter,
+        identity_inputs=identity_inputs,
         inputs=inputs,
         input_keys=input_keys,
         optional_input_keys=optional_input_keys,
@@ -465,7 +465,6 @@ def resolve_run_invocation(
         facet_from=facet_from,
         facet_schema_version=facet_schema_version,
         facet_index=facet_index,
-        hash_inputs=hash_inputs,
         year=year,
         iteration=iteration,
         phase=phase,
@@ -525,13 +524,13 @@ def resolve_run_invocation(
         model=resolved.model,
         description=resolved.description,
         config=resolved.config,
-        config_plan=resolved.config_plan,
+        adapter=resolved.adapter,
+        identity_inputs=resolved.identity_inputs,
         tags=resolved.tags,
         facet=resolved.facet,
         facet_from=resolved.facet_from,
         facet_schema_version=resolved.facet_schema_version,
         facet_index=resolved.facet_index,
-        hash_inputs=resolved.hash_inputs,
         inputs=resolved.inputs,
         input_keys=resolved.input_keys,
         optional_input_keys=resolved.optional_input_keys,

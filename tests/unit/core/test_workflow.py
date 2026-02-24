@@ -317,12 +317,32 @@ def test_step_default_path_includes_model_name(tracker: Tracker):
     )
 
 
-def test_run_config_plan_includes_adapter_version(tracker: Tracker):
+def test_run_adapter_includes_adapter_version(
+    tracker: Tracker, tmp_path: Path, monkeypatch
+):
+    config_root = tmp_path / "adapter_cfg_run"
+    config_root.mkdir(parents=True, exist_ok=True)
+
+    class DummyAdapter:
+        root_dirs = [config_root]
+
+    adapter = DummyAdapter()
     plan_v1 = _dummy_config_plan(adapter_version="1.0")
+    plan_v2 = _dummy_config_plan(adapter_version="2.0")
+    plans = iter([plan_v1, plan_v2])
+
+    def fake_prepare_config(*, adapter, config_dirs, **kwargs):
+        del kwargs
+        assert adapter is not None
+        assert list(config_dirs) == [config_root]
+        return next(plans)
+
+    monkeypatch.setattr(tracker, "prepare_config", fake_prepare_config)
+
     tracker.run(
         fn=lambda: None,
         name="plan_run_v1",
-        config_plan=plan_v1,
+        adapter=adapter,
         cache_options=CacheOptions(cache_mode="overwrite"),
     )
     record_v1 = tracker.last_run
@@ -330,11 +350,10 @@ def test_run_config_plan_includes_adapter_version(tracker: Tracker):
     assert record_v1.config["__consist_config_plan__"]["adapter_version"] == "1.0"
     hash_v1 = record_v1.run.config_hash
 
-    plan_v2 = _dummy_config_plan(adapter_version="2.0")
     tracker.run(
         fn=lambda: None,
         name="plan_run_v2",
-        config_plan=plan_v2,
+        adapter=adapter,
         cache_options=CacheOptions(cache_mode="overwrite"),
     )
     record_v2 = tracker.last_run
@@ -344,13 +363,29 @@ def test_run_config_plan_includes_adapter_version(tracker: Tracker):
     assert hash_v1 != hash_v2
 
 
-def test_scenario_run_with_config_plan(tracker: Tracker):
+def test_scenario_run_with_adapter(tracker: Tracker, tmp_path: Path, monkeypatch):
+    config_root = tmp_path / "adapter_cfg_scenario"
+    config_root.mkdir(parents=True, exist_ok=True)
+
+    class DummyAdapter:
+        root_dirs = [config_root]
+
+    adapter = DummyAdapter()
     plan = _dummy_config_plan(adapter_version="3.1")
+
+    def fake_prepare_config(*, adapter, config_dirs, **kwargs):
+        del kwargs
+        assert adapter is not None
+        assert list(config_dirs) == [config_root]
+        return plan
+
+    monkeypatch.setattr(tracker, "prepare_config", fake_prepare_config)
+
     with tracker.scenario("scen_plan") as sc:
         sc.run(
             fn=lambda: None,
             name="step",
-            config_plan=plan,
+            adapter=adapter,
             cache_options=CacheOptions(cache_mode="overwrite"),
         )
         record = tracker.last_run
@@ -358,18 +393,55 @@ def test_scenario_run_with_config_plan(tracker: Tracker):
         assert record.config["__consist_config_plan__"]["adapter_version"] == "3.1"
 
 
-def test_scenario_run_uses_decorator_config_plan_default(tracker: Tracker) -> None:
+def test_scenario_run_uses_decorator_adapter_default(
+    tracker: Tracker, tmp_path: Path, monkeypatch
+) -> None:
+    config_root = tmp_path / "adapter_cfg_decorator"
+    config_root.mkdir(parents=True, exist_ok=True)
+
+    class DummyAdapter:
+        root_dirs = [config_root]
+
+    adapter = DummyAdapter()
+
     @tracker.define_step(
-        config_plan=lambda ctx: _dummy_config_plan(
-            adapter_version=str(ctx.year),
-            content_hash=f"hash_{ctx.year}",
-        )
+        adapter=lambda ctx: adapter,
     )
     def step() -> None:
         return None
+
+    def fake_prepare_config(*, adapter, config_dirs, **kwargs):
+        del kwargs
+        assert adapter is not None
+        assert list(config_dirs) == [config_root]
+        return _dummy_config_plan(
+            adapter_version="2042",
+            content_hash="hash_2042",
+        )
+
+    monkeypatch.setattr(tracker, "prepare_config", fake_prepare_config)
 
     with tracker.scenario("scen_plan_default") as sc:
         sc.run(fn=step, year=2042, cache_options=CacheOptions(cache_mode="overwrite"))
         record = tracker.last_run
         assert record is not None
         assert record.config["__consist_config_plan__"]["adapter_version"] == "2042"
+
+
+def test_scenario_run_uses_decorator_identity_inputs_default(
+    tracker: Tracker, tmp_path: Path
+) -> None:
+    dep = tmp_path / "scenario_identity_dep.yaml"
+    dep.write_text("mode=test\n")
+
+    @tracker.define_step(identity_inputs=[dep])
+    def step() -> None:
+        return None
+
+    with tracker.scenario("scen_identity_inputs_default") as sc:
+        sc.run(fn=step, cache_options=CacheOptions(cache_mode="overwrite"))
+        record = tracker.last_run
+        assert record is not None
+        digest_map = record.run.meta.get("consist_hash_inputs")
+        assert isinstance(digest_map, dict)
+        assert len(digest_map) == 1

@@ -68,6 +68,7 @@ recommended public kwargs for new run/trace calls.
         - begin_run
         - start_run
         - run
+        - run_with_config_overrides
         - trace
         - scenario
         - end_run
@@ -101,6 +102,7 @@ recommended public kwargs for new run/trace calls.
         - get_run_config
         - get_run_inputs
         - get_run_outputs
+        - get_config_bundle
         - get_artifact_lineage
         - print_lineage
         - history

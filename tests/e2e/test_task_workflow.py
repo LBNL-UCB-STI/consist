@@ -53,7 +53,7 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     """
     End-to-end validation of @task decorator workflow:
     - Task with simple caching
-    - Task with hash_inputs (config file dependency)
+    - Task with identity_inputs (config file dependency)
     - Task with capture_outputs (legacy code wrapper)
     - Cache hit behavior on re-execution
     - CLI introspection
@@ -112,7 +112,7 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
         df.to_csv(output_path, index=False)
         return output_path
 
-    # Task 3: Legacy code wrapper with hash_inputs + capture_outputs
+    # Task 3: Legacy code wrapper with identity_inputs + capture_outputs
     def run_legacy_analysis(cleaned_file: Path, _consist_ctx: RunContext) -> None:
         """Wrapper around legacy analysis code that reads config files."""
         # Simulate legacy code that reads config files and writes to ./outputs
@@ -120,7 +120,7 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
         output_dir.mkdir(exist_ok=True)
 
         with _consist_ctx.capture_outputs(output_dir, pattern="*.csv"):
-            # Legacy code reads the config files (captured by hash_inputs)
+            # Legacy code reads the config files (captured by identity_inputs)
             with open(config_path) as f:
                 config_data = json.load(f)
 
@@ -192,7 +192,7 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
             inject_context=True,
             load_inputs=False,
         ),
-        hash_inputs=[("cleaning_config", config_path), ("params", params_path)],
+        identity_inputs=[("cleaning_config", config_path), ("params", params_path)],
     )
     assert legacy_result.outputs, "Legacy analysis should capture outputs"
 
@@ -227,7 +227,7 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     assert any("analysis" in k for k in artifact_keys)
 
     # === Example: new config pattern for "legacy reads config files" workflows ===
-    # The config files should affect the run identity (hash_inputs) without being shoved into DB meta,
+    # The config files should affect the run identity (identity_inputs) without being shoved into DB meta,
     # while a small facet stays queryable.
     with tracker.start_run(
         run_id="manual_config_demo",

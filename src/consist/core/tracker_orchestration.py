@@ -189,24 +189,7 @@ class RunTraceCoordinator:
         self,
         *,
         adapter: Optional["ConfigAdapter"],
-        legacy_config_plan: Optional["ConfigPlan"],
     ) -> Optional["ConfigPlan"]:
-        if adapter is not None and legacy_config_plan is not None:
-            raise ValueError(
-                format_problem_cause_fix(
-                    problem="Pass either adapter= or config_plan=, not both.",
-                    cause=(
-                        "Both identity sources were supplied, making run identity "
-                        "ambiguous."
-                    ),
-                    fix=(
-                        "Use the recommended path with adapter=... and remove "
-                        "config_plan=."
-                    ),
-                )
-            )
-        if legacy_config_plan is not None:
-            return legacy_config_plan
         if adapter is None:
             return None
         tracker = self._tracker
@@ -251,7 +234,6 @@ class RunTraceCoordinator:
         cache_options: Optional[CacheOptions] = None,
         output_policy: Optional[OutputPolicyOptions] = None,
         execution_options: Optional[ExecutionOptions] = None,
-        **legacy_kwargs: Any,
     ) -> RunResult:
         """Execute function/container run flow with tracker-level orchestration.
 
@@ -332,34 +314,8 @@ class RunTraceCoordinator:
         validation. Future cleanup should split those responsibilities into
         independent phases/components.
 
-        Hidden compatibility kwargs are still accepted:
-        ``config_plan`` and ``hash_inputs``.
         """
         tracker = self._tracker
-        legacy_config_plan = legacy_kwargs.pop("config_plan", None)
-        legacy_hash_inputs = legacy_kwargs.pop("hash_inputs", None)
-        self._raise_unexpected_kwargs(legacy_kwargs)
-        if identity_inputs is not None and legacy_hash_inputs is not None:
-            raise ValueError(
-                format_problem_cause_fix(
-                    problem=("Pass either identity_inputs= or hash_inputs=, not both."),
-                    cause=(
-                        "Both new and legacy identity input options were provided, "
-                        "which makes intent ambiguous."
-                    ),
-                    fix=(
-                        "Use the recommended path with identity_inputs=... and remove "
-                        "hash_inputs=."
-                    ),
-                )
-            )
-        resolved_identity_inputs = (
-            identity_inputs if identity_inputs is not None else legacy_hash_inputs
-        )
-        config_plan = self._prepare_config_plan(
-            adapter=adapter,
-            legacy_config_plan=legacy_config_plan,
-        )
 
         resolved_invocation = resolve_run_invocation(
             fn=fn,
@@ -367,7 +323,8 @@ class RunTraceCoordinator:
             model=model,
             description=description,
             config=config,
-            config_plan=config_plan,
+            adapter=adapter,
+            identity_inputs=identity_inputs,
             inputs=inputs,
             input_keys=input_keys,
             optional_input_keys=optional_input_keys,
@@ -376,7 +333,6 @@ class RunTraceCoordinator:
             facet_from=facet_from,
             facet_schema_version=facet_schema_version,
             facet_index=facet_index,
-            hash_inputs=resolved_identity_inputs,
             year=year,
             iteration=iteration,
             phase=phase,
@@ -400,7 +356,10 @@ class RunTraceCoordinator:
         resolved_model = resolved_invocation.model
         description = resolved_invocation.description
         config = resolved_invocation.config
-        config_plan = resolved_invocation.config_plan
+        adapter = resolved_invocation.adapter
+        config_plan = self._prepare_config_plan(
+            adapter=adapter,
+        )
         tags = resolved_invocation.tags
         facet = resolved_invocation.facet
         facet_index = resolved_invocation.facet_index
@@ -414,7 +373,7 @@ class RunTraceCoordinator:
         cache_version = resolved_invocation.cache_version
         validate_cached_outputs = resolved_invocation.validate_cached_outputs
         load_inputs = resolved_invocation.load_inputs
-        identity_inputs = resolved_invocation.hash_inputs
+        identity_inputs = resolved_invocation.identity_inputs
         facet_from = resolved_invocation.facet_from
         facet_schema_version = resolved_invocation.facet_schema_version
         output_mismatch = resolved_invocation.output_mismatch
@@ -1070,7 +1029,6 @@ class RunTraceCoordinator:
         code_identity_extra_deps: Optional[List[str]] = None,
         output_mismatch: str = "warn",
         output_missing: str = "warn",
-        **legacy_kwargs: Any,
     ) -> Iterator["Tracker"]:
         """Execute context-managed trace flow with tracker-level orchestration.
 
@@ -1150,36 +1108,8 @@ class RunTraceCoordinator:
         Tracker
             Active tracker within trace run scope.
 
-        Notes
-        -----
-        Hidden compatibility kwargs are still accepted:
-        ``config_plan`` and ``hash_inputs``.
         """
         tracker = self._tracker
-        legacy_config_plan = legacy_kwargs.pop("config_plan", None)
-        legacy_hash_inputs = legacy_kwargs.pop("hash_inputs", None)
-        self._raise_unexpected_kwargs(legacy_kwargs)
-        if identity_inputs is not None and legacy_hash_inputs is not None:
-            raise ValueError(
-                format_problem_cause_fix(
-                    problem=("Pass either identity_inputs= or hash_inputs=, not both."),
-                    cause=(
-                        "Both new and legacy identity input options were provided, "
-                        "which makes intent ambiguous."
-                    ),
-                    fix=(
-                        "Use the recommended path with identity_inputs=... and remove "
-                        "hash_inputs=."
-                    ),
-                )
-            )
-        resolved_identity_inputs = (
-            identity_inputs if identity_inputs is not None else legacy_hash_inputs
-        )
-        config_plan = self._prepare_config_plan(
-            adapter=adapter,
-            legacy_config_plan=legacy_config_plan,
-        )
         output_mismatch_policy = cast(
             Literal["warn", "error", "ignore"], output_mismatch
         )
@@ -1191,7 +1121,8 @@ class RunTraceCoordinator:
             model=model,
             description=description,
             config=config,
-            config_plan=config_plan,
+            adapter=adapter,
+            identity_inputs=identity_inputs,
             inputs=inputs,
             input_keys=input_keys,
             optional_input_keys=optional_input_keys,
@@ -1200,7 +1131,6 @@ class RunTraceCoordinator:
             facet_from=facet_from,
             facet_schema_version=facet_schema_version,
             facet_index=facet_index,
-            hash_inputs=resolved_identity_inputs,
             year=year,
             iteration=iteration,
             phase=None,
@@ -1236,7 +1166,10 @@ class RunTraceCoordinator:
         resolved_model = resolved_invocation.model
         description = resolved_invocation.description
         config = resolved_invocation.config
-        config_plan = resolved_invocation.config_plan
+        adapter = resolved_invocation.adapter
+        config_plan = self._prepare_config_plan(
+            adapter=adapter,
+        )
         tags = resolved_invocation.tags
         facet = resolved_invocation.facet
         facet_index = resolved_invocation.facet_index
@@ -1249,7 +1182,7 @@ class RunTraceCoordinator:
         cache_hydration = resolved_invocation.cache_hydration
         cache_version = resolved_invocation.cache_version
         validate_cached_outputs = resolved_invocation.validate_cached_outputs
-        identity_inputs = resolved_invocation.hash_inputs
+        identity_inputs = resolved_invocation.identity_inputs
         facet_from = resolved_invocation.facet_from
         facet_schema_version = resolved_invocation.facet_schema_version
         output_missing = resolved_invocation.output_missing

@@ -49,6 +49,7 @@ from consist.core.config_canonicalization import (
     CanonicalizationResult,
     ConfigContribution,
     ConfigPlan,
+    SupportsRunWithConfigOverrides,
     validate_config_plan,
 )
 from consist.core.config_facets import ConfigFacetManager
@@ -1197,7 +1198,6 @@ class Tracker:
         cache_options: Optional[CacheOptions] = None,
         output_policy: Optional[OutputPolicyOptions] = None,
         execution_options: Optional[ExecutionOptions] = None,
-        **legacy_kwargs: Any,
     ) -> RunResult:
         """
         Execute a function-shaped run with caching and output handling.
@@ -1282,11 +1282,6 @@ class Tracker:
             Grouped execution controls (`load_inputs`, `executor`, `container`,
             `runtime_kwargs`, `inject_context`).
 
-        **legacy_kwargs : Any
-            Hidden backwards-compatibility kwargs. ``config_plan`` and
-            ``hash_inputs`` are still accepted, but ``adapter`` and
-            ``identity_inputs`` are the public API.
-
         Returns
         -------
         RunResult
@@ -1365,7 +1360,61 @@ class Tracker:
             cache_options=cache_options,
             output_policy=output_policy,
             execution_options=execution_options,
-            **legacy_kwargs,
+        )
+
+    def run_with_config_overrides(
+        self,
+        *,
+        adapter: SupportsRunWithConfigOverrides,
+        base_run_id: str,
+        overrides: Any,
+        output_dir: Path,
+        fn: Callable[..., Any],
+        name: str,
+        model: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+        outputs: Optional[List[str]] = None,
+        execution_options: Optional[ExecutionOptions] = None,
+        strict: bool = True,
+        identity_label: str = "activitysim_config",
+        **run_kwargs: Any,
+    ) -> RunResult:
+        """
+        Delegate config-override execution to an adapter-specific implementation.
+
+        The tracker remains adapter-agnostic by forwarding to
+        ``adapter.run_with_config_overrides(...)`` when available.
+        """
+        if not isinstance(adapter, SupportsRunWithConfigOverrides):
+            raise TypeError(
+                format_problem_cause_fix(
+                    problem=(
+                        "Adapter does not support run_with_config_overrides delegation."
+                    ),
+                    cause=(
+                        "The provided adapter does not implement "
+                        "run_with_config_overrides(...)."
+                    ),
+                    fix=(
+                        "Use an adapter that implements override execution, or "
+                        "materialize configs manually then call tracker.run(...)."
+                    ),
+                )
+            )
+        return adapter.run_with_config_overrides(
+            tracker=self,
+            base_run_id=base_run_id,
+            overrides=overrides,
+            output_dir=output_dir,
+            fn=fn,
+            name=name,
+            model=model,
+            config=config,
+            outputs=outputs,
+            execution_options=execution_options,
+            strict=strict,
+            identity_label=identity_label,
+            **run_kwargs,
         )
 
     @contextmanager
@@ -1408,7 +1457,6 @@ class Tracker:
         code_identity_extra_deps: Optional[List[str]] = None,
         output_mismatch: str = "warn",
         output_missing: str = "warn",
-        **legacy_kwargs: Any,
     ) -> Iterator["Tracker"]:
         """
         Context manager for inline tracing of a run with inline execution.
@@ -1505,11 +1553,6 @@ class Tracker:
         output_missing : str, default "warn"
             Behavior when expected outputs are missing: "warn", "error", or "ignore".
 
-        **legacy_kwargs : Any
-            Hidden backwards-compatibility kwargs. ``config_plan`` and
-            ``hash_inputs`` are still accepted, but ``adapter`` and
-            ``identity_inputs`` are the public API.
-
         Yields
         ------
         Tracker
@@ -1596,7 +1639,6 @@ class Tracker:
             code_identity_extra_deps=code_identity_extra_deps,
             output_mismatch=output_mismatch,
             output_missing=output_missing,
-            **legacy_kwargs,
         ) as active_tracker:
             yield active_tracker
 
@@ -3049,7 +3091,7 @@ class Tracker:
         facet_index: Optional[bool] = None,
     ) -> Callable[["StepContext"], ConfigPlan]:
         """
-        Build a StepContext resolver for use with `@define_step(config_plan=...)`.
+        Build a StepContext resolver for use with `@define_step(adapter=...)`.
 
         Exactly one config-directory source must be provided:
         - `config_dirs`: static iterable of directories.
@@ -4257,6 +4299,93 @@ class Tracker:
         if record is None:
             return None
         return record.config
+
+    def get_config_bundle(
+        self,
+        run_id: str,
+        *,
+        adapter: str | None = None,
+        role: str = "bundle",
+        allow_missing: bool = False,
+    ) -> Path | None:
+        """
+        Resolve a config artifact path for a run by role.
+
+        This helper scans run-linked artifacts and selects those with
+        ``artifact.meta["config_role"] == role``. When ``adapter`` is provided,
+        matching uses existing adapter identity conventions:
+        ``run.meta["config_adapter"]`` and/or artifact metadata
+        (``artifact.meta["config_adapter"]`` or ``artifact.meta["adapter"]``).
+
+        If multiple artifacts match, selection is deterministic: sort by
+        ``(artifact.key, artifact.created_at, artifact.id)`` and return the first.
+        """
+        artifacts = self.get_artifacts_for_run(run_id)
+        input_artifacts = list(artifacts.inputs.values())
+
+        matching: list[Artifact] = []
+        for artifact in input_artifacts:
+            meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+            if meta.get("config_role") == role:
+                matching.append(artifact)
+
+        run = self.get_run(run_id)
+        run_adapter: str | None = None
+        if run is not None and isinstance(run.meta, dict):
+            candidate = run.meta.get("config_adapter")
+            if isinstance(candidate, str) and candidate:
+                run_adapter = candidate
+
+        if adapter is not None:
+            if run_adapter is not None and run_adapter != adapter:
+                matching = []
+            else:
+                filtered: list[Artifact] = []
+                for artifact in matching:
+                    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+                    artifact_adapters: list[str] = []
+                    for key in ("config_adapter", "adapter"):
+                        value = meta.get(key)
+                        if isinstance(value, str) and value:
+                            artifact_adapters.append(value)
+                    if artifact_adapters:
+                        if adapter in artifact_adapters:
+                            filtered.append(artifact)
+                    elif run_adapter == adapter:
+                        filtered.append(artifact)
+                matching = filtered
+
+        if matching:
+            selected = sorted(
+                matching,
+                key=lambda artifact: (
+                    artifact.key,
+                    artifact.created_at.isoformat() if artifact.created_at else "",
+                    str(artifact.id),
+                ),
+            )[0]
+            resolved = Path(self.resolve_uri(selected.container_uri))
+            if resolved.exists():
+                return resolved
+
+            if allow_missing:
+                return None
+            raise FileNotFoundError(
+                "Config artifact was found but the resolved file is missing for "
+                f"run_id={run_id!r}, role={role!r}, key={selected.key!r}: {resolved!s}. "
+                "Check path mounts or regenerate config artifacts for this run."
+            )
+
+        if allow_missing:
+            return None
+        adapter_hint = f", adapter={adapter!r}" if adapter is not None else ""
+        raise FileNotFoundError(
+            "No config artifact found for "
+            f"run_id={run_id!r}, role={role!r}{adapter_hint}. "
+            "Ensure config artifacts were logged with meta['config_role'] and, when "
+            "adapter filtering is requested, run.meta['config_adapter'] and/or "
+            "artifact.meta['config_adapter'|'adapter'] match."
+        )
 
     def get_artifacts_for_run(self, run_id: str) -> RunArtifacts:
         """

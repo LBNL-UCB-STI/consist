@@ -121,6 +121,41 @@ def test_run_context_run_dir_is_created(tracker):
     assert result.outputs["out"].path.exists()
 
 
+def test_run_with_config_overrides_requires_supporting_adapter(tracker, tmp_path):
+    with pytest.raises(
+        TypeError, match="does not support run_with_config_overrides delegation"
+    ):
+        tracker.run_with_config_overrides(
+            adapter=object(),
+            base_run_id="missing_run",
+            overrides={},
+            output_dir=tmp_path / "materialized",
+            fn=lambda: None,
+            name="override_step",
+        )
+
+
+def test_tracker_run_rejects_removed_config_plan_kwarg(tracker, tmp_path):
+    @tracker.define_step(adapter=object())
+    def step() -> None:
+        return None
+
+    with pytest.raises(TypeError, match="unexpected keyword argument 'config_plan'"):
+        tracker.run(fn=step, name="step", config_plan=object())
+
+
+def test_tracker_run_rejects_removed_hash_inputs_kwarg(tracker, tmp_path):
+    dep = tmp_path / "tracker_identity_dep.yaml"
+    dep.write_text("mode=test\n")
+
+    @tracker.define_step(identity_inputs=[dep])
+    def step() -> None:
+        return None
+
+    with pytest.raises(TypeError, match="unexpected keyword argument 'hash_inputs'"):
+        tracker.run(fn=step, name="step", hash_inputs=[dep])
+
+
 def test_start_run_overwrite_updates_cache_index(tracker, tmp_path):
     input_path = tmp_path / "input.txt"
     input_path.write_text("payload")
@@ -504,6 +539,121 @@ def test_tracker_get_run_result_strict_validation_checks_paths(tracker):
         tracker.get_run_result(produced.run.id, validate="strict")
 
 
+def test_tracker_get_config_bundle_returns_resolved_bundle_path(tracker):
+    with tracker.start_run("bundle_run", "bundle_model"):
+        bundle_path = tracker.run_artifact_dir() / "config_bundle.tar.gz"
+        bundle_path.parent.mkdir(parents=True, exist_ok=True)
+        bundle_path.write_text("bundle")
+        tracker.log_artifact(
+            bundle_path,
+            key="config_bundle",
+            direction="input",
+            config_role="bundle",
+        )
+
+    resolved = tracker.get_config_bundle("bundle_run")
+    assert resolved == bundle_path.resolve()
+
+
+def test_tracker_get_config_bundle_adapter_filter_matches_and_misses(tracker):
+    with tracker.start_run("bundle_adapter", "bundle_model"):
+        tracker.log_meta(config_adapter="activitysim")
+        bundle_path = tracker.run_artifact_dir() / "config_bundle.tar.gz"
+        bundle_path.parent.mkdir(parents=True, exist_ok=True)
+        bundle_path.write_text("bundle")
+        tracker.log_artifact(
+            bundle_path,
+            key="config_bundle",
+            direction="input",
+            config_role="bundle",
+        )
+
+    assert (
+        tracker.get_config_bundle("bundle_adapter", adapter="activitysim")
+        == bundle_path.resolve()
+    )
+    assert (
+        tracker.get_config_bundle(
+            "bundle_adapter",
+            adapter="beam",
+            allow_missing=True,
+        )
+        is None
+    )
+
+
+def test_tracker_get_config_bundle_adapter_filter_uses_artifact_metadata(tracker):
+    with tracker.start_run("bundle_artifact_adapter", "bundle_model"):
+        bundle_path = tracker.run_artifact_dir() / "config_bundle.tar.gz"
+        bundle_path.parent.mkdir(parents=True, exist_ok=True)
+        bundle_path.write_text("bundle")
+        tracker.log_artifact(
+            bundle_path,
+            key="config_bundle",
+            direction="input",
+            config_role="bundle",
+            adapter="beam",
+        )
+
+    resolved = tracker.get_config_bundle("bundle_artifact_adapter", adapter="beam")
+    assert resolved == bundle_path.resolve()
+
+
+def test_tracker_get_config_bundle_allow_missing_returns_none(tracker):
+    with tracker.start_run("bundle_missing_allow", "bundle_model"):
+        pass
+
+    assert tracker.get_config_bundle("bundle_missing_allow", allow_missing=True) is None
+
+
+def test_tracker_get_config_bundle_missing_raises_file_not_found(tracker):
+    with tracker.start_run("bundle_missing_error", "bundle_model"):
+        pass
+
+    with pytest.raises(FileNotFoundError, match="No config artifact found"):
+        tracker.get_config_bundle("bundle_missing_error")
+
+
+def test_tracker_get_config_bundle_selects_deterministic_match(tracker):
+    with tracker.start_run("bundle_multiple", "bundle_model"):
+        first = tracker.run_artifact_dir() / "z_config_bundle.tar.gz"
+        second = tracker.run_artifact_dir() / "a_config_bundle.tar.gz"
+        first.parent.mkdir(parents=True, exist_ok=True)
+        first.write_text("z")
+        second.write_text("a")
+
+        tracker.log_artifact(
+            first,
+            key="z_bundle",
+            direction="input",
+            config_role="bundle",
+        )
+        tracker.log_artifact(
+            second,
+            key="a_bundle",
+            direction="input",
+            config_role="bundle",
+        )
+
+    resolved = tracker.get_config_bundle("bundle_multiple")
+    assert resolved == second.resolve()
+
+
+def test_tracker_get_config_bundle_ignores_output_artifacts(tracker):
+    with tracker.start_run("bundle_output_only", "bundle_model"):
+        bundle_path = tracker.run_artifact_dir() / "config_bundle.tar.gz"
+        bundle_path.parent.mkdir(parents=True, exist_ok=True)
+        bundle_path.write_text("bundle")
+        tracker.log_artifact(
+            bundle_path,
+            key="config_bundle",
+            direction="output",
+            config_role="bundle",
+        )
+
+    assert tracker.get_config_bundle("bundle_output_only", allow_missing=True) is None
+
+
 def test_cache_epoch_affects_config_hash(tmp_path):
     def step(ctx) -> None:
         ctx.run_dir.mkdir(parents=True, exist_ok=True)
@@ -554,9 +704,7 @@ def test_cache_version_affects_config_hash(tracker):
     assert hash_v1 != hash_v2
 
 
-def test_tracker_run_adapter_identity_matches_legacy_config_plan(
-    tracker, tmp_path, monkeypatch
-):
+def test_tracker_run_adapter_identity_populates_meta(tracker, tmp_path, monkeypatch):
     dep_path = tmp_path / "identity_dep.yaml"
     dep_path.write_text("threshold: 0.5\n")
 
@@ -604,16 +752,7 @@ def test_tracker_run_adapter_identity_matches_legacy_config_plan(
         identity_inputs=[dep_path],
         cache_options=CacheOptions(cache_mode="overwrite"),
     )
-    legacy_run = tracker.run(
-        fn=step,
-        name="identity_step",
-        config_plan=adapter_plan,
-        hash_inputs=[dep_path],
-        cache_options=CacheOptions(cache_mode="overwrite"),
-    )
-
     assert calls == [[config_root]]
-    assert adapter_run.run.config_hash == legacy_run.run.config_hash
     assert adapter_run.run.meta["config_adapter"] == "dummy_adapter"
     assert adapter_run.run.meta["config_bundle_hash"] == "adapter_identity_hash"
     assert adapter_run.run.meta["consist_hash_inputs"]

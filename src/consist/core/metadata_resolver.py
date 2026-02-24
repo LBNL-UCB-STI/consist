@@ -16,10 +16,10 @@ from typing import (
 
 from consist.core.decorators import StepDefinition
 from consist.core.step_context import StepContext, format_step_name, resolve_metadata
-from consist.types import HashInputs
+from consist.types import IdentityInputs
 
 if TYPE_CHECKING:
-    from consist.core.config_canonicalization import ConfigPlan
+    from consist.core.config_canonicalization import ConfigAdapter
 
 
 @dataclass(frozen=True)
@@ -28,7 +28,8 @@ class ResolvedStepMetadata:
     model: str
     description: Optional[str]
     config: Optional[Dict[str, Any]]
-    config_plan: Optional["ConfigPlan"]
+    adapter: Optional["ConfigAdapter"]
+    identity_inputs: IdentityInputs
     tags: Optional[List[str]]
     facet: Optional[Any]
     facet_index: Optional[bool]
@@ -42,7 +43,6 @@ class ResolvedStepMetadata:
     cache_version: Optional[int]
     validate_cached_outputs: Optional[str]
     load_inputs: Optional[bool]
-    hash_inputs: HashInputs
     facet_from: Optional[List[str]]
     facet_schema_version: Optional[Union[str, int]]
 
@@ -67,7 +67,6 @@ class MetadataResolver:
         model: Optional[str],
         description: Optional[str],
         config: Optional[Dict[str, Any]],
-        config_plan: Optional["ConfigPlan"],
         inputs: Optional[Union[Mapping[str, Any], Iterable[Any]]],
         input_keys: Optional[Union[Iterable[str], str]],
         optional_input_keys: Optional[Union[Iterable[str], str]],
@@ -76,7 +75,6 @@ class MetadataResolver:
         facet_from: Optional[List[str]],
         facet_schema_version: Optional[Union[str, int]],
         facet_index: Optional[bool],
-        hash_inputs: HashInputs,
         year: Optional[int],
         iteration: Optional[int],
         phase: Optional[str],
@@ -93,6 +91,8 @@ class MetadataResolver:
         validate_cached_outputs: Optional[str],
         load_inputs: Optional[bool],
         missing_name_error: str,
+        adapter: Optional["ConfigAdapter"] = None,
+        identity_inputs: IdentityInputs = None,
     ) -> ResolvedStepMetadata:
         func_name = getattr(fn, "__name__", None) if fn is not None else None
         step_def = StepDefinition()
@@ -161,7 +161,10 @@ class MetadataResolver:
 
         resolved_description = _resolve_meta(description, step_def.description)
         resolved_config = _resolve_meta(config, step_def.config)
-        resolved_config_plan = _resolve_meta(config_plan, step_def.config_plan)
+        resolved_adapter = _resolve_meta(adapter, step_def.adapter)
+        resolved_identity_inputs = _resolve_meta(
+            identity_inputs, step_def.identity_inputs
+        )
         resolved_tags = _resolve_meta(tags, step_def.tags)
         if resolved_tags is not None:
             resolved_tags = list(resolved_tags)
@@ -185,7 +188,6 @@ class MetadataResolver:
             validate_cached_outputs, step_def.validate_cached_outputs
         )
         resolved_load_inputs = _resolve_meta(load_inputs, step_def.load_inputs)
-        resolved_hash_inputs = _resolve_meta(hash_inputs, step_def.hash_inputs)
         resolved_facet_from = _resolve_meta(facet_from, step_def.facet_from)
         if resolved_facet_from is not None:
             resolved_facet_from = list(resolved_facet_from)
@@ -198,7 +200,8 @@ class MetadataResolver:
             model=resolved_model,
             description=resolved_description,
             config=resolved_config,
-            config_plan=resolved_config_plan,
+            adapter=resolved_adapter,
+            identity_inputs=resolved_identity_inputs,
             tags=resolved_tags,
             facet=resolved_facet,
             facet_index=resolved_facet_index,
@@ -212,7 +215,6 @@ class MetadataResolver:
             cache_version=resolved_cache_version,
             validate_cached_outputs=resolved_validate_cached_outputs,
             load_inputs=resolved_load_inputs,
-            hash_inputs=resolved_hash_inputs,
             facet_from=resolved_facet_from,
             facet_schema_version=resolved_facet_schema_version,
         )
