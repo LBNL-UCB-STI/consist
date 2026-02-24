@@ -507,6 +507,282 @@ class RunTraceCoordinator:
             start_kwargs=start_kwargs,
         )
 
+    def _execute_container_run(
+        self,
+        *,
+        tracker: "Tracker",
+        run_id: str,
+        run: Any,
+        resolved_name: str,
+        output_paths: Optional[Mapping[str, ArtifactRef]],
+        container: Any,
+        load_inputs: bool,
+        resolved_inputs: List[ArtifactRef],
+        on_missing_outputs: Callable[[str, List[str]], None],
+    ) -> RunResult:
+        if container is None or output_paths is None:
+            raise RuntimeError("Container execution requires container and output_paths.")
+        if load_inputs:
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem="executor='container' does not support load_inputs.",
+                    cause=(
+                        "Input auto-loading is only supported for Python "
+                        "callable execution."
+                    ),
+                    fix=(
+                        "Disable load_inputs for container runs and pass input "
+                        "artifacts through inputs=... instead."
+                    ),
+                )
+            )
+        if not isinstance(container, MappingABC):
+            raise TypeError(
+                format_problem_cause_fix(
+                    problem="container must be a mapping of run_container arguments.",
+                    cause="The provided container spec is not a mapping object.",
+                    fix=(
+                        "Pass execution_options=ExecutionOptions(container={...}) "
+                        "with key/value options."
+                    ),
+                )
+            )
+
+        from consist.integrations.containers import run_container
+
+        container_args = dict(container)
+        image = container_args.pop("image", None)
+        command = container_args.pop("command", None)
+        backend_type = container_args.pop("backend", None) or container_args.pop(
+            "backend_type", None
+        )
+        backend_type = backend_type or "docker"
+        environment = container_args.pop("environment", None) or {}
+        working_dir = container_args.pop("working_dir", None)
+        volumes = container_args.pop("volumes", None) or {}
+        pull_latest = bool(container_args.pop("pull_latest", False))
+        lineage_mode = container_args.pop("lineage_mode", "full")
+
+        if container_args:
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem=(
+                        "Unknown container options were provided: "
+                        f"{sorted(container_args.keys())}."
+                    ),
+                    cause=(
+                        "The container spec includes keys that are not accepted "
+                        "by the run_container integration."
+                    ),
+                    fix=(
+                        "Remove unknown keys and keep only supported fields "
+                        "(for example image, command, backend, environment, "
+                        "volumes, working_dir, pull_latest, lineage_mode)."
+                    ),
+                )
+            )
+        if image is None or command is None:
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem="container spec must include image and command.",
+                    cause=(
+                        "Container execution cannot start without an image and "
+                        "command."
+                    ),
+                    fix=(
+                        "Set container={'image': '...', 'command': [...]} in "
+                        "ExecutionOptions."
+                    ),
+                )
+            )
+
+        output_base_dir = tracker.run_artifact_dir()
+        resolved_output_paths = {
+            str(key): self._helpers.resolve_output_path(tracker, ref, output_base_dir)
+            for key, ref in output_paths.items()
+        }
+
+        result = run_container(
+            tracker=tracker,
+            run_id=run_id,
+            image=image,
+            command=command,
+            volumes=volumes,
+            inputs=resolved_inputs,
+            outputs=resolved_output_paths,
+            environment=environment,
+            working_dir=working_dir,
+            backend_type=backend_type,
+            pull_latest=pull_latest,
+            lineage_mode=lineage_mode,
+        )
+
+        outputs_map = dict(result.artifacts)
+        missing = [key for key in output_paths.keys() if key not in outputs_map]
+        on_missing_outputs(f"Run {resolved_name!r}", missing)
+
+        return RunResult(
+            run=run,
+            outputs=outputs_map,
+            cache_hit=result.cache_hit,
+        )
+
+    def _execute_python_run(
+        self,
+        *,
+        tracker: "Tracker",
+        active_tracker: "Tracker",
+        fn: Optional[Callable[..., Any]],
+        resolved_name: str,
+        config: Optional[Union[Dict[str, Any], BaseModel]],
+        inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]],
+        runtime_kwargs_dict: Optional[Mapping[str, Any]],
+        inject_context: Optional[Union[bool, str]],
+        load_inputs: bool,
+        input_artifacts_by_key: Dict[str, Artifact],
+        capture_dir: Optional[Path],
+        capture_pattern: str,
+    ) -> tuple[Any, Dict[str, Artifact]]:
+        runtime_kwargs = dict(runtime_kwargs_dict or {})
+        required_runtime = getattr(fn, "__consist_runtime_required__", ())
+        if required_runtime:
+            missing = [
+                required_name
+                for required_name in required_runtime
+                if required_name not in runtime_kwargs
+            ]
+            if missing:
+                missing_list = ", ".join(sorted(missing))
+                raise ValueError(
+                    format_problem_cause_fix(
+                        problem=(
+                            f"Missing runtime_kwargs for {resolved_name!r}: "
+                            f"{missing_list}."
+                        ),
+                        cause=(
+                            "The step requires runtime-only parameters declared via "
+                            "@consist.require_runtime_kwargs."
+                        ),
+                        fix=(
+                            "Provide runtime_kwargs={...} (or "
+                            "execution_options=ExecutionOptions("
+                            "runtime_kwargs={...})) with those keys, or remove "
+                            "@consist.require_runtime_kwargs."
+                        ),
+                    )
+                )
+        config_dict: Dict[str, Any] = {}
+        if config is None:
+            config_dict = {}
+        elif isinstance(config, BaseModel):
+            config_dict = config.model_dump()
+        else:
+            config_dict = dict(config)
+
+        if fn is None:
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem="run() requires a callable `fn` to execute.",
+                    cause="The Python executor was selected without a function.",
+                    fix=(
+                        "Provide fn=callable, or use "
+                        "ExecutionOptions(executor='container') with container "
+                        "settings."
+                    ),
+                )
+            )
+        fn_callable = fn
+        sig = inspect.signature(fn_callable)
+        params = sig.parameters
+        has_var_kw = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+        call_kwargs: Dict[str, Any] = {}
+
+        if "config" in params and "config" not in runtime_kwargs and config is not None:
+            call_kwargs["config"] = config if isinstance(config, BaseModel) else config_dict
+
+        for param_name, param in params.items():
+            if param.kind in (
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            ):
+                continue
+            if param_name in call_kwargs:
+                continue
+            if param_name in runtime_kwargs:
+                call_kwargs[param_name] = runtime_kwargs[param_name]
+                continue
+            if load_inputs and isinstance(inputs, Mapping):
+                if param_name in input_artifacts_by_key:
+                    if param_name in config_dict:
+                        logging.warning(
+                            "[Consist] Ambiguous param %r present in inputs and config; preferring inputs.",
+                            param_name,
+                        )
+                    artifact = input_artifacts_by_key[param_name]
+                    if get_tracker_ref(artifact) is None:
+                        set_tracker_ref(artifact, tracker)
+                    if artifact.driver in DriverType.tabular_drivers():
+                        from consist.api import load_df
+
+                        call_kwargs[param_name] = load_df(artifact, tracker=tracker)
+                    else:
+                        call_kwargs[param_name] = tracker.load(artifact)
+                    continue
+            if param_name in config_dict:
+                call_kwargs[param_name] = config_dict[param_name]
+
+        for runtime_key, runtime_value in runtime_kwargs.items():
+            if runtime_key not in call_kwargs:
+                call_kwargs[runtime_key] = runtime_value
+
+        if inject_context:
+            ctx_name = inject_context if isinstance(inject_context, str) else "_consist_ctx"
+            if ctx_name not in call_kwargs:
+                if ctx_name in params or has_var_kw:
+                    call_kwargs[ctx_name] = RunContext(tracker)
+                else:
+                    raise ValueError(
+                        format_problem_cause_fix(
+                            problem=(
+                                f"inject_context requested '{ctx_name}', but fn does "
+                                "not accept it."
+                            ),
+                            cause=(
+                                "Context injection was enabled, but the function "
+                                "signature has no matching parameter."
+                            ),
+                            fix=(
+                                f"Add a '{ctx_name}' parameter to fn, set "
+                                "inject_context to a parameter name that exists, "
+                                "or disable inject_context."
+                            ),
+                        )
+                    )
+
+        try:
+            sig.bind_partial(**call_kwargs)
+        except TypeError as exc:
+            raise TypeError(
+                f"Tracker.run could not bind arguments for {resolved_name!r}: {exc}"
+            ) from exc
+
+        captured_outputs: Dict[str, Artifact] = {}
+        if capture_dir is not None:
+            with active_tracker.capture_outputs(capture_dir, pattern=capture_pattern) as cap:
+                result = fn_callable(**call_kwargs)
+            if result is not None:
+                raise ValueError(
+                    "capture_dir requires the run function to return None. "
+                    "Use inject_context to log outputs manually if you need a return value."
+                )
+            captured_outputs = {a.key: a for a in cap.artifacts}
+        else:
+            result = fn_callable(**call_kwargs)
+
+        return result, captured_outputs
+
     def run(
         self,
         fn: Optional[Callable[..., Any]] = None,
@@ -729,269 +1005,32 @@ class RunTraceCoordinator:
                 )
 
             if executor == "container":
-                if container is None or output_paths is None:
-                    raise RuntimeError(
-                        "Container execution requires container and output_paths."
-                    )
-                if load_inputs:
-                    raise ValueError(
-                        format_problem_cause_fix(
-                            problem="executor='container' does not support load_inputs.",
-                            cause=(
-                                "Input auto-loading is only supported for Python "
-                                "callable execution."
-                            ),
-                            fix=(
-                                "Disable load_inputs for container runs and pass input "
-                                "artifacts through inputs=... instead."
-                            ),
-                        )
-                    )
-                if not isinstance(container, MappingABC):
-                    raise TypeError(
-                        format_problem_cause_fix(
-                            problem=(
-                                "container must be a mapping of run_container "
-                                "arguments."
-                            ),
-                            cause="The provided container spec is not a mapping object.",
-                            fix=(
-                                "Pass execution_options=ExecutionOptions(container={...}) "
-                                "with key/value options."
-                            ),
-                        )
-                    )
-
-                from consist.integrations.containers import run_container
-
-                container_args = dict(container)
-                image = container_args.pop("image", None)
-                command = container_args.pop("command", None)
-                backend_type = container_args.pop(
-                    "backend", None
-                ) or container_args.pop("backend_type", None)
-                backend_type = backend_type or "docker"
-                environment = container_args.pop("environment", None) or {}
-                working_dir = container_args.pop("working_dir", None)
-                volumes = container_args.pop("volumes", None) or {}
-                pull_latest = bool(container_args.pop("pull_latest", False))
-                lineage_mode = container_args.pop("lineage_mode", "full")
-
-                if container_args:
-                    raise ValueError(
-                        format_problem_cause_fix(
-                            problem=(
-                                "Unknown container options were provided: "
-                                f"{sorted(container_args.keys())}."
-                            ),
-                            cause=(
-                                "The container spec includes keys that are not accepted "
-                                "by the run_container integration."
-                            ),
-                            fix=(
-                                "Remove unknown keys and keep only supported fields "
-                                "(for example image, command, backend, environment, "
-                                "volumes, working_dir, pull_latest, lineage_mode)."
-                            ),
-                        )
-                    )
-                if image is None or command is None:
-                    raise ValueError(
-                        format_problem_cause_fix(
-                            problem="container spec must include image and command.",
-                            cause=(
-                                "Container execution cannot start without an image and "
-                                "command."
-                            ),
-                            fix=(
-                                "Set container={'image': '...', 'command': [...]} in "
-                                "ExecutionOptions."
-                            ),
-                        )
-                    )
-
-                output_base_dir = tracker.run_artifact_dir()
-                resolved_output_paths = {
-                    str(key): self._helpers.resolve_output_path(
-                        tracker, ref, output_base_dir
-                    )
-                    for key, ref in output_paths.items()
-                }
-
-                result = run_container(
+                return self._execute_container_run(
                     tracker=tracker,
                     run_id=run_id,
-                    image=image,
-                    command=command,
-                    volumes=volumes,
-                    inputs=resolved_inputs,
-                    outputs=resolved_output_paths,
-                    environment=environment,
-                    working_dir=working_dir,
-                    backend_type=backend_type,
-                    pull_latest=pull_latest,
-                    lineage_mode=lineage_mode,
-                )
-
-                outputs_map = dict(result.artifacts)
-                missing = [key for key in output_paths.keys() if key not in outputs_map]
-                _handle_missing_outputs(f"Run {resolved_name!r}", missing)
-
-                return RunResult(
                     run=current_consist.run,
-                    outputs=outputs_map,
-                    cache_hit=result.cache_hit,
+                    resolved_name=resolved_name,
+                    output_paths=output_paths,
+                    container=container,
+                    load_inputs=load_inputs,
+                    resolved_inputs=resolved_inputs,
+                    on_missing_outputs=_handle_missing_outputs,
                 )
 
-            runtime_kwargs = dict(runtime_kwargs_dict or {})
-            required_runtime = getattr(fn, "__consist_runtime_required__", ())
-            if required_runtime:
-                missing = [
-                    required_name
-                    for required_name in required_runtime
-                    if required_name not in runtime_kwargs
-                ]
-                if missing:
-                    missing_list = ", ".join(sorted(missing))
-                    raise ValueError(
-                        format_problem_cause_fix(
-                            problem=(
-                                f"Missing runtime_kwargs for {resolved_name!r}: "
-                                f"{missing_list}."
-                            ),
-                            cause=(
-                                "The step requires runtime-only parameters declared via "
-                                "@consist.require_runtime_kwargs."
-                            ),
-                            fix=(
-                                "Provide runtime_kwargs={...} (or "
-                                "execution_options=ExecutionOptions("
-                                "runtime_kwargs={...})) with those keys, or remove "
-                                "@consist.require_runtime_kwargs."
-                            ),
-                        )
-                    )
-            config_dict: Dict[str, Any] = {}
-            if config is None:
-                config_dict = {}
-            elif isinstance(config, BaseModel):
-                config_dict = config.model_dump()
-            else:
-                config_dict = dict(config)
-
-            if fn is None:
-                raise ValueError(
-                    format_problem_cause_fix(
-                        problem="run() requires a callable `fn` to execute.",
-                        cause="The Python executor was selected without a function.",
-                        fix=(
-                            "Provide fn=callable, or use "
-                            "ExecutionOptions(executor='container') with container "
-                            "settings."
-                        ),
-                    )
-                )
-            fn_callable = fn
-            sig = inspect.signature(fn_callable)
-            params = sig.parameters
-            has_var_kw = any(
-                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+            result, captured_outputs = self._execute_python_run(
+                tracker=tracker,
+                active_tracker=active_tracker,
+                fn=fn,
+                resolved_name=resolved_name,
+                config=config,
+                inputs=inputs,
+                runtime_kwargs_dict=runtime_kwargs_dict,
+                inject_context=inject_context,
+                load_inputs=load_inputs,
+                input_artifacts_by_key=input_artifacts_by_key,
+                capture_dir=capture_dir,
+                capture_pattern=capture_pattern,
             )
-            call_kwargs: Dict[str, Any] = {}
-
-            if (
-                "config" in params
-                and "config" not in runtime_kwargs
-                and config is not None
-            ):
-                call_kwargs["config"] = (
-                    config if isinstance(config, BaseModel) else config_dict
-                )
-
-            for param_name, param in params.items():
-                if param.kind in (
-                    inspect.Parameter.VAR_POSITIONAL,
-                    inspect.Parameter.VAR_KEYWORD,
-                ):
-                    continue
-                if param_name in call_kwargs:
-                    continue
-                if param_name in runtime_kwargs:
-                    call_kwargs[param_name] = runtime_kwargs[param_name]
-                    continue
-                if load_inputs and isinstance(inputs, Mapping):
-                    if param_name in input_artifacts_by_key:
-                        if param_name in config_dict:
-                            logging.warning(
-                                "[Consist] Ambiguous param %r present in inputs and config; preferring inputs.",
-                                param_name,
-                            )
-                        artifact = input_artifacts_by_key[param_name]
-                        if get_tracker_ref(artifact) is None:
-                            set_tracker_ref(artifact, tracker)
-                        if artifact.driver in DriverType.tabular_drivers():
-                            from consist.api import load_df
-
-                            call_kwargs[param_name] = load_df(artifact, tracker=tracker)
-                        else:
-                            call_kwargs[param_name] = tracker.load(artifact)
-                        continue
-                if param_name in config_dict:
-                    call_kwargs[param_name] = config_dict[param_name]
-
-            for runtime_key, runtime_value in runtime_kwargs.items():
-                if runtime_key not in call_kwargs:
-                    call_kwargs[runtime_key] = runtime_value
-
-            if inject_context:
-                ctx_name = (
-                    inject_context
-                    if isinstance(inject_context, str)
-                    else "_consist_ctx"
-                )
-                if ctx_name not in call_kwargs:
-                    if ctx_name in params or has_var_kw:
-                        call_kwargs[ctx_name] = RunContext(tracker)
-                    else:
-                        raise ValueError(
-                            format_problem_cause_fix(
-                                problem=(
-                                    f"inject_context requested '{ctx_name}', but fn does "
-                                    "not accept it."
-                                ),
-                                cause=(
-                                    "Context injection was enabled, but the function "
-                                    "signature has no matching parameter."
-                                ),
-                                fix=(
-                                    f"Add a '{ctx_name}' parameter to fn, set "
-                                    "inject_context to a parameter name that exists, "
-                                    "or disable inject_context."
-                                ),
-                            )
-                        )
-
-            try:
-                sig.bind_partial(**call_kwargs)
-            except TypeError as exc:
-                raise TypeError(
-                    f"Tracker.run could not bind arguments for {resolved_name!r}: {exc}"
-                ) from exc
-
-            captured_outputs: Dict[str, Artifact] = {}
-            if capture_dir is not None:
-                with active_tracker.capture_outputs(
-                    capture_dir, pattern=capture_pattern
-                ) as cap:
-                    result = fn_callable(**call_kwargs)
-                if result is not None:
-                    raise ValueError(
-                        "capture_dir requires the run function to return None. "
-                        "Use inject_context to log outputs manually if you need a return value."
-                    )
-                captured_outputs = {a.key: a for a in cap.artifacts}
-            else:
-                result = fn_callable(**call_kwargs)
 
             outputs_map: Dict[str, Artifact] = {}
             output_base_dir = tracker.run_artifact_dir()
