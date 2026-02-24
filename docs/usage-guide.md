@@ -10,6 +10,10 @@ Consist provides flexible patterns for tracking provenance in scientific workflo
 [quickstart tutorial](getting-started/quickstart.md), then work through the
 examples below in order.
 
+If you are building a reusable domain integration, see
+[Building a Domain Tracker](building-domain-tracker.md#when-to-wrap-vs-use-direct-apis)
+for the recommended wrapper architecture.
+
 ---
 
 ## Choosing Your Pattern
@@ -436,6 +440,23 @@ a function parameter with loaded data.
 Rule of thumb:
 - Use `consist.ref(...)` for one-off single links.
 - Use `consist.refs(...)` when wiring multiple outputs or when you plan to reuse the mapping.
+
+Concise and explicit `refs(...)` forms:
+
+```python
+# Assume setup_result has outputs: "zones", "persons", and "jobs".
+# Concise: map all outputs by their original keys.
+all_inputs = consist.refs(setup_result)
+
+# Explicit: select only the outputs you need.
+subset_inputs = consist.refs(setup_result, "persons", "jobs")
+
+# Explicit aliases: rename keys for downstream function parameters.
+aliased_inputs = consist.refs(
+    setup_result,
+    {"population_df": "persons", "employment_df": "jobs"},
+)
+```
 
 **Alias-map form** (when downstream parameter names differ):
 ``` python
@@ -1039,7 +1060,7 @@ A baseline scenario and 8 future scenarios all share the same network preprocess
 ## Querying Results
 
 ### Finding Runs
-See: [Example notebooks](examples.md#tutorial-series).
+See: [Example notebooks](examples.md).
 
 ``` python
 import consist
@@ -1063,7 +1084,7 @@ result_2030 = runs_by_year[2030]
 1. Filter by scenario ID.
 
 ### Loading Artifacts
-See: [Example notebooks](examples.md#tutorial-series).
+See: [Example notebooks](examples.md).
 
 ``` python
 artifacts = tracker.get_artifacts_for_run(run.id)
@@ -1075,7 +1096,7 @@ df = consist.load_df(persons_artifact)  # (1)!
 1. Load the artifact data into a DataFrame.
 
 ### Cross-Run Queries with Views
-See: [Example notebooks](examples.md#tutorial-series).
+See: [Example notebooks](examples.md).
 
 Register schemas to enable SQL queries across all runs:
 

@@ -58,3 +58,20 @@ Generated SQLModel modules are written under `examples/src/generated/`.
   dedicated package in real projects).
 - Prefer managed output helpers inside active runs:
   `consist.output_path(...)` or injected `ctx.output_path(...)`.
+
+Concise vs explicit input wiring patterns:
+
+```python
+from pathlib import Path
+import consist
+
+# Concise: map all outputs from a previous run result.
+all_links = consist.refs(previous_result)
+
+# Explicit: select/rename only what downstream needs.
+aliased_links = consist.refs(previous_result, {"population_df": "persons"})
+
+# identity_inputs supports both forms.
+identity_inputs = [Path("./configs/activitysim")]
+identity_inputs = [("asim_config", Path("./configs/activitysim"))]
+```

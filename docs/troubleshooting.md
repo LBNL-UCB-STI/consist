@@ -24,15 +24,15 @@ New run/trace/scenario validation errors follow a consistent structure:
 
 Common messages and fixes:
 
-### "Pass either identity_inputs= or hash_inputs=, not both."
+### "unexpected keyword argument 'hash_inputs'"
 
-- `Cause`: both new (`identity_inputs`) and legacy (`hash_inputs`) identity kwargs were provided.
-- `Fix`: use the recommended path and keep only `identity_inputs=...`.
+- `Cause`: `hash_inputs` is no longer accepted on run/trace/scenario public surfaces.
+- `Fix`: use `identity_inputs=[...]`.
 
-### "Pass either adapter= or config_plan=, not both."
+### "unexpected keyword argument 'config_plan'"
 
-- `Cause`: both adapter-driven identity and legacy config-plan identity were provided.
-- `Fix`: use the recommended path and keep only `adapter=...`.
+- `Cause`: `config_plan` is no longer accepted on run/trace/scenario public surfaces.
+- `Fix`: pass `adapter=...` (and optional `identity_inputs=[...]`) instead.
 
 ### "identity_inputs/hash_inputs must be a list of paths."
 

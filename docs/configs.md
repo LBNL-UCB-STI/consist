@@ -34,9 +34,8 @@ Relevant arguments:
 - `facet_schema_version: str|int|None`
 - `facet_index: bool` (default `True`)
 
-`config_plan` and `hash_inputs` are hidden compatibility kwargs for migration;
-they are still accepted, but they are not the recommended public run/trace
-surface.
+`config_plan` and `hash_inputs` are not accepted on these run/trace surfaces.
+Use `adapter` and `identity_inputs`.
 
 ## Identity Hashing
 
@@ -109,6 +108,29 @@ Digests are recorded in:
 
 - `config["__consist_hash_inputs__"]` (identity-only payload)
 - `run.meta["consist_hash_inputs"]` (audit/debugging)
+
+### Concise and Explicit Forms
+
+`identity_inputs` itself must be a list, and each list item can be either:
+
+- a bare `Path`/`str` entry
+- or a `(label, path)` tuple
+
+```python
+from pathlib import Path
+
+config_root = Path("./configs/activitysim")
+coeffs_csv = config_root / "tour_mode_choice_coefficients.csv"
+
+# Concise: bare paths (labels auto-derived)
+identity_inputs = [config_root, coeffs_csv]
+
+# Explicit: tuple labels (stable names in identity summaries)
+identity_inputs = [
+    ("asim_config", config_root),
+    ("tour_mode_coeffs", coeffs_csv),
+]
+```
 
 ### When to Use Identity Inputs
 

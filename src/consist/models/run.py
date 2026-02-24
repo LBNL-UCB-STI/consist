@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field as PydanticField
 
@@ -18,6 +19,9 @@ from sqlmodel import Field, SQLModel
 from consist.models.artifact import Artifact, UUIDType
 
 UTC = timezone.utc
+
+if TYPE_CHECKING:
+    from consist.core.tracker import Tracker
 
 
 class RunArtifactLink(SQLModel, table=True):
@@ -280,6 +284,26 @@ class RunResult(BaseModel):
 
     def as_dict(self) -> Dict[str, Artifact]:
         return dict(self.outputs)
+
+    def output_path(self, key: str, tracker: Optional["Tracker"] = None) -> Path:
+        """
+        Resolve a run output key to a filesystem path.
+
+        Parameters
+        ----------
+        key : str
+            Output artifact key to resolve.
+        tracker : Optional[Tracker], optional
+            Explicit tracker to use for URI resolution when the artifact is
+            detached from tracker context.
+
+        Returns
+        -------
+        Path
+            Resolved filesystem path for the selected output artifact.
+        """
+        artifact = resolve_run_result_output(self, key=key)
+        return artifact.as_path(tracker=tracker)
 
 
 def resolve_run_result_output(

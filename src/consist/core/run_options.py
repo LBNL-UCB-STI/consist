@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Final, Mapping, Optional, Union
 
+from consist.core.error_messages import format_problem_cause_fix
 from consist.types import (
     CacheOptions,
     CodeIdentityMode,
@@ -73,6 +74,49 @@ def raise_legacy_policy_kwargs_error(
     raise TypeError(
         f"{api_name} no longer accepts legacy policy {plural}: {quoted_keys}. "
         f"Use options objects instead: {guidance}."
+    )
+
+
+def resolve_runtime_kwargs_alias(
+    *,
+    api_name: str,
+    execution_options: Optional[ExecutionOptions] = None,
+    runtime_kwargs: Optional[Mapping[str, Any]] = None,
+) -> Optional[ExecutionOptions]:
+    """
+    Normalize top-level ``runtime_kwargs`` into ``ExecutionOptions``.
+    """
+    if runtime_kwargs is None:
+        return execution_options
+
+    if execution_options is not None and execution_options.runtime_kwargs is not None:
+        raise ValueError(
+            format_problem_cause_fix(
+                problem=(
+                    f"{api_name} received both top-level runtime_kwargs and "
+                    "execution_options.runtime_kwargs."
+                ),
+                cause=(
+                    "Runtime kwargs were provided in two places, making intent "
+                    "ambiguous."
+                ),
+                fix=(
+                    "Provide runtime kwargs in exactly one place: either "
+                    "runtime_kwargs={...} or "
+                    "execution_options=ExecutionOptions(runtime_kwargs={...})."
+                ),
+            )
+        )
+
+    if execution_options is None:
+        return ExecutionOptions(runtime_kwargs=runtime_kwargs)
+
+    return ExecutionOptions(
+        load_inputs=execution_options.load_inputs,
+        executor=execution_options.executor,
+        container=execution_options.container,
+        runtime_kwargs=runtime_kwargs,
+        inject_context=execution_options.inject_context,
     )
 
 

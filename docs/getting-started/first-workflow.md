@@ -7,7 +7,8 @@ This tutorial builds a two-step data pipeline demonstrating artifact passing, ca
 Install Consist first and ensure your environment can write Parquet files:
 
 - Base installation instructions: [Installation](installation.md)
-- Parquet engine required for this tutorial: `pip install "consist[parquet]"`
+- Parquet engine required for this tutorial (from a local clone):
+  `pip install -e ".[parquet]"`
 
 ## Create Input Data
 
@@ -175,3 +176,4 @@ This workflow demonstrated:
 - **[Config Management](../concepts/config-management.md)** — Control which parameters affect caching
 - **[Caching & Hydration](../concepts/caching-and-hydration.md)** — Advanced cache strategies and data recovery
 - **[Data Materialization](../concepts/data-materialization.md)** — Ingest artifacts for SQL analysis
+- **[Building a Domain Tracker](../building-domain-tracker.md)** — Wrap Consist behind domain verbs

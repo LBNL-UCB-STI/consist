@@ -8,9 +8,11 @@ from typing import (
     Callable,
     Iterable,
     Literal,
+    Mapping,
     NamedTuple,
     Optional,
     Protocol,
+    Sequence,
     TYPE_CHECKING,
     Union,
     runtime_checkable,
@@ -20,6 +22,7 @@ from sqlmodel import SQLModel
 
 from consist.core.identity import IdentityManager
 from consist.models.run import Run
+from consist.types import IdentityInputs
 
 RowFactory = Callable[[str], Iterable[dict[str, Any]]]
 RowSource = Union[Iterable[dict[str, Any]], RowFactory]
@@ -380,7 +383,9 @@ class SupportsRunWithConfigOverrides(Protocol):
         self,
         *,
         tracker: "Tracker",
-        base_run_id: str,
+        base_run_id: Optional[str] = None,
+        base_config_dirs: Optional[Sequence[Path]] = None,
+        base_primary_config: Optional[Path] = None,
         overrides: Any,
         output_dir: Path,
         fn: Callable[..., Any],
@@ -390,7 +395,10 @@ class SupportsRunWithConfigOverrides(Protocol):
         outputs: Optional[list[str]] = None,
         execution_options: Any = None,
         strict: bool = True,
+        identity_inputs: IdentityInputs = None,
+        resolved_config_identity: Literal["auto", "off"] = "auto",
         identity_label: str = "activitysim_config",
+        override_runtime_kwargs: Optional[Mapping[str, Any]] = None,
         **run_kwargs: Any,
     ) -> Any: ...
 
@@ -525,5 +533,8 @@ def compute_config_pack_hash(
     digest_map: dict[str, str] = {}
     for idx, root_dir in enumerate(root_dirs):
         label = f"config_dir_{idx}:{root_dir}"
-        digest_map[label] = identity.digest_path(root_dir)
+        digest_map[label] = identity.digest_path(
+            root_dir,
+            hashing_strategy_override="full",
+        )
     return identity.canonical_json_sha256({"config_dirs": digest_map})

@@ -11,7 +11,7 @@ import uuid
 import weakref
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Literal, Optional
 
 from pydantic import PrivateAttr
 from sqlalchemy import JSON, Column
@@ -25,6 +25,11 @@ from sqlmodel import Field, SQLModel
 from consist.types import DriverType
 
 UTC = timezone.utc
+
+if TYPE_CHECKING:
+    import pandas as pd
+
+    from consist.core.tracker import Tracker
 
 
 def get_tracker_ref(artifact: Any) -> Optional[weakref.ReferenceType[Any]]:
@@ -226,6 +231,42 @@ class Artifact(SQLModel, table=True):
         if self.abs_path:
             return Path(self.abs_path)
         return Path(self.container_uri)
+
+    def as_path(self, tracker: Optional["Tracker"] = None) -> Path:
+        """
+        Resolve this artifact to a filesystem path.
+
+        When ``tracker`` is provided, URI resolution uses that tracker directly.
+        Otherwise this falls back to the attached tracker context (if any), then
+        runtime absolute path, then raw URI path.
+        """
+        if tracker is not None:
+            return Path(tracker.resolve_uri(self.container_uri))
+        return self.path
+
+    def as_df(
+        self,
+        tracker: Optional["Tracker"] = None,
+        *,
+        db_fallback: Literal["inputs-only", "always", "never"] = "inputs-only",
+        close: bool = True,
+        **kwargs: Any,
+    ) -> "pd.DataFrame":
+        """
+        Load this artifact as a pandas DataFrame.
+
+        This is equivalent to ``consist.load_df(self, ...)`` and supports the same
+        loader options.
+        """
+        from consist.api import load_df
+
+        return load_df(
+            self,
+            tracker=tracker,
+            db_fallback=db_fallback,
+            close=close,
+            **kwargs,
+        )
 
     # --- Format Helpers ---
 

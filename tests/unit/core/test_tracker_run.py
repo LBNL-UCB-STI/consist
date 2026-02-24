@@ -11,6 +11,8 @@ import pytest
 import consist
 from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
 from consist.core.tracker import Tracker
+from consist.models.artifact import Artifact
+from consist.models.run import RunResult
 from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
 
 
@@ -132,6 +134,105 @@ def test_run_with_config_overrides_requires_supporting_adapter(tracker, tmp_path
             output_dir=tmp_path / "materialized",
             fn=lambda: None,
             name="override_step",
+        )
+
+
+def test_run_with_config_overrides_rejects_multiple_base_selectors(tracker, tmp_path):
+    class _Adapter:
+        def run_with_config_overrides(
+            self, **kwargs
+        ):  # pragma: no cover - should not be called
+            raise AssertionError("adapter delegation should not occur")
+
+    with pytest.raises(ValueError, match="exactly one base selector"):
+        tracker.run_with_config_overrides(
+            adapter=_Adapter(),
+            base_run_id="baseline",
+            base_config_dirs=[tmp_path],
+            overrides={},
+            output_dir=tmp_path / "materialized",
+            fn=lambda: None,
+            name="override_step_dual_selector",
+        )
+
+
+def test_run_with_config_overrides_requires_base_selector(tracker, tmp_path):
+    class _Adapter:
+        def run_with_config_overrides(
+            self, **kwargs
+        ):  # pragma: no cover - should not be called
+            raise AssertionError("adapter delegation should not occur")
+
+    with pytest.raises(ValueError, match="requires a base selector"):
+        tracker.run_with_config_overrides(
+            adapter=_Adapter(),
+            overrides={},
+            output_dir=tmp_path / "materialized_missing_selector",
+            fn=lambda: None,
+            name="override_step_missing_selector",
+        )
+
+
+def test_run_with_config_overrides_rejects_blank_base_run_id(tracker, tmp_path):
+    class _Adapter:
+        def run_with_config_overrides(
+            self, **kwargs
+        ):  # pragma: no cover - should not be called
+            raise AssertionError("adapter delegation should not occur")
+
+    with pytest.raises(ValueError, match="base_run_id must be a non-empty string"):
+        tracker.run_with_config_overrides(
+            adapter=_Adapter(),
+            base_run_id="   ",
+            overrides={},
+            output_dir=tmp_path / "materialized_blank_run_id",
+            fn=lambda: None,
+            name="override_step_blank_run_id",
+        )
+
+
+def test_run_with_config_overrides_rejects_empty_base_config_dirs(tracker, tmp_path):
+    class _Adapter:
+        def run_with_config_overrides(
+            self, **kwargs
+        ):  # pragma: no cover - should not be called
+            raise AssertionError("adapter delegation should not occur")
+
+    with pytest.raises(
+        ValueError,
+        match="base_config_dirs must contain at least one directory",
+    ):
+        tracker.run_with_config_overrides(
+            adapter=_Adapter(),
+            base_config_dirs=[],
+            overrides={},
+            output_dir=tmp_path / "materialized_empty_base_config_dirs",
+            fn=lambda: None,
+            name="override_step_empty_base_config_dirs",
+        )
+
+
+def test_run_with_config_overrides_rejects_invalid_resolved_config_identity(
+    tracker, tmp_path
+):
+    class _Adapter:
+        def run_with_config_overrides(
+            self, **kwargs
+        ):  # pragma: no cover - should not be called
+            raise AssertionError("adapter delegation should not occur")
+
+    with pytest.raises(
+        ValueError,
+        match="resolved_config_identity must be either 'auto' or 'off'",
+    ):
+        tracker.run_with_config_overrides(
+            adapter=_Adapter(),
+            base_run_id="baseline",
+            overrides={},
+            output_dir=tmp_path / "materialized_invalid_identity_mode",
+            fn=lambda: None,
+            name="override_step_invalid_identity_mode",
+            resolved_config_identity="invalid",
         )
 
 
@@ -499,6 +600,44 @@ def test_tracker_get_run_result_returns_selected_outputs(tracker):
 
     subset = tracker.get_run_result(produced.run.id, keys=["b"])
     assert list(subset.outputs.keys()) == ["b"]
+
+
+def test_run_result_output_path_resolves_immediate_and_historical_outputs(tracker):
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "out.txt").write_text("ok")
+
+    produced = tracker.run(
+        fn=step,
+        output_paths={"out": "out.txt"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert produced.output_path("out") == produced.outputs["out"].path
+
+    historical = tracker.get_run_result(produced.run.id, keys=["out"])
+    assert historical.output_path("out") == produced.outputs["out"].path
+
+
+def test_run_result_output_path_supports_explicit_tracker_fallback(tracker):
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "out.txt").write_text("ok")
+
+    produced = tracker.run(
+        fn=step,
+        output_paths={"out": "out.txt"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    detached_output = Artifact.model_validate(produced.outputs["out"].model_dump())
+    detached_result = RunResult(
+        run=produced.run,
+        outputs={"out": detached_output},
+        cache_hit=False,
+    )
+
+    resolved = detached_result.output_path("out", tracker=tracker)
+    assert resolved == produced.outputs["out"].path
 
 
 def test_tracker_get_run_result_validates_keys_and_run_id(tracker):

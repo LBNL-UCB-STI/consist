@@ -55,8 +55,34 @@ with tracker.trace(
     simulate_inline()
 ```
 
-`config_plan` and `hash_inputs` are hidden compatibility kwargs, not the
-recommended public kwargs for new run/trace calls.
+`config_plan` and `hash_inputs` are not accepted on `Tracker.run(...)` and
+`Tracker.trace(...)`. Use `adapter` and `identity_inputs`.
+
+## Config Override Selectors
+
+`Tracker.run_with_config_overrides(...)` now supports one-of base selectors:
+
+- `base_run_id="existing_run_id"` for historical bundle/config artifacts
+- `base_config_dirs=[Path("configs"), ...]` for first-run override execution
+
+Use exactly one selector. Passing both raises a `ValueError`.
+
+`base_primary_config=...` is optional and only applies with
+`base_config_dirs` (for adapters that require/accept a primary config hint).
+
+`run_with_config_overrides(...)` also accepts:
+
+- `identity_inputs=[...]`: additive hash-only inputs. These are merged with the
+  adapter-resolved config identity when enabled.
+- `resolved_config_identity="auto" | "off"`:
+  - `"auto"` (default) injects the adapter-selected resolved config root into
+    identity hashing using `identity_label`.
+  - `"off"` disables that auto injection and keeps only user-provided
+    `identity_inputs`.
+
+For override runs, Consist persists standardized run metadata:
+`run.meta["resolved_config_identity"]` with `mode`, `adapter`, `label`, `path`,
+and `digest`.
 
 ::: consist.core.tracker.Tracker
     options:

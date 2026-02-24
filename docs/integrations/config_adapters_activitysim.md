@@ -88,8 +88,8 @@ with use_tracker(tracker):
         run_activitysim()
 ```
 
-`config_plan` is still accepted as a compatibility kwarg, but it is not the
-recommended public run/trace surface.
+`config_plan` is not accepted on run/trace public surfaces. Use `adapter=...`
+and `identity_inputs=...`.
 
 You can still precompute plans for validation and orchestration workflows:
 
@@ -172,7 +172,47 @@ coef = adapter.get_coefficient_value(
 )
 ```
 
-For end-to-end override execution, use tracker-level delegation:
+For end-to-end override execution with no prior run, use config roots directly:
+
+```python
+result = tracker.run_with_config_overrides(
+    adapter=adapter,
+    base_config_dirs=[overlay_dir, base_dir],
+    base_primary_config=Path("settings.yaml"),  # optional hint
+    overrides=ConfigOverrides(
+        coefficients={("accessibility_coefficients.csv", "time", ""): 2.3}
+    ),
+    output_dir=Path("temp/materialized"),
+    fn=run_model_step,
+    name="activitysim_calibration_step",
+    model="activitysim",
+    config={"iteration": 2},
+)
+```
+
+`run_with_config_overrides(...)` supports additive manual identity inputs:
+
+```python
+result = tracker.run_with_config_overrides(
+    adapter=adapter,
+    base_config_dirs=[overlay_dir, base_dir],
+    overrides=ConfigOverrides(),
+    output_dir=Path("temp/materialized"),
+    fn=run_model_step,
+    name="activitysim_calibration_step",
+    identity_inputs=[("manual_context", Path("calibration_notes.yaml"))],
+)
+```
+
+By default, the adapter also auto-adds the selected resolved config root to
+identity hashing (`resolved_config_identity="auto"`). To disable this escape
+hatch, pass `resolved_config_identity="off"` and only your manual
+`identity_inputs` are used.
+
+Each override run stores `run.meta["resolved_config_identity"]` with:
+`mode`, `adapter`, `label`, `path`, and `digest`.
+
+You can still use a historical run as the base selector:
 
 ```python
 result = tracker.run_with_config_overrides(

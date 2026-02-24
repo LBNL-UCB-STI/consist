@@ -529,7 +529,7 @@ def run(
         The Tracker instance responsible for provenance and caching.
         If None, the active global tracker is resolved.
     adapter : Optional[ConfigAdapter]
-        Config adapter used to derive a config plan before execution.
+        Config adapter used to resolve adapter-driven identity for the run.
     identity_inputs : IdentityInputs
         Additional hash-only identity inputs that contribute to cache keys.
     cache_options : Optional[CacheOptions]
@@ -783,7 +783,7 @@ def trace(
     tracker : Optional[Tracker]
         The tracker instance to use.
     adapter : Optional[ConfigAdapter]
-        Config adapter used to derive a config plan before execution.
+        Config adapter used to resolve adapter-driven identity for the trace.
     identity_inputs : IdentityInputs
         Additional hash-only identity inputs that contribute to cache keys.
     **kwargs : Any

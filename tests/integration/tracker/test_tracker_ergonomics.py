@@ -97,6 +97,32 @@ def test_run_output_helpers(tracker: Tracker, run_dir):
     assert df.shape[0] == 1
 
 
+def test_artifact_accessor_helpers_support_attached_and_explicit_tracker(
+    tracker: Tracker, run_dir
+):
+    output_path = run_dir / "artifact_helpers.csv"
+    output_path.write_text("a,b\n1,2\n", encoding="utf-8")
+
+    with tracker.start_run("artifact_helpers_run", "artifact_helpers_model"):
+        tracker.log_output(output_path, key="results")
+
+    historical = tracker.get_run_result("artifact_helpers_run", keys=["results"])
+    attached_artifact = historical.outputs["results"]
+
+    assert attached_artifact.as_path() == output_path
+    attached_df = attached_artifact.as_df()
+    assert attached_df["a"].tolist() == [1]
+    assert attached_df["b"].tolist() == [2]
+
+    detached = Artifact.model_validate(attached_artifact.model_dump())
+    with pytest.raises(RuntimeError, match="requires a Tracker instance"):
+        detached.as_df()
+
+    assert detached.as_path(tracker=tracker) == output_path
+    fallback_df = detached.as_df(tracker=tracker)
+    assert fallback_df.equals(attached_df)
+
+
 def test_run_config_snapshot_access(tracker: Tracker):
     """
     Verifies run config snapshot access via Tracker helpers.

@@ -21,6 +21,7 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    Sequence,
     TYPE_CHECKING,
     Tuple,
     Type,
@@ -1198,6 +1199,7 @@ class Tracker:
         cache_options: Optional[CacheOptions] = None,
         output_policy: Optional[OutputPolicyOptions] = None,
         execution_options: Optional[ExecutionOptions] = None,
+        runtime_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> RunResult:
         """
         Execute a function-shaped run with caching and output handling.
@@ -1281,6 +1283,10 @@ class Tracker:
         execution_options : Optional[ExecutionOptions], optional
             Grouped execution controls (`load_inputs`, `executor`, `container`,
             `runtime_kwargs`, `inject_context`).
+        runtime_kwargs : Optional[Mapping[str, Any]], optional
+            Top-level alias for `execution_options.runtime_kwargs`. This is
+            mutually exclusive with
+            `execution_options=ExecutionOptions(runtime_kwargs=...)`.
 
         Returns
         -------
@@ -1360,13 +1366,16 @@ class Tracker:
             cache_options=cache_options,
             output_policy=output_policy,
             execution_options=execution_options,
+            runtime_kwargs=runtime_kwargs,
         )
 
     def run_with_config_overrides(
         self,
         *,
         adapter: SupportsRunWithConfigOverrides,
-        base_run_id: str,
+        base_run_id: Optional[str] = None,
+        base_config_dirs: Optional[Sequence[Path]] = None,
+        base_primary_config: Optional[Path] = None,
         overrides: Any,
         output_dir: Path,
         fn: Callable[..., Any],
@@ -1376,7 +1385,10 @@ class Tracker:
         outputs: Optional[List[str]] = None,
         execution_options: Optional[ExecutionOptions] = None,
         strict: bool = True,
+        identity_inputs: IdentityInputs = None,
+        resolved_config_identity: Literal["auto", "off"] = "auto",
         identity_label: str = "activitysim_config",
+        override_runtime_kwargs: Optional[Mapping[str, Any]] = None,
         **run_kwargs: Any,
     ) -> RunResult:
         """
@@ -1384,6 +1396,11 @@ class Tracker:
 
         The tracker remains adapter-agnostic by forwarding to
         ``adapter.run_with_config_overrides(...)`` when available.
+
+        Exactly one base selector is required:
+        ``base_run_id`` or ``base_config_dirs``.
+        ``base_primary_config`` is optional and only applies to
+        ``base_config_dirs`` flows.
         """
         if not isinstance(adapter, SupportsRunWithConfigOverrides):
             raise TypeError(
@@ -1401,9 +1418,32 @@ class Tracker:
                     ),
                 )
             )
+        if base_run_id is not None and base_config_dirs is not None:
+            raise ValueError(
+                "run_with_config_overrides requires exactly one base selector. "
+                "Provide either base_run_id or base_config_dirs, not both."
+            )
+        if base_run_id is None and base_config_dirs is None:
+            raise ValueError(
+                "run_with_config_overrides requires a base selector. "
+                "Provide either base_run_id or base_config_dirs."
+            )
+        if base_run_id is not None and not str(base_run_id).strip():
+            raise ValueError("base_run_id must be a non-empty string when provided.")
+        if base_config_dirs is not None and len(base_config_dirs) == 0:
+            raise ValueError(
+                "base_config_dirs must contain at least one directory when provided."
+            )
+        if resolved_config_identity not in {"auto", "off"}:
+            raise ValueError(
+                "resolved_config_identity must be either 'auto' or 'off'. "
+                f"Got {resolved_config_identity!r}."
+            )
         return adapter.run_with_config_overrides(
             tracker=self,
             base_run_id=base_run_id,
+            base_config_dirs=base_config_dirs,
+            base_primary_config=base_primary_config,
             overrides=overrides,
             output_dir=output_dir,
             fn=fn,
@@ -1413,7 +1453,10 @@ class Tracker:
             outputs=outputs,
             execution_options=execution_options,
             strict=strict,
+            identity_inputs=identity_inputs,
+            resolved_config_identity=resolved_config_identity,
             identity_label=identity_label,
+            override_runtime_kwargs=override_runtime_kwargs,
             **run_kwargs,
         )
 
@@ -4832,6 +4875,19 @@ class Tracker:
         even if the subsequent database synchronization fails.
         """
         self.persistence.flush_json()
+
+    def _flush_run_snapshot(self, run: Run) -> None:
+        """
+        Flush JSON snapshots for a specific run record.
+
+        This supports post-run metadata updates (for example adapter-managed
+        identity metadata) when no active run context exists.
+        """
+        if self.current_consist is not None and self.current_consist.run.id == run.id:
+            self._flush_json()
+            return
+        if self._last_consist is not None and self._last_consist.run.id == run.id:
+            self.persistence.flush_record_json(self._last_consist)
 
     def _sync_run_to_db(self, run: Run) -> None:
         """

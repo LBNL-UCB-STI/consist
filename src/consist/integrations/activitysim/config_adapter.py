@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import gzip
+import inspect
 import json
 import logging
 import shutil
@@ -16,6 +17,7 @@ from typing import (
     Dict,
     Iterable,
     Literal,
+    Mapping,
     Optional,
     Sequence,
     Set,
@@ -49,7 +51,7 @@ from consist.models.run import Run
 if TYPE_CHECKING:  # pragma: no cover
     from consist.core.tracker import Tracker
     from consist.models.run import RunResult
-    from consist.types import ExecutionOptions
+    from consist.types import ExecutionOptions, IdentityInputs
 
 try:
     import yaml
@@ -98,6 +100,10 @@ _PROBABILITIES_META_KEYS = {
     "tour_hour",
     "trip_num",
     "vehicle_year",
+}
+
+_DEFAULT_OVERRIDE_RUNTIME_KWARGS: dict[str, str] = {
+    "config_dir": "selected_root_dir",
 }
 
 
@@ -726,6 +732,418 @@ class ActivitySimConfigAdapter:
             identity=tracker.identity,
             strict=strict,
         )
+        return self._with_ordered_root_dirs(canonical)
+
+    def materialize_from_config_dirs(
+        self,
+        *,
+        base_config_dirs: Sequence[Path],
+        base_primary_config: Path | None,
+        overrides: "ConfigOverrides",
+        output_dir: Path,
+        identity: IdentityManager,
+        strict: bool = True,
+    ) -> CanonicalConfig:
+        """
+        Materialize ActivitySim overrides directly from config directories.
+        """
+        if yaml is None:
+            raise ImportError("PyYAML is required for ActivitySim canonicalization.")
+        if output_dir.exists() and any(output_dir.iterdir()):
+            raise ValueError(f"output_dir must be empty: {output_dir}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        resolved_base_dirs = self._resolve_base_config_dirs(base_config_dirs)
+        resolved_primary = self._resolve_primary_config_hint(
+            base_primary_config=base_primary_config,
+            base_root_dirs=resolved_base_dirs,
+        )
+        staged_root_dirs = self._copy_root_dirs(
+            base_root_dirs=resolved_base_dirs,
+            output_dir=output_dir,
+        )
+
+        for (file_name, key), value in overrides.constants.items():
+            _apply_yaml_override(
+                file_name=file_name,
+                key=key,
+                value=value,
+                config_dirs=staged_root_dirs,
+            )
+        for (
+            file_name,
+            coefficient_name,
+            segment,
+        ), value in overrides.coefficients.items():
+            _apply_coefficients_override(
+                file_name=file_name,
+                coefficient_name=coefficient_name,
+                segment=segment,
+                value=value,
+                config_dirs=staged_root_dirs,
+            )
+
+        content_hash = identity.canonical_json_sha256(
+            {
+                "base_config_hash": compute_config_pack_hash(
+                    root_dirs=resolved_base_dirs,
+                    identity=identity,
+                ),
+                "overrides": overrides.to_canonical_dict(),
+                "adapter_version": self.adapter_version,
+            }
+        )
+
+        discovered = self.discover(staged_root_dirs, identity=identity, strict=strict)
+        staged_primary = self._map_path_to_staged_roots(
+            path=resolved_primary,
+            base_root_dirs=resolved_base_dirs,
+            staged_root_dirs=staged_root_dirs,
+        )
+        canonical = CanonicalConfig(
+            root_dirs=discovered.root_dirs,
+            primary_config=staged_primary or discovered.primary_config,
+            config_files=discovered.config_files,
+            external_files=discovered.external_files,
+            content_hash=content_hash,
+        )
+        return self._with_ordered_root_dirs(canonical)
+
+    def run_with_config_overrides(
+        self,
+        *,
+        tracker: "Tracker",
+        base_run_id: str | None = None,
+        base_config_dirs: Sequence[Path] | None = None,
+        base_primary_config: Path | None = None,
+        overrides: "ConfigOverrides",
+        output_dir: Path,
+        fn: Any,
+        name: str,
+        model: str | None = None,
+        config: dict[str, Any] | None = None,
+        outputs: list[str] | None = None,
+        execution_options: "ExecutionOptions" | None = None,
+        strict: bool = True,
+        identity_inputs: "IdentityInputs" = None,
+        resolved_config_identity: Literal["auto", "off"] = "auto",
+        identity_label: str = "activitysim_config",
+        override_runtime_kwargs: Mapping[str, Any] | None = None,
+        **run_kwargs: Any,
+    ) -> "RunResult":
+        """
+        Materialize override configs and execute a tracker run with identity wiring.
+
+        The staged config directory is deterministic for a (base selector, overrides)
+        combination so repeated invocations preserve adapter identity and cache hits.
+        By default, selected override roots are injected into runtime kwargs
+        (``config_dir`` -> selected root) when the callable accepts them.
+        """
+        for forbidden in ("adapter", "config_plan", "hash_inputs"):
+            if forbidden in run_kwargs:
+                raise ValueError(
+                    "run_with_config_overrides does not accept "
+                    f"{forbidden}= in run kwargs."
+                )
+        runtime_kwargs = run_kwargs.pop("runtime_kwargs", None)
+        if (
+            runtime_kwargs is not None
+            and execution_options is not None
+            and execution_options.runtime_kwargs is not None
+        ):
+            raise ValueError(
+                "run_with_config_overrides received runtime kwargs in both "
+                "runtime_kwargs= and execution_options.runtime_kwargs=. "
+                "Use exactly one runtime kwargs source, and use "
+                "override_runtime_kwargs=... to map adapter-derived override "
+                "roots (for example selected_root_dir) into callable kwargs."
+            )
+        if not identity_label or not identity_label.strip():
+            raise ValueError("identity_label must be a non-empty string.")
+        if resolved_config_identity not in {"auto", "off"}:
+            raise ValueError(
+                "resolved_config_identity must be either 'auto' or 'off'. "
+                f"Got {resolved_config_identity!r}."
+            )
+        if output_dir.exists() and not output_dir.is_dir():
+            raise ValueError(f"output_dir must be a directory path: {output_dir!s}")
+
+        base_selector = self._resolve_override_base_selector(
+            base_run_id=base_run_id,
+            base_config_dirs=base_config_dirs,
+            base_primary_config=base_primary_config,
+        )
+        resolved_base_dirs: list[Path] | None = None
+        resolved_primary_hint: Path | None = None
+        selector_identity: dict[str, Any]
+        if base_selector["kind"] == "run_id":
+            selector_identity = {
+                "selector": "base_run_id",
+                "base_run_id": base_selector["run_id"],
+            }
+        else:
+            resolved_base_dirs = self._resolve_base_config_dirs(
+                base_selector["config_dirs"]
+            )
+            resolved_primary_hint = self._resolve_primary_config_hint(
+                base_primary_config=base_primary_config,
+                base_root_dirs=resolved_base_dirs,
+            )
+            selector_identity = {
+                "selector": "base_config_dirs",
+                "base_config_hash": compute_config_pack_hash(
+                    root_dirs=resolved_base_dirs,
+                    identity=tracker.identity,
+                ),
+                "base_primary_config": self._primary_config_selector_identity(
+                    primary_config=resolved_primary_hint,
+                    base_root_dirs=resolved_base_dirs,
+                ),
+            }
+
+        override_key = tracker.identity.canonical_json_sha256(
+            {
+                "base_selector": selector_identity,
+                "overrides": overrides.to_canonical_dict(),
+                "adapter_version": self.adapter_version,
+            }
+        )
+        staged_output_dir = output_dir / f"override_{override_key[:16]}"
+        if staged_output_dir.exists():
+            shutil.rmtree(staged_output_dir)
+
+        if base_selector["kind"] == "run_id":
+            materialized = self.materialize_from_run(
+                tracker=tracker,
+                run_id=base_selector["run_id"],
+                overrides=overrides,
+                output_dir=staged_output_dir,
+                strict=strict,
+            )
+        else:
+            materialized = self.materialize_from_config_dirs(
+                base_config_dirs=resolved_base_dirs
+                if resolved_base_dirs is not None
+                else base_selector["config_dirs"],
+                base_primary_config=resolved_primary_hint,
+                overrides=overrides,
+                output_dir=staged_output_dir,
+                identity=tracker.identity,
+                strict=strict,
+            )
+
+        selected_root = self.select_root_dir(materialized)
+        run_adapter = replace(self, root_dirs=list(materialized.root_dirs))
+        existing_runtime_kwargs = (
+            runtime_kwargs
+            if runtime_kwargs is not None
+            else (execution_options.runtime_kwargs if execution_options else None)
+        )
+        injected_runtime_kwargs = self._build_override_runtime_kwargs(
+            fn=fn,
+            selected_root=selected_root,
+            root_dirs=materialized.root_dirs,
+            explicit_mapping=override_runtime_kwargs,
+            existing_runtime_kwargs=existing_runtime_kwargs,
+        )
+        merged_runtime_kwargs: dict[str, Any] = {}
+        if existing_runtime_kwargs is not None:
+            merged_runtime_kwargs.update(existing_runtime_kwargs)
+        merged_runtime_kwargs.update(injected_runtime_kwargs)
+        resolved_execution_options = execution_options
+        if runtime_kwargs is not None or injected_runtime_kwargs:
+            if execution_options is None:
+                from consist.types import ExecutionOptions
+
+                resolved_execution_options = ExecutionOptions(
+                    runtime_kwargs=merged_runtime_kwargs
+                )
+            else:
+                resolved_execution_options = replace(
+                    execution_options,
+                    runtime_kwargs=merged_runtime_kwargs,
+                )
+
+        auto_identity_label = identity_label.strip()
+        merged_identity_inputs: list[Any] = list(identity_inputs or [])
+        auto_identity_path: Path | None = None
+        if resolved_config_identity == "auto":
+            auto_identity_path = selected_root
+            merged_identity_inputs.append((auto_identity_label, selected_root))
+        resolved_identity_inputs = merged_identity_inputs or None
+
+        run_result = tracker.run(
+            fn=fn,
+            name=name,
+            model=model,
+            config=config,
+            adapter=run_adapter,
+            identity_inputs=resolved_identity_inputs,
+            outputs=outputs,
+            execution_options=resolved_execution_options,
+            **run_kwargs,
+        )
+        auto_digest: str | None = None
+        if resolved_config_identity == "auto":
+            consist_hash_inputs = (
+                run_result.run.meta.get("consist_hash_inputs")
+                if isinstance(run_result.run.meta, dict)
+                else None
+            )
+            if isinstance(consist_hash_inputs, dict):
+                resolved_digest = consist_hash_inputs.get(auto_identity_label)
+                if isinstance(resolved_digest, str):
+                    auto_digest = resolved_digest
+
+        if run_result.run.meta is None:
+            run_result.run.meta = {}
+        run_result.run.meta["resolved_config_identity"] = {
+            "mode": resolved_config_identity,
+            "adapter": run_adapter.model_name,
+            "label": auto_identity_label,
+            "path": str(auto_identity_path) if auto_identity_path is not None else None,
+            "digest": auto_digest,
+        }
+        tracker._flush_run_snapshot(run_result.run)
+        tracker._sync_run_to_db(run_result.run)
+        return run_result
+
+    @staticmethod
+    def _resolve_override_base_selector(
+        *,
+        base_run_id: str | None,
+        base_config_dirs: Sequence[Path] | None,
+        base_primary_config: Path | None,
+    ) -> dict[str, Any]:
+        if base_run_id is not None and base_config_dirs is not None:
+            raise ValueError(
+                "run_with_config_overrides requires exactly one base selector. "
+                "Provide either base_run_id or base_config_dirs, not both."
+            )
+        if base_run_id is None and base_config_dirs is None:
+            raise ValueError(
+                "run_with_config_overrides requires a base selector. "
+                "Provide either base_run_id or base_config_dirs."
+            )
+        if base_run_id is not None:
+            if base_primary_config is not None:
+                raise ValueError(
+                    "base_primary_config can only be used with base_config_dirs."
+                )
+            resolved_run_id = str(base_run_id).strip()
+            if not resolved_run_id:
+                raise ValueError(
+                    "base_run_id must be a non-empty string when provided."
+                )
+            return {"kind": "run_id", "run_id": resolved_run_id}
+        if base_config_dirs is None or len(base_config_dirs) == 0:
+            raise ValueError(
+                "base_config_dirs must contain at least one directory when provided."
+            )
+        return {"kind": "config_dirs", "config_dirs": list(base_config_dirs)}
+
+    @staticmethod
+    def _resolve_base_config_dirs(base_config_dirs: Sequence[Path]) -> list[Path]:
+        resolved_dirs: list[Path] = []
+        for path_like in base_config_dirs:
+            root_dir = Path(path_like).resolve()
+            if not root_dir.exists():
+                raise FileNotFoundError(
+                    f"Base config directory does not exist: {root_dir!s}"
+                )
+            if not root_dir.is_dir():
+                raise ValueError(
+                    f"base_config_dirs entries must be directories. Got: {root_dir!s}"
+                )
+            resolved_dirs.append(root_dir)
+        if not resolved_dirs:
+            raise ValueError(
+                "base_config_dirs must contain at least one directory when provided."
+            )
+        return resolved_dirs
+
+    @staticmethod
+    def _resolve_primary_config_hint(
+        *,
+        base_primary_config: Path | None,
+        base_root_dirs: Sequence[Path],
+    ) -> Path | None:
+        if base_primary_config is None:
+            return None
+        primary_path = Path(base_primary_config)
+        if primary_path.is_absolute():
+            candidate_paths = [primary_path]
+        else:
+            candidate_paths = [root / primary_path for root in base_root_dirs]
+        for candidate in candidate_paths:
+            if not candidate.exists():
+                continue
+            resolved = candidate.resolve()
+            if any(
+                resolved.is_relative_to(base_root.resolve())
+                for base_root in base_root_dirs
+            ):
+                return resolved
+        raise FileNotFoundError(
+            "base_primary_config was not found under base_config_dirs: "
+            f"{base_primary_config!s}"
+        )
+
+    @staticmethod
+    def _map_path_to_staged_roots(
+        *,
+        path: Path | None,
+        base_root_dirs: Sequence[Path],
+        staged_root_dirs: Sequence[Path],
+    ) -> Path | None:
+        if path is None:
+            return None
+        resolved = path.resolve()
+        for base_root, staged_root in zip(base_root_dirs, staged_root_dirs):
+            base_resolved = base_root.resolve()
+            if resolved.is_relative_to(base_resolved):
+                rel_path = resolved.relative_to(base_resolved)
+                return (staged_root / rel_path).resolve()
+        raise FileNotFoundError(
+            f"base_primary_config was not found under base_config_dirs: {path!s}"
+        )
+
+    @staticmethod
+    def _primary_config_selector_identity(
+        *,
+        primary_config: Path | None,
+        base_root_dirs: Sequence[Path],
+    ) -> dict[str, Any] | None:
+        if primary_config is None:
+            return None
+        resolved = primary_config.resolve()
+        for index, base_root in enumerate(base_root_dirs):
+            base_resolved = base_root.resolve()
+            if resolved.is_relative_to(base_resolved):
+                rel_path = resolved.relative_to(base_resolved).as_posix()
+                return {"root_index": index, "relative_path": rel_path}
+        return {"absolute_path": resolved.as_posix()}
+
+    @staticmethod
+    def _copy_root_dirs(
+        *,
+        base_root_dirs: Sequence[Path],
+        output_dir: Path,
+    ) -> list[Path]:
+        staged_root_dirs: list[Path] = []
+        used_names: set[str] = set()
+        for index, root_dir in enumerate(base_root_dirs):
+            base_name = root_dir.name or f"config_{index}"
+            staged_name = base_name
+            if staged_name in used_names:
+                staged_name = f"{index}_{base_name}"
+            used_names.add(staged_name)
+            staged_root = output_dir / staged_name
+            shutil.copytree(root_dir, staged_root)
+            staged_root_dirs.append(staged_root)
+        return staged_root_dirs
+
+    def _with_ordered_root_dirs(self, canonical: CanonicalConfig) -> CanonicalConfig:
         ordered_roots = self._ordered_root_dirs(canonical)
         if ordered_roots == canonical.root_dirs:
             return canonical
@@ -737,71 +1155,48 @@ class ActivitySimConfigAdapter:
             content_hash=canonical.content_hash,
         )
 
-    def run_with_config_overrides(
-        self,
+    @staticmethod
+    def _build_override_runtime_kwargs(
         *,
-        tracker: "Tracker",
-        base_run_id: str,
-        overrides: "ConfigOverrides",
-        output_dir: Path,
         fn: Any,
-        name: str,
-        model: str | None = None,
-        config: dict[str, Any] | None = None,
-        outputs: list[str] | None = None,
-        execution_options: "ExecutionOptions" | None = None,
-        strict: bool = True,
-        identity_label: str = "activitysim_config",
-        **run_kwargs: Any,
-    ) -> "RunResult":
-        """
-        Materialize override configs and execute a tracker run with identity wiring.
-
-        The staged config directory is deterministic for a (base run, overrides)
-        combination so repeated invocations preserve adapter identity and cache hits.
-        """
-        for forbidden in ("adapter", "identity_inputs", "config_plan", "hash_inputs"):
-            if forbidden in run_kwargs:
-                raise ValueError(
-                    "run_with_config_overrides does not accept "
-                    f"{forbidden}= in run kwargs."
-                )
-        if not identity_label or not identity_label.strip():
-            raise ValueError("identity_label must be a non-empty string.")
-        if output_dir.exists() and not output_dir.is_dir():
-            raise ValueError(f"output_dir must be a directory path: {output_dir!s}")
-
-        override_key = tracker.identity.canonical_json_sha256(
-            {
-                "base_run_id": base_run_id,
-                "overrides": overrides.to_canonical_dict(),
-                "adapter_version": self.adapter_version,
-            }
+        selected_root: Path,
+        root_dirs: Sequence[Path],
+        explicit_mapping: Mapping[str, Any] | None,
+        existing_runtime_kwargs: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        mapping = (
+            dict(explicit_mapping)
+            if explicit_mapping is not None
+            else dict(_DEFAULT_OVERRIDE_RUNTIME_KWARGS)
         )
-        staged_output_dir = output_dir / f"override_{override_key[:16]}"
-        if staged_output_dir.exists():
-            shutil.rmtree(staged_output_dir)
+        existing = dict(existing_runtime_kwargs or {})
+        resolved_sources: dict[str, Any] = {
+            "selected_root_dir": selected_root,
+            "root_dirs": list(root_dirs),
+        }
+        injected: dict[str, Any] = {}
+        for runtime_key, source in mapping.items():
+            if runtime_key in existing:
+                continue
+            if not ActivitySimConfigAdapter._callable_accepts_kwarg(fn, runtime_key):
+                continue
+            if isinstance(source, str) and source in resolved_sources:
+                injected[runtime_key] = resolved_sources[source]
+            else:
+                injected[runtime_key] = source
+        return injected
 
-        materialized = self.materialize_from_run(
-            tracker=tracker,
-            run_id=base_run_id,
-            overrides=overrides,
-            output_dir=staged_output_dir,
-            strict=strict,
-        )
-        selected_root = self.select_root_dir(materialized)
-        run_adapter = replace(self, root_dirs=list(materialized.root_dirs))
-
-        return tracker.run(
-            fn=fn,
-            name=name,
-            model=model,
-            config=config,
-            adapter=run_adapter,
-            identity_inputs=[(identity_label.strip(), selected_root)],
-            outputs=outputs,
-            execution_options=execution_options,
-            **run_kwargs,
+    @staticmethod
+    def _callable_accepts_kwarg(fn: Any, runtime_key: str) -> bool:
+        try:
+            signature = inspect.signature(fn)
+        except (TypeError, ValueError):
+            return False
+        if runtime_key in signature.parameters:
+            return True
+        return any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
         )
 
     def select_root_dir(

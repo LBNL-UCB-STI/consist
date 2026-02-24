@@ -41,9 +41,8 @@ This applies to:
 - `Tracker.run(...)` / `Tracker.trace(...)`
 - `ScenarioContext.run(...)` / `ScenarioContext.trace(...)`
 
-`config_plan=` and `hash_inputs=` are hidden compatibility kwargs. They remain
-accepted for migration compatibility but are not part of the recommended public
-surface for new docs/examples.
+`config_plan=` and `hash_inputs=` are not accepted on these run/trace surfaces.
+Passing them raises `TypeError` (`unexpected keyword argument ...`).
 
 For cache identity debugging, use `run.identity_summary`.
 

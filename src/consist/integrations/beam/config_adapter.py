@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import inspect
 import json
 import logging
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import shutil
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence, TYPE_CHECKING
+from typing import Any, Iterable, Literal, Mapping, Optional, Sequence, TYPE_CHECKING
 
 from sqlmodel import SQLModel
 
@@ -27,6 +28,8 @@ from consist.models.run import Run
 
 if TYPE_CHECKING:  # pragma: no cover
     from consist.core.tracker import Tracker
+    from consist.models.run import RunResult
+    from consist.types import ExecutionOptions, IdentityInputs
 
 try:
     _pyhocon = importlib.import_module("pyhocon")
@@ -41,6 +44,10 @@ except ImportError:  # pragma: no cover
 
 
 _INCLUDE_RE = re.compile(r"^\s*include\s+(?:\"([^\"]+)\"|file\(\"([^\"]+)\"\))")
+
+_DEFAULT_OVERRIDE_RUNTIME_KWARGS: dict[str, str] = {
+    "config_dir": "selected_root_dir",
+}
 
 
 @dataclass(frozen=True)
@@ -262,6 +269,425 @@ class BeamConfigAdapter:
             output_dir=output_dir,
             identity=identity,
             strict=strict,
+        )
+
+    def materialize_from_run(
+        self,
+        tracker: "Tracker",
+        run_id: str,
+        overrides: BeamConfigOverrides,
+        output_dir: Path,
+        strict: bool = True,
+    ) -> CanonicalConfig:
+        run = tracker.get_run(run_id)
+        run_adapter: str | None = None
+        if run is not None and isinstance(run.meta, dict):
+            adapter_value = run.meta.get("config_adapter")
+            if isinstance(adapter_value, str) and adapter_value:
+                run_adapter = adapter_value
+        if run_adapter is not None and run_adapter != self.model_name:
+            raise ValueError(
+                "Base run is not a BEAM config run: "
+                f"run_id={run_id!r}, config_adapter={run_adapter!r}."
+            )
+
+        root_dirs, primary_config = self._resolve_base_config_from_run(tracker, run_id)
+        run_adapter_obj = replace(
+            self, root_dirs=list(root_dirs), primary_config=primary_config
+        )
+        return run_adapter_obj.materialize(
+            list(root_dirs),
+            overrides,
+            output_dir=output_dir,
+            identity=tracker.identity,
+            strict=strict,
+        )
+
+    def run_with_config_overrides(
+        self,
+        *,
+        tracker: "Tracker",
+        base_run_id: str | None = None,
+        base_config_dirs: Sequence[Path] | None = None,
+        base_primary_config: Path | None = None,
+        overrides: BeamConfigOverrides,
+        output_dir: Path,
+        fn: Any,
+        name: str,
+        model: str | None = None,
+        config: dict[str, Any] | None = None,
+        outputs: list[str] | None = None,
+        execution_options: "ExecutionOptions" | None = None,
+        strict: bool = True,
+        identity_inputs: "IdentityInputs" = None,
+        resolved_config_identity: Literal["auto", "off"] = "auto",
+        identity_label: str = "beam_config",
+        override_runtime_kwargs: Mapping[str, Any] | None = None,
+        **run_kwargs: Any,
+    ) -> "RunResult":
+        for forbidden in ("adapter", "config_plan", "hash_inputs"):
+            if forbidden in run_kwargs:
+                raise ValueError(
+                    "run_with_config_overrides does not accept "
+                    f"{forbidden}= in run kwargs."
+                )
+        runtime_kwargs = run_kwargs.pop("runtime_kwargs", None)
+        if (
+            runtime_kwargs is not None
+            and execution_options is not None
+            and execution_options.runtime_kwargs is not None
+        ):
+            raise ValueError(
+                "run_with_config_overrides received runtime kwargs in both "
+                "runtime_kwargs= and execution_options.runtime_kwargs=. "
+                "Use exactly one runtime kwargs source, and use "
+                "override_runtime_kwargs=... to map adapter-derived override "
+                "roots (for example selected_root_dir) into callable kwargs."
+            )
+        if not identity_label or not identity_label.strip():
+            raise ValueError("identity_label must be a non-empty string.")
+        if resolved_config_identity not in {"auto", "off"}:
+            raise ValueError(
+                "resolved_config_identity must be either 'auto' or 'off'. "
+                f"Got {resolved_config_identity!r}."
+            )
+        if output_dir.exists() and not output_dir.is_dir():
+            raise ValueError(f"output_dir must be a directory path: {output_dir!s}")
+
+        base_selector = self._resolve_override_base_selector(
+            base_run_id=base_run_id,
+            base_config_dirs=base_config_dirs,
+            base_primary_config=base_primary_config,
+        )
+        selector_identity: dict[str, Any]
+        if base_selector["kind"] == "run_id":
+            selector_identity = {
+                "selector": "base_run_id",
+                "base_run_id": base_selector["run_id"],
+            }
+        else:
+            resolved_dirs = self._resolve_base_config_dirs(base_selector["config_dirs"])
+            resolved_primary = self._resolve_base_primary_config_for_dirs(
+                base_config_dirs=resolved_dirs,
+                base_primary_config=base_primary_config,
+            )
+            base_adapter = replace(
+                self,
+                root_dirs=list(resolved_dirs),
+                primary_config=resolved_primary,
+            )
+            discovered_base = base_adapter.discover(
+                list(resolved_dirs),
+                identity=tracker.identity,
+                strict=strict,
+            )
+            selector_identity = {
+                "selector": "base_config_dirs",
+                "base_config_hash": discovered_base.content_hash,
+                "base_primary_config": str(resolved_primary),
+            }
+
+        override_key = tracker.identity.canonical_json_sha256(
+            {
+                "base_selector": selector_identity,
+                "overrides": overrides.to_canonical_dict(),
+                "adapter_version": self.adapter_version,
+            }
+        )
+        staged_output_dir = output_dir / f"override_{override_key[:16]}"
+        if staged_output_dir.exists():
+            shutil.rmtree(staged_output_dir)
+
+        if base_selector["kind"] == "run_id":
+            materialized = self.materialize_from_run(
+                tracker=tracker,
+                run_id=base_selector["run_id"],
+                overrides=overrides,
+                output_dir=staged_output_dir,
+                strict=strict,
+            )
+        else:
+            resolved_dirs = self._resolve_base_config_dirs(base_selector["config_dirs"])
+            resolved_primary = self._resolve_base_primary_config_for_dirs(
+                base_config_dirs=resolved_dirs,
+                base_primary_config=base_primary_config,
+            )
+            base_adapter = replace(
+                self,
+                root_dirs=list(resolved_dirs),
+                primary_config=resolved_primary,
+            )
+            materialized = base_adapter.materialize(
+                list(resolved_dirs),
+                overrides,
+                output_dir=staged_output_dir,
+                identity=tracker.identity,
+                strict=strict,
+            )
+        if not materialized.root_dirs:
+            raise ValueError("Materialized BEAM config has no root directories.")
+        selected_root = materialized.root_dirs[0]
+        run_adapter = replace(
+            self,
+            root_dirs=list(materialized.root_dirs),
+            primary_config=materialized.primary_config,
+        )
+
+        existing_runtime_kwargs = (
+            runtime_kwargs
+            if runtime_kwargs is not None
+            else (execution_options.runtime_kwargs if execution_options else None)
+        )
+        injected_runtime_kwargs = self._build_override_runtime_kwargs(
+            fn=fn,
+            selected_root=selected_root,
+            root_dirs=materialized.root_dirs,
+            explicit_mapping=override_runtime_kwargs,
+            existing_runtime_kwargs=existing_runtime_kwargs,
+        )
+        merged_runtime_kwargs: dict[str, Any] = {}
+        if existing_runtime_kwargs is not None:
+            merged_runtime_kwargs.update(existing_runtime_kwargs)
+        merged_runtime_kwargs.update(injected_runtime_kwargs)
+        resolved_execution_options = execution_options
+        if runtime_kwargs is not None or injected_runtime_kwargs:
+            if execution_options is None:
+                from consist.types import ExecutionOptions
+
+                resolved_execution_options = ExecutionOptions(
+                    runtime_kwargs=merged_runtime_kwargs
+                )
+            else:
+                resolved_execution_options = replace(
+                    execution_options,
+                    runtime_kwargs=merged_runtime_kwargs,
+                )
+
+        auto_identity_label = identity_label.strip()
+        merged_identity_inputs: list[Any] = list(identity_inputs or [])
+        auto_identity_path: Path | None = None
+        if resolved_config_identity == "auto":
+            auto_identity_path = selected_root
+            merged_identity_inputs.append((auto_identity_label, selected_root))
+        resolved_identity_inputs = merged_identity_inputs or None
+
+        run_result = tracker.run(
+            fn=fn,
+            name=name,
+            model=model,
+            config=config,
+            adapter=run_adapter,
+            identity_inputs=resolved_identity_inputs,
+            outputs=outputs,
+            execution_options=resolved_execution_options,
+            **run_kwargs,
+        )
+        auto_digest: str | None = None
+        if resolved_config_identity == "auto":
+            consist_hash_inputs = (
+                run_result.run.meta.get("consist_hash_inputs")
+                if isinstance(run_result.run.meta, dict)
+                else None
+            )
+            if isinstance(consist_hash_inputs, dict):
+                resolved_digest = consist_hash_inputs.get(auto_identity_label)
+                if isinstance(resolved_digest, str):
+                    auto_digest = resolved_digest
+
+        if run_result.run.meta is None:
+            run_result.run.meta = {}
+        run_result.run.meta["resolved_config_identity"] = {
+            "mode": resolved_config_identity,
+            "adapter": run_adapter.model_name,
+            "label": auto_identity_label,
+            "path": str(auto_identity_path) if auto_identity_path is not None else None,
+            "digest": auto_digest,
+        }
+        tracker._flush_run_snapshot(run_result.run)
+        tracker._sync_run_to_db(run_result.run)
+        return run_result
+
+    def _resolve_base_config_from_run(
+        self, tracker: "Tracker", run_id: str
+    ) -> tuple[list[Path], Path]:
+        artifacts = tracker.get_artifacts_for_run(run_id)
+        conf_artifacts = [
+            artifact
+            for artifact in artifacts.inputs.values()
+            if isinstance(artifact.meta, dict)
+            and artifact.meta.get("config_role") == "conf"
+        ]
+        if not conf_artifacts:
+            raise FileNotFoundError(
+                "No BEAM config artifacts found for "
+                f"run_id={run_id!r}. Expected input artifacts with "
+                "meta['config_role'] == 'conf'."
+            )
+
+        ordered_conf = sorted(
+            conf_artifacts,
+            key=lambda artifact: (
+                artifact.key,
+                artifact.created_at.isoformat() if artifact.created_at else "",
+                str(artifact.id),
+            ),
+        )
+
+        root_dirs: list[Path] = []
+        resolved_conf_paths: list[Path] = []
+        for artifact in ordered_conf:
+            resolved = Path(tracker.resolve_uri(artifact.container_uri))
+            if not resolved.exists():
+                raise FileNotFoundError(
+                    "Config artifact exists in metadata but file is missing for "
+                    f"run_id={run_id!r}, key={artifact.key!r}: {resolved!s}"
+                )
+            resolved_conf_paths.append(resolved)
+            root = _infer_root_dir_from_config_artifact(artifact.key, resolved)
+            if root not in root_dirs:
+                root_dirs.append(root)
+
+        primary_config = _select_primary_config_from_artifacts(
+            resolved_conf_paths,
+            primary_hint=self.primary_config,
+        )
+        return root_dirs, primary_config
+
+    @staticmethod
+    def _resolve_override_base_selector(
+        *,
+        base_run_id: str | None,
+        base_config_dirs: Sequence[Path] | None,
+        base_primary_config: Path | None,
+    ) -> dict[str, Any]:
+        if base_run_id is not None and base_config_dirs is not None:
+            raise ValueError(
+                "run_with_config_overrides requires exactly one base selector. "
+                "Provide either base_run_id or base_config_dirs, not both."
+            )
+        if base_run_id is None and base_config_dirs is None:
+            raise ValueError(
+                "run_with_config_overrides requires a base selector. "
+                "Provide either base_run_id or base_config_dirs."
+            )
+        if base_run_id is not None:
+            if base_primary_config is not None:
+                raise ValueError(
+                    "base_primary_config can only be used with base_config_dirs."
+                )
+            resolved_run_id = str(base_run_id).strip()
+            if not resolved_run_id:
+                raise ValueError(
+                    "base_run_id must be a non-empty string when provided."
+                )
+            return {"kind": "run_id", "run_id": resolved_run_id}
+        if base_config_dirs is None or len(base_config_dirs) == 0:
+            raise ValueError(
+                "base_config_dirs must contain at least one directory when provided."
+            )
+        return {"kind": "config_dirs", "config_dirs": list(base_config_dirs)}
+
+    @staticmethod
+    def _resolve_base_config_dirs(base_config_dirs: Sequence[Path]) -> list[Path]:
+        resolved_dirs: list[Path] = []
+        for path_like in base_config_dirs:
+            root_dir = Path(path_like).resolve()
+            if not root_dir.exists():
+                raise FileNotFoundError(
+                    f"Base config directory does not exist: {root_dir!s}"
+                )
+            if not root_dir.is_dir():
+                raise ValueError(
+                    f"base_config_dirs entries must be directories. Got: {root_dir!s}"
+                )
+            resolved_dirs.append(root_dir)
+        if not resolved_dirs:
+            raise ValueError(
+                "base_config_dirs must contain at least one directory when provided."
+            )
+        return resolved_dirs
+
+    def _resolve_base_primary_config_for_dirs(
+        self,
+        *,
+        base_config_dirs: Sequence[Path],
+        base_primary_config: Path | None,
+    ) -> Path:
+        primary_hint = (
+            base_primary_config
+            if base_primary_config is not None
+            else self.primary_config
+        )
+        if primary_hint is None:
+            raise ValueError(
+                "base_primary_config is required when using base_config_dirs unless "
+                "adapter.primary_config is already set."
+            )
+        primary_path = Path(primary_hint)
+        if primary_path.is_absolute():
+            if not primary_path.exists():
+                raise FileNotFoundError(f"BEAM config not found: {primary_path!s}")
+            resolved = primary_path.resolve()
+            if any(
+                resolved.is_relative_to(root_dir.resolve())
+                for root_dir in base_config_dirs
+            ):
+                return resolved
+            raise ValueError(
+                "base_primary_config must be located under base_config_dirs when "
+                "an absolute path is provided."
+            )
+        for root_dir in base_config_dirs:
+            candidate = (root_dir / primary_path).resolve()
+            if candidate.exists():
+                return candidate
+        raise FileNotFoundError(
+            "base_primary_config was not found under base_config_dirs: "
+            f"{primary_hint!s}"
+        )
+
+    @staticmethod
+    def _build_override_runtime_kwargs(
+        *,
+        fn: Any,
+        selected_root: Path,
+        root_dirs: Sequence[Path],
+        explicit_mapping: Mapping[str, Any] | None,
+        existing_runtime_kwargs: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        mapping = (
+            dict(explicit_mapping)
+            if explicit_mapping is not None
+            else dict(_DEFAULT_OVERRIDE_RUNTIME_KWARGS)
+        )
+        existing = dict(existing_runtime_kwargs or {})
+        resolved_sources: dict[str, Any] = {
+            "selected_root_dir": selected_root,
+            "root_dirs": list(root_dirs),
+        }
+        injected: dict[str, Any] = {}
+        for runtime_key, source in mapping.items():
+            if runtime_key in existing:
+                continue
+            if not BeamConfigAdapter._callable_accepts_kwarg(fn, runtime_key):
+                continue
+            if isinstance(source, str) and source in resolved_sources:
+                injected[runtime_key] = resolved_sources[source]
+            else:
+                injected[runtime_key] = source
+        return injected
+
+    @staticmethod
+    def _callable_accepts_kwarg(fn: Any, runtime_key: str) -> bool:
+        try:
+            signature = inspect.signature(fn)
+        except (TypeError, ValueError):
+            return False
+        if runtime_key in signature.parameters:
+            return True
+        return any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
         )
 
     def build_facet(
@@ -533,6 +959,60 @@ def _add_artifact(
         direction="input",
         meta=data,
     )
+
+
+def _parse_config_key_root_and_rel(key: str) -> tuple[str, Path] | None:
+    if not key.startswith("config:"):
+        return None
+    suffix = key[len("config:") :]
+    if "/" not in suffix:
+        return None
+    root_name, rel = suffix.split("/", 1)
+    if not root_name or not rel:
+        return None
+    return root_name, Path(rel)
+
+
+def _infer_root_dir_from_config_artifact(key: str, resolved_path: Path) -> Path:
+    parsed = _parse_config_key_root_and_rel(key)
+    if parsed is None:
+        return resolved_path.parent.resolve()
+
+    root_name, rel_path = parsed
+    depth = len(rel_path.parts)
+    candidate = resolved_path
+    for _ in range(depth):
+        candidate = candidate.parent
+    candidate = candidate.resolve()
+    if candidate.name == root_name:
+        return candidate
+
+    for parent in resolved_path.parents:
+        if parent.name == root_name:
+            return parent.resolve()
+    return candidate
+
+
+def _select_primary_config_from_artifacts(
+    conf_paths: Sequence[Path], *, primary_hint: Path | None
+) -> Path:
+    if not conf_paths:
+        raise ValueError("Cannot resolve primary config from an empty artifact list.")
+
+    if primary_hint is None:
+        return conf_paths[0]
+
+    hint = Path(primary_hint)
+    hint_name = hint.name
+    hint_posix = hint.as_posix()
+
+    for path in conf_paths:
+        if path.name == hint_name:
+            return path
+    for path in conf_paths:
+        if path.as_posix().endswith(hint_posix):
+            return path
+    return conf_paths[0]
 
 
 def _is_in_roots(path: Path, root_dirs: Sequence[Path]) -> bool:

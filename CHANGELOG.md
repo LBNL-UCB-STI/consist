@@ -14,8 +14,18 @@ The format is based on [Keep a Changelog], and this project adheres to
 - Add `Run.identity_summary` for cache-identity debugging (hash components,
   adapter contribution, identity-input digests, and run identity fields)
   by @zneedell (PR link TBD).
-- Add Workstream 2 migration coverage tests for adapter handoff, run/trace
+- Add migration coverage tests for adapter handoff, run/trace
   identity kwargs parity, and identity-summary behavior
+  by @zneedell (PR link TBD).
+- Add one-line output accessors for run/artifact ergonomics:
+  `RunResult.output_path(...)`, `Artifact.as_path(...)`, and
+  `Artifact.as_df(...)` (with attached-tracker behavior and explicit-tracker
+  fallback) by @zneedell (PR link TBD).
+- Add top-level `runtime_kwargs={...}` alias on `run(...)`, normalized to
+  `ExecutionOptions.runtime_kwargs` with explicit conflict validation
+  by @zneedell (PR link TBD).
+- Add a new "Building a Domain Tracker" guide and docs navigation entry,
+  including wrapper patterns and direct-vs-wrapper guidance
   by @zneedell (PR link TBD).
 
 ### Changed
@@ -35,6 +45,18 @@ The format is based on [Keep a Changelog], and this project adheres to
   by @zneedell (PR link TBD).
 - Update user-facing docs for the unified identity model (`identity_inputs`,
   adapter handoff, and `run.identity_summary`)
+  by @zneedell (PR link TBD).
+- Remove deprecated `config_plan`/`hash_inputs` kwargs from run/trace/scenario
+  and `define_step`, and add adapter-driven config override helpers
+  (`run_with_config_overrides`, `get_config_bundle`, and new ActivitySim
+  materialization/lookup helpers). Follow-up ergonomics now support
+  `run_with_config_overrides(...)` runtime-kwarg auto-injection from
+  materialized override roots (ActivitySim + BEAM), with
+  `override_runtime_kwargs` customization and explicit runtime kwargs
+  precedence by @zneedell (PR link TBD).
+- Clarify concise and explicit input-linking forms in docs/examples:
+  `consist.refs(run_result)` / aliased refs mappings and bare-path vs labeled
+  tuple forms for `identity_inputs`
   by @zneedell (PR link TBD).
 
 ### Fixed
@@ -126,9 +148,15 @@ The format is based on [Keep a Changelog], and this project adheres to
   handling, and cross-platform test execution.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
+
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
+
 [Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.0-beta.3...HEAD
+
 [0.1.0]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.0-beta.3...v0.1.0
+
 [0.1.0-beta.3]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.0-beta.2...v0.1.0-beta.3
+
 [0.1.0-beta.2]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.0-beta.1...v0.1.0-beta.2
+
 [0.1.0-beta.1]: https://github.com/LBNL-UCB-STI/consist/releases/tag/v0.1.0-beta.1
