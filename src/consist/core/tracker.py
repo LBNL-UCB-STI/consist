@@ -43,6 +43,7 @@ from consist.core.cache import (
 from consist.core.tracker_artifact_logging import ArtifactLoggingCoordinator
 from consist.core.tracker_lifecycle import RunLifecycleCoordinator
 from consist.core.tracker_orchestration import RunTraceCoordinator, RunTraceHelpers
+from consist.core.tracker_config import TrackerConfig
 from consist.core.config_canonicalization import (
     ConfigAdapter,
     ConfigAdapterOptions,
@@ -297,6 +298,15 @@ class Tracker:
     5.  Facilitating **smart caching** based on a Merkle DAG strategy, enabling "run forking" and "hydration"
         of previously computed results.
     """
+
+    @classmethod
+    def from_config(cls, config: TrackerConfig) -> "Tracker":
+        """
+        Construct a tracker from a ``TrackerConfig`` object.
+        """
+        if not isinstance(config, TrackerConfig):
+            raise TypeError("config must be a TrackerConfig instance.")
+        return cls(**config.to_init_kwargs())
 
     def __init__(
         self,
