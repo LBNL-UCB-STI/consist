@@ -27,6 +27,7 @@ from consist.core.cache import (
     validate_cached_run_outputs,
 )
 from consist.core.context import pop_tracker, push_tracker
+from consist.core.error_messages import format_problem_cause_fix
 from consist.core.validation import (
     validate_config_structure,
     validate_run_meta,
@@ -46,6 +47,83 @@ if TYPE_CHECKING:
     from consist.core.tracker import Tracker
 
 UTC = timezone.utc
+
+
+def _normalize_identity_inputs(hash_inputs: HashInputs) -> Optional[list[Any]]:
+    if hash_inputs is None:
+        return None
+    if isinstance(hash_inputs, (str, Path)):
+        raise ValueError(
+            format_problem_cause_fix(
+                problem="identity_inputs/hash_inputs must be a list of paths.",
+                cause=(
+                    "A single string/path was provided, which is ambiguous for "
+                    "identity input parsing."
+                ),
+                fix=(
+                    "Use the recommended path: identity_inputs=[Path(...)] or "
+                    "identity_inputs=[('label', Path(...))]."
+                ),
+            )
+        )
+    try:
+        items = list(hash_inputs)
+    except TypeError as exc:
+        raise TypeError(
+            format_problem_cause_fix(
+                problem="identity_inputs/hash_inputs must be iterable.",
+                cause="The provided value cannot be iterated as identity input items.",
+                fix=(
+                    "Pass a list of paths or (label, path) tuples, for example "
+                    "identity_inputs=[Path('config.yaml')]."
+                ),
+            )
+        ) from exc
+
+    for item in items:
+        if isinstance(item, tuple):
+            if len(item) != 2:
+                raise TypeError(
+                    format_problem_cause_fix(
+                        problem=(
+                            "identity_inputs tuple items must be (label, path) pairs."
+                        ),
+                        cause=f"Received tuple with {len(item)} elements: {item!r}.",
+                        fix=(
+                            "Use ('my_label', Path('file_or_dir')) for tuple-style "
+                            "identity inputs."
+                        ),
+                    )
+                )
+            label, path_value = item
+            if not isinstance(label, str) or not isinstance(path_value, (str, Path)):
+                raise TypeError(
+                    format_problem_cause_fix(
+                        problem=(
+                            "identity_inputs tuple items must be (str, path-like)."
+                        ),
+                        cause=f"Received tuple item with invalid types: {item!r}.",
+                        fix=(
+                            "Ensure tuple values are ('label', str|Path) when using "
+                            "identity_inputs."
+                        ),
+                    )
+                )
+            continue
+        if not isinstance(item, (str, Path)):
+            raise TypeError(
+                format_problem_cause_fix(
+                    problem=(
+                        "identity_inputs entries must be paths or (label, path) tuples."
+                    ),
+                    cause=f"Received unsupported identity input item: {item!r}.",
+                    fix=(
+                        "Pass each identity input as str/Path, or as a "
+                        "(label, str|Path) tuple."
+                    ),
+                )
+            )
+    return items
 
 
 class RunLifecycleCoordinator:
@@ -200,9 +278,35 @@ class RunLifecycleCoordinator:
         else:
             config_dict = config
 
-        if hash_inputs:
+        normalized_hash_inputs = _normalize_identity_inputs(hash_inputs)
+        if normalized_hash_inputs:
             config_dict = dict(config_dict)
-            digest_map = tracker.identity.compute_hash_inputs_digests(hash_inputs)
+            digest_map = tracker.identity.compute_hash_inputs_digests(
+                normalized_hash_inputs
+            )
+            failed_digests = {
+                label: digest
+                for label, digest in digest_map.items()
+                if isinstance(digest, str) and digest.startswith("ERROR:")
+            }
+            if failed_digests:
+                failed_labels = ", ".join(sorted(failed_digests.keys()))
+                raise ValueError(
+                    format_problem_cause_fix(
+                        problem=(
+                            "Failed to compute identity input digests for: "
+                            f"{failed_labels}."
+                        ),
+                        cause=(
+                            "One or more identity_inputs/hash_inputs paths are missing "
+                            "or unreadable."
+                        ),
+                        fix=(
+                            "Use the recommended path and pass existing files/directories "
+                            "in identity_inputs=[...], then retry."
+                        ),
+                    )
+                )
             if "__consist_hash_inputs__" in config_dict:
                 logging.warning(
                     "[Consist] Overwriting user-provided '__consist_hash_inputs__' in config for run %s.",

@@ -14,6 +14,68 @@ This guide organizes issues by symptom. For concept definitions, see [Core Conce
 
 ---
 
+## Run Invocation Diagnostics (Recommended Path)
+
+New run/trace/scenario validation errors follow a consistent structure:
+
+- `Problem`: what failed
+- `Cause`: why Consist rejected the invocation
+- `Fix`: the concrete remediation
+
+Common messages and fixes:
+
+### "Pass either identity_inputs= or hash_inputs=, not both."
+
+- `Cause`: both new (`identity_inputs`) and legacy (`hash_inputs`) identity kwargs were provided.
+- `Fix`: use the recommended path and keep only `identity_inputs=...`.
+
+### "Pass either adapter= or config_plan=, not both."
+
+- `Cause`: both adapter-driven identity and legacy config-plan identity were provided.
+- `Fix`: use the recommended path and keep only `adapter=...`.
+
+### "identity_inputs/hash_inputs must be a list of paths."
+
+- `Cause`: a single string/path or invalid shape was passed instead of a list.
+- `Fix`: pass `identity_inputs=[Path(...)]` or `identity_inputs=[(\"label\", Path(...))]`.
+
+### "Failed to compute identity input digests ..."
+
+- `Cause`: one or more identity input paths are missing or unreadable.
+- `Fix`: verify every identity input path exists and is readable before running.
+
+### "load_inputs=True requires inputs to be a dict."
+
+- `Cause`: auto-loading inputs into function parameters requires named inputs.
+- `Fix`: pass `inputs={\"param_name\": path_or_artifact}` or disable auto-loading with `ExecutionOptions(load_inputs=False)`.
+
+### "cache_hydration='outputs-requested' requires output_paths."
+
+- `Cause`: requested-output hydration needs explicit destination mappings.
+- `Fix`: declare `output_paths={...}` whenever using `cache_hydration='outputs-requested'`.
+
+### "Tracker.run supports executor='python' or 'container'."
+
+- `Cause`: an unsupported executor value was provided.
+- `Fix`: set `ExecutionOptions(executor='python')` or `ExecutionOptions(executor='container', container={...})`.
+
+### "cache_options.code_identity callable modes require executor='python'."
+
+- `Cause`: callable code identity modes require Python callable execution.
+- `Fix`: either switch to `executor='python'` or use `code_identity='repo_git'` for container runs.
+
+### "executor='container' requires output_paths."
+
+- `Cause`: container runs cannot infer outputs from Python return values.
+- `Fix`: provide explicit output mappings with `output_paths={key: path}`.
+
+### "Scenario input string did not resolve ..."
+
+- `Cause`: the scenario input string matched neither a Coupler key nor an existing filesystem path.
+- `Fix`: pass a real path, or on the recommended path use `consist.refs(...)` between steps.
+
+---
+
 ## Cache & Provenance Issues
 
 ### "Relation leak warnings"

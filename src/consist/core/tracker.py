@@ -65,6 +65,7 @@ from consist.core.materialize import materialize_artifacts
 from consist.core.matrix import MatrixViewFactory
 from consist.core.netcdf_views import NetCdfMetadataView
 from consist.core.openmatrix_views import OpenMatrixMetadataView
+from consist.core.error_messages import format_problem_cause_fix
 from consist.core.spatial_views import SpatialMetadataView
 from consist.core.queries import RunQueryService
 from consist.core.settings import ConsistSettings
@@ -107,7 +108,12 @@ def _resolve_input_reference(
         ref,
         key,
         type_label="inputs",
-        missing_path_error="Input path does not exist: {path!s}",
+        missing_path_error=(
+            "Problem: Input path does not exist: {path!s}\n"
+            "Cause: The provided input path is missing or not accessible.\n"
+            "Fix: Pass an existing file/directory path or a valid Artifact/RunResult "
+            "reference."
+        ),
     )
 
 
@@ -136,7 +142,16 @@ def _resolve_input_reference_configured(
         ref_str = str(ref)
     else:
         raise TypeError(
-            f"{type_label} must be Artifact, RunResult, Path, or str (got {type(ref)})."
+            format_problem_cause_fix(
+                problem=(
+                    f"{type_label} must be Artifact, RunResult, Path, or str "
+                    f"(got {type(ref)})."
+                ),
+                cause="An unsupported input reference type was provided.",
+                fix=(
+                    "Pass Artifact/RunResult references, or filesystem paths as str/Path."
+                ),
+            )
         )
 
     resolved = (
@@ -873,7 +888,12 @@ class Tracker:
         key: Optional[str] = None,
         *,
         type_label: str = "inputs",
-        missing_path_error: str = "Input path does not exist: {path!s}",
+        missing_path_error: str = (
+            "Problem: Input path does not exist: {path!s}\n"
+            "Cause: The provided input path is missing or not accessible.\n"
+            "Fix: Pass an existing file/directory path or a valid Artifact/RunResult "
+            "reference."
+        ),
         missing_string_error: Optional[str] = None,
         string_ref_resolver: Optional[Callable[[str], Optional[ArtifactRef]]] = None,
     ) -> ArtifactRef:
