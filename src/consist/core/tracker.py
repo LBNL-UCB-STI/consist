@@ -4279,6 +4279,49 @@ class Tracker:
             return self.db.get_run(run_id)
         return None
 
+    def snapshot_db(
+        self, dest_path: str | os.PathLike[str], checkpoint: bool = True
+    ) -> Path:
+        """
+        Snapshot the configured provenance database to a destination path.
+
+        Parameters
+        ----------
+        dest_path : str | os.PathLike[str]
+            Destination path for the snapshot database file.
+        checkpoint : bool, default True
+            If True, checkpoint the source DB before copying.
+
+        Returns
+        -------
+        Path
+            Snapshot database path.
+        """
+        if self.db is None:
+            raise RuntimeError("Database snapshot requires a configured database.")
+
+        active_run_id = self.current_consist.run.id if self.current_consist else None
+        last_completed_run_id: Optional[str] = None
+        if (
+            self._last_consist is not None
+            and self._last_consist.run.status == "completed"
+        ):
+            last_completed_run_id = self._last_consist.run.id
+        else:
+            completed_runs = self.db.find_runs(status="completed", limit=1)
+            if completed_runs:
+                last_completed_run_id = completed_runs[0].id
+
+        return self.db.snapshot_to(
+            dest_path=dest_path,
+            checkpoint=checkpoint,
+            metadata={
+                "run_id": active_run_id,
+                "last_completed_run_id": last_completed_run_id,
+                "cache_epoch": self._cache_epoch,
+            },
+        )
+
     def get_run_record(
         self, run_id: str, *, allow_missing: bool = False
     ) -> Optional[ConsistRecord]:

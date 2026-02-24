@@ -4,8 +4,12 @@ import logging
 import re
 import uuid
 import json
+import os
+import shutil
 import contextvars
 from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import (
     Optional,
     List,
@@ -295,6 +299,112 @@ class DatabaseManager:
                 )
                 return
             logging.warning(f"Failed to relax run.parent_run_id FK: {e}")
+
+    def _atomic_copy_file(self, src: Path, dest: Path) -> None:
+        """Copy a file via temp path and atomic rename in destination directory."""
+        temp_path = dest.parent / f".{dest.name}.{uuid.uuid4().hex}.tmp"
+        try:
+            shutil.copy2(src, temp_path)
+            temp_path.replace(dest)
+        finally:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except OSError:
+                pass
+
+    def _atomic_write_json_file(self, payload: Dict[str, Any], dest: Path) -> None:
+        """Write JSON to a temp file then atomically replace target."""
+        temp_path = dest.parent / f".{dest.name}.{uuid.uuid4().hex}.tmp"
+        try:
+            temp_path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            temp_path.replace(dest)
+        finally:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except OSError:
+                pass
+
+    def _snapshot_sidecar_path(self, destination: Path) -> Path:
+        """
+        Build a sidecar metadata path paired to a snapshot DB file.
+
+        Example: provenance.duckdb -> provenance.snapshot_meta.json
+        """
+        base_name = destination.stem if destination.suffix else destination.name
+        return destination.with_name(f"{base_name}.snapshot_meta.json")
+
+    def snapshot_to(
+        self,
+        dest_path: str | os.PathLike[str],
+        checkpoint: bool = True,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Path:
+        """
+        Create a crash-safe snapshot of the configured DuckDB database.
+
+        Parameters
+        ----------
+        dest_path : str | os.PathLike[str]
+            Destination path for the snapshot database file.
+        checkpoint : bool, default True
+            If True, issue DuckDB CHECKPOINT before copying.
+        metadata : Optional[Dict[str, Any]], optional
+            Optional metadata payload written to a paired sidecar JSON file.
+
+        Returns
+        -------
+        Path
+            The destination snapshot database path.
+        """
+        if self.db_path == ":memory:":
+            raise ValueError("Cannot snapshot an in-memory DuckDB database.")
+
+        source_db_path = Path(self.db_path)
+        destination = Path(dest_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        if checkpoint:
+
+            def _checkpoint() -> None:
+                with self.engine.begin() as conn:
+                    conn.exec_driver_sql("CHECKPOINT")
+
+            self.execute_with_retry(_checkpoint, operation_name="snapshot_checkpoint")
+
+        self._atomic_copy_file(source_db_path, destination)
+
+        source_wal_path = Path(f"{source_db_path}.wal")
+        destination_wal_path = Path(f"{destination}.wal")
+        if checkpoint:
+            try:
+                if destination_wal_path.exists():
+                    destination_wal_path.unlink()
+            except OSError as exc:
+                logging.warning(
+                    "Failed to remove stale snapshot WAL at %s: %s",
+                    destination_wal_path,
+                    exc,
+                )
+        elif source_wal_path.exists():
+            self._atomic_copy_file(source_wal_path, destination_wal_path)
+
+        if metadata is not None:
+            snapshot_metadata = dict(metadata)
+            snapshot_metadata["snapshot_ts_utc"] = datetime.now(
+                timezone.utc
+            ).isoformat()
+            snapshot_metadata["source_db_path"] = str(source_db_path)
+            self._atomic_write_json_file(
+                snapshot_metadata,
+                self._snapshot_sidecar_path(destination),
+            )
+
+        return destination
 
     def execute_with_retry(
         self,
