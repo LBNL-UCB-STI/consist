@@ -20,6 +20,7 @@ import abc
 import importlib
 import os
 import logging
+import re
 import shlex
 import subprocess
 import shutil
@@ -33,6 +34,112 @@ except ImportError:
     docker = None
 
 logger = logging.getLogger(__name__)
+
+DEBUG_STREAM_ENV_VAR = "CONSIST_CONTAINER_DEBUG_STREAM"
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_SENSITIVE_KEY_RE = re.compile(
+    r"(pass(word)?|secret|token|api[_-]?key|access[_-]?key|auth|credential|cookie|private[_-]?key)",
+    re.IGNORECASE,
+)
+_SECRET_LIKE_VALUE_RE = re.compile(r"^[A-Za-z0-9+/_.:-]{24,}$")
+_FLAG_PREFIX_RE = re.compile(r"^-{1,2}")
+_COMMON_SECRET_FLAGS = {"p", "password", "token", "secret", "apikey", "api-key"}
+
+
+def _debug_stream_enabled() -> bool:
+    raw = os.environ.get(DEBUG_STREAM_ENV_VAR, "")
+    return raw.strip().lower() in _TRUE_VALUES
+
+
+def _looks_sensitive_key(key: str) -> bool:
+    return bool(_SENSITIVE_KEY_RE.search(key or ""))
+
+
+def _looks_secret_value(value: str) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if lowered.startswith("bearer "):
+        return True
+    if text.startswith(("ghp_", "github_pat_", "glpat-", "xoxb-", "xoxp-")):
+        return True
+    return bool(_SECRET_LIKE_VALUE_RE.fullmatch(text))
+
+
+def _summarize_command(command: Union[str, List[str]]) -> str:
+    try:
+        tokens = (
+            shlex.split(command) if isinstance(command, str) else [str(t) for t in command]
+        )
+    except Exception:
+        return "<unparseable>"
+    if not tokens:
+        return "<empty>"
+
+    executable = tokens[0]
+    args = tokens[1:]
+    sensitive_markers: set[str] = set()
+    expecting_sensitive_value = False
+
+    for token in args:
+        cleaned = _FLAG_PREFIX_RE.sub("", token)
+        if expecting_sensitive_value:
+            sensitive_markers.add("<value>")
+            expecting_sensitive_value = False
+            continue
+
+        if "=" in cleaned:
+            key, value = cleaned.split("=", 1)
+            if _looks_sensitive_key(key):
+                sensitive_markers.add(key)
+            elif _looks_secret_value(value):
+                sensitive_markers.add("<inline-secret>")
+            continue
+
+        if _looks_sensitive_key(cleaned):
+            sensitive_markers.add(cleaned)
+            if cleaned.lower() in _COMMON_SECRET_FLAGS:
+                expecting_sensitive_value = True
+            continue
+
+        if _looks_secret_value(cleaned):
+            sensitive_markers.add("<token>")
+
+    if sensitive_markers:
+        return (
+            f"{executable} ({len(args)} args; sensitive values redacted: "
+            f"{', '.join(sorted(sensitive_markers))})"
+        )
+    return f"{executable} ({len(args)} args)"
+
+
+def _summarize_environment(env: Dict[str, str], max_items: int = 5) -> str:
+    if not env:
+        return "none"
+
+    rendered: list[str] = []
+    redacted_count = 0
+    for key in sorted(env):
+        value = "" if env[key] is None else str(env[key])
+        if _looks_sensitive_key(key) or _looks_secret_value(value):
+            rendered.append(f"{key}=<redacted>")
+            redacted_count += 1
+        else:
+            compact = value if len(value) <= 32 else f"{value[:29]}..."
+            rendered.append(f"{key}={compact}")
+
+    preview = rendered[:max_items]
+    suffix = ""
+    if len(rendered) > max_items:
+        suffix = f", ... (+{len(rendered) - max_items} more)"
+    return (
+        ", ".join(preview)
+        + suffix
+        + f" [total={len(rendered)}, redacted={redacted_count}]"
+    )
 
 
 class ContainerBackend(abc.ABC):
@@ -233,7 +340,14 @@ class DockerBackend(ContainerBackend):
             if self.pull_latest and hasattr(self.client, "images"):
                 self.client.images.pull(image)
 
-            logger.info(f"🐳 Running Docker: {image} {command}")
+            logger.info(
+                "🐳 Running Docker image=%s command=%s env={%s} mounts=%d workdir=%s",
+                image,
+                _summarize_command(command),
+                _summarize_environment(env),
+                len(docker_volumes),
+                working_dir or "<default>",
+            )
             container = self.client.containers.run(
                 image,
                 command=run_command,
@@ -245,12 +359,30 @@ class DockerBackend(ContainerBackend):
                 stdout=True,
             )
 
-            # Stream logs
-            for line in container.logs(stream=True):
-                print(line.decode("utf-8", errors="replace").strip())
+            stream_logs = _debug_stream_enabled()
+            if stream_logs:
+                logger.debug(
+                    "Docker raw log streaming enabled via %s=1.",
+                    DEBUG_STREAM_ENV_VAR,
+                )
+                for line in container.logs(stream=True):
+                    print(line.decode("utf-8", errors="replace").strip())
+            else:
+                logger.debug(
+                    "Docker raw log streaming disabled. Set %s=1 to enable.",
+                    DEBUG_STREAM_ENV_VAR,
+                )
 
             result = container.wait()
             exit_code = result.get("StatusCode", 1)
+
+            if exit_code != 0 and not stream_logs:
+                logger.error(
+                    "Docker container exited with status %s. Raw output is suppressed by "
+                    "default; set %s=1 to stream container logs.",
+                    exit_code,
+                    DEBUG_STREAM_ENV_VAR,
+                )
 
             container.remove()
             return exit_code == 0
@@ -453,28 +585,52 @@ class SingularityBackend(ContainerBackend):
         else:
             cmd_list.extend(shlex.split(command))
 
-        cmd_str = " ".join(cmd_list)
-        logger.info(f"🔮 Running Singularity: {cmd_str}")
+        logger.info(
+            "🔮 Running Singularity image=%s command=%s env={%s} binds=%d workdir=%s",
+            image,
+            _summarize_command(command),
+            _summarize_environment(env),
+            len(bind_list),
+            working_dir or "<default>",
+        )
         if passthrough_env:
             logger.info(
                 "🔮 Passing %d env var(s) via SINGULARITYENV_/APPTAINERENV_ "
-                "(values contain whitespace): %s",
+                "(values contain whitespace).",
                 len(passthrough_env) // 2,
-                ", ".join(
-                    sorted(
-                        {
-                            k.replace("SINGULARITYENV_", "")
-                            for k in passthrough_env
-                            if k.startswith("SINGULARITYENV_")
-                        }
-                    )
-                ),
             )
 
         try:
             process_env = os.environ.copy()
             process_env.update(passthrough_env)
-            res = subprocess.run(cmd_list, check=False, env=process_env)
+            stream_logs = _debug_stream_enabled()
+            if stream_logs:
+                logger.debug(
+                    "Singularity raw output streaming enabled via %s=1.",
+                    DEBUG_STREAM_ENV_VAR,
+                )
+                res = subprocess.run(cmd_list, check=False, env=process_env)
+            else:
+                logger.debug(
+                    "Singularity raw output streaming disabled. Set %s=1 to enable.",
+                    DEBUG_STREAM_ENV_VAR,
+                )
+                res = subprocess.run(
+                    cmd_list,
+                    check=False,
+                    env=process_env,
+                    capture_output=True,
+                    text=True,
+                )
+                if res.returncode != 0:
+                    stderr_lines = len((res.stderr or "").splitlines())
+                    logger.error(
+                        "Singularity exited with status %s. Captured %d stderr line(s). "
+                        "Set %s=1 to stream raw output.",
+                        res.returncode,
+                        stderr_lines,
+                        DEBUG_STREAM_ENV_VAR,
+                    )
             return res.returncode == 0
         except FileNotFoundError:
             logger.error("Singularity executable not found.")

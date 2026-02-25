@@ -5,6 +5,7 @@ import hashlib
 import gzip
 import json
 import logging
+import re
 import shutil
 import tempfile
 import tarfile
@@ -286,6 +287,8 @@ class ActivitySimConfigAdapter:
     bundle_cache_dir: Optional[Path] = None
     check_probabilities: bool = False
     root_dirs: Optional[list[Path]] = None
+    allow_out_of_root_yaml_includes: bool = False
+    allow_out_of_root_csv_refs: bool = False
 
     def discover(
         self,
@@ -324,7 +327,11 @@ class ActivitySimConfigAdapter:
         if yaml is None:
             raise ImportError("PyYAML is required for ActivitySim canonicalization.")
         resolved_strict = options.strict if options is not None else strict
-        settings_path = _resolve_yaml_path("settings.yaml", root_dirs)
+        settings_path = _resolve_yaml_path(
+            "settings.yaml",
+            root_dirs,
+            allow_out_of_root=self.allow_out_of_root_yaml_includes,
+        )
         if settings_path is None:
             subdir_candidates = _find_settings_yaml_subdirs(root_dirs)
             if subdir_candidates:
@@ -341,12 +348,20 @@ class ActivitySimConfigAdapter:
                 [str(p) for p in root_dirs],
             )
         settings = (
-            _load_effective_settings(root_dirs, settings_path=settings_path)
+            _load_effective_settings(
+                root_dirs,
+                settings_path=settings_path,
+                allow_out_of_root_includes=self.allow_out_of_root_yaml_includes,
+            )
             if settings_path
             else {}
         )
         models = settings.get("models", [])
-        config_files = _resolve_model_yamls(models, root_dirs)
+        config_files = _resolve_model_yamls(
+            models,
+            root_dirs,
+            allow_out_of_root_includes=self.allow_out_of_root_yaml_includes,
+        )
         if settings_path:
             config_files.insert(0, settings_path)
 
@@ -412,7 +427,9 @@ class ActivitySimConfigAdapter:
 
         settings = (
             _load_effective_settings(
-                config.root_dirs, settings_path=config.primary_config
+                config.root_dirs,
+                settings_path=config.primary_config,
+                allow_out_of_root_includes=self.allow_out_of_root_yaml_includes,
             )
             if config.primary_config
             else {}
@@ -442,6 +459,7 @@ class ActivitySimConfigAdapter:
             inherit_settings=inherit_settings,
             allow_heuristics=allow_heuristics,
             strict=resolved_strict,
+            allow_out_of_root_refs=self.allow_out_of_root_csv_refs,
         )
         for csv_path in referenced:
             add_artifact(csv_path, role="csv")
@@ -474,12 +492,14 @@ class ActivitySimConfigAdapter:
                 cfg: CanonicalConfig = config,
                 s: dict[str, Any] = settings,
                 inherit: bool = inherit_settings,
+                allow_out_of_root_includes: bool = self.allow_out_of_root_yaml_includes,
             ) -> Iterable[dict[str, Any]]:
                 return _build_constants_rows(
                     run_id=run_id,
                     config=cfg,
                     settings=s,
                     inherit_settings=inherit,
+                    allow_out_of_root_includes=allow_out_of_root_includes,
                 )
 
             ingestables.extend(
@@ -669,6 +689,7 @@ class ActivitySimConfigAdapter:
                 key=key,
                 value=value,
                 config_dirs=staged_root_dirs,
+                allow_out_of_root_yaml_paths=self.allow_out_of_root_yaml_includes,
             )
         for (
             file_name,
@@ -681,6 +702,7 @@ class ActivitySimConfigAdapter:
                 segment=segment,
                 value=value,
                 config_dirs=staged_root_dirs,
+                allow_out_of_root_csv_refs=self.allow_out_of_root_csv_refs,
             )
 
         content_hash = identity.canonical_json_sha256(
@@ -780,6 +802,7 @@ class ActivitySimConfigAdapter:
                 key=key,
                 value=value,
                 config_dirs=staged_root_dirs,
+                allow_out_of_root_yaml_paths=self.allow_out_of_root_yaml_includes,
             )
         for (
             file_name,
@@ -792,6 +815,7 @@ class ActivitySimConfigAdapter:
                 segment=segment,
                 value=value,
                 config_dirs=staged_root_dirs,
+                allow_out_of_root_csv_refs=self.allow_out_of_root_csv_refs,
             )
 
         content_hash = identity.canonical_json_sha256(
@@ -1153,7 +1177,11 @@ class ActivitySimConfigAdapter:
                     output_dir=Path(temp_dir),
                     strict=True,
                 )
-                csv_path, _ = _resolve_csv_reference(file_name, canonical.root_dirs)
+                csv_path, _ = _resolve_csv_reference(
+                    file_name,
+                    canonical.root_dirs,
+                    allow_out_of_root=self.allow_out_of_root_csv_refs,
+                )
                 if csv_path is None:
                     raise KeyError(
                         f"Coefficient file not found: {file_name!r} for run_id={run_id!r}."
@@ -1173,7 +1201,11 @@ class ActivitySimConfigAdapter:
                     )
                 return parsed
 
-        csv_path, _ = _resolve_csv_reference(file_name, resolved_dirs)
+        csv_path, _ = _resolve_csv_reference(
+            file_name,
+            resolved_dirs,
+            allow_out_of_root=self.allow_out_of_root_csv_refs,
+        )
         if csv_path is None:
             raise KeyError(
                 "Coefficient file not found: "
@@ -1216,7 +1248,9 @@ class ActivitySimConfigAdapter:
             raise ImportError("PyYAML is required for ActivitySim canonicalization.")
         settings = (
             _load_effective_settings(
-                config.root_dirs, settings_path=config.primary_config
+                config.root_dirs,
+                settings_path=config.primary_config,
+                allow_out_of_root_includes=self.allow_out_of_root_yaml_includes,
             )
             if config.primary_config
             else {}
@@ -1225,7 +1259,12 @@ class ActivitySimConfigAdapter:
         facet: dict[str, Any] = {}
 
         for file_name, entries in (facet_spec.get("yaml") or {}).items():
-            data = _load_effective_yaml(file_name, config.root_dirs, inherit_settings)
+            data = _load_effective_yaml(
+                file_name,
+                config.root_dirs,
+                inherit_settings,
+                allow_out_of_root_includes=self.allow_out_of_root_yaml_includes,
+            )
             constants = data.get("CONSTANTS", {}) if isinstance(data, dict) else {}
             for key, alias in _parse_facet_entries(entries):
                 const_key = (
@@ -1235,7 +1274,11 @@ class ActivitySimConfigAdapter:
                 facet[alias or key] = value
 
         for file_name, entries in (facet_spec.get("coefficients") or {}).items():
-            csv_path = _resolve_csv_reference(file_name, config.root_dirs)[0]
+            csv_path = _resolve_csv_reference(
+                file_name,
+                config.root_dirs,
+                allow_out_of_root=self.allow_out_of_root_csv_refs,
+            )[0]
             for key, alias in _parse_facet_entries(entries):
                 value = _read_coefficient_value(csv_path, key) if csv_path else None
                 facet[alias or key] = value
@@ -1718,20 +1761,29 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
 
 
 def _resolve_yaml_path(
-    name: str, config_dirs: Sequence[Path], base_dir: Optional[Path] = None
+    name: str,
+    config_dirs: Sequence[Path],
+    base_dir: Optional[Path] = None,
+    *,
+    allow_out_of_root: bool = False,
 ) -> Optional[Path]:
     candidate = Path(name)
     if candidate.suffix == "":
         candidate = candidate.with_suffix(".yaml")
     if candidate.is_absolute():
-        return candidate if candidate.exists() else None
+        resolved = candidate.resolve()
+        if not allow_out_of_root and not _is_within_roots(resolved, config_dirs):
+            return None
+        return resolved if resolved.exists() else None
     if base_dir:
-        local = base_dir / candidate
-        if local.exists():
+        local = (base_dir / candidate).resolve()
+        if local.exists() and (
+            allow_out_of_root or _is_within_roots(local, config_dirs)
+        ):
             return local
     for config_dir in config_dirs:
-        path = config_dir / candidate
-        if path.exists():
+        path = (config_dir / candidate).resolve()
+        if path.exists() and (allow_out_of_root or _is_within_roots(path, config_dirs)):
             return path
     return None
 
@@ -1748,7 +1800,11 @@ def _find_settings_yaml_subdirs(config_dirs: Sequence[Path]) -> list[Path]:
 
 
 def _load_yaml_with_includes(
-    path: Path, config_dirs: Sequence[Path], visited: Set[Path]
+    path: Path,
+    config_dirs: Sequence[Path],
+    visited: Set[Path],
+    *,
+    allow_out_of_root_includes: bool = False,
 ) -> Dict[str, Any]:
     if path in visited:
         return {}
@@ -1761,7 +1817,10 @@ def _load_yaml_with_includes(
             include_settings = [include_settings]
         for include_name in include_settings:
             include_path = _resolve_yaml_path(
-                str(include_name), config_dirs, base_dir=path.parent
+                str(include_name),
+                config_dirs,
+                base_dir=path.parent,
+                allow_out_of_root=allow_out_of_root_includes,
             )
             if include_path is None:
                 logging.warning(
@@ -1769,18 +1828,31 @@ def _load_yaml_with_includes(
                     include_name,
                 )
                 continue
-            include_data = _load_yaml_with_includes(include_path, config_dirs, visited)
+            include_data = _load_yaml_with_includes(
+                include_path,
+                config_dirs,
+                visited,
+                allow_out_of_root_includes=allow_out_of_root_includes,
+            )
             merged = _deep_merge(merged, include_data)
     merged = _deep_merge(merged, data)
     return merged
 
 
 def _load_effective_settings(
-    config_dirs: Sequence[Path], *, settings_path: Optional[Path]
+    config_dirs: Sequence[Path],
+    *,
+    settings_path: Optional[Path],
+    allow_out_of_root_includes: bool = False,
 ) -> Dict[str, Any]:
     if settings_path is None:
         return {}
-    primary = _load_yaml_with_includes(settings_path, config_dirs, set())
+    primary = _load_yaml_with_includes(
+        settings_path,
+        config_dirs,
+        set(),
+        allow_out_of_root_includes=allow_out_of_root_includes,
+    )
     inherit_settings = bool(primary.get("inherit_settings", False))
     if not inherit_settings:
         return primary
@@ -1791,33 +1863,69 @@ def _load_effective_settings(
             settings_paths.append(candidate)
     merged: Dict[str, Any] = {}
     for path in reversed(settings_paths):
-        merged = _deep_merge(merged, _load_yaml_with_includes(path, config_dirs, set()))
+        merged = _deep_merge(
+            merged,
+            _load_yaml_with_includes(
+                path,
+                config_dirs,
+                set(),
+                allow_out_of_root_includes=allow_out_of_root_includes,
+            ),
+        )
     return merged
 
 
 def _load_effective_yaml(
-    file_name: str, config_dirs: Sequence[Path], inherit_settings: bool
+    file_name: str,
+    config_dirs: Sequence[Path],
+    inherit_settings: bool,
+    *,
+    allow_out_of_root_includes: bool = False,
 ) -> Dict[str, Any]:
     candidate = Path(file_name)
     if candidate.suffix == "":
         candidate = candidate.with_suffix(".yaml")
     if not inherit_settings:
-        path = _resolve_yaml_path(str(candidate), config_dirs)
+        path = _resolve_yaml_path(
+            str(candidate),
+            config_dirs,
+            allow_out_of_root=allow_out_of_root_includes,
+        )
         if path is None:
             return {}
-        return _load_yaml_with_includes(path, config_dirs, set())
+        return _load_yaml_with_includes(
+            path,
+            config_dirs,
+            set(),
+            allow_out_of_root_includes=allow_out_of_root_includes,
+        )
     paths = []
     for config_dir in config_dirs:
-        path = config_dir / candidate
-        if path.exists():
+        path = (config_dir / candidate).resolve()
+        if path.exists() and (
+            allow_out_of_root_includes or _is_within_roots(path, config_dirs)
+        ):
             paths.append(path)
     merged: Dict[str, Any] = {}
     for path in reversed(paths):
-        merged = _deep_merge(merged, _load_yaml_with_includes(path, config_dirs, set()))
+        merged = _deep_merge(
+            merged,
+            _load_yaml_with_includes(
+                path,
+                config_dirs,
+                set(),
+                allow_out_of_root_includes=allow_out_of_root_includes,
+            ),
+        )
     return merged
 
 
-def _resolve_model_yamls(models: Any, config_dirs: Sequence[Path]) -> list[Path]:
+def _resolve_model_yamls(
+    models: Any,
+    config_dirs: Sequence[Path],
+    *,
+    allow_out_of_root_includes: bool = False,
+) -> list[Path]:
     if not isinstance(models, list):
         logging.warning(
             "[Consist][ActivitySim] Expected list for settings.models, got %s.",
@@ -1842,7 +1950,11 @@ def _resolve_model_yamls(models: Any, config_dirs: Sequence[Path]) -> list[Path]
             candidates.append(model[: -len("_settings")])
         path = None
         for candidate in candidates:
-            path = _resolve_yaml_path(candidate, config_dirs)
+            path = _resolve_yaml_path(
+                candidate,
+                config_dirs,
+                allow_out_of_root=allow_out_of_root_includes,
+            )
             if path:
                 break
         if path is None:
@@ -1917,20 +2029,36 @@ def _normalize_csv_reference(name: str) -> list[Path]:
     return candidates
 
 
+def _is_within_roots(path: Path, root_dirs: Sequence[Path]) -> bool:
+    resolved = path.resolve()
+    for root in root_dirs:
+        if resolved.is_relative_to(root.resolve()):
+            return True
+    return False
+
+
 def _resolve_csv_reference(
-    name: str, config_dirs: Sequence[Path]
+    name: str,
+    config_dirs: Sequence[Path],
+    *,
+    allow_out_of_root: bool = False,
 ) -> tuple[Optional[Path], bool]:
     candidates = _normalize_csv_reference(name)
     if not candidates:
         return None, False
     for candidate in candidates:
         if candidate.is_absolute():
-            if candidate.exists():
-                return candidate, True
+            resolved = candidate.resolve()
+            if resolved.exists() and (
+                allow_out_of_root or _is_within_roots(resolved, config_dirs)
+            ):
+                return resolved, True
             continue
         for config_dir in config_dirs:
-            path = config_dir / candidate
-            if path.exists():
+            path = (config_dir / candidate).resolve()
+            if path.exists() and (
+                allow_out_of_root or _is_within_roots(path, config_dirs)
+            ):
                 return path, True
     return None, True
 
@@ -1942,6 +2070,7 @@ def _collect_referenced_csvs(
     inherit_settings: bool,
     allow_heuristics: bool,
     strict: bool,
+    allow_out_of_root_refs: bool,
 ) -> list[Path]:
     referenced: list[Path] = []
     seen: Set[Path] = set()
@@ -1950,7 +2079,11 @@ def _collect_referenced_csvs(
         for ref in sorted(
             _collect_reference_values(data, allow_heuristics=allow_heuristics)
         ):
-            csv_path, attempted = _resolve_csv_reference(ref, config_dirs)
+            csv_path, attempted = _resolve_csv_reference(
+                ref,
+                config_dirs,
+                allow_out_of_root=allow_out_of_root_refs,
+            )
             if csv_path is None:
                 if not attempted:
                     continue
@@ -1965,6 +2098,15 @@ def _collect_referenced_csvs(
     return referenced
 
 
+def _safe_filename_component(value: str, *, fallback: str = "model") -> str:
+    """
+    Convert arbitrary model names into safe filename components.
+    """
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
+    sanitized = sanitized.strip("._-")
+    return sanitized or fallback
+
+
 def _bundle_configs(
     *,
     config_dirs: Sequence[Path],
@@ -1977,9 +2119,15 @@ def _bundle_configs(
         cache_dir = tracker.run_dir / "config_bundles"
     cache_dir = cache_dir.resolve()
     cache_dir.mkdir(parents=True, exist_ok=True)
+    safe_model_name = _safe_filename_component(run.model_name)
     bundle_path = (
-        cache_dir / f"{run.model_name}_config_bundle_{content_hash[:10]}.tar.gz"
-    )
+        cache_dir / f"{safe_model_name}_config_bundle_{content_hash[:10]}.tar.gz"
+    ).resolve()
+    if not bundle_path.is_relative_to(cache_dir):
+        raise ValueError(
+            "Resolved bundle path escaped bundle cache directory: "
+            f"cache_dir={cache_dir!s}, bundle_path={bundle_path!s}"
+        )
     if bundle_path.exists():
         return bundle_path
     with tarfile.open(bundle_path, "w:gz") as archive:
@@ -2026,11 +2174,17 @@ def _build_constants_rows(
     config: CanonicalConfig,
     settings: Dict[str, Any],
     inherit_settings: bool,
+    allow_out_of_root_includes: bool,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for yaml_path in config.config_files:
         # Attribute constants to the active YAML file after inheritance resolution.
-        data = _load_effective_yaml(yaml_path.name, config.root_dirs, inherit_settings)
+        data = _load_effective_yaml(
+            yaml_path.name,
+            config.root_dirs,
+            inherit_settings,
+            allow_out_of_root_includes=allow_out_of_root_includes,
+        )
         constants = data.get("CONSTANTS", {})
         if isinstance(constants, dict):
             flattened = _flatten_constants(constants)
@@ -2063,8 +2217,13 @@ def _apply_yaml_override(
     key: str,
     value: Any,
     config_dirs: Sequence[Path],
+    allow_out_of_root_yaml_paths: bool = False,
 ) -> None:
-    path = _resolve_yaml_path(file_name, config_dirs)
+    path = _resolve_yaml_path(
+        file_name,
+        config_dirs,
+        allow_out_of_root=allow_out_of_root_yaml_paths,
+    )
     if path is None:
         raise FileNotFoundError(f"YAML file not found for override: {file_name}")
     data = _load_yaml(path)
@@ -2590,8 +2749,13 @@ def _apply_coefficients_override(
     segment: str,
     value: float,
     config_dirs: Sequence[Path],
+    allow_out_of_root_csv_refs: bool = False,
 ) -> None:
-    csv_path, _ = _resolve_csv_reference(file_name, config_dirs)
+    csv_path, _ = _resolve_csv_reference(
+        file_name,
+        config_dirs,
+        allow_out_of_root=allow_out_of_root_csv_refs,
+    )
     if csv_path is None:
         raise FileNotFoundError(f"CSV file not found for override: {file_name}")
     with _open_csv(csv_path) as handle:

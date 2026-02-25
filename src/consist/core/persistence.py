@@ -2,10 +2,11 @@ import time
 import random
 import logging
 import re
+import os
 import uuid
 import json
-import os
 import shutil
+import tempfile
 import contextvars
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -63,11 +64,33 @@ _RETRYABLE_DB_ERROR_MARKERS = (
     "another connection",
     "another process",
 )
+_SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _is_retryable_db_error(message: str) -> bool:
     normalized = message.lower()
     return any(marker in normalized for marker in _RETRYABLE_DB_ERROR_MARKERS)
+
+
+def _validate_identifier(identifier: str, *, label: str) -> str:
+    if not _SAFE_IDENTIFIER_RE.fullmatch(identifier):
+        raise ValueError(
+            f"Invalid {label}. Only letters, numbers, and underscores are allowed, "
+            "and the identifier must not start with a number."
+        )
+    return identifier
+
+
+def _quote_ident(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _quote_qualified_identifier(name: str, *, label: str) -> str:
+    parts = name.split(".")
+    if not parts or any(part == "" for part in parts):
+        raise ValueError(f"Invalid {label}: empty identifier component.")
+    safe_parts = [_validate_identifier(part, label=label) for part in parts]
+    return ".".join(_quote_ident(part) for part in safe_parts)
 
 
 def _assert_json_depth(obj: Any, *, max_depth: int) -> None:
@@ -759,19 +782,61 @@ class DatabaseManager:
                     table_schema = summary.get("table_schema")
                     if not isinstance(table_name, str) or not table_name:
                         continue
-                    if isinstance(table_schema, str) and table_schema:
-                        from_table = f"{table_schema}.{table_name}"
-                    else:
-                        from_table = table_name
-                    safe_from = from_table.replace(".", "_")
-                    constraint = f"fk_{safe_from}_{rel.from_field}"
+                    if not isinstance(rel.from_field, str) or not rel.from_field:
+                        continue
+                    if not isinstance(rel.to_table, str) or not rel.to_table:
+                        continue
+                    if not isinstance(rel.to_field, str) or not rel.to_field:
+                        continue
+
+                    try:
+                        from_parts = []
+                        if isinstance(table_schema, str) and table_schema:
+                            from_parts.append(
+                                _validate_identifier(table_schema, label="table_schema")
+                            )
+                        from_parts.append(
+                            _validate_identifier(table_name, label="table_name")
+                        )
+                        quoted_from_table = ".".join(
+                            _quote_ident(part) for part in from_parts
+                        )
+                        from_table = ".".join(from_parts)
+
+                        safe_from_field = _validate_identifier(
+                            rel.from_field, label="from_field"
+                        )
+                        safe_to_field = _validate_identifier(
+                            rel.to_field, label="to_field"
+                        )
+                        quoted_to_table = _quote_qualified_identifier(
+                            rel.to_table, label="to_table"
+                        )
+
+                        safe_from = "_".join(from_parts)
+                        constraint = f"fk_{safe_from}_{safe_from_field}"
+                        constraint = _validate_identifier(
+                            constraint, label="constraint_name"
+                        )
+                    except ValueError as e:
+                        logging.warning(
+                            "Skipping FK creation due to invalid identifier(s) "
+                            "(table=%s, from_field=%s, to_table=%s, to_field=%s): %s",
+                            table_name,
+                            rel.from_field,
+                            rel.to_table,
+                            rel.to_field,
+                            e,
+                        )
+                        continue
+
                     stmt = (
                         "ALTER TABLE "
-                        f"{from_table} "
+                        f"{quoted_from_table} "
                         "ADD CONSTRAINT "
-                        f"{constraint} "
-                        f"FOREIGN KEY ({rel.from_field}) "
-                        f"REFERENCES {rel.to_table}({rel.to_field})"
+                        f"{_quote_ident(constraint)} "
+                        f"FOREIGN KEY ({_quote_ident(safe_from_field)}) "
+                        f"REFERENCES {quoted_to_table}({_quote_ident(safe_to_field)})"
                     )
                     try:
                         conn.exec_driver_sql(stmt)
@@ -2434,16 +2499,34 @@ class ProvenanceWriter:
         per_run_dir = tracker.fs.run_dir / "consist_runs"
         per_run_dir.mkdir(parents=True, exist_ok=True)
         per_run_target = per_run_dir / f"{safe_run_id}.json"
-        per_run_tmp = per_run_target.with_suffix(".tmp")
-        with open(per_run_tmp, "w", encoding="utf-8") as f:
-            f.write(json_str)
-        per_run_tmp.replace(per_run_target)
+        self._write_text_atomic(per_run_target, json_str)
 
         latest_target = tracker.fs.run_dir / "consist.json"
-        latest_tmp = latest_target.with_suffix(".tmp")
-        with open(latest_tmp, "w", encoding="utf-8") as f:
-            f.write(json_str)
-        latest_tmp.replace(latest_target)
+        self._write_text_atomic(latest_target, json_str)
+
+    def _write_text_atomic(self, target: Path, payload: str) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path: Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=target.parent,
+                prefix=f".{target.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                handle.write(payload)
+                handle.flush()
+                tmp_path = Path(handle.name)
+            os.replace(tmp_path, target)
+        except Exception:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            raise
 
     def sync_run(self, run: "RunModel") -> None:
         """

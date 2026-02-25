@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,20 @@ PROFILE_VERSION = 1
 MAX_SCHEMA_JSON_BYTES = 65_536
 MAX_INLINE_PROFILE_BYTES = 16_384
 MAX_FIELDS = 2_000
+_SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_identifier(identifier: str, *, label: str) -> str:
+    if not _SAFE_IDENTIFIER_RE.fullmatch(identifier):
+        raise ValueError(
+            f"Invalid {label}. Only letters, numbers, and underscores are allowed, "
+            "and the identifier must not start with a number."
+        )
+    return identifier
+
+
+def _quote_ident(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
 
 
 def _normalize_index_name(name: Any, level: int) -> str:
@@ -416,9 +431,11 @@ def _describe_relation(
     view_name: str,
 ) -> List[SchemaFieldProfile]:
     fields: List[SchemaFieldProfile] = []
+    safe_view_name = _validate_identifier(view_name, label="view_name")
+    quoted_view_name = _quote_ident(safe_view_name)
     try:
-        relation.create_view(view_name, replace=True)
-        rows = conn.sql(f"DESCRIBE {view_name}").fetchall()
+        relation.create_view(safe_view_name, replace=True)
+        rows = conn.sql(f"DESCRIBE {quoted_view_name}").fetchall()
         for idx, row in enumerate(rows, start=1):
             col_name = row[0]
             col_type = row[1]
@@ -435,5 +452,5 @@ def _describe_relation(
                 )
             )
     finally:
-        conn.sql(f"DROP VIEW IF EXISTS {view_name}")
+        conn.sql(f"DROP VIEW IF EXISTS {quoted_view_name}")
     return fields

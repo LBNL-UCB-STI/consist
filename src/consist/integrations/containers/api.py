@@ -109,11 +109,14 @@ def _container_signature(
     tracker: Tracker,
 ) -> str:
     logger.debug(
-        "[container.signature] hashable_config=%s",
-        defn.to_hashable_config(),
+        "[container.signature] backend=%s image_digest=%s command_args=%d input_items=%d",
+        defn.backend,
+        defn.image_digest,
+        len(defn.command or []),
+        len(inputs),
     )
     input_hashes = _hash_inputs(tracker, inputs)
-    logger.debug("[container.signature] input_hashes=%s", input_hashes)
+    logger.debug("[container.signature] input_hash_count=%d", len(input_hashes))
     payload = {
         "config": defn.to_hashable_config(),
         "inputs": input_hashes,
@@ -121,7 +124,7 @@ def _container_signature(
     sig = hashlib.sha256(
         json.dumps(payload, sort_keys=True).encode("utf-8")
     ).hexdigest()
-    logger.debug("[container.signature] signature=%s payload=%s", sig, payload)
+    logger.debug("[container.signature] signature=%s", sig)
     return sig
 
 
