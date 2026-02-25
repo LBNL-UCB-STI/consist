@@ -9662,17 +9662,14 @@ Special cases:
 
 
 <h2 id="consist.core.tracker.Tracker.get_artifact" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">get_artifact</span><span class="p">(</span><span class="n">key_or_id</span><span class="p">)</span></code>
+            <code class="highlight language-python"><span class="n">get_artifact</span><span class="p">(</span><span class="n">key_or_id</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">run_id</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
 
 <a href="#consist.core.tracker.Tracker.get_artifact" class="headerlink" title="Permanent link">&para;</a></h2>
 
 
     <div class="doc doc-contents ">
 
-        <p>Retrieves an Artifact by its semantic key or UUID.</p>
-<p>This method provides a flexible way to locate artifacts, first checking
-the in-memory context of the current run, and then querying the database
-for persistent records.</p>
+        <p>Retrieves an Artifact by semantic key or UUID, optionally scoped to run_id.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
@@ -9695,13 +9692,28 @@ for persistent records.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>The artifact's 'key' (e.g., "households") or its unique UUID.
-When a string is provided, the most recently created artifact matching
-that key is returned.</p>
+                <p>The artifact key (e.g., "households") or artifact UUID.</p>
               </div>
             </td>
             <td>
                 <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>run_id</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>If provided, limits results to artifacts linked to this run (as either
+input or output) via <code>run_artifact_link</code>.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
             </td>
           </tr>
       </tbody>
@@ -9723,7 +9735,7 @@ that key is returned.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>The found <code>Artifact</code> object, or <code>None</code> if no matching artifact is found.</p>
+                <p>The found artifact, or <code>None</code> if not found.</p>
               </div>
             </td>
           </tr>
@@ -12321,7 +12333,7 @@ selection respects the prefer_source parameter.</p>
                 <code>prefer_source</code>
             </td>
             <td>
-                  <code>(<span title="file">file</span>, <span title="duckdb">duckdb</span>)</code>
+                  <code>(<span title="file">file</span>, <span title="duckdb">duckdb</span>, <span title="user_provided">user_provided</span>)</code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -12335,6 +12347,7 @@ not override user_provided schemas.</p>
 <ul>
 <li>"file": Prefer the original file schema (CSV/Parquet with pandas dtypes)</li>
 <li>"duckdb": Prefer the post-ingestion schema from the DuckDB table</li>
+<li>"user_provided": Prefer manually curated schema observations explicitly</li>
 <li>None (default): Prefer file, as it preserves richer type information
   (e.g., pandas category)</li>
 </ul>
