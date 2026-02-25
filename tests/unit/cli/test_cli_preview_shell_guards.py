@@ -299,6 +299,97 @@ def test_shell_schema_stub_surfaces_value_error(capsys) -> None:
     assert "invalid class name" in out
 
 
+def test_shell_schema_stub_rejects_key_and_artifact_id_together(capsys) -> None:
+    """Shell schema_stub should reject ambiguous selector combinations."""
+    shell = ConsistShell(MagicMock())
+
+    shell.do_schema_stub(
+        "artifact_key --artifact-id 00000000-0000-0000-0000-000000000001"
+    )
+
+    out = capsys.readouterr().out
+    assert "Provide either artifact_key or --artifact-id, not both." in out
+
+
+def test_shell_schema_stub_rejects_run_id_with_artifact_id(capsys) -> None:
+    """Shell schema_stub should enforce run-id usage only with artifact_key lookup."""
+    shell = ConsistShell(MagicMock())
+
+    shell.do_schema_stub(
+        "--artifact-id 00000000-0000-0000-0000-000000000001 --run-id run-123"
+    )
+
+    out = capsys.readouterr().out
+    assert "--run-id can only be used with artifact_key selection." in out
+
+
+def test_shell_schema_stub_rejects_invalid_source(capsys) -> None:
+    """Shell schema_stub should validate --source values."""
+    shell = ConsistShell(MagicMock())
+
+    shell.do_schema_stub("artifact_key --source bad_source")
+
+    out = capsys.readouterr().out
+    assert "--source must be one of: file|duckdb|user_provided" in out
+
+
+def test_shell_schema_stub_uses_run_id_and_prints_selection_explainability(
+    capsys,
+) -> None:
+    """Shell schema_stub should use run-scoped key lookup and print selection details."""
+    tracker = MagicMock()
+    tracker.get_artifact.return_value = SimpleNamespace(id="artifact-id-123")
+    tracker.select_artifact_schema_for_artifact.return_value = SimpleNamespace(
+        schema_id="schema-id-123",
+        source="file",
+        candidate_count=3,
+        selection_rule="default source order file>duckdb",
+    )
+    tracker.export_schema_sqlmodel.return_value = "class ExportedModel(SQLModel): ..."
+    shell = ConsistShell(tracker)
+
+    shell.do_schema_stub("artifact_key --run-id run-123 --source file")
+
+    out = capsys.readouterr().out
+    tracker.get_artifact.assert_called_once_with("artifact_key", run_id="run-123")
+    tracker.select_artifact_schema_for_artifact.assert_called_once_with(
+        artifact_id="artifact-id-123",
+        source="file",
+        strict_source=True,
+    )
+    tracker.export_schema_sqlmodel.assert_called_once_with(
+        schema_id="schema-id-123",
+        class_name=None,
+        table_name=None,
+        abstract=True,
+        include_system_cols=False,
+        include_stats_comments=True,
+    )
+    assert "Schema selection: source=file, schema_id=schema-id-123, candidates=3" in out
+    assert "Selection rule: default source order file>duckdb" in out
+
+
+def test_shell_schema_stub_allows_artifact_id_selector(capsys) -> None:
+    """Shell schema_stub should support direct artifact-id selection."""
+    tracker = MagicMock()
+    tracker.get_artifact.return_value = SimpleNamespace(id="artifact-id-123")
+    tracker.export_schema_sqlmodel.return_value = "class ExportedModel(SQLModel): ..."
+    shell = ConsistShell(tracker)
+
+    shell.do_schema_stub("--artifact-id 00000000-0000-0000-0000-000000000001")
+
+    _ = capsys.readouterr().out
+    tracker.get_artifact.assert_called_once_with("00000000-0000-0000-0000-000000000001")
+    tracker.export_schema_sqlmodel.assert_called_once_with(
+        artifact_id="artifact-id-123",
+        class_name=None,
+        table_name=None,
+        abstract=True,
+        include_system_cols=False,
+        include_stats_comments=True,
+    )
+
+
 def test_shell_schema_profile_unsupported_loaded_type_without_db_profile(
     capsys,
 ) -> None:

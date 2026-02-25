@@ -59,7 +59,12 @@ from consist.core.events import EventManager
 from consist.core.fs import FileSystemManager
 from consist.core.identity import IdentityManager
 from consist.core.indexing import IndexBySpec
-from consist.core.persistence import DatabaseManager, ProvenanceWriter
+from consist.core.persistence import (
+    ArtifactSchemaSelection,
+    DatabaseManager,
+    ProvenanceWriter,
+    SchemaProfileSource,
+)
 from consist.core.views import ViewFactory, ViewRegistry
 from consist.core.ingestion import ingest_artifact
 from consist.core.lineage import LineageService
@@ -727,7 +732,7 @@ class Tracker:
         abstract: bool = True,
         include_system_cols: bool = False,
         include_stats_comments: bool = True,
-        prefer_source: Optional[Literal["file", "duckdb"]] = None,
+        prefer_source: Optional[SchemaProfileSource] = None,
     ) -> str:
         """
         Export a captured artifact schema as a SQLModel stub for manual editing.
@@ -756,7 +761,7 @@ class Tracker:
             Whether to include Consist system columns in the stub.
         include_stats_comments : bool, default True
             Whether to include column-level stats as comments.
-        prefer_source : {"file", "duckdb"}, optional
+        prefer_source : {"file", "duckdb", "user_provided"}, optional
             Preference hint for when user_provided schema does not exist. This is
             useful when an artifact has both a file profile (pandas dtypes) and a
             duckdb profile (post-ingestion types). Ignored if schema_id is provided
@@ -768,6 +773,7 @@ class Tracker:
 
             - "file": Prefer the original file schema (CSV/Parquet with pandas dtypes)
             - "duckdb": Prefer the post-ingestion schema from the DuckDB table
+            - "user_provided": Prefer manually curated schema observations explicitly
             - None (default): Prefer file, as it preserves richer type information
               (e.g., pandas category)
 
@@ -3755,32 +3761,60 @@ class Tracker:
 
     # --- Retrieval Helpers ---
 
-    def get_artifact(self, key_or_id: Union[str, uuid.UUID]) -> Optional[Artifact]:
+    def get_artifact(
+        self,
+        key_or_id: Union[str, uuid.UUID],
+        *,
+        run_id: Optional[str] = None,
+    ) -> Optional[Artifact]:
         """
-        Retrieves an Artifact by its semantic key or UUID.
-
-        This method provides a flexible way to locate artifacts, first checking
-        the in-memory context of the current run, and then querying the database
-        for persistent records.
+        Retrieves an Artifact by semantic key or UUID, optionally scoped to run_id.
 
         Parameters
         ----------
         key_or_id : Union[str, uuid.UUID]
-            The artifact's 'key' (e.g., "households") or its unique UUID.
-            When a string is provided, the most recently created artifact matching
-            that key is returned.
+            The artifact key (e.g., "households") or artifact UUID.
+        run_id : Optional[str], optional
+            If provided, limits results to artifacts linked to this run (as either
+            input or output) via ``run_artifact_link``.
 
         Returns
         -------
         Optional[Artifact]
-            The found `Artifact` object, or `None` if no matching artifact is found.
+            The found artifact, or ``None`` if not found.
         """
         if self.db:
-            artifact = self.db.get_artifact(key_or_id)
+            artifact = self.db.get_artifact(key_or_id, run_id=run_id)
             if artifact is not None:
                 set_tracker_ref(artifact, self)
             return artifact
         return None
+
+    def select_artifact_schema_for_artifact(
+        self,
+        *,
+        artifact_id: Union[str, uuid.UUID],
+        source: Optional[SchemaProfileSource] = None,
+        strict_source: bool = False,
+    ) -> Optional[ArtifactSchemaSelection]:
+        """
+        Resolve schema selection metadata for an artifact.
+
+        Returns selection details (schema_id/source/candidate_count/rule) used for
+        explainability and deterministic source selection in shell UX.
+        """
+        if not self.db:
+            raise ValueError(
+                "Schema selection requires a configured database (db_path)."
+            )
+        artifact_uuid = (
+            uuid.UUID(artifact_id) if isinstance(artifact_id, str) else artifact_id
+        )
+        return self.db.select_artifact_schema_for_artifact(
+            artifact_id=artifact_uuid,
+            prefer_source=source,
+            strict_source=strict_source,
+        )
 
     def get_artifact_by_uri(
         self,
