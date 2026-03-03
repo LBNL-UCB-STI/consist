@@ -117,3 +117,110 @@ def test_discover_global_tables_from_schema(maintenance: DatabaseMaintenance) ->
         conn.exec_driver_sql("CREATE TABLE local_rows (id INTEGER)")
 
     assert maintenance._discover_global_tables() == ["a_rows", "z_rows"]
+
+
+def test_classify_global_table_modes(maintenance: DatabaseMaintenance) -> None:
+    with maintenance.db.engine.begin() as conn:
+        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+        conn.exec_driver_sql(
+            "CREATE TABLE global_tables.run_scoped_table (consist_run_id VARCHAR)"
+        )
+        conn.exec_driver_sql("CREATE TABLE global_tables.run_link_table (run_id VARCHAR)")
+        conn.exec_driver_sql(
+            "CREATE TABLE global_tables.unscoped_cache_table (content_hash VARCHAR)"
+        )
+
+    assert maintenance._classify_global_table("run_scoped_table") == "run_scoped"
+    assert maintenance._classify_global_table("run_link_table") == "run_link"
+    assert maintenance._classify_global_table("unscoped_cache_table") == "unscoped_cache"
+
+
+@pytest.mark.parametrize(
+    ("table_alias", "expected_column"),
+    [("", '"consist_run_id"'), ("gt", '"gt"."consist_run_id"')],
+)
+def test_resolve_global_table_filter_sql_run_scoped(
+    maintenance: DatabaseMaintenance, table_alias: str, expected_column: str
+) -> None:
+    with maintenance.db.engine.begin() as conn:
+        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+        conn.exec_driver_sql(
+            "CREATE TABLE global_tables.scoped_filter_table (consist_run_id VARCHAR)"
+        )
+
+    sql = maintenance._resolve_global_table_filter_sql(
+        "scoped_filter_table", ["run_1", "run_2"], table_alias=table_alias
+    )
+
+    assert sql == f"{expected_column} = ANY(['run_1', 'run_2'])"
+
+
+@pytest.mark.parametrize(
+    ("table_alias", "expected_column"), [("", '"run_id"'), ("gt", '"gt"."run_id"')]
+)
+def test_resolve_global_table_filter_sql_run_link(
+    maintenance: DatabaseMaintenance, table_alias: str, expected_column: str
+) -> None:
+    with maintenance.db.engine.begin() as conn:
+        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+        conn.exec_driver_sql("CREATE TABLE global_tables.link_filter_table (run_id VARCHAR)")
+
+    sql = maintenance._resolve_global_table_filter_sql(
+        "link_filter_table", ["run_1", "run_2"], table_alias=table_alias
+    )
+
+    assert sql == f"{expected_column} = ANY(['run_1', 'run_2'])"
+
+
+def test_resolve_global_table_filter_sql_unscoped_cache_returns_none(
+    maintenance: DatabaseMaintenance,
+) -> None:
+    with maintenance.db.engine.begin() as conn:
+        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+        conn.exec_driver_sql(
+            "CREATE TABLE global_tables.cache_filter_table (content_hash VARCHAR)"
+        )
+
+    sql = maintenance._resolve_global_table_filter_sql(
+        "cache_filter_table", ["run_1"], table_alias="gt"
+    )
+
+    assert sql is None
+
+
+@pytest.mark.parametrize("bad_table", ["bad-table", "global_tables.foo", "1table"])
+def test_classify_global_table_rejects_invalid_identifiers(
+    maintenance: DatabaseMaintenance, bad_table: str
+) -> None:
+    with pytest.raises(ValueError, match="Invalid table"):
+        maintenance._classify_global_table(bad_table)
+
+
+@pytest.mark.parametrize("bad_alias", ["bad-alias", "gt.foo", "1alias"])
+def test_resolve_global_table_filter_sql_rejects_invalid_alias(
+    maintenance: DatabaseMaintenance, bad_alias: str
+) -> None:
+    with maintenance.db.engine.begin() as conn:
+        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+        conn.exec_driver_sql(
+            "CREATE TABLE global_tables.alias_validation_table (consist_run_id VARCHAR)"
+        )
+
+    with pytest.raises(ValueError, match="Invalid table_alias"):
+        maintenance._resolve_global_table_filter_sql(
+            "alias_validation_table", ["run_1"], table_alias=bad_alias
+        )
+
+
+@pytest.mark.parametrize("table_name", ["scoped_empty_ids", "link_empty_ids"])
+def test_resolve_global_table_filter_sql_empty_run_ids_is_non_destructive(
+    maintenance: DatabaseMaintenance, table_name: str
+) -> None:
+    column = "consist_run_id" if "scoped" in table_name else "run_id"
+    with maintenance.db.engine.begin() as conn:
+        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+        conn.exec_driver_sql(f"CREATE TABLE global_tables.{table_name} ({column} VARCHAR)")
+
+    sql = maintenance._resolve_global_table_filter_sql(table_name, [])
+
+    assert sql == "1 = 0"

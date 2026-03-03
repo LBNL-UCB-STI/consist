@@ -4,6 +4,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Literal, Optional
+import re
 import uuid
 
 from sqlalchemy.engine import Engine
@@ -15,6 +16,7 @@ if TYPE_CHECKING:
     from consist.core.persistence import DatabaseManager
 
 GlobalTableMode = Literal["run_scoped", "run_link", "unscoped_cache"]
+_SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(slots=True)
@@ -282,8 +284,29 @@ class DatabaseMaintenance:
     def _classify_global_table(
         self, table: str, engine: Optional[Engine] = None
     ) -> GlobalTableMode:
-        raise NotImplementedError(
-            "Step 1 only: _classify_global_table() is not implemented yet."
+        safe_table = self._validate_identifier(table, label="table")
+        active_engine = engine or self.db.engine
+
+        def _query() -> GlobalTableMode:
+            with active_engine.begin() as conn:
+                rows = conn.exec_driver_sql(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'global_tables'
+                      AND table_name = ?
+                    """,
+                    (safe_table,),
+                ).fetchall()
+            column_names = {str(row[0]) for row in rows}
+            if "consist_run_id" in column_names:
+                return "run_scoped"
+            if "run_id" in column_names:
+                return "run_link"
+            return "unscoped_cache"
+
+        return self.db.execute_with_retry(
+            _query, operation_name="maintenance_classify_global_table"
         )
 
     def _global_table_row_counts(
@@ -303,9 +326,27 @@ class DatabaseMaintenance:
         *,
         table_alias: str = "",
     ) -> Optional[str]:
-        raise NotImplementedError(
-            "Step 1 only: _resolve_global_table_filter_sql() is not implemented yet."
+        safe_table = self._validate_identifier(table, label="table")
+        mode = self._classify_global_table(safe_table)
+        if mode == "unscoped_cache":
+            return None
+
+        normalized_run_ids = self._normalize_run_ids(run_ids)
+        if not normalized_run_ids:
+            return "1 = 0"
+
+        run_column = "consist_run_id" if mode == "run_scoped" else "run_id"
+        quoted_column = self._quote_ident(run_column)
+        if table_alias:
+            safe_alias = self._validate_identifier(table_alias, label="table_alias")
+            column_ref = f'{self._quote_ident(safe_alias)}.{quoted_column}'
+        else:
+            column_ref = quoted_column
+
+        run_id_literals = ", ".join(
+            self._quote_sql_string_literal(run_id) for run_id in normalized_run_ids
         )
+        return f"{column_ref} = ANY([{run_id_literals}])"
 
     def _build_intersection_column_list(
         self,
@@ -362,3 +403,21 @@ class DatabaseMaintenance:
             return uuid.UUID(str(value))
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _validate_identifier(identifier: str, *, label: str) -> str:
+        value = str(identifier).strip()
+        if not _SAFE_IDENTIFIER_RE.fullmatch(value):
+            raise ValueError(
+                f"Invalid {label}. Only letters, numbers, and underscores are allowed, "
+                "and the identifier must not start with a number."
+            )
+        return value
+
+    @staticmethod
+    def _quote_ident(identifier: str) -> str:
+        return '"' + identifier.replace('"', '""') + '"'
+
+    @staticmethod
+    def _quote_sql_string_literal(value: str) -> str:
+        return "'" + str(value).replace("'", "''") + "'"
