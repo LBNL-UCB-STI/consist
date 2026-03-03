@@ -224,3 +224,151 @@ def test_resolve_global_table_filter_sql_empty_run_ids_is_non_destructive(
     sql = maintenance._resolve_global_table_filter_sql(table_name, [])
 
     assert sql == "1 = 0"
+
+
+def test_build_intersection_column_list_returns_shared_columns_in_target_order(
+    maintenance: DatabaseMaintenance,
+) -> None:
+    with maintenance.db.engine.begin() as conn:
+        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS source_schema")
+        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS target_schema")
+        conn.exec_driver_sql(
+            """
+            CREATE TABLE source_schema.shared_table (
+                source_only INTEGER,
+                col_b INTEGER,
+                col_a INTEGER,
+                common_col INTEGER
+            )
+            """
+        )
+        conn.exec_driver_sql(
+            """
+            CREATE TABLE target_schema.shared_table (
+                target_only INTEGER,
+                common_col INTEGER,
+                col_a INTEGER,
+                col_b INTEGER
+            )
+            """
+        )
+
+    columns = maintenance._build_intersection_column_list(
+        "shared_table",
+        source_schema="source_schema",
+        target_schema="target_schema",
+    )
+
+    assert columns == ['"common_col"', '"col_a"', '"col_b"']
+
+
+def test_build_intersection_column_list_excludes_source_only_and_target_only_columns(
+    maintenance: DatabaseMaintenance,
+) -> None:
+    with maintenance.db.engine.begin() as conn:
+        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS source_drift")
+        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS target_drift")
+        conn.exec_driver_sql(
+            """
+            CREATE TABLE source_drift.drift_table (
+                id INTEGER,
+                shared_left INTEGER,
+                source_only INTEGER,
+                shared_right INTEGER
+            )
+            """
+        )
+        conn.exec_driver_sql(
+            """
+            CREATE TABLE target_drift.drift_table (
+                target_only_a INTEGER,
+                shared_right INTEGER,
+                shared_left INTEGER,
+                target_only_b INTEGER
+            )
+            """
+        )
+
+    columns = maintenance._build_intersection_column_list(
+        "drift_table",
+        source_schema="source_drift",
+        target_schema="target_drift",
+    )
+
+    assert columns == ['"shared_right"', '"shared_left"']
+
+
+def test_build_intersection_column_list_same_source_and_target_schema(
+    maintenance: DatabaseMaintenance,
+) -> None:
+    with maintenance.db.engine.begin() as conn:
+        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS same_schema")
+        conn.exec_driver_sql(
+            """
+            CREATE TABLE same_schema.same_table (
+                first_col INTEGER,
+                second_col INTEGER,
+                third_col INTEGER
+            )
+            """
+        )
+
+    columns = maintenance._build_intersection_column_list(
+        "same_table",
+        source_schema="same_schema",
+        target_schema="same_schema",
+    )
+
+    assert columns == ['"first_col"', '"second_col"', '"third_col"']
+
+
+@pytest.mark.parametrize(
+    ("create_source", "create_target"),
+    [(False, False), (True, False), (False, True)],
+)
+def test_build_intersection_column_list_missing_tables_returns_empty_list(
+    maintenance: DatabaseMaintenance, create_source: bool, create_target: bool
+) -> None:
+    table_name = f"missing_table_{int(create_source)}_{int(create_target)}"
+    with maintenance.db.engine.begin() as conn:
+        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS source_missing")
+        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS target_missing")
+        if create_source:
+            conn.exec_driver_sql(
+                f"CREATE TABLE source_missing.{table_name} (shared_col INTEGER)"
+            )
+        if create_target:
+            conn.exec_driver_sql(
+                f"CREATE TABLE target_missing.{table_name} (shared_col INTEGER)"
+            )
+
+    columns = maintenance._build_intersection_column_list(
+        table_name,
+        source_schema="source_missing",
+        target_schema="target_missing",
+    )
+
+    assert columns == []
+
+
+@pytest.mark.parametrize(
+    ("table", "source_schema", "target_schema", "error_label"),
+    [
+        ("bad-table", "source_schema", "target_schema", "table"),
+        ("table_name", "bad-schema", "target_schema", "source_schema"),
+        ("table_name", "source_schema", "1target", "target_schema"),
+    ],
+)
+def test_build_intersection_column_list_rejects_invalid_identifiers(
+    maintenance: DatabaseMaintenance,
+    table: str,
+    source_schema: str,
+    target_schema: str,
+    error_label: str,
+) -> None:
+    with pytest.raises(ValueError, match=f"Invalid {error_label}"):
+        maintenance._build_intersection_column_list(
+            table,
+            source_schema=source_schema,
+            target_schema=target_schema,
+        )

@@ -356,8 +356,50 @@ class DatabaseMaintenance:
         target_schema: str,
         engine: Optional[Engine] = None,
     ) -> list[str]:
-        raise NotImplementedError(
-            "Step 1 only: _build_intersection_column_list() is not implemented yet."
+        safe_table = self._validate_identifier(table, label="table")
+        safe_source_schema = self._validate_identifier(
+            source_schema, label="source_schema"
+        )
+        safe_target_schema = self._validate_identifier(
+            target_schema, label="target_schema"
+        )
+        active_engine = engine or self.db.engine
+
+        def _query() -> list[str]:
+            with active_engine.begin() as conn:
+                rows = conn.exec_driver_sql(
+                    """
+                    SELECT table_schema, column_name, ordinal_position
+                    FROM information_schema.columns
+                    WHERE table_name = ?
+                      AND table_schema IN (?, ?)
+                    ORDER BY table_schema, ordinal_position
+                    """,
+                    (safe_table, safe_source_schema, safe_target_schema),
+                ).fetchall()
+
+            source_columns: set[str] = set()
+            target_columns_in_order: list[str] = []
+
+            for schema_name, column_name, _ in rows:
+                schema_value = str(schema_name)
+                column_value = str(column_name)
+                if schema_value == safe_source_schema:
+                    source_columns.add(column_value)
+                if schema_value == safe_target_schema:
+                    target_columns_in_order.append(column_value)
+
+            if not source_columns or not target_columns_in_order:
+                return []
+
+            return [
+                self._quote_ident(column_name)
+                for column_name in target_columns_in_order
+                if column_name in source_columns
+            ]
+
+        return self.db.execute_with_retry(
+            _query, operation_name="maintenance_build_intersection_column_list"
         )
 
     def _resolve_artifact_disk_paths(
