@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 import uuid
 from pathlib import Path
 
@@ -372,3 +374,236 @@ def test_build_intersection_column_list_rejects_invalid_identifiers(
             source_schema=source_schema,
             target_schema=target_schema,
         )
+
+
+def test_inspect_reports_expected_counts_and_global_sizes(
+    maintenance: DatabaseMaintenance,
+) -> None:
+    now = datetime.now(timezone.utc)
+    linked_artifact_id = uuid.uuid4()
+    orphaned_artifact_id = uuid.uuid4()
+
+    with maintenance.db.session_scope() as session:
+        session.add_all(
+            [
+                Run(
+                    id="run_completed",
+                    model_name="demo",
+                    status="completed",
+                    ended_at=now,
+                ),
+                Run(
+                    id="run_running_zombie",
+                    model_name="demo",
+                    status="running",
+                    ended_at=now,
+                ),
+                Run(id="run_failed", model_name="demo", status="failed", ended_at=now),
+                Artifact(
+                    id=linked_artifact_id,
+                    key="linked_artifact",
+                    container_uri="outputs://linked.parquet",
+                    driver="parquet",
+                ),
+                Artifact(
+                    id=orphaned_artifact_id,
+                    key="orphaned_artifact",
+                    container_uri="outputs://orphaned.parquet",
+                    driver="parquet",
+                ),
+                RunArtifactLink(
+                    run_id="run_completed",
+                    artifact_id=linked_artifact_id,
+                    direction="output",
+                ),
+            ]
+        )
+        session.commit()
+
+    with maintenance.db.engine.begin() as conn:
+        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+        conn.exec_driver_sql(
+            "CREATE TABLE global_tables.sample_global (consist_run_id VARCHAR)"
+        )
+        conn.exec_driver_sql(
+            """
+            INSERT INTO global_tables.sample_global (consist_run_id)
+            VALUES ('run_completed'), ('run_running_zombie'), ('run_failed')
+            """
+        )
+
+    report = maintenance.inspect()
+
+    assert report.total_runs == 3
+    assert report.runs_by_status == {"completed": 1, "failed": 1, "running": 1}
+    assert report.total_artifacts == 2
+    assert report.orphaned_artifact_count == 1
+    assert report.zombie_run_ids == ["run_running_zombie"]
+    assert report.global_table_sizes == {"sample_global": 3}
+    assert report.db_file_size_mb > 0.0
+    assert report.json_snapshot_count == 0
+    assert report.json_db_parity is False
+
+
+def test_inspect_json_db_parity_true_with_snapshot_files(
+    maintenance: DatabaseMaintenance,
+) -> None:
+    with maintenance.db.session_scope() as session:
+        session.add_all(
+            [
+                Run(id="run_a", model_name="demo"),
+                Run(id="run_b", model_name="demo"),
+            ]
+        )
+        session.commit()
+
+    snapshot_dir = maintenance.run_dir / "consist_runs"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    (snapshot_dir / "run_a.json").write_text(
+        json.dumps({"run": {"id": "run_a"}}),
+        encoding="utf-8",
+    )
+    (snapshot_dir / "run_b.json").write_text(
+        json.dumps({"run": {"id": "run_b"}}),
+        encoding="utf-8",
+    )
+
+    report = maintenance.inspect()
+
+    assert report.json_snapshot_count == 2
+    assert report.json_db_parity is True
+
+
+def test_inspect_json_db_parity_false_with_mismatched_snapshot_ids(
+    maintenance: DatabaseMaintenance,
+) -> None:
+    with maintenance.db.session_scope() as session:
+        session.add(Run(id="run_only_in_db", model_name="demo"))
+        session.commit()
+
+    snapshot_dir = maintenance.run_dir / "consist_runs"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    (snapshot_dir / "run_only_in_db.json").write_text(
+        json.dumps({"run": {"id": "run_only_in_db"}}),
+        encoding="utf-8",
+    )
+    (snapshot_dir / "run_only_in_json.json").write_text(
+        json.dumps({"run": {"id": "run_only_in_json"}}),
+        encoding="utf-8",
+    )
+
+    report = maintenance.inspect()
+
+    assert report.json_snapshot_count == 2
+    assert report.json_db_parity is False
+
+
+def test_doctor_reports_invariant_violations(maintenance: DatabaseMaintenance) -> None:
+    now = datetime.now(timezone.utc)
+    missing_producer_artifact = uuid.uuid4()
+    produced_artifact = uuid.uuid4()
+
+    with maintenance.db.session_scope() as session:
+        session.add_all(
+            [
+                Run(id="zombie_run", model_name="demo", status="running", ended_at=now),
+                Run(
+                    id="completed_missing_end",
+                    model_name="demo",
+                    status="completed",
+                    ended_at=None,
+                ),
+                Run(
+                    id="failed_missing_end",
+                    model_name="demo",
+                    status="failed",
+                    ended_at=None,
+                ),
+                Run(id="valid_parent", model_name="demo", status="completed", ended_at=now),
+                Run(
+                    id="dangling_child",
+                    model_name="demo",
+                    status="completed",
+                    parent_run_id="missing_parent",
+                    ended_at=now,
+                ),
+                Artifact(
+                    id=missing_producer_artifact,
+                    key="missing_producer",
+                    container_uri="outputs://missing_producer.parquet",
+                    driver="parquet",
+                    run_id="missing_run",
+                ),
+                Artifact(
+                    id=produced_artifact,
+                    key="produced",
+                    container_uri="outputs://produced.parquet",
+                    driver="parquet",
+                    run_id="valid_parent",
+                ),
+            ]
+        )
+        session.commit()
+
+    report = maintenance.doctor()
+
+    assert report.zombie_run_ids == ["zombie_run"]
+    assert report.completed_without_end_time == [
+        "completed_missing_end",
+        "failed_missing_end",
+    ]
+    assert report.dangling_parent_run_ids == ["missing_parent"]
+    assert report.artifacts_with_missing_producing_run == [missing_producer_artifact]
+    assert report.global_table_schema_drift == {}
+
+
+def test_global_table_row_counts_full_and_filtered_behavior(
+    maintenance: DatabaseMaintenance,
+) -> None:
+    with maintenance.db.engine.begin() as conn:
+        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+        conn.exec_driver_sql(
+            "CREATE TABLE global_tables.scoped_counts (consist_run_id VARCHAR)"
+        )
+        conn.exec_driver_sql("CREATE TABLE global_tables.link_counts (run_id VARCHAR)")
+        conn.exec_driver_sql(
+            "CREATE TABLE global_tables.cache_counts (content_hash VARCHAR)"
+        )
+        conn.exec_driver_sql(
+            """
+            INSERT INTO global_tables.scoped_counts (consist_run_id)
+            VALUES ('run_1'), ('run_1'), ('run_2')
+            """
+        )
+        conn.exec_driver_sql(
+            """
+            INSERT INTO global_tables.link_counts (run_id)
+            VALUES ('run_1'), ('run_3')
+            """
+        )
+        conn.exec_driver_sql(
+            """
+            INSERT INTO global_tables.cache_counts (content_hash)
+            VALUES ('hash_a'), ('hash_b')
+            """
+        )
+
+    full_counts = maintenance._global_table_row_counts(
+        ["scoped_counts", "link_counts", "cache_counts"], []
+    )
+    filtered_counts = maintenance._global_table_row_counts(
+        ["scoped_counts", "link_counts", "cache_counts"], ["run_1", "run_2"]
+    )
+
+    assert full_counts == {"cache_counts": 2, "link_counts": 2, "scoped_counts": 3}
+    assert list(full_counts.keys()) == ["cache_counts", "link_counts", "scoped_counts"]
+    assert filtered_counts == {
+        "cache_counts": 0,
+        "link_counts": 1,
+        "scoped_counts": 3,
+    }
+    assert list(filtered_counts.keys()) == [
+        "cache_counts",
+        "link_counts",
+        "scoped_counts",
+    ]

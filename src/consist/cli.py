@@ -22,6 +22,7 @@ if __package__ is None and __spec__ is None:
 
 import cmd
 from contextlib import contextmanager
+from dataclasses import asdict
 import importlib
 from importlib.metadata import PackageNotFoundError, version as package_version
 import shlex
@@ -53,6 +54,7 @@ from sqlalchemy import and_, or_, select as sa_select
 from sqlmodel import Session, col, select
 
 from consist import Tracker
+from consist.core.maintenance import DatabaseMaintenance
 from consist.core.persistence import DatabaseManager
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.tools import queries
@@ -72,10 +74,12 @@ except ImportError:  # pragma: no cover - platform dependent
 app = typer.Typer(rich_markup_mode="markdown")
 schema_app = typer.Typer(rich_markup_mode="markdown")
 views_app = typer.Typer(rich_markup_mode="markdown")
+db_app = typer.Typer(rich_markup_mode="markdown")
 console = Console()
 
 app.add_typer(schema_app, name="schema")
 app.add_typer(views_app, name="views")
+app.add_typer(db_app, name="db")
 
 MAX_CLI_LIMIT = 1_000_000
 MAX_PREVIEW_ROWS = 1_000_000
@@ -208,6 +212,95 @@ def _tracker_session(tracker: Tracker) -> Iterator[Session]:
         return
     with db.session_scope() as session:
         yield session
+
+
+def _maintenance_service(db_path: Optional[str]) -> DatabaseMaintenance:
+    tracker = get_tracker(db_path)
+    db = getattr(tracker, "db", None)
+    if not isinstance(db, DatabaseManager):
+        console.print(
+            "[red]Runtime error: tracker has no configured database manager.[/red]"
+        )
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+    return DatabaseMaintenance(db=db, run_dir=Path(tracker.run_dir))
+
+
+@db_app.command("inspect")
+def db_inspect(
+    json_output: bool = typer.Option(
+        False, "--json", help="Output maintenance report as JSON."
+    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
+) -> None:
+    """Inspect database state and snapshot parity."""
+    report = _maintenance_service(db_path).inspect()
+    if json_output:
+        output_json(asdict(report))
+        return
+
+    summary = Table(title="Database Inspect")
+    summary.add_column("Metric", style="cyan")
+    summary.add_column("Value", style="green")
+    summary.add_row("Total runs", str(report.total_runs))
+    summary.add_row(
+        "Runs by status",
+        ", ".join(f"{status}={count}" for status, count in report.runs_by_status.items())
+        or "-",
+    )
+    summary.add_row("Total artifacts", str(report.total_artifacts))
+    summary.add_row("Orphaned artifacts", str(report.orphaned_artifact_count))
+    summary.add_row("Zombie runs", ", ".join(report.zombie_run_ids) or "-")
+    summary.add_row("DB file size (MB)", f"{report.db_file_size_mb:.3f}")
+    summary.add_row("JSON snapshots", str(report.json_snapshot_count))
+    summary.add_row("JSON/DB parity", str(report.json_db_parity))
+    console.print(summary)
+
+    global_sizes = Table(title="Global Table Sizes")
+    global_sizes.add_column("Table", style="cyan")
+    global_sizes.add_column("Rows", style="magenta")
+    if report.global_table_sizes:
+        for table_name, row_count in report.global_table_sizes.items():
+            global_sizes.add_row(table_name, str(row_count))
+    else:
+        global_sizes.add_row("-", "0")
+    console.print(global_sizes)
+
+
+@db_app.command("doctor")
+def db_doctor(
+    json_output: bool = typer.Option(
+        False, "--json", help="Output maintenance diagnostics as JSON."
+    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
+) -> None:
+    """Run read-only integrity diagnostics."""
+    report = _maintenance_service(db_path).doctor()
+    if json_output:
+        output_json(asdict(report))
+        return
+
+    diagnostics = Table(title="Database Doctor")
+    diagnostics.add_column("Check", style="cyan")
+    diagnostics.add_column("Details", style="green")
+    diagnostics.add_row("Zombie runs", ", ".join(report.zombie_run_ids) or "-")
+    diagnostics.add_row(
+        "Completed/failed with null ended_at",
+        ", ".join(report.completed_without_end_time) or "-",
+    )
+    diagnostics.add_row(
+        "Dangling parent run IDs",
+        ", ".join(report.dangling_parent_run_ids) or "-",
+    )
+    diagnostics.add_row(
+        "Artifacts with missing producing run",
+        ", ".join(str(value) for value in report.artifacts_with_missing_producing_run)
+        or "-",
+    )
+    diagnostics.add_row(
+        "Global table schema drift",
+        json.dumps(report.global_table_schema_drift, sort_keys=True) or "{}",
+    )
+    console.print(diagnostics)
 
 
 def _render_schema_profile(

@@ -892,6 +892,83 @@ def test_summary_no_runs_exits_cleanly(tmp_path):
         assert "No runs found in the database" in result.stdout
 
 
+def _seed_db_for_maintenance_cli(db_path: Path) -> None:
+    db = DatabaseManager(str(db_path))
+    artifact_id = uuid.uuid4()
+    now = datetime(2025, 1, 1, 12, 0)
+    try:
+        with db.session_scope() as session:
+            session.add(
+                Run(
+                    id="cli_run",
+                    model_name="demo",
+                    status="completed",
+                    created_at=now,
+                    started_at=now,
+                    ended_at=now,
+                )
+            )
+            session.add(
+                Artifact(
+                    id=artifact_id,
+                    key="cli_artifact",
+                    container_uri="outputs://cli_artifact.parquet",
+                    driver="parquet",
+                    run_id="cli_run",
+                )
+            )
+            session.add(
+                RunArtifactLink(
+                    run_id="cli_run",
+                    artifact_id=artifact_id,
+                    direction="output",
+                )
+            )
+            session.commit()
+    finally:
+        db.engine.dispose()
+
+
+def test_db_inspect_json_output_includes_expected_keys(tmp_path, monkeypatch):
+    db_path = tmp_path / "cli_maintenance_inspect.duckdb"
+    _seed_db_for_maintenance_cli(db_path)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["db", "inspect", "--json", "--db-path", str(db_path)])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert set(payload.keys()) == {
+        "total_runs",
+        "runs_by_status",
+        "total_artifacts",
+        "orphaned_artifact_count",
+        "zombie_run_ids",
+        "global_table_sizes",
+        "db_file_size_mb",
+        "json_snapshot_count",
+        "json_db_parity",
+    }
+
+
+def test_db_doctor_json_output_includes_expected_keys(tmp_path, monkeypatch):
+    db_path = tmp_path / "cli_maintenance_doctor.duckdb"
+    _seed_db_for_maintenance_cli(db_path)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["db", "doctor", "--json", "--db-path", str(db_path)])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert set(payload.keys()) == {
+        "zombie_run_ids",
+        "completed_without_end_time",
+        "dangling_parent_run_ids",
+        "artifacts_with_missing_producing_run",
+        "global_table_schema_drift",
+    }
+
+
 # --- Shell command tests ---
 
 

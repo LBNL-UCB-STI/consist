@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Literal, Optional
 import re
@@ -131,10 +132,203 @@ class DatabaseMaintenance:
         self.run_dir = Path(run_dir)
 
     def inspect(self) -> InspectReport:
-        raise NotImplementedError("Step 1 only: inspect() is not implemented yet.")
+        def _query() -> tuple[int, dict[str, int], int, int, list[str], list[str]]:
+            with self.db.engine.begin() as conn:
+                total_runs_row = conn.exec_driver_sql(
+                    "SELECT COUNT(*) FROM run"
+                ).fetchone()
+                total_runs = int(total_runs_row[0] if total_runs_row else 0)
+
+                status_rows = conn.exec_driver_sql(
+                    """
+                    SELECT status, COUNT(*) AS count
+                    FROM run
+                    GROUP BY status
+                    ORDER BY status
+                    """
+                ).fetchall()
+                runs_by_status = {
+                    str(status): int(count) for status, count in status_rows if status
+                }
+
+                total_artifacts_row = conn.exec_driver_sql(
+                    "SELECT COUNT(*) FROM artifact"
+                ).fetchone()
+                total_artifacts = int(total_artifacts_row[0] if total_artifacts_row else 0)
+
+                orphaned_row = conn.exec_driver_sql(
+                    """
+                    SELECT COUNT(*)
+                    FROM artifact a
+                    LEFT JOIN run_artifact_link ral
+                      ON a.id = ral.artifact_id
+                    WHERE ral.artifact_id IS NULL
+                    """
+                ).fetchone()
+                orphaned_artifact_count = int(orphaned_row[0] if orphaned_row else 0)
+
+                zombie_rows = conn.exec_driver_sql(
+                    """
+                    SELECT id
+                    FROM run
+                    WHERE status = 'running'
+                      AND ended_at IS NOT NULL
+                    ORDER BY id
+                    """
+                ).fetchall()
+                zombie_run_ids = [str(row[0]) for row in zombie_rows]
+
+                db_run_rows = conn.exec_driver_sql(
+                    """
+                    SELECT id
+                    FROM run
+                    ORDER BY id
+                    """
+                ).fetchall()
+                db_run_ids = [str(row[0]) for row in db_run_rows]
+
+            return (
+                total_runs,
+                runs_by_status,
+                total_artifacts,
+                orphaned_artifact_count,
+                zombie_run_ids,
+                db_run_ids,
+            )
+
+        (
+            total_runs,
+            runs_by_status,
+            total_artifacts,
+            orphaned_artifact_count,
+            zombie_run_ids,
+            db_run_ids,
+        ) = self.db.execute_with_retry(_query, operation_name="maintenance_inspect")
+
+        global_tables = self._discover_global_tables()
+        global_table_sizes = self._global_table_row_counts(
+            global_tables, [], engine=self.db.engine
+        )
+
+        db_file_size_mb = 0.0
+        db_path_raw = getattr(self.db, "db_path", None)
+        if isinstance(db_path_raw, str) and db_path_raw:
+            db_path = Path(db_path_raw)
+            if db_path.exists() and db_path.is_file():
+                db_file_size_mb = round(db_path.stat().st_size / (1024 * 1024), 6)
+
+        snapshot_dir = self.run_dir / "consist_runs"
+        snapshot_files = sorted(snapshot_dir.glob("*.json")) if snapshot_dir.exists() else []
+        snapshot_run_ids: set[str] = set()
+        for snapshot_file in snapshot_files:
+            try:
+                payload = json.loads(snapshot_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            run_payload = payload.get("run")
+            if not isinstance(run_payload, dict):
+                continue
+            run_id = run_payload.get("id")
+            if run_id is None:
+                continue
+            parsed_run_id = str(run_id).strip()
+            if parsed_run_id:
+                snapshot_run_ids.add(parsed_run_id)
+
+        db_run_id_set = set(db_run_ids)
+
+        return InspectReport(
+            total_runs=total_runs,
+            runs_by_status=runs_by_status,
+            total_artifacts=total_artifacts,
+            orphaned_artifact_count=orphaned_artifact_count,
+            zombie_run_ids=zombie_run_ids,
+            global_table_sizes=global_table_sizes,
+            db_file_size_mb=db_file_size_mb,
+            json_snapshot_count=len(snapshot_files),
+            json_db_parity=db_run_id_set == snapshot_run_ids,
+        )
 
     def doctor(self) -> DoctorReport:
-        raise NotImplementedError("Step 1 only: doctor() is not implemented yet.")
+        def _query() -> tuple[list[str], list[str], list[str], list[uuid.UUID]]:
+            with self.db.engine.begin() as conn:
+                zombie_rows = conn.exec_driver_sql(
+                    """
+                    SELECT id
+                    FROM run
+                    WHERE status = 'running'
+                      AND ended_at IS NOT NULL
+                    ORDER BY id
+                    """
+                ).fetchall()
+                zombie_run_ids = [str(row[0]) for row in zombie_rows]
+
+                completed_without_end_rows = conn.exec_driver_sql(
+                    """
+                    SELECT id
+                    FROM run
+                    WHERE status IN ('completed', 'failed')
+                      AND ended_at IS NULL
+                    ORDER BY id
+                    """
+                ).fetchall()
+                completed_without_end_time = [
+                    str(row[0]) for row in completed_without_end_rows
+                ]
+
+                dangling_parent_rows = conn.exec_driver_sql(
+                    """
+                    SELECT DISTINCT child.parent_run_id
+                    FROM run child
+                    LEFT JOIN run parent
+                      ON child.parent_run_id = parent.id
+                    WHERE child.parent_run_id IS NOT NULL
+                      AND parent.id IS NULL
+                    ORDER BY child.parent_run_id
+                    """
+                ).fetchall()
+                dangling_parent_run_ids = [
+                    str(row[0]) for row in dangling_parent_rows if row[0]
+                ]
+
+                missing_producer_rows = conn.exec_driver_sql(
+                    """
+                    SELECT artifact.id
+                    FROM artifact
+                    LEFT JOIN run
+                      ON artifact.run_id = run.id
+                    WHERE artifact.run_id IS NOT NULL
+                      AND run.id IS NULL
+                    ORDER BY CAST(artifact.id AS VARCHAR)
+                    """
+                ).fetchall()
+                artifacts_with_missing_producing_run: list[uuid.UUID] = []
+                for row in missing_producer_rows:
+                    parsed_uuid = self._coerce_uuid(row[0])
+                    if parsed_uuid is not None:
+                        artifacts_with_missing_producing_run.append(parsed_uuid)
+
+            return (
+                zombie_run_ids,
+                completed_without_end_time,
+                dangling_parent_run_ids,
+                artifacts_with_missing_producing_run,
+            )
+
+        (
+            zombie_run_ids,
+            completed_without_end_time,
+            dangling_parent_run_ids,
+            artifacts_with_missing_producing_run,
+        ) = self.db.execute_with_retry(_query, operation_name="maintenance_doctor")
+
+        return DoctorReport(
+            zombie_run_ids=zombie_run_ids,
+            completed_without_end_time=completed_without_end_time,
+            dangling_parent_run_ids=dangling_parent_run_ids,
+            artifacts_with_missing_producing_run=artifacts_with_missing_producing_run,
+            global_table_schema_drift={},
+        )
 
     def plan_purge(
         self, run_ids: Iterable[str] | str, *, include_children: bool
@@ -315,8 +509,47 @@ class DatabaseMaintenance:
         run_ids: Iterable[str] | str,
         engine: Optional[Engine] = None,
     ) -> dict[str, int]:
-        raise NotImplementedError(
-            "Step 1 only: _global_table_row_counts() is not implemented yet."
+        safe_tables = sorted(
+            {self._validate_identifier(table, label="table") for table in tables}
+        )
+        normalized_run_ids = self._normalize_run_ids(run_ids)
+        active_engine = engine or self.db.engine
+
+        def _query() -> dict[str, int]:
+            counts: dict[str, int] = {}
+            with active_engine.begin() as conn:
+                for table in safe_tables:
+                    quoted_table = self._quote_ident(table)
+                    if not normalized_run_ids:
+                        row = conn.exec_driver_sql(
+                            f"SELECT COUNT(*) FROM global_tables.{quoted_table}"
+                        ).fetchone()
+                        counts[table] = int(row[0] if row else 0)
+                        continue
+
+                    filter_sql = self._resolve_global_table_filter_sql(
+                        table,
+                        normalized_run_ids,
+                        table_alias="gt",
+                        engine=active_engine,
+                    )
+                    if filter_sql is None:
+                        counts[table] = 0
+                        continue
+
+                    row = conn.exec_driver_sql(
+                        f"""
+                        SELECT COUNT(*)
+                        FROM global_tables.{quoted_table} AS "gt"
+                        WHERE {filter_sql}
+                        """
+                    ).fetchone()
+                    counts[table] = int(row[0] if row else 0)
+
+            return {table: counts[table] for table in safe_tables}
+
+        return self.db.execute_with_retry(
+            _query, operation_name="maintenance_global_table_row_counts"
         )
 
     def _resolve_global_table_filter_sql(
@@ -325,9 +558,10 @@ class DatabaseMaintenance:
         run_ids: Iterable[str] | str,
         *,
         table_alias: str = "",
+        engine: Optional[Engine] = None,
     ) -> Optional[str]:
         safe_table = self._validate_identifier(table, label="table")
-        mode = self._classify_global_table(safe_table)
+        mode = self._classify_global_table(safe_table, engine=engine)
         if mode == "unscoped_cache":
             return None
 
