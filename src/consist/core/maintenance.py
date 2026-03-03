@@ -375,7 +375,14 @@ class DatabaseMaintenance:
     def snapshot(
         self, dest_path: Path, *, checkpoint: bool = True, metadata: Optional[dict] = None
     ) -> Path:
-        raise NotImplementedError("Step 1 only: snapshot() is not implemented yet.")
+        snapshot_metadata: dict = {"operation": "maintenance_snapshot"}
+        if metadata:
+            snapshot_metadata.update(metadata)
+        return self.db.snapshot_to(
+            dest_path=dest_path,
+            checkpoint=checkpoint,
+            metadata=snapshot_metadata,
+        )
 
     def _expand_run_ids(self, run_ids: Iterable[str] | str) -> list[str]:
         """

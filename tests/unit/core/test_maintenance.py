@@ -557,6 +557,55 @@ def test_doctor_reports_invariant_violations(maintenance: DatabaseMaintenance) -
     assert report.global_table_schema_drift == {}
 
 
+def test_snapshot_creates_destination_file(maintenance: DatabaseMaintenance) -> None:
+    destination = maintenance.run_dir / "snapshots" / "maintenance_snapshot.duckdb"
+
+    snapshot_path = maintenance.snapshot(destination)
+
+    assert snapshot_path == destination
+    assert snapshot_path.exists()
+    assert snapshot_path.is_file()
+
+
+def test_snapshot_writes_sidecar_metadata_file(maintenance: DatabaseMaintenance) -> None:
+    destination = maintenance.run_dir / "snapshots" / "with_sidecar.duckdb"
+
+    maintenance.snapshot(destination)
+
+    sidecar_path = maintenance.db._snapshot_sidecar_path(destination)
+    assert sidecar_path.exists()
+    payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    assert payload["operation"] == "maintenance_snapshot"
+
+
+def test_snapshot_merges_default_and_custom_metadata(
+    maintenance: DatabaseMaintenance,
+) -> None:
+    destination = maintenance.run_dir / "snapshots" / "metadata_merge.duckdb"
+
+    maintenance.snapshot(
+        destination,
+        metadata={
+            "operation": "custom_snapshot",
+            "requested_by": "unit_test",
+        },
+    )
+
+    sidecar_path = maintenance.db._snapshot_sidecar_path(destination)
+    payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    assert payload["operation"] == "custom_snapshot"
+    assert payload["requested_by"] == "unit_test"
+
+
+def test_snapshot_checkpoint_false_path_works(maintenance: DatabaseMaintenance) -> None:
+    destination = maintenance.run_dir / "snapshots" / "no_checkpoint.duckdb"
+
+    snapshot_path = maintenance.snapshot(destination, checkpoint=False)
+
+    assert snapshot_path == destination
+    assert snapshot_path.exists()
+
+
 def test_global_table_row_counts_full_and_filtered_behavior(
     maintenance: DatabaseMaintenance,
 ) -> None:

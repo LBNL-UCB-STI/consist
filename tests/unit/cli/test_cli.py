@@ -969,6 +969,65 @@ def test_db_doctor_json_output_includes_expected_keys(tmp_path, monkeypatch):
     }
 
 
+def test_db_snapshot_json_output_includes_expected_keys(tmp_path, monkeypatch):
+    db_path = tmp_path / "cli_snapshot_source.duckdb"
+    _seed_db_for_maintenance_cli(db_path)
+    monkeypatch.chdir(tmp_path)
+    out_path = tmp_path / "snapshots" / "cli_snapshot.duckdb"
+
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "snapshot",
+            "--out",
+            str(out_path),
+            "--json",
+            "--db-path",
+            str(db_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["snapshot_path"] == str(out_path)
+    assert payload["checkpoint"] is True
+    assert payload["sidecar_path"] == str(
+        out_path.with_name(f"{out_path.stem}.snapshot_meta.json")
+    )
+    assert out_path.exists()
+    assert Path(payload["sidecar_path"]).exists()
+
+
+def test_db_snapshot_no_checkpoint_reflected_in_json_output(tmp_path, monkeypatch):
+    db_path = tmp_path / "cli_snapshot_no_checkpoint_source.duckdb"
+    _seed_db_for_maintenance_cli(db_path)
+    monkeypatch.chdir(tmp_path)
+    out_path = tmp_path / "snapshots" / "cli_snapshot_no_checkpoint.duckdb"
+
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "snapshot",
+            "--out",
+            str(out_path),
+            "--no-checkpoint",
+            "--json",
+            "--db-path",
+            str(db_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["checkpoint"] is False
+    assert payload["snapshot_path"] == str(out_path)
+    assert payload["sidecar_path"] == str(
+        out_path.with_name(f"{out_path.stem}.snapshot_meta.json")
+    )
+
+
 # --- Shell command tests ---
 
 

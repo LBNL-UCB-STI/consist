@@ -225,6 +225,14 @@ def _maintenance_service(db_path: Optional[str]) -> DatabaseMaintenance:
     return DatabaseMaintenance(db=db, run_dir=Path(tracker.run_dir))
 
 
+def _resolve_snapshot_sidecar_path(db: DatabaseManager, snapshot_path: Path) -> Path:
+    sidecar_path_fn = getattr(db, "_snapshot_sidecar_path", None)
+    if callable(sidecar_path_fn):
+        return sidecar_path_fn(snapshot_path)
+    base_name = snapshot_path.stem if snapshot_path.suffix else snapshot_path.name
+    return snapshot_path.with_name(f"{base_name}.snapshot_meta.json")
+
+
 @db_app.command("inspect")
 def db_inspect(
     json_output: bool = typer.Option(
@@ -301,6 +309,43 @@ def db_doctor(
         json.dumps(report.global_table_schema_drift, sort_keys=True) or "{}",
     )
     console.print(diagnostics)
+
+
+@db_app.command("snapshot")
+def db_snapshot(
+    out_path: Path = typer.Option(
+        ...,
+        "--out",
+        help="Destination path for the snapshot DuckDB file.",
+    ),
+    no_checkpoint: bool = typer.Option(
+        False,
+        "--no-checkpoint",
+        help="Skip CHECKPOINT before copying the database.",
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output snapshot metadata as JSON."
+    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
+) -> None:
+    """Create a database snapshot and metadata sidecar."""
+    maintenance = _maintenance_service(db_path)
+    checkpoint = not no_checkpoint
+    snapshot_path = maintenance.snapshot(out_path, checkpoint=checkpoint)
+    sidecar_path = _resolve_snapshot_sidecar_path(maintenance.db, snapshot_path)
+
+    if json_output:
+        output_json(
+            {
+                "snapshot_path": str(snapshot_path),
+                "checkpoint": checkpoint,
+                "sidecar_path": str(sidecar_path),
+            }
+        )
+        return
+
+    console.print(f"Snapshot path: {snapshot_path}")
+    console.print(f"Sidecar path: {sidecar_path}")
 
 
 def _render_schema_profile(
