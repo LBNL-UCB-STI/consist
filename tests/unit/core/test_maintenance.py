@@ -746,6 +746,92 @@ def test_plan_purge_includes_children_and_global_table_candidates(
     }
 
 
+def test_resolve_artifact_disk_paths_workspace_relative(
+    maintenance: DatabaseMaintenance, tmp_path: Path
+) -> None:
+    artifact_id = uuid.uuid4()
+    run_workspace = tmp_path / "workspace_run"
+    artifact_path = run_workspace / "outputs" / "artifact.txt"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text("artifact", encoding="utf-8")
+
+    with maintenance.db.session_scope() as session:
+        session.add(
+            Run(
+                id="workspace_run",
+                model_name="demo",
+                meta={"_physical_run_dir": str(run_workspace)},
+            )
+        )
+        session.add(
+            Artifact(
+                id=artifact_id,
+                key="workspace_artifact",
+                container_uri="./outputs/artifact.txt",
+                driver="txt",
+                run_id="workspace_run",
+            )
+        )
+        session.commit()
+
+    resolved_paths = maintenance._resolve_artifact_disk_paths([artifact_id])
+
+    assert resolved_paths == [artifact_path.resolve()]
+
+
+def test_resolve_artifact_disk_paths_mounted_uri_from_run_and_artifact_metadata(
+    maintenance: DatabaseMaintenance, tmp_path: Path
+) -> None:
+    run_mount_artifact_id = uuid.uuid4()
+    artifact_mount_artifact_id = uuid.uuid4()
+    run_mount_root = tmp_path / "mount_root_run"
+    artifact_mount_root = tmp_path / "mount_root_artifact"
+    run_mount_file = run_mount_root / "dataset" / "run_mount.csv"
+    artifact_mount_file = artifact_mount_root / "dataset" / "artifact_mount.csv"
+    run_mount_file.parent.mkdir(parents=True, exist_ok=True)
+    artifact_mount_file.parent.mkdir(parents=True, exist_ok=True)
+    run_mount_file.write_text("run", encoding="utf-8")
+    artifact_mount_file.write_text("artifact", encoding="utf-8")
+
+    with maintenance.db.session_scope() as session:
+        session.add(
+            Run(
+                id="mount_run",
+                model_name="demo",
+                meta={"mounts": {"inputs": str(run_mount_root)}},
+            )
+        )
+        session.add_all(
+            [
+                Artifact(
+                    id=run_mount_artifact_id,
+                    key="run_mount_artifact",
+                    container_uri="inputs://dataset/run_mount.csv",
+                    driver="csv",
+                    run_id="mount_run",
+                ),
+                Artifact(
+                    id=artifact_mount_artifact_id,
+                    key="artifact_mount_artifact",
+                    container_uri="inputs://dataset/artifact_mount.csv",
+                    driver="csv",
+                    run_id="mount_run",
+                    meta={"mount_root": str(artifact_mount_root)},
+                ),
+            ]
+        )
+        session.commit()
+
+    resolved_paths = maintenance._resolve_artifact_disk_paths(
+        [run_mount_artifact_id, artifact_mount_artifact_id]
+    )
+
+    assert resolved_paths == [
+        run_mount_file.resolve(),
+        artifact_mount_file.resolve(),
+    ]
+
+
 def test_purge_dry_run_makes_no_db_changes(maintenance: DatabaseMaintenance) -> None:
     artifact_id = uuid.uuid4()
     snapshot_path = maintenance.run_dir / "consist_runs" / "dry_run_target.json"
@@ -788,6 +874,75 @@ def test_purge_dry_run_makes_no_db_changes(maintenance: DatabaseMaintenance) -> 
         assert session.get(Artifact, artifact_id) is not None
         links = session.exec(select(RunArtifactLink)).all()
         assert len(links) == 1
+
+
+def test_purge_delete_files_removes_files_and_directories(
+    maintenance: DatabaseMaintenance, tmp_path: Path
+) -> None:
+    file_artifact_id = uuid.uuid4()
+    dir_artifact_id = uuid.uuid4()
+    run_workspace = tmp_path / "purge_delete_workspace"
+    file_path = run_workspace / "outputs" / "delete_me.txt"
+    dir_path = run_workspace / "outputs" / "delete_dir"
+    nested_path = dir_path / "nested.txt"
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    dir_path.mkdir(parents=True, exist_ok=True)
+    file_path.write_text("file", encoding="utf-8")
+    nested_path.write_text("nested", encoding="utf-8")
+
+    with maintenance.db.session_scope() as session:
+        session.add(
+            Run(
+                id="purge_delete_files_run",
+                model_name="demo",
+                meta={"_physical_run_dir": str(run_workspace)},
+            )
+        )
+        session.add_all(
+            [
+                Artifact(
+                    id=file_artifact_id,
+                    key="delete_file_artifact",
+                    container_uri="./outputs/delete_me.txt",
+                    driver="txt",
+                    run_id="purge_delete_files_run",
+                ),
+                Artifact(
+                    id=dir_artifact_id,
+                    key="delete_dir_artifact",
+                    container_uri="./outputs/delete_dir",
+                    driver="other",
+                    run_id="purge_delete_files_run",
+                ),
+                RunArtifactLink(
+                    run_id="purge_delete_files_run",
+                    artifact_id=file_artifact_id,
+                    direction="output",
+                ),
+                RunArtifactLink(
+                    run_id="purge_delete_files_run",
+                    artifact_id=dir_artifact_id,
+                    direction="output",
+                ),
+            ]
+        )
+        session.commit()
+
+    result = maintenance.purge(
+        "purge_delete_files_run",
+        include_children=False,
+        delete_files=True,
+        delete_ingested_data=False,
+        dry_run=False,
+    )
+
+    assert result.executed is True
+    assert {path.resolve() for path in result.plan.disk_files} == {
+        file_path.resolve(),
+        dir_path.resolve(),
+    }
+    assert not file_path.exists()
+    assert not dir_path.exists()
 
 
 def test_purge_executes_core_deletes_and_ingested_skip(

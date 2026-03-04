@@ -4,11 +4,12 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
-from typing import TYPE_CHECKING, Iterable, Literal, Optional
+from typing import TYPE_CHECKING, Any, Iterable, Literal, Optional
 import re
 import uuid
+from urllib.parse import unquote, urlsplit
 
 from sqlalchemy.engine import Engine
 from sqlmodel import col, select
@@ -753,7 +754,12 @@ class DatabaseMaintenance:
         if delete_files:
             for disk_path in plan.disk_files:
                 try:
-                    disk_path.unlink(missing_ok=True)
+                    if not disk_path.exists() and not disk_path.is_symlink():
+                        continue
+                    if disk_path.is_dir() and not disk_path.is_symlink():
+                        shutil.rmtree(disk_path, ignore_errors=True)
+                    else:
+                        disk_path.unlink(missing_ok=True)
                 except OSError:
                     continue
 
@@ -2321,8 +2327,226 @@ class DatabaseMaintenance:
     def _resolve_artifact_disk_paths(
         self, artifact_ids: Iterable[uuid.UUID]
     ) -> list[Path]:
-        del artifact_ids
-        return []
+        normalized_artifact_ids: list[uuid.UUID] = []
+        seen_artifact_ids: set[uuid.UUID] = set()
+        for value in artifact_ids:
+            parsed_uuid = self._coerce_uuid(value)
+            if parsed_uuid is None or parsed_uuid in seen_artifact_ids:
+                continue
+            seen_artifact_ids.add(parsed_uuid)
+            normalized_artifact_ids.append(parsed_uuid)
+
+        if not normalized_artifact_ids:
+            return []
+
+        with self.db.session_scope() as session:
+            artifacts = session.exec(
+                select(Artifact).where(col(Artifact.id).in_(normalized_artifact_ids))
+            ).all()
+            output_links = session.exec(
+                select(RunArtifactLink.artifact_id, RunArtifactLink.run_id)
+                .where(col(RunArtifactLink.artifact_id).in_(normalized_artifact_ids))
+                .where(col(RunArtifactLink.direction) == "output")
+                .order_by(RunArtifactLink.run_id)
+            ).all()
+
+        artifacts_by_id: dict[uuid.UUID, Artifact] = {artifact.id: artifact for artifact in artifacts}
+        run_id_by_artifact: dict[uuid.UUID, str] = {}
+        run_ids: set[str] = set()
+
+        for artifact in artifacts:
+            if artifact.run_id:
+                run_id_by_artifact[artifact.id] = artifact.run_id
+                run_ids.add(artifact.run_id)
+
+        for artifact_id_raw, run_id_raw in output_links:
+            parsed_uuid = self._coerce_uuid(artifact_id_raw)
+            if parsed_uuid is None or parsed_uuid in run_id_by_artifact:
+                continue
+            run_id = str(run_id_raw).strip()
+            if not run_id:
+                continue
+            run_id_by_artifact[parsed_uuid] = run_id
+            run_ids.add(run_id)
+
+        runs_by_id: dict[str, Run] = {}
+        if run_ids:
+            with self.db.session_scope() as session:
+                runs = session.exec(select(Run).where(col(Run.id).in_(run_ids))).all()
+            runs_by_id = {run.id: run for run in runs}
+
+        resolved_paths: list[Path] = []
+        seen_paths: set[str] = set()
+        for artifact_id in normalized_artifact_ids:
+            artifact = artifacts_by_id.get(artifact_id)
+            if artifact is None:
+                continue
+            run_id = run_id_by_artifact.get(artifact_id)
+            run = runs_by_id.get(run_id) if run_id else None
+            for candidate in self._resolve_artifact_uri_candidates(artifact, run):
+                if not candidate.exists():
+                    continue
+                path_key = str(candidate)
+                if path_key in seen_paths:
+                    continue
+                seen_paths.add(path_key)
+                resolved_paths.append(candidate)
+
+        return resolved_paths
+
+    def _resolve_artifact_uri_candidates(
+        self, artifact: Artifact, run: Optional[Run]
+    ) -> list[Path]:
+        uri = str(getattr(artifact, "container_uri", "") or "").strip()
+        if not uri:
+            return []
+
+        run_dir = self._resolve_run_directory_for_artifact(run)
+        run_meta = run.meta if run and isinstance(run.meta, dict) else {}
+        artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+        candidate_paths: list[Path] = []
+        seen_candidates: set[str] = set()
+
+        def _append_candidate(path: Optional[Path]) -> None:
+            if path is None:
+                return
+            path_key = str(path)
+            if path_key in seen_candidates:
+                return
+            seen_candidates.add(path_key)
+            candidate_paths.append(path)
+
+        if uri.startswith("./"):
+            _append_candidate(self._resolve_relative_path_under_root(uri[2:], run_dir))
+            return candidate_paths
+
+        if "://" in uri:
+            scheme, rel_path = uri.split("://", 1)
+            normalized_scheme = scheme.strip()
+
+            if normalized_scheme == "file":
+                _append_candidate(self._resolve_file_uri(uri))
+                return candidate_paths
+
+            if normalized_scheme == "workspace":
+                _append_candidate(
+                    self._resolve_relative_path_under_root(rel_path, run_dir)
+                )
+                return candidate_paths
+
+            safe_relative = self._normalize_relative_uri_path(rel_path)
+            if safe_relative is None:
+                return candidate_paths
+
+            for root in self._mount_roots_for_uri(
+                normalized_scheme, run_meta=run_meta, artifact_meta=artifact_meta
+            ):
+                _append_candidate(
+                    self._resolve_relative_path_under_root(safe_relative, root)
+                )
+            return candidate_paths
+
+        raw_path = Path(uri)
+        if raw_path.is_absolute():
+            try:
+                _append_candidate(raw_path.resolve())
+            except OSError:
+                return candidate_paths
+
+        return candidate_paths
+
+    def _resolve_run_directory_for_artifact(self, run: Optional[Run]) -> Path:
+        if run and isinstance(run.meta, dict):
+            physical_run_dir = run.meta.get("_physical_run_dir")
+            if isinstance(physical_run_dir, str) and physical_run_dir:
+                try:
+                    return Path(physical_run_dir).resolve()
+                except OSError:
+                    pass
+        try:
+            return self.run_dir.resolve()
+        except OSError:
+            return self.run_dir
+
+    def _mount_roots_for_uri(
+        self,
+        scheme: str,
+        *,
+        run_meta: dict[str, Any],
+        artifact_meta: dict[str, Any],
+    ) -> list[Path]:
+        roots: list[Path] = []
+        seen_roots: set[str] = set()
+        mounts_raw = run_meta.get("mounts")
+        if isinstance(mounts_raw, dict):
+            mount_root = mounts_raw.get(scheme)
+            if isinstance(mount_root, str) and mount_root:
+                normalized_root = self._normalize_mount_root_path(mount_root)
+                if normalized_root is not None:
+                    root_key = str(normalized_root)
+                    seen_roots.add(root_key)
+                    roots.append(normalized_root)
+
+        artifact_mount_root = artifact_meta.get("mount_root")
+        if isinstance(artifact_mount_root, str) and artifact_mount_root:
+            normalized_root = self._normalize_mount_root_path(artifact_mount_root)
+            if normalized_root is not None:
+                root_key = str(normalized_root)
+                if root_key not in seen_roots:
+                    seen_roots.add(root_key)
+                    roots.append(normalized_root)
+
+        return roots
+
+    @staticmethod
+    def _normalize_mount_root_path(root: str) -> Optional[Path]:
+        try:
+            root_path = Path(root)
+            if not root_path.is_absolute():
+                return None
+            return root_path.resolve()
+        except OSError:
+            return None
+
+    @staticmethod
+    def _normalize_relative_uri_path(value: str) -> Optional[str]:
+        rel_path = PurePosixPath(value.strip())
+        if not rel_path.parts or rel_path.is_absolute():
+            return None
+        if any(part == ".." for part in rel_path.parts):
+            return None
+        return rel_path.as_posix()
+
+    @staticmethod
+    def _resolve_relative_path_under_root(relative_path: str, root: Path) -> Optional[Path]:
+        safe_rel_path = DatabaseMaintenance._normalize_relative_uri_path(relative_path)
+        if safe_rel_path is None:
+            return None
+        try:
+            root_resolved = root.resolve()
+            resolved_path = (root_resolved / safe_rel_path).resolve()
+            resolved_path.relative_to(root_resolved)
+        except (OSError, ValueError):
+            return None
+        return resolved_path
+
+    @staticmethod
+    def _resolve_file_uri(uri: str) -> Optional[Path]:
+        parsed = urlsplit(uri)
+        if parsed.scheme != "file":
+            return None
+        if parsed.netloc not in {"", "localhost"}:
+            return None
+        path_text = unquote(parsed.path or "")
+        if not path_text:
+            return None
+        path = Path(path_text)
+        if not path.is_absolute():
+            return None
+        try:
+            return path.resolve()
+        except OSError:
+            return None
 
     def _init_shard_schema(self, shard_path: Path) -> None:
         target_path = Path(shard_path)
