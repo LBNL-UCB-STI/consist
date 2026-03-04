@@ -98,6 +98,18 @@ An optional Python library for loading data into data warehouses. Consist integr
 
 ---
 
+## Derivable References
+
+The condition where Consist can safely infer relationships between tables during maintenance operations without guessing.
+
+For cache pruning, references are derivable when run-link tables expose both `run_id` and `content_hash`, and unscoped cache tables expose `content_hash`.
+
+When references are not derivable, Consist uses safe skip/no-op behavior instead of deleting data based on uncertain joins.
+
+**See also**: Run-Link Table, Unscoped Cache Table, Skip/No-op Behavior
+
+---
+
 ## Facet
 
 A small, queryable subset of configuration (e.g., `{"year": 2030, "scenario": "baseline"}`) that's indexed in DuckDB so you can filter runs. Use facets when you want to ask "show me all runs where year=2030" without storing the entire 50MB config file.
@@ -257,6 +269,26 @@ This creates a Run with one input artifact, one config dict, and one output arti
 
 ---
 
+## Run-Link Table
+
+A `global_tables.*` table classified as `run_link` because it includes `run_id` (and not `consist_run_id`).
+
+Run-link tables are used for run-associated metadata and, when they also include `content_hash`, can serve as derivable reference sources for safe unscoped cache pruning.
+
+**See also**: Run-Scoped Table, Unscoped Cache Table, Derivable References
+
+---
+
+## Run-Scoped Table
+
+A `global_tables.*` table classified as `run_scoped` because it includes `consist_run_id`.
+
+Run-scoped rows are directly attributable to specific runs and are deleted by `consist db purge --delete-ingested-data` for selected run IDs.
+
+**See also**: Run-Link Table, Unscoped Cache Table
+
+---
+
 ## Scenario
 
 A grouping of related runs. Scenarios are useful for organizing multi-variant studies or iterative workflows.
@@ -270,6 +302,20 @@ A grouping of related runs. Scenarios are useful for organizing multi-variant st
 **Important**: Consist uses "scenario" differently from policy modeling jargon. In Consist, a scenario is a parent run grouping; in transportation modeling, "baseline scenario" and "growth scenario" are policy variants. Don't confuse the two.
 
 **See also**: Run, Coupler, Trace
+
+---
+
+## Skip/No-op Behavior
+
+Conservative maintenance behavior where Consist intentionally performs no deletion or merge action when safety preconditions are not met.
+
+Examples:
+- `consist db purge --prune-cache` becomes a no-op for unscoped cache pruning when references are not derivable, or when `--delete-ingested-data` is not enabled.
+- `consist db merge --conflict skip` skips incompatible global tables while still merging compatible data.
+
+This behavior prioritizes correctness and data safety over aggressive cleanup.
+
+**See also**: Derivable References, Unscoped Cache Table
 
 ---
 
@@ -295,6 +341,18 @@ A unique fingerprint of a run created by hashing together your code version, con
 The execution path through a multi-step workflow, showing which runs were executed, which were cache hits, and what artifacts were passed between them.
 
 **See also**: Scenario, Coupler, Lineage
+
+---
+
+## Unscoped Cache Table
+
+A `global_tables.*` table classified as `unscoped_cache` because it has neither `consist_run_id` nor `run_id`.
+
+These tables often contain shared cache rows keyed by values like `content_hash`. They are preserved by default in purge/merge/export flows unless safe derivation rules allow targeted pruning/copy behavior.
+
+For `--prune-cache`, correctness assumes `content_hash` equivalence across participating derivable run-link and unscoped cache tables.
+
+**See also**: Run-Scoped Table, Run-Link Table, Derivable References
 
 ---
 

@@ -25,6 +25,47 @@ consist --version
 
 ## Commands
 
+### consist db
+
+Database maintenance and recovery commands.
+See the dedicated guide: [DB Maintenance Guide](db-maintenance.md).
+
+```bash
+consist db inspect
+consist db doctor
+consist db snapshot --out snapshot.duckdb
+consist db rebuild --json-dir ./consist_runs --mode minimal
+consist db compact
+consist db export <run_id> --out shard.duckdb
+consist db merge shard.duckdb --conflict error
+consist db purge <run_id> --dry-run
+consist db fix-status <run_id> completed --reason "manual correction"
+```
+
+Operational recipes:
+
+```bash
+# 1) Health checks (inspect + doctor)
+consist db inspect --db-path ./provenance.duckdb
+consist db doctor --db-path ./provenance.duckdb
+
+# 2) Safe purge preview + execute (with optional cache pruning)
+consist db purge RUN_ID --dry-run --db-path ./provenance.duckdb
+consist db purge RUN_ID --delete-ingested-data --prune-cache --yes --db-path ./provenance.duckdb
+
+# 3) Rebuild from JSON snapshots (minimal vs full)
+consist db rebuild --json-dir ./consist_runs --mode minimal --db-path ./provenance.duckdb
+consist db rebuild --json-dir ./consist_runs --mode full --db-path ./provenance.duckdb
+
+# 4) Merge conflict handling (error|skip)
+consist db merge shard.duckdb --conflict error --json --db-path ./provenance.duckdb
+consist db merge shard.duckdb --conflict skip --db-path ./provenance.duckdb
+```
+
+Notes:
+- Merge conflict mode values are `error` and `skip`.
+- `--prune-cache` only applies when `--delete-ingested-data` is enabled.
+
 ### consist runs
 
 List recent runs with optional filters.

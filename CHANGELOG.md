@@ -7,6 +7,27 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- Add `consist db rebuild --mode minimal|full` behavior:
+  `minimal` restores run/artifact/link baseline and `full` performs best-effort
+  facet/schema/index restoration from JSON snapshots where possible
+  by @zneedell (PR link TBD).
+- Add `consist db purge --prune-cache` for safe, derivation-based pruning of
+  unscoped cache rows no longer referenced by surviving run-link rows
+  by @zneedell (PR link TBD).
+
+### Changed
+
+- Add explicit merge-time compatibility handling for `global_tables.*` during
+  `consist db merge`: `--conflict error` aborts on incompatible schemas while
+  `--conflict skip` skips incompatible tables with reporting in JSON and
+  non-JSON output by @zneedell (PR link TBD).
+- Document and enforce `--prune-cache` assumptions/no-op behavior:
+  pruning requires derivable references and assumes `content_hash` equivalence
+  across participating run-link/unscoped cache tables
+  by @zneedell (PR link TBD).
+
 ## [0.1.0] - Unreleased
 
 ### Added

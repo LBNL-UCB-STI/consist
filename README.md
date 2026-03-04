@@ -10,10 +10,14 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-BSD--3--Clause-blue.svg" alt="License BSD 3-Clause"></a>
 </p>
 
-**Consist** is a provenance-first caching layer for scientific simulation workflows. It automatically records what code, configuration, and input data produced each output in your pipeline—eliminating redundant computation and making results searchable via SQL.
+**Consist** is a provenance-first caching layer for scientific simulation workflows. It automatically records what code,
+configuration, and input data produced each output in your pipeline—eliminating redundant computation and making results
+searchable via SQL.
 
 ### Why Consist?
+
 Multi-run simulation workflows typically accumulate friction:
+
 - **Provenance ambiguity**: "Which configuration produced those results in Figure 3?"
 - **Redundant computation**: Re-running a 4-hour pipeline because you changed one unrelated parameter.
 - **Scattered outputs**: Finding and comparing results across scenario variants manually.
@@ -43,14 +47,16 @@ import pandas as pd
 
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
+
 def clean_data(raw: pd.DataFrame, threshold: float = 0.5) -> pd.DataFrame:
     return raw[raw["value"] > threshold]
+
 
 # Executes function and records inputs/config/outputs
 result = tracker.run(
     fn=clean_data,
-    inputs={"raw": Path("raw.csv")},   # Hashed for cache identity
-    config={"threshold": 0.5},    # Hashed for cache identity
+    inputs={"raw": Path("raw.csv")},  # Hashed for cache identity
+    config={"threshold": 0.5},  # Hashed for cache identity
     outputs=["cleaned"],
 )
 
@@ -64,17 +70,19 @@ result = tracker.run(
 
 # Artifact: file with provenance metadata attached
 artifact = result.outputs["cleaned"]
-print(artifact.path)   # -> PosixPath('.../runs/outputs/.../cleaned.parquet')
+print(artifact.path)  # -> PosixPath('.../runs/outputs/.../cleaned.parquet')
 
 # Load the data back as a DataFrame
 cleaned_df = consist.load_df(artifact)
 ```
 
-**Summary**: Consist computes a fingerprint from your code version, config, and input files. If you change anything upstream, only affected downstream steps will re-execute.
+**Summary**: Consist computes a fingerprint from your code version, config, and input files. If you change anything
+upstream, only affected downstream steps will re-execute.
 
 ```python
 def analyze_data(cleaned: pd.DataFrame) -> pd.DataFrame:
     return cleaned.groupby("category", as_index=False)["value"].mean()
+
 
 preprocess = tracker.run(
     fn=clean_data,
@@ -88,19 +96,20 @@ analyze = tracker.run(
 )
 ```
 
-Pass `key=...` whenever an upstream run has multiple outputs. Legacy coupler-key
-patterns (for example `inputs=["cleaned"]`) still work, but explicit links are
-recommended for new docs and code.
-
 ---
 
 ## Key Features
 
-- **Intelligent Caching**: Instant cache hits for matching fingerprints. If you change one parameter, only affected downstream steps re-execute.
-- **Complete Lineage**: Every result is tagged with the exact code and config that created it. Trace lineage from any output back to its sources.
-- **SQL-Native Analysis**: All metadata is indexed in DuckDB. Query across runs, join tables, and compare variants using standard SQL.
-- **Container Support**: Track Docker/Singularity containers as functions--image digests and mounts become part of the cache signature.
-- **User Friendly CLI**: Inspect history (`consist runs`), trace lineage (`consist lineage`), and compare results without writing code.
+- **Intelligent Caching**: Instant cache hits for matching fingerprints. If you change one parameter, only affected
+  downstream steps re-execute.
+- **Complete Lineage**: Every result is tagged with the exact code and config that created it. Trace lineage from any
+  output back to its sources.
+- **SQL-Native Analysis**: All metadata is indexed in DuckDB. Query across runs, join tables, and compare variants using
+  standard SQL.
+- **Container Support**: Track Docker/Singularity containers as functions--image digests and mounts become part of the
+  cache signature.
+- **User Friendly CLI**: Inspect history (`consist runs`), trace lineage (`consist lineage`), and compare results
+  without writing code.
 
 ---
 
@@ -112,10 +121,13 @@ recommended for new docs and code.
 | **[Usage Guide](docs/usage-guide.md)**                    | Detailed patterns for scenarios and complex workflows.       |
 | **[Architecture](docs/architecture.md)**                  | Deep dive into hashing, lineage, and the DuckDB core.        |
 | **[CLI Reference](docs/cli-reference.md)**                | Guide to the `consist` command-line tools.                   |
+| **[DB Maintenance](docs/db-maintenance.md)**              | Operational runbooks for inspect/doctor/purge/merge/rebuild. |
 | **[Example Gallery](docs/examples.md)**                   | Interactive notebooks for Monte Carlo, Demand Modeling, etc. |
 
 ---
 
 ## Etymology
 
-In railroad terminology, a **consist** (noun, pronounced *CON-sist*) is the specific lineup of locomotives and cars that make up a train. In this library, a **consist** is the immutable record of exactly which components—code, config, and inputs—were coupled together to produce a result.
+In railroad terminology, a **consist** (noun, pronounced *CON-sist*) is the specific lineup of locomotives and cars that
+make up a train. In this library, a **consist** is the immutable record of exactly which components—code, config, and
+inputs—were coupled together to produce a result.
