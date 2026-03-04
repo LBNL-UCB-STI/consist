@@ -457,6 +457,11 @@ def db_export(
     summary.add_row("Ingested tables exported", str(len(result.ingested_rows)))
     summary.add_row("Snapshots copied", str(result.snapshots_copied))
     console.print(summary)
+    if result.unscoped_cache_tables_skipped:
+        console.print(
+            "Warning: skipped unscoped cache table(s) during export; rows were not "
+            f"exported: {', '.join(result.unscoped_cache_tables_skipped)}"
+        )
 
 
 @db_app.command("merge")
@@ -503,6 +508,11 @@ def db_merge(
     summary.add_row("Global tables merged", str(len(result.ingested_tables_merged)))
     summary.add_row("Snapshots merged", str(result.snapshots_merged))
     console.print(summary)
+    if result.unscoped_cache_tables_skipped:
+        console.print(
+            "Warning: skipped unscoped cache table(s) during merge; rows were not "
+            f"merged: {', '.join(result.unscoped_cache_tables_skipped)}"
+        )
 
 
 @db_app.command("purge")

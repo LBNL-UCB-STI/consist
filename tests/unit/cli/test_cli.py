@@ -930,6 +930,24 @@ def _seed_db_for_maintenance_cli(db_path: Path) -> None:
         db.engine.dispose()
 
 
+def _seed_unscoped_cache_global_table(db_path: Path, table_name: str) -> None:
+    db = DatabaseManager(str(db_path))
+    try:
+        with db.engine.begin() as conn:
+            conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+            conn.exec_driver_sql(
+                f"CREATE TABLE global_tables.{table_name} (content_hash VARCHAR)"
+            )
+            conn.exec_driver_sql(
+                f"""
+                INSERT INTO global_tables.{table_name} (content_hash)
+                VALUES ('hash_a')
+                """
+            )
+    finally:
+        db.engine.dispose()
+
+
 def _write_cli_snapshot(
     json_dir: Path, *, run_id: str, artifact_id: Optional[uuid.UUID] = None
 ) -> None:
@@ -1149,6 +1167,32 @@ def test_db_export_json_output_is_parseable(tmp_path, monkeypatch):
     assert shard_path.exists()
 
 
+def test_db_export_non_json_warns_when_unscoped_cache_tables_skipped(tmp_path, monkeypatch):
+    db_path = tmp_path / "cli_export_warn_source.duckdb"
+    _seed_db_for_maintenance_cli(db_path)
+    _seed_unscoped_cache_global_table(db_path, "cache_export_warn")
+    monkeypatch.chdir(tmp_path)
+    shard_path = tmp_path / "cli_export_warn_shard.duckdb"
+
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "export",
+            "cli_run",
+            "--out",
+            str(shard_path),
+            "--include-data",
+            "--db-path",
+            str(db_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Warning: skipped unscoped cache table(s) during export" in result.stdout
+    assert "cache_export_warn" in result.stdout
+
+
 def test_db_export_no_children_excludes_descendants(tmp_path, monkeypatch):
     db_path = tmp_path / "cli_export_no_children_source.duckdb"
     db = DatabaseManager(str(db_path))
@@ -1273,6 +1317,63 @@ def test_db_merge_json_output_is_parseable(tmp_path, monkeypatch):
         merged_db.engine.dispose()
 
 
+def test_db_merge_non_json_warns_when_unscoped_cache_tables_skipped(
+    tmp_path, monkeypatch
+):
+    source_db_path = tmp_path / "cli_merge_warn_source.duckdb"
+    target_db_path = tmp_path / "cli_merge_warn_target.duckdb"
+    shard_path = tmp_path / "cli_merge_warn_shard.duckdb"
+    _seed_db_for_maintenance_cli(source_db_path)
+    target_db = DatabaseManager(str(target_db_path))
+    target_db.engine.dispose()
+
+    source_db = DatabaseManager(str(source_db_path))
+    source_maintenance = DatabaseMaintenance(source_db, run_dir=tmp_path / "source_runs")
+    try:
+        source_maintenance.export(
+            "cli_run",
+            shard_path,
+            include_data=False,
+            include_snapshots=False,
+        )
+    finally:
+        source_db.engine.dispose()
+
+    shard_db = DatabaseManager(str(shard_path))
+    try:
+        with shard_db.engine.begin() as conn:
+            conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+            conn.exec_driver_sql(
+                "CREATE TABLE global_tables.cache_merge_warn (content_hash VARCHAR)"
+            )
+            conn.exec_driver_sql(
+                """
+                INSERT INTO global_tables.cache_merge_warn (content_hash)
+                VALUES ('hash_a')
+                """
+            )
+    finally:
+        shard_db.engine.dispose()
+
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "merge",
+            str(shard_path),
+            "--conflict",
+            "skip",
+            "--db-path",
+            str(target_db_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Warning: skipped unscoped cache table(s) during merge" in result.stdout
+    assert "cache_merge_warn" in result.stdout
+
+
 def test_db_purge_dry_run_json_output_is_parseable(tmp_path, monkeypatch):
     db_path = tmp_path / "cli_purge_dry_run.duckdb"
     _seed_db_for_maintenance_cli(db_path)
@@ -1323,6 +1424,28 @@ def test_db_purge_non_dry_run_with_yes_executes(tmp_path, monkeypatch):
     try:
         with db.session_scope() as session:
             assert session.get(Run, "cli_run") is None
+    finally:
+        db.engine.dispose()
+
+
+def test_db_purge_without_yes_can_be_cancelled(tmp_path, monkeypatch):
+    db_path = tmp_path / "cli_purge_cancel.duckdb"
+    _seed_db_for_maintenance_cli(db_path)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["db", "purge", "cli_run", "--db-path", str(db_path)],
+        input="n\n",
+    )
+
+    assert result.exit_code == 0
+    assert "Purge 1 run(s)" in result.stdout
+    assert "Purge cancelled." in result.stdout
+    db = DatabaseManager(str(db_path))
+    try:
+        with db.session_scope() as session:
+            assert session.get(Run, "cli_run") is not None
     finally:
         db.engine.dispose()
 

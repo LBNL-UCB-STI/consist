@@ -1967,11 +1967,16 @@ class DatabaseMaintenance:
         snapshot_metadata: dict = {"operation": "maintenance_snapshot"}
         if metadata:
             snapshot_metadata.update(metadata)
-        return self.db.snapshot_to(
+        snapshot_path = self.db.snapshot_to(
             dest_path=dest_path,
             checkpoint=checkpoint,
             metadata=snapshot_metadata,
         )
+        self._log_audit(
+            "snapshot",
+            f"dest_path={snapshot_path} checkpoint={checkpoint}",
+        )
+        return snapshot_path
 
     def _expand_run_ids(self, run_ids: Iterable[str] | str) -> list[str]:
         """

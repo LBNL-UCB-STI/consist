@@ -611,6 +611,19 @@ def test_snapshot_checkpoint_false_path_works(maintenance: DatabaseMaintenance) 
     assert snapshot_path.exists()
 
 
+def test_snapshot_writes_audit_log_entry(maintenance: DatabaseMaintenance) -> None:
+    destination = maintenance.run_dir / "snapshots" / "audit_snapshot.duckdb"
+
+    maintenance.snapshot(destination, checkpoint=False)
+
+    audit_log = maintenance.run_dir / ".consist_audit.log"
+    assert audit_log.exists()
+    audit_text = audit_log.read_text(encoding="utf-8")
+    assert "\tsnapshot\t" in audit_text
+    assert f"dest_path={destination}" in audit_text
+    assert "checkpoint=False" in audit_text
+
+
 def test_global_table_row_counts_full_and_filtered_behavior(
     maintenance: DatabaseMaintenance,
 ) -> None:
