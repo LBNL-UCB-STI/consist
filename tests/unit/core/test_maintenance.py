@@ -1588,6 +1588,79 @@ def test_export_no_children_only_copies_requested_run(tmp_path: Path) -> None:
         db.engine.dispose()
 
 
+def test_export_dry_run_previews_without_writes(tmp_path: Path) -> None:
+    db = DatabaseManager(str(tmp_path / "export_dry_run_source.duckdb"))
+    maintenance = DatabaseMaintenance(db=db, run_dir=tmp_path / "runs_source")
+    artifact_id = uuid.uuid4()
+    try:
+        with maintenance.db.session_scope() as session:
+            session.add(Run(id="root_run", model_name="demo"))
+            session.add(
+                Artifact(
+                    id=artifact_id,
+                    key="root_output",
+                    container_uri="outputs://root.parquet",
+                    driver="parquet",
+                    run_id="root_run",
+                )
+            )
+            session.add(
+                RunArtifactLink(
+                    run_id="root_run",
+                    artifact_id=artifact_id,
+                    direction="output",
+                )
+            )
+            session.commit()
+
+        with maintenance.db.engine.begin() as conn:
+            conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+            conn.exec_driver_sql(
+                "CREATE TABLE global_tables.scoped_export_preview (consist_run_id VARCHAR)"
+            )
+            conn.exec_driver_sql(
+                "CREATE TABLE global_tables.cache_export_preview (content_hash VARCHAR)"
+            )
+            conn.exec_driver_sql(
+                """
+                INSERT INTO global_tables.scoped_export_preview (consist_run_id)
+                VALUES ('root_run')
+                """
+            )
+            conn.exec_driver_sql(
+                """
+                INSERT INTO global_tables.cache_export_preview (content_hash)
+                VALUES ('cache_a')
+                """
+            )
+
+        source_snapshot_dir = maintenance.run_dir / "consist_runs"
+        source_snapshot_dir.mkdir(parents=True, exist_ok=True)
+        (source_snapshot_dir / "root_run.json").write_text("{}", encoding="utf-8")
+
+        shard_path = tmp_path / "exported_dry_run_shard.duckdb"
+        result = maintenance.export(
+            "root_run",
+            shard_path,
+            include_data=True,
+            include_snapshots=True,
+            dry_run=True,
+        )
+
+        assert result.run_ids == ["root_run"]
+        assert result.artifact_count == 1
+        assert result.ingested_rows == {"scoped_export_preview": 1}
+        assert result.unscoped_cache_tables_skipped == ["cache_export_preview"]
+        assert result.snapshots_copied == 0
+        assert not shard_path.exists()
+        assert not (shard_path.parent / "shard_snapshots").exists()
+        assert not (maintenance.run_dir / ".consist_audit.log").exists()
+        with maintenance.db.session_scope() as session:
+            assert session.get(Run, "root_run") is not None
+    finally:
+        db.engine.dispose()
+
+
 def test_merge_happy_path_and_conflict_skip_policy(tmp_path: Path) -> None:
     source_db = DatabaseManager(str(tmp_path / "merge_source.duckdb"))
     target_db = DatabaseManager(str(tmp_path / "merge_target.duckdb"))
@@ -1741,6 +1814,90 @@ def test_merge_happy_path_and_conflict_skip_policy(tmp_path: Path) -> None:
             assert int(run_config_count[0] if run_config_count else 0) == 1
             assert int(artifact_kv_count[0] if artifact_kv_count else 0) == 1
             assert int(observation_count[0] if observation_count else 0) == 1
+    finally:
+        source_db.engine.dispose()
+        target_db.engine.dispose()
+
+
+def test_merge_dry_run_previews_without_writes(tmp_path: Path) -> None:
+    source_db = DatabaseManager(str(tmp_path / "merge_dry_run_source.duckdb"))
+    target_db = DatabaseManager(str(tmp_path / "merge_dry_run_target.duckdb"))
+    source_maintenance = DatabaseMaintenance(source_db, run_dir=tmp_path / "runs_source")
+    target_maintenance = DatabaseMaintenance(target_db, run_dir=tmp_path / "runs_target")
+    conflict_artifact_id = uuid.uuid4()
+    new_artifact_id = uuid.uuid4()
+    try:
+        with source_db.session_scope() as session:
+            session.add_all(
+                [
+                    Run(id="conflict_run", model_name="source_model"),
+                    Run(id="new_run", model_name="source_model"),
+                    Artifact(
+                        id=conflict_artifact_id,
+                        key="conflict_artifact",
+                        container_uri="outputs://conflict.parquet",
+                        driver="parquet",
+                        run_id="conflict_run",
+                    ),
+                    Artifact(
+                        id=new_artifact_id,
+                        key="new_artifact",
+                        container_uri="outputs://new.parquet",
+                        driver="parquet",
+                        run_id="new_run",
+                    ),
+                    RunArtifactLink(
+                        run_id="conflict_run",
+                        artifact_id=conflict_artifact_id,
+                        direction="output",
+                    ),
+                    RunArtifactLink(
+                        run_id="new_run",
+                        artifact_id=new_artifact_id,
+                        direction="output",
+                    ),
+                ]
+            )
+            session.commit()
+
+        shard_path = tmp_path / "merge_dry_run_shard.duckdb"
+        source_maintenance.export(
+            ["conflict_run", "new_run"],
+            shard_path,
+            include_data=False,
+            include_snapshots=False,
+            include_children=False,
+        )
+
+        shard_snapshot_dir = shard_path.parent / "shard_snapshots"
+        shard_snapshot_dir.mkdir(parents=True, exist_ok=True)
+        (shard_snapshot_dir / "new_run.json").write_text("{}", encoding="utf-8")
+
+        with target_db.session_scope() as session:
+            session.add(Run(id="conflict_run", model_name="target_model"))
+            session.commit()
+
+        merge_result = target_maintenance.merge(
+            shard_path,
+            conflict="skip",
+            include_snapshots=True,
+            dry_run=True,
+        )
+        assert merge_result.runs_merged == ["new_run"]
+        assert merge_result.runs_skipped == ["conflict_run"]
+        assert merge_result.conflicts_detected == ["conflict_run"]
+        assert merge_result.artifacts_merged == 1
+        assert merge_result.snapshots_merged == 1
+
+        with target_db.session_scope() as session:
+            assert session.get(Run, "new_run") is None
+            persisted_conflict = session.get(Run, "conflict_run")
+            assert persisted_conflict is not None
+            assert persisted_conflict.model_name == "target_model"
+            assert session.get(Artifact, new_artifact_id) is None
+
+        assert not (target_maintenance.run_dir / "consist_runs" / "new_run.json").exists()
+        assert not (target_maintenance.run_dir / ".consist_audit.log").exists()
     finally:
         source_db.engine.dispose()
         target_db.engine.dispose()

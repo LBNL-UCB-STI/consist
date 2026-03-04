@@ -430,6 +430,11 @@ def db_export(
         "--include-snapshots",
         help="Copy JSON snapshots into shard_snapshots.",
     ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview export without writing shard DB or files.",
+    ),
     db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
     json_output: bool = typer.Option(
         False, "--json", help="Output export result as JSON."
@@ -443,6 +448,7 @@ def db_export(
         include_data=include_data,
         include_snapshots=include_snapshots,
         include_children=not no_children,
+        dry_run=dry_run,
     )
     if json_output:
         output_json(asdict(result))
@@ -452,6 +458,7 @@ def db_export(
     summary.add_column("Field", style="cyan")
     summary.add_column("Value", style="green")
     summary.add_row("Out path", str(result.out_path))
+    summary.add_row("Dry run", str(dry_run))
     summary.add_row("Runs exported", str(len(result.run_ids)))
     summary.add_row("Artifacts exported", str(result.artifact_count))
     summary.add_row("Ingested tables exported", str(len(result.ingested_rows)))
@@ -477,6 +484,11 @@ def db_merge(
         "--include-snapshots",
         help="Copy JSON snapshots from shard_snapshots into canonical paths.",
     ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview merge without writing database or files.",
+    ),
     db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
     json_output: bool = typer.Option(
         False, "--json", help="Output merge result as JSON."
@@ -489,6 +501,7 @@ def db_merge(
             shard_path,
             conflict=conflict,
             include_snapshots=include_snapshots,
+            dry_run=dry_run,
         )
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
@@ -502,6 +515,7 @@ def db_merge(
     summary.add_column("Field", style="cyan")
     summary.add_column("Value", style="green")
     summary.add_row("Shard path", str(result.shard_path))
+    summary.add_row("Dry run", str(dry_run))
     summary.add_row("Runs merged", str(len(result.runs_merged)))
     summary.add_row("Runs skipped", str(len(result.runs_skipped)))
     summary.add_row("Artifacts merged", str(result.artifacts_merged))

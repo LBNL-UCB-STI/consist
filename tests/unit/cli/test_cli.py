@@ -1167,6 +1167,43 @@ def test_db_export_json_output_is_parseable(tmp_path, monkeypatch):
     assert shard_path.exists()
 
 
+def test_db_export_dry_run_json_output_is_parseable_and_no_writes(tmp_path, monkeypatch):
+    db_path = tmp_path / "cli_export_dry_run_source.duckdb"
+    _seed_db_for_maintenance_cli(db_path)
+    monkeypatch.chdir(tmp_path)
+    shard_path = tmp_path / "cli_export_dry_run_shard.duckdb"
+
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "export",
+            "cli_run",
+            "--out",
+            str(shard_path),
+            "--dry-run",
+            "--json",
+            "--db-path",
+            str(db_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert set(payload.keys()) == {
+        "run_ids",
+        "artifact_count",
+        "out_path",
+        "ingested_rows",
+        "ingested_table_modes",
+        "unscoped_cache_tables_skipped",
+        "snapshots_copied",
+    }
+    assert payload["run_ids"] == ["cli_run"]
+    assert payload["out_path"] == str(shard_path)
+    assert not shard_path.exists()
+
+
 def test_db_export_non_json_warns_when_unscoped_cache_tables_skipped(tmp_path, monkeypatch):
     db_path = tmp_path / "cli_export_warn_source.duckdb"
     _seed_db_for_maintenance_cli(db_path)
@@ -1313,6 +1350,64 @@ def test_db_merge_json_output_is_parseable(tmp_path, monkeypatch):
     try:
         with merged_db.session_scope() as session:
             assert session.get(Run, "cli_run") is not None
+    finally:
+        merged_db.engine.dispose()
+
+
+def test_db_merge_dry_run_json_output_is_parseable_and_no_writes(tmp_path, monkeypatch):
+    source_db_path = tmp_path / "cli_merge_dry_run_source.duckdb"
+    target_db_path = tmp_path / "cli_merge_dry_run_target.duckdb"
+    shard_path = tmp_path / "cli_merge_dry_run_shard.duckdb"
+    _seed_db_for_maintenance_cli(source_db_path)
+    target_db = DatabaseManager(str(target_db_path))
+    target_db.engine.dispose()
+
+    source_db = DatabaseManager(str(source_db_path))
+    source_maintenance = DatabaseMaintenance(source_db, run_dir=tmp_path / "source_runs")
+    try:
+        source_maintenance.export(
+            "cli_run",
+            shard_path,
+            include_data=False,
+            include_snapshots=False,
+        )
+    finally:
+        source_db.engine.dispose()
+
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "merge",
+            str(shard_path),
+            "--conflict",
+            "skip",
+            "--dry-run",
+            "--json",
+            "--db-path",
+            str(target_db_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert set(payload.keys()) == {
+        "shard_path",
+        "runs_merged",
+        "runs_skipped",
+        "artifacts_merged",
+        "ingested_tables_merged",
+        "unscoped_cache_tables_skipped",
+        "conflicts_detected",
+        "snapshots_merged",
+    }
+    assert payload["runs_merged"] == ["cli_run"]
+
+    merged_db = DatabaseManager(str(target_db_path))
+    try:
+        with merged_db.session_scope() as session:
+            assert session.get(Run, "cli_run") is None
     finally:
         merged_db.engine.dispose()
 

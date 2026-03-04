@@ -855,6 +855,7 @@ class DatabaseMaintenance:
         include_data: bool,
         include_snapshots: bool,
         include_children: bool = True,
+        dry_run: bool = False,
     ) -> ExportResult:
         normalized_run_ids = self._normalize_run_ids(run_ids)
         expanded_run_ids = (
@@ -880,6 +881,43 @@ class DatabaseMaintenance:
         ingested_rows: dict[str, int] = {}
         unscoped_cache_tables_skipped: list[str] = []
         artifact_count = 0
+
+        if dry_run:
+            if selected_run_ids:
+                with self.db.engine.begin() as conn:
+                    artifact_rows = conn.exec_driver_sql(
+                        f"""
+                        SELECT DISTINCT CAST({self._quote_ident("artifact_id")} AS VARCHAR)
+                        FROM {self._qualified_table_sql("run_artifact_link")}
+                        WHERE {self._quote_ident("run_id")} = ANY(
+                            [{", ".join(self._quote_sql_string_literal(value) for value in selected_run_ids)}]
+                        )
+                        ORDER BY CAST({self._quote_ident("artifact_id")} AS VARCHAR)
+                        """
+                    ).fetchall()
+                artifact_count = len(artifact_rows)
+
+            if include_data and selected_run_ids:
+                candidate_rows = self._global_table_row_counts(
+                    discovered_tables,
+                    selected_run_ids,
+                )
+                for table in discovered_tables:
+                    mode = ingested_table_modes.get(table)
+                    if mode == "unscoped_cache":
+                        unscoped_cache_tables_skipped.append(table)
+                        continue
+                    ingested_rows[table] = candidate_rows.get(table, 0)
+
+            return ExportResult(
+                run_ids=selected_run_ids,
+                artifact_count=artifact_count,
+                out_path=out_path,
+                ingested_rows=ingested_rows,
+                ingested_table_modes=ingested_table_modes,
+                unscoped_cache_tables_skipped=unscoped_cache_tables_skipped,
+                snapshots_copied=0,
+            )
 
         self._init_shard_schema(out_path)
 
@@ -1196,7 +1234,12 @@ class DatabaseMaintenance:
         )
 
     def merge(
-        self, shard_path: Path, *, conflict: str, include_snapshots: bool
+        self,
+        shard_path: Path,
+        *,
+        conflict: str,
+        include_snapshots: bool,
+        dry_run: bool = False,
     ) -> MergeResult:
         shard_path = Path(shard_path)
         if not shard_path.exists():
@@ -1270,6 +1313,94 @@ class DatabaseMaintenance:
                     self._quote_sql_string_literal(value) for value in values
                 )
                 return f"ANY([{literals}])"
+
+            if dry_run:
+                if runs_to_merge:
+                    shard_link_columns = self._list_table_columns(
+                        "run_artifact_link",
+                        engine=shard_db.engine,
+                    )
+                    if {"run_id", "artifact_id"}.issubset(set(shard_link_columns)):
+                        with shard_db.engine.begin() as conn:
+                            artifact_rows = conn.exec_driver_sql(
+                                f"""
+                                SELECT DISTINCT CAST({self._quote_ident("artifact_id")} AS VARCHAR)
+                                FROM {self._qualified_table_sql("run_artifact_link")}
+                                WHERE {self._quote_ident("run_id")} = {_any_sql(runs_to_merge)}
+                                ORDER BY CAST({self._quote_ident("artifact_id")} AS VARCHAR)
+                                """
+                            ).fetchall()
+                        artifact_ids = [str(row[0]) for row in artifact_rows]
+                    else:
+                        artifact_ids = []
+
+                    if artifact_ids:
+                        with self.db.engine.begin() as conn:
+                            existing_artifact_rows = conn.exec_driver_sql(
+                                f"""
+                                SELECT DISTINCT CAST({self._quote_ident("id")} AS VARCHAR)
+                                FROM {self._qualified_table_sql("artifact")}
+                                WHERE CAST({self._quote_ident("id")} AS VARCHAR)
+                                      = {_any_sql(artifact_ids)}
+                                """
+                            ).fetchall()
+                        existing_artifacts = {str(row[0]) for row in existing_artifact_rows}
+                        artifacts_merged = len(
+                            [value for value in artifact_ids if value not in existing_artifacts]
+                        )
+                    else:
+                        artifacts_merged = 0
+
+                    for table in shard_global_tables:
+                        mode = shard_table_modes.get(table)
+                        if mode == "unscoped_cache":
+                            unscoped_cache_tables_skipped.append(table)
+                            continue
+                        filter_sql = shard_table_filters.get(table)
+                        if filter_sql is None:
+                            continue
+                        quoted_table = self._quote_ident(
+                            self._validate_identifier(table, label="table")
+                        )
+                        with shard_db.engine.begin() as conn:
+                            row = conn.exec_driver_sql(
+                                f"""
+                                SELECT COUNT(*)
+                                FROM global_tables.{quoted_table} AS "src_gt"
+                                WHERE {filter_sql}
+                                """
+                            ).fetchone()
+                        candidate_rows = int(row[0] if row else 0)
+                        if candidate_rows > 0:
+                            ingested_tables_merged.append(table)
+                else:
+                    artifacts_merged = 0
+
+                snapshots_merged = 0
+                if include_snapshots and runs_to_merge:
+                    source_snapshot_dir = shard_path.parent / "shard_snapshots"
+                    for run_id in runs_to_merge:
+                        source_name = self._resolve_run_snapshot_path(run_id, None).name
+                        source_snapshot = source_snapshot_dir / source_name
+                        if not source_snapshot.exists():
+                            continue
+                        destination_snapshot = self._resolve_run_snapshot_path(run_id, None)
+                        if destination_snapshot.exists():
+                            continue
+                        snapshots_merged += 1
+
+                return MergeResult(
+                    shard_path=shard_path,
+                    runs_merged=runs_to_merge,
+                    runs_skipped=runs_skipped,
+                    artifacts_merged=artifacts_merged,
+                    ingested_tables_merged=sorted(set(ingested_tables_merged)),
+                    unscoped_cache_tables_skipped=sorted(
+                        set(unscoped_cache_tables_skipped)
+                    ),
+                    conflicts_detected=conflicts_detected,
+                    snapshots_merged=snapshots_merged,
+                )
 
             def _write() -> None:
                 nonlocal artifacts_merged, ingested_tables_merged, unscoped_cache_tables_skipped
