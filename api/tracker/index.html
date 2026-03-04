@@ -25,7 +25,7 @@
       
       
       <link rel="icon" href="../../assets/logo.png">
-      <meta name="generator" content="zensical-0.0.23">
+      <meta name="generator" content="zensical-0.0.24">
     
     
       
@@ -36,7 +36,7 @@
       
         
       
-      <link rel="stylesheet" href="../../assets/stylesheets/modern/main.1e989742.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/modern/main.28978c9b.min.css">
       
         
           
@@ -2033,6 +2033,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#constructing-with-trackerconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Constructing with TrackerConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#public-identity-kwargs-run-trace" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2092,6 +2103,17 @@
     <span class="md-ellipsis">
       
         engine
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consist.core.tracker.Tracker.from_config" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        from_config
       
     </span>
   </a>
@@ -3213,6 +3235,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#constructing-with-trackerconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Constructing with TrackerConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#public-identity-kwargs-run-trace" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3272,6 +3305,17 @@
     <span class="md-ellipsis">
       
         engine
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consist.core.tracker.Tracker.from_config" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        from_config
       
     </span>
   </a>
@@ -4197,21 +4241,30 @@ executed, start here.</p>
 </span></code></pre></div>
 <p>For top-level wrappers around these methods, see <a href="../api_helpers/">API Helpers</a>.
 For grouped workflows, see <a href="../workflow/">Workflow Contexts</a>.</p>
+<h2 id="constructing-with-trackerconfig">Constructing with <code>TrackerConfig</code><a class="headerlink" href="#constructing-with-trackerconfig" title="Permanent link">&para;</a></h2>
+<p>Use <code>Tracker.from_config(...)</code> when you want a typed configuration object for
+tracker construction.</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist.core.tracker</span><span class="w"> </span><span class="kn">import</span> <span class="n">Tracker</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist.core.tracker_config</span><span class="w"> </span><span class="kn">import</span> <span class="n">TrackerConfig</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="n">config</span> <span class="o">=</span> <span class="n">TrackerConfig</span><span class="p">(</span><span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;./runs&quot;</span><span class="p">,</span> <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">)</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="o">.</span><span class="n">from_config</span><span class="p">(</span><span class="n">config</span><span class="p">)</span>
+</span></code></pre></div>
 <h2 id="public-identity-kwargs-run-trace">Public identity kwargs (<code>run</code> / <code>trace</code>)<a class="headerlink" href="#public-identity-kwargs-run-trace" title="Permanent link">&para;</a></h2>
 <p>Use <code>adapter</code> and <code>identity_inputs</code> on <code>Tracker.run(...)</code> and
 <code>Tracker.trace(...)</code>:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">result</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
-</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>    <span class="n">fn</span><span class="o">=</span><span class="n">simulate</span><span class="p">,</span>
-</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>    <span class="n">adapter</span><span class="o">=</span><span class="n">activitysim_adapter</span><span class="p">,</span>
-</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>    <span class="n">identity_inputs</span><span class="o">=</span><span class="p">[(</span><span class="s2">&quot;asim_config&quot;</span><span class="p">,</span> <span class="n">asim_config_dir</span><span class="p">)],</span>
-</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="p">)</span>
-</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>
-</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">trace</span><span class="p">(</span>
-</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>    <span class="s2">&quot;simulate_trace&quot;</span><span class="p">,</span>
-</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>    <span class="n">adapter</span><span class="o">=</span><span class="n">activitysim_adapter</span><span class="p">,</span>
-</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>    <span class="n">identity_inputs</span><span class="o">=</span><span class="p">[(</span><span class="s2">&quot;asim_config&quot;</span><span class="p">,</span> <span class="n">asim_config_dir</span><span class="p">)],</span>
-</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="p">):</span>
-</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a>    <span class="n">simulate_inline</span><span class="p">()</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="n">result</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>    <span class="n">fn</span><span class="o">=</span><span class="n">simulate</span><span class="p">,</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>    <span class="n">adapter</span><span class="o">=</span><span class="n">activitysim_adapter</span><span class="p">,</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>    <span class="n">identity_inputs</span><span class="o">=</span><span class="p">[(</span><span class="s2">&quot;asim_config&quot;</span><span class="p">,</span> <span class="n">asim_config_dir</span><span class="p">)],</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="p">)</span>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">trace</span><span class="p">(</span>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>    <span class="s2">&quot;simulate_trace&quot;</span><span class="p">,</span>
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>    <span class="n">adapter</span><span class="o">=</span><span class="n">activitysim_adapter</span><span class="p">,</span>
+</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>    <span class="n">identity_inputs</span><span class="o">=</span><span class="p">[(</span><span class="s2">&quot;asim_config&quot;</span><span class="p">,</span> <span class="n">asim_config_dir</span><span class="p">)],</span>
+</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="p">):</span>
+</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>    <span class="n">simulate_inline</span><span class="p">()</span>
 </span></code></pre></div>
 <p><code>config_plan</code> and <code>hash_inputs</code> are not accepted on <code>Tracker.run(...)</code> and
 <code>Tracker.trace(...)</code>. Use <code>adapter</code> and <code>identity_inputs</code>.</p>
@@ -4491,6 +4544,28 @@ tracker/query helpers are insufficient.</p>
 
 
 
+
+<div class="doc doc-object doc-function">
+
+
+<h2 id="consist.core.tracker.Tracker.from_config" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">from_config</span><span class="p">(</span><span class="n">config</span><span class="p">)</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-classmethod"><code>classmethod</code></small>
+  </span>
+
+<a href="#consist.core.tracker.Tracker.from_config" class="headerlink" title="Permanent link">&para;</a></h2>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Construct a tracker from a <code>TrackerConfig</code> object.</p>
+
+
+    </div>
+
+</div>
 
 <div class="doc doc-object doc-function">
 
@@ -15354,7 +15429,7 @@ like OpenLineage event emission, logging, or notifications.</p>
       <script id="__config" type="application/json">{"annotate":null,"base":"../..","features":["announce.dismiss","content.action.view","content.code.annotate","content.code.copy","content.code.select","content.footnote.tooltips","content.tabs.link","content.tooltips","navigation.expand","navigation.footer","navigation.indexes","navigation.path","navigation.sections","navigation.tabs","navigation.top","navigation.tracking","search.highlight","toc.follow"],"search":"../../assets/javascripts/workers/search.e2d2d235.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
     
     
-      <script src="../../assets/javascripts/bundle.5fcf0de6.min.js"></script>
+      <script src="../../assets/javascripts/bundle.16f8adc2.min.js"></script>
       
     
   </body>
