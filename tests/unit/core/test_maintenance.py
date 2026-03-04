@@ -1219,6 +1219,135 @@ def test_purge_deletes_global_rows_when_requested(
     assert [row[0] for row in cache_rows] == ["cache_a", "cache_b"]
 
 
+def test_purge_prune_cache_noops_without_derivable_reference_path(
+    maintenance: DatabaseMaintenance,
+) -> None:
+    with maintenance.db.session_scope() as session:
+        session.add_all(
+            [
+                Run(id="purge_target", model_name="demo"),
+                Run(id="keep_target", model_name="demo"),
+            ]
+        )
+        session.commit()
+
+    with maintenance.db.engine.begin() as conn:
+        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+        conn.exec_driver_sql(
+            "CREATE TABLE global_tables.link_without_hash (run_id VARCHAR)"
+        )
+        conn.exec_driver_sql(
+            "CREATE TABLE global_tables.cache_no_derivation (content_hash VARCHAR)"
+        )
+        conn.exec_driver_sql(
+            """
+            INSERT INTO global_tables.link_without_hash (run_id)
+            VALUES ('purge_target'), ('keep_target')
+            """
+        )
+        conn.exec_driver_sql(
+            """
+            INSERT INTO global_tables.cache_no_derivation (content_hash)
+            VALUES ('cache_only_purge'), ('cache_keep')
+            """
+        )
+
+    maintenance.purge(
+        "purge_target",
+        include_children=False,
+        delete_files=False,
+        delete_ingested_data=True,
+        prune_cache=True,
+        dry_run=False,
+    )
+
+    with maintenance.db.engine.begin() as conn:
+        link_rows = conn.exec_driver_sql(
+            "SELECT run_id FROM global_tables.link_without_hash ORDER BY run_id"
+        ).fetchall()
+        cache_rows = conn.exec_driver_sql(
+            """
+            SELECT content_hash
+            FROM global_tables.cache_no_derivation
+            ORDER BY content_hash
+            """
+        ).fetchall()
+
+    assert [row[0] for row in link_rows] == ["keep_target"]
+    assert [row[0] for row in cache_rows] == ["cache_keep", "cache_only_purge"]
+
+
+def test_purge_prune_cache_without_delete_ingested_data_is_noop(
+    maintenance: DatabaseMaintenance,
+) -> None:
+    with maintenance.db.session_scope() as session:
+        session.add_all(
+            [
+                Run(id="purge_target", model_name="demo"),
+                Run(id="keep_target", model_name="demo"),
+            ]
+        )
+        session.commit()
+
+    with maintenance.db.engine.begin() as conn:
+        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+        conn.exec_driver_sql(
+            """
+            CREATE TABLE global_tables.link_with_hash (
+                run_id VARCHAR,
+                content_hash VARCHAR
+            )
+            """
+        )
+        conn.exec_driver_sql(
+            "CREATE TABLE global_tables.cache_safe_noop (content_hash VARCHAR)"
+        )
+        conn.exec_driver_sql(
+            """
+            INSERT INTO global_tables.link_with_hash (run_id, content_hash)
+            VALUES ('purge_target', 'cache_only_purge'), ('keep_target', 'cache_keep')
+            """
+        )
+        conn.exec_driver_sql(
+            """
+            INSERT INTO global_tables.cache_safe_noop (content_hash)
+            VALUES ('cache_only_purge'), ('cache_keep')
+            """
+        )
+
+    result = maintenance.purge(
+        "purge_target",
+        include_children=False,
+        delete_files=False,
+        delete_ingested_data=False,
+        prune_cache=True,
+        dry_run=False,
+    )
+
+    assert result.ingested_data_skipped is True
+    with maintenance.db.engine.begin() as conn:
+        link_rows = conn.exec_driver_sql(
+            """
+            SELECT run_id, content_hash
+            FROM global_tables.link_with_hash
+            ORDER BY run_id
+            """
+        ).fetchall()
+        cache_rows = conn.exec_driver_sql(
+            """
+            SELECT content_hash
+            FROM global_tables.cache_safe_noop
+            ORDER BY content_hash
+            """
+        ).fetchall()
+
+    assert [(row[0], row[1]) for row in link_rows] == [
+        ("keep_target", "cache_keep"),
+        ("purge_target", "cache_only_purge"),
+    ]
+    assert [row[0] for row in cache_rows] == ["cache_keep", "cache_only_purge"]
+
+
 @pytest.mark.parametrize("new_status", ["completed", "failed"])
 def test_fix_status_running_to_terminal_sets_end_time_and_reason(
     maintenance: DatabaseMaintenance, new_status: str

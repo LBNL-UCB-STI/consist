@@ -334,6 +334,119 @@ def test_db_maintenance_purge_e2e_dry_run_and_execute(tmp_path: Path) -> None:
         db.engine.dispose()
 
 
+def test_db_maintenance_purge_prune_cache_keeps_shared_hashes(tmp_path: Path) -> None:
+    db = DatabaseManager(str(tmp_path / "purge_prune_cache.duckdb"))
+    maintenance = DatabaseMaintenance(db, run_dir=tmp_path / "purge_prune_cache_runs")
+
+    try:
+        with maintenance.db.session_scope() as session:
+            session.add_all(
+                [
+                    Run(id="purge_run", model_name="demo"),
+                    Run(id="keep_run", model_name="demo"),
+                ]
+            )
+            session.commit()
+
+        with maintenance.db.engine.begin() as conn:
+            conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE global_tables.link_primary (
+                    run_id VARCHAR,
+                    content_hash VARCHAR
+                )
+                """
+            )
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE global_tables.link_secondary (
+                    run_id VARCHAR,
+                    content_hash VARCHAR
+                )
+                """
+            )
+            conn.exec_driver_sql(
+                "CREATE TABLE global_tables.cache_unscoped (content_hash VARCHAR)"
+            )
+            conn.exec_driver_sql(
+                """
+                INSERT INTO global_tables.link_primary (run_id, content_hash)
+                VALUES
+                    ('purge_run', 'hash_drop'),
+                    ('purge_run', 'hash_shared'),
+                    ('purge_run', 'hash_cross_table'),
+                    ('keep_run', 'hash_shared')
+                """
+            )
+            conn.exec_driver_sql(
+                """
+                INSERT INTO global_tables.link_secondary (run_id, content_hash)
+                VALUES
+                    ('keep_run', 'hash_cross_table'),
+                    ('keep_run', 'hash_keep_only')
+                """
+            )
+            conn.exec_driver_sql(
+                """
+                INSERT INTO global_tables.cache_unscoped (content_hash)
+                VALUES
+                    ('hash_drop'),
+                    ('hash_shared'),
+                    ('hash_cross_table'),
+                    ('hash_keep_only'),
+                    ('hash_unused')
+                """
+            )
+
+        result = maintenance.purge(
+            "purge_run",
+            include_children=False,
+            delete_files=False,
+            delete_ingested_data=True,
+            prune_cache=True,
+            dry_run=False,
+        )
+        assert result.executed is True
+
+        with maintenance.db.engine.begin() as conn:
+            primary_rows = conn.exec_driver_sql(
+                """
+                SELECT run_id, content_hash
+                FROM global_tables.link_primary
+                ORDER BY run_id, content_hash
+                """
+            ).fetchall()
+            secondary_rows = conn.exec_driver_sql(
+                """
+                SELECT run_id, content_hash
+                FROM global_tables.link_secondary
+                ORDER BY run_id, content_hash
+                """
+            ).fetchall()
+            cache_rows = conn.exec_driver_sql(
+                """
+                SELECT content_hash
+                FROM global_tables.cache_unscoped
+                ORDER BY content_hash
+                """
+            ).fetchall()
+
+        assert [(row[0], row[1]) for row in primary_rows] == [("keep_run", "hash_shared")]
+        assert [(row[0], row[1]) for row in secondary_rows] == [
+            ("keep_run", "hash_cross_table"),
+            ("keep_run", "hash_keep_only"),
+        ]
+        assert [row[0] for row in cache_rows] == [
+            "hash_cross_table",
+            "hash_keep_only",
+            "hash_shared",
+            "hash_unused",
+        ]
+    finally:
+        db.engine.dispose()
+
+
 def test_db_maintenance_merge_conflict_error_mode_raises(tmp_path: Path) -> None:
     source_db = DatabaseManager(str(tmp_path / "merge_conflict_source.duckdb"))
     target_db = DatabaseManager(str(tmp_path / "merge_conflict_target.duckdb"))

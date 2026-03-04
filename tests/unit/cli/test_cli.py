@@ -23,7 +23,13 @@ from consist.cli import (
     app,
     find_db_path,
 )
-from consist.core.maintenance import DatabaseMaintenance, RebuildResult
+from consist.core.maintenance import (
+    DatabaseMaintenance,
+    MergeResult,
+    PurgePlan,
+    PurgeResult,
+    RebuildResult,
+)
 from consist.core.persistence import DatabaseManager
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifactLink
@@ -1538,6 +1544,44 @@ def test_db_merge_non_json_warns_when_unscoped_cache_tables_skipped(
     assert "cache_merge_warn" in result.stdout
 
 
+def test_db_merge_non_json_warns_when_incompatible_global_tables_skipped(
+    tmp_path, monkeypatch
+):
+    maintenance = MagicMock()
+    maintenance.merge.return_value = MergeResult(
+        shard_path=tmp_path / "mock_shard.duckdb",
+        runs_merged=["cli_run"],
+        runs_skipped=[],
+        artifacts_merged=0,
+        ingested_tables_merged=[],
+        unscoped_cache_tables_skipped=[],
+        conflicts_detected=[],
+        snapshots_merged=0,
+        incompatible_global_tables_skipped={
+            "link_bad": "missing required target column 'run_id' for mode 'run_link'"
+        },
+    )
+    monkeypatch.setattr("consist.cli._maintenance_service", lambda _db_path: maintenance)
+
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "merge",
+            str(tmp_path / "mock_shard.duckdb"),
+            "--conflict",
+            "skip",
+            "--db-path",
+            str(tmp_path / "target.duckdb"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Warning: skipped incompatible global table(s) during merge" in result.stdout
+    assert "link_bad" in result.stdout
+    assert "missing required target column 'run_id'" in result.stdout
+
+
 def test_db_purge_dry_run_json_output_is_parseable(tmp_path, monkeypatch):
     db_path = tmp_path / "cli_purge_dry_run.duckdb"
     _seed_db_for_maintenance_cli(db_path)
@@ -1550,6 +1594,7 @@ def test_db_purge_dry_run_json_output_is_parseable(tmp_path, monkeypatch):
             "purge",
             "cli_run",
             "--dry-run",
+            "--prune-cache",
             "--json",
             "--db-path",
             str(db_path),
@@ -1561,6 +1606,43 @@ def test_db_purge_dry_run_json_output_is_parseable(tmp_path, monkeypatch):
     assert set(payload.keys()) == {"plan", "executed", "ingested_data_skipped"}
     assert payload["executed"] is False
     assert payload["plan"]["run_ids"] == ["cli_run"]
+
+
+def test_db_purge_passes_prune_cache_flag_to_maintenance(tmp_path, monkeypatch):
+    maintenance = MagicMock()
+    maintenance.purge.return_value = PurgeResult(
+        plan=PurgePlan(
+            run_ids=["cli_run"],
+            child_run_ids=[],
+            orphaned_artifact_ids=[],
+            json_files=[],
+            disk_files=[],
+            ingested_data={},
+            ingested_table_modes={},
+        ),
+        executed=True,
+        ingested_data_skipped=False,
+    )
+    monkeypatch.setattr("consist.cli._maintenance_service", lambda _db_path: maintenance)
+
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "purge",
+            "cli_run",
+            "--yes",
+            "--prune-cache",
+            "--db-path",
+            str(tmp_path / "target.duckdb"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert maintenance.purge.call_count == 1
+    kwargs = maintenance.purge.call_args.kwargs
+    assert kwargs["delete_ingested_data"] is False
+    assert kwargs["prune_cache"] is True
 
 
 def test_db_purge_non_dry_run_with_yes_executes(tmp_path, monkeypatch):

@@ -405,6 +405,7 @@ class DatabaseMaintenance:
         delete_files: bool,
         delete_ingested_data: bool,
         dry_run: bool,
+        prune_cache: bool = False,
     ) -> PurgeResult:
         plan = self.plan_purge(run_ids, include_children=include_children)
         ingested_candidates_exist = any(count > 0 for count in plan.ingested_data.values())
@@ -612,6 +613,56 @@ class DatabaseMaintenance:
 
                 if delete_ingested_data and selected_run_ids:
                     run_id_filter_values = _any_sql(selected_run_ids)
+                    derivable_run_link_tables: list[str] = []
+                    prunable_cache_tables: list[str] = []
+                    purged_content_hashes: set[str] = set()
+
+                    if prune_cache:
+                        table_columns_by_name: dict[str, set[str]] = {}
+                        for table in plan.ingested_data:
+                            safe_table = self._validate_identifier(table, label="table")
+                            mode = plan.ingested_table_modes.get(table)
+                            if mode not in {"run_link", "unscoped_cache"}:
+                                continue
+                            column_rows = conn.exec_driver_sql(
+                                """
+                                SELECT column_name
+                                FROM information_schema.columns
+                                WHERE table_schema = 'global_tables'
+                                  AND table_name = ?
+                                """,
+                                (safe_table,),
+                            ).fetchall()
+                            table_columns_by_name[safe_table] = {
+                                str(row[0]) for row in column_rows
+                            }
+
+                            columns = table_columns_by_name[safe_table]
+                            if mode == "run_link" and {
+                                "run_id",
+                                "content_hash",
+                            }.issubset(columns):
+                                derivable_run_link_tables.append(safe_table)
+                            if mode == "unscoped_cache" and "content_hash" in columns:
+                                prunable_cache_tables.append(safe_table)
+
+                        if derivable_run_link_tables and prunable_cache_tables:
+                            for table in derivable_run_link_tables:
+                                quoted_table = self._quote_ident(table)
+                                hash_rows = conn.exec_driver_sql(
+                                    f"""
+                                    SELECT DISTINCT CAST({self._quote_ident("content_hash")} AS VARCHAR)
+                                    FROM global_tables.{quoted_table}
+                                    WHERE {self._quote_ident("run_id")} = {run_id_filter_values}
+                                      AND {self._quote_ident("content_hash")} IS NOT NULL
+                                    """
+                                ).fetchall()
+                                purged_content_hashes.update(
+                                    str(row[0])
+                                    for row in hash_rows
+                                    if row[0] is not None
+                                )
+
                     for table in plan.ingested_data:
                         mode = plan.ingested_table_modes.get(table)
                         if mode not in {"run_scoped", "run_link"}:
@@ -629,6 +680,47 @@ class DatabaseMaintenance:
                             WHERE {run_column} = {run_id_filter_values}
                             """
                         )
+
+                    if (
+                        prune_cache
+                        and derivable_run_link_tables
+                        and prunable_cache_tables
+                        and purged_content_hashes
+                    ):
+                        sorted_purged_hashes = sorted(purged_content_hashes)
+                        purged_hash_filter = _any_sql(sorted_purged_hashes)
+                        surviving_content_hashes: set[str] = set()
+                        for table in derivable_run_link_tables:
+                            quoted_table = self._quote_ident(table)
+                            surviving_hash_rows = conn.exec_driver_sql(
+                                f"""
+                                SELECT DISTINCT CAST({self._quote_ident("content_hash")} AS VARCHAR)
+                                FROM global_tables.{quoted_table}
+                                WHERE CAST({self._quote_ident("content_hash")} AS VARCHAR)
+                                      = {purged_hash_filter}
+                                  AND {self._quote_ident("content_hash")} IS NOT NULL
+                                """
+                            ).fetchall()
+                            surviving_content_hashes.update(
+                                str(row[0])
+                                for row in surviving_hash_rows
+                                if row[0] is not None
+                            )
+
+                        unreferenced_hashes = sorted(
+                            purged_content_hashes - surviving_content_hashes
+                        )
+                        if unreferenced_hashes:
+                            unreferenced_hash_filter = _any_sql(unreferenced_hashes)
+                            for table in prunable_cache_tables:
+                                quoted_table = self._quote_ident(table)
+                                conn.exec_driver_sql(
+                                    f"""
+                                    DELETE FROM global_tables.{quoted_table}
+                                    WHERE CAST({self._quote_ident("content_hash")} AS VARCHAR)
+                                          = {unreferenced_hash_filter}
+                                    """
+                                )
 
             if clear_artifact_ids or selected_orphaned_artifact_ids:
                 with self.db.engine.begin() as conn:
@@ -777,6 +869,7 @@ class DatabaseMaintenance:
                 f"orphaned_artifacts={len(plan.orphaned_artifact_ids)} "
                 f"json_files={len(plan.json_files)} "
                 f"delete_ingested_data={delete_ingested_data} "
+                f"prune_cache={prune_cache} "
                 f"delete_files={delete_files}"
             ),
         )

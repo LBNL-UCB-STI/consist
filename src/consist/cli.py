@@ -533,6 +533,15 @@ def db_merge(
             "Warning: skipped unscoped cache table(s) during merge; rows were not "
             f"merged: {', '.join(result.unscoped_cache_tables_skipped)}"
         )
+    if result.incompatible_global_tables_skipped:
+        details = "; ".join(
+            f"{table}: {reason}"
+            for table, reason in sorted(result.incompatible_global_tables_skipped.items())
+        )
+        console.print(
+            "Warning: skipped incompatible global table(s) during merge; "
+            f"rows were not merged: {details}"
+        )
 
 
 @db_app.command("purge")
@@ -552,6 +561,14 @@ def db_purge(
         False,
         "--delete-ingested-data",
         help="Delete run-scoped/link-scoped rows from global_tables schema.",
+    ),
+    prune_cache: bool = typer.Option(
+        False,
+        "--prune-cache",
+        help=(
+            "Prune unscoped cache rows no longer referenced by surviving run-link rows. "
+            "Only applies when --delete-ingested-data is set."
+        ),
     ),
     delete_files: bool = typer.Option(
         False,
@@ -592,6 +609,7 @@ def db_purge(
         include_children=include_children,
         delete_files=delete_files,
         delete_ingested_data=delete_ingested_data,
+        prune_cache=prune_cache,
         dry_run=dry_run,
     )
     if json_output:
