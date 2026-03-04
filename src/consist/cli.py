@@ -264,7 +264,9 @@ def db_inspect(
     summary.add_row("Total runs", str(report.total_runs))
     summary.add_row(
         "Runs by status",
-        ", ".join(f"{status}={count}" for status, count in report.runs_by_status.items())
+        ", ".join(
+            f"{status}={count}" for status, count in report.runs_by_status.items()
+        )
         or "-",
     )
     summary.add_row("Total artifacts", str(report.total_artifacts))
@@ -548,7 +550,9 @@ def db_merge(
     if result.incompatible_global_tables_skipped:
         details = "; ".join(
             f"{table}: {reason}"
-            for table, reason in sorted(result.incompatible_global_tables_skipped.items())
+            for table, reason in sorted(
+                result.incompatible_global_tables_skipped.items()
+            )
         )
         console.print(
             "Warning: skipped incompatible global table(s) during merge; "
@@ -712,7 +716,9 @@ def db_fix_status(
     summary.add_row("Status", str(payload["status"]))
     summary.add_row("Ended At", str(payload["ended_at"] or "-"))
     summary.add_row("Updated At", str(payload["updated_at"]))
-    summary.add_row("Meta", json.dumps(payload["meta"] or {}, default=str, sort_keys=True))
+    summary.add_row(
+        "Meta", json.dumps(payload["meta"] or {}, default=str, sort_keys=True)
+    )
     console.print(summary)
 
 

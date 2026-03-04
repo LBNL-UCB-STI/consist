@@ -72,7 +72,9 @@ def _looks_secret_value(value: str) -> bool:
 def _summarize_command(command: Union[str, List[str]]) -> str:
     try:
         tokens = (
-            shlex.split(command) if isinstance(command, str) else [str(t) for t in command]
+            shlex.split(command)
+            if isinstance(command, str)
+            else [str(t) for t in command]
         )
     except Exception:
         return "<unparseable>"

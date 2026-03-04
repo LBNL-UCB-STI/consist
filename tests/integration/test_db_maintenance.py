@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 import uuid
 
 import pytest
@@ -13,6 +14,12 @@ from consist.core.persistence import DatabaseManager
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifactLink
 from consist.models.run_config_kv import RunConfigKV
+
+
+def _run(**kwargs: Any) -> Run:
+    kwargs.setdefault("config_hash", None)
+    kwargs.setdefault("git_hash", None)
+    return Run(**kwargs)
 
 
 def _write_snapshot(run_dir: Path, run_id: str) -> Path:
@@ -67,9 +74,9 @@ def test_db_maintenance_export_merge_e2e_with_subtree_and_filtered_data(
         with source.db.session_scope() as session:
             session.add_all(
                 [
-                    Run(id="root_run", model_name="demo"),
-                    Run(id="child_run", model_name="demo", parent_run_id="root_run"),
-                    Run(id="other_run", model_name="demo"),
+                    _run(id="root_run", model_name="demo"),
+                    _run(id="child_run", model_name="demo", parent_run_id="root_run"),
+                    _run(id="other_run", model_name="demo"),
                     Artifact(
                         id=root_artifact_id,
                         key="root_out",
@@ -228,9 +235,11 @@ def test_db_maintenance_purge_e2e_dry_run_and_execute(tmp_path: Path) -> None:
         with maintenance.db.session_scope() as session:
             session.add_all(
                 [
-                    Run(id="purge_root", model_name="demo"),
-                    Run(id="purge_child", model_name="demo", parent_run_id="purge_root"),
-                    Run(id="keep_run", model_name="demo"),
+                    _run(id="purge_root", model_name="demo"),
+                    _run(
+                        id="purge_child", model_name="demo", parent_run_id="purge_root"
+                    ),
+                    _run(id="keep_run", model_name="demo"),
                     Artifact(
                         id=root_artifact_id,
                         key="root_art",
@@ -342,8 +351,8 @@ def test_db_maintenance_purge_prune_cache_keeps_shared_hashes(tmp_path: Path) ->
         with maintenance.db.session_scope() as session:
             session.add_all(
                 [
-                    Run(id="purge_run", model_name="demo"),
-                    Run(id="keep_run", model_name="demo"),
+                    _run(id="purge_run", model_name="demo"),
+                    _run(id="keep_run", model_name="demo"),
                 ]
             )
             session.commit()
@@ -432,7 +441,9 @@ def test_db_maintenance_purge_prune_cache_keeps_shared_hashes(tmp_path: Path) ->
                 """
             ).fetchall()
 
-        assert [(row[0], row[1]) for row in primary_rows] == [("keep_run", "hash_shared")]
+        assert [(row[0], row[1]) for row in primary_rows] == [
+            ("keep_run", "hash_shared")
+        ]
         assert [(row[0], row[1]) for row in secondary_rows] == [
             ("keep_run", "hash_cross_table"),
             ("keep_run", "hash_keep_only"),
@@ -457,7 +468,7 @@ def test_db_maintenance_merge_conflict_error_mode_raises(tmp_path: Path) -> None
     try:
         with source.db.session_scope() as session:
             session.add(
-                Run(
+                _run(
                     id="conflict_run",
                     model_name="source_model",
                 )
@@ -490,7 +501,7 @@ def test_db_maintenance_merge_conflict_error_mode_raises(tmp_path: Path) -> None
 
         with target.db.session_scope() as session:
             session.add(
-                Run(
+                _run(
                     id="conflict_run",
                     model_name="target_model",
                 )
@@ -525,8 +536,8 @@ def test_db_maintenance_merge_conflict_skip_mode_merges_non_conflicting_runs(
         with source.db.session_scope() as session:
             session.add_all(
                 [
-                    Run(id="conflict_run", model_name="source_model"),
-                    Run(id="new_run", model_name="source_model"),
+                    _run(id="conflict_run", model_name="source_model"),
+                    _run(id="new_run", model_name="source_model"),
                     Artifact(
                         id=conflict_artifact_id,
                         key="conflict_art",
@@ -566,14 +577,16 @@ def test_db_maintenance_merge_conflict_skip_mode_merges_non_conflicting_runs(
 
         with target.db.session_scope() as session:
             session.add(
-                Run(
+                _run(
                     id="conflict_run",
                     model_name="target_model",
                 )
             )
             session.commit()
 
-        merge_result = target.merge(shard_path, conflict="skip", include_snapshots=False)
+        merge_result = target.merge(
+            shard_path, conflict="skip", include_snapshots=False
+        )
         assert merge_result.runs_skipped == ["conflict_run"]
         assert merge_result.runs_merged == ["new_run"]
         assert merge_result.conflicts_detected == ["conflict_run"]
@@ -601,7 +614,7 @@ def test_db_maintenance_merge_global_table_incompatible_schema_error_mode_raises
 
     try:
         with source.db.session_scope() as session:
-            session.add(Run(id="table_error_run", model_name="source_model"))
+            session.add(_run(id="table_error_run", model_name="source_model"))
             session.commit()
 
         with source.db.engine.begin() as conn:
@@ -662,7 +675,7 @@ def test_db_maintenance_merge_global_table_incompatible_schema_skip_mode_skips_t
 
     try:
         with source.db.session_scope() as session:
-            session.add(Run(id="table_skip_run", model_name="source_model"))
+            session.add(_run(id="table_skip_run", model_name="source_model"))
             session.commit()
 
         with source.db.engine.begin() as conn:
@@ -715,10 +728,14 @@ def test_db_maintenance_merge_global_table_incompatible_schema_skip_mode_skips_t
                 """
             )
 
-        merge_result = target.merge(shard_path, conflict="skip", include_snapshots=False)
+        merge_result = target.merge(
+            shard_path, conflict="skip", include_snapshots=False
+        )
         assert merge_result.runs_merged == ["table_skip_run"]
         assert merge_result.ingested_tables_merged == ["scoped_ok"]
-        assert set(merge_result.incompatible_global_tables_skipped.keys()) == {"link_bad"}
+        assert set(merge_result.incompatible_global_tables_skipped.keys()) == {
+            "link_bad"
+        }
         assert "run_id" in merge_result.incompatible_global_tables_skipped["link_bad"]
 
         with target.db.engine.begin() as conn:
@@ -750,7 +767,7 @@ def test_db_maintenance_merge_global_table_additive_drift_still_merges(
 
     try:
         with source.db.session_scope() as session:
-            session.add(Run(id="table_additive_run", model_name="source_model"))
+            session.add(_run(id="table_additive_run", model_name="source_model"))
             session.commit()
 
         with source.db.engine.begin() as conn:
@@ -789,7 +806,9 @@ def test_db_maintenance_merge_global_table_additive_drift_still_merges(
                 """
             )
 
-        merge_result = target.merge(shard_path, conflict="error", include_snapshots=False)
+        merge_result = target.merge(
+            shard_path, conflict="error", include_snapshots=False
+        )
         assert merge_result.runs_merged == ["table_additive_run"]
         assert merge_result.ingested_tables_merged == ["scoped_additive"]
         assert merge_result.incompatible_global_tables_skipped == {}
@@ -819,7 +838,7 @@ def test_db_maintenance_merge_schema_drift_target_extra_column_still_merges(
 
     try:
         with source.db.session_scope() as session:
-            session.add(Run(id="drift_run", model_name="source_model"))
+            session.add(_run(id="drift_run", model_name="source_model"))
             session.add(
                 Artifact(
                     id=artifact_id,
@@ -857,9 +876,13 @@ def test_db_maintenance_merge_schema_drift_target_extra_column_still_merges(
         )
 
         with target.db.engine.begin() as conn:
-            conn.exec_driver_sql("ALTER TABLE run_config_kv ADD COLUMN target_extra VARCHAR")
+            conn.exec_driver_sql(
+                "ALTER TABLE run_config_kv ADD COLUMN target_extra VARCHAR"
+            )
 
-        merge_result = target.merge(shard_path, conflict="error", include_snapshots=False)
+        merge_result = target.merge(
+            shard_path, conflict="error", include_snapshots=False
+        )
         assert merge_result.runs_merged == ["drift_run"]
 
         with target.db.engine.begin() as conn:
@@ -890,7 +913,7 @@ def test_db_maintenance_merge_retries_on_transient_lock_error(
 
     try:
         with source.db.session_scope() as session:
-            session.add(Run(id="retry_run", model_name="source_model"))
+            session.add(_run(id="retry_run", model_name="source_model"))
             session.add(
                 Artifact(
                     id=artifact_id,
@@ -959,7 +982,7 @@ def test_db_maintenance_export_retries_on_transient_lock_error(
 
     try:
         with maintenance.db.session_scope() as session:
-            session.add(Run(id="export_retry_run", model_name="source_model"))
+            session.add(_run(id="export_retry_run", model_name="source_model"))
             session.add(
                 Artifact(
                     id=artifact_id,
@@ -1014,7 +1037,7 @@ def test_db_maintenance_purge_retries_on_transient_lock_error(
 
     try:
         with maintenance.db.session_scope() as session:
-            session.add(Run(id="purge_retry_run", model_name="demo"))
+            session.add(_run(id="purge_retry_run", model_name="demo"))
             session.add(
                 Artifact(
                     id=artifact_id,
@@ -1125,7 +1148,7 @@ def test_db_maintenance_compact_runs_after_writes_and_purge(tmp_path: Path) -> N
 
     try:
         with maintenance.db.session_scope() as session:
-            session.add(Run(id="compact_run", model_name="demo"))
+            session.add(_run(id="compact_run", model_name="demo"))
             session.add(
                 Artifact(
                     id=artifact_id,
@@ -1155,7 +1178,9 @@ def test_db_maintenance_compact_runs_after_writes_and_purge(tmp_path: Path) -> N
         maintenance.compact()
 
         with maintenance.db.engine.begin() as conn:
-            run_count_row = conn.exec_driver_sql('SELECT COUNT(*) FROM "run"').fetchone()
+            run_count_row = conn.exec_driver_sql(
+                'SELECT COUNT(*) FROM "run"'
+            ).fetchone()
         assert int(run_count_row[0] if run_count_row else 0) == 0
 
         audit_log = maintenance.run_dir / ".consist_audit.log"

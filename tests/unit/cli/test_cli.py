@@ -937,6 +937,8 @@ def _seed_db_for_maintenance_cli(db_path: Path) -> None:
                 Run(
                     id="cli_run",
                     model_name="demo",
+                    config_hash=None,
+                    git_hash=None,
                     status="completed",
                     created_at=now,
                     started_at=now,
@@ -1154,7 +1156,9 @@ def test_db_rebuild_passes_full_mode_to_maintenance(tmp_path, monkeypatch):
         errors=[],
         dry_run=False,
     )
-    monkeypatch.setattr("consist.cli._maintenance_service", lambda _db_path: maintenance)
+    monkeypatch.setattr(
+        "consist.cli._maintenance_service", lambda _db_path: maintenance
+    )
 
     result = runner.invoke(
         app,
@@ -1188,7 +1192,9 @@ def test_db_rebuild_defaults_mode_to_minimal(tmp_path, monkeypatch):
         errors=[],
         dry_run=False,
     )
-    monkeypatch.setattr("consist.cli._maintenance_service", lambda _db_path: maintenance)
+    monkeypatch.setattr(
+        "consist.cli._maintenance_service", lambda _db_path: maintenance
+    )
 
     result = runner.invoke(
         app,
@@ -1268,7 +1274,9 @@ def test_db_export_json_output_is_parseable(tmp_path, monkeypatch):
     assert shard_path.exists()
 
 
-def test_db_export_dry_run_json_output_is_parseable_and_no_writes(tmp_path, monkeypatch):
+def test_db_export_dry_run_json_output_is_parseable_and_no_writes(
+    tmp_path, monkeypatch
+):
     db_path = tmp_path / "cli_export_dry_run_source.duckdb"
     _seed_db_for_maintenance_cli(db_path)
     monkeypatch.chdir(tmp_path)
@@ -1305,7 +1313,9 @@ def test_db_export_dry_run_json_output_is_parseable_and_no_writes(tmp_path, monk
     assert not shard_path.exists()
 
 
-def test_db_export_non_json_warns_when_unscoped_cache_tables_skipped(tmp_path, monkeypatch):
+def test_db_export_non_json_warns_when_unscoped_cache_tables_skipped(
+    tmp_path, monkeypatch
+):
     db_path = tmp_path / "cli_export_warn_source.duckdb"
     _seed_db_for_maintenance_cli(db_path)
     _seed_unscoped_cache_global_table(db_path, "cache_export_warn")
@@ -1340,10 +1350,18 @@ def test_db_export_no_children_excludes_descendants(tmp_path, monkeypatch):
         with db.session_scope() as session:
             session.add_all(
                 [
-                    Run(id="parent_run", model_name="demo", status="completed"),
+                    Run(
+                        id="parent_run",
+                        model_name="demo",
+                        config_hash=None,
+                        git_hash=None,
+                        status="completed",
+                    ),
                     Run(
                         id="child_run",
                         model_name="demo",
+                        config_hash=None,
+                        git_hash=None,
                         status="completed",
                         parent_run_id="parent_run",
                     ),
@@ -1408,7 +1426,9 @@ def test_db_merge_json_output_is_parseable(tmp_path, monkeypatch):
     target_db.engine.dispose()
 
     source_db = DatabaseManager(str(source_db_path))
-    source_maintenance = DatabaseMaintenance(source_db, run_dir=tmp_path / "source_runs")
+    source_maintenance = DatabaseMaintenance(
+        source_db, run_dir=tmp_path / "source_runs"
+    )
     try:
         source_maintenance.export(
             "cli_run",
@@ -1465,7 +1485,9 @@ def test_db_merge_dry_run_json_output_is_parseable_and_no_writes(tmp_path, monke
     target_db.engine.dispose()
 
     source_db = DatabaseManager(str(source_db_path))
-    source_maintenance = DatabaseMaintenance(source_db, run_dir=tmp_path / "source_runs")
+    source_maintenance = DatabaseMaintenance(
+        source_db, run_dir=tmp_path / "source_runs"
+    )
     try:
         source_maintenance.export(
             "cli_run",
@@ -1526,7 +1548,9 @@ def test_db_merge_non_json_warns_when_unscoped_cache_tables_skipped(
     target_db.engine.dispose()
 
     source_db = DatabaseManager(str(source_db_path))
-    source_maintenance = DatabaseMaintenance(source_db, run_dir=tmp_path / "source_runs")
+    source_maintenance = DatabaseMaintenance(
+        source_db, run_dir=tmp_path / "source_runs"
+    )
     try:
         source_maintenance.export(
             "cli_run",
@@ -1589,7 +1613,9 @@ def test_db_merge_non_json_warns_when_incompatible_global_tables_skipped(
             "link_bad": "missing required target column 'run_id' for mode 'run_link'"
         },
     )
-    monkeypatch.setattr("consist.cli._maintenance_service", lambda _db_path: maintenance)
+    monkeypatch.setattr(
+        "consist.cli._maintenance_service", lambda _db_path: maintenance
+    )
 
     result = runner.invoke(
         app,
@@ -1651,7 +1677,9 @@ def test_db_purge_passes_prune_cache_flag_to_maintenance(tmp_path, monkeypatch):
         executed=True,
         ingested_data_skipped=False,
     )
-    monkeypatch.setattr("consist.cli._maintenance_service", lambda _db_path: maintenance)
+    monkeypatch.setattr(
+        "consist.cli._maintenance_service", lambda _db_path: maintenance
+    )
 
     result = runner.invoke(
         app,

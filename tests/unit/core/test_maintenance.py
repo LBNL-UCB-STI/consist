@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 import json
 from datetime import datetime, timezone
 import uuid
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -19,7 +21,7 @@ from consist.models.run_config_kv import RunConfigKV
 
 
 @pytest.fixture
-def maintenance(tmp_path: Path) -> DatabaseMaintenance:
+def maintenance(tmp_path: Path) -> Iterator[DatabaseMaintenance]:
     db = DatabaseManager(str(tmp_path / "maintenance.duckdb"))
     manager = DatabaseMaintenance(db=db, run_dir=tmp_path / "runs")
     try:
@@ -28,15 +30,23 @@ def maintenance(tmp_path: Path) -> DatabaseMaintenance:
         db.engine.dispose()
 
 
-def test_expand_run_ids_recursive_and_cycle_safe(maintenance: DatabaseMaintenance) -> None:
+def _run(**kwargs: Any) -> Run:
+    kwargs.setdefault("config_hash", None)
+    kwargs.setdefault("git_hash", None)
+    return Run(**kwargs)
+
+
+def test_expand_run_ids_recursive_and_cycle_safe(
+    maintenance: DatabaseMaintenance,
+) -> None:
     with maintenance.db.session_scope() as session:
         session.add_all(
             [
-                Run(id="root", model_name="demo"),
-                Run(id="child_a", model_name="demo", parent_run_id="root"),
-                Run(id="child_b", model_name="demo", parent_run_id="child_a"),
-                Run(id="cycle_1", model_name="demo", parent_run_id="cycle_2"),
-                Run(id="cycle_2", model_name="demo", parent_run_id="cycle_1"),
+                _run(id="root", model_name="demo"),
+                _run(id="child_a", model_name="demo", parent_run_id="root"),
+                _run(id="child_b", model_name="demo", parent_run_id="child_a"),
+                _run(id="cycle_1", model_name="demo", parent_run_id="cycle_2"),
+                _run(id="cycle_2", model_name="demo", parent_run_id="cycle_1"),
             ]
         )
         session.commit()
@@ -45,8 +55,8 @@ def test_expand_run_ids_recursive_and_cycle_safe(maintenance: DatabaseMaintenanc
 
     assert set(expanded) == {"root", "child_a", "child_b", "cycle_1", "cycle_2"}
     assert len(expanded) == 5
-    assert expanded.index("root") < expanded.index("child_a") < expanded.index(
-        "child_b"
+    assert (
+        expanded.index("root") < expanded.index("child_a") < expanded.index("child_b")
     )
 
 
@@ -61,9 +71,9 @@ def test_find_orphaned_artifacts_linked_only_to_selected_runs(
     with maintenance.db.session_scope() as session:
         session.add_all(
             [
-                Run(id="purge_one", model_name="demo"),
-                Run(id="purge_two", model_name="demo"),
-                Run(id="keep", model_name="demo"),
+                _run(id="purge_one", model_name="demo"),
+                _run(id="purge_two", model_name="demo"),
+                _run(id="keep", model_name="demo"),
             ]
         )
         session.add_all(
@@ -105,9 +115,13 @@ def test_find_orphaned_artifacts_linked_only_to_selected_runs(
                 RunArtifactLink(
                     run_id="purge_two", artifact_id=orphan_multi, direction="input"
                 ),
-                RunArtifactLink(run_id="purge_one", artifact_id=shared, direction="output"),
+                RunArtifactLink(
+                    run_id="purge_one", artifact_id=shared, direction="output"
+                ),
                 RunArtifactLink(run_id="keep", artifact_id=shared, direction="input"),
-                RunArtifactLink(run_id="keep", artifact_id=retained, direction="output"),
+                RunArtifactLink(
+                    run_id="keep", artifact_id=retained, direction="output"
+                ),
             ]
         )
         session.commit()
@@ -132,14 +146,18 @@ def test_classify_global_table_modes(maintenance: DatabaseMaintenance) -> None:
         conn.exec_driver_sql(
             "CREATE TABLE global_tables.run_scoped_table (consist_run_id VARCHAR)"
         )
-        conn.exec_driver_sql("CREATE TABLE global_tables.run_link_table (run_id VARCHAR)")
+        conn.exec_driver_sql(
+            "CREATE TABLE global_tables.run_link_table (run_id VARCHAR)"
+        )
         conn.exec_driver_sql(
             "CREATE TABLE global_tables.unscoped_cache_table (content_hash VARCHAR)"
         )
 
     assert maintenance._classify_global_table("run_scoped_table") == "run_scoped"
     assert maintenance._classify_global_table("run_link_table") == "run_link"
-    assert maintenance._classify_global_table("unscoped_cache_table") == "unscoped_cache"
+    assert (
+        maintenance._classify_global_table("unscoped_cache_table") == "unscoped_cache"
+    )
 
 
 @pytest.mark.parametrize(
@@ -170,7 +188,9 @@ def test_resolve_global_table_filter_sql_run_link(
 ) -> None:
     with maintenance.db.engine.begin() as conn:
         conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-        conn.exec_driver_sql("CREATE TABLE global_tables.link_filter_table (run_id VARCHAR)")
+        conn.exec_driver_sql(
+            "CREATE TABLE global_tables.link_filter_table (run_id VARCHAR)"
+        )
 
     sql = maintenance._resolve_global_table_filter_sql(
         "link_filter_table", ["run_1", "run_2"], table_alias=table_alias
@@ -226,7 +246,9 @@ def test_resolve_global_table_filter_sql_empty_run_ids_is_non_destructive(
     column = "consist_run_id" if "scoped" in table_name else "run_id"
     with maintenance.db.engine.begin() as conn:
         conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-        conn.exec_driver_sql(f"CREATE TABLE global_tables.{table_name} ({column} VARCHAR)")
+        conn.exec_driver_sql(
+            f"CREATE TABLE global_tables.{table_name} ({column} VARCHAR)"
+        )
 
     sql = maintenance._resolve_global_table_filter_sql(table_name, [])
 
@@ -391,19 +413,19 @@ def test_inspect_reports_expected_counts_and_global_sizes(
     with maintenance.db.session_scope() as session:
         session.add_all(
             [
-                Run(
+                _run(
                     id="run_completed",
                     model_name="demo",
                     status="completed",
                     ended_at=now,
                 ),
-                Run(
+                _run(
                     id="run_running_zombie",
                     model_name="demo",
                     status="running",
                     ended_at=now,
                 ),
-                Run(id="run_failed", model_name="demo", status="failed", ended_at=now),
+                _run(id="run_failed", model_name="demo", status="failed", ended_at=now),
                 Artifact(
                     id=linked_artifact_id,
                     key="linked_artifact",
@@ -456,8 +478,8 @@ def test_inspect_json_db_parity_true_with_snapshot_files(
     with maintenance.db.session_scope() as session:
         session.add_all(
             [
-                Run(id="run_a", model_name="demo"),
-                Run(id="run_b", model_name="demo"),
+                _run(id="run_a", model_name="demo"),
+                _run(id="run_b", model_name="demo"),
             ]
         )
         session.commit()
@@ -483,7 +505,7 @@ def test_inspect_json_db_parity_false_with_mismatched_snapshot_ids(
     maintenance: DatabaseMaintenance,
 ) -> None:
     with maintenance.db.session_scope() as session:
-        session.add(Run(id="run_only_in_db", model_name="demo"))
+        session.add(_run(id="run_only_in_db", model_name="demo"))
         session.commit()
 
     snapshot_dir = maintenance.run_dir / "consist_runs"
@@ -511,21 +533,28 @@ def test_doctor_reports_invariant_violations(maintenance: DatabaseMaintenance) -
     with maintenance.db.session_scope() as session:
         session.add_all(
             [
-                Run(id="zombie_run", model_name="demo", status="running", ended_at=now),
-                Run(
+                _run(
+                    id="zombie_run", model_name="demo", status="running", ended_at=now
+                ),
+                _run(
                     id="completed_missing_end",
                     model_name="demo",
                     status="completed",
                     ended_at=None,
                 ),
-                Run(
+                _run(
                     id="failed_missing_end",
                     model_name="demo",
                     status="failed",
                     ended_at=None,
                 ),
-                Run(id="valid_parent", model_name="demo", status="completed", ended_at=now),
-                Run(
+                _run(
+                    id="valid_parent",
+                    model_name="demo",
+                    status="completed",
+                    ended_at=now,
+                ),
+                _run(
                     id="dangling_child",
                     model_name="demo",
                     status="completed",
@@ -572,7 +601,9 @@ def test_snapshot_creates_destination_file(maintenance: DatabaseMaintenance) -> 
     assert snapshot_path.is_file()
 
 
-def test_snapshot_writes_sidecar_metadata_file(maintenance: DatabaseMaintenance) -> None:
+def test_snapshot_writes_sidecar_metadata_file(
+    maintenance: DatabaseMaintenance,
+) -> None:
     destination = maintenance.run_dir / "snapshots" / "with_sidecar.duckdb"
 
     maintenance.snapshot(destination)
@@ -691,14 +722,14 @@ def test_plan_purge_includes_children_and_global_table_candidates(
     with maintenance.db.session_scope() as session:
         session.add_all(
             [
-                Run(id="root", model_name="demo"),
-                Run(
+                _run(id="root", model_name="demo"),
+                _run(
                     id="child",
                     model_name="demo",
                     parent_run_id="root",
                     meta={"_physical_run_dir": str(child_run_dir)},
                 ),
-                Run(id="keep", model_name="demo"),
+                _run(id="keep", model_name="demo"),
             ]
         )
         session.commit()
@@ -757,7 +788,7 @@ def test_resolve_artifact_disk_paths_workspace_relative(
 
     with maintenance.db.session_scope() as session:
         session.add(
-            Run(
+            _run(
                 id="workspace_run",
                 model_name="demo",
                 meta={"_physical_run_dir": str(run_workspace)},
@@ -795,7 +826,7 @@ def test_resolve_artifact_disk_paths_mounted_uri_from_run_and_artifact_metadata(
 
     with maintenance.db.session_scope() as session:
         session.add(
-            Run(
+            _run(
                 id="mount_run",
                 model_name="demo",
                 meta={"mounts": {"inputs": str(run_mount_root)}},
@@ -839,7 +870,7 @@ def test_purge_dry_run_makes_no_db_changes(maintenance: DatabaseMaintenance) -> 
     snapshot_path.write_text("{}", encoding="utf-8")
 
     with maintenance.db.session_scope() as session:
-        session.add(Run(id="dry_run_target", model_name="demo"))
+        session.add(_run(id="dry_run_target", model_name="demo"))
         session.add(
             Artifact(
                 id=artifact_id,
@@ -892,7 +923,7 @@ def test_purge_delete_files_removes_files_and_directories(
 
     with maintenance.db.session_scope() as session:
         session.add(
-            Run(
+            _run(
                 id="purge_delete_files_run",
                 model_name="demo",
                 meta={"_physical_run_dir": str(run_workspace)},
@@ -961,9 +992,9 @@ def test_purge_executes_core_deletes_and_ingested_skip(
     with maintenance.db.session_scope() as session:
         session.add_all(
             [
-                Run(id="purge_root", model_name="demo"),
-                Run(id="purge_child", model_name="demo", parent_run_id="purge_root"),
-                Run(id="keep_run", model_name="demo"),
+                _run(id="purge_root", model_name="demo"),
+                _run(id="purge_child", model_name="demo", parent_run_id="purge_root"),
+                _run(id="keep_run", model_name="demo"),
                 Artifact(
                     id=orphan_root_id,
                     key="orphan_root",
@@ -1007,8 +1038,12 @@ def test_purge_executes_core_deletes_and_ingested_skip(
                     artifact_id=shared_id,
                     direction="output",
                 ),
-                RunArtifactLink(run_id="keep_run", artifact_id=shared_id, direction="input"),
-                RunArtifactLink(run_id="keep_run", artifact_id=keep_id, direction="output"),
+                RunArtifactLink(
+                    run_id="keep_run", artifact_id=shared_id, direction="input"
+                ),
+                RunArtifactLink(
+                    run_id="keep_run", artifact_id=keep_id, direction="output"
+                ),
                 RunConfigKV(
                     run_id="purge_root",
                     facet_id="facet_1",
@@ -1159,8 +1194,8 @@ def test_purge_deletes_global_rows_when_requested(
     with maintenance.db.session_scope() as session:
         session.add_all(
             [
-                Run(id="purge_target", model_name="demo"),
-                Run(id="keep_target", model_name="demo"),
+                _run(id="purge_target", model_name="demo"),
+                _run(id="keep_target", model_name="demo"),
             ]
         )
         session.commit()
@@ -1225,8 +1260,8 @@ def test_purge_prune_cache_noops_without_derivable_reference_path(
     with maintenance.db.session_scope() as session:
         session.add_all(
             [
-                Run(id="purge_target", model_name="demo"),
-                Run(id="keep_target", model_name="demo"),
+                _run(id="purge_target", model_name="demo"),
+                _run(id="keep_target", model_name="demo"),
             ]
         )
         session.commit()
@@ -1283,8 +1318,8 @@ def test_purge_prune_cache_without_delete_ingested_data_is_noop(
     with maintenance.db.session_scope() as session:
         session.add_all(
             [
-                Run(id="purge_target", model_name="demo"),
-                Run(id="keep_target", model_name="demo"),
+                _run(id="purge_target", model_name="demo"),
+                _run(id="keep_target", model_name="demo"),
             ]
         )
         session.commit()
@@ -1353,7 +1388,7 @@ def test_fix_status_running_to_terminal_sets_end_time_and_reason(
     maintenance: DatabaseMaintenance, new_status: str
 ) -> None:
     with maintenance.db.session_scope() as session:
-        session.add(Run(id=f"run_{new_status}", model_name="demo", status="running"))
+        session.add(_run(id=f"run_{new_status}", model_name="demo", status="running"))
         session.commit()
 
     updated = maintenance.fix_status(
@@ -1375,7 +1410,7 @@ def test_fix_status_terminal_to_running_clears_ended_at(
     now = datetime.now(timezone.utc)
     with maintenance.db.session_scope() as session:
         session.add(
-            Run(
+            _run(
                 id="run_terminal",
                 model_name="demo",
                 status="completed",
@@ -1396,7 +1431,7 @@ def test_fix_status_terminal_to_running_requires_force(
     now = datetime.now(timezone.utc)
     with maintenance.db.session_scope() as session:
         session.add(
-            Run(
+            _run(
                 id="run_terminal_requires_force",
                 model_name="demo",
                 status="completed",
@@ -1418,7 +1453,7 @@ def test_fix_status_invalid_status_raises_value_error(
     maintenance: DatabaseMaintenance,
 ) -> None:
     with maintenance.db.session_scope() as session:
-        session.add(Run(id="run_bad_status", model_name="demo", status="running"))
+        session.add(_run(id="run_bad_status", model_name="demo", status="running"))
         session.commit()
 
     with pytest.raises(ValueError, match="Invalid status"):
@@ -1442,9 +1477,9 @@ def test_export_copies_core_global_rows_and_snapshots(tmp_path: Path) -> None:
         with maintenance.db.session_scope() as session:
             session.add_all(
                 [
-                    Run(id="root_run", model_name="demo"),
-                    Run(id="child_run", model_name="demo", parent_run_id="root_run"),
-                    Run(id="other_run", model_name="demo"),
+                    _run(id="root_run", model_name="demo"),
+                    _run(id="child_run", model_name="demo", parent_run_id="root_run"),
+                    _run(id="other_run", model_name="demo"),
                     Artifact(
                         id=root_artifact_id,
                         key="root_output",
@@ -1660,8 +1695,8 @@ def test_export_no_children_only_copies_requested_run(tmp_path: Path) -> None:
         with maintenance.db.session_scope() as session:
             session.add_all(
                 [
-                    Run(id="root_run", model_name="demo"),
-                    Run(id="child_run", model_name="demo", parent_run_id="root_run"),
+                    _run(id="root_run", model_name="demo"),
+                    _run(id="child_run", model_name="demo", parent_run_id="root_run"),
                     Artifact(
                         id=root_artifact_id,
                         key="root_output",
@@ -1705,7 +1740,9 @@ def test_export_no_children_only_copies_requested_run(tmp_path: Path) -> None:
         shard_db = DatabaseManager(str(shard_path))
         try:
             with shard_db.engine.begin() as conn:
-                run_count = conn.exec_driver_sql('SELECT COUNT(*) FROM "run"').fetchone()
+                run_count = conn.exec_driver_sql(
+                    'SELECT COUNT(*) FROM "run"'
+                ).fetchone()
                 artifact_count = conn.exec_driver_sql(
                     'SELECT COUNT(*) FROM "artifact"'
                 ).fetchone()
@@ -1723,7 +1760,7 @@ def test_export_dry_run_previews_without_writes(tmp_path: Path) -> None:
     artifact_id = uuid.uuid4()
     try:
         with maintenance.db.session_scope() as session:
-            session.add(Run(id="root_run", model_name="demo"))
+            session.add(_run(id="root_run", model_name="demo"))
             session.add(
                 Artifact(
                     id=artifact_id,
@@ -1793,13 +1830,17 @@ def test_export_dry_run_previews_without_writes(tmp_path: Path) -> None:
 def test_merge_happy_path_and_conflict_skip_policy(tmp_path: Path) -> None:
     source_db = DatabaseManager(str(tmp_path / "merge_source.duckdb"))
     target_db = DatabaseManager(str(tmp_path / "merge_target.duckdb"))
-    source_maintenance = DatabaseMaintenance(source_db, run_dir=tmp_path / "runs_source")
-    target_maintenance = DatabaseMaintenance(target_db, run_dir=tmp_path / "runs_target")
+    source_maintenance = DatabaseMaintenance(
+        source_db, run_dir=tmp_path / "runs_source"
+    )
+    target_maintenance = DatabaseMaintenance(
+        target_db, run_dir=tmp_path / "runs_target"
+    )
     artifact_id = uuid.uuid4()
     try:
         with source_db.session_scope() as session:
             session.add(
-                Run(
+                _run(
                     id="merge_run",
                     model_name="source_model",
                     meta={"_physical_run_dir": str(source_maintenance.run_dir)},
@@ -1951,16 +1992,20 @@ def test_merge_happy_path_and_conflict_skip_policy(tmp_path: Path) -> None:
 def test_merge_dry_run_previews_without_writes(tmp_path: Path) -> None:
     source_db = DatabaseManager(str(tmp_path / "merge_dry_run_source.duckdb"))
     target_db = DatabaseManager(str(tmp_path / "merge_dry_run_target.duckdb"))
-    source_maintenance = DatabaseMaintenance(source_db, run_dir=tmp_path / "runs_source")
-    target_maintenance = DatabaseMaintenance(target_db, run_dir=tmp_path / "runs_target")
+    source_maintenance = DatabaseMaintenance(
+        source_db, run_dir=tmp_path / "runs_source"
+    )
+    target_maintenance = DatabaseMaintenance(
+        target_db, run_dir=tmp_path / "runs_target"
+    )
     conflict_artifact_id = uuid.uuid4()
     new_artifact_id = uuid.uuid4()
     try:
         with source_db.session_scope() as session:
             session.add_all(
                 [
-                    Run(id="conflict_run", model_name="source_model"),
-                    Run(id="new_run", model_name="source_model"),
+                    _run(id="conflict_run", model_name="source_model"),
+                    _run(id="new_run", model_name="source_model"),
                     Artifact(
                         id=conflict_artifact_id,
                         key="conflict_artifact",
@@ -2003,7 +2048,7 @@ def test_merge_dry_run_previews_without_writes(tmp_path: Path) -> None:
         (shard_snapshot_dir / "new_run.json").write_text("{}", encoding="utf-8")
 
         with target_db.session_scope() as session:
-            session.add(Run(id="conflict_run", model_name="target_model"))
+            session.add(_run(id="conflict_run", model_name="target_model"))
             session.commit()
 
         merge_result = target_maintenance.merge(
@@ -2025,7 +2070,9 @@ def test_merge_dry_run_previews_without_writes(tmp_path: Path) -> None:
             assert persisted_conflict.model_name == "target_model"
             assert session.get(Artifact, new_artifact_id) is None
 
-        assert not (target_maintenance.run_dir / "consist_runs" / "new_run.json").exists()
+        assert not (
+            target_maintenance.run_dir / "consist_runs" / "new_run.json"
+        ).exists()
         assert not (target_maintenance.run_dir / ".consist_audit.log").exists()
     finally:
         source_db.engine.dispose()
@@ -2035,12 +2082,16 @@ def test_merge_dry_run_previews_without_writes(tmp_path: Path) -> None:
 def test_merge_tolerates_target_side_schema_drift_on_aux_tables(tmp_path: Path) -> None:
     source_db = DatabaseManager(str(tmp_path / "merge_drift_source.duckdb"))
     target_db = DatabaseManager(str(tmp_path / "merge_drift_target.duckdb"))
-    source_maintenance = DatabaseMaintenance(source_db, run_dir=tmp_path / "runs_source")
-    target_maintenance = DatabaseMaintenance(target_db, run_dir=tmp_path / "runs_target")
+    source_maintenance = DatabaseMaintenance(
+        source_db, run_dir=tmp_path / "runs_source"
+    )
+    target_maintenance = DatabaseMaintenance(
+        target_db, run_dir=tmp_path / "runs_target"
+    )
     artifact_id = uuid.uuid4()
     try:
         with source_db.session_scope() as session:
-            session.add(Run(id="drift_run", model_name="source_model"))
+            session.add(_run(id="drift_run", model_name="source_model"))
             session.add(
                 Artifact(
                     id=artifact_id,
@@ -2088,8 +2139,12 @@ def test_merge_tolerates_target_side_schema_drift_on_aux_tables(tmp_path: Path) 
         )
 
         with target_db.engine.begin() as conn:
-            conn.exec_driver_sql("ALTER TABLE run_config_kv ADD COLUMN target_extra VARCHAR")
-            conn.exec_driver_sql("ALTER TABLE artifact_kv ADD COLUMN target_extra VARCHAR")
+            conn.exec_driver_sql(
+                "ALTER TABLE run_config_kv ADD COLUMN target_extra VARCHAR"
+            )
+            conn.exec_driver_sql(
+                "ALTER TABLE artifact_kv ADD COLUMN target_extra VARCHAR"
+            )
 
         merge_result = target_maintenance.merge(
             shard_path,
@@ -2167,7 +2222,7 @@ def _snapshot_payload(
 def test_rebuild_from_json_happy_path_and_idempotent_run_counting(
     maintenance: DatabaseMaintenance, tmp_path: Path
 ) -> None:
-    existing_run = Run(id="existing_run", model_name="demo")
+    existing_run = _run(id="existing_run", model_name="demo")
     with maintenance.db.session_scope() as session:
         session.add(existing_run)
         session.commit()
@@ -2180,7 +2235,9 @@ def test_rebuild_from_json_happy_path_and_idempotent_run_counting(
         encoding="utf-8",
     )
     (json_dir / "b_new.json").write_text(
-        json.dumps(_snapshot_payload(run_id="new_run", output_artifact_ids=[artifact_id])),
+        json.dumps(
+            _snapshot_payload(run_id="new_run", output_artifact_ids=[artifact_id])
+        ),
         encoding="utf-8",
     )
 
@@ -2208,7 +2265,11 @@ def test_rebuild_from_json_dry_run_does_not_write(
     json_dir = tmp_path / "rebuild_dry_run_snapshots"
     json_dir.mkdir(parents=True, exist_ok=True)
     (json_dir / "dry_run.json").write_text(
-        json.dumps(_snapshot_payload(run_id="dry_run_rebuild", output_artifact_ids=[artifact_id])),
+        json.dumps(
+            _snapshot_payload(
+                run_id="dry_run_rebuild", output_artifact_ids=[artifact_id]
+            )
+        ),
         encoding="utf-8",
     )
 

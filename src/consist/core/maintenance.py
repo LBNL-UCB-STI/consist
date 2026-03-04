@@ -165,7 +165,9 @@ class DatabaseMaintenance:
                 total_artifacts_row = conn.exec_driver_sql(
                     "SELECT COUNT(*) FROM artifact"
                 ).fetchone()
-                total_artifacts = int(total_artifacts_row[0] if total_artifacts_row else 0)
+                total_artifacts = int(
+                    total_artifacts_row[0] if total_artifacts_row else 0
+                )
 
                 orphaned_row = conn.exec_driver_sql(
                     """
@@ -229,7 +231,9 @@ class DatabaseMaintenance:
                 db_file_size_mb = round(db_path.stat().st_size / (1024 * 1024), 6)
 
         snapshot_dir = self.run_dir / "consist_runs"
-        snapshot_files = sorted(snapshot_dir.glob("*.json")) if snapshot_dir.exists() else []
+        snapshot_files = (
+            sorted(snapshot_dir.glob("*.json")) if snapshot_dir.exists() else []
+        )
         snapshot_run_ids: set[str] = set()
         for snapshot_file in snapshot_files:
             try:
@@ -365,7 +369,9 @@ class DatabaseMaintenance:
         json_files: list[Path] = []
         seen_json_paths: set[str] = set()
         for run_id in expanded_run_ids:
-            snapshot_path = self._resolve_run_snapshot_path(run_id, runs_by_id.get(run_id))
+            snapshot_path = self._resolve_run_snapshot_path(
+                run_id, runs_by_id.get(run_id)
+            )
             if not snapshot_path.exists():
                 continue
             path_key = str(snapshot_path)
@@ -408,7 +414,9 @@ class DatabaseMaintenance:
         prune_cache: bool = False,
     ) -> PurgeResult:
         plan = self.plan_purge(run_ids, include_children=include_children)
-        ingested_candidates_exist = any(count > 0 for count in plan.ingested_data.values())
+        ingested_candidates_exist = any(
+            count > 0 for count in plan.ingested_data.values()
+        )
         ingested_data_skipped = ingested_candidates_exist and not delete_ingested_data
 
         if dry_run:
@@ -419,10 +427,14 @@ class DatabaseMaintenance:
             )
 
         selected_run_ids = plan.run_ids
-        selected_orphaned_artifact_ids = [str(value) for value in plan.orphaned_artifact_ids]
+        selected_orphaned_artifact_ids = [
+            str(value) for value in plan.orphaned_artifact_ids
+        ]
 
         def _any_sql(values: list[str]) -> str:
-            literals = ", ".join(self._quote_sql_string_literal(value) for value in values)
+            literals = ", ".join(
+                self._quote_sql_string_literal(value) for value in values
+            )
             return f"ANY([{literals}])"
 
         def _execute() -> None:
@@ -432,12 +444,12 @@ class DatabaseMaintenance:
             preserved_observation_rows: list[tuple] = []
             with self.db.engine.begin() as conn:
                 run_filter = (
-                    f'{self._quote_ident("run_id")} = {_any_sql(selected_run_ids)}'
+                    f"{self._quote_ident('run_id')} = {_any_sql(selected_run_ids)}"
                     if selected_run_ids
                     else None
                 )
                 orphaned_artifact_filter = (
-                    f'CAST({self._quote_ident("artifact_id")} AS VARCHAR) = '
+                    f"CAST({self._quote_ident('artifact_id')} AS VARCHAR) = "
                     f"{_any_sql(selected_orphaned_artifact_ids)}"
                     if selected_orphaned_artifact_ids
                     else None
@@ -517,54 +529,65 @@ class DatabaseMaintenance:
                             """
                         ).fetchall()
                         preserved_links = [
-                            (str(run_id), str(artifact_id), str(direction), bool(is_implicit))
+                            (
+                                str(run_id),
+                                str(artifact_id),
+                                str(direction),
+                                bool(is_implicit),
+                            )
                             for run_id, artifact_id, direction, is_implicit in preserved_rows
                         ]
-                        preserved_artifact_kv_rows = conn.exec_driver_sql(
-                            f"""
-                            SELECT
-                                CAST({self._quote_ident("artifact_id")} AS VARCHAR),
-                                {self._quote_ident("facet_id")},
-                                {self._quote_ident("key_path")},
-                                {self._quote_ident("namespace")},
-                                {self._quote_ident("value_type")},
-                                {self._quote_ident("value_str")},
-                                {self._quote_ident("value_num")},
-                                {self._quote_ident("value_bool")},
-                                {self._quote_ident("value_json")},
-                                {self._quote_ident("created_at")}
-                            FROM {self._quote_ident("artifact_kv")}
-                            WHERE CAST({self._quote_ident("artifact_id")} AS VARCHAR)
-                                  = {_any_sql(clear_artifact_ids)}
-                            ORDER BY
-                                CAST({self._quote_ident("artifact_id")} AS VARCHAR),
-                                {self._quote_ident("facet_id")},
-                                {self._quote_ident("key_path")}
-                            """
-                        ).fetchall()
-                        preserved_observation_rows = conn.exec_driver_sql(
-                            f"""
-                            SELECT
-                                CAST({self._quote_ident("id")} AS VARCHAR),
-                                CAST({self._quote_ident("artifact_id")} AS VARCHAR),
-                                {self._quote_ident("schema_id")},
-                                {self._quote_ident("run_id")},
-                                {self._quote_ident("source")},
-                                {self._quote_ident("sample_rows")},
-                                {self._quote_ident("observed_at")}
-                            FROM {self._quote_ident("artifact_schema_observation")}
-                            WHERE CAST({self._quote_ident("artifact_id")} AS VARCHAR)
-                                  = {_any_sql(clear_artifact_ids)}
-                              AND (
-                                  {self._quote_ident("run_id")} IS NULL
-                                  OR NOT (
-                                      {self._quote_ident("run_id")}
-                                      = {_any_sql(selected_run_ids)}
+                        preserved_artifact_kv_rows = [
+                            tuple(row)
+                            for row in conn.exec_driver_sql(
+                                f"""
+                                SELECT
+                                    CAST({self._quote_ident("artifact_id")} AS VARCHAR),
+                                    {self._quote_ident("facet_id")},
+                                    {self._quote_ident("key_path")},
+                                    {self._quote_ident("namespace")},
+                                    {self._quote_ident("value_type")},
+                                    {self._quote_ident("value_str")},
+                                    {self._quote_ident("value_num")},
+                                    {self._quote_ident("value_bool")},
+                                    {self._quote_ident("value_json")},
+                                    {self._quote_ident("created_at")}
+                                FROM {self._quote_ident("artifact_kv")}
+                                WHERE CAST({self._quote_ident("artifact_id")} AS VARCHAR)
+                                      = {_any_sql(clear_artifact_ids)}
+                                ORDER BY
+                                    CAST({self._quote_ident("artifact_id")} AS VARCHAR),
+                                    {self._quote_ident("facet_id")},
+                                    {self._quote_ident("key_path")}
+                                """
+                            ).fetchall()
+                        ]
+                        preserved_observation_rows = [
+                            tuple(row)
+                            for row in conn.exec_driver_sql(
+                                f"""
+                                SELECT
+                                    CAST({self._quote_ident("id")} AS VARCHAR),
+                                    CAST({self._quote_ident("artifact_id")} AS VARCHAR),
+                                    {self._quote_ident("schema_id")},
+                                    {self._quote_ident("run_id")},
+                                    {self._quote_ident("source")},
+                                    {self._quote_ident("sample_rows")},
+                                    {self._quote_ident("observed_at")}
+                                FROM {self._quote_ident("artifact_schema_observation")}
+                                WHERE CAST({self._quote_ident("artifact_id")} AS VARCHAR)
+                                      = {_any_sql(clear_artifact_ids)}
+                                  AND (
+                                      {self._quote_ident("run_id")} IS NULL
+                                      OR NOT (
+                                          {self._quote_ident("run_id")}
+                                          = {_any_sql(selected_run_ids)}
+                                      )
                                   )
-                              )
-                            ORDER BY CAST({self._quote_ident("id")} AS VARCHAR)
-                            """
-                        ).fetchall()
+                                ORDER BY CAST({self._quote_ident("id")} AS VARCHAR)
+                                """
+                            ).fetchall()
+                        ]
 
                     conn.exec_driver_sql(
                         f"""
@@ -971,7 +994,9 @@ class DatabaseMaintenance:
                     select(Run).where(col(Run.id).in_(expanded_run_ids))
                 ).all()
             runs_by_id = {run.id: run for run in runs}
-        selected_run_ids = [run_id for run_id in expanded_run_ids if run_id in runs_by_id]
+        selected_run_ids = [
+            run_id for run_id in expanded_run_ids if run_id in runs_by_id
+        ]
 
         discovered_tables = self._discover_global_tables()
         ingested_table_modes = {
@@ -1021,7 +1046,9 @@ class DatabaseMaintenance:
         self._init_shard_schema(out_path)
 
         def _any_sql(values: list[str]) -> str:
-            literals = ", ".join(self._quote_sql_string_literal(value) for value in values)
+            literals = ", ".join(
+                self._quote_sql_string_literal(value) for value in values
+            )
             return f"ANY([{literals}])"
 
         def _write() -> None:
@@ -1075,12 +1102,16 @@ class DatabaseMaintenance:
                             schema=source_schema,
                             engine=self.db.engine,
                         )
-                        run_artifact_link_source_set = set(run_artifact_link_source_columns)
+                        run_artifact_link_source_set = set(
+                            run_artifact_link_source_columns
+                        )
                         if (
                             run_artifact_link_columns
                             and "run_id" in run_artifact_link_source_set
                         ):
-                            run_artifact_link_column_sql = ", ".join(run_artifact_link_columns)
+                            run_artifact_link_column_sql = ", ".join(
+                                run_artifact_link_columns
+                            )
                             conn.exec_driver_sql(
                                 f"""
                                 INSERT INTO {self._qualified_table_sql("run_artifact_link", catalog=alias)} ({run_artifact_link_column_sql})
@@ -1115,7 +1146,10 @@ class DatabaseMaintenance:
                                 engine=self.db.engine,
                             )
                         )
-                        if run_config_kv_columns and "run_id" in run_config_source_columns:
+                        if (
+                            run_config_kv_columns
+                            and "run_id" in run_config_source_columns
+                        ):
                             run_config_column_sql = ", ".join(run_config_kv_columns)
                             conn.exec_driver_sql(
                                 f"""
@@ -1126,7 +1160,9 @@ class DatabaseMaintenance:
                                 """
                             )
 
-                        observation_columns = _core_columns("artifact_schema_observation")
+                        observation_columns = _core_columns(
+                            "artifact_schema_observation"
+                        )
                         observation_source_columns = set(
                             self._list_table_columns(
                                 "artifact_schema_observation",
@@ -1137,15 +1173,17 @@ class DatabaseMaintenance:
                         observation_filters: list[str] = []
                         if "run_id" in observation_source_columns:
                             observation_filters.append(
-                                f'{self._quote_ident("run_id")} = {run_id_filter}'
+                                f"{self._quote_ident('run_id')} = {run_id_filter}"
                             )
                         if artifact_ids and "artifact_id" in observation_source_columns:
                             observation_filters.append(
-                                f'CAST({self._quote_ident("artifact_id")} AS VARCHAR)'
+                                f"CAST({self._quote_ident('artifact_id')} AS VARCHAR)"
                                 f" = {_any_sql(artifact_ids)}"
                             )
                         observation_where = (
-                            " OR ".join(observation_filters) if observation_filters else None
+                            " OR ".join(observation_filters)
+                            if observation_filters
+                            else None
                         )
 
                         if artifact_ids:
@@ -1177,7 +1215,10 @@ class DatabaseMaintenance:
                                     engine=self.db.engine,
                                 )
                             )
-                            if artifact_kv_columns and "artifact_id" in artifact_kv_source_columns:
+                            if (
+                                artifact_kv_columns
+                                and "artifact_id" in artifact_kv_source_columns
+                            ):
                                 artifact_kv_column_sql = ", ".join(artifact_kv_columns)
                                 conn.exec_driver_sql(
                                     f"""
@@ -1193,7 +1234,8 @@ class DatabaseMaintenance:
                             observation_columns
                             and observation_where
                             and not (
-                                "artifact_id" in observation_source_columns and not artifact_ids
+                                "artifact_id" in observation_source_columns
+                                and not artifact_ids
                             )
                         ):
                             schemas_ready = True
@@ -1304,7 +1346,9 @@ class DatabaseMaintenance:
             shard_snapshot_dir = out_path.parent / "shard_snapshots"
             shard_snapshot_dir.mkdir(parents=True, exist_ok=True)
             for run_id in selected_run_ids:
-                source_snapshot = self._resolve_run_snapshot_path(run_id, runs_by_id.get(run_id))
+                source_snapshot = self._resolve_run_snapshot_path(
+                    run_id, runs_by_id.get(run_id)
+                )
                 if not source_snapshot.exists():
                     continue
                 destination_snapshot = shard_snapshot_dir / source_snapshot.name
@@ -1364,7 +1408,7 @@ class DatabaseMaintenance:
             else:
                 shard_run_ids = []
             shard_global_tables = self._discover_global_tables(engine=shard_db.engine)
-            shard_table_modes = {
+            shard_table_modes: dict[str, GlobalTableMode] = {
                 table: self._classify_global_table(table, engine=shard_db.engine)
                 for table in shard_global_tables
             }
@@ -1476,9 +1520,15 @@ class DatabaseMaintenance:
                                       = {_any_sql(artifact_ids)}
                                 """
                             ).fetchall()
-                        existing_artifacts = {str(row[0]) for row in existing_artifact_rows}
+                        existing_artifacts = {
+                            str(row[0]) for row in existing_artifact_rows
+                        }
                         artifacts_merged = len(
-                            [value for value in artifact_ids if value not in existing_artifacts]
+                            [
+                                value
+                                for value in artifact_ids
+                                if value not in existing_artifacts
+                            ]
                         )
                     else:
                         artifacts_merged = 0
@@ -1518,7 +1568,9 @@ class DatabaseMaintenance:
                         source_snapshot = source_snapshot_dir / source_name
                         if not source_snapshot.exists():
                             continue
-                        destination_snapshot = self._resolve_run_snapshot_path(run_id, None)
+                        destination_snapshot = self._resolve_run_snapshot_path(
+                            run_id, None
+                        )
                         if destination_snapshot.exists():
                             continue
                         snapshots_merged += 1
@@ -1538,7 +1590,10 @@ class DatabaseMaintenance:
                 )
 
             def _write() -> None:
-                nonlocal artifacts_merged, ingested_tables_merged, unscoped_cache_tables_skipped
+                nonlocal \
+                    artifacts_merged, \
+                    ingested_tables_merged, \
+                    unscoped_cache_tables_skipped
                 alias = "shard_merge"
                 merge_source_schema = "merge_source"
                 with self.db.engine.begin() as conn:
@@ -1551,7 +1606,9 @@ class DatabaseMaintenance:
                             CREATE SCHEMA IF NOT EXISTS {self._quote_ident(merge_source_schema)}
                             """
                         )
-                        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+                        conn.exec_driver_sql(
+                            "CREATE SCHEMA IF NOT EXISTS global_tables"
+                        )
                         if runs_to_merge:
                             run_filter = _any_sql(runs_to_merge)
                             source_schema = "main"
@@ -1598,7 +1655,9 @@ class DatabaseMaintenance:
                                     """
                                 )
 
-                            run_artifact_link_columns = _core_columns("run_artifact_link")
+                            run_artifact_link_columns = _core_columns(
+                                "run_artifact_link"
+                            )
                             run_artifact_link_source_columns = self._list_table_columns(
                                 "run_artifact_link",
                                 schema=source_schema,
@@ -1624,7 +1683,10 @@ class DatabaseMaintenance:
                                     """
                                 ).fetchall()
 
-                            if run_artifact_link_columns and {"run_id", "artifact_id"}.issubset(
+                            if run_artifact_link_columns and {
+                                "run_id",
+                                "artifact_id",
+                            }.issubset(
                                 set(run_artifact_link_source_columns).intersection(
                                     run_artifact_link_target_columns
                                 )
@@ -1768,7 +1830,9 @@ class DatabaseMaintenance:
                                         artifact_kv_target_columns
                                     )
                                 ):
-                                    artifact_kv_column_sql = ", ".join(artifact_kv_columns)
+                                    artifact_kv_column_sql = ", ".join(
+                                        artifact_kv_columns
+                                    )
                                     conn.exec_driver_sql(
                                         f"""
                                         INSERT INTO {self._qualified_table_sql("artifact_kv")} ({artifact_kv_column_sql})
@@ -1789,7 +1853,9 @@ class DatabaseMaintenance:
                                         """
                                     )
 
-                            observation_columns = _core_columns("artifact_schema_observation")
+                            observation_columns = _core_columns(
+                                "artifact_schema_observation"
+                            )
                             observation_source_columns = set(
                                 self._list_table_columns(
                                     "artifact_schema_observation",
@@ -1815,7 +1881,10 @@ class DatabaseMaintenance:
                                 observation_filters.append(
                                     f'"src_obs".{self._quote_ident("run_id")} = {run_filter}'
                                 )
-                            if "artifact_id" in observation_source_columns and artifact_ids:
+                            if (
+                                "artifact_id" in observation_source_columns
+                                and artifact_ids
+                            ):
                                 observation_filters.append(
                                     f'CAST("src_obs".{self._quote_ident("artifact_id")} AS VARCHAR)'
                                     f" = {_any_sql(artifact_ids)}"
@@ -1908,7 +1977,9 @@ class DatabaseMaintenance:
                                     continue
                                 if table in incompatible_global_tables_skipped:
                                     continue
-                                safe_table = self._validate_identifier(table, label="table")
+                                safe_table = self._validate_identifier(
+                                    table, label="table"
+                                )
                                 quoted_table = self._quote_ident(safe_table)
                                 conn.exec_driver_sql(
                                     f"""
@@ -2028,7 +2099,9 @@ class DatabaseMaintenance:
                 runs_skipped=runs_skipped,
                 artifacts_merged=artifacts_merged,
                 ingested_tables_merged=sorted(set(ingested_tables_merged)),
-                unscoped_cache_tables_skipped=sorted(set(unscoped_cache_tables_skipped)),
+                unscoped_cache_tables_skipped=sorted(
+                    set(unscoped_cache_tables_skipped)
+                ),
                 conflicts_detected=conflicts_detected,
                 snapshots_merged=snapshots_merged,
                 incompatible_global_tables_skipped=incompatible_global_tables_skipped,
@@ -2069,7 +2142,9 @@ class DatabaseMaintenance:
         )
 
         if not snapshot_dir.exists() or not snapshot_dir.is_dir():
-            errors.append(f"{snapshot_dir}: JSON directory does not exist or is not a directory.")
+            errors.append(
+                f"{snapshot_dir}: JSON directory does not exist or is not a directory."
+            )
             return RebuildResult(
                 json_files_scanned=0,
                 runs_inserted=0,
@@ -2088,7 +2163,9 @@ class DatabaseMaintenance:
             try:
                 payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
-                errors.append(f"{snapshot_path.name}: failed to read/parse JSON ({exc})")
+                errors.append(
+                    f"{snapshot_path.name}: failed to read/parse JSON ({exc})"
+                )
                 continue
 
             try:
@@ -2184,7 +2261,9 @@ class DatabaseMaintenance:
                                 git_hash=getattr(run, "git_hash", None),
                                 input_hash=run.input_hash,
                                 signature=run.signature,
-                                meta=dict(run.meta) if isinstance(run.meta, dict) else {},
+                                meta=dict(run.meta)
+                                if isinstance(run.meta, dict)
+                                else {},
                                 started_at=run.started_at,
                                 ended_at=run.ended_at,
                                 created_at=run.created_at,
@@ -2203,7 +2282,10 @@ class DatabaseMaintenance:
                         parsed_uuid = self._coerce_uuid(artifact_id)
                         if parsed_uuid is None:
                             continue
-                        if session.get(RunArtifactLink, (run_id, parsed_uuid)) is not None:
+                        if (
+                            session.get(RunArtifactLink, (run_id, parsed_uuid))
+                            is not None
+                        ):
                             continue
                         session.add(
                             RunArtifactLink(
@@ -2299,9 +2381,10 @@ class DatabaseMaintenance:
     ) -> None:
         with self.db.session_scope() as session:
             run_meta = dict(run.meta) if isinstance(run.meta, dict) else {}
-            run_namespace = self._coerce_non_empty_str(
-                run_meta.get("config_facet_namespace")
-            ) or run.model_name
+            run_namespace = (
+                self._coerce_non_empty_str(run_meta.get("config_facet_namespace"))
+                or run.model_name
+            )
 
             if supports_full_restore.get("run_config_kv"):
                 self._restore_run_config_kv_rows(
@@ -2396,9 +2479,10 @@ class DatabaseMaintenance:
         facet_id = self._coerce_non_empty_str(artifact_meta.get("artifact_facet_id"))
         if facet_id is None:
             facet_id = identity.canonical_json_sha256(facet_payload)
-        namespace = self._coerce_non_empty_str(
-            artifact_meta.get("artifact_facet_namespace")
-        ) or default_namespace
+        namespace = (
+            self._coerce_non_empty_str(artifact_meta.get("artifact_facet_namespace"))
+            or default_namespace
+        )
 
         flattened = flatten_facet_values(
             facet_dict=facet_payload,
@@ -2543,7 +2627,11 @@ class DatabaseMaintenance:
         return None
 
     def snapshot(
-        self, dest_path: Path, *, checkpoint: bool = True, metadata: Optional[dict] = None
+        self,
+        dest_path: Path,
+        *,
+        checkpoint: bool = True,
+        metadata: Optional[dict] = None,
     ) -> Path:
         snapshot_metadata: dict = {"operation": "maintenance_snapshot"}
         if metadata:
@@ -2572,7 +2660,9 @@ class DatabaseMaintenance:
 
         with self.db.session_scope() as session:
             rows = session.exec(
-                select(Run.id, Run.parent_run_id).where(col(Run.parent_run_id).is_not(None))
+                select(Run.id, Run.parent_run_id).where(
+                    col(Run.parent_run_id).is_not(None)
+                )
             ).all()
 
         children_by_parent: dict[str, list[str]] = {}
@@ -2600,9 +2690,7 @@ class DatabaseMaintenance:
 
         return expanded
 
-    def _find_orphaned_artifacts(
-        self, run_ids: Iterable[str] | str
-    ) -> list[uuid.UUID]:
+    def _find_orphaned_artifacts(self, run_ids: Iterable[str] | str) -> list[uuid.UUID]:
         """
         Return artifact IDs linked exclusively to the selected run IDs.
 
@@ -2755,7 +2843,7 @@ class DatabaseMaintenance:
         quoted_column = self._quote_ident(run_column)
         if table_alias:
             safe_alias = self._validate_identifier(table_alias, label="table_alias")
-            column_ref = f'{self._quote_ident(safe_alias)}.{quoted_column}'
+            column_ref = f"{self._quote_ident(safe_alias)}.{quoted_column}"
         else:
             column_ref = quoted_column
 
@@ -2805,12 +2893,18 @@ class DatabaseMaintenance:
             return (
                 f"missing required source column '{required_column}' for mode '{mode}'"
             )
-        if required_column and target_table_exists and required_column not in target_column_types:
+        if (
+            required_column
+            and target_table_exists
+            and required_column not in target_column_types
+        ):
             return (
                 f"missing required target column '{required_column}' for mode '{mode}'"
             )
 
-        shared_columns = sorted(set(source_column_types).intersection(target_column_types))
+        shared_columns = sorted(
+            set(source_column_types).intersection(target_column_types)
+        )
         incompatible_columns: list[str] = []
         for column_name in shared_columns:
             source_type = source_column_types[column_name]
@@ -3068,7 +3162,9 @@ class DatabaseMaintenance:
                 .order_by(RunArtifactLink.run_id)
             ).all()
 
-        artifacts_by_id: dict[uuid.UUID, Artifact] = {artifact.id: artifact for artifact in artifacts}
+        artifacts_by_id: dict[uuid.UUID, Artifact] = {
+            artifact.id: artifact for artifact in artifacts
+        }
         run_id_by_artifact: dict[uuid.UUID, str] = {}
         run_ids: set[str] = set()
 
@@ -3236,7 +3332,9 @@ class DatabaseMaintenance:
         return rel_path.as_posix()
 
     @staticmethod
-    def _resolve_relative_path_under_root(relative_path: str, root: Path) -> Optional[Path]:
+    def _resolve_relative_path_under_root(
+        relative_path: str, root: Path
+    ) -> Optional[Path]:
         safe_rel_path = DatabaseMaintenance._normalize_relative_uri_path(relative_path)
         if safe_rel_path is None:
             return None
@@ -3292,7 +3390,9 @@ class DatabaseMaintenance:
 
     def _log_audit(self, operation: str, summary: str) -> None:
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+        timestamp = (
+            datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+        )
         audit_path = self.run_dir / ".consist_audit.log"
         with audit_path.open("a", encoding="utf-8") as file:
             file.write(f"{timestamp}\t{operation}\t{summary}\n")
@@ -3352,7 +3452,10 @@ class DatabaseMaintenance:
     def _qualified_table_sql(
         table: str, *, schema: str = "main", catalog: Optional[str] = None
     ) -> str:
-        parts = [DatabaseMaintenance._quote_ident(schema), DatabaseMaintenance._quote_ident(table)]
+        parts = [
+            DatabaseMaintenance._quote_ident(schema),
+            DatabaseMaintenance._quote_ident(table),
+        ]
         if catalog:
             parts.insert(0, DatabaseMaintenance._quote_ident(catalog))
         return ".".join(parts)

@@ -3404,8 +3404,7 @@ class Tracker:
         try:
             with self.engine.begin() as connection:
                 result = connection.exec_driver_sql(
-                    f"SELECT 1 FROM {table_ref} "
-                    "WHERE content_hash = ? LIMIT 1",
+                    f"SELECT 1 FROM {table_ref} WHERE content_hash = ? LIMIT 1",
                     (content_hash,),
                 ).fetchone()
             return result is not None
