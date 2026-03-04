@@ -1,10 +1,8 @@
 import inspect
 import itertools
-import importlib
 from dataclasses import replace
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
-from datetime import datetime, timezone
 import logging
 import os
 from types import MappingProxyType
@@ -40,9 +38,18 @@ from consist.core.artifacts import ArtifactManager
 from consist.core.cache import (
     ActiveRunCacheOptions,
 )
+from consist.core.run_resolution import (
+    is_xarray_dataset as _is_xarray_dataset,
+    preview_run_artifact_dir as _preview_run_artifact_dir,
+    resolve_input_reference_configured as _resolve_input_reference_configured,
+    resolve_input_refs as _resolve_input_refs,
+    resolve_output_path as _resolve_output_path,
+    write_xarray_dataset as _write_xarray_dataset,
+)
 from consist.core.tracker_artifact_logging import ArtifactLoggingCoordinator
 from consist.core.tracker_lifecycle import RunLifecycleCoordinator
 from consist.core.tracker_orchestration import RunTraceCoordinator, RunTraceHelpers
+from consist.core.tracker_config import TrackerConfig
 from consist.core.config_canonicalization import (
     ConfigAdapter,
     ConfigAdapterOptions,
@@ -84,7 +91,6 @@ from consist.models.run import (
     Run,
     RunArtifacts,
     RunResult,
-    resolve_run_result_output,
 )
 from consist.types import (
     ArtifactRef,
@@ -102,85 +108,7 @@ if TYPE_CHECKING:
     from consist.core.coupler import Coupler
     from consist.core.step_context import StepContext
 
-UTC = timezone.utc
-
 AccessMode = Literal["standard", "analysis", "read_only"]
-
-
-def _resolve_input_reference(
-    tracker: "Tracker", ref: RunInputRef, key: Optional[str]
-) -> ArtifactRef:
-    return _resolve_input_reference_configured(
-        tracker,
-        ref,
-        key,
-        type_label="inputs",
-        missing_path_error=(
-            "Problem: Input path does not exist: {path!s}\n"
-            "Cause: The provided input path is missing or not accessible.\n"
-            "Fix: Pass an existing file/directory path or a valid Artifact/RunResult "
-            "reference."
-        ),
-    )
-
-
-def _resolve_input_reference_configured(
-    tracker: "Tracker",
-    ref: RunInputRef,
-    key: Optional[str],
-    *,
-    type_label: str,
-    missing_path_error: str,
-    missing_string_error: Optional[str] = None,
-    string_ref_resolver: Optional[Callable[[str], Optional[ArtifactRef]]] = None,
-) -> ArtifactRef:
-    if isinstance(ref, Artifact):
-        return ref
-    if isinstance(ref, RunResult):
-        return resolve_run_result_output(ref)
-
-    if isinstance(ref, str):
-        if string_ref_resolver is not None:
-            resolved_ref = string_ref_resolver(ref)
-            if resolved_ref is not None:
-                return resolved_ref
-        ref_str = ref
-    elif isinstance(ref, Path):
-        ref_str = str(ref)
-    else:
-        raise TypeError(
-            format_problem_cause_fix(
-                problem=(
-                    f"{type_label} must be Artifact, RunResult, Path, or str "
-                    f"(got {type(ref)})."
-                ),
-                cause="An unsupported input reference type was provided.",
-                fix=(
-                    "Pass Artifact/RunResult references, or filesystem paths as str/Path."
-                ),
-            )
-        )
-
-    resolved = (
-        Path(tracker.resolve_uri(ref_str))
-        if isinstance(ref, str) and "://" in ref_str
-        else Path(ref_str)
-    )
-    if not resolved.exists():
-        if isinstance(ref, str) and missing_string_error is not None:
-            raise ValueError(missing_string_error.format(value=ref, path=resolved))
-        raise ValueError(missing_path_error.format(path=resolved))
-    if key is None:
-        return resolved
-    return tracker.artifacts.create_artifact(
-        resolved, run_id=None, key=key, direction="input"
-    )
-
-
-def _resolve_input_ref(
-    tracker: "Tracker", ref: RunInputRef, key: Optional[str]
-) -> ArtifactRef:
-    return _resolve_input_reference(tracker, ref, key)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -188,99 +116,6 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _is_xarray_dataset(value: Any) -> bool:
-    try:
-        xr = importlib.import_module("xarray")
-    except ImportError:
-        return False
-    return isinstance(value, xr.Dataset)
-
-
-def _write_xarray_dataset(dataset: Any, path: Path) -> None:
-    try:
-        xr = importlib.import_module("xarray")
-    except ImportError as exc:
-        raise ImportError("xarray is required to log xarray.Dataset outputs.") from exc
-    if not isinstance(dataset, xr.Dataset):
-        raise TypeError(f"Expected xarray.Dataset, got {type(dataset)}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    dataset.to_zarr(path, mode="w")
-
-
-def _resolve_input_refs(
-    tracker: "Tracker",
-    inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]],
-    depends_on: Optional[List[RunInputRef]],
-    *,
-    include_keyed_artifacts: bool,
-) -> tuple[List[ArtifactRef], Dict[str, Artifact]]:
-    resolved_inputs: List[ArtifactRef] = []
-    input_artifacts_by_key: Dict[str, Artifact] = {}
-    if inputs is not None:
-        if isinstance(inputs, MappingABC):
-            typed_inputs = cast(Mapping[str, RunInputRef], inputs)
-            for key, ref in typed_inputs.items():
-                if not isinstance(key, str):
-                    raise TypeError(
-                        f"inputs mapping keys must be str (got {type(key)})."
-                    )
-                resolved = _resolve_input_ref(tracker, ref, key)
-                resolved_inputs.append(resolved)
-                if include_keyed_artifacts and isinstance(resolved, Artifact):
-                    input_artifacts_by_key[key] = resolved
-        else:
-            for ref in list(inputs):
-                resolved_inputs.append(_resolve_input_ref(tracker, ref, None))
-
-    if depends_on:
-        for dep in depends_on:
-            resolved_inputs.append(_resolve_input_ref(tracker, dep, None))
-
-    return resolved_inputs, input_artifacts_by_key
-
-
-def _preview_run_artifact_dir(
-    tracker: "Tracker",
-    *,
-    run_id: str,
-    model: str,
-    description: Optional[str],
-    year: Optional[int],
-    iteration: Optional[int],
-    parent_run_id: Optional[str],
-    tags: Optional[List[str]],
-) -> Path:
-    preview = Run(
-        id=run_id,
-        model_name=model,
-        description=description,
-        year=year,
-        iteration=iteration,
-        parent_run_id=parent_run_id,
-        tags=tags or [],
-        status="running",
-        config_hash=None,
-        git_hash=None,
-        meta={},
-        started_at=datetime.now(UTC),
-        created_at=datetime.now(UTC),
-    )
-    return tracker.run_artifact_dir(preview)
-
-
-def _resolve_output_path(tracker: "Tracker", ref: ArtifactRef, base_dir: Path) -> Path:
-    if isinstance(ref, Artifact):
-        raw = ref.path or tracker.resolve_uri(ref.container_uri)
-        return Path(raw)
-    ref_str = str(ref)
-    if isinstance(ref, str) and "://" in ref_str:
-        return Path(tracker.resolve_uri(ref_str))
-    ref_path = Path(ref_str)
-    if not ref_path.is_absolute():
-        return base_dir / ref_path
-    return ref_path
 
 
 class Tracker:
@@ -302,6 +137,15 @@ class Tracker:
     5.  Facilitating **smart caching** based on a Merkle DAG strategy, enabling "run forking" and "hydration"
         of previously computed results.
     """
+
+    @classmethod
+    def from_config(cls, config: TrackerConfig) -> "Tracker":
+        """
+        Construct a tracker from a ``TrackerConfig`` object.
+        """
+        if not isinstance(config, TrackerConfig):
+            raise TypeError("config must be a TrackerConfig instance.")
+        return cls(**config.to_init_kwargs())
 
     def __init__(
         self,
@@ -4312,6 +4156,49 @@ class Tracker:
         if self.db:
             return self.db.get_run(run_id)
         return None
+
+    def snapshot_db(
+        self, dest_path: str | os.PathLike[str], checkpoint: bool = True
+    ) -> Path:
+        """
+        Snapshot the configured provenance database to a destination path.
+
+        Parameters
+        ----------
+        dest_path : str | os.PathLike[str]
+            Destination path for the snapshot database file.
+        checkpoint : bool, default True
+            If True, checkpoint the source DB before copying.
+
+        Returns
+        -------
+        Path
+            Snapshot database path.
+        """
+        if self.db is None:
+            raise RuntimeError("Database snapshot requires a configured database.")
+
+        active_run_id = self.current_consist.run.id if self.current_consist else None
+        last_completed_run_id: Optional[str] = None
+        if (
+            self._last_consist is not None
+            and self._last_consist.run.status == "completed"
+        ):
+            last_completed_run_id = self._last_consist.run.id
+        else:
+            completed_runs = self.db.find_runs(status="completed", limit=1)
+            if completed_runs:
+                last_completed_run_id = completed_runs[0].id
+
+        return self.db.snapshot_to(
+            dest_path=dest_path,
+            checkpoint=checkpoint,
+            metadata={
+                "run_id": active_run_id,
+                "last_completed_run_id": last_completed_run_id,
+                "cache_epoch": self._cache_epoch,
+            },
+        )
 
     def get_run_record(
         self, run_id: str, *, allow_missing: bool = False
