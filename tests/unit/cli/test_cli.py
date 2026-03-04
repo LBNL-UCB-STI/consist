@@ -25,6 +25,8 @@ from consist.cli import (
 )
 from consist.core.maintenance import (
     DatabaseMaintenance,
+    DoctorReport,
+    InspectReport,
     MergeResult,
     PurgePlan,
     PurgeResult,
@@ -1029,6 +1031,42 @@ def test_db_inspect_json_output_includes_expected_keys(tmp_path, monkeypatch):
     }
 
 
+# Regression contract for operator-facing DB maintenance UX:
+# non-JSON mode must keep actionable summaries/warnings and usage errors.
+def test_db_inspect_non_json_output_includes_summary_and_global_table_rows(monkeypatch):
+    maintenance = MagicMock()
+    maintenance.inspect.return_value = InspectReport(
+        total_runs=3,
+        runs_by_status={"completed": 2, "failed": 1},
+        total_artifacts=4,
+        orphaned_artifact_count=1,
+        zombie_run_ids=["run_zombie"],
+        global_table_sizes={"global_tables.trip_table": 7},
+        db_file_size_mb=12.345,
+        json_snapshot_count=3,
+        json_db_parity=True,
+    )
+    monkeypatch.setattr(
+        "consist.cli._maintenance_service", lambda _db_path: maintenance
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "inspect",
+            "--db-path",
+            "ignored.duckdb",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Database Inspect" in result.stdout
+    assert "Global Table Sizes" in result.stdout
+    assert "completed=2, failed=1" in result.stdout
+    assert "global_tables.trip_table" in result.stdout
+
+
 def test_db_doctor_json_output_includes_expected_keys(tmp_path, monkeypatch):
     db_path = tmp_path / "cli_maintenance_doctor.duckdb"
     _seed_db_for_maintenance_cli(db_path)
@@ -1045,6 +1083,37 @@ def test_db_doctor_json_output_includes_expected_keys(tmp_path, monkeypatch):
         "artifacts_with_missing_producing_run",
         "global_table_schema_drift",
     }
+
+
+def test_db_doctor_non_json_output_includes_schema_drift_details(monkeypatch):
+    maintenance = MagicMock()
+    maintenance.doctor.return_value = DoctorReport(
+        zombie_run_ids=["run_zombie"],
+        completed_without_end_time=["run_completed_missing_end"],
+        dangling_parent_run_ids=["parent_missing"],
+        artifacts_with_missing_producing_run=[uuid.uuid4()],
+        global_table_schema_drift={"global_tables.trip": "missing consist_run_id"},
+    )
+    monkeypatch.setattr(
+        "consist.cli._maintenance_service", lambda _db_path: maintenance
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "doctor",
+            "--db-path",
+            "ignored.duckdb",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Database Doctor" in result.stdout
+    assert "Global table schema drift" in result.stdout
+    assert "global_tables.trip" in result.stdout
+    assert "missing" in result.stdout
+    assert "consist_run_id" in result.stdout
 
 
 def test_db_snapshot_json_output_includes_expected_keys(tmp_path, monkeypatch):
@@ -1106,6 +1175,34 @@ def test_db_snapshot_no_checkpoint_reflected_in_json_output(tmp_path, monkeypatc
     )
 
 
+def test_db_snapshot_non_json_prints_snapshot_and_sidecar_paths(tmp_path, monkeypatch):
+    maintenance = MagicMock()
+    snapshot_path = tmp_path / "snapshots" / "manual.duckdb"
+    maintenance.snapshot.return_value = snapshot_path
+    maintenance.db = type("DbStub", (), {})()
+    monkeypatch.setattr(
+        "consist.cli._maintenance_service", lambda _db_path: maintenance
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "snapshot",
+            "--out",
+            str(snapshot_path),
+            "--db-path",
+            "ignored.duckdb",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Snapshot path:" in result.stdout
+    assert "manual.duckdb" in result.stdout
+    assert "Sidecar path:" in result.stdout
+    assert "manual.snapshot_meta.json" in result.stdout
+
+
 def test_db_rebuild_json_output_is_parseable(tmp_path, monkeypatch):
     db_path = tmp_path / "cli_rebuild_target.duckdb"
     db = DatabaseManager(str(db_path))
@@ -1144,6 +1241,38 @@ def test_db_rebuild_json_output_is_parseable(tmp_path, monkeypatch):
     assert payload["json_files_scanned"] == 1
     assert payload["runs_inserted"] == 1
     assert payload["dry_run"] is False
+
+
+def test_db_rebuild_non_json_renders_error_table_when_rebuild_has_errors(monkeypatch):
+    maintenance = MagicMock()
+    maintenance.rebuild_from_json.return_value = RebuildResult(
+        json_files_scanned=2,
+        runs_inserted=1,
+        runs_already_present=0,
+        artifacts_inserted=1,
+        errors=["invalid JSON in bad.json"],
+        dry_run=False,
+    )
+    monkeypatch.setattr(
+        "consist.cli._maintenance_service", lambda _db_path: maintenance
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "rebuild",
+            "--json-dir",
+            str(Path("ignored_json")),
+            "--db-path",
+            "ignored.duckdb",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Database Rebuild" in result.stdout
+    assert "Rebuild Errors" in result.stdout
+    assert "invalid JSON in bad.json" in result.stdout
 
 
 def test_db_rebuild_passes_full_mode_to_maintenance(tmp_path, monkeypatch):
@@ -1236,6 +1365,27 @@ def test_db_compact_json_output_is_parseable(tmp_path, monkeypatch):
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload == {"compacted": True}
+
+
+def test_db_compact_non_json_outputs_success_message(monkeypatch):
+    maintenance = MagicMock()
+    monkeypatch.setattr(
+        "consist.cli._maintenance_service", lambda _db_path: maintenance
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "compact",
+            "--db-path",
+            "ignored.duckdb",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Database compacted." in result.stdout
+    maintenance.compact.assert_called_once_with()
 
 
 def test_db_export_json_output_is_parseable(tmp_path, monkeypatch):
@@ -1636,6 +1786,28 @@ def test_db_merge_non_json_warns_when_incompatible_global_tables_skipped(
     assert "missing required target column 'run_id'" in result.stdout
 
 
+def test_db_merge_value_error_returns_usage_error(tmp_path, monkeypatch):
+    maintenance = MagicMock()
+    maintenance.merge.side_effect = ValueError("invalid conflict policy")
+    monkeypatch.setattr(
+        "consist.cli._maintenance_service", lambda _db_path: maintenance
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "merge",
+            str(tmp_path / "mock_shard.duckdb"),
+            "--db-path",
+            str(tmp_path / "target.duckdb"),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "invalid conflict policy" in result.stdout
+
+
 def test_db_purge_dry_run_json_output_is_parseable(tmp_path, monkeypatch):
     db_path = tmp_path / "cli_purge_dry_run.duckdb"
     _seed_db_for_maintenance_cli(db_path)
@@ -1756,6 +1928,88 @@ def test_db_purge_without_yes_can_be_cancelled(tmp_path, monkeypatch):
         db.engine.dispose()
 
 
+def test_db_purge_confirmation_shows_prune_cache_noop_when_ingested_delete_disabled(
+    tmp_path, monkeypatch
+):
+    maintenance = MagicMock()
+    maintenance.plan_purge.return_value = PurgePlan(
+        run_ids=["cli_run"],
+        child_run_ids=[],
+        orphaned_artifact_ids=[],
+        json_files=[],
+        disk_files=[],
+        ingested_data={},
+        ingested_table_modes={},
+    )
+    monkeypatch.setattr(
+        "consist.cli._maintenance_service", lambda _db_path: maintenance
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "purge",
+            "cli_run",
+            "--prune-cache",
+            "--db-path",
+            str(tmp_path / "target.duckdb"),
+        ],
+        input="n\n",
+    )
+
+    assert result.exit_code == 0
+    assert "Confirm purge scope:" in result.stdout
+    assert "prune_cache=noop" in result.stdout
+    maintenance.purge.assert_not_called()
+
+
+def test_db_purge_confirmation_shows_enabled_ingested_rows_and_prune_cache(
+    tmp_path, monkeypatch
+):
+    maintenance = MagicMock()
+    maintenance.plan_purge.return_value = PurgePlan(
+        run_ids=["cli_run"],
+        child_run_ids=[],
+        orphaned_artifact_ids=[],
+        json_files=[],
+        disk_files=[],
+        ingested_data={
+            "global_tables.run_scoped_table": 4,
+            "global_tables.run_link_table": 10,
+            "global_tables.cache": 999,
+        },
+        ingested_table_modes={
+            "global_tables.run_scoped_table": "run_scoped",
+            "global_tables.run_link_table": "run_link",
+            "global_tables.cache": "unscoped_cache",
+        },
+    )
+    monkeypatch.setattr(
+        "consist.cli._maintenance_service", lambda _db_path: maintenance
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "purge",
+            "cli_run",
+            "--delete-ingested-data",
+            "--prune-cache",
+            "--db-path",
+            str(tmp_path / "target.duckdb"),
+        ],
+        input="n\n",
+    )
+
+    assert result.exit_code == 0
+    assert "Confirm purge scope:" in result.stdout
+    assert "ingested_global=enabled(rows~14)" in result.stdout
+    assert "prune_cache=enabled" in result.stdout
+    maintenance.purge.assert_not_called()
+
+
 def test_root_help_includes_command_group_descriptions():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
@@ -1814,6 +2068,63 @@ def test_db_fix_status_terminal_to_running_requires_force(tmp_path, monkeypatch)
 
     assert result.exit_code == 2
     assert "--force" in result.stdout
+
+
+def test_db_fix_status_non_json_outputs_summary_table(tmp_path, monkeypatch):
+    updated = MagicMock()
+    updated.id = "cli_run"
+    updated.status = "failed"
+    updated.ended_at = datetime(2026, 1, 2, 3, 4, 5)
+    updated.updated_at = datetime(2026, 1, 2, 3, 4, 5)
+    updated.meta = {"status_fix_reason": "manual_fix"}
+
+    maintenance = MagicMock()
+    maintenance.fix_status.return_value = updated
+    monkeypatch.setattr(
+        "consist.cli._maintenance_service", lambda _db_path: maintenance
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "fix-status",
+            "cli_run",
+            "failed",
+            "--db-path",
+            str(tmp_path / "target.duckdb"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Run Status Updated" in result.stdout
+    assert "manual_fix" in result.stdout
+    maintenance.fix_status.assert_called_once_with(
+        "cli_run", "failed", reason=None, force=False
+    )
+
+
+def test_db_fix_status_value_error_returns_usage_error(tmp_path, monkeypatch):
+    maintenance = MagicMock()
+    maintenance.fix_status.side_effect = ValueError("invalid status transition")
+    monkeypatch.setattr(
+        "consist.cli._maintenance_service", lambda _db_path: maintenance
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "fix-status",
+            "cli_run",
+            "running",
+            "--db-path",
+            str(tmp_path / "target.duckdb"),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "invalid status transition" in result.stdout
 
 
 # --- Shell command tests ---
