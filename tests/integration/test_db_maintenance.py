@@ -478,6 +478,223 @@ def test_db_maintenance_merge_conflict_skip_mode_merges_non_conflicting_runs(
         target_db.engine.dispose()
 
 
+def test_db_maintenance_merge_global_table_incompatible_schema_error_mode_raises(
+    tmp_path: Path,
+) -> None:
+    source_db = DatabaseManager(str(tmp_path / "merge_table_error_source.duckdb"))
+    target_db = DatabaseManager(str(tmp_path / "merge_table_error_target.duckdb"))
+    source = DatabaseMaintenance(source_db, run_dir=tmp_path / "source_runs")
+    target = DatabaseMaintenance(target_db, run_dir=tmp_path / "target_runs")
+
+    try:
+        with source.db.session_scope() as session:
+            session.add(Run(id="table_error_run", model_name="source_model"))
+            session.commit()
+
+        with source.db.engine.begin() as conn:
+            conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE global_tables.link_incompat (
+                    run_id VARCHAR,
+                    payload VARCHAR
+                )
+                """
+            )
+            conn.exec_driver_sql(
+                """
+                INSERT INTO global_tables.link_incompat (run_id, payload)
+                VALUES ('table_error_run', 'source_payload')
+                """
+            )
+
+        shard_path = tmp_path / "merge_table_error_shard.duckdb"
+        source.export(
+            "table_error_run",
+            shard_path,
+            include_data=True,
+            include_snapshots=False,
+        )
+
+        with target.db.engine.begin() as conn:
+            conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE global_tables.link_incompat (
+                    run_id INTEGER,
+                    payload VARCHAR
+                )
+                """
+            )
+
+        with pytest.raises(
+            ValueError, match="link_incompat: incompatible shared column type\\(s\\)"
+        ):
+            target.merge(shard_path, conflict="error", include_snapshots=False)
+
+        with target.db.session_scope() as session:
+            assert session.get(Run, "table_error_run") is None
+    finally:
+        source_db.engine.dispose()
+        target_db.engine.dispose()
+
+
+def test_db_maintenance_merge_global_table_incompatible_schema_skip_mode_skips_table(
+    tmp_path: Path,
+) -> None:
+    source_db = DatabaseManager(str(tmp_path / "merge_table_skip_source.duckdb"))
+    target_db = DatabaseManager(str(tmp_path / "merge_table_skip_target.duckdb"))
+    source = DatabaseMaintenance(source_db, run_dir=tmp_path / "source_runs")
+    target = DatabaseMaintenance(target_db, run_dir=tmp_path / "target_runs")
+
+    try:
+        with source.db.session_scope() as session:
+            session.add(Run(id="table_skip_run", model_name="source_model"))
+            session.commit()
+
+        with source.db.engine.begin() as conn:
+            conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE global_tables.scoped_ok (
+                    consist_run_id VARCHAR,
+                    payload VARCHAR
+                )
+                """
+            )
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE global_tables.link_bad (
+                    run_id VARCHAR,
+                    payload VARCHAR
+                )
+                """
+            )
+            conn.exec_driver_sql(
+                """
+                INSERT INTO global_tables.scoped_ok (consist_run_id, payload)
+                VALUES ('table_skip_run', 'scoped_payload')
+                """
+            )
+            conn.exec_driver_sql(
+                """
+                INSERT INTO global_tables.link_bad (run_id, payload)
+                VALUES ('table_skip_run', 'link_payload')
+                """
+            )
+
+        shard_path = tmp_path / "merge_table_skip_shard.duckdb"
+        source.export(
+            "table_skip_run",
+            shard_path,
+            include_data=True,
+            include_snapshots=False,
+        )
+
+        with target.db.engine.begin() as conn:
+            conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE global_tables.link_bad (
+                    run_id INTEGER,
+                    payload VARCHAR
+                )
+                """
+            )
+
+        merge_result = target.merge(shard_path, conflict="skip", include_snapshots=False)
+        assert merge_result.runs_merged == ["table_skip_run"]
+        assert merge_result.ingested_tables_merged == ["scoped_ok"]
+        assert set(merge_result.incompatible_global_tables_skipped.keys()) == {"link_bad"}
+        assert "run_id" in merge_result.incompatible_global_tables_skipped["link_bad"]
+
+        with target.db.engine.begin() as conn:
+            scoped_rows = conn.exec_driver_sql(
+                """
+                SELECT consist_run_id, payload
+                FROM global_tables.scoped_ok
+                ORDER BY consist_run_id
+                """
+            ).fetchall()
+            bad_rows = conn.exec_driver_sql(
+                "SELECT run_id, payload FROM global_tables.link_bad"
+            ).fetchall()
+
+        assert scoped_rows == [("table_skip_run", "scoped_payload")]
+        assert bad_rows == []
+    finally:
+        source_db.engine.dispose()
+        target_db.engine.dispose()
+
+
+def test_db_maintenance_merge_global_table_additive_drift_still_merges(
+    tmp_path: Path,
+) -> None:
+    source_db = DatabaseManager(str(tmp_path / "merge_table_additive_source.duckdb"))
+    target_db = DatabaseManager(str(tmp_path / "merge_table_additive_target.duckdb"))
+    source = DatabaseMaintenance(source_db, run_dir=tmp_path / "source_runs")
+    target = DatabaseMaintenance(target_db, run_dir=tmp_path / "target_runs")
+
+    try:
+        with source.db.session_scope() as session:
+            session.add(Run(id="table_additive_run", model_name="source_model"))
+            session.commit()
+
+        with source.db.engine.begin() as conn:
+            conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE global_tables.scoped_additive (
+                    consist_run_id VARCHAR,
+                    source_only VARCHAR
+                )
+                """
+            )
+            conn.exec_driver_sql(
+                """
+                INSERT INTO global_tables.scoped_additive (consist_run_id, source_only)
+                VALUES ('table_additive_run', 'source_value')
+                """
+            )
+
+        shard_path = tmp_path / "merge_table_additive_shard.duckdb"
+        source.export(
+            "table_additive_run",
+            shard_path,
+            include_data=True,
+            include_snapshots=False,
+        )
+
+        with target.db.engine.begin() as conn:
+            conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE global_tables.scoped_additive (
+                    consist_run_id VARCHAR,
+                    target_only VARCHAR
+                )
+                """
+            )
+
+        merge_result = target.merge(shard_path, conflict="error", include_snapshots=False)
+        assert merge_result.runs_merged == ["table_additive_run"]
+        assert merge_result.ingested_tables_merged == ["scoped_additive"]
+        assert merge_result.incompatible_global_tables_skipped == {}
+
+        with target.db.engine.begin() as conn:
+            row = conn.exec_driver_sql(
+                """
+                SELECT consist_run_id, target_only
+                FROM global_tables.scoped_additive
+                WHERE consist_run_id = 'table_additive_run'
+                """
+            ).fetchone()
+        assert row == ("table_additive_run", None)
+    finally:
+        source_db.engine.dispose()
+        target_db.engine.dispose()
+
+
 def test_db_maintenance_merge_schema_drift_target_extra_column_still_merges(
     tmp_path: Path,
 ) -> None:

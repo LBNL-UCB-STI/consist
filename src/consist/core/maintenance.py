@@ -77,6 +77,7 @@ class MergeResult:
     unscoped_cache_tables_skipped: list[str]
     conflicts_detected: list[str]
     snapshots_merged: int
+    incompatible_global_tables_skipped: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -1297,10 +1298,43 @@ class DatabaseMaintenance:
                 runs_skipped = []
                 runs_to_merge = list(shard_run_ids)
 
+            incompatible_global_tables_skipped: dict[str, str] = {}
+            if runs_to_merge:
+                compatibility_issues: dict[str, str] = {}
+                for table, mode in shard_table_modes.items():
+                    if mode == "unscoped_cache":
+                        continue
+                    compatibility_issue = self._global_table_merge_compatibility_issue(
+                        table,
+                        mode=mode,
+                        source_engine=shard_db.engine,
+                        target_engine=self.db.engine,
+                    )
+                    if compatibility_issue:
+                        compatibility_issues[table] = compatibility_issue
+
+                if compatibility_issues:
+                    incompatible_global_tables_skipped = {
+                        table: compatibility_issues[table]
+                        for table in sorted(compatibility_issues)
+                    }
+                    if conflict_mode == "error":
+                        details = "; ".join(
+                            (
+                                f"{table}: {reason}"
+                                for table, reason in incompatible_global_tables_skipped.items()
+                            )
+                        )
+                        raise ValueError(
+                            "Global table schema compatibility check failed: " + details
+                        )
+
             shard_table_filters: dict[str, Optional[str]] = {}
             if runs_to_merge:
                 for table, mode in shard_table_modes.items():
                     if mode == "unscoped_cache":
+                        continue
+                    if table in incompatible_global_tables_skipped:
                         continue
                     shard_table_filters[table] = self._resolve_global_table_filter_sql(
                         table,
@@ -1361,6 +1395,8 @@ class DatabaseMaintenance:
                         if mode == "unscoped_cache":
                             unscoped_cache_tables_skipped.append(table)
                             continue
+                        if table in incompatible_global_tables_skipped:
+                            continue
                         filter_sql = shard_table_filters.get(table)
                         if filter_sql is None:
                             continue
@@ -1405,6 +1441,7 @@ class DatabaseMaintenance:
                     ),
                     conflicts_detected=conflicts_detected,
                     snapshots_merged=snapshots_merged,
+                    incompatible_global_tables_skipped=incompatible_global_tables_skipped,
                 )
 
             def _write() -> None:
@@ -1776,6 +1813,8 @@ class DatabaseMaintenance:
                                 if mode == "unscoped_cache":
                                     unscoped_cache_tables_skipped.append(table)
                                     continue
+                                if table in incompatible_global_tables_skipped:
+                                    continue
                                 safe_table = self._validate_identifier(table, label="table")
                                 quoted_table = self._quote_ident(safe_table)
                                 conn.exec_driver_sql(
@@ -1809,43 +1848,41 @@ class DatabaseMaintenance:
                                 candidate_rows = int(count_row[0] if count_row else 0)
                                 if candidate_rows <= 0:
                                     continue
-                                columns = self._build_intersection_column_list(
-                                    safe_table,
-                                    source_schema=merge_source_schema,
-                                    target_schema="global_tables",
+                                source_lookup_name = self._qualified_table_lookup_name(
+                                    safe_table, schema=merge_source_schema
                                 )
-                                if not columns:
-                                    source_rows = conn.exec_driver_sql(
-                                        """
-                                        SELECT column_name
-                                        FROM information_schema.columns
-                                        WHERE table_schema = ?
-                                          AND table_name = ?
-                                        ORDER BY ordinal_position
-                                        """,
-                                        (merge_source_schema, safe_table),
-                                    ).fetchall()
-                                    target_rows = conn.exec_driver_sql(
-                                        """
-                                        SELECT column_name
-                                        FROM information_schema.columns
-                                        WHERE table_schema = 'global_tables'
-                                          AND table_name = ?
-                                        ORDER BY ordinal_position
-                                        """,
-                                        (safe_table,),
-                                    ).fetchall()
-                                    source_columns = {str(row[0]) for row in source_rows}
-                                    columns = []
-                                    seen_columns: set[str] = set()
-                                    for row in target_rows:
-                                        column_name = str(row[0])
-                                        if (
-                                            column_name in source_columns
-                                            and column_name not in seen_columns
-                                        ):
-                                            columns.append(self._quote_ident(column_name))
-                                            seen_columns.add(column_name)
+                                target_lookup_name = self._qualified_table_lookup_name(
+                                    safe_table, schema="global_tables"
+                                )
+                                source_rows = conn.exec_driver_sql(
+                                    f"""
+                                    SELECT name
+                                    FROM pragma_table_info(
+                                        {self._quote_sql_string_literal(source_lookup_name)}
+                                    )
+                                    ORDER BY cid
+                                    """
+                                ).fetchall()
+                                target_rows = conn.exec_driver_sql(
+                                    f"""
+                                    SELECT name
+                                    FROM pragma_table_info(
+                                        {self._quote_sql_string_literal(target_lookup_name)}
+                                    )
+                                    ORDER BY cid
+                                    """
+                                ).fetchall()
+                                source_columns = {str(row[0]) for row in source_rows}
+                                columns: list[str] = []
+                                seen_columns: set[str] = set()
+                                for row in target_rows:
+                                    column_name = str(row[0])
+                                    if (
+                                        column_name in source_columns
+                                        and column_name not in seen_columns
+                                    ):
+                                        columns.append(self._quote_ident(column_name))
+                                        seen_columns.add(column_name)
                                 if not columns:
                                     continue
                                 column_sql = ", ".join(columns)
@@ -1901,6 +1938,7 @@ class DatabaseMaintenance:
                 unscoped_cache_tables_skipped=sorted(set(unscoped_cache_tables_skipped)),
                 conflicts_detected=conflicts_detected,
                 snapshots_merged=snapshots_merged,
+                incompatible_global_tables_skipped=incompatible_global_tables_skipped,
             )
         finally:
             shard_db.engine.dispose()
@@ -2632,6 +2670,149 @@ class DatabaseMaintenance:
             self._quote_sql_string_literal(run_id) for run_id in normalized_run_ids
         )
         return f"{column_ref} = ANY([{run_id_literals}])"
+
+    @staticmethod
+    def _required_global_table_column(mode: GlobalTableMode) -> Optional[str]:
+        if mode == "run_scoped":
+            return "consist_run_id"
+        if mode == "run_link":
+            return "run_id"
+        return None
+
+    @staticmethod
+    def _normalize_sql_type(type_name: str) -> str:
+        return " ".join(str(type_name).strip().upper().split())
+
+    def _global_table_merge_compatibility_issue(
+        self,
+        table: str,
+        *,
+        mode: GlobalTableMode,
+        source_engine: Engine,
+        target_engine: Engine,
+    ) -> Optional[str]:
+        safe_table = self._validate_identifier(table, label="table")
+        source_column_types = self._list_table_columns_with_types(
+            safe_table,
+            schema="global_tables",
+            engine=source_engine,
+        )
+        if not source_column_types:
+            return "source table missing in global_tables schema"
+
+        target_column_types = self._list_table_columns_with_types(
+            safe_table,
+            schema="global_tables",
+            engine=target_engine,
+        )
+        target_table_exists = bool(target_column_types)
+
+        required_column = self._required_global_table_column(mode)
+        if required_column and required_column not in source_column_types:
+            return (
+                f"missing required source column '{required_column}' for mode '{mode}'"
+            )
+        if required_column and target_table_exists and required_column not in target_column_types:
+            return (
+                f"missing required target column '{required_column}' for mode '{mode}'"
+            )
+
+        shared_columns = sorted(set(source_column_types).intersection(target_column_types))
+        incompatible_columns: list[str] = []
+        for column_name in shared_columns:
+            source_type = source_column_types[column_name]
+            target_type = target_column_types[column_name]
+            if not self._types_compatible_for_merge(
+                source_type, target_type, engine=target_engine
+            ):
+                incompatible_columns.append(
+                    f"{column_name} (source={source_type}, target={target_type})"
+                )
+
+        if incompatible_columns:
+            return "incompatible shared column type(s): " + ", ".join(
+                incompatible_columns
+            )
+        return None
+
+    def _types_compatible_for_merge(
+        self,
+        source_type: str,
+        target_type: str,
+        *,
+        engine: Optional[Engine] = None,
+    ) -> bool:
+        normalized_source = self._normalize_sql_type(source_type)
+        normalized_target = self._normalize_sql_type(target_type)
+        if not normalized_source or not normalized_target:
+            return False
+        if normalized_source == normalized_target:
+            return True
+
+        active_engine = engine or self.db.engine
+
+        def _query() -> bool:
+            with active_engine.begin() as conn:
+                try:
+                    row = conn.exec_driver_sql(
+                        f"""
+                        SELECT can_cast_implicitly(
+                            NULL::{normalized_source},
+                            NULL::{normalized_target}
+                        )
+                        """
+                    ).fetchone()
+                except Exception:
+                    return False
+            return bool(row[0]) if row else False
+
+        return self.db.execute_with_retry(
+            _query, operation_name="maintenance_types_compatible_for_merge"
+        )
+
+    def _list_table_columns_with_types(
+        self,
+        table: str,
+        *,
+        schema: str = "main",
+        catalog: Optional[str] = None,
+        engine: Optional[Engine] = None,
+    ) -> dict[str, str]:
+        safe_table = self._validate_identifier(table, label="table")
+        safe_schema = self._validate_identifier(schema, label="schema")
+        safe_catalog = (
+            self._validate_identifier(catalog, label="catalog")
+            if catalog is not None
+            else None
+        )
+        active_engine = engine or self.db.engine
+        lookup_name = self._qualified_table_lookup_name(
+            safe_table, schema=safe_schema, catalog=safe_catalog
+        )
+
+        def _query() -> dict[str, str]:
+            with active_engine.begin() as conn:
+                try:
+                    rows = conn.exec_driver_sql(
+                        f"""
+                        SELECT name, type
+                        FROM pragma_table_info({self._quote_sql_string_literal(lookup_name)})
+                        ORDER BY cid
+                        """
+                    ).fetchall()
+                except Exception:
+                    return {}
+            column_types: dict[str, str] = {}
+            for row in rows:
+                column_name = str(row[0])
+                if column_name in column_types:
+                    continue
+                column_types[column_name] = str(row[1] or "").strip()
+            return column_types
+
+        return self.db.execute_with_retry(
+            _query, operation_name="maintenance_list_table_columns_with_types"
+        )
 
     def _build_intersection_column_list(
         self,

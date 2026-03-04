@@ -1411,6 +1411,7 @@ def test_db_merge_json_output_is_parseable(tmp_path, monkeypatch):
         "unscoped_cache_tables_skipped",
         "conflicts_detected",
         "snapshots_merged",
+        "incompatible_global_tables_skipped",
     }
     assert payload["runs_merged"] == ["cli_run"]
     merged_db = DatabaseManager(str(target_db_path))
@@ -1468,6 +1469,7 @@ def test_db_merge_dry_run_json_output_is_parseable_and_no_writes(tmp_path, monke
         "unscoped_cache_tables_skipped",
         "conflicts_detected",
         "snapshots_merged",
+        "incompatible_global_tables_skipped",
     }
     assert payload["runs_merged"] == ["cli_run"]
 
