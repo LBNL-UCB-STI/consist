@@ -22,6 +22,8 @@ Examples are tiered:
   extension runs.
 - `../03_transportation_demand_modeling.ipynb`: end-to-end transportation
   scenario analysis.
+- `../04_beam_core_demo.ipynb`: BEAM CORE-style linear workflow demo focused
+  on provenance diff, lineage, and cache behavior.
 - `scripts/model_integrator_wrapper.py`: integration-style scenario template
   for wrapping external tools.
 
