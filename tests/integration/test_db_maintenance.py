@@ -12,6 +12,7 @@ from consist.core.maintenance import DatabaseMaintenance
 from consist.core.persistence import DatabaseManager
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifactLink
+from consist.models.run_config_kv import RunConfigKV
 
 
 def _write_snapshot(run_dir: Path, run_id: str) -> Path:
@@ -19,6 +20,35 @@ def _write_snapshot(run_dir: Path, run_id: str) -> Path:
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     snapshot_path.write_text(json.dumps({"run": {"id": run_id}}), encoding="utf-8")
     return snapshot_path
+
+
+def _inject_single_lock_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    db: DatabaseManager,
+    operation_name: str,
+) -> dict[str, int]:
+    original_execute_with_retry = db.execute_with_retry
+    state = {"calls": 0}
+
+    def wrapped_execute_with_retry(func, *args, **kwargs):
+        current_operation = kwargs.get("operation_name")
+        if current_operation != operation_name:
+            return original_execute_with_retry(func, *args, **kwargs)
+
+        def flaky():
+            state["calls"] += 1
+            if state["calls"] == 1:
+                raise OperationalError(
+                    statement="BEGIN",
+                    params=None,
+                    orig=Exception("database is locked"),
+                )
+            return func()
+
+        return original_execute_with_retry(flaky, *args, **kwargs)
+
+    monkeypatch.setattr(db, "execute_with_retry", wrapped_execute_with_retry)
+    return state
 
 
 def test_db_maintenance_export_merge_e2e_with_subtree_and_filtered_data(
@@ -368,6 +398,157 @@ def test_db_maintenance_merge_conflict_error_mode_raises(tmp_path: Path) -> None
         target_db.engine.dispose()
 
 
+def test_db_maintenance_merge_conflict_skip_mode_merges_non_conflicting_runs(
+    tmp_path: Path,
+) -> None:
+    source_db = DatabaseManager(str(tmp_path / "merge_skip_source.duckdb"))
+    target_db = DatabaseManager(str(tmp_path / "merge_skip_target.duckdb"))
+    source = DatabaseMaintenance(source_db, run_dir=tmp_path / "source_runs")
+    target = DatabaseMaintenance(target_db, run_dir=tmp_path / "target_runs")
+    conflict_artifact_id = uuid.uuid4()
+    new_artifact_id = uuid.uuid4()
+
+    try:
+        with source.db.session_scope() as session:
+            session.add_all(
+                [
+                    Run(id="conflict_run", model_name="source_model"),
+                    Run(id="new_run", model_name="source_model"),
+                    Artifact(
+                        id=conflict_artifact_id,
+                        key="conflict_art",
+                        container_uri="outputs://conflict.parquet",
+                        driver="parquet",
+                        run_id="conflict_run",
+                    ),
+                    Artifact(
+                        id=new_artifact_id,
+                        key="new_art",
+                        container_uri="outputs://new.parquet",
+                        driver="parquet",
+                        run_id="new_run",
+                    ),
+                    RunArtifactLink(
+                        run_id="conflict_run",
+                        artifact_id=conflict_artifact_id,
+                        direction="output",
+                    ),
+                    RunArtifactLink(
+                        run_id="new_run",
+                        artifact_id=new_artifact_id,
+                        direction="output",
+                    ),
+                ]
+            )
+            session.commit()
+
+        shard_path = tmp_path / "merge_skip_shard.duckdb"
+        source.export(
+            ["conflict_run", "new_run"],
+            shard_path,
+            include_data=False,
+            include_snapshots=False,
+            include_children=False,
+        )
+
+        with target.db.session_scope() as session:
+            session.add(
+                Run(
+                    id="conflict_run",
+                    model_name="target_model",
+                )
+            )
+            session.commit()
+
+        merge_result = target.merge(shard_path, conflict="skip", include_snapshots=False)
+        assert merge_result.runs_skipped == ["conflict_run"]
+        assert merge_result.runs_merged == ["new_run"]
+        assert merge_result.conflicts_detected == ["conflict_run"]
+        assert merge_result.artifacts_merged == 1
+
+        with target.db.session_scope() as session:
+            conflict_run = session.get(Run, "conflict_run")
+            new_run = session.get(Run, "new_run")
+        assert conflict_run is not None
+        assert conflict_run.model_name == "target_model"
+        assert new_run is not None
+        assert new_run.model_name == "source_model"
+    finally:
+        source_db.engine.dispose()
+        target_db.engine.dispose()
+
+
+def test_db_maintenance_merge_schema_drift_target_extra_column_still_merges(
+    tmp_path: Path,
+) -> None:
+    source_db = DatabaseManager(str(tmp_path / "merge_drift_source.duckdb"))
+    target_db = DatabaseManager(str(tmp_path / "merge_drift_target.duckdb"))
+    source = DatabaseMaintenance(source_db, run_dir=tmp_path / "source_runs")
+    target = DatabaseMaintenance(target_db, run_dir=tmp_path / "target_runs")
+    artifact_id = uuid.uuid4()
+
+    try:
+        with source.db.session_scope() as session:
+            session.add(Run(id="drift_run", model_name="source_model"))
+            session.add(
+                Artifact(
+                    id=artifact_id,
+                    key="drift_art",
+                    container_uri="outputs://drift.parquet",
+                    driver="parquet",
+                    run_id="drift_run",
+                )
+            )
+            session.add(
+                RunArtifactLink(
+                    run_id="drift_run",
+                    artifact_id=artifact_id,
+                    direction="output",
+                )
+            )
+            session.add(
+                RunConfigKV(
+                    run_id="drift_run",
+                    facet_id="facet_a",
+                    namespace="demo",
+                    key="param",
+                    value_type="str",
+                    value_str="drift_value",
+                )
+            )
+            session.commit()
+
+        shard_path = tmp_path / "merge_drift_shard.duckdb"
+        source.export(
+            "drift_run",
+            shard_path,
+            include_data=False,
+            include_snapshots=False,
+        )
+
+        with target.db.engine.begin() as conn:
+            conn.exec_driver_sql("ALTER TABLE run_config_kv ADD COLUMN target_extra VARCHAR")
+
+        merge_result = target.merge(shard_path, conflict="error", include_snapshots=False)
+        assert merge_result.runs_merged == ["drift_run"]
+
+        with target.db.engine.begin() as conn:
+            row = conn.exec_driver_sql(
+                """
+                SELECT run_id, value_str, target_extra
+                FROM run_config_kv
+                WHERE run_id = 'drift_run'
+                """
+            ).fetchone()
+        assert row is not None
+        assert row[0] == "drift_run"
+        assert row[1] == "drift_value"
+        assert row[2] is None
+    finally:
+        source_db.engine.dispose()
+        target_db.engine.dispose()
+
+
 def test_db_maintenance_merge_retries_on_transient_lock_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -437,6 +618,111 @@ def test_db_maintenance_merge_retries_on_transient_lock_error(
     finally:
         source_db.engine.dispose()
         target_db.engine.dispose()
+
+
+def test_db_maintenance_export_retries_on_transient_lock_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = DatabaseManager(str(tmp_path / "export_retry_source.duckdb"))
+    maintenance = DatabaseMaintenance(db, run_dir=tmp_path / "source_runs")
+    artifact_id = uuid.uuid4()
+
+    try:
+        with maintenance.db.session_scope() as session:
+            session.add(Run(id="export_retry_run", model_name="source_model"))
+            session.add(
+                Artifact(
+                    id=artifact_id,
+                    key="retry_art",
+                    container_uri="outputs://retry.parquet",
+                    driver="parquet",
+                    run_id="export_retry_run",
+                )
+            )
+            session.add(
+                RunArtifactLink(
+                    run_id="export_retry_run",
+                    artifact_id=artifact_id,
+                    direction="output",
+                )
+            )
+            session.commit()
+
+        retry_state = _inject_single_lock_failure(
+            monkeypatch,
+            maintenance.db,
+            "maintenance_export",
+        )
+
+        shard_path = tmp_path / "export_retry_shard.duckdb"
+        result = maintenance.export(
+            "export_retry_run",
+            shard_path,
+            include_data=False,
+            include_snapshots=False,
+        )
+
+        assert result.run_ids == ["export_retry_run"]
+        assert retry_state["calls"] >= 2
+
+        shard_db = DatabaseManager(str(shard_path))
+        try:
+            with shard_db.session_scope() as session:
+                assert session.get(Run, "export_retry_run") is not None
+        finally:
+            shard_db.engine.dispose()
+    finally:
+        db.engine.dispose()
+
+
+def test_db_maintenance_purge_retries_on_transient_lock_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = DatabaseManager(str(tmp_path / "purge_retry.duckdb"))
+    maintenance = DatabaseMaintenance(db, run_dir=tmp_path / "purge_runs")
+    artifact_id = uuid.uuid4()
+
+    try:
+        with maintenance.db.session_scope() as session:
+            session.add(Run(id="purge_retry_run", model_name="demo"))
+            session.add(
+                Artifact(
+                    id=artifact_id,
+                    key="retry_art",
+                    container_uri="outputs://retry.parquet",
+                    driver="parquet",
+                    run_id="purge_retry_run",
+                )
+            )
+            session.add(
+                RunArtifactLink(
+                    run_id="purge_retry_run",
+                    artifact_id=artifact_id,
+                    direction="output",
+                )
+            )
+            session.commit()
+
+        retry_state = _inject_single_lock_failure(
+            monkeypatch,
+            maintenance.db,
+            "maintenance_purge",
+        )
+
+        result = maintenance.purge(
+            "purge_retry_run",
+            include_children=False,
+            delete_files=False,
+            delete_ingested_data=False,
+            dry_run=False,
+        )
+        assert result.executed is True
+        assert retry_state["calls"] >= 2
+
+        with maintenance.db.session_scope() as session:
+            assert session.get(Run, "purge_retry_run") is None
+    finally:
+        db.engine.dispose()
 
 
 def test_db_maintenance_rebuild_from_json_e2e_with_malformed_file(
