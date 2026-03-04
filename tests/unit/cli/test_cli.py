@@ -322,6 +322,34 @@ def test_runs_json_output(mock_db_session):
         assert run2["tags"] == ["prod"]
 
 
+def test_runs_json_output_handles_non_serializable_meta(mock_db_session):
+    run = MagicMock()
+    run.id = "run_with_set_meta"
+    run.model_name = "demo"
+    run.status = "completed"
+    run.parent_run_id = None
+    run.year = 2025
+    run.created_at = datetime(2025, 1, 1, 12, 0)
+    run.duration_seconds = 1.0
+    run.tags = ["demo"]
+    run.meta = {"bad_set": {1, 2}}
+
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker") as m_tracker,
+        patch("consist.cli.queries.get_runs", return_value=[run]) as m_get_runs,
+    ):
+        m_tracker.return_value.engine = mock_db_session.get_bind()
+        result = runner.invoke(app, ["runs", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert len(payload) == 1
+    assert payload[0]["id"] == "run_with_set_meta"
+    assert isinstance(payload[0]["meta"]["bad_set"], str)
+    m_get_runs.assert_called_once()
+
+
 def test_cli_runner_fixture_runs_json(cli_runner, tracker, sample_csv):
     # Create a run using the shared tracker and log an output so it persists
     with tracker.start_run("fixture_run", "demo") as t:
@@ -1686,7 +1714,11 @@ def test_db_purge_without_yes_can_be_cancelled(tmp_path, monkeypatch):
     )
 
     assert result.exit_code == 0
-    assert "Purge 1 run(s)" in result.stdout
+    assert "Confirm purge scope:" in result.stdout
+    assert "runs=1" in result.stdout
+    assert "snapshots=" in result.stdout
+    assert "disk_files=disabled" in result.stdout
+    assert "ingested_global=preserve" in result.stdout
     assert "Purge cancelled." in result.stdout
     db = DatabaseManager(str(db_path))
     try:
@@ -1694,6 +1726,14 @@ def test_db_purge_without_yes_can_be_cancelled(tmp_path, monkeypatch):
             assert session.get(Run, "cli_run") is not None
     finally:
         db.engine.dispose()
+
+
+def test_root_help_includes_command_group_descriptions():
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    assert "Schema inspection, profiling" in result.stdout
+    assert "Materialized and hybrid SQL view management" in result.stdout
+    assert "Database maintenance and recovery commands" in result.stdout
 
 
 def test_db_fix_status_json_output_contains_expected_fields(tmp_path, monkeypatch):

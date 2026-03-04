@@ -77,9 +77,21 @@ views_app = typer.Typer(rich_markup_mode="markdown")
 db_app = typer.Typer(rich_markup_mode="markdown")
 console = Console()
 
-app.add_typer(schema_app, name="schema")
-app.add_typer(views_app, name="views")
-app.add_typer(db_app, name="db")
+app.add_typer(
+    schema_app,
+    name="schema",
+    help="Schema inspection, profiling, and code-generation commands.",
+)
+app.add_typer(
+    views_app,
+    name="views",
+    help="Materialized and hybrid SQL view management commands.",
+)
+app.add_typer(
+    db_app,
+    name="db",
+    help="Database maintenance and recovery commands.",
+)
 
 MAX_CLI_LIMIT = 1_000_000
 MAX_PREVIEW_ROWS = 1_000_000
@@ -592,12 +604,35 @@ def db_purge(
 
     if not dry_run and not yes:
         preview = maintenance.plan_purge(run_id, include_children=include_children)
-        confirmed = typer.confirm(
+        scoped_ingested_rows = sum(
+            count
+            for table, count in preview.ingested_data.items()
+            if preview.ingested_table_modes.get(table) in {"run_scoped", "run_link"}
+        )
+        scope_fields = [
+            f"runs={len(preview.run_ids)}",
+            f"snapshots={len(preview.json_files)}",
+            f"orphaned_artifacts={len(preview.orphaned_artifact_ids)}",
             (
-                f"Purge {len(preview.run_ids)} run(s), "
-                f"{len(preview.orphaned_artifact_ids)} orphaned artifact(s), "
-                f"and {len(preview.json_files)} snapshot file(s)?"
+                f"disk_files=enabled({len(preview.disk_files)})"
+                if delete_files
+                else "disk_files=disabled"
             ),
+            (
+                f"ingested_global=enabled(rows~{scoped_ingested_rows})"
+                if delete_ingested_data
+                else "ingested_global=preserve"
+            ),
+            (
+                "prune_cache=enabled"
+                if prune_cache and delete_ingested_data
+                else "prune_cache=noop"
+                if prune_cache and not delete_ingested_data
+                else "prune_cache=disabled"
+            ),
+        ]
+        confirmed = typer.confirm(
+            "Confirm purge scope: " + ", ".join(scope_fields) + "?",
             default=False,
         )
         if not confirmed:
@@ -1498,7 +1533,7 @@ def runs(
                         "meta": getattr(r, "meta", None),
                     }
                 )
-            print(json.dumps(output, indent=2))
+            output_json(output)
             return
 
     _render_runs_table(tracker, limit, model_name, tag, status)

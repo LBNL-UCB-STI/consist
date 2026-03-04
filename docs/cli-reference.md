@@ -21,6 +21,13 @@ consist --help
 consist --version
 ```
 
+Shell completion helpers:
+
+```bash
+consist --install-completion   # Install for current shell
+consist --show-completion      # Print completion script
+```
+
 ---
 
 ## Commands
