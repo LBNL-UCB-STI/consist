@@ -355,6 +355,11 @@ def db_rebuild(
         "--json-dir",
         help="Directory containing per-run JSON snapshots to rebuild from.",
     ),
+    mode: Literal["minimal", "full"] = typer.Option(
+        "minimal",
+        "--mode",
+        help="Rebuild mode: minimal restores runs/artifacts/links; full also restores optional facet/schema indexes.",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -367,7 +372,7 @@ def db_rebuild(
 ) -> None:
     """Rebuild DB run/artifact/link rows from JSON snapshots."""
     maintenance = _maintenance_service(db_path)
-    result = maintenance.rebuild_from_json(json_dir, dry_run=dry_run)
+    result = maintenance.rebuild_from_json(json_dir, dry_run=dry_run, mode=mode)
     if json_output:
         output_json(asdict(result))
         return
@@ -375,6 +380,7 @@ def db_rebuild(
     summary = Table(title="Database Rebuild")
     summary.add_column("Field", style="cyan")
     summary.add_column("Value", style="green")
+    summary.add_row("Mode", mode)
     summary.add_row("Dry run", str(result.dry_run))
     summary.add_row("JSON files scanned", str(result.json_files_scanned))
     summary.add_row("Runs inserted", str(result.runs_inserted))

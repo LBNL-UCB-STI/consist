@@ -23,7 +23,7 @@ from consist.cli import (
     app,
     find_db_path,
 )
-from consist.core.maintenance import DatabaseMaintenance
+from consist.core.maintenance import DatabaseMaintenance, RebuildResult
 from consist.core.persistence import DatabaseManager
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifactLink
@@ -1108,6 +1108,73 @@ def test_db_rebuild_json_output_is_parseable(tmp_path, monkeypatch):
     assert payload["json_files_scanned"] == 1
     assert payload["runs_inserted"] == 1
     assert payload["dry_run"] is False
+
+
+def test_db_rebuild_passes_full_mode_to_maintenance(tmp_path, monkeypatch):
+    maintenance = MagicMock()
+    maintenance.rebuild_from_json.return_value = RebuildResult(
+        json_files_scanned=0,
+        runs_inserted=0,
+        runs_already_present=0,
+        artifacts_inserted=0,
+        errors=[],
+        dry_run=False,
+    )
+    monkeypatch.setattr("consist.cli._maintenance_service", lambda _db_path: maintenance)
+
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "rebuild",
+            "--json-dir",
+            str(tmp_path),
+            "--mode",
+            "full",
+            "--db-path",
+            str(tmp_path / "target.duckdb"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert maintenance.rebuild_from_json.call_count == 1
+    kwargs = maintenance.rebuild_from_json.call_args.kwargs
+    assert kwargs["mode"] == "full"
+    assert "Mode" in result.stdout
+    assert "full" in result.stdout
+
+
+def test_db_rebuild_defaults_mode_to_minimal(tmp_path, monkeypatch):
+    maintenance = MagicMock()
+    maintenance.rebuild_from_json.return_value = RebuildResult(
+        json_files_scanned=0,
+        runs_inserted=0,
+        runs_already_present=0,
+        artifacts_inserted=0,
+        errors=[],
+        dry_run=False,
+    )
+    monkeypatch.setattr("consist.cli._maintenance_service", lambda _db_path: maintenance)
+
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "rebuild",
+            "--json-dir",
+            str(tmp_path),
+            "--db-path",
+            str(tmp_path / "target.duckdb"),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert maintenance.rebuild_from_json.call_count == 1
+    kwargs = maintenance.rebuild_from_json.call_args.kwargs
+    assert kwargs["mode"] == "minimal"
+    payload = json.loads(result.stdout)
+    assert payload["json_files_scanned"] == 0
 
 
 def test_db_compact_json_output_is_parseable(tmp_path, monkeypatch):

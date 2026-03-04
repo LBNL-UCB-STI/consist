@@ -14,8 +14,13 @@ from urllib.parse import unquote, urlsplit
 from sqlalchemy.engine import Engine
 from sqlmodel import col, select
 
+from consist.core.facet_common import flatten_facet_values
+from consist.core.identity import IdentityManager
 from consist.models.artifact import Artifact
+from consist.models.artifact_kv import ArtifactKV
+from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaObservation
 from consist.models.run import ConsistRecord, Run, RunArtifactLink
+from consist.models.run_config_kv import RunConfigKV
 
 if TYPE_CHECKING:
     from consist.core.persistence import DatabaseManager
@@ -1908,7 +1913,13 @@ class DatabaseMaintenance:
         self.db.execute_with_retry(_vacuum, operation_name="maintenance_compact")
         self._log_audit("compact", "operation=vacuum")
 
-    def rebuild_from_json(self, json_dir: Path, *, dry_run: bool) -> RebuildResult:
+    def rebuild_from_json(
+        self,
+        json_dir: Path,
+        *,
+        dry_run: bool,
+        mode: Literal["minimal", "full"] = "minimal",
+    ) -> RebuildResult:
         snapshot_dir = Path(json_dir)
         errors: list[str] = []
         runs_inserted = 0
@@ -1916,6 +1927,15 @@ class DatabaseMaintenance:
         artifacts_inserted = 0
         run_exists_cache: dict[str, bool] = {}
         artifact_exists_cache: dict[str, bool] = {}
+        rebuild_mode = str(mode).strip().lower()
+        if rebuild_mode not in {"minimal", "full"}:
+            raise ValueError("mode must be one of: minimal, full")
+        identity = IdentityManager(project_root=str(self.run_dir))
+        supports_full_restore = (
+            self._build_rebuild_full_table_support()
+            if rebuild_mode == "full" and not dry_run
+            else {}
+        )
 
         if not snapshot_dir.exists() or not snapshot_dir.is_dir():
             errors.append(f"{snapshot_dir}: JSON directory does not exist or is not a directory.")
@@ -1953,6 +1973,7 @@ class DatabaseMaintenance:
                 continue
 
             artifact_rows: dict[str, Artifact] = {}
+            snapshot_artifact_meta: dict[str, tuple[uuid.UUID, dict[str, Any]]] = {}
             for artifact in [*record.inputs, *record.outputs]:
                 parsed_uuid = self._coerce_uuid(artifact.id)
                 if parsed_uuid is None:
@@ -1975,6 +1996,11 @@ class DatabaseMaintenance:
                         if isinstance(artifact.meta, dict)
                         else {},
                         created_at=artifact.created_at,
+                    )
+                if artifact_id not in snapshot_artifact_meta:
+                    snapshot_artifact_meta[artifact_id] = (
+                        parsed_uuid,
+                        dict(artifact.meta) if isinstance(artifact.meta, dict) else {},
                     )
 
             link_rows: dict[str, str] = {}
@@ -2074,6 +2100,25 @@ class DatabaseMaintenance:
                 runs_inserted += 1
             artifacts_inserted += inserted_artifacts_for_file
 
+            if rebuild_mode == "full":
+                try:
+                    self.db.execute_with_retry(
+                        lambda: self._restore_full_snapshot_metadata(
+                            run_id=run_id,
+                            run=run,
+                            run_facet=record.facet,
+                            snapshot_artifact_meta=snapshot_artifact_meta,
+                            supports_full_restore=supports_full_restore,
+                            identity=identity,
+                        ),
+                        operation_name="maintenance_rebuild_from_json_full_restore",
+                    )
+                except Exception as exc:
+                    errors.append(
+                        f"{snapshot_path.name}: optional full restore failed ({exc})"
+                    )
+                    continue
+
         result = RebuildResult(
             json_files_scanned=len(snapshot_files),
             runs_inserted=runs_inserted,
@@ -2092,11 +2137,279 @@ class DatabaseMaintenance:
                     f"runs_inserted={result.runs_inserted} "
                     f"runs_already_present={result.runs_already_present} "
                     f"artifacts_inserted={result.artifacts_inserted} "
+                    f"mode={rebuild_mode} "
                     f"errors={len(result.errors)}"
                 ),
             )
 
         return result
+
+    def _build_rebuild_full_table_support(self) -> dict[str, bool]:
+        return {
+            "run_config_kv": self._table_supports_model("run_config_kv", RunConfigKV),
+            "artifact_kv": self._table_supports_model("artifact_kv", ArtifactKV),
+            "artifact_schema": self._table_supports_model(
+                "artifact_schema", ArtifactSchema
+            ),
+            "artifact_schema_observation": self._table_supports_model(
+                "artifact_schema_observation", ArtifactSchemaObservation
+            ),
+        }
+
+    def _restore_full_snapshot_metadata(
+        self,
+        *,
+        run_id: str,
+        run: Run,
+        run_facet: Any,
+        snapshot_artifact_meta: dict[str, tuple[uuid.UUID, dict[str, Any]]],
+        supports_full_restore: dict[str, bool],
+        identity: IdentityManager,
+    ) -> None:
+        with self.db.session_scope() as session:
+            run_meta = dict(run.meta) if isinstance(run.meta, dict) else {}
+            run_namespace = self._coerce_non_empty_str(
+                run_meta.get("config_facet_namespace")
+            ) or run.model_name
+
+            if supports_full_restore.get("run_config_kv"):
+                self._restore_run_config_kv_rows(
+                    session=session,
+                    run_id=run_id,
+                    run_facet=run_facet,
+                    run_meta=run_meta,
+                    namespace=run_namespace,
+                    identity=identity,
+                )
+
+            restore_schema = bool(
+                supports_full_restore.get("artifact_schema")
+                and supports_full_restore.get("artifact_schema_observation")
+            )
+            for artifact_id, artifact_meta in snapshot_artifact_meta.values():
+                if supports_full_restore.get("artifact_kv"):
+                    self._restore_artifact_kv_rows(
+                        session=session,
+                        artifact_id=artifact_id,
+                        artifact_meta=artifact_meta,
+                        default_namespace=run.model_name,
+                        identity=identity,
+                    )
+
+                if restore_schema:
+                    self._restore_artifact_schema_rows(
+                        session=session,
+                        artifact_id=artifact_id,
+                        artifact_meta=artifact_meta,
+                        run_id=run_id,
+                    )
+
+            session.commit()
+
+    def _restore_run_config_kv_rows(
+        self,
+        *,
+        session: Any,
+        run_id: str,
+        run_facet: Any,
+        run_meta: dict[str, Any],
+        namespace: str,
+        identity: IdentityManager,
+    ) -> None:
+        if not isinstance(run_facet, dict) or not run_facet:
+            return
+
+        facet_id = self._coerce_non_empty_str(run_meta.get("config_facet_id"))
+        if facet_id is None:
+            facet_id = identity.canonical_json_sha256(run_facet)
+
+        flattened = flatten_facet_values(
+            facet_dict=run_facet,
+            include_json_leaves=True,
+        )
+        for row in flattened:
+            pk = (run_id, facet_id, namespace, row.key_path)
+            if session.get(RunConfigKV, pk) is not None:
+                continue
+            session.add(
+                RunConfigKV(
+                    run_id=run_id,
+                    facet_id=facet_id,
+                    namespace=namespace,
+                    key=row.key_path,
+                    value_type=row.value_type,
+                    value_str=row.value_str,
+                    value_num=row.value_num,
+                    value_bool=row.value_bool,
+                    value_json=row.value_json,
+                )
+            )
+
+    def _restore_artifact_kv_rows(
+        self,
+        *,
+        session: Any,
+        artifact_id: uuid.UUID,
+        artifact_meta: dict[str, Any],
+        default_namespace: str,
+        identity: IdentityManager,
+    ) -> None:
+        facet_payload = artifact_meta.get("artifact_facet")
+        if not isinstance(facet_payload, dict) or not facet_payload:
+            fallback_payload = artifact_meta.get("facet")
+            if isinstance(fallback_payload, dict) and fallback_payload:
+                facet_payload = fallback_payload
+            else:
+                return
+
+        facet_id = self._coerce_non_empty_str(artifact_meta.get("artifact_facet_id"))
+        if facet_id is None:
+            facet_id = identity.canonical_json_sha256(facet_payload)
+        namespace = self._coerce_non_empty_str(
+            artifact_meta.get("artifact_facet_namespace")
+        ) or default_namespace
+
+        flattened = flatten_facet_values(
+            facet_dict=facet_payload,
+            include_json_leaves=False,
+        )
+        for row in flattened:
+            pk = (artifact_id, facet_id, row.key_path)
+            if session.get(ArtifactKV, pk) is not None:
+                continue
+            session.add(
+                ArtifactKV(
+                    artifact_id=artifact_id,
+                    facet_id=facet_id,
+                    key_path=row.key_path,
+                    namespace=namespace,
+                    value_type=row.value_type,
+                    value_str=row.value_str,
+                    value_num=row.value_num,
+                    value_bool=row.value_bool,
+                )
+            )
+
+    def _restore_artifact_schema_rows(
+        self,
+        *,
+        session: Any,
+        artifact_id: uuid.UUID,
+        artifact_meta: dict[str, Any],
+        run_id: str,
+    ) -> None:
+        schema_id = self._coerce_non_empty_str(artifact_meta.get("schema_id"))
+        if schema_id is None:
+            return
+
+        summary = artifact_meta.get("schema_summary")
+        summary_json = summary if isinstance(summary, dict) else {}
+
+        profile = artifact_meta.get("schema_profile")
+        profile_json = profile if isinstance(profile, dict) else None
+
+        existing_schema = session.get(ArtifactSchema, schema_id)
+        if existing_schema is None:
+            profile_version = summary_json.get("profile_version")
+            if not isinstance(profile_version, int) or profile_version <= 0:
+                profile_version = 1
+            session.add(
+                ArtifactSchema(
+                    id=schema_id,
+                    profile_version=profile_version,
+                    summary_json=summary_json,
+                    profile_json=profile_json,
+                )
+            )
+        else:
+            updated = False
+            if not existing_schema.summary_json and summary_json:
+                existing_schema.summary_json = summary_json
+                updated = True
+            if existing_schema.profile_json is None and profile_json is not None:
+                existing_schema.profile_json = profile_json
+                updated = True
+            if updated:
+                session.add(existing_schema)
+
+        source = self._schema_observation_source(
+            summary_json=summary_json,
+            artifact_meta=artifact_meta,
+        )
+        sample_rows = self._schema_observation_sample_rows(
+            summary_json=summary_json,
+            artifact_meta=artifact_meta,
+        )
+
+        existing_rows = session.exec(
+            select(ArtifactSchemaObservation).where(
+                ArtifactSchemaObservation.run_id == run_id,
+                ArtifactSchemaObservation.artifact_id == artifact_id,
+                ArtifactSchemaObservation.schema_id == schema_id,
+            )
+        ).all()
+        if any(
+            row.source == source and row.sample_rows == sample_rows
+            for row in existing_rows
+        ):
+            return
+
+        session.add(
+            ArtifactSchemaObservation(
+                artifact_id=artifact_id,
+                schema_id=schema_id,
+                run_id=run_id,
+                source=source,
+                sample_rows=sample_rows,
+            )
+        )
+
+    def _table_supports_model(self, table_name: str, model: type[Any]) -> bool:
+        table_columns = set(self._list_table_columns(table_name))
+        if not table_columns:
+            return False
+        model_table = getattr(model, "__table__", None)
+        if model_table is None:
+            return False
+        model_columns = {str(column.name) for column in model_table.columns}
+        return model_columns.issubset(table_columns)
+
+    @staticmethod
+    def _coerce_non_empty_str(value: Any) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        candidate = value.strip()
+        return candidate if candidate else None
+
+    @classmethod
+    def _schema_observation_source(
+        cls, *, summary_json: dict[str, Any], artifact_meta: dict[str, Any]
+    ) -> str:
+        source = cls._coerce_non_empty_str(summary_json.get("source"))
+        if source is not None:
+            return source
+        source = cls._coerce_non_empty_str(artifact_meta.get("schema_source"))
+        if source is not None:
+            return source
+        source = cls._coerce_non_empty_str(artifact_meta.get("source"))
+        if source is not None:
+            return source
+        return "snapshot_rebuild"
+
+    @staticmethod
+    def _schema_observation_sample_rows(
+        *, summary_json: dict[str, Any], artifact_meta: dict[str, Any]
+    ) -> Optional[int]:
+        summary_rows = summary_json.get("sample_rows")
+        if isinstance(summary_rows, int):
+            return summary_rows
+        meta_rows = artifact_meta.get("sample_rows")
+        if isinstance(meta_rows, int):
+            return meta_rows
+        schema_meta_rows = artifact_meta.get("schema_sample_rows")
+        if isinstance(schema_meta_rows, int):
+            return schema_meta_rows
+        return None
 
     def snapshot(
         self, dest_path: Path, *, checkpoint: bool = True, metadata: Optional[dict] = None

@@ -2004,23 +2004,34 @@ def _snapshot_payload(
     run_id: str,
     model_name: str = "demo",
     output_artifact_ids: list[uuid.UUID] | None = None,
+    facet: dict | None = None,
+    run_meta: dict | None = None,
+    output_artifact_meta: dict[uuid.UUID, dict] | None = None,
 ) -> dict:
     outputs = []
     for index, artifact_id in enumerate(output_artifact_ids or []):
+        artifact_meta = (
+            output_artifact_meta.get(artifact_id, {}) if output_artifact_meta else {}
+        )
         outputs.append(
             {
                 "id": str(artifact_id),
                 "key": f"output_{index}",
                 "container_uri": f"outputs://output_{index}.parquet",
                 "driver": "parquet",
+                "meta": artifact_meta,
             }
         )
     return {
-        "run": {"id": run_id, "model_name": model_name},
+        "run": {
+            "id": run_id,
+            "model_name": model_name,
+            "meta": run_meta or {},
+        },
         "inputs": [],
         "outputs": outputs,
         "config": {},
-        "facet": {},
+        "facet": facet or {},
     }
 
 
@@ -2104,6 +2115,179 @@ def test_rebuild_from_json_collects_malformed_errors(
     assert "bad.json" in result.errors[0]
     with maintenance.db.session_scope() as session:
         assert session.get(Run, "good_run") is not None
+
+
+def test_rebuild_from_json_full_mode_populates_run_config_kv(
+    maintenance: DatabaseMaintenance, tmp_path: Path
+) -> None:
+    json_dir = tmp_path / "rebuild_full_mode_run_facet"
+    json_dir.mkdir(parents=True, exist_ok=True)
+    (json_dir / "full_run.json").write_text(
+        json.dumps(
+            _snapshot_payload(
+                run_id="full_run",
+                facet={"alpha": 1, "nested": {"flag": True, "items": [1, 2]}},
+                run_meta={
+                    "config_facet_id": "facet_run_id",
+                    "config_facet_namespace": "custom_namespace",
+                },
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    result = maintenance.rebuild_from_json(json_dir, dry_run=False, mode="full")
+
+    assert result.errors == []
+    with maintenance.db.session_scope() as session:
+        rows = session.exec(
+            select(RunConfigKV)
+            .where(RunConfigKV.run_id == "full_run")
+            .order_by(RunConfigKV.key)
+        ).all()
+
+    assert [row.key for row in rows] == ["alpha", "nested.flag", "nested.items"]
+    assert all(row.facet_id == "facet_run_id" for row in rows)
+    assert all(row.namespace == "custom_namespace" for row in rows)
+    assert rows[0].value_type == "int"
+    assert rows[0].value_num == 1.0
+    assert rows[1].value_type == "bool"
+    assert rows[1].value_bool is True
+    assert rows[2].value_type == "json"
+    assert rows[2].value_json == [1, 2]
+
+
+def test_rebuild_from_json_full_mode_populates_artifact_schema_observation(
+    maintenance: DatabaseMaintenance, tmp_path: Path
+) -> None:
+    artifact_id = uuid.uuid4()
+    schema_id = "schema_full_mode_001"
+    json_dir = tmp_path / "rebuild_full_mode_schema"
+    json_dir.mkdir(parents=True, exist_ok=True)
+    (json_dir / "schema_run.json").write_text(
+        json.dumps(
+            _snapshot_payload(
+                run_id="schema_run",
+                output_artifact_ids=[artifact_id],
+                output_artifact_meta={
+                    artifact_id: {
+                        "schema_id": schema_id,
+                        "schema_summary": {
+                            "source": "file",
+                            "sample_rows": 42,
+                            "profile_version": 2,
+                        },
+                        "schema_profile": {"fields": [{"name": "col_a"}]},
+                    }
+                },
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    result = maintenance.rebuild_from_json(json_dir, dry_run=False, mode="full")
+
+    assert result.errors == []
+    with maintenance.db.session_scope() as session:
+        schema_row = session.get(ArtifactSchema, schema_id)
+        observations = session.exec(
+            select(ArtifactSchemaObservation).where(
+                ArtifactSchemaObservation.run_id == "schema_run",
+                ArtifactSchemaObservation.artifact_id == artifact_id,
+                ArtifactSchemaObservation.schema_id == schema_id,
+            )
+        ).all()
+
+    assert schema_row is not None
+    assert schema_row.summary_json["source"] == "file"
+    assert schema_row.profile_json == {"fields": [{"name": "col_a"}]}
+    assert len(observations) == 1
+    assert observations[0].source == "file"
+    assert observations[0].sample_rows == 42
+
+
+def test_rebuild_from_json_full_mode_is_idempotent_for_optional_rows(
+    maintenance: DatabaseMaintenance, tmp_path: Path
+) -> None:
+    artifact_id = uuid.uuid4()
+    json_dir = tmp_path / "rebuild_full_mode_idempotent"
+    json_dir.mkdir(parents=True, exist_ok=True)
+    (json_dir / "idempotent_run.json").write_text(
+        json.dumps(
+            _snapshot_payload(
+                run_id="idempotent_run",
+                facet={"a": 1, "b": "two"},
+                output_artifact_ids=[artifact_id],
+                output_artifact_meta={
+                    artifact_id: {
+                        "artifact_facet": {"color": "blue", "score": 3},
+                        "schema_id": "schema_idempotent",
+                        "schema_summary": {"source": "duckdb", "sample_rows": 7},
+                    }
+                },
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    first = maintenance.rebuild_from_json(json_dir, dry_run=False, mode="full")
+    second = maintenance.rebuild_from_json(json_dir, dry_run=False, mode="full")
+
+    assert first.errors == []
+    assert second.errors == []
+    with maintenance.db.session_scope() as session:
+        run_kv_rows = session.exec(
+            select(RunConfigKV).where(RunConfigKV.run_id == "idempotent_run")
+        ).all()
+        artifact_kv_rows = session.exec(
+            select(ArtifactKV).where(ArtifactKV.artifact_id == artifact_id)
+        ).all()
+        observation_rows = session.exec(
+            select(ArtifactSchemaObservation).where(
+                ArtifactSchemaObservation.run_id == "idempotent_run",
+                ArtifactSchemaObservation.artifact_id == artifact_id,
+            )
+        ).all()
+
+    assert len(run_kv_rows) == 2
+    assert len(artifact_kv_rows) == 2
+    assert len(observation_rows) == 1
+
+
+def test_rebuild_from_json_minimal_mode_does_not_populate_optional_tables(
+    maintenance: DatabaseMaintenance, tmp_path: Path
+) -> None:
+    artifact_id = uuid.uuid4()
+    json_dir = tmp_path / "rebuild_minimal_mode_optional"
+    json_dir.mkdir(parents=True, exist_ok=True)
+    (json_dir / "minimal_run.json").write_text(
+        json.dumps(
+            _snapshot_payload(
+                run_id="minimal_run",
+                facet={"x": 10},
+                output_artifact_ids=[artifact_id],
+                output_artifact_meta={
+                    artifact_id: {
+                        "artifact_facet": {"k": "v"},
+                        "schema_id": "schema_minimal",
+                        "schema_summary": {"source": "file", "sample_rows": 3},
+                    }
+                },
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    result = maintenance.rebuild_from_json(json_dir, dry_run=False, mode="minimal")
+
+    assert result.errors == []
+    with maintenance.db.session_scope() as session:
+        assert session.get(Run, "minimal_run") is not None
+        assert session.get(Artifact, artifact_id) is not None
+        assert session.exec(select(RunConfigKV)).all() == []
+        assert session.exec(select(ArtifactKV)).all() == []
+        assert session.exec(select(ArtifactSchema)).all() == []
+        assert session.exec(select(ArtifactSchemaObservation)).all() == []
 
 
 def test_compact_runs_vacuum_and_writes_audit(maintenance: DatabaseMaintenance) -> None:
