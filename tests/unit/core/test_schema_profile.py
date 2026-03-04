@@ -10,8 +10,10 @@ These tests validate the new "deduped schema" feature:
 
 import json
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import pytest
 from sqlalchemy import column, table
 from sqlmodel import Field, SQLModel, Session, select
 
@@ -22,6 +24,67 @@ from consist.models.artifact_schema import (
     ArtifactSchemaObservation,
     ArtifactSchemaRelation,
 )
+from consist.models.run import RunArtifactLink
+
+
+def test_get_artifact_filters_key_lookup_by_run_id(tracker):
+    artifact_run_a_id = uuid.uuid4()
+    artifact_run_b_id = uuid.uuid4()
+    artifact_run_a = Artifact(
+        id=artifact_run_a_id,
+        key="collision_key",
+        container_uri="inputs://collision_a.csv",
+        driver="csv",
+        hash="collision_hash_a",
+        run_id=None,
+        created_at=datetime.now(timezone.utc),
+    )
+    artifact_run_b = Artifact(
+        id=artifact_run_b_id,
+        key="collision_key",
+        container_uri="inputs://collision_b.csv",
+        driver="csv",
+        hash="collision_hash_b",
+        run_id="run_b",
+        created_at=datetime.now(timezone.utc) + timedelta(seconds=1),
+    )
+
+    with Session(tracker.engine) as session:
+        session.add(artifact_run_a)
+        session.add(artifact_run_b)
+        session.add(
+            RunArtifactLink(
+                run_id="run_a",
+                artifact_id=artifact_run_a_id,
+                direction="input",
+            )
+        )
+        session.add(
+            RunArtifactLink(
+                run_id="run_b",
+                artifact_id=artifact_run_b_id,
+                direction="output",
+            )
+        )
+        session.commit()
+
+    fetched_default = tracker.db.get_artifact("collision_key")
+    assert fetched_default is not None
+    assert fetched_default.id == artifact_run_b_id
+
+    fetched_run_a = tracker.db.get_artifact("collision_key", run_id="run_a")
+    assert fetched_run_a is not None
+    assert fetched_run_a.id == artifact_run_a_id
+
+    fetched_run_a_by_uuid = tracker.db.get_artifact(artifact_run_a_id, run_id="run_a")
+    assert fetched_run_a_by_uuid is not None
+    assert fetched_run_a_by_uuid.id == artifact_run_a_id
+
+    fetched_not_linked = tracker.db.get_artifact(artifact_run_a_id, run_id="run_b")
+    assert fetched_not_linked is None
+
+    fetched_missing = tracker.db.get_artifact("collision_key", run_id="run_missing")
+    assert fetched_missing is None
 
 
 def test_profile_and_persist_ingested_schema(tracker, sample_csv):
@@ -516,6 +579,130 @@ def test_get_artifact_schema_for_artifact_respects_prefer_source(tracker):
     assert fetched_duckdb is not None
     schema_duckdb_row, _ = fetched_duckdb
     assert schema_duckdb_row.id == schema_duckdb
+
+
+def test_select_artifact_schema_for_artifact_strict_source_metadata(tracker):
+    artifact_id = uuid.uuid4()
+    artifact = Artifact(
+        id=artifact_id,
+        key="artifact_select_source",
+        container_uri="inputs://artifact_select_source.csv",
+        driver="csv",
+        hash="select_source_hash",
+    )
+
+    schema_file = "schema_select_file"
+    schema_duckdb = "schema_select_duckdb"
+
+    with Session(tracker.engine) as session:
+        session.add(artifact)
+        session.add(
+            ArtifactSchema(
+                id=schema_file,
+                summary_json={"table_name": "file_table"},
+                profile_version=1,
+            )
+        )
+        session.add(
+            ArtifactSchema(
+                id=schema_duckdb,
+                summary_json={"table_name": "duckdb_table"},
+                profile_version=1,
+            )
+        )
+        session.add(
+            ArtifactSchemaField(
+                schema_id=schema_file,
+                ordinal_position=1,
+                name="file_col",
+                logical_type="varchar",
+                nullable=True,
+            )
+        )
+        session.add(
+            ArtifactSchemaField(
+                schema_id=schema_duckdb,
+                ordinal_position=1,
+                name="duckdb_col",
+                logical_type="varchar",
+                nullable=True,
+            )
+        )
+        session.add(
+            ArtifactSchemaObservation(
+                artifact_id=artifact_id,
+                schema_id=schema_file,
+                source="file",
+            )
+        )
+        session.add(
+            ArtifactSchemaObservation(
+                artifact_id=artifact_id,
+                schema_id=schema_duckdb,
+                source="duckdb",
+            )
+        )
+        session.commit()
+
+    selection = tracker.db.select_artifact_schema_for_artifact(
+        artifact_id=artifact_id,
+        prefer_source="duckdb",
+        strict_source=True,
+    )
+    assert selection is not None
+    assert selection.schema_id == schema_duckdb
+    assert selection.source == "duckdb"
+    assert selection.candidate_count == 2
+    assert selection.selection_rule == "explicit source=duckdb"
+
+
+def test_select_artifact_schema_for_artifact_strict_source_missing_raises(tracker):
+    artifact_id = uuid.uuid4()
+    artifact = Artifact(
+        id=artifact_id,
+        key="artifact_select_source_missing",
+        container_uri="inputs://artifact_select_source_missing.csv",
+        driver="csv",
+        hash="select_source_missing_hash",
+    )
+
+    schema_file = "schema_select_missing_file"
+    with Session(tracker.engine) as session:
+        session.add(artifact)
+        session.add(
+            ArtifactSchema(
+                id=schema_file,
+                summary_json={"table_name": "file_table"},
+                profile_version=1,
+            )
+        )
+        session.add(
+            ArtifactSchemaField(
+                schema_id=schema_file,
+                ordinal_position=1,
+                name="file_col",
+                logical_type="varchar",
+                nullable=True,
+            )
+        )
+        session.add(
+            ArtifactSchemaObservation(
+                artifact_id=artifact_id,
+                schema_id=schema_file,
+                source="file",
+            )
+        )
+        session.commit()
+
+    with pytest.raises(
+        ValueError,
+        match="No schema observation with source 'duckdb'",
+    ):
+        tracker.db.select_artifact_schema_for_artifact(
+            artifact_id=artifact_id,
+            prefer_source="duckdb",
+            strict_source=True,
+        )
 
 
 def test_get_artifact_schema_for_artifact_backfills_ordinals_from_profile_order(

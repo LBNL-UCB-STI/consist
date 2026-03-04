@@ -1,11 +1,9 @@
 import inspect
 import itertools
-import importlib
 import re
 from dataclasses import replace
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
-from datetime import datetime, timezone
 import logging
 import os
 from types import MappingProxyType
@@ -41,9 +39,18 @@ from consist.core.artifacts import ArtifactManager
 from consist.core.cache import (
     ActiveRunCacheOptions,
 )
+from consist.core.run_resolution import (
+    is_xarray_dataset as _is_xarray_dataset,
+    preview_run_artifact_dir as _preview_run_artifact_dir,
+    resolve_input_reference_configured as _resolve_input_reference_configured,
+    resolve_input_refs as _resolve_input_refs,
+    resolve_output_path as _resolve_output_path,
+    write_xarray_dataset as _write_xarray_dataset,
+)
 from consist.core.tracker_artifact_logging import ArtifactLoggingCoordinator
 from consist.core.tracker_lifecycle import RunLifecycleCoordinator
 from consist.core.tracker_orchestration import RunTraceCoordinator, RunTraceHelpers
+from consist.core.tracker_config import TrackerConfig
 from consist.core.config_canonicalization import (
     ConfigAdapter,
     ConfigAdapterOptions,
@@ -60,7 +67,12 @@ from consist.core.events import EventManager
 from consist.core.fs import FileSystemManager
 from consist.core.identity import IdentityManager
 from consist.core.indexing import IndexBySpec
-from consist.core.persistence import DatabaseManager, ProvenanceWriter
+from consist.core.persistence import (
+    ArtifactSchemaSelection,
+    DatabaseManager,
+    ProvenanceWriter,
+    SchemaProfileSource,
+)
 from consist.core.views import ViewFactory, ViewRegistry
 from consist.core.ingestion import ingest_artifact
 from consist.core.lineage import LineageService
@@ -80,7 +92,6 @@ from consist.models.run import (
     Run,
     RunArtifacts,
     RunResult,
-    resolve_run_result_output,
 )
 from consist.types import (
     ArtifactRef,
@@ -98,8 +109,6 @@ if TYPE_CHECKING:
     from consist.core.coupler import Coupler
     from consist.core.step_context import StepContext
 
-UTC = timezone.utc
-
 AccessMode = Literal["standard", "analysis", "read_only"]
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -112,180 +121,11 @@ def _quote_ident(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
-def _resolve_input_reference(
-    tracker: "Tracker", ref: RunInputRef, key: Optional[str]
-) -> ArtifactRef:
-    return _resolve_input_reference_configured(
-        tracker,
-        ref,
-        key,
-        type_label="inputs",
-        missing_path_error=(
-            "Problem: Input path does not exist: {path!s}\n"
-            "Cause: The provided input path is missing or not accessible.\n"
-            "Fix: Pass an existing file/directory path or a valid Artifact/RunResult "
-            "reference."
-        ),
-    )
-
-
-def _resolve_input_reference_configured(
-    tracker: "Tracker",
-    ref: RunInputRef,
-    key: Optional[str],
-    *,
-    type_label: str,
-    missing_path_error: str,
-    missing_string_error: Optional[str] = None,
-    string_ref_resolver: Optional[Callable[[str], Optional[ArtifactRef]]] = None,
-) -> ArtifactRef:
-    if isinstance(ref, Artifact):
-        return ref
-    if isinstance(ref, RunResult):
-        return resolve_run_result_output(ref)
-
-    if isinstance(ref, str):
-        if string_ref_resolver is not None:
-            resolved_ref = string_ref_resolver(ref)
-            if resolved_ref is not None:
-                return resolved_ref
-        ref_str = ref
-    elif isinstance(ref, Path):
-        ref_str = str(ref)
-    else:
-        raise TypeError(
-            format_problem_cause_fix(
-                problem=(
-                    f"{type_label} must be Artifact, RunResult, Path, or str "
-                    f"(got {type(ref)})."
-                ),
-                cause="An unsupported input reference type was provided.",
-                fix=(
-                    "Pass Artifact/RunResult references, or filesystem paths as str/Path."
-                ),
-            )
-        )
-
-    resolved = (
-        Path(tracker.resolve_uri(ref_str))
-        if isinstance(ref, str) and "://" in ref_str
-        else Path(ref_str)
-    )
-    if not resolved.exists():
-        if isinstance(ref, str) and missing_string_error is not None:
-            raise ValueError(missing_string_error.format(value=ref, path=resolved))
-        raise ValueError(missing_path_error.format(path=resolved))
-    if key is None:
-        return resolved
-    return tracker.artifacts.create_artifact(
-        resolved, run_id=None, key=key, direction="input"
-    )
-
-
-def _resolve_input_ref(
-    tracker: "Tracker", ref: RunInputRef, key: Optional[str]
-) -> ArtifactRef:
-    return _resolve_input_reference(tracker, ref, key)
-
-
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _is_xarray_dataset(value: Any) -> bool:
-    try:
-        xr = importlib.import_module("xarray")
-    except ImportError:
-        return False
-    return isinstance(value, xr.Dataset)
-
-
-def _write_xarray_dataset(dataset: Any, path: Path) -> None:
-    try:
-        xr = importlib.import_module("xarray")
-    except ImportError as exc:
-        raise ImportError("xarray is required to log xarray.Dataset outputs.") from exc
-    if not isinstance(dataset, xr.Dataset):
-        raise TypeError(f"Expected xarray.Dataset, got {type(dataset)}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    dataset.to_zarr(path, mode="w")
-
-
-def _resolve_input_refs(
-    tracker: "Tracker",
-    inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]],
-    depends_on: Optional[List[RunInputRef]],
-    *,
-    include_keyed_artifacts: bool,
-) -> tuple[List[ArtifactRef], Dict[str, Artifact]]:
-    resolved_inputs: List[ArtifactRef] = []
-    input_artifacts_by_key: Dict[str, Artifact] = {}
-    if inputs is not None:
-        if isinstance(inputs, MappingABC):
-            typed_inputs = cast(Mapping[str, RunInputRef], inputs)
-            for key, ref in typed_inputs.items():
-                if not isinstance(key, str):
-                    raise TypeError(
-                        f"inputs mapping keys must be str (got {type(key)})."
-                    )
-                resolved = _resolve_input_ref(tracker, ref, key)
-                resolved_inputs.append(resolved)
-                if include_keyed_artifacts and isinstance(resolved, Artifact):
-                    input_artifacts_by_key[key] = resolved
-        else:
-            for ref in list(inputs):
-                resolved_inputs.append(_resolve_input_ref(tracker, ref, None))
-
-    if depends_on:
-        for dep in depends_on:
-            resolved_inputs.append(_resolve_input_ref(tracker, dep, None))
-
-    return resolved_inputs, input_artifacts_by_key
-
-
-def _preview_run_artifact_dir(
-    tracker: "Tracker",
-    *,
-    run_id: str,
-    model: str,
-    description: Optional[str],
-    year: Optional[int],
-    iteration: Optional[int],
-    parent_run_id: Optional[str],
-    tags: Optional[List[str]],
-) -> Path:
-    preview = Run(
-        id=run_id,
-        model_name=model,
-        description=description,
-        year=year,
-        iteration=iteration,
-        parent_run_id=parent_run_id,
-        tags=tags or [],
-        status="running",
-        config_hash=None,
-        git_hash=None,
-        meta={},
-        started_at=datetime.now(UTC),
-        created_at=datetime.now(UTC),
-    )
-    return tracker.run_artifact_dir(preview)
-
-
-def _resolve_output_path(tracker: "Tracker", ref: ArtifactRef, base_dir: Path) -> Path:
-    if isinstance(ref, Artifact):
-        raw = ref.path or tracker.resolve_uri(ref.container_uri)
-        return Path(raw)
-    ref_str = str(ref)
-    if isinstance(ref, str) and "://" in ref_str:
-        return Path(tracker.resolve_uri(ref_str))
-    ref_path = Path(ref_str)
-    if not ref_path.is_absolute():
-        return base_dir / ref_path
-    return ref_path
 
 
 class Tracker:
@@ -307,6 +147,15 @@ class Tracker:
     5.  Facilitating **smart caching** based on a Merkle DAG strategy, enabling "run forking" and "hydration"
         of previously computed results.
     """
+
+    @classmethod
+    def from_config(cls, config: TrackerConfig) -> "Tracker":
+        """
+        Construct a tracker from a ``TrackerConfig`` object.
+        """
+        if not isinstance(config, TrackerConfig):
+            raise TypeError("config must be a TrackerConfig instance.")
+        return cls(**config.to_init_kwargs())
 
     def __init__(
         self,
@@ -737,7 +586,7 @@ class Tracker:
         abstract: bool = True,
         include_system_cols: bool = False,
         include_stats_comments: bool = True,
-        prefer_source: Optional[Literal["file", "duckdb"]] = None,
+        prefer_source: Optional[SchemaProfileSource] = None,
     ) -> str:
         """
         Export a captured artifact schema as a SQLModel stub for manual editing.
@@ -766,7 +615,7 @@ class Tracker:
             Whether to include Consist system columns in the stub.
         include_stats_comments : bool, default True
             Whether to include column-level stats as comments.
-        prefer_source : {"file", "duckdb"}, optional
+        prefer_source : {"file", "duckdb", "user_provided"}, optional
             Preference hint for when user_provided schema does not exist. This is
             useful when an artifact has both a file profile (pandas dtypes) and a
             duckdb profile (post-ingestion types). Ignored if schema_id is provided
@@ -778,6 +627,7 @@ class Tracker:
 
             - "file": Prefer the original file schema (CSV/Parquet with pandas dtypes)
             - "duckdb": Prefer the post-ingestion schema from the DuckDB table
+            - "user_provided": Prefer manually curated schema observations explicitly
             - None (default): Prefer file, as it preserves richer type information
               (e.g., pandas category)
 
@@ -3767,32 +3617,60 @@ class Tracker:
 
     # --- Retrieval Helpers ---
 
-    def get_artifact(self, key_or_id: Union[str, uuid.UUID]) -> Optional[Artifact]:
+    def get_artifact(
+        self,
+        key_or_id: Union[str, uuid.UUID],
+        *,
+        run_id: Optional[str] = None,
+    ) -> Optional[Artifact]:
         """
-        Retrieves an Artifact by its semantic key or UUID.
-
-        This method provides a flexible way to locate artifacts, first checking
-        the in-memory context of the current run, and then querying the database
-        for persistent records.
+        Retrieves an Artifact by semantic key or UUID, optionally scoped to run_id.
 
         Parameters
         ----------
         key_or_id : Union[str, uuid.UUID]
-            The artifact's 'key' (e.g., "households") or its unique UUID.
-            When a string is provided, the most recently created artifact matching
-            that key is returned.
+            The artifact key (e.g., "households") or artifact UUID.
+        run_id : Optional[str], optional
+            If provided, limits results to artifacts linked to this run (as either
+            input or output) via ``run_artifact_link``.
 
         Returns
         -------
         Optional[Artifact]
-            The found `Artifact` object, or `None` if no matching artifact is found.
+            The found artifact, or ``None`` if not found.
         """
         if self.db:
-            artifact = self.db.get_artifact(key_or_id)
+            artifact = self.db.get_artifact(key_or_id, run_id=run_id)
             if artifact is not None:
                 set_tracker_ref(artifact, self)
             return artifact
         return None
+
+    def select_artifact_schema_for_artifact(
+        self,
+        *,
+        artifact_id: Union[str, uuid.UUID],
+        source: Optional[SchemaProfileSource] = None,
+        strict_source: bool = False,
+    ) -> Optional[ArtifactSchemaSelection]:
+        """
+        Resolve schema selection metadata for an artifact.
+
+        Returns selection details (schema_id/source/candidate_count/rule) used for
+        explainability and deterministic source selection in shell UX.
+        """
+        if not self.db:
+            raise ValueError(
+                "Schema selection requires a configured database (db_path)."
+            )
+        artifact_uuid = (
+            uuid.UUID(artifact_id) if isinstance(artifact_id, str) else artifact_id
+        )
+        return self.db.select_artifact_schema_for_artifact(
+            artifact_id=artifact_uuid,
+            prefer_source=source,
+            strict_source=strict_source,
+        )
 
     def get_artifact_by_uri(
         self,

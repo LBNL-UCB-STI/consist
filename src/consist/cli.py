@@ -1907,12 +1907,16 @@ class ConsistShell(cmd.Cmd):
     _PREVIEW_COMPLETION_FLAGS: Tuple[str, ...] = ("--rows", "-n")
     _SCENARIOS_COMPLETION_FLAGS: Tuple[str, ...] = ("--limit",)
     _SCHEMA_STUB_COMPLETION_FLAGS: Tuple[str, ...] = (
+        "--artifact-id",
+        "--run-id",
+        "--source",
         "--class-name",
         "--table-name",
         "--include-system-cols",
         "--no-stats-comments",
         "--concrete",
     )
+    _SCHEMA_STUB_SOURCES: Tuple[str, ...] = ("file", "duckdb", "user_provided")
     _PICKER_LIMIT = 20
 
     def __init__(self, tracker: Tracker, *, trust_db: bool = False):
@@ -2052,6 +2056,98 @@ class ConsistShell(cmd.Cmd):
             missing_message="[yellow]No artifacts available.[/yellow]",
             prompt="Choose artifact number (Enter to cancel): ",
         )
+
+    def _parse_schema_stub_args(self, arg: str) -> Dict[str, Any]:
+        args = self._safe_split(arg)
+        parsed: Dict[str, Any] = {
+            "artifact_key": None,
+            "artifact_id": None,
+            "run_id": None,
+            "source": None,
+            "class_name": None,
+            "table_name": None,
+            "include_system_cols": False,
+            "include_stats_comments": True,
+            "abstract": True,
+        }
+
+        i = 0
+        while i < len(args):
+            token = args[i]
+            if token == "--class-name":
+                if i + 1 >= len(args):
+                    raise ValueError("--class-name requires a value")
+                parsed["class_name"] = args[i + 1]
+                i += 2
+                continue
+            if token == "--table-name":
+                if i + 1 >= len(args):
+                    raise ValueError("--table-name requires a value")
+                parsed["table_name"] = args[i + 1]
+                i += 2
+                continue
+            if token == "--artifact-id":
+                if i + 1 >= len(args):
+                    raise ValueError("--artifact-id requires a UUID value")
+                parsed["artifact_id"] = args[i + 1]
+                i += 2
+                continue
+            if token == "--run-id":
+                if i + 1 >= len(args):
+                    raise ValueError("--run-id requires a value")
+                parsed["run_id"] = args[i + 1]
+                i += 2
+                continue
+            if token == "--source":
+                if i + 1 >= len(args):
+                    raise ValueError(
+                        "--source requires a value (file|duckdb|user_provided)"
+                    )
+                parsed["source"] = args[i + 1]
+                i += 2
+                continue
+            if token == "--include-system-cols":
+                parsed["include_system_cols"] = True
+                i += 1
+                continue
+            if token == "--no-stats-comments":
+                parsed["include_stats_comments"] = False
+                i += 1
+                continue
+            if token == "--concrete":
+                parsed["abstract"] = False
+                i += 1
+                continue
+            if token.startswith("--"):
+                raise ValueError(f"Unknown option: {token}")
+            if parsed["artifact_key"] is not None:
+                raise ValueError(
+                    "schema_stub accepts at most one positional artifact_key."
+                )
+            parsed["artifact_key"] = token
+            i += 1
+
+        artifact_key = parsed["artifact_key"]
+        artifact_id = parsed["artifact_id"]
+        run_id = parsed["run_id"]
+        source = parsed["source"]
+
+        if artifact_key is None and artifact_id is None:
+            raise ValueError("artifact_key required (or provide --artifact-id).")
+        if artifact_key is not None and artifact_id is not None:
+            raise ValueError("Provide either artifact_key or --artifact-id, not both.")
+        if artifact_id is not None:
+            try:
+                uuid.UUID(str(artifact_id))
+            except ValueError as exc:
+                raise ValueError("--artifact-id must be a UUID") from exc
+        if run_id is not None and artifact_id is not None:
+            raise ValueError("--run-id can only be used with artifact_key selection.")
+        if source is not None and source not in self._SCHEMA_STUB_SOURCES:
+            allowed = "|".join(self._SCHEMA_STUB_SOURCES)
+            raise ValueError(f"--source must be one of: {allowed}")
+
+        return parsed
 
     def do_ls(self, arg: str) -> None:
         """Alias for runs/artifacts. Usage: ls [<run_id>]"""
@@ -2301,58 +2397,71 @@ class ConsistShell(cmd.Cmd):
             console.print(f"[red]Error: {exc}[/red]")
 
     def do_schema_stub(self, arg: str) -> None:
-        """Export SQLModel schema stub. Usage: schema_stub <artifact_key> [--class-name NAME] [--table-name NAME] [--include-system-cols] [--no-stats-comments] [--concrete]"""
+        """Export SQLModel schema stub. Usage: schema_stub <artifact_key>|--artifact-id UUID [--run-id RUN_ID] [--source file|duckdb|user_provided] [--class-name NAME] [--table-name NAME] [--include-system-cols] [--no-stats-comments] [--concrete]"""
         try:
-            args = self._safe_split(arg)
-            if not args:
-                console.print("[red]Error: artifact_key required[/red]")
-                return
+            parsed = self._parse_schema_stub_args(arg)
+            artifact_key = parsed["artifact_key"]
+            artifact_id = parsed["artifact_id"]
+            run_id = parsed["run_id"]
+            source = parsed["source"]
 
-            artifact_key = args[0]
-            class_name = None
-            table_name = None
-            include_system_cols = False
-            include_stats_comments = True
-            abstract = True
-
-            i = 1
-            while i < len(args):
-                if args[i] == "--class-name" and i + 1 < len(args):
-                    class_name = args[i + 1]
-                    i += 2
-                elif args[i] == "--table-name" and i + 1 < len(args):
-                    table_name = args[i + 1]
-                    i += 2
-                elif args[i] == "--include-system-cols":
-                    include_system_cols = True
-                    i += 1
-                elif args[i] == "--no-stats-comments":
-                    include_stats_comments = False
-                    i += 1
-                elif args[i] == "--concrete":
-                    abstract = False
-                    i += 1
-                else:
-                    i += 1
-
-            artifact = self.tracker.get_artifact(artifact_key)
+            if artifact_id is not None:
+                artifact = self.tracker.get_artifact(artifact_id)
+            else:
+                artifact = self.tracker.get_artifact(artifact_key, run_id=run_id)
             if not artifact:
-                console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
+                if artifact_key is not None and run_id is not None:
+                    console.print(
+                        f"[red]Artifact '{artifact_key}' not found for run '{run_id}'.[/red]"
+                    )
+                elif artifact_key is not None:
+                    console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
+                else:
+                    console.print(f"[red]Artifact '{artifact_id}' not found.[/red]")
                 return
+
+            export_selector: Dict[str, Any] = {"artifact_id": str(artifact.id)}
+            resolver = getattr(
+                self.tracker, "select_artifact_schema_for_artifact", None
+            )
+            if callable(resolver):
+                selection = resolver(
+                    artifact_id=str(artifact.id),
+                    source=source,
+                    strict_source=source is not None,
+                )
+                schema_id = getattr(selection, "schema_id", None)
+                selected_source = getattr(selection, "source", None)
+                candidate_count = getattr(selection, "candidate_count", None)
+                selection_rule = getattr(selection, "selection_rule", None)
+                if (
+                    isinstance(schema_id, str)
+                    and isinstance(selected_source, str)
+                    and isinstance(candidate_count, int)
+                    and isinstance(selection_rule, str)
+                ):
+                    console.print(
+                        "[dim]Schema selection: "
+                        f"source={selected_source}, "
+                        f"schema_id={schema_id}, "
+                        f"candidates={candidate_count}[/dim]"
+                    )
+                    console.print(f"[dim]Selection rule: {selection_rule}[/dim]")
+                    export_selector = {"schema_id": schema_id}
 
             code = self.tracker.export_schema_sqlmodel(
-                artifact_id=str(artifact.id),
-                class_name=class_name,
-                table_name=table_name,
-                abstract=abstract,
-                include_system_cols=include_system_cols,
-                include_stats_comments=include_stats_comments,
+                **export_selector,
+                class_name=parsed["class_name"],
+                table_name=parsed["table_name"],
+                abstract=parsed["abstract"],
+                include_system_cols=parsed["include_system_cols"],
+                include_stats_comments=parsed["include_stats_comments"],
             )
             print(code)
         except KeyError:
             console.print("[red]Captured schema not found for this artifact.[/red]")
         except ValueError as exc:
-            console.print(f"[red]{exc}[/red]")
+            console.print(f"[red]Error: {exc}[/red]")
         except Exception as exc:
             console.print(f"[red]Error: {exc}[/red]")
 

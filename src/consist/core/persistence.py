@@ -8,6 +8,7 @@ import json
 import shutil
 import tempfile
 import contextvars
+from dataclasses import dataclass
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,6 +66,16 @@ _RETRYABLE_DB_ERROR_MARKERS = (
     "another process",
 )
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+SchemaProfileSource = Literal["file", "duckdb", "user_provided"]
+
+
+@dataclass(frozen=True)
+class ArtifactSchemaSelection:
+    schema_id: str
+    source: str
+    candidate_count: int
+    selection_rule: str
 
 
 def _is_retryable_db_error(message: str) -> bool:
@@ -1349,24 +1360,145 @@ class DatabaseManager:
             logging.warning(f"Signature lookup failed: {e}")
             return None
 
-    def get_artifact(self, key_or_id: str | uuid.UUID) -> Optional[Artifact]:
+    def get_artifact(
+        self,
+        key_or_id: str | uuid.UUID,
+        *,
+        run_id: Optional[str] = None,
+    ) -> Optional[Artifact]:
         def _query():
             with self.session_scope() as session:
                 try:
                     # Try UUID lookup first
                     uuid_obj = uuid.UUID(str(key_or_id))
-                    return session.get(Artifact, uuid_obj)
+                    artifact = session.get(Artifact, uuid_obj)
+                    if artifact is None:
+                        return None
+                    if run_id is not None:
+                        link = session.exec(
+                            select(RunArtifactLink)
+                            .where(RunArtifactLink.run_id == run_id)
+                            .where(RunArtifactLink.artifact_id == artifact.id)
+                            .limit(1)
+                        ).first()
+                        if link is None:
+                            return None
+                    return artifact
                 except ValueError:
-                    # Fallback to Key lookup (most recent)
-                    return session.exec(
-                        select(Artifact)
-                        .where(Artifact.key == key_or_id)
-                        .order_by(col(Artifact.created_at).desc())
-                        .limit(1)
-                    ).first()
+                    # Fallback to key lookup (most recent), optionally scoped to
+                    # artifacts linked to the requested run.
+                    statement = select(Artifact).where(Artifact.key == key_or_id)
+                    if run_id is not None:
+                        statement = statement.join(
+                            RunArtifactLink,
+                            Artifact.id == RunArtifactLink.artifact_id,  # ty: ignore[invalid-argument-type]
+                        ).where(RunArtifactLink.run_id == run_id)
+                    statement = statement.order_by(
+                        col(Artifact.created_at).desc()
+                    ).limit(1)
+                    return session.exec(statement).first()
 
         try:
             return self.execute_with_retry(_query)
+        except Exception:
+            return None
+
+    def select_artifact_schema_for_artifact(
+        self,
+        *,
+        artifact_id: uuid.UUID,
+        prefer_source: Optional[SchemaProfileSource] = None,
+        strict_source: bool = False,
+    ) -> Optional[ArtifactSchemaSelection]:
+        """
+        Select a schema profile for an artifact and return explainable selection metadata.
+
+        Selection order (default):
+        user_provided > prefer_source (if set) > file > duckdb > most-recent fallback.
+        """
+
+        def _query() -> Optional[ArtifactSchemaSelection]:
+            with self.session_scope() as session:
+                observations = session.exec(
+                    select(ArtifactSchemaObservation)
+                    .where(ArtifactSchemaObservation.artifact_id == artifact_id)
+                    .order_by(col(ArtifactSchemaObservation.observed_at).desc())
+                ).all()
+
+                if not observations:
+                    return None
+
+                candidate_count = len(observations)
+
+                if strict_source and prefer_source is not None:
+                    explicit = next(
+                        (obs for obs in observations if obs.source == prefer_source),
+                        None,
+                    )
+                    if explicit is None:
+                        raise ValueError(
+                            f"No schema observation with source '{prefer_source}' "
+                            f"for artifact '{artifact_id}'. "
+                            f"Available candidates: {candidate_count}."
+                        )
+                    return ArtifactSchemaSelection(
+                        schema_id=explicit.schema_id,
+                        source=explicit.source,
+                        candidate_count=candidate_count,
+                        selection_rule=f"explicit source={prefer_source}",
+                    )
+
+                user_provided_obs = next(
+                    (obs for obs in observations if obs.source == "user_provided"), None
+                )
+                if user_provided_obs is not None:
+                    return ArtifactSchemaSelection(
+                        schema_id=user_provided_obs.schema_id,
+                        source=user_provided_obs.source,
+                        candidate_count=candidate_count,
+                        selection_rule="user_provided override",
+                    )
+
+                if prefer_source is not None:
+                    preferred = next(
+                        (obs for obs in observations if obs.source == prefer_source),
+                        None,
+                    )
+                    if preferred is not None:
+                        return ArtifactSchemaSelection(
+                            schema_id=preferred.schema_id,
+                            source=preferred.source,
+                            candidate_count=candidate_count,
+                            selection_rule=f"preferred source={prefer_source}",
+                        )
+
+                for source in ("file", "duckdb"):
+                    fallback = next(
+                        (obs for obs in observations if obs.source == source), None
+                    )
+                    if fallback is not None:
+                        return ArtifactSchemaSelection(
+                            schema_id=fallback.schema_id,
+                            source=fallback.source,
+                            candidate_count=candidate_count,
+                            selection_rule="default source order file>duckdb",
+                        )
+
+                # Unknown source values only: use most recent observation.
+                most_recent = observations[0]
+                return ArtifactSchemaSelection(
+                    schema_id=most_recent.schema_id,
+                    source=most_recent.source,
+                    candidate_count=candidate_count,
+                    selection_rule="most recent observation fallback",
+                )
+
+        try:
+            return self.execute_with_retry(
+                _query, operation_name="select_artifact_schema_for_artifact"
+            )
+        except ValueError:
+            raise
         except Exception:
             return None
 
@@ -1411,7 +1543,7 @@ class DatabaseManager:
         *,
         artifact_id: uuid.UUID,
         backfill_ordinals: bool = True,
-        prefer_source: Optional[Literal["file", "duckdb"]] = None,
+        prefer_source: Optional[SchemaProfileSource] = None,
     ) -> Optional[Tuple[ArtifactSchema, List[ArtifactSchemaField]]]:
         """
         Fetch the schema for an artifact, optionally preferring a specific profiling source.
@@ -1425,7 +1557,7 @@ class DatabaseManager:
             The artifact to fetch the schema for.
         backfill_ordinals : bool, default True
             If True, automatically infer missing column ordinal positions from column order.
-        prefer_source : {"file", "duckdb"}, optional
+        prefer_source : {"file", "duckdb", "user_provided"}, optional
             Preference hint for when user_provided schema does not exist. If specified
             and no user_provided schema is available, prefer schemas from this source.
             If the preferred source has no observations, falls back to the default order
@@ -1455,62 +1587,16 @@ class DatabaseManager:
         are never accidentally replaced by auto-profiled schemas.
         """
 
-        def _query_observations() -> Optional[str]:
-            """
-            Query all schema observations for this artifact and apply preference logic
-            to select the best schema_id.
-            """
-            with self.session_scope() as session:
-                # Fetch all observations for this artifact, most recent first.
-                # We order by observed_at DESC so that if the same source has multiple
-                # observations, we get the most recent one.
-                observations = session.exec(
-                    select(ArtifactSchemaObservation)
-                    .where(ArtifactSchemaObservation.artifact_id == artifact_id)
-                    .order_by(col(ArtifactSchemaObservation.observed_at).desc())
-                ).all()
-
-                if not observations:
-                    return None
-
-                # User-provided schemas are ALWAYS preferred if they exist, because they
-                # represent manually-curated, production-ready definitions with FK constraints,
-                # indexes, etc. This is unconditional: prefer_source does not override it.
-                user_provided_obs = next(
-                    (obs for obs in observations if obs.source == "user_provided"), None
-                )
-                if user_provided_obs:
-                    return user_provided_obs.schema_id
-
-                # If user explicitly requested a source and user_provided doesn't exist,
-                # use their preference.
-                if prefer_source:
-                    matching = next(
-                        (obs for obs in observations if obs.source == prefer_source),
-                        None,
-                    )
-                    if matching:
-                        return matching.schema_id
-
-                # Fall back to default preference order. File profiles preserve more type
-                # information than database profiles (e.g., pandas category vs VARCHAR),
-                # so file > duckdb (when user_provided is not available).
-                default_source_order = ["file", "duckdb"]
-                for source in default_source_order:
-                    matching = next(
-                        (obs for obs in observations if obs.source == source), None
-                    )
-                    if matching:
-                        return matching.schema_id
-
-                return None
-
-        schema_id = self.execute_with_retry(_query_observations)
-        if schema_id is None:
+        selection = self.select_artifact_schema_for_artifact(
+            artifact_id=artifact_id,
+            prefer_source=prefer_source,
+            strict_source=False,
+        )
+        if selection is None:
             return None
 
         return self.get_artifact_schema(
-            schema_id=schema_id, backfill_ordinals=backfill_ordinals
+            schema_id=selection.schema_id, backfill_ordinals=backfill_ordinals
         )
 
     def get_artifacts_for_run(self, run_id: str) -> List[Tuple[Artifact, str]]:
