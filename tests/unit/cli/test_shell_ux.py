@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -156,6 +157,18 @@ def test_shell_completions_include_aliases_flags_and_dynamic_values(tmp_path) ->
         "--class-name",
         "--concrete",
     ]
+    assert shell.complete_db("i", "db i", 3, 4) == ["inspect"]
+    assert shell.complete_schema("c", "schema c", 7, 8) == ["capture-file"]
+    assert shell.complete_views("c", "views c", 6, 7) == ["create"]
+    assert shell.complete_cli("d", "cli d", 4, 5) == ["db"]
+    assert shell.complete_consist("s", "consist s", 8, 9) == [
+        "search",
+        "scenarios",
+        "scenario",
+        "summary",
+        "show",
+        "schema",
+    ]
 
 
 def test_shell_completion_falls_back_to_empty_on_query_failure(tmp_path) -> None:
@@ -213,3 +226,140 @@ def test_shell_history_saves_on_exit_and_eof(tmp_path) -> None:
         shell.do_EOF("")
 
     fake_readline_eof.write_history_file.assert_called_once_with(str(history_path))
+
+
+def test_shell_routed_db_command_applies_db_path_default(tmp_path) -> None:
+    tracker = MagicMock()
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker, db_path="shell.db")
+
+    with patch("consist.cli.app") as app_mock:
+        shell.do_db("inspect --json")
+
+    app_mock.assert_called_once()
+    assert app_mock.call_args.kwargs["args"] == [
+        "db",
+        "inspect",
+        "--json",
+        "--db-path",
+        "shell.db",
+    ]
+
+
+def test_shell_routed_schema_capture_file_applies_shell_defaults(tmp_path) -> None:
+    tracker = MagicMock()
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(
+            tracker,
+            db_path="shell.db",
+            trust_db=True,
+            mount_overrides={"workspace": "/archive/workspace"},
+        )
+
+    with patch("consist.cli.app") as app_mock:
+        shell.do_schema("capture-file --artifact-key trips")
+
+    app_mock.assert_called_once()
+    routed_args = app_mock.call_args.kwargs["args"]
+    assert routed_args[:4] == ["schema", "capture-file", "--artifact-key", "trips"]
+    assert "--db-path" in routed_args
+    assert "shell.db" in routed_args
+    assert "--trust-db" in routed_args
+    assert "--mount" in routed_args
+    assert "workspace=/archive/workspace" in routed_args
+
+
+def test_shell_artifacts_query_mode_routes_to_cli_parser(tmp_path) -> None:
+    tracker = MagicMock()
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+
+    with patch.object(shell, "_invoke_cli_command") as routed:
+        shell.do_artifacts("--param beam.year=2018 --limit 5")
+
+    routed.assert_called_once_with("artifacts", "--param beam.year=2018 --limit 5")
+
+
+def test_shell_runs_json_mode_uses_output_json(tmp_path) -> None:
+    tracker = MagicMock()
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+
+    fake_run = SimpleNamespace(
+        id="run-1",
+        model_name="model",
+        status="completed",
+        parent_run_id=None,
+        year=2025,
+        created_at=datetime(2025, 1, 1, 12, 0, 0),
+        duration_seconds=1.5,
+        tags=["test"],
+        meta={"k": "v"},
+    )
+
+    with (
+        patch("consist.cli._tracker_session") as tracker_session,
+        patch("consist.cli.queries.get_runs", return_value=[fake_run]),
+        patch("consist.cli.output_json") as output_json_mock,
+    ):
+        tracker_session.return_value.__enter__.return_value = MagicMock()
+        shell.do_runs("--json")
+
+    output_json_mock.assert_called_once()
+    payload = output_json_mock.call_args.args[0]
+    assert payload[0]["id"] == "run-1"
+    assert payload[0]["created_at"] == "2025-01-01T12:00:00"
+
+
+def test_shell_artifacts_accepts_cached_run_ref(tmp_path) -> None:
+    tracker = MagicMock()
+    tracker.get_run.return_value = MagicMock()
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+    shell._last_run_ids = ["run-abc-123"]
+
+    with patch("consist.cli._render_artifacts_table", return_value=[]):
+        shell.do_artifacts("#1")
+
+    tracker.get_run.assert_called_once_with("run-abc-123")
+
+
+def test_shell_preview_accepts_cached_artifact_ref(tmp_path) -> None:
+    tracker = MagicMock()
+    tracker.get_artifact.return_value = SimpleNamespace(
+        id="artifact-id",
+        key="artifact-key",
+        driver="csv",
+        run_id=None,
+        container_uri="inputs://data/file.csv",
+        meta={},
+    )
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+    shell._last_artifact_ids = ["artifact-id"]
+
+    with patch(
+        "consist.cli._load_artifact_with_diagnostics",
+        return_value=pd.DataFrame({"value": [1]}),
+    ):
+        shell.do_preview("@1")
+
+    tracker.get_artifact.assert_called_once_with("artifact-id")

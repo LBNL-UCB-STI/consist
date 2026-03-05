@@ -308,7 +308,59 @@ def test_shell_schema_stub_rejects_key_and_artifact_id_together(capsys) -> None:
     )
 
     out = capsys.readouterr().out
-    assert "Provide either artifact_key or --artifact-id, not both." in out
+    assert "Provide exactly one selector" in out
+
+
+def test_shell_preview_supports_hash_selector(capsys) -> None:
+    tracker = MagicMock()
+    tracker.get_artifact.return_value = None
+    shell = ConsistShell(tracker)
+    shell._lookup_artifact_by_hash_prefix = MagicMock(
+        return_value=SimpleNamespace(
+            id="artifact-id-123",
+            key="resolved_by_hash",
+            run_id="run-1",
+            driver="csv",
+            container_uri="inputs://file.csv",
+            meta={},
+        )
+    )
+
+    with patch(
+        "consist.cli._load_artifact_with_diagnostics",
+        return_value=pd.DataFrame({"x": [1]}),
+    ):
+        shell.do_preview("--hash deadbeef")
+
+    shell._lookup_artifact_by_hash_prefix.assert_called_once_with(
+        "deadbeef", command_name="preview"
+    )
+
+
+def test_shell_schema_stub_supports_hash_selector(capsys) -> None:
+    tracker = MagicMock()
+    tracker.export_schema_sqlmodel.return_value = "class ExportedModel(SQLModel): ..."
+    shell = ConsistShell(tracker)
+    shell._lookup_artifact_by_hash_prefix = MagicMock(
+        return_value=SimpleNamespace(id="artifact-id-123")
+    )
+
+    shell.do_schema_stub("--hash deadbeef")
+
+    _ = capsys.readouterr().out
+    shell._lookup_artifact_by_hash_prefix.assert_called_once_with(
+        "deadbeef",
+        command_name="schema_stub",
+        run_id=None,
+    )
+    tracker.export_schema_sqlmodel.assert_called_once_with(
+        artifact_id="artifact-id-123",
+        class_name=None,
+        table_name=None,
+        abstract=True,
+        include_system_cols=False,
+        include_stats_comments=True,
+    )
 
 
 def test_shell_schema_stub_rejects_run_id_with_artifact_id(capsys) -> None:

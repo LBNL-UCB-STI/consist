@@ -2196,6 +2196,7 @@ def test_shell_command_invokes_cmdloop():
             trust_db=False,
             db_path="mock.db",
             run_dir=None,
+            mount_overrides={},
         )
         m_shell.return_value.cmdloop.assert_called_once()
 
@@ -2257,6 +2258,16 @@ def test_shell_passes_mount_overrides_to_tracker(tmp_path):
     normalized_stdout = result.stdout.replace("\n", "")
     assert "Using mount override(s):" in normalized_stdout
     assert f"workspace={workspace_root.resolve()}" in normalized_stdout
+    m_shell.assert_called_once_with(
+        tracker,
+        trust_db=False,
+        db_path="mock.db",
+        run_dir=None,
+        mount_overrides={
+            "workspace": str(workspace_root.resolve()),
+            "inputs": str(inputs_root.resolve()),
+        },
+    )
     m_shell.return_value.cmdloop.assert_called_once()
 
 
@@ -2280,7 +2291,12 @@ def test_shell_rejects_invalid_mount_override_syntax():
 def test_shell_runs_parsing_calls_helper():
     tracker = MagicMock()
     shell = ConsistShell(tracker)
-    with patch("consist.cli._render_runs_table") as render:
+    with (
+        patch("consist.cli._render_runs_table") as render,
+        patch("consist.cli._tracker_session") as tracker_session,
+        patch("consist.cli.queries.get_runs", return_value=[]),
+    ):
+        tracker_session.return_value.__enter__.return_value = MagicMock()
         shell.do_runs("--limit 5 --model create --status failed --tag dev --tag prod")
     render.assert_called_once_with(tracker, 5, "create", ["dev", "prod"], "failed")
 
