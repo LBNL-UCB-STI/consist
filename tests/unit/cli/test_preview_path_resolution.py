@@ -68,19 +68,35 @@ def test_preview_resolves_relative_paths_from_current_working_directory(
     assert "origin_zone" in result.stdout
 
 
-def test_preview_rejects_removed_run_dir_option() -> None:
+def test_preview_accepts_run_dir_option_for_moved_run_roots(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    archive_root = tmp_path / "archive" / "beam_core_demo"
+    db_dir = repo_root / "db"
+    db_dir.mkdir(parents=True)
+    archive_root.mkdir(parents=True)
+    db_path = db_dir / "beam_core_demo.duckdb"
+    _create_relative_csv_artifact(run_dir=archive_root, db_path=db_path)
+
+    monkeypatch.chdir(repo_root)
     runner = CliRunner()
     result = runner.invoke(
         app,
         [
             "preview",
             "trip_table",
+            "--db-path",
+            "db/beam_core_demo.duckdb",
             "--run-dir",
-            "/tmp/archive",
+            str(archive_root),
+            "--rows",
+            "1",
         ],
     )
 
-    assert result.exit_code == 2
+    assert result.exit_code == 0
+    assert "Preview: trip_table" in result.stdout
 
 
 def test_preview_does_not_use_physical_run_dir_without_trust_db(
@@ -146,7 +162,7 @@ def test_preview_uses_physical_run_dir_when_trust_db_enabled(
     assert "Preview: trip_table" in result.stdout
 
 
-def test_validate_reports_missing_artifacts_when_relative_paths_are_not_resolvable(
+def test_validate_auto_resolves_relative_paths_from_db_parent(
     tmp_path: Path, monkeypatch
 ) -> None:
     repo_root = tmp_path / "repo"
@@ -167,35 +183,62 @@ def test_validate_reports_missing_artifacts_when_relative_paths_are_not_resolvab
     )
 
     assert result.exit_code == 0
-    assert "Found 1 missing artifacts" in result.stdout
-    assert "trip_table" in result.stdout
+    assert "All artifacts validated successfully" in result.stdout
 
 
-def test_validate_rejects_removed_run_dir_option() -> None:
+def test_validate_accepts_run_dir_option_for_moved_run_roots(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    archive_root = tmp_path / "archive" / "beam_core_demo"
+    db_dir = repo_root / "db"
+    db_dir.mkdir(parents=True)
+    archive_root.mkdir(parents=True)
+    db_path = db_dir / "beam_core_demo.duckdb"
+    _create_relative_csv_artifact(run_dir=archive_root, db_path=db_path)
+
+    monkeypatch.chdir(repo_root)
     runner = CliRunner()
     result = runner.invoke(
         app,
         [
             "validate",
+            "--db-path",
+            "db/beam_core_demo.duckdb",
             "--run-dir",
-            "/tmp/archive",
+            str(archive_root),
         ],
     )
 
-    assert result.exit_code == 2
+    assert result.exit_code == 0
+    assert "All artifacts validated successfully" in result.stdout
 
 
-def test_validate_rejects_removed_trust_db_option() -> None:
+def test_validate_accepts_trust_db_option_for_moved_run_roots(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    archive_root = tmp_path / "archive" / "beam_core_demo"
+    db_dir = repo_root / "db"
+    db_dir.mkdir(parents=True)
+    archive_root.mkdir(parents=True)
+    db_path = db_dir / "beam_core_demo.duckdb"
+    _create_relative_csv_artifact(run_dir=archive_root, db_path=db_path)
+
+    monkeypatch.chdir(repo_root)
     runner = CliRunner()
     result = runner.invoke(
         app,
         [
             "validate",
+            "--db-path",
+            "db/beam_core_demo.duckdb",
             "--trust-db",
         ],
     )
 
-    assert result.exit_code == 2
+    assert result.exit_code == 0
+    assert "All artifacts validated successfully" in result.stdout
 
 
 def test_shell_preview_uses_trust_db_mount_inference_for_workspace_uris(
