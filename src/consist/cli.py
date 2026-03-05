@@ -2503,8 +2503,15 @@ class ConsistShell(cmd.Cmd):
         """Inject shell-level defaults when routed through Typer."""
         prepared = list(args)
         command_path = self._cli_command_path(prepared)
+        group_root_without_subcommand = (
+            command_path in {("db",), ("schema",), ("views",)}
+        )
 
-        if self.db_path and not self._has_option(prepared, "--db-path"):
+        if (
+            self.db_path
+            and not group_root_without_subcommand
+            and not self._has_option(prepared, "--db-path")
+        ):
             prepared.extend(["--db-path", self.db_path])
 
         if (

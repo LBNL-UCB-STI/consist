@@ -249,6 +249,25 @@ def test_shell_routed_db_command_applies_db_path_default(tmp_path) -> None:
     ]
 
 
+def test_shell_group_root_commands_do_not_inject_db_path(tmp_path) -> None:
+    tracker = MagicMock()
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker, db_path="shell.db")
+
+    with patch("consist.cli.app") as app_mock:
+        shell.do_views("")
+        shell.do_schema("")
+        shell.do_db("")
+
+    assert app_mock.call_count == 3
+    assert app_mock.call_args_list[0].kwargs["args"] == ["views"]
+    assert app_mock.call_args_list[1].kwargs["args"] == ["schema"]
+    assert app_mock.call_args_list[2].kwargs["args"] == ["db"]
+
+
 def test_shell_routed_schema_capture_file_applies_shell_defaults(tmp_path) -> None:
     tracker = MagicMock()
     with (
