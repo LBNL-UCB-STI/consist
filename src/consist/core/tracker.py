@@ -1127,8 +1127,10 @@ class Tracker:
             Parent run ID (for nested runs in scenarios).
 
         outputs : Optional[List[str]], optional
-            Names of output artifacts to log (for executor='python' with auto-loaded DataFrames).
-            Maps artifact key to ingested table name.
+            Output artifact keys for return-value logging with executor='python'.
+            Supports DataFrame/Series/xarray returns and path-like returns. If omitted,
+            Consist auto-logs artifact-like returns (Path/str/Artifact or dict[str, ...])
+            when ``output_paths`` is not provided.
         output_paths : Optional[Mapping[str, ArtifactRef]], optional
             Output file paths to log. Dict maps artifact keys to host paths or Artifact refs.
         capture_dir : Optional[Path], optional

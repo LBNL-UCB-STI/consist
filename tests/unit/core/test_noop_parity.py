@@ -57,3 +57,30 @@ def test_noop_and_real_missing_runtime_kwargs(tracker) -> None:
             name="noop_step",
             execution_options=ExecutionOptions(runtime_kwargs={}),
         )
+
+
+def test_noop_and_real_infer_outputs_when_omitted(tracker, tmp_path: Path) -> None:
+    out_path = tmp_path / "inferred.txt"
+
+    def step(*, output_path: Path) -> Path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("ok")
+        return output_path
+
+    real_result = tracker.run(
+        fn=step,
+        name="step",
+        execution_options=ExecutionOptions(runtime_kwargs={"output_path": out_path}),
+    )
+
+    noop_tracker = consist.NoopTracker()
+    noop_result = noop_tracker.run(
+        fn=step,
+        name="step",
+        execution_options=ExecutionOptions(runtime_kwargs={"output_path": out_path}),
+    )
+
+    assert set(real_result.outputs.keys()) == {"step"}
+    assert set(noop_result.outputs.keys()) == {"step"}
+    assert real_result.outputs["step"].path == out_path
+    assert noop_result.outputs["step"].path == out_path
