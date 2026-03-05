@@ -39,6 +39,9 @@ def test_get_variables_passes_run_year_and_variable_type_filters_to_sql(
 
     assert isinstance(result, pd.DataFrame)
     assert captured["engine"] is tracker.engine
+    assert 'FROM "global_tables"."climate"' in str(captured["query"])
+    assert 'FROM "global_tables"."climate__dims"' in str(captured["query"])
+    assert 'FROM "global_tables"."climate__shape"' in str(captured["query"])
     assert "r.id IN (:0,:1)" in str(captured["query"])
     assert "AND r.year = :year" in str(captured["query"])
     assert "AND nc.variable_type = :var_type" in str(captured["query"])
@@ -108,3 +111,32 @@ def test_get_attributes_handles_missing_variable_and_parses_json_attributes(
 
     assert view.get_attributes("climate", variable_name="missing") is None
     assert view.get_attributes("climate", variable_name="temperature") == {"units": "K"}
+
+
+@pytest.mark.parametrize(
+    "concept_key",
+    [
+        "bad-key",
+        "bad key",
+        "bad.key",
+        "1bad",
+        "bad;DROP TABLE run;--",
+        'bad"or"1"="1',
+    ],
+)
+def test_get_variables_rejects_unsafe_concept_key(
+    monkeypatch: pytest.MonkeyPatch, concept_key: str
+) -> None:
+    called = {"read_sql": False}
+
+    def fake_read_sql(*_args, **_kwargs):
+        called["read_sql"] = True
+        return pd.DataFrame()
+
+    monkeypatch.setattr("consist.core.netcdf_views.pd.read_sql", fake_read_sql)
+    view = NetCdfMetadataView(SimpleNamespace(engine=object()))
+
+    with pytest.raises(ValueError, match="Invalid concept_key"):
+        view.get_variables(concept_key)
+
+    assert called["read_sql"] is False

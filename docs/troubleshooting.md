@@ -14,6 +14,72 @@ This guide organizes issues by symptom. For concept definitions, see [Core Conce
 
 ---
 
+## Database Maintenance Runbook (Snapshot -> Diagnose -> Action)
+
+When troubleshooting provenance DB health, prefer this safe sequence:
+
+1. **Snapshot first (rollback safety):**
+
+   ```bash
+   consist db snapshot --out ./snapshots/provenance.pre-maintenance.duckdb --db-path ./provenance.duckdb
+   ```
+
+2. **Diagnose before mutating:**
+
+   ```bash
+   consist db inspect --db-path ./provenance.duckdb
+   consist db doctor --db-path ./provenance.duckdb
+   ```
+
+3. **Take one action at a time (preview first):**
+
+   - Purge with preview:
+
+     ```bash
+     consist db purge RUN_ID --dry-run --db-path ./provenance.duckdb
+     consist db purge RUN_ID --delete-ingested-data --yes --db-path ./provenance.duckdb
+     ```
+
+   - Optional unscoped cache pruning:
+
+     ```bash
+     consist db purge RUN_ID --delete-ingested-data --prune-cache --yes --db-path ./provenance.duckdb
+     ```
+
+     `--prune-cache` behavior:
+     - only applies when `--delete-ingested-data` is enabled
+     - only applies when references are derivable (for example, `run_link` tables with `run_id` + `content_hash`)
+     - assumes `content_hash` has equivalent semantics across derivable `run_link` and `unscoped_cache` tables
+     - becomes a skip/no-op when references are not derivable
+
+   - Merge shards with explicit conflict policy:
+
+     ```bash
+     consist db merge shard.duckdb --conflict error --db-path ./provenance.duckdb
+     consist db merge shard.duckdb --conflict skip --db-path ./provenance.duckdb
+     ```
+
+     `--conflict error` aborts on incompatible global-table schema checks.
+     `--conflict skip` merges compatible data and skips incompatible tables with warnings.
+
+   - Rebuild from JSON snapshots:
+
+     ```bash
+     consist db rebuild --json-dir ./runs/consist_runs --mode minimal --db-path ./provenance.duckdb
+     consist db rebuild --json-dir ./runs/consist_runs --mode full --db-path ./provenance.duckdb
+     ```
+
+     `minimal` restores run/artifact/link baseline.
+     `full` additionally attempts facet/schema/index restoration where snapshot content and DB schema compatibility allow.
+
+4. **Compact after bulk changes:**
+
+   ```bash
+   consist db compact --db-path ./provenance.duckdb
+   ```
+
+---
+
 ## Run Invocation Diagnostics (Recommended Path)
 
 New run/trace/scenario validation errors follow a consistent structure:

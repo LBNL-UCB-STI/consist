@@ -15,6 +15,7 @@ Key functionalities include:
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 import pandas as pd
@@ -22,6 +23,27 @@ from sqlalchemy import text
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
+
+_SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_identifier(identifier: str, *, label: str) -> str:
+    if not _SAFE_IDENTIFIER_RE.fullmatch(identifier):
+        raise ValueError(
+            f"Invalid {label}. Only letters, numbers, and underscores are allowed, "
+            "and the identifier must not start with a number."
+        )
+    return identifier
+
+
+def _quote_ident(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _qualified_table(schema: str, table: str) -> str:
+    safe_schema = _validate_identifier(schema, label="schema")
+    safe_table = _validate_identifier(table, label="concept_key")
+    return f"{_quote_ident(safe_schema)}.{_quote_ident(safe_table)}"
 
 
 class OpenMatrixMetadataView:
@@ -119,13 +141,15 @@ class OpenMatrixMetadataView:
         """
         if not self.tracker.engine:
             raise RuntimeError("Database connection required.")
+        base_table = _qualified_table("global_tables", concept_key)
+        shape_table = _qualified_table("global_tables", f"{concept_key}__shape")
 
         query = f"""
             WITH shape AS (
                 SELECT
                     _dlt_parent_id,
                     list(value ORDER BY _dlt_list_idx) AS shape
-                FROM global_tables.{concept_key}__shape
+                FROM {shape_table}
                 GROUP BY _dlt_parent_id
             )
             SELECT
@@ -138,7 +162,7 @@ class OpenMatrixMetadataView:
                 r.id as run_id,
                 r.year,
                 r.iteration
-            FROM global_tables.{concept_key} omx
+            FROM {base_table} omx
             LEFT JOIN shape s ON s._dlt_parent_id = omx._dlt_id
             JOIN artifact a ON omx.consist_artifact_id = CAST(a.id AS TEXT)
             JOIN run r ON a.run_id = r.id

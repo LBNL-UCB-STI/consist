@@ -22,6 +22,7 @@ if __package__ is None and __spec__ is None:
 
 import cmd
 from contextlib import contextmanager
+from dataclasses import asdict
 import importlib
 from importlib.metadata import PackageNotFoundError, version as package_version
 import shlex
@@ -53,6 +54,7 @@ from sqlalchemy import and_, or_, select as sa_select
 from sqlmodel import Session, col, select
 
 from consist import Tracker
+from consist.core.maintenance import DatabaseMaintenance
 from consist.core.persistence import DatabaseManager
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.tools import queries
@@ -72,10 +74,24 @@ except ImportError:  # pragma: no cover - platform dependent
 app = typer.Typer(rich_markup_mode="markdown")
 schema_app = typer.Typer(rich_markup_mode="markdown")
 views_app = typer.Typer(rich_markup_mode="markdown")
+db_app = typer.Typer(rich_markup_mode="markdown")
 console = Console()
 
-app.add_typer(schema_app, name="schema")
-app.add_typer(views_app, name="views")
+app.add_typer(
+    schema_app,
+    name="schema",
+    help="Schema inspection, profiling, and code-generation commands.",
+)
+app.add_typer(
+    views_app,
+    name="views",
+    help="Materialized and hybrid SQL view management commands.",
+)
+app.add_typer(
+    db_app,
+    name="db",
+    help="Database maintenance and recovery commands.",
+)
 
 MAX_CLI_LIMIT = 1_000_000
 MAX_PREVIEW_ROWS = 1_000_000
@@ -208,6 +224,502 @@ def _tracker_session(tracker: Tracker) -> Iterator[Session]:
         return
     with db.session_scope() as session:
         yield session
+
+
+def _maintenance_service(db_path: Optional[str]) -> DatabaseMaintenance:
+    tracker = get_tracker(db_path)
+    db = getattr(tracker, "db", None)
+    if not isinstance(db, DatabaseManager):
+        console.print(
+            "[red]Runtime error: tracker has no configured database manager.[/red]"
+        )
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+    return DatabaseMaintenance(db=db, run_dir=Path(tracker.run_dir))
+
+
+def _resolve_snapshot_sidecar_path(db: DatabaseManager, snapshot_path: Path) -> Path:
+    sidecar_path_fn = getattr(db, "_snapshot_sidecar_path", None)
+    if callable(sidecar_path_fn):
+        return sidecar_path_fn(snapshot_path)
+    base_name = snapshot_path.stem if snapshot_path.suffix else snapshot_path.name
+    return snapshot_path.with_name(f"{base_name}.snapshot_meta.json")
+
+
+@db_app.command("inspect")
+def db_inspect(
+    json_output: bool = typer.Option(
+        False, "--json", help="Output maintenance report as JSON."
+    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
+) -> None:
+    """Inspect database state and snapshot parity."""
+    report = _maintenance_service(db_path).inspect()
+    if json_output:
+        output_json(asdict(report))
+        return
+
+    summary = Table(title="Database Inspect")
+    summary.add_column("Metric", style="cyan")
+    summary.add_column("Value", style="green")
+    summary.add_row("Total runs", str(report.total_runs))
+    summary.add_row(
+        "Runs by status",
+        ", ".join(
+            f"{status}={count}" for status, count in report.runs_by_status.items()
+        )
+        or "-",
+    )
+    summary.add_row("Total artifacts", str(report.total_artifacts))
+    summary.add_row("Orphaned artifacts", str(report.orphaned_artifact_count))
+    summary.add_row("Zombie runs", ", ".join(report.zombie_run_ids) or "-")
+    summary.add_row("DB file size (MB)", f"{report.db_file_size_mb:.3f}")
+    summary.add_row("JSON snapshots", str(report.json_snapshot_count))
+    summary.add_row("JSON/DB parity", str(report.json_db_parity))
+    console.print(summary)
+
+    global_sizes = Table(title="Global Table Sizes")
+    global_sizes.add_column("Table", style="cyan")
+    global_sizes.add_column("Rows", style="magenta")
+    if report.global_table_sizes:
+        for table_name, row_count in report.global_table_sizes.items():
+            global_sizes.add_row(table_name, str(row_count))
+    else:
+        global_sizes.add_row("-", "0")
+    console.print(global_sizes)
+
+
+@db_app.command("doctor")
+def db_doctor(
+    json_output: bool = typer.Option(
+        False, "--json", help="Output maintenance diagnostics as JSON."
+    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
+) -> None:
+    """Run read-only integrity diagnostics."""
+    report = _maintenance_service(db_path).doctor()
+    if json_output:
+        output_json(asdict(report))
+        return
+
+    diagnostics = Table(title="Database Doctor")
+    diagnostics.add_column("Check", style="cyan")
+    diagnostics.add_column("Details", style="green")
+    diagnostics.add_row("Zombie runs", ", ".join(report.zombie_run_ids) or "-")
+    diagnostics.add_row(
+        "Completed/failed with null ended_at",
+        ", ".join(report.completed_without_end_time) or "-",
+    )
+    diagnostics.add_row(
+        "Dangling parent run IDs",
+        ", ".join(report.dangling_parent_run_ids) or "-",
+    )
+    diagnostics.add_row(
+        "Artifacts with missing producing run",
+        ", ".join(str(value) for value in report.artifacts_with_missing_producing_run)
+        or "-",
+    )
+    diagnostics.add_row(
+        "Global table schema drift",
+        json.dumps(report.global_table_schema_drift, sort_keys=True) or "{}",
+    )
+    console.print(diagnostics)
+
+
+@db_app.command("snapshot")
+def db_snapshot(
+    out_path: Path = typer.Option(
+        ...,
+        "--out",
+        help="Destination path for the snapshot DuckDB file.",
+    ),
+    no_checkpoint: bool = typer.Option(
+        False,
+        "--no-checkpoint",
+        help="Skip CHECKPOINT before copying the database.",
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output snapshot metadata as JSON."
+    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
+) -> None:
+    """Create a database snapshot and metadata sidecar."""
+    maintenance = _maintenance_service(db_path)
+    checkpoint = not no_checkpoint
+    snapshot_path = maintenance.snapshot(out_path, checkpoint=checkpoint)
+    sidecar_path = _resolve_snapshot_sidecar_path(maintenance.db, snapshot_path)
+
+    if json_output:
+        output_json(
+            {
+                "snapshot_path": str(snapshot_path),
+                "checkpoint": checkpoint,
+                "sidecar_path": str(sidecar_path),
+            }
+        )
+        return
+
+    console.print(f"Snapshot path: {snapshot_path}")
+    console.print(f"Sidecar path: {sidecar_path}")
+
+
+@db_app.command("rebuild")
+def db_rebuild(
+    json_dir: Path = typer.Option(
+        Path("consist_runs"),
+        "--json-dir",
+        help="Directory containing per-run JSON snapshots to rebuild from.",
+    ),
+    mode: Literal["minimal", "full"] = typer.Option(
+        "minimal",
+        "--mode",
+        help="Rebuild mode: minimal restores runs/artifacts/links; full also restores optional facet/schema indexes.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Parse and count rebuild candidates without writing to the DB.",
+    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output rebuild result as JSON."
+    ),
+) -> None:
+    """Rebuild DB run/artifact/link rows from JSON snapshots."""
+    maintenance = _maintenance_service(db_path)
+    result = maintenance.rebuild_from_json(json_dir, dry_run=dry_run, mode=mode)
+    if json_output:
+        output_json(asdict(result))
+        return
+
+    summary = Table(title="Database Rebuild")
+    summary.add_column("Field", style="cyan")
+    summary.add_column("Value", style="green")
+    summary.add_row("Mode", mode)
+    summary.add_row("Dry run", str(result.dry_run))
+    summary.add_row("JSON files scanned", str(result.json_files_scanned))
+    summary.add_row("Runs inserted", str(result.runs_inserted))
+    summary.add_row("Runs already present", str(result.runs_already_present))
+    summary.add_row("Artifacts inserted", str(result.artifacts_inserted))
+    summary.add_row("Errors", str(len(result.errors)))
+    console.print(summary)
+
+    if result.errors:
+        error_table = Table(title="Rebuild Errors")
+        error_table.add_column("Error", style="red", overflow="fold")
+        for error in result.errors:
+            error_table.add_row(error)
+        console.print(error_table)
+
+
+@db_app.command("compact")
+def db_compact(
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output compact result as JSON."
+    ),
+) -> None:
+    """Run VACUUM on the database."""
+    maintenance = _maintenance_service(db_path)
+    maintenance.compact()
+    if json_output:
+        output_json({"compacted": True})
+        return
+    console.print("Database compacted.")
+
+
+@db_app.command("export")
+def db_export(
+    run_id: str = typer.Argument(..., help="Root run ID to export."),
+    out_path: Path = typer.Option(
+        ...,
+        "--out",
+        help="Destination shard database path (e.g., shard.duckdb).",
+    ),
+    no_children: bool = typer.Option(
+        False,
+        "--no-children",
+        help="Export only this exact run (exclude descendants).",
+    ),
+    include_data: bool = typer.Option(
+        False,
+        "--include-data",
+        help="Include filtered global_tables rows in the shard.",
+    ),
+    include_snapshots: bool = typer.Option(
+        False,
+        "--include-snapshots",
+        help="Copy JSON snapshots into shard_snapshots.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview export without writing shard DB or files.",
+    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output export result as JSON."
+    ),
+) -> None:
+    """Export run lineage into a standalone shard database."""
+    maintenance = _maintenance_service(db_path)
+    result = maintenance.export(
+        run_id,
+        out_path,
+        include_data=include_data,
+        include_snapshots=include_snapshots,
+        include_children=not no_children,
+        dry_run=dry_run,
+    )
+    if json_output:
+        output_json(asdict(result))
+        return
+
+    summary = Table(title="Database Export")
+    summary.add_column("Field", style="cyan")
+    summary.add_column("Value", style="green")
+    summary.add_row("Out path", str(result.out_path))
+    summary.add_row("Dry run", str(dry_run))
+    summary.add_row("Runs exported", str(len(result.run_ids)))
+    summary.add_row("Artifacts exported", str(result.artifact_count))
+    summary.add_row("Ingested tables exported", str(len(result.ingested_rows)))
+    summary.add_row("Snapshots copied", str(result.snapshots_copied))
+    console.print(summary)
+    if result.unscoped_cache_tables_skipped:
+        console.print(
+            "Warning: skipped unscoped cache table(s) during export; rows were not "
+            f"exported: {', '.join(result.unscoped_cache_tables_skipped)}"
+        )
+
+
+@db_app.command("merge")
+def db_merge(
+    shard_path: Path = typer.Argument(..., help="Path to shard database to merge."),
+    conflict: Literal["error", "skip"] = typer.Option(
+        "error",
+        "--conflict",
+        help="Conflict policy for run ID collisions.",
+    ),
+    include_snapshots: bool = typer.Option(
+        False,
+        "--include-snapshots",
+        help="Copy JSON snapshots from shard_snapshots into canonical paths.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview merge without writing database or files.",
+    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output merge result as JSON."
+    ),
+) -> None:
+    """Merge a shard database into the current provenance database."""
+    maintenance = _maintenance_service(db_path)
+    try:
+        result = maintenance.merge(
+            shard_path,
+            conflict=conflict,
+            include_snapshots=include_snapshots,
+            dry_run=dry_run,
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR) from exc
+
+    if json_output:
+        output_json(asdict(result))
+        return
+
+    summary = Table(title="Database Merge")
+    summary.add_column("Field", style="cyan")
+    summary.add_column("Value", style="green")
+    summary.add_row("Shard path", str(result.shard_path))
+    summary.add_row("Dry run", str(dry_run))
+    summary.add_row("Runs merged", str(len(result.runs_merged)))
+    summary.add_row("Runs skipped", str(len(result.runs_skipped)))
+    summary.add_row("Artifacts merged", str(result.artifacts_merged))
+    summary.add_row("Global tables merged", str(len(result.ingested_tables_merged)))
+    summary.add_row("Snapshots merged", str(result.snapshots_merged))
+    console.print(summary)
+    if result.unscoped_cache_tables_skipped:
+        console.print(
+            "Warning: skipped unscoped cache table(s) during merge; rows were not "
+            f"merged: {', '.join(result.unscoped_cache_tables_skipped)}"
+        )
+    if result.incompatible_global_tables_skipped:
+        details = "; ".join(
+            f"{table}: {reason}"
+            for table, reason in sorted(
+                result.incompatible_global_tables_skipped.items()
+            )
+        )
+        console.print(
+            "Warning: skipped incompatible global table(s) during merge; "
+            f"rows were not merged: {details}"
+        )
+
+
+@db_app.command("purge")
+def db_purge(
+    run_id: str = typer.Argument(..., help="Run ID to purge."),
+    no_children: bool = typer.Option(
+        False,
+        "--no-children",
+        help="Do not include descendant runs.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview purge plan without deleting anything.",
+    ),
+    delete_ingested_data: bool = typer.Option(
+        False,
+        "--delete-ingested-data",
+        help="Delete run-scoped/link-scoped rows from global_tables schema.",
+    ),
+    prune_cache: bool = typer.Option(
+        False,
+        "--prune-cache",
+        help=(
+            "Prune unscoped cache rows no longer referenced by surviving run-link rows. "
+            "Only applies when --delete-ingested-data is set."
+        ),
+    ),
+    delete_files: bool = typer.Option(
+        False,
+        "--delete-files",
+        help="Delete artifact disk files listed in purge plan.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip confirmation prompt for non-dry-run purges.",
+    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output purge result as JSON."
+    ),
+) -> None:
+    """Purge run records, snapshots, and optional ingested/global data."""
+    maintenance = _maintenance_service(db_path)
+    include_children = not no_children
+
+    if not dry_run and not yes:
+        preview = maintenance.plan_purge(run_id, include_children=include_children)
+        scoped_ingested_rows = sum(
+            count
+            for table, count in preview.ingested_data.items()
+            if preview.ingested_table_modes.get(table) in {"run_scoped", "run_link"}
+        )
+        scope_fields = [
+            f"runs={len(preview.run_ids)}",
+            f"snapshots={len(preview.json_files)}",
+            f"orphaned_artifacts={len(preview.orphaned_artifact_ids)}",
+            (
+                f"disk_files=enabled({len(preview.disk_files)})"
+                if delete_files
+                else "disk_files=disabled"
+            ),
+            (
+                f"ingested_global=enabled(rows~{scoped_ingested_rows})"
+                if delete_ingested_data
+                else "ingested_global=preserve"
+            ),
+            (
+                "prune_cache=enabled"
+                if prune_cache and delete_ingested_data
+                else "prune_cache=noop"
+                if prune_cache and not delete_ingested_data
+                else "prune_cache=disabled"
+            ),
+        ]
+        confirmed = typer.confirm(
+            "Confirm purge scope: " + ", ".join(scope_fields) + "?",
+            default=False,
+        )
+        if not confirmed:
+            console.print("Purge cancelled.")
+            raise typer.Exit(CLI_EXIT_SUCCESS)
+
+    result = maintenance.purge(
+        run_id,
+        include_children=include_children,
+        delete_files=delete_files,
+        delete_ingested_data=delete_ingested_data,
+        prune_cache=prune_cache,
+        dry_run=dry_run,
+    )
+    if json_output:
+        output_json(asdict(result))
+        return
+
+    summary = Table(title="Database Purge")
+    summary.add_column("Field", style="cyan")
+    summary.add_column("Value", style="green")
+    summary.add_row("Executed", str(result.executed))
+    summary.add_row("Run IDs", ", ".join(result.plan.run_ids) or "-")
+    summary.add_row("Child run IDs", ", ".join(result.plan.child_run_ids) or "-")
+    summary.add_row(
+        "Orphaned artifact IDs",
+        ", ".join(str(value) for value in result.plan.orphaned_artifact_ids) or "-",
+    )
+    summary.add_row("Snapshot JSON files", str(len(result.plan.json_files)))
+    summary.add_row("Disk files", str(len(result.plan.disk_files)))
+    summary.add_row("Ingested data skipped", str(result.ingested_data_skipped))
+    console.print(summary)
+
+
+@db_app.command("fix-status")
+def db_fix_status(
+    run_id: str = typer.Argument(..., help="Run ID to update."),
+    status: str = typer.Argument(..., help="New status: running|completed|failed."),
+    reason: Optional[str] = typer.Option(
+        None,
+        "--reason",
+        help="Optional reason recorded in run metadata.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Required when transitioning from completed/failed back to running.",
+    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output updated run fields as JSON."
+    ),
+) -> None:
+    """Fix an incorrect run status in-place."""
+    maintenance = _maintenance_service(db_path)
+    try:
+        updated_run = maintenance.fix_status(run_id, status, reason=reason, force=force)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR) from exc
+
+    payload = {
+        "id": updated_run.id,
+        "status": updated_run.status,
+        "ended_at": updated_run.ended_at,
+        "updated_at": updated_run.updated_at,
+        "meta": updated_run.meta,
+    }
+    if json_output:
+        output_json(payload)
+        return
+
+    summary = Table(title="Run Status Updated")
+    summary.add_column("Field", style="cyan")
+    summary.add_column("Value", style="green")
+    summary.add_row("Run ID", str(payload["id"]))
+    summary.add_row("Status", str(payload["status"]))
+    summary.add_row("Ended At", str(payload["ended_at"] or "-"))
+    summary.add_row("Updated At", str(payload["updated_at"]))
+    summary.add_row(
+        "Meta", json.dumps(payload["meta"] or {}, default=str, sort_keys=True)
+    )
+    console.print(summary)
 
 
 def _render_schema_profile(
@@ -1027,7 +1539,7 @@ def runs(
                         "meta": getattr(r, "meta", None),
                     }
                 )
-            print(json.dumps(output, indent=2))
+            output_json(output)
             return
 
     _render_runs_table(tracker, limit, model_name, tag, status)

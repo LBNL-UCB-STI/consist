@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
+import tempfile
 
 import numpy as np
 import pandas as pd
@@ -112,6 +113,32 @@ class TravelDemandScenarioConfig:
 # =============================================================================
 
 
+def _is_path_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _validate_skims_delete_target(path: Path) -> Path:
+    """Validate recursive delete targets for zarr overwrite behavior."""
+    resolved = path.resolve()
+    if resolved.suffix != ".zarr":
+        raise ValueError(f"Refusing to delete non-zarr target: {resolved}")
+
+    safe_roots = [Path.cwd().resolve(), Path(tempfile.gettempdir()).resolve()]
+    if not any(_is_path_within(resolved, root) for root in safe_roots):
+        safe_scope = ", ".join(str(root) for root in safe_roots)
+        raise ValueError(
+            f"Refusing to delete path outside safe roots ({safe_scope}): {resolved}"
+        )
+
+    if resolved in {Path("/"), Path.home().resolve(), Path.cwd().resolve()}:
+        raise ValueError(f"Refusing to delete unsafe target path: {resolved}")
+    return resolved
+
+
 def create_skims_dataset(
     zones: pd.DataFrame,
     distances: pd.DataFrame,
@@ -164,7 +191,12 @@ def save_skims(ds: xr.Dataset, path: Path | str) -> None:
     if path.exists():
         import shutil
 
-        shutil.rmtree(path)
+        safe_target = _validate_skims_delete_target(path)
+        if not safe_target.is_dir():
+            raise ValueError(
+                f"Refusing to recursively delete non-directory target: {safe_target}"
+            )
+        shutil.rmtree(safe_target)
     ds.to_zarr(path)
 
 

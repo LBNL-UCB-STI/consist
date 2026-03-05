@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass, field, replace
 import shutil
@@ -44,12 +43,15 @@ if TYPE_CHECKING:  # pragma: no cover
 try:
     _pyhocon = importlib.import_module("pyhocon")
     _pyhocon_config_tree = importlib.import_module("pyhocon.config_tree")
+    _pyhocon_config_parser = importlib.import_module("pyhocon.config_parser")
     ConfigFactory = _pyhocon.ConfigFactory
     HOCONConverter = _pyhocon.HOCONConverter
+    ConfigParser = _pyhocon_config_parser.ConfigParser
     NonExistentKey = _pyhocon_config_tree.NonExistentKey
 except ImportError:  # pragma: no cover
     ConfigFactory = None
     HOCONConverter = None
+    ConfigParser = None
     NonExistentKey = None
 
 
@@ -627,21 +629,53 @@ def _load_config_tree(
         raise ImportError("pyhocon is required for BEAM canonicalization.")
     if HOCONConverter is None:
         raise ImportError("pyhocon is required for BEAM canonicalization.")
-    original_env: dict[str, Optional[str]] = {}
-    if env_overrides:
+    if resolve and env_overrides:
+        if ConfigParser is None:
+            raise ImportError("pyhocon is required for BEAM canonicalization.")
+        if NonExistentKey is None:
+            raise ImportError("pyhocon is required for BEAM canonicalization.")
+        config = ConfigFactory.parse_file(str(path), resolve=False)
+        inserted_keys: list[str] = []
         for key, value in env_overrides.items():
-            original_env[key] = os.environ.get(key)
-            os.environ[key] = value
-    try:
-        config = ConfigFactory.parse_file(str(path), resolve=resolve)
+            if not key:
+                continue
+            if config.get(key, NonExistentKey) is not NonExistentKey:
+                continue
+            config.put(key, value)
+            inserted_keys.append(key)
+        ConfigParser.resolve_substitutions(config, accept_unresolved=False)
+        for key in inserted_keys:
+            _remove_config_key(config, key)
         return json.loads(HOCONConverter.to_json(config))
-    finally:
-        if env_overrides:
-            for key, original in original_env.items():
-                if original is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = original
+
+    config = ConfigFactory.parse_file(str(path), resolve=resolve)
+    return json.loads(HOCONConverter.to_json(config))
+
+
+def _remove_config_key(config: Any, key: str) -> None:
+    parts = [part for part in key.split(".") if part]
+    if not parts:
+        return
+    cursor: Any = config
+    parents: list[tuple[dict[str, Any], str]] = []
+    for part in parts[:-1]:
+        if not isinstance(cursor, dict):
+            return
+        child = cursor.get(part)
+        if not isinstance(child, dict):
+            return
+        parents.append((cursor, part))
+        cursor = child
+
+    if not isinstance(cursor, dict):
+        return
+    cursor.pop(parts[-1], None)
+    for parent, part in reversed(parents):
+        child = parent.get(part)
+        if isinstance(child, dict) and not child:
+            parent.pop(part, None)
+        else:
+            break
 
 
 def _iter_config_rows(

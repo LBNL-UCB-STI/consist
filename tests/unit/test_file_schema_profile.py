@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from consist.core.identity import IdentityManager
 from consist.tools.schema_profile import MAX_FIELDS, profile_file_schema
@@ -89,3 +90,18 @@ def test_profile_file_schema_h5_index_columns(tmp_path):
         source="file",
     )
     assert set(field.name for field in result.fields) == {"a", "b"}
+
+
+def test_profile_file_schema_rejects_unsafe_view_name(tmp_path):
+    path = tmp_path / "sample.csv"
+    pd.DataFrame({"a": [1], "b": ["x"]}).to_csv(path, index=False)
+
+    with pytest.raises(ValueError, match="Invalid view_name"):
+        profile_file_schema(
+            identity=IdentityManager(),
+            path=str(path),
+            driver="csv",
+            sample_rows=1,
+            source="file",
+            view_name='tmp_view"; DROP VIEW run;--',
+        )

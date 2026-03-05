@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
@@ -10,7 +11,10 @@ import pytest
 
 from consist.integrations.activitysim import ActivitySimConfigAdapter, ConfigOverrides
 from consist.core.config_canonicalization import ConfigAdapterOptions
-from consist.integrations.activitysim.config_adapter import _digest_path_with_name
+from consist.integrations.activitysim.config_adapter import (
+    _bundle_configs,
+    _digest_path_with_name,
+)
 from tests.helpers.activitysim_fixtures import build_activitysim_test_configs
 
 
@@ -289,6 +293,74 @@ def test_missing_include_settings_warns(tracker, tmp_path: Path, caplog):
     assert any("include_settings file" in record.message for record in caplog.records)
 
 
+def test_include_settings_rejects_out_of_root_absolute_include(tracker, tmp_path: Path):
+    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path)
+    outside_include = tmp_path / "outside_include.yaml"
+    outside_include.write_text("CONSTANTS:\n  EXTERNAL_FLAG: 99\n", encoding="utf-8")
+    include_yaml = base_dir / "include_external.yaml"
+    include_yaml.write_text(
+        "include_settings: "
+        f"{outside_include.as_posix()}\n"
+        "CONSTANTS:\n"
+        "  LOCAL_FLAG: 1\n",
+        encoding="utf-8",
+    )
+    _append_model(overlay_dir / "settings.yaml", "include_external")
+
+    adapter = ActivitySimConfigAdapter()
+    run = tracker.begin_run("activitysim_include_external_blocked", "activitysim")
+    canonical = adapter.discover(
+        [overlay_dir, base_dir], identity=tracker.identity, strict=True
+    )
+    result = adapter.canonicalize(canonical, run=run, tracker=tracker, strict=True)
+    tracker.end_run()
+
+    constants_spec = _find_ingestable(result.ingestables, "activitysim_constants_cache")
+    assert constants_spec is not None
+    rows = list(constants_spec.rows)
+    assert any(
+        row["file_name"] == "include_external.yaml"
+        and row["key"] == "CONSTANTS.LOCAL_FLAG"
+        and row["value_num"] == 1.0
+        for row in rows
+    )
+    assert not any(
+        row["file_name"] == "include_external.yaml"
+        and row["key"] == "CONSTANTS.EXTERNAL_FLAG"
+        for row in rows
+    )
+
+
+def test_include_settings_allows_in_root_absolute_include(tracker, tmp_path: Path):
+    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path)
+    in_root_include = base_dir / "in_root_include.yaml"
+    in_root_include.write_text("CONSTANTS:\n  IN_ROOT_FLAG: 42\n", encoding="utf-8")
+    include_yaml = base_dir / "include_in_root.yaml"
+    include_yaml.write_text(
+        f"include_settings: {in_root_include.resolve().as_posix()}\n",
+        encoding="utf-8",
+    )
+    _append_model(overlay_dir / "settings.yaml", "include_in_root")
+
+    adapter = ActivitySimConfigAdapter()
+    run = tracker.begin_run("activitysim_include_in_root", "activitysim")
+    canonical = adapter.discover(
+        [overlay_dir, base_dir], identity=tracker.identity, strict=True
+    )
+    result = adapter.canonicalize(canonical, run=run, tracker=tracker, strict=True)
+    tracker.end_run()
+
+    constants_spec = _find_ingestable(result.ingestables, "activitysim_constants_cache")
+    assert constants_spec is not None
+    rows = list(constants_spec.rows)
+    assert any(
+        row["file_name"] == "include_in_root.yaml"
+        and row["key"] == "CONSTANTS.IN_ROOT_FLAG"
+        and row["value_num"] == 42.0
+        for row in rows
+    )
+
+
 def test_inherit_settings_respects_primary_only(tracker, tmp_path: Path):
     base_dir, overlay_dir = build_activitysim_test_configs(tmp_path, sample_rate=0.25)
     overlay_settings = overlay_dir / "settings.yaml"
@@ -351,6 +423,56 @@ def test_heuristic_reference_discovery_toggle(tracker, tmp_path: Path):
     assert "extra_coeffs.csv" not in artifact_names
 
 
+def test_out_of_root_absolute_csv_reference_is_rejected_by_default(
+    tracker, tmp_path: Path
+):
+    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path)
+    outside_csv = tmp_path / "outside_coefficients.csv"
+    outside_csv.write_text("coefficient_name,value\noutside,9.0\n", encoding="utf-8")
+    outside_yaml = base_dir / "outside_csv.yaml"
+    outside_yaml.write_text(f"SPEC: {outside_csv.as_posix()}\n", encoding="utf-8")
+    _append_model(overlay_dir / "settings.yaml", "outside_csv")
+
+    adapter = ActivitySimConfigAdapter()
+    run = tracker.begin_run("activitysim_external_csv_default", "activitysim")
+    canonical = adapter.discover(
+        [overlay_dir, base_dir], identity=tracker.identity, strict=False
+    )
+    result = adapter.canonicalize(canonical, run=run, tracker=tracker, strict=False)
+    tracker.end_run()
+
+    assert outside_csv not in {spec.path for spec in result.artifacts}
+
+    run_strict = tracker.begin_run("activitysim_external_csv_strict", "activitysim")
+    strict_canonical = adapter.discover(
+        [overlay_dir, base_dir], identity=tracker.identity, strict=False
+    )
+    with pytest.raises(FileNotFoundError, match="Missing referenced CSV"):
+        adapter.canonicalize(
+            strict_canonical, run=run_strict, tracker=tracker, strict=True
+        )
+    tracker.end_run()
+
+
+def test_out_of_root_absolute_csv_reference_can_be_opted_in(tracker, tmp_path: Path):
+    base_dir, overlay_dir = build_activitysim_test_configs(tmp_path)
+    outside_csv = tmp_path / "outside_coefficients.csv"
+    outside_csv.write_text("coefficient_name,value\noutside,9.0\n", encoding="utf-8")
+    outside_yaml = base_dir / "outside_csv_opt_in.yaml"
+    outside_yaml.write_text(f"SPEC: {outside_csv.as_posix()}\n", encoding="utf-8")
+    _append_model(overlay_dir / "settings.yaml", "outside_csv_opt_in")
+
+    adapter = ActivitySimConfigAdapter(allow_out_of_root_csv_refs=True)
+    run = tracker.begin_run("activitysim_external_csv_opt_in", "activitysim")
+    canonical = adapter.discover(
+        [overlay_dir, base_dir], identity=tracker.identity, strict=True
+    )
+    result = adapter.canonicalize(canonical, run=run, tracker=tracker, strict=True)
+    tracker.end_run()
+
+    assert outside_csv in {spec.path for spec in result.artifacts}
+
+
 def test_bundle_artifact_logged(tracker, tmp_path: Path):
     base_dir, overlay_dir = build_activitysim_test_configs(tmp_path)
     adapter = ActivitySimConfigAdapter(bundle_configs=True)
@@ -401,6 +523,28 @@ def test_bundle_cache_dir_reuse(tracker, tmp_path: Path):
     )
     assert bundle_b.path == bundle_a.path
     assert bundle_b.path.stat().st_mtime == mtime
+
+
+def test_bundle_path_sanitizes_model_name_and_stays_under_cache_dir(tmp_path: Path):
+    config_root = tmp_path / "config_root"
+    config_root.mkdir()
+    (config_root / "settings.yaml").write_text("models: []\n", encoding="utf-8")
+    cache_dir = tmp_path / "bundle_cache"
+    run = SimpleNamespace(model_name="../../../../../tmp/evil//model")
+    tracker = SimpleNamespace(run_dir=tmp_path / "run_dir")
+
+    bundle_path = _bundle_configs(
+        config_dirs=[config_root],
+        run=run,
+        tracker=tracker,
+        content_hash="0123456789abcdef",
+        cache_dir=cache_dir,
+    )
+
+    assert bundle_path.resolve().is_relative_to(cache_dir.resolve())
+    assert "/" not in bundle_path.name
+    assert ".." not in bundle_path.name
+    assert bundle_path.name.startswith("tmp_evil_model_config_bundle_")
 
 
 def test_materialize_applies_overrides(tracker, tmp_path: Path):

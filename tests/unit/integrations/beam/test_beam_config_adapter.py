@@ -1,13 +1,16 @@
 import logging
 import importlib
 import json
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import func, select
 from sqlmodel import Session, SQLModel
 
 from consist.integrations.beam import BeamConfigAdapter, BeamConfigOverrides
+from consist.integrations.beam.config_adapter import _load_config_tree
 from consist.models.beam import BeamConfigCache, BeamConfigIngestRunLink
 from consist.types import CacheOptions, ExecutionOptions
 from tests.helpers.beam_fixtures import build_beam_test_configs
@@ -36,6 +39,26 @@ def test_beam_discover_includes_and_hash(tracker, tmp_path: Path):
     assert canonical.primary_config == overlay_conf
     assert any(p.name == "common.conf" for p in canonical.config_files)
     assert canonical.content_hash
+
+
+def test_beam_load_config_tree_applies_env_overrides_without_env_mutation(
+    tmp_path: Path,
+):
+    config_path = tmp_path / "env.conf"
+    config_path.write_text("value = ${TEST_OVERRIDE}\n", encoding="utf-8")
+
+    with patch.object(os._Environ, "__setitem__", autospec=True) as setitem_mock:
+        with patch.object(os._Environ, "pop", autospec=True) as pop_mock:
+            tree = _load_config_tree(
+                config_path,
+                resolve=True,
+                env_overrides={"TEST_OVERRIDE": "scoped-value"},
+            )
+
+    assert tree["value"] == "scoped-value"
+    assert "TEST_OVERRIDE" not in tree
+    assert setitem_mock.call_count == 0
+    assert pop_mock.call_count == 0
 
 
 def test_beam_canonicalize_artifacts_and_rows(tracker, tmp_path: Path, caplog):

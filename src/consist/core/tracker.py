@@ -1,5 +1,6 @@
 import inspect
 import itertools
+import re
 from dataclasses import replace
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
@@ -109,6 +110,15 @@ if TYPE_CHECKING:
     from consist.core.step_context import StepContext
 
 AccessMode = Literal["standard", "analysis", "read_only"]
+_SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _is_safe_identifier(identifier: str) -> bool:
+    return bool(_SAFE_IDENTIFIER_RE.fullmatch(identifier))
+
+
+def _quote_ident(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -3238,11 +3248,13 @@ class Tracker:
     def _ingest_cache_hit(self, table_name: str, content_hash: str) -> bool:
         if self.engine is None:
             return False
+        if not _is_safe_identifier(table_name):
+            return False
+        table_ref = f"{_quote_ident('global_tables')}.{_quote_ident(table_name)}"
         try:
             with self.engine.begin() as connection:
                 result = connection.exec_driver_sql(
-                    f"SELECT 1 FROM global_tables.{table_name} "
-                    "WHERE content_hash = ? LIMIT 1",
+                    f"SELECT 1 FROM {table_ref} WHERE content_hash = ? LIMIT 1",
                     (content_hash,),
                 ).fetchone()
             return result is not None

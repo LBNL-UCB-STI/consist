@@ -70,6 +70,7 @@ deeper work.
       [Config Adapters](integrations/config_adapters.md),
       [Container Integration](containers-guide.md)
     - **Practitioners and MPO staff**: [CLI Reference](cli-reference.md),
+      [DB Maintenance Guide](db-maintenance.md),
       [Troubleshooting](troubleshooting.md)
     - **Researchers**: [Data Materialization](concepts/data-materialization.md),
       [Mounts & Portability](mounts-and-portability.md),
@@ -92,6 +93,7 @@ deeper work.
 |----------------------------------------|-----------------------------------------------------------------------------------------|
 | Speed up my pipeline                   | [Caching & Hydration](concepts/caching-and-hydration.md)                                |
 | Debug a cache miss                     | [Troubleshooting](troubleshooting.md)                                                   |
+| Operate or repair the provenance DB    | [DB Maintenance Guide](db-maintenance.md)                                               |
 | Find which config produced a result    | [`consist lineage`](cli-reference.md#consist-lineage)                                   |
 | Compare results across scenarios       | [Data Materialization](concepts/data-materialization.md)                                |
 | Ingest data for SQL analysis           | [Data Materialization](concepts/data-materialization.md)                                |
