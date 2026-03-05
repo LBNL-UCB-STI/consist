@@ -813,6 +813,191 @@ def _ensure_tracker_mounts_for_artifact(
     _apply_inferred_mounts(tracker, inferred)
 
 
+def _resolve_schema_capture_path(
+    *,
+    tracker: Tracker,
+    artifact: "Artifact",
+    run: "Run",
+    override_path: Optional[Path],
+) -> Path:
+    if override_path is not None:
+        return override_path.expanduser().resolve()
+
+    candidates: List[Path] = []
+    try:
+        candidates.append(tracker.resolve_historical_path(artifact, run))
+    except Exception:
+        pass
+    try:
+        candidates.append(Path(tracker.resolve_uri(artifact.container_uri)).resolve())
+    except Exception:
+        pass
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    if candidates:
+        rendered = ", ".join(str(path) for path in candidates)
+        raise FileNotFoundError(
+            "Could not resolve an existing artifact file path. "
+            f"Tried: {rendered}. Provide --path to override."
+        )
+
+    raise FileNotFoundError(
+        "Could not resolve artifact path from URI. Provide --path to override."
+    )
+
+
+@schema_app.command("capture-file")
+def schema_capture_file(
+    artifact_key: Optional[str] = typer.Option(
+        None,
+        "--artifact-key",
+        "--table-key",
+        help="Artifact key to profile.",
+    ),
+    artifact_id: Optional[str] = typer.Option(
+        None,
+        "--artifact-id",
+        help="Artifact UUID to profile.",
+    ),
+    run_id: Optional[str] = typer.Option(
+        None,
+        "--run-id",
+        help="Optional run scope for --artifact-key lookups.",
+    ),
+    path: Optional[Path] = typer.Option(
+        None,
+        "--path",
+        help="Override on-disk file path to profile.",
+    ),
+    sample_rows: int = typer.Option(
+        1000,
+        "--sample-rows",
+        min=1,
+        max=MAX_CLI_LIMIT,
+        help="Maximum rows sampled during schema inference.",
+    ),
+    if_changed: bool = typer.Option(
+        False,
+        "--if-changed",
+        help="Reuse existing schema observations for unchanged file hashes.",
+    ),
+    trust_db: bool = typer.Option(
+        False,
+        "--trust-db",
+        help="Allow metadata-based mount inference when resolving artifact paths.",
+    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
+) -> None:
+    """
+    Capture file schema metadata for an existing artifact record.
+
+    This is useful for artifacts logged before file schema profiling was enabled.
+    After capture, ``schema export`` and shell ``schema_stub`` can generate stubs
+    from the newly persisted schema profile.
+    """
+    selectors = [artifact_key, artifact_id]
+    if sum(1 for selector in selectors if selector is not None) != 1:
+        console.print(
+            "[red]Provide exactly one of --artifact-key or --artifact-id[/red]"
+        )
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR)
+    if run_id is not None and artifact_id is not None:
+        console.print(
+            "[red]--run-id can only be used with --artifact-key selection.[/red]"
+        )
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR)
+    if artifact_id is not None:
+        try:
+            uuid.UUID(artifact_id)
+        except ValueError:
+            console.print("[red]--artifact-id must be a UUID[/red]")
+            raise typer.Exit(CLI_EXIT_USAGE_ERROR)
+
+    tracker = get_tracker(db_path)
+    if artifact_id is not None:
+        artifact = tracker.get_artifact(artifact_id)
+    else:
+        artifact = tracker.get_artifact(artifact_key, run_id=run_id)
+    if artifact is None:
+        if artifact_key is not None and run_id is not None:
+            console.print(
+                f"[red]Artifact '{artifact_key}' not found for run '{run_id}'.[/red]"
+            )
+        elif artifact_key is not None:
+            console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
+        else:
+            console.print(f"[red]Artifact '{artifact_id}' not found.[/red]")
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+
+    driver = artifact.driver
+    if driver not in ("csv", "parquet", "h5_table"):
+        console.print(
+            "[red]Only csv/parquet/h5_table artifacts support file schema capture; "
+            f"got driver '{driver}'.[/red]"
+        )
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR)
+
+    if artifact.run_id is None:
+        console.print(
+            "[red]Artifact has no producing run_id; cannot attach schema observation.[/red]"
+        )
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+    run = tracker.get_run(artifact.run_id)
+    if run is None:
+        console.print(
+            f"[red]Producing run '{artifact.run_id}' not found for artifact.[/red]"
+        )
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+
+    _ensure_tracker_mounts_for_artifact(tracker, artifact, trust_db=trust_db)
+    try:
+        resolved_path = _resolve_schema_capture_path(
+            tracker=tracker,
+            artifact=artifact,
+            run=run,
+            override_path=path,
+        )
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR) from exc
+
+    if not resolved_path.exists():
+        console.print(
+            f"[red]Artifact file does not exist at resolved path: {resolved_path}[/red]"
+        )
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+
+    tracker.artifact_schemas.profile_file_artifact(
+        artifact=artifact,
+        run=run,
+        resolved_path=str(resolved_path),
+        driver=cast(Literal["csv", "parquet", "h5_table"], driver),
+        sample_rows=sample_rows,
+        source="file",
+        reuse_if_unchanged=if_changed,
+    )
+
+    if not tracker.db:
+        console.print("[red]Tracker database not initialized.[/red]")
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+    fetched = tracker.db.get_artifact_schema_for_artifact(artifact_id=artifact.id)
+    if fetched is None:
+        console.print(
+            "[red]Schema capture did not produce a stored schema profile.[/red]"
+        )
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+
+    schema, fields = fetched
+    console.print(
+        "[green]Captured file schema for artifact "
+        f"'{artifact.key}' (schema_id={schema.id}, columns={len(fields)}).[/green]"
+    )
+    console.print(f"[dim]Profiled path: {resolved_path}[/dim]")
+
+
 @schema_app.command("export")
 def schema_export(
     schema_id: Optional[str] = typer.Option(

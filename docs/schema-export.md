@@ -43,6 +43,16 @@ If you already see `schema_id` in an artifact’s `meta`, you’re ready to expo
 
 You can also capture schemas **without ingestion** for CSV/Parquet artifacts by enabling lightweight file profiling at log time (`profile_file_schema=True`, optional `file_schema_sample_rows=`). This writes the same `schema_id` pointer into `artifact.meta`, allowing schema export even if the original file is later missing or moved.
 
+If an artifact was already logged without schema profiling, you can backfill file
+schema metadata later (as long as the file is still accessible):
+
+```bash
+python -m consist.cli schema capture-file --artifact-key trip_table
+```
+
+Use `--artifact-id` for UUID-based selection, and `--path` to override path
+resolution when the stored URI no longer resolves directly.
+
 ## Exporting from the CLI
 
 Export by artifact UUID (recommended UX for now):

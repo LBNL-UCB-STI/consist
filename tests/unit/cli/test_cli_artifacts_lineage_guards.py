@@ -70,6 +70,32 @@ def test_schema_export_reports_missing_artifact_key() -> None:
     assert "Artifact 'missing_artifact_key' not found." in result.stdout
 
 
+def test_schema_capture_file_requires_selector(cli_runner) -> None:
+    """`schema capture-file` should require exactly one artifact selector."""
+    result = cli_runner.invoke(app, ["schema", "capture-file"])
+
+    assert result.exit_code == 2
+    assert "Provide exactly one of --artifact-key or --artifact-id" in result.stdout
+
+
+def test_schema_capture_file_rejects_run_id_with_artifact_id(cli_runner) -> None:
+    """`schema capture-file` should disallow --run-id with --artifact-id."""
+    result = cli_runner.invoke(
+        app,
+        [
+            "schema",
+            "capture-file",
+            "--artifact-id",
+            "00000000-0000-0000-0000-000000000000",
+            "--run-id",
+            "run-123",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "--run-id can only be used with --artifact-key selection." in result.stdout
+
+
 def test_artifacts_query_mode_surfaces_value_errors(cli_runner) -> None:
     """`artifacts` query mode should exit 1 and print parser/query validation errors."""
     with patch(
