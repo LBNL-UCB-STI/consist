@@ -711,6 +711,54 @@ def test_preview_command_unsupported_loaded_type(mock_db_session, tmp_path):
         assert "Preview not implemented" in result.stdout
 
 
+def test_preview_passes_mount_overrides_to_tracker(tmp_path):
+    workspace_root = tmp_path / "archive_workspace"
+    workspace_root.mkdir(parents=True)
+
+    with patch("consist.cli.get_tracker") as mock_get_tracker:
+        tracker = MagicMock()
+        tracker.get_artifact.return_value = None
+        mock_get_tracker.return_value = tracker
+
+        result = runner.invoke(
+            app,
+            [
+                "preview",
+                "missing_artifact",
+                "--db-path",
+                "mock.db",
+                "--mount",
+                f"workspace={workspace_root}",
+            ],
+        )
+
+    assert result.exit_code == 1
+    mock_get_tracker.assert_called_once_with(
+        "mock.db",
+        run_dir=None,
+        mounts={"workspace": str(workspace_root.resolve())},
+    )
+
+
+def test_preview_rejects_invalid_mount_override_syntax():
+    with patch("consist.cli.get_tracker") as mock_get_tracker:
+        result = runner.invoke(
+            app,
+            [
+                "preview",
+                "raw_data",
+                "--db-path",
+                "mock.db",
+                "--mount",
+                "workspace",
+            ],
+        )
+
+    assert result.exit_code == 2
+    assert "Invalid --mount value" in result.stdout
+    mock_get_tracker.assert_not_called()
+
+
 def test_schema_export_command_success_stdout(mock_db_session, tmp_path):
     with (
         patch("pathlib.Path.exists", return_value=True),
@@ -2168,6 +2216,65 @@ def test_shell_uses_env_db_when_db_path_omitted(tmp_path, monkeypatch):
     assert "Loaded database:" in normalized_stdout
     assert str(env_db) in normalized_stdout
     m_shell.return_value.cmdloop.assert_called_once()
+
+
+def test_shell_passes_mount_overrides_to_tracker(tmp_path):
+    workspace_root = tmp_path / "archive_workspace"
+    inputs_root = tmp_path / "shared_inputs"
+    workspace_root.mkdir(parents=True)
+    inputs_root.mkdir(parents=True)
+
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("consist.cli.get_tracker") as m_tracker,
+        patch("consist.cli.ConsistShell") as m_shell,
+    ):
+        tracker = MagicMock()
+        m_tracker.return_value = tracker
+
+        result = runner.invoke(
+            app,
+            [
+                "shell",
+                "--db-path",
+                "mock.db",
+                "--mount",
+                f"workspace={workspace_root}",
+                "--mount",
+                f"inputs={inputs_root}",
+            ],
+        )
+
+    assert result.exit_code == 0
+    m_tracker.assert_called_once_with(
+        "mock.db",
+        run_dir=None,
+        mounts={
+            "workspace": str(workspace_root.resolve()),
+            "inputs": str(inputs_root.resolve()),
+        },
+    )
+    normalized_stdout = result.stdout.replace("\n", "")
+    assert "Using mount override(s):" in normalized_stdout
+    assert f"workspace={workspace_root.resolve()}" in normalized_stdout
+    m_shell.return_value.cmdloop.assert_called_once()
+
+
+def test_shell_rejects_invalid_mount_override_syntax():
+    with patch("pathlib.Path.exists", return_value=True):
+        result = runner.invoke(
+            app,
+            [
+                "shell",
+                "--db-path",
+                "mock.db",
+                "--mount",
+                "workspace",
+            ],
+        )
+
+    assert result.exit_code == 2
+    assert "Invalid --mount value" in result.stdout
 
 
 def test_shell_runs_parsing_calls_helper():

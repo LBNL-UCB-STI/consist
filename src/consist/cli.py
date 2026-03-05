@@ -25,6 +25,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 import importlib
 from importlib.metadata import PackageNotFoundError, version as package_version
+import re
 import shlex
 import json
 import uuid
@@ -170,6 +171,47 @@ def _parse_bounded_int(value: str, *, name: str, minimum: int, maximum: int) -> 
     return parsed
 
 
+def _parse_mount_overrides(values: Optional[List[str]]) -> Dict[str, str]:
+    """Parse repeatable --mount NAME=PATH options into a resolved mount mapping."""
+    if not values:
+        return {}
+
+    mounts: Dict[str, str] = {}
+    for raw_value in values:
+        spec = raw_value.strip()
+        if "=" not in spec:
+            raise ValueError(
+                f"Invalid --mount value {raw_value!r}; expected NAME=PATH."
+            )
+        name, path_value = spec.split("=", 1)
+        name = name.strip()
+        path_value = path_value.strip()
+
+        if not name:
+            raise ValueError(
+                f"Invalid --mount value {raw_value!r}; mount name cannot be empty."
+            )
+        if not path_value:
+            raise ValueError(
+                f"Invalid --mount value {raw_value!r}; mount path cannot be empty."
+            )
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", name):
+            raise ValueError(
+                f"Invalid mount name {name!r}; use letters, numbers, '_' or '-' and start with a letter."
+            )
+
+        mounts[name] = str(_resolve_cli_path(path_value))
+    return mounts
+
+
+def _resolve_mount_overrides_or_exit(values: Optional[List[str]]) -> Dict[str, str]:
+    try:
+        return _parse_mount_overrides(values)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR) from exc
+
+
 def _escape_like_pattern(value: str) -> str:
     value = value.replace(LIKE_ESCAPE_CHAR, LIKE_ESCAPE_CHAR * 2)
     value = value.replace("%", f"{LIKE_ESCAPE_CHAR}%")
@@ -204,7 +246,10 @@ def find_db_path(explicit_path: Optional[str] = None) -> str:
 
 # Then update get_tracker:
 def get_tracker(
-    db_path: Optional[str] = None, *, run_dir: Optional[Path | str] = None
+    db_path: Optional[str] = None,
+    *,
+    run_dir: Optional[Path | str] = None,
+    mounts: Optional[Dict[str, str]] = None,
 ) -> Tracker:
     """Initializes and returns a Tracker instance."""
     resolved_path = find_db_path(db_path)
@@ -215,7 +260,7 @@ def get_tracker(
         )
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
     tracker_run_dir = Path(run_dir) if run_dir is not None else Path(".")
-    return Tracker(run_dir=tracker_run_dir, db_path=resolved_path)
+    return Tracker(run_dir=tracker_run_dir, db_path=resolved_path, mounts=mounts)
 
 
 @contextmanager
@@ -889,6 +934,14 @@ def schema_capture_file(
         "--trust-db",
         help="Allow metadata-based mount inference when resolving artifact paths.",
     ),
+    mount: Optional[List[str]] = typer.Option(
+        None,
+        "--mount",
+        help=(
+            "Mount override mapping (repeatable): NAME=PATH. "
+            "Example: --mount workspace=/path/to/archive"
+        ),
+    ),
     db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
 ) -> None:
     """
@@ -916,7 +969,9 @@ def schema_capture_file(
             console.print("[red]--artifact-id must be a UUID[/red]")
             raise typer.Exit(CLI_EXIT_USAGE_ERROR)
 
-    tracker = get_tracker(db_path)
+    resolved_db_path = find_db_path(db_path)
+    mount_overrides = _resolve_mount_overrides_or_exit(mount)
+    tracker = get_tracker(resolved_db_path, mounts=mount_overrides or None)
     if artifact_id is not None:
         artifact = tracker.get_artifact(artifact_id)
     else:
@@ -2154,10 +2209,23 @@ def preview(
         "--trust-db",
         help="Allow metadata-based mount and run-dir inference for artifact resolution.",
     ),
+    mount: Optional[List[str]] = typer.Option(
+        None,
+        "--mount",
+        help=(
+            "Mount override mapping (repeatable): NAME=PATH. "
+            "Example: --mount workspace=/path/to/archive"
+        ),
+    ),
 ) -> None:
     """Shows a small preview of an artifact (tabular or array-like when supported)."""
     resolved_db_path = find_db_path(db_path)
-    tracker = get_tracker(resolved_db_path, run_dir=run_dir)
+    mount_overrides = _resolve_mount_overrides_or_exit(mount)
+    tracker = get_tracker(
+        resolved_db_path,
+        run_dir=run_dir,
+        mounts=mount_overrides or None,
+    )
 
     # Fetch artifact first to give a precise message (unsupported driver vs missing)
     artifact = tracker.get_artifact(artifact_key)
@@ -3033,6 +3101,14 @@ def shell(
         "--run-dir",
         help="Base directory for resolving relative artifact paths in shell preview/schema_profile.",
     ),
+    mount: Optional[List[str]] = typer.Option(
+        None,
+        "--mount",
+        help=(
+            "Mount override mapping (repeatable): NAME=PATH. "
+            "Example: --mount workspace=/path/to/archive"
+        ),
+    ),
     trust_db: bool = typer.Option(
         False,
         "--trust-db",
@@ -3044,11 +3120,20 @@ def shell(
     The database is loaded once and reused across shell commands.
     """
     resolved_db_path = find_db_path(db_path)
-    tracker = get_tracker(resolved_db_path, run_dir=run_dir)
+    mount_overrides = _resolve_mount_overrides_or_exit(mount)
+
+    tracker = get_tracker(
+        resolved_db_path,
+        run_dir=run_dir,
+        mounts=mount_overrides or None,
+    )
     resolved_db_path = getattr(tracker, "db_path", None)
     if not isinstance(resolved_db_path, str) or not resolved_db_path:
         resolved_db_path = find_db_path(db_path)
     console.print(f"[green]✓ Loaded database: {resolved_db_path}[/green]")
+    if mount_overrides:
+        mounts_text = ", ".join(f"{name}={path}" for name, path in mount_overrides.items())
+        console.print(f"[dim]Using mount override(s): {mounts_text}[/dim]")
     ConsistShell(
         tracker,
         trust_db=trust_db,
