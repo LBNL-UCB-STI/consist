@@ -166,6 +166,29 @@ class RunQueryService:
             run_id, namespace=namespace, prefix=prefix, limit=limit
         )
 
+    def get_run_config_kv_for_runs(
+        self,
+        run_ids: Iterable[str],
+        *,
+        namespace: Optional[str] = None,
+        keys: Optional[Iterable[str]] = None,
+        limit: int = 100_000,
+    ) -> List[RunConfigKV]:
+        if not self._tracker.db:
+            return []
+
+        run_id_list = list(run_ids)
+        if not run_id_list:
+            return []
+
+        key_list = list(dict.fromkeys(keys)) if keys is not None else None
+        return self._tracker.db.get_run_config_kv_for_runs(
+            run_id_list,
+            namespace=namespace,
+            keys=key_list,
+            limit=limit,
+        )
+
     def _resolve_config_namespace(
         self, run_id: str, namespace: Optional[str]
     ) -> Optional[str]:

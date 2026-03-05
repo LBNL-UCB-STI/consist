@@ -8,7 +8,8 @@ executed, start here.
 
 - You are building a reusable library or service and want explicit dependencies.
 - You want direct control over lifecycle methods like `start_run`, `run`,
-  `scenario`, and query methods (`find_runs`, `get_artifact`, lineage helpers).
+  `scenario`, and query methods (`find_runs`, `run_set`, `get_artifact`,
+  lineage helpers).
 - You want to avoid relying on global context (`consist.use_tracker(...)`).
 
 ## Minimal runnable example
@@ -132,6 +133,7 @@ and `digest`.
         - ingest
         # Querying and history
         - find_runs
+        - run_set
         - find_run
         - find_latest_run
         - get_latest_run_id

@@ -8,6 +8,7 @@ the Tracker for managing runs, logging artifacts, and ingesting data.
 # Models
 from consist.models.run import Run, RunResult
 from consist.models.artifact import Artifact
+from consist.runset import AlignedPair, RunSet
 
 # Core
 from consist.core.tracker import Tracker
@@ -61,6 +62,7 @@ from consist.api import (
     register_views,
     find_run,
     find_runs,
+    run_set,
     db_session,
     run_query,
     config_run_query,
@@ -105,6 +107,8 @@ __all__ = [
     "Run",
     "RunResult",
     "Artifact",
+    "RunSet",
+    "AlignedPair",
     # Types
     "DriverType",
     "CacheOptions",
@@ -167,6 +171,7 @@ __all__ = [
     "register_views",
     "find_run",
     "find_runs",
+    "run_set",
     "db_session",
     "run_query",
     "config_run_query",

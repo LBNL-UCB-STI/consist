@@ -108,6 +108,7 @@ from consist.types import (
 if TYPE_CHECKING:
     from consist.core.coupler import Coupler
     from consist.core.step_context import StepContext
+    from consist.runset import RunSet
 
 AccessMode = Literal["standard", "analysis", "read_only"]
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -1760,6 +1761,30 @@ class Tracker:
             If no runs match, or more than one run matches.
         """
         return self.queries.find_run(**kwargs)
+
+    def run_set(self, label: Optional[str] = None, **filters: Any) -> "RunSet":
+        """
+        Build a RunSet from ``find_runs`` filters.
+
+        Parameters
+        ----------
+        label : Optional[str], optional
+            Optional label attached to the returned RunSet.
+        **filters : Any
+            Filters forwarded to ``find_runs``.
+
+        Returns
+        -------
+        RunSet
+            A tracker-backed RunSet for fluent grouping/alignment analysis.
+
+        Notes
+        -----
+        This is equivalent to ``RunSet.from_query(self, label=label, **filters)``.
+        """
+        from consist.runset import RunSet
+
+        return RunSet.from_query(self, label=label, **filters)
 
     def run_query(self, query: Executable) -> list:
         """

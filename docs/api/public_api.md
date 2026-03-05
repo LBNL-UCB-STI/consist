@@ -77,6 +77,8 @@ with tracker.scenario("baseline") as sc:
 - [`consist.Tracker`](tracker.md)
 - [`consist.Run`](run.md)
 - [`consist.Artifact`](artifact.md)
+- [`consist.RunSet`](runset.md#consist.runset.RunSet)
+- [`consist.AlignedPair`](runset.md#consist.runset.AlignedPair)
 - `consist.CacheOptions`, `consist.OutputPolicyOptions`, `consist.ExecutionOptions`
 
 ### Scenario / workflow helpers
@@ -125,6 +127,9 @@ Scenario defaults like `name_template` and `cache_epoch` are configured via `con
 - [`consist.register_views`](api_helpers.md#consist.api.register_views)
 - [`consist.find_run`](api_helpers.md#consist.api.find_run)
 - [`consist.find_runs`](api_helpers.md#consist.api.find_runs)
+- [`consist.run_set`](api_helpers.md#consist.api.run_set)
+- [`Tracker.run_set(...)`](tracker.md#consist.core.tracker.Tracker.run_set)
+- [`RunSet`](runset.md#consist.runset.RunSet) and [`AlignedPair`](runset.md#consist.runset.AlignedPair)
 - [`Tracker.find_latest_run(...)`](tracker.md#consist.core.tracker.Tracker.find_latest_run)
 - [`Tracker.diff_runs(...)`](tracker.md#consist.core.tracker.Tracker.diff_runs)
 - [`Tracker.get_run_inputs(...)`](tracker.md#consist.core.tracker.Tracker.get_run_inputs) / [`Tracker.get_run_outputs(...)`](tracker.md#consist.core.tracker.Tracker.get_run_outputs)
@@ -157,7 +162,7 @@ as needed.
 
 #### Querying and history
 
-- `find_runs`, `find_run`, `find_latest_run`, `get_latest_run_id`
+- `find_runs`, `run_set`, `find_run`, `find_latest_run`, `get_latest_run_id`
 - `find_artifacts`, `get_artifact`, `get_artifacts_for_run`
 - `find_artifacts_by_params`, `get_artifact_kv`, `register_artifact_facet_parser`
 - `get_run`, `get_run_config`, `get_run_inputs`, `get_run_outputs`
