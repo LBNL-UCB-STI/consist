@@ -1197,10 +1197,13 @@ def test_db_snapshot_non_json_prints_snapshot_and_sidecar_paths(tmp_path, monkey
     )
 
     assert result.exit_code == 0
-    assert "Snapshot path:" in result.stdout
-    assert "manual.duckdb" in result.stdout
-    assert "Sidecar path:" in result.stdout
-    assert "manual.snapshot_meta.json" in result.stdout
+    normalized_stdout = result.stdout.replace("\n", "")
+    assert f"Snapshot path: {snapshot_path}" in normalized_stdout
+    assert "Sidecar path:" in normalized_stdout
+    assert (
+        str(snapshot_path.with_name(f"{snapshot_path.stem}.snapshot_meta.json"))
+        in normalized_stdout
+    )
 
 
 def test_db_rebuild_json_output_is_parseable(tmp_path, monkeypatch):
