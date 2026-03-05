@@ -920,6 +920,11 @@ def schema_capture_file(
     if artifact_id is not None:
         artifact = tracker.get_artifact(artifact_id)
     else:
+        if artifact_key is None:
+            console.print(
+                "[red]Internal selector validation failed: missing artifact key.[/red]"
+            )
+            raise typer.Exit(CLI_EXIT_USAGE_ERROR)
         artifact = tracker.get_artifact(artifact_key, run_id=run_id)
     if artifact is None:
         if artifact_key is not None and run_id is not None:
