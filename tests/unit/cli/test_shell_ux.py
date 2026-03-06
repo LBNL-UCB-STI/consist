@@ -171,6 +171,20 @@ def test_shell_completions_include_aliases_flags_and_dynamic_values(tmp_path) ->
     ]
 
 
+def test_shell_hash_flag_completions_include_hash_options(tmp_path) -> None:
+    tracker = MagicMock()
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+
+    assert shell.complete_preview("--h", "preview --h", 8, 11) == ["--hash"]
+    assert shell.complete_schema_profile("--h", "schema_profile --h", 15, 18) == [
+        "--hash"
+    ]
+
+
 def test_shell_completion_falls_back_to_empty_on_query_failure(tmp_path) -> None:
     tracker = MagicMock()
     with (
@@ -185,6 +199,82 @@ def test_shell_completion_falls_back_to_empty_on_query_failure(tmp_path) -> None
         assert shell.complete_preview("", "preview ", 8, 8) == []
         assert shell.complete_schema_profile("", "schema_profile ", 15, 15) == []
         assert shell.complete_schema_stub("", "schema_stub ", 12, 12) == []
+
+
+def test_shell_hash_lookup_rejects_empty_prefix(tmp_path, capsys) -> None:
+    tracker = MagicMock()
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+
+    resolved = shell._lookup_artifact_by_hash_prefix("   ", command_name="preview")
+
+    out = capsys.readouterr().out
+    assert resolved is None
+    assert "--hash requires a non-empty prefix." in out
+
+
+def test_shell_hash_lookup_reports_run_scoped_miss(tmp_path, capsys) -> None:
+    tracker = MagicMock()
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+    shell._last_artifact_run_id = "run-123"
+
+    with patch("consist.cli._tracker_session") as tracker_session:
+        session = tracker_session.return_value.__enter__.return_value
+        session.exec.return_value.all.return_value = []
+        resolved = shell._lookup_artifact_by_hash_prefix(
+            "deadbeef", command_name="preview"
+        )
+
+    out = capsys.readouterr().out
+    normalized = " ".join(out.split())
+    assert resolved is None
+    assert "No artifact found for hash prefix 'deadbeef' in run 'run-123'" in out
+    assert "while running preview." in normalized
+
+
+def test_shell_hash_lookup_reports_ambiguity_with_candidates(tmp_path, capsys) -> None:
+    tracker = MagicMock()
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+
+    matches = [
+        SimpleNamespace(
+            hash="deadbeef001",
+            key="trips_2018_it0",
+            id="artifact-1",
+            run_id="run-a",
+        ),
+        SimpleNamespace(
+            hash="deadbeef002",
+            key="trips_2018_it1",
+            id="artifact-2",
+            run_id="run-a",
+        ),
+    ]
+
+    with patch("consist.cli._tracker_session") as tracker_session:
+        session = tracker_session.return_value.__enter__.return_value
+        session.exec.return_value.all.return_value = matches
+        resolved = shell._lookup_artifact_by_hash_prefix(
+            "deadbeef", command_name="schema_profile", run_id="run-a"
+        )
+
+    out = capsys.readouterr().out
+    normalized = " ".join(out.split())
+    assert resolved is None
+    assert "Hash prefix 'deadbeef' is ambiguous in run 'run-a'" in out
+    assert "Use a longer prefix for schema_profile." in normalized
+    assert "deadbeef001 (key=trips_2018_it0, id=artifact-1, run=run-a)" in out
 
 
 def test_shell_history_loads_existing_file_on_start(tmp_path) -> None:
