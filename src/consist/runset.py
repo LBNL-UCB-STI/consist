@@ -469,8 +469,10 @@ class AlignedPair:
                 "Build RunSets with RunSet.from_query(...) first."
             )
         if left_tracker is None:
+            assert right_tracker is not None
             return right_tracker
         if right_tracker is None:
+            assert left_tracker is not None
             return left_tracker
         if left_tracker is right_tracker:
             return left_tracker

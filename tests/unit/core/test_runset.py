@@ -252,7 +252,9 @@ def test_runset_from_runs_raises_for_facet_filters(tracker: Tracker) -> None:
         runs.filter(scenario="base")
 
 
-def test_runset_latest_orders_grouped_numeric_keys_numerically(tracker: Tracker) -> None:
+def test_runset_latest_orders_grouped_numeric_keys_numerically(
+    tracker: Tracker,
+) -> None:
     _create_run(
         tracker,
         run_id="year_10",
