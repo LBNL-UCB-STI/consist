@@ -21,11 +21,11 @@ Examples are tiered:
 - `../02_iterative_workflows.ipynb`: iterative scenario loops and cache
   extension runs.
 - `../03_transportation_demand_modeling.ipynb`: end-to-end transportation
-  scenario analysis.
+  scenario analysis with multi-run comparison via `RunSet`.
 - `../04_beam_core_demo.ipynb`: BEAM CORE-style linear workflow demo focused
-  on provenance diff, lineage, and cache behavior.
+  on provenance diff, lineage, cache behavior, and `RunSet` alignment patterns.
 - `scripts/model_integrator_wrapper.py`: integration-style scenario template
-  for wrapping external tools.
+  for wrapping external tools, including `RunSet`-based baseline/policy pairing.
 
 For manual lifecycle/decorator APIs (`start_run`, `begin_run/end_run`,
 `define_step`), see:

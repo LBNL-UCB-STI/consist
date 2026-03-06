@@ -17,10 +17,13 @@ Save this as `setup_data.py` and run it once:
 ``` python
 from pathlib import Path
 import pandas as pd
+import json
 
 Path("./data").mkdir(exist_ok=True)
 df = pd.DataFrame({"id": [1, 2, 3, 4, 5], "value": [10, 20, 30, 40, 50]})
 df.to_csv("./data/raw.csv", index=False)
+
+Path("./config.json").write_text(json.dumps({"threshold": 15}))
 ```
 
 ```bash
@@ -29,76 +32,109 @@ python setup_data.py
 
 ## Define the Pipeline
 
-Save the following as `workflow.py`:
+Adding Consist requires minimal changes to existing functions — primarily adding
+a `dict[str, Path]` return so the tracker knows what was produced.
 
-``` python
-from pathlib import Path
-import pandas as pd
-import consist
-from consist import ExecutionOptions, Tracker
+=== "Without Consist"
 
-tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+    Save the following as `workflow.py`:
 
-def clean_data(raw_path: Path, threshold: float) -> Path:
-    """Remove rows below threshold and write cleaned output."""
-    df = pd.read_csv(raw_path)
-    df_clean = df[df["value"] >= threshold]
+    ``` python
+    from pathlib import Path
+    import pandas as pd
+    import json
 
-    out_path = consist.output_path("cleaned")  # (1)!
-    df_clean.to_parquet(out_path, index=False)
-    return out_path  # (2)!
+    CLEANED_PATH = Path("./cleaned.parquet")  # (1)!
 
 
-def summarize(cleaned) -> Path:  # (3)!
-    """Compute summary statistics from cleaned data."""
-    summary = {"mean": cleaned["value"].mean(), "count": len(cleaned)}
-
-    out_path = consist.output_path("summary", ext="json")
-    pd.Series(summary).to_json(out_path)
-    return out_path
+    def clean_data(raw_path: Path, config_path: Path) -> None:
+        """Remove rows below threshold and write cleaned output."""
+        threshold = json.loads(config_path.read_text())["threshold"]
+        df = pd.read_csv(raw_path)
+        df[df["value"] >= threshold].to_parquet(CLEANED_PATH, index=False)
 
 
-# --- Execute the pipeline ---
+    def summarize(cleaned_path: Path) -> None:
+        """Compute summary statistics from cleaned data."""
+        df = pd.read_parquet(cleaned_path)
+        pd.Series({"mean": df["value"].mean(), "count": len(df)}).to_json("./summary.json")
 
-with consist.use_tracker(tracker):
+
+    clean_data(Path("./data/raw.csv"), Path("./config.json"))
+    summarize(CLEANED_PATH)  # (2)!
+
+    final = pd.read_json(Path("./summary.json"), typ="series")
+    print(f"Result: {final.to_dict()}")
+    ```
+
+    1. The output path must be declared somewhere both functions can see. If
+       `clean_data` ever writes to a different location, `summarize` breaks silently.
+    2. The dependency between steps is implicit — this call only works because
+       `clean_data` happened to run first and write to `CLEANED_PATH`.
+
+    This runs correctly, but every execution re-runs both steps. There is no record
+    of which `config.json` produced which `summary.json`, and no way to ask why
+    results changed between runs.
+
+=== "With Consist"
+
+    Save the following as `workflow.py`:
+
+    ``` python
+    from pathlib import Path
+    import pandas as pd
+    import json
+    import consist
+    from consist import Tracker
+
+    tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+
+
+    def clean_data(raw_path: Path, config_path: Path) -> dict[str, Path]:  # (1)!
+        """Remove rows below threshold and write cleaned output."""
+        threshold = json.loads(config_path.read_text())["threshold"]
+        df = pd.read_csv(raw_path)
+        out_path = Path("./cleaned.parquet")
+        df[df["value"] >= threshold].to_parquet(out_path, index=False)
+        return {"cleaned": out_path}
+
+
+    def summarize(cleaned_path: Path) -> dict[str, Path]:
+        """Compute summary statistics from cleaned data."""
+        df = pd.read_parquet(cleaned_path)
+        out_path = Path("./summary.json")
+        pd.Series({"mean": df["value"].mean(), "count": len(df)}).to_json(out_path)
+        return {"summary": out_path}
+
+
     # Step 1: Clean
     clean_result = tracker.run(
         fn=clean_data,
-        name="clean",
-        config={"threshold": 15},  # (4)!
-        inputs=[Path("./data/raw.csv")],  # (5)!
-        outputs=["cleaned"],
-        execution_options=ExecutionOptions(
-            runtime_kwargs={"raw_path": Path("./data/raw.csv"), "threshold": 15}
-        ),
+        inputs={  # (2)!
+            "raw_path": Path("./data/raw.csv"),
+            "config_path": Path("./config.json"),
+        },
     )
     print(f"Clean: {clean_result.run.status}")
 
     # Step 2: Summarize (consumes output from Step 1)
     summary_result = tracker.run(
         fn=summarize,
-        name="summarize",
-        inputs={"cleaned": consist.ref(clean_result, key="cleaned")},  # (6)!
-        outputs=["summary"],
-        execution_options=ExecutionOptions(load_inputs=True),
+        inputs={"cleaned_path": consist.ref(clean_result, key="cleaned")},  # (3)!
     )
     print(f"Summarize: {summary_result.run.status}")
 
     # Load final result
     final = pd.read_json(summary_result.outputs["summary"].path, typ="series")
     print(f"Result: {final.to_dict()}")
-```
+    ```
 
-1. Use `consist.output_path(...)` to resolve a managed output path. This honors output policy and `artifact_dir` overrides while avoiding manual path bugs.
-2. Return the output path. Consist registers it as the `cleaned` artifact.
-3. Artifact inputs are auto-loaded when input keys match parameter names and `load_inputs=True`.
-4. `config` is hashed into the run's signature. Changing `threshold` causes a cache miss.
-5. `inputs` lists files or artifacts whose content hashes are included in the signature.
-6. Use `consist.ref(...)` to select and link the upstream output artifact explicitly.
-
-**Best practice:** Keep step-to-step links explicit with
-`consist.ref(run_result, key="...")`. Passing a raw `RunResult` is only clear
-when there is exactly one output.
+    1. The only change to the function body: return `{"cleaned": out_path}` instead
+       of `None`. Consist uses this to register the output artifact.
+    2. `inputs` maps parameter names to paths or artifacts. Each file's content hash
+       is included in the cache signature — no global path constants needed.
+    3. `consist.ref(...)` passes the upstream artifact directly. The dependency is an
+       explicit value, not a shared constant or implicit ordering assumption.
 
 ## Run and Observe Caching
 
@@ -124,15 +160,12 @@ python workflow.py
 
 Both steps return cached results instantly. The function bodies do not execute.
 
-## Invalidate with Config Change
+## Invalidate with a Config Change
 
-Edit `workflow.py` to change the threshold:
+Edit `config.json` to change the threshold:
 
-``` python
-config={"threshold": 25},  # Changed from 15
-execution_options=ExecutionOptions(
-    runtime_kwargs={"raw_path": Path("./data/raw.csv"), "threshold": 25},
-),
+```json
+{"threshold": 25}
 ```
 
 Run again:
@@ -141,7 +174,7 @@ Run again:
 python workflow.py
 ```
 
-Consist detects the config change and re-executes `clean_data`. Because its output artifact changes, `summarize` also re-executes—its input hash differs from the cached version.
+Consist detects that `config.json`'s content hash changed and re-executes `clean_data`. Because its output artifact changes, `summarize` also re-executes — its input hash now differs from the cached version.
 
 ```
 Clean: completed
@@ -149,7 +182,7 @@ Summarize: completed
 Result: {'mean': 40.0, 'count': 3}
 ```
 
-This is the Merkle DAG at work: changes propagate downstream automatically.
+This is the Merkle DAG at work: a change to any input propagates downstream automatically. The `config.json` file is just another hashed input — no special configuration API required.
 
 ## View Lineage
 
@@ -165,7 +198,7 @@ Each run shows its inputs, outputs, config hash, and status. Artifacts link to t
 
 This workflow demonstrated:
 
-- **Cacheable function steps** with explicit `run(..., outputs=[...])`
+- **Cacheable function steps** using `tracker.run(...)` with `dict[str, Path]` returns
 - **Artifact passing** where one step's output becomes another's input
 - **Cache invalidation** triggered by config changes
 - **Lineage tracking** linking runs through their artifacts

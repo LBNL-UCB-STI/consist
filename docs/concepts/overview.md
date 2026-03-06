@@ -40,7 +40,7 @@ On cache hits, Consist returns output artifact metadata without copying files. L
 
 ## Provenance & Lineage
 
-**Provenance**: The complete history of a result—code version, configuration, input data, and compute environment. Consist records provenance automatically for every run.
+**Provenance**: The complete history of a result—code version, configuration, input data, and compute environment. Consist records provenance for every tracked run.
 
 **Lineage**: The dependency chain showing which run created an artifact, which inputs that run consumed, and which runs produced those inputs.
 
@@ -85,47 +85,45 @@ For a full term index, see the [Glossary](../glossary.md).
 
 **Inputs** are files or values that influence computation. File inputs are hashed by content or metadata depending on the hashing strategy (`full` vs `fast`).
 
-**Outputs** are named artifacts declared via `consist.run(...)` or `tracker.run(...)`. Consist stores their paths and provenance metadata for lookup and querying.
+**Outputs** are named artifacts registered via a function's `dict[str, Path]` return value, or explicitly via `output_paths`. Consist stores their paths and provenance metadata for lookup and querying.
 
-Prefer `consist.output_path(...)` / `consist.output_dir(...)` (or injected `RunContext.output_path(...)` / `RunContext.output_dir(...)`) for outputs. These helpers apply managed path policy, honor `artifact_dir` overrides, and reduce manual path bugs while keeping artifacts portable.
+### Recommended pattern: file-based I/O
 
-### Input mappings and auto-loading
-
-Inputs can be passed as a list (hash-only) or a mapping (hash + parameter
-injection). When using a mapping, Consist matches input keys to function
-parameters and auto-loads artifacts by default. To pass raw paths instead, use
-`execution_options=ExecutionOptions(load_inputs=False, runtime_kwargs={...})`.
-
-Concrete example:
+The recommended pattern is for functions to accept file paths as inputs, write output files, and return a `dict[str, Path]` mapping artifact keys to output paths. Consist uses the return value to log artifacts — no separate `output_paths` argument required.
 
 ``` python
 import pandas as pd
-from consist import ExecutionOptions
+from pathlib import Path
 
-def summarize_trips(trips_df):
-    return trips_df["distance_miles"].mean()
-
-result = consist.run(  # (1)!
-    fn=summarize_trips,
-    inputs={"trips_df": trips_artifact},
-)
-
-def summarize_trips_from_path(trips_path: str):
+def summarize_trips(trips_path: Path) -> dict[str, Path]:
     df = pd.read_parquet(trips_path)
-    return df["distance_miles"].mean()
+    out = Path("./summary.parquet")
+    df.groupby("mode")["distance_miles"].mean().to_frame().to_parquet(out)
+    return {"summary": out}
 
-result = consist.run(  # (2)!
-    fn=summarize_trips_from_path,
-    inputs={"trips_path": trips_artifact},
-    execution_options=ExecutionOptions(
-        load_inputs=False,
-        runtime_kwargs={"trips_path": trips_artifact.path},
-    ),
+result = tracker.run(
+    fn=summarize_trips,
+    inputs={"trips_path": trips_artifact},  # path resolved from artifact; hashed for cache identity
 )
 ```
 
-1. Auto-loading: mapping keys match function params, so Consist loads the DataFrame.
-2. No auto-loading: you get the raw path and load it yourself.
+The function is a plain Python callable: testable without a tracker, honest about its I/O, and readable without framework knowledge.
+
+### When to use `output_paths`
+
+If a function writes files but returns `None` (e.g., a legacy tool or subprocess wrapper), register outputs explicitly:
+
+``` python
+result = tracker.run(
+    fn=run_legacy_model,
+    inputs={"config": config_artifact},
+    output_paths={"results": Path("./model_output.csv")},
+)
+```
+
+### Auto-loading inputs as DataFrames
+
+If you prefer to receive a DataFrame directly instead of a path, Consist can load the artifact's file and inject it as the parameter value (default `load_inputs=True`). This is convenient for short scripts but hides the I/O boundary — prefer the path-based pattern for pipelines where the function boundary matters.
 
 ---
 
