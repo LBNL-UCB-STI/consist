@@ -1851,6 +1851,41 @@ class DatabaseManager:
         except Exception:
             return []
 
+    def get_run_config_kv_for_runs(
+        self,
+        run_ids: Sequence[str],
+        *,
+        namespace: Optional[str] = None,
+        keys: Optional[Sequence[str]] = None,
+        limit: int = 100_000,
+    ) -> List[RunConfigKV]:
+        """
+        Return flattened facet key/value rows for multiple runs.
+        """
+        if not run_ids:
+            return []
+        if keys is not None and len(keys) == 0:
+            return []
+
+        def _query():
+            with self.session_scope() as session:
+                statement = select(RunConfigKV).where(
+                    col(RunConfigKV.run_id).in_(run_ids)
+                )
+                if namespace:
+                    statement = statement.where(RunConfigKV.namespace == namespace)
+                if keys is not None:
+                    statement = statement.where(col(RunConfigKV.key).in_(keys))
+                rows = session.exec(statement.limit(limit)).all()
+                for row in rows:
+                    session.expunge(row)
+                return rows
+
+        try:
+            return self.execute_with_retry(_query)
+        except Exception:
+            return []
+
     def get_artifact_kv(
         self,
         artifact_id: uuid.UUID,

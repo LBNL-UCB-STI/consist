@@ -615,6 +615,57 @@ class RunTraceCoordinator:
             direction="output",
         )
 
+    @staticmethod
+    def _default_output_key(
+        *,
+        fn: Optional[Callable[..., Any]],
+        resolved_name: str,
+    ) -> str:
+        fn_name = getattr(fn, "__name__", None) if fn is not None else None
+        if isinstance(fn_name, str) and fn_name and fn_name != "<lambda>":
+            return fn_name
+        return resolved_name
+
+    @staticmethod
+    def _try_infer_artifact_outputs(
+        *,
+        tracker: "Tracker",
+        fn: Optional[Callable[..., Any]],
+        resolved_name: str,
+        result: Any,
+    ) -> Optional[Dict[str, Artifact]]:
+        if isinstance(result, (Artifact, str, Path)):
+            output_key = RunTraceCoordinator._default_output_key(
+                fn=fn,
+                resolved_name=resolved_name,
+            )
+            logged = RunTraceCoordinator._log_output_value(
+                tracker,
+                output_key,
+                cast(Optional[ArtifactRef], result),
+            )
+            if logged is None:
+                return {}
+            return {output_key: logged}
+
+        if isinstance(result, dict):
+            inferred: Dict[str, Artifact] = {}
+            for output_key, output_value in result.items():
+                if not isinstance(output_key, str):
+                    return None
+                if not isinstance(output_value, (Artifact, str, Path)):
+                    return None
+                logged = RunTraceCoordinator._log_output_value(
+                    tracker,
+                    output_key,
+                    cast(Optional[ArtifactRef], output_value),
+                )
+                if logged is not None:
+                    inferred[output_key] = logged
+            return inferred
+
+        return None
+
     def _log_declared_output_paths(
         self,
         *,
@@ -652,6 +703,7 @@ class RunTraceCoordinator:
         *,
         tracker: "Tracker",
         current_consist: Any,
+        fn: Optional[Callable[..., Any]],
         resolved_name: str,
         outputs: Optional[List[str]],
         output_paths: Optional[Mapping[str, ArtifactRef]],
@@ -746,10 +798,21 @@ class RunTraceCoordinator:
             else:
                 raise TypeError(f"Run returned unsupported type {type(result)}")
         elif result is not None:
-            logging.warning(
-                "[Consist] Run %r returned a value but no outputs were declared; ignoring return value.",
-                resolved_name,
-            )
+            inferred_outputs = None
+            if output_paths is None:
+                inferred_outputs = self._try_infer_artifact_outputs(
+                    tracker=tracker,
+                    fn=fn,
+                    resolved_name=resolved_name,
+                    result=result,
+                )
+            if inferred_outputs is not None:
+                outputs_map.update(inferred_outputs)
+            else:
+                logging.warning(
+                    "[Consist] Run %r returned a value but no outputs were declared; ignoring return value.",
+                    resolved_name,
+                )
 
         if captured_outputs:
             for output_key, artifact in captured_outputs.items():
@@ -1304,6 +1367,7 @@ class RunTraceCoordinator:
             outputs_map = self._normalize_run_outputs(
                 tracker=tracker,
                 current_consist=current_consist,
+                fn=fn,
                 resolved_name=resolved_name,
                 outputs=outputs,
                 output_paths=output_paths,
