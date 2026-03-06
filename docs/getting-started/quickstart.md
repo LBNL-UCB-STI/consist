@@ -12,55 +12,43 @@ Save this as `quickstart_run.py`:
 
 ``` python
 from pathlib import Path
+from consist import Tracker
 import consist
-from consist import ExecutionOptions, Tracker
 
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
-def square_value(*, value: int) -> Path:
-    out = consist.output_path("square", ext="txt")
+def square_value(input_file: Path) -> dict[str, Path]:
+    value = int(input_file.read_text().strip())
+    out = Path("./square.txt")
     out.write_text(f"{value ** 2}\n", encoding="utf-8")
-    print(f"executed square_value(value={value})")
-    return out
+    print(f"executed square_value on {input_file}")
+    return {"square": out}
 
-with consist.use_tracker(tracker):
-    first = consist.run(
-        fn=square_value,
-        name="square",
-        config={"value": 5},
-        outputs=["square"],
-        execution_options=ExecutionOptions(runtime_kwargs={"value": 5}),
-    )
-    second = consist.run(
-        fn=square_value,
-        name="square",
-        config={"value": 5},
-        outputs=["square"],
-        execution_options=ExecutionOptions(runtime_kwargs={"value": 5}),
-    )
+first = tracker.run(fn=square_value, inputs={"input_file": Path("input.txt")})
+second = tracker.run(fn=square_value, inputs={"input_file": Path("input.txt")})
 
-print(first.cache_hit, second.cache_hit)
+print(first.cache_hit, second.cache_hit)  # False, True
 ```
 
-Run it twice:
+Create `input.txt` containing `5`, then run the script twice:
 
 ```bash
+echo "5" > input.txt
 python quickstart_run.py
 python quickstart_run.py
 ```
 
-On the second call, `run(...)` returns a cache hit and skips function execution.
+On the second call (and on the first call's second `tracker.run`), `run(...)` returns a cache hit and skips execution.
 
 ## Pattern 2: Always-Execute Step (`trace`)
 
 Use `trace(...)` for diagnostics or side effects that should always run:
 
 ``` python
-with consist.use_tracker(tracker):
-    with consist.trace("inspect_square", config={"value": 5}) as t:
-        audit_path = consist.output_path("audit", ext="txt")
-        audit_path.write_text("inspection complete\n", encoding="utf-8")
-        t.log_output(audit_path, key="audit")
+with tracker.trace("inspect_square", inputs={"input_file": Path("input.txt")}) as t:
+    audit_path = Path("./audit.txt")
+    audit_path.write_text("inspection complete\n", encoding="utf-8")
+    t.log_output(audit_path, key="audit")
 ```
 
 `trace(...)` still records identity/config/inputs, but the block always executes.
@@ -70,20 +58,17 @@ with consist.use_tracker(tracker):
 Combine `run(...)` and `trace(...)` in one workflow:
 
 ``` python
-with consist.scenario("demo_pipeline", tracker=tracker, config={"value": 5}) as sc:
+with tracker.scenario("demo_pipeline") as sc:
     step = sc.run(
         fn=square_value,
-        name="square",
-        config={"value": 5},
-        outputs=["square"],
-        execution_options=ExecutionOptions(runtime_kwargs={"value": 5}),
+        inputs={"input_file": Path("input.txt")},
     )
 
     with sc.trace(
         "quality_check",
         inputs={"square": consist.ref(step, key="square")},
     ) as t:
-        qc_path = consist.output_path("qc", ext="txt")
+        qc_path = Path("./qc.txt")
         qc_path.write_text("qc ok\n", encoding="utf-8")
         t.log_output(qc_path, key="qc")
 ```
