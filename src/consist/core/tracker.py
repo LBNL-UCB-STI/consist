@@ -3041,10 +3041,13 @@ class Tracker:
             if static_dirs is not None:
                 return static_dirs
             source = config_dirs_from
-            if callable(source):
-                candidate = source(ctx)
+            if isinstance(source, str):
+                candidate = _resolve_runtime_path(ctx, source)
             else:
-                candidate = _resolve_runtime_path(ctx, cast(str, source))
+                source_from_ctx = cast(
+                    Callable[["StepContext"], Iterable[Union[str, Path]]], source
+                )
+                candidate = source_from_ctx(ctx)
             if isinstance(candidate, (str, Path)):
                 raise ValueError(
                     "Resolved config_dirs must be an iterable of paths, not a single "
@@ -3234,7 +3237,7 @@ class Tracker:
                         spec.table_name,
                         artifact.key,
                     )
-                rows = spec.rows(run.id) if callable(spec.rows) else spec.rows
+                rows = spec.materialize_rows(run.id)
                 self.ingest(
                     artifact,
                     data=rows,

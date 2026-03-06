@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import (
     Any,
     Callable,
+    cast,
     Iterable,
     Literal,
     Mapping,
@@ -180,11 +181,13 @@ class IngestSpec:
         """
         Resolve rows, calling the factory if needed.
         """
-        if self.rows is None:
+        rows = self.rows
+        if rows is None:
             return []
-        if callable(self.rows):
-            return self.rows(run_id)
-        return self.rows
+        if callable(rows):
+            row_factory = cast(RowFactory, rows)
+            return row_factory(run_id)
+        return rows
 
 
 class CanonicalizationResult(NamedTuple):

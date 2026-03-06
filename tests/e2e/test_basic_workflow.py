@@ -242,7 +242,8 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
         )
         assert preview_result.exit_code == 0
         assert "value" in preview_result.stdout
-        assert "value_doubled" in preview_result.stdout
+        # Rich may truncate wide headers in terminal tables.
+        assert "value_do" in preview_result.stdout
 
         schema_result = runner.invoke(
             cli_app,

@@ -14,6 +14,34 @@ The CLI looks for the provenance database in this order:
 3. `provenance.duckdb` in the current directory
 4. Common subdirectories (`./data/`, `./db/`, `./.consist/`)
 
+## Artifact Path Resolution
+
+Some artifacts are stored with relative URIs like `./outputs/...`. For commands that load
+or validate artifact files (`preview`, `validate`, and shell `preview`/`schema_profile`),
+Consist resolves relative paths in this order:
+
+1. Explicit `--run-dir`
+2. Parent directory of `--db-path`
+3. Current working directory
+4. `_physical_run_dir` from run metadata (**only** when `--trust-db` is enabled)
+
+This keeps default behavior safe while still supporting archived/moved run directories.
+
+Examples:
+
+```bash
+# Typical case: db and outputs are colocated (auto-discovery via --db-path parent)
+consist preview trip_table --db-path examples/runs/beam_core_demo/beam_core_demo_demo.duckdb
+
+# Archived/moved run root: explicitly point to the new location
+consist preview trip_table \
+  --db-path archives/beam_core_demo.duckdb \
+  --run-dir /data/archive/beam_core_demo
+
+# Allow fallback to _physical_run_dir metadata from the DB
+consist preview trip_table --db-path archives/beam_core_demo.duckdb --trust-db
+```
+
 ## Global Options
 
 ```bash
@@ -200,7 +228,8 @@ Preview tabular artifacts (CSV, Parquet) without loading full data.
 ```bash
 consist preview <artifact_key>
 consist preview <artifact_key> --rows 10
-consist preview <artifact_key> --trust-db  # Allow mount inference from DB metadata
+consist preview <artifact_key> --run-dir /path/to/run_root
+consist preview <artifact_key> --trust-db  # Allow metadata-based mount/run-dir inference
 ```
 
 ### consist validate
@@ -210,6 +239,9 @@ Check that artifacts in the database exist on disk.
 ```bash
 consist validate
 consist validate --fix  # Mark missing artifacts
+consist validate --db-path examples/runs/beam_core_demo/beam_core_demo_demo.duckdb
+consist validate --db-path archives/beam_core_demo.duckdb --run-dir /data/archive/beam_core_demo
+consist validate --db-path archives/beam_core_demo.duckdb --trust-db
 ```
 
 ### consist shell
@@ -218,7 +250,9 @@ Start an interactive session for exploring provenance.
 
 ```bash
 consist shell
-consist shell --trust-db  # Allow mount inference from DB metadata
+consist shell --db-path examples/runs/beam_core_demo/beam_core_demo_demo.duckdb
+consist shell --run-dir /data/archive/beam_core_demo
+consist shell --trust-db  # Allow metadata-based mount/run-dir inference
 ```
 
 Inside the shell:

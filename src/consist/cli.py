@@ -203,7 +203,9 @@ def find_db_path(explicit_path: Optional[str] = None) -> str:
 
 
 # Then update get_tracker:
-def get_tracker(db_path: Optional[str] = None) -> Tracker:
+def get_tracker(
+    db_path: Optional[str] = None, *, run_dir: Optional[Path | str] = None
+) -> Tracker:
     """Initializes and returns a Tracker instance."""
     resolved_path = find_db_path(db_path)
     if not Path(resolved_path).exists():
@@ -212,7 +214,8 @@ def get_tracker(db_path: Optional[str] = None) -> Tracker:
             "[yellow]Hint: Use --db-path to specify location or set CONSIST_DB environment variable[/yellow]"
         )
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
-    return Tracker(run_dir=Path("."), db_path=resolved_path)
+    tracker_run_dir = Path(run_dir) if run_dir is not None else Path(".")
+    return Tracker(run_dir=tracker_run_dir, db_path=resolved_path)
 
 
 @contextmanager
@@ -1380,12 +1383,23 @@ def search(
 @app.command()
 def validate(
     db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
+    run_dir: Optional[str] = typer.Option(
+        None,
+        "--run-dir",
+        help="Base directory for resolving relative artifact paths like ./outputs/...",
+    ),
+    trust_db: bool = typer.Option(
+        False,
+        "--trust-db",
+        help="Allow metadata-based run-dir inference for relative artifact validation.",
+    ),
     fix: bool = typer.Option(
         False, help="Attempt to fix issues (mark artifacts as missing)."
     ),
 ) -> None:
     """Check that artifacts referenced in DB actually exist on disk."""
-    tracker = get_tracker(db_path)
+    resolved_db_path = find_db_path(db_path)
+    tracker = get_tracker(resolved_db_path, run_dir=run_dir)
     from consist.models.artifact import Artifact
 
     with _tracker_session(tracker) as session:
@@ -1401,6 +1415,26 @@ def validate(
         for artifact_id, key, uri, run_id in _iter_artifact_rows(
             session, batch_size=batch_size
         ):
+            if uri.startswith("./"):
+                resolution_bases, _ = _build_relative_resolution_bases_for_uri(
+                    tracker,
+                    container_uri=uri,
+                    run_id=run_id,
+                    db_path=resolved_db_path,
+                    run_dir=run_dir,
+                    trust_db=trust_db,
+                )
+                if resolution_bases:
+                    found = False
+                    for _, base_dir in resolution_bases:
+                        candidate = (base_dir / uri[2:]).resolve()
+                        if candidate.exists():
+                            found = True
+                            break
+                    if not found:
+                        missing.append((key, uri, run_id))
+                        missing_ids.append(artifact_id)
+                    continue
             try:
                 abs_path = tracker.resolve_uri(uri)
                 if not Path(abs_path).exists():
@@ -1654,7 +1688,92 @@ def _build_lineage_tree(
         _build_lineage_tree(child_branch, input_lineage, visited_runs.copy())
 
 
-def _print_missing_artifact_file_help(tracker: Tracker, artifact: "Artifact") -> None:
+def _resolve_cli_path(path: Path | str) -> Path:
+    """Resolve a CLI path against cwd, preserving absolute inputs."""
+    path_obj = Path(path).expanduser()
+    if not path_obj.is_absolute():
+        path_obj = Path.cwd() / path_obj
+    return path_obj.resolve()
+
+
+def _set_tracker_run_dir(tracker: Tracker, run_dir: Path) -> None:
+    """Update tracker and file-system manager run_dir in sync."""
+    tracker.run_dir = run_dir
+    tracker.fs.run_dir = run_dir
+
+
+def _build_relative_resolution_bases(
+    tracker: Tracker,
+    artifact: "Artifact",
+    *,
+    db_path: Optional[str],
+    run_dir: Optional[str],
+    trust_db: bool,
+) -> tuple[List[Tuple[str, Path]], Optional[Path]]:
+    return _build_relative_resolution_bases_for_uri(
+        tracker,
+        container_uri=artifact.container_uri,
+        run_id=artifact.run_id,
+        db_path=db_path,
+        run_dir=run_dir,
+        trust_db=trust_db,
+    )
+
+
+def _build_relative_resolution_bases_for_uri(
+    tracker: Tracker,
+    *,
+    container_uri: str,
+    run_id: Optional[str],
+    db_path: Optional[str],
+    run_dir: Optional[str],
+    trust_db: bool,
+) -> tuple[List[Tuple[str, Path]], Optional[Path]]:
+    """Build ordered base directories for resolving relative artifact URIs."""
+    if not container_uri.startswith("./"):
+        return [], None
+
+    bases: List[Tuple[str, Path]] = []
+    seen: set[Path] = set()
+
+    def _append(label: str, base: Path | str) -> None:
+        resolved = _resolve_cli_path(base)
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        bases.append((label, resolved))
+
+    if run_dir:
+        _append("explicit --run-dir", run_dir)
+
+    if db_path:
+        _append("db-path parent", _resolve_cli_path(db_path).parent)
+
+    _append("current working directory", Path.cwd())
+
+    db_metadata_run_dir: Optional[Path] = None
+    run = tracker.get_run(run_id) if run_id else None
+    if run and isinstance(run.meta, dict):
+        candidate = run.meta.get("_physical_run_dir")
+        if isinstance(candidate, str) and candidate:
+            db_metadata_run_dir = _resolve_cli_path(candidate)
+            if trust_db:
+                _append(
+                    "trusted run metadata (_physical_run_dir)",
+                    db_metadata_run_dir,
+                )
+
+    return bases, db_metadata_run_dir
+
+
+def _print_missing_artifact_file_help(
+    tracker: Tracker,
+    artifact: "Artifact",
+    *,
+    attempted_paths: Optional[List[Tuple[str, Path]]] = None,
+    db_metadata_run_dir: Optional[Path] = None,
+    trust_db: bool = False,
+) -> None:
     abs_path = tracker.resolve_uri(artifact.container_uri)
     from consist.tools.mount_diagnostics import (
         build_mount_resolution_hint,
@@ -1669,6 +1788,20 @@ def _print_missing_artifact_file_help(tracker: Tracker, artifact: "Artifact") ->
         if hint
         else f"Resolved path: {abs_path}\nThe artifact may have been deleted, moved, or your mounts are misconfigured."
     )
+    extra_lines: List[str] = []
+    if attempted_paths:
+        extra_lines.append("Attempted resolution bases:")
+        for label, path in attempted_paths:
+            extra_lines.append(f"- {label}: {path}")
+    if db_metadata_run_dir is not None and not trust_db:
+        extra_lines.append(f"Database metadata suggests run_dir: {db_metadata_run_dir}")
+        extra_lines.append(f"Try: --run-dir {db_metadata_run_dir}")
+        extra_lines.append(
+            "Or re-run with --trust-db to allow _physical_run_dir fallback."
+        )
+    if extra_lines:
+        help_text = f"{help_text}\n" + "\n".join(extra_lines)
+
     console.print(
         f"[red]Artifact file not found at: {artifact.container_uri}[/red]\n{help_text}"
     )
@@ -1698,8 +1831,13 @@ def _load_artifact_with_diagnostics(
     artifact: "Artifact",
     *,
     n_rows: int | None = None,
+    resolution_bases: Optional[List[Tuple[str, Path]]] = None,
+    db_metadata_run_dir: Optional[Path] = None,
+    trust_db: bool = False,
 ) -> Any | None:
-    try:
+    attempted_paths: List[Tuple[str, Path]] = []
+
+    def _load_once() -> Any:
         import consist
 
         load_kwargs: Dict[str, Any] = {}
@@ -1709,8 +1847,39 @@ def _load_artifact_with_diagnostics(
         return consist.load(
             artifact, tracker=tracker, db_fallback="always", **load_kwargs
         )
+
+    try:
+        if artifact.container_uri.startswith("./") and resolution_bases:
+            original_run_dir = _resolve_cli_path(tracker.run_dir)
+            for label, base_dir in resolution_bases:
+                try:
+                    _set_tracker_run_dir(tracker, base_dir)
+                    return _load_once()
+                except FileNotFoundError:
+                    attempted_paths.append(
+                        (label, (base_dir / artifact.container_uri[2:]).resolve())
+                    )
+                finally:
+                    _set_tracker_run_dir(tracker, original_run_dir)
+
+            _print_missing_artifact_file_help(
+                tracker,
+                artifact,
+                attempted_paths=attempted_paths,
+                db_metadata_run_dir=db_metadata_run_dir,
+                trust_db=trust_db,
+            )
+            return None
+
+        return _load_once()
     except FileNotFoundError:
-        _print_missing_artifact_file_help(tracker, artifact)
+        _print_missing_artifact_file_help(
+            tracker,
+            artifact,
+            attempted_paths=attempted_paths or None,
+            db_metadata_run_dir=db_metadata_run_dir,
+            trust_db=trust_db,
+        )
         return None
     except ImportError as e:
         console.print(
@@ -1784,15 +1953,21 @@ def preview(
     db_path: Optional[str] = typer.Option(
         None, help="Path to the Consist DuckDB database."
     ),
+    run_dir: Optional[str] = typer.Option(
+        None,
+        "--run-dir",
+        help="Base directory for resolving relative artifact paths like ./outputs/...",
+    ),
     n_rows: int = typer.Option(5, "--rows", "-n", help="Number of rows to display."),
     trust_db: bool = typer.Option(
         False,
         "--trust-db",
-        help="Allow mount inference from database metadata for artifact resolution.",
+        help="Allow metadata-based mount and run-dir inference for artifact resolution.",
     ),
 ) -> None:
     """Shows a small preview of an artifact (tabular or array-like when supported)."""
-    tracker = get_tracker(db_path)
+    resolved_db_path = find_db_path(db_path)
+    tracker = get_tracker(resolved_db_path, run_dir=run_dir)
 
     # Fetch artifact first to give a precise message (unsupported driver vs missing)
     artifact = tracker.get_artifact(artifact_key)
@@ -1801,7 +1976,21 @@ def preview(
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
     _ensure_tracker_mounts_for_artifact(tracker, artifact, trust_db=trust_db)
-    data = _load_artifact_with_diagnostics(tracker, artifact, n_rows=n_rows)
+    resolution_bases, db_metadata_run_dir = _build_relative_resolution_bases(
+        tracker,
+        artifact,
+        db_path=resolved_db_path,
+        run_dir=run_dir,
+        trust_db=trust_db,
+    )
+    data = _load_artifact_with_diagnostics(
+        tracker,
+        artifact,
+        n_rows=n_rows,
+        resolution_bases=resolution_bases,
+        db_metadata_run_dir=db_metadata_run_dir,
+        trust_db=trust_db,
+    )
     if data is None:
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
@@ -1919,10 +2108,19 @@ class ConsistShell(cmd.Cmd):
     _SCHEMA_STUB_SOURCES: Tuple[str, ...] = ("file", "duckdb", "user_provided")
     _PICKER_LIMIT = 20
 
-    def __init__(self, tracker: Tracker, *, trust_db: bool = False):
+    def __init__(
+        self,
+        tracker: Tracker,
+        *,
+        trust_db: bool = False,
+        db_path: Optional[str] = None,
+        run_dir: Optional[str] = None,
+    ):
         super().__init__()
         self.tracker = tracker
         self.trust_db = trust_db
+        self.db_path = db_path
+        self.run_dir = run_dir
         self._history_path = Path.home() / ".consist" / "shell_history"
         self._history_saved = False
         self._load_history()
@@ -2262,8 +2460,20 @@ class ConsistShell(cmd.Cmd):
             _ensure_tracker_mounts_for_artifact(
                 self.tracker, artifact, trust_db=self.trust_db
             )
+            resolution_bases, db_metadata_run_dir = _build_relative_resolution_bases(
+                self.tracker,
+                artifact,
+                db_path=self.db_path,
+                run_dir=self.run_dir,
+                trust_db=self.trust_db,
+            )
             data = _load_artifact_with_diagnostics(
-                self.tracker, artifact, n_rows=n_rows
+                self.tracker,
+                artifact,
+                n_rows=n_rows,
+                resolution_bases=resolution_bases,
+                db_metadata_run_dir=db_metadata_run_dir,
+                trust_db=self.trust_db,
             )
             if data is None:
                 return
@@ -2330,6 +2540,13 @@ class ConsistShell(cmd.Cmd):
             _ensure_tracker_mounts_for_artifact(
                 self.tracker, artifact, trust_db=self.trust_db
             )
+            resolution_bases, db_metadata_run_dir = _build_relative_resolution_bases(
+                self.tracker,
+                artifact,
+                db_path=self.db_path,
+                run_dir=self.run_dir,
+                trust_db=self.trust_db,
+            )
 
             if self.tracker.db and artifact.id:
                 fetched = self.tracker.db.get_artifact_schema_for_artifact(
@@ -2342,7 +2559,13 @@ class ConsistShell(cmd.Cmd):
                     )
                     _render_schema_profile(schema, fields)
                     return
-            data = _load_artifact_with_diagnostics(self.tracker, artifact)
+            data = _load_artifact_with_diagnostics(
+                self.tracker,
+                artifact,
+                resolution_bases=resolution_bases,
+                db_metadata_run_dir=db_metadata_run_dir,
+                trust_db=self.trust_db,
+            )
             if data is None:
                 return
 
@@ -2615,22 +2838,33 @@ def shell(
     db_path: Optional[str] = typer.Option(
         None, help="Path to the Consist DuckDB database."
     ),
+    run_dir: Optional[str] = typer.Option(
+        None,
+        "--run-dir",
+        help="Base directory for resolving relative artifact paths in shell preview/schema_profile.",
+    ),
     trust_db: bool = typer.Option(
         False,
         "--trust-db",
-        help="Allow mount inference from database metadata for artifact resolution.",
+        help="Allow metadata-based mount and run-dir inference for artifact resolution.",
     ),
 ) -> None:
     """
     Start an interactive shell for exploring the provenance database.
     The database is loaded once and reused across shell commands.
     """
-    tracker = get_tracker(db_path)
+    resolved_db_path = find_db_path(db_path)
+    tracker = get_tracker(resolved_db_path, run_dir=run_dir)
     resolved_db_path = getattr(tracker, "db_path", None)
     if not isinstance(resolved_db_path, str) or not resolved_db_path:
         resolved_db_path = find_db_path(db_path)
     console.print(f"[green]✓ Loaded database: {resolved_db_path}[/green]")
-    ConsistShell(tracker, trust_db=trust_db).cmdloop()
+    ConsistShell(
+        tracker,
+        trust_db=trust_db,
+        db_path=resolved_db_path,
+        run_dir=run_dir,
+    ).cmdloop()
 
 
 if __name__ == "__main__":
