@@ -1379,9 +1379,7 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> List["Artifact"]:
         console.print("[dim]Artifact refs:[/dim]")
         max_refs_to_show = 20
         for index, artifact in enumerate(rendered[:max_refs_to_show], start=1):
-            console.print(
-                f"[dim]  @{index}: {artifact.key} (id={artifact.id})[/dim]"
-            )
+            console.print(f"[dim]  @{index}: {artifact.key} (id={artifact.id})[/dim]")
         if len(rendered) > max_refs_to_show:
             console.print(
                 f"[dim]  ... and {len(rendered) - max_refs_to_show} more artifact refs[/dim]"
@@ -2503,9 +2501,11 @@ class ConsistShell(cmd.Cmd):
         """Inject shell-level defaults when routed through Typer."""
         prepared = list(args)
         command_path = self._cli_command_path(prepared)
-        group_root_without_subcommand = (
-            command_path in {("db",), ("schema",), ("views",)}
-        )
+        group_root_without_subcommand = command_path in {
+            ("db",),
+            ("schema",),
+            ("views",),
+        }
 
         if (
             self.db_path
@@ -2522,7 +2522,8 @@ class ConsistShell(cmd.Cmd):
             prepared.extend(["--run-dir", self.run_dir])
 
         if (
-            command_path in {
+            command_path
+            in {
                 ("preview",),
                 ("validate",),
                 ("schema", "capture-file"),
@@ -2861,9 +2862,7 @@ class ConsistShell(cmd.Cmd):
         source = parsed["source"]
 
         selector_count = sum(
-            1
-            for value in (artifact_key, artifact_id, hash_prefix)
-            if value is not None
+            1 for value in (artifact_key, artifact_id, hash_prefix) if value is not None
         )
         if selector_count == 0:
             raise ValueError(
@@ -3059,9 +3058,7 @@ class ConsistShell(cmd.Cmd):
                 console.print("[dim]Run refs:[/dim]")
                 for index, run_id in enumerate(self._last_run_ids, start=1):
                     console.print(f"[dim]  #{index}: {run_id}[/dim]")
-                console.print(
-                    "[dim]Tip: use show #<n> or artifacts #<n>.[/dim]"
-                )
+                console.print("[dim]Tip: use show #<n> or artifacts #<n>.[/dim]")
         except Exception as exc:
             console.print(f"[red]Error: {exc}[/red]")
 
@@ -3628,9 +3625,7 @@ class ConsistShell(cmd.Cmd):
             return self._complete_choices(text, self._VIEWS_SUBCOMMANDS)
         return []
 
-    def complete_cli(
-        self, text: str, line: str, begidx: int, endidx: int
-    ) -> List[str]:
+    def complete_cli(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
         del endidx
         if self._is_first_argument(line, begidx):
             return self._complete_choices(text, self._CLI_ROOT_COMMANDS)
@@ -3726,7 +3721,9 @@ def shell(
         resolved_db_path = find_db_path(db_path)
     console.print(f"[green]✓ Loaded database: {resolved_db_path}[/green]")
     if mount_overrides:
-        mounts_text = ", ".join(f"{name}={path}" for name, path in mount_overrides.items())
+        mounts_text = ", ".join(
+            f"{name}={path}" for name, path in mount_overrides.items()
+        )
         console.print(f"[dim]Using mount override(s): {mounts_text}[/dim]")
     ConsistShell(
         tracker,
