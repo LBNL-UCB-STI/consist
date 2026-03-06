@@ -32,7 +32,8 @@ python setup_data.py
 
 ## Define the Pipeline
 
-The function bodies are identical in both versions — Consist only changes how you call them.
+Adding Consist requires minimal changes to existing functions — primarily adding
+a `dict[str, Path]` return so the tracker knows what was produced.
 
 === "Without Consist"
 
@@ -43,36 +44,37 @@ The function bodies are identical in both versions — Consist only changes how 
     import pandas as pd
     import json
 
+    CLEANED_PATH = Path("./cleaned.parquet")  # (1)!
 
-    def clean_data(raw_path: Path, config_path: Path) -> dict[str, Path]:
+
+    def clean_data(raw_path: Path, config_path: Path) -> None:
         """Remove rows below threshold and write cleaned output."""
         threshold = json.loads(config_path.read_text())["threshold"]
         df = pd.read_csv(raw_path)
-        out_path = Path("./cleaned.parquet")
-        df[df["value"] >= threshold].to_parquet(out_path, index=False)
-        return {"cleaned": out_path}
+        df[df["value"] >= threshold].to_parquet(CLEANED_PATH, index=False)
 
 
-    def summarize(cleaned_path: Path) -> dict[str, Path]:
+    def summarize(cleaned_path: Path) -> None:
         """Compute summary statistics from cleaned data."""
         df = pd.read_parquet(cleaned_path)
-        out_path = Path("./summary.json")
-        pd.Series({"mean": df["value"].mean(), "count": len(df)}).to_json(out_path)
-        return {"summary": out_path}
+        pd.Series({"mean": df["value"].mean(), "count": len(df)}).to_json("./summary.json")
 
 
-    # Direct calls — no tracking, no caching
-    clean_outputs = clean_data(Path("./data/raw.csv"), Path("./config.json"))
-    summarize(clean_outputs["cleaned"])
+    clean_data(Path("./data/raw.csv"), Path("./config.json"))
+    summarize(CLEANED_PATH)  # (2)!
 
     final = pd.read_json(Path("./summary.json"), typ="series")
     print(f"Result: {final.to_dict()}")
     ```
 
-    This runs correctly, but every execution re-runs both steps regardless of
-    whether inputs changed. There is no record of which `config.json` produced
-    which `summary.json`, no way to skip work on re-runs, and no lineage linking
-    outputs back to their inputs.
+    1. The output path must be declared somewhere both functions can see. If
+       `clean_data` ever writes to a different location, `summarize` breaks silently.
+    2. The dependency between steps is implicit — this call only works because
+       `clean_data` happened to run first and write to `CLEANED_PATH`.
+
+    This runs correctly, but every execution re-runs both steps. There is no record
+    of which `config.json` produced which `summary.json`, and no way to ask why
+    results changed between runs.
 
 === "With Consist"
 
@@ -127,9 +129,12 @@ The function bodies are identical in both versions — Consist only changes how 
     print(f"Result: {final.to_dict()}")
     ```
 
-    1. The function bodies are unchanged from the plain Python version.
-    2. `inputs` is a dict mapping parameter names to paths or artifacts. Each file's content hash is included in the cache signature.
-    3. `consist.ref(...)` links the upstream output artifact explicitly — the dependency is a concrete value, not an implicit name match.
+    1. The only change to the function body: return `{"cleaned": out_path}` instead
+       of `None`. Consist uses this to register the output artifact.
+    2. `inputs` maps parameter names to paths or artifacts. Each file's content hash
+       is included in the cache signature — no global path constants needed.
+    3. `consist.ref(...)` passes the upstream artifact directly. The dependency is an
+       explicit value, not a shared constant or implicit ordering assumption.
 
 ## Run and Observe Caching
 
