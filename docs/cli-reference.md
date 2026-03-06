@@ -153,6 +153,32 @@ Query-mode options:
 - `--family-prefix`: prefix filter on indexed `artifact_family` facet
 - `--limit`: maximum results (default `100`)
 
+### consist schema capture-file
+
+Capture file schema metadata for an already-logged artifact so `schema export`
+and shell `schema_stub` can generate SQLModel stubs.
+
+```bash
+# Capture by artifact key
+consist schema capture-file --artifact-key trip_table
+
+# Capture by UUID
+consist schema capture-file --artifact-id 00000000-0000-0000-0000-000000000000
+
+# Run-scoped key lookup + explicit path override
+consist schema capture-file \
+  --artifact-key trip_table \
+  --run-id beam_2025_iter2 \
+  --path /data/beam/outputs/trip_table.parquet
+```
+
+Options:
+
+- `--sample-rows N`: rows to sample during inference (default `1000`)
+- `--if-changed`: reuse prior schema observation when artifact hash is unchanged
+- `--trust-db`: allow metadata-based mount inference when resolving paths
+- `--db-path`: explicit DB path
+
 ### consist views create
 
 Create a grouped hybrid view from schema identity + facet/run filters.

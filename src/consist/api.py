@@ -66,6 +66,7 @@ from consist.types import (
 if TYPE_CHECKING:
     from consist.core.config_canonicalization import ConfigAdapter
     from consist.core.step_context import StepContext
+    from consist.runset import RunSet
 
 GeoDataFrameType = Any
 XarrayDatasetType = Any
@@ -1629,6 +1630,37 @@ def find_runs(
     """
     tr = tracker or current_tracker()
     return tr.find_runs(**filters)
+
+
+def run_set(
+    tracker: Optional["Tracker"] = None,
+    label: Optional[str] = None,
+    **filters: Any,
+) -> "RunSet":
+    """
+    Convenience proxy for ``Tracker.run_set``.
+
+    Parameters
+    ----------
+    tracker : Optional[Tracker], optional
+        Tracker instance to query; defaults to the active tracker.
+    label : Optional[str], optional
+        Optional label attached to the returned RunSet.
+    **filters : Any
+        Filter values forwarded to ``Tracker.run_set``.
+
+    Returns
+    -------
+    RunSet
+        A tracker-backed RunSet for grouping/alignment workflows.
+
+    Notes
+    -----
+    This convenience helper resolves a tracker from context and forwards to
+    ``Tracker.run_set(...)``.
+    """
+    tr = tracker or current_tracker()
+    return tr.run_set(label=label, **filters)
 
 
 @contextmanager

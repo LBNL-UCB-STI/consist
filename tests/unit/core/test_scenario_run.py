@@ -492,6 +492,30 @@ def test_scenario_run_execution_options_match_tracker_run(tracker, tmp_path):
     assert tracker_values == scenario_values == [2, 3]
 
 
+def test_scenario_run_infers_artifact_outputs_when_outputs_omitted(tracker):
+    def step(ctx):
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        out_path = ctx.run_dir / "out.txt"
+        out_path.write_text("ok\n")
+        return out_path
+
+    tracker_result = tracker.run(
+        fn=step,
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    with tracker.scenario("scen_infer_outputs") as sc:
+        scenario_result = sc.run(
+            fn=step,
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+
+    assert set(tracker_result.outputs.keys()) == {"step"}
+    assert set(scenario_result.outputs.keys()) == {"step"}
+    assert tracker_result.outputs["step"].path.exists()
+    assert scenario_result.outputs["step"].path.exists()
+
+
 def test_scenario_run_metadata_resolution_matches_tracker_run(tracker):
     @tracker.define_step(
         name_template="{func_name}__y{year}",
