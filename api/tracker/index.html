@@ -5560,8 +5560,10 @@ run inputs.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Names of output artifacts to log (for executor='python' with auto-loaded DataFrames).
-Maps artifact key to ingested table name.</p>
+                <p>Output artifact keys for return-value logging with executor='python'.
+Supports DataFrame/Series/xarray returns and path-like returns. If omitted,
+Consist auto-logs artifact-like returns (Path/str/Artifact or dict[str, ...])
+when <code>output_paths</code> is not provided.</p>
               </div>
             </td>
             <td>
