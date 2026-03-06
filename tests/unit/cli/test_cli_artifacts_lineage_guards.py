@@ -70,6 +70,84 @@ def test_schema_export_reports_missing_artifact_key() -> None:
     assert "Artifact 'missing_artifact_key' not found." in result.stdout
 
 
+def test_schema_capture_file_requires_selector(cli_runner) -> None:
+    """`schema capture-file` should require exactly one artifact selector."""
+    result = cli_runner.invoke(app, ["schema", "capture-file"])
+
+    assert result.exit_code == 2
+    assert "Provide exactly one of --artifact-key or --artifact-id" in result.stdout
+
+
+def test_schema_capture_file_rejects_run_id_with_artifact_id(cli_runner) -> None:
+    """`schema capture-file` should disallow --run-id with --artifact-id."""
+    result = cli_runner.invoke(
+        app,
+        [
+            "schema",
+            "capture-file",
+            "--artifact-id",
+            "00000000-0000-0000-0000-000000000000",
+            "--run-id",
+            "run-123",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "--run-id can only be used with --artifact-key selection." in result.stdout
+
+
+def test_schema_capture_file_passes_mount_overrides_to_tracker(tmp_path) -> None:
+    """`schema capture-file` should pass explicit mount overrides to tracker setup."""
+    workspace_root = tmp_path / "archive_workspace"
+    workspace_root.mkdir(parents=True)
+
+    with patch("consist.cli.get_tracker") as mock_get_tracker:
+        tracker = mock_get_tracker.return_value
+        tracker.get_artifact.return_value = None
+
+        result = runner.invoke(
+            app,
+            [
+                "schema",
+                "capture-file",
+                "--artifact-key",
+                "missing_artifact",
+                "--db-path",
+                "mock.db",
+                "--mount",
+                f"workspace={workspace_root}",
+            ],
+        )
+
+    assert result.exit_code == 1
+    mock_get_tracker.assert_called_once_with(
+        "mock.db",
+        mounts={"workspace": str(workspace_root.resolve())},
+    )
+
+
+def test_schema_capture_file_rejects_invalid_mount_override_syntax() -> None:
+    """`schema capture-file` should fail fast on malformed --mount values."""
+    with patch("consist.cli.get_tracker") as mock_get_tracker:
+        result = runner.invoke(
+            app,
+            [
+                "schema",
+                "capture-file",
+                "--artifact-key",
+                "missing_artifact",
+                "--db-path",
+                "mock.db",
+                "--mount",
+                "workspace",
+            ],
+        )
+
+    assert result.exit_code == 2
+    assert "Invalid --mount value" in result.stdout
+    mock_get_tracker.assert_not_called()
+
+
 def test_artifacts_query_mode_surfaces_value_errors(cli_runner) -> None:
     """`artifacts` query mode should exit 1 and print parser/query validation errors."""
     with patch(

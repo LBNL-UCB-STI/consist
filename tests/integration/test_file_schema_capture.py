@@ -2,7 +2,9 @@ import os
 
 import pandas as pd
 from sqlmodel import Session, select
+from typer.testing import CliRunner
 
+from consist.cli import app
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaObservation
 
 
@@ -59,6 +61,43 @@ def test_cli_schema_uses_db_when_file_missing(tracker, tmp_path):
 
     fetched = tracker.db.get_artifact_schema_for_artifact(artifact_id=art.id)
     assert fetched is not None
+
+
+def test_cli_schema_capture_file_profiles_existing_artifact(tracker, run_dir):
+    path = run_dir / "data_capture.csv"
+    pd.DataFrame({"a": [1], "b": ["x"]}).to_csv(path, index=False)
+
+    with tracker.start_run("run_capture_cli", model="test_model"):
+        art = tracker.log_artifact(path, key="capture_data", direction="output")
+
+    assert tracker.db.get_artifact_schema_for_artifact(artifact_id=art.id) is None
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "schema",
+            "capture-file",
+            "--artifact-key",
+            "capture_data",
+            "--db-path",
+            str(tracker.db_path),
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Captured file schema for artifact 'capture_data'" in result.stdout
+
+    fetched = tracker.db.get_artifact_schema_for_artifact(artifact_id=art.id)
+    assert fetched is not None
+    schema, _ = fetched
+    with Session(tracker.engine) as session:
+        observations = session.exec(
+            select(ArtifactSchemaObservation).where(
+                ArtifactSchemaObservation.schema_id == schema.id
+            )
+        ).all()
+    assert any(
+        obs.artifact_id == art.id and obs.source == "file" for obs in observations
+    )
 
 
 def test_profile_file_artifact_skips_when_schema_id_present(tracker, tmp_path):

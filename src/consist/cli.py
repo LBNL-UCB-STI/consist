@@ -25,6 +25,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 import importlib
 from importlib.metadata import PackageNotFoundError, version as package_version
+import re
 import shlex
 import json
 import uuid
@@ -40,9 +41,11 @@ from typing import (
     Mapping,
     Tuple,
     Literal,
+    Sequence,
     cast,
 )
 
+import click
 import duckdb
 import pandas as pd
 import typer
@@ -170,6 +173,47 @@ def _parse_bounded_int(value: str, *, name: str, minimum: int, maximum: int) -> 
     return parsed
 
 
+def _parse_mount_overrides(values: Optional[List[str]]) -> Dict[str, str]:
+    """Parse repeatable --mount NAME=PATH options into a resolved mount mapping."""
+    if not values:
+        return {}
+
+    mounts: Dict[str, str] = {}
+    for raw_value in values:
+        spec = raw_value.strip()
+        if "=" not in spec:
+            raise ValueError(
+                f"Invalid --mount value {raw_value!r}; expected NAME=PATH."
+            )
+        name, path_value = spec.split("=", 1)
+        name = name.strip()
+        path_value = path_value.strip()
+
+        if not name:
+            raise ValueError(
+                f"Invalid --mount value {raw_value!r}; mount name cannot be empty."
+            )
+        if not path_value:
+            raise ValueError(
+                f"Invalid --mount value {raw_value!r}; mount path cannot be empty."
+            )
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", name):
+            raise ValueError(
+                f"Invalid mount name {name!r}; use letters, numbers, '_' or '-' and start with a letter."
+            )
+
+        mounts[name] = str(_resolve_cli_path(path_value))
+    return mounts
+
+
+def _resolve_mount_overrides_or_exit(values: Optional[List[str]]) -> Dict[str, str]:
+    try:
+        return _parse_mount_overrides(values)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR) from exc
+
+
 def _escape_like_pattern(value: str) -> str:
     value = value.replace(LIKE_ESCAPE_CHAR, LIKE_ESCAPE_CHAR * 2)
     value = value.replace("%", f"{LIKE_ESCAPE_CHAR}%")
@@ -204,7 +248,10 @@ def find_db_path(explicit_path: Optional[str] = None) -> str:
 
 # Then update get_tracker:
 def get_tracker(
-    db_path: Optional[str] = None, *, run_dir: Optional[Path | str] = None
+    db_path: Optional[str] = None,
+    *,
+    run_dir: Optional[Path | str] = None,
+    mounts: Optional[Dict[str, str]] = None,
 ) -> Tracker:
     """Initializes and returns a Tracker instance."""
     resolved_path = find_db_path(db_path)
@@ -215,7 +262,7 @@ def get_tracker(
         )
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
     tracker_run_dir = Path(run_dir) if run_dir is not None else Path(".")
-    return Tracker(run_dir=tracker_run_dir, db_path=resolved_path)
+    return Tracker(run_dir=tracker_run_dir, db_path=resolved_path, mounts=mounts)
 
 
 @contextmanager
@@ -813,6 +860,206 @@ def _ensure_tracker_mounts_for_artifact(
     _apply_inferred_mounts(tracker, inferred)
 
 
+def _resolve_schema_capture_path(
+    *,
+    tracker: Tracker,
+    artifact: "Artifact",
+    run: "Run",
+    override_path: Optional[Path],
+) -> Path:
+    if override_path is not None:
+        return override_path.expanduser().resolve()
+
+    candidates: List[Path] = []
+    try:
+        candidates.append(tracker.resolve_historical_path(artifact, run))
+    except Exception:
+        pass
+    try:
+        candidates.append(Path(tracker.resolve_uri(artifact.container_uri)).resolve())
+    except Exception:
+        pass
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    if candidates:
+        rendered = ", ".join(str(path) for path in candidates)
+        raise FileNotFoundError(
+            "Could not resolve an existing artifact file path. "
+            f"Tried: {rendered}. Provide --path to override."
+        )
+
+    raise FileNotFoundError(
+        "Could not resolve artifact path from URI. Provide --path to override."
+    )
+
+
+@schema_app.command("capture-file")
+def schema_capture_file(
+    artifact_key: Optional[str] = typer.Option(
+        None,
+        "--artifact-key",
+        "--table-key",
+        help="Artifact key to profile.",
+    ),
+    artifact_id: Optional[str] = typer.Option(
+        None,
+        "--artifact-id",
+        help="Artifact UUID to profile.",
+    ),
+    run_id: Optional[str] = typer.Option(
+        None,
+        "--run-id",
+        help="Optional run scope for --artifact-key lookups.",
+    ),
+    path: Optional[Path] = typer.Option(
+        None,
+        "--path",
+        help="Override on-disk file path to profile.",
+    ),
+    sample_rows: int = typer.Option(
+        1000,
+        "--sample-rows",
+        min=1,
+        max=MAX_CLI_LIMIT,
+        help="Maximum rows sampled during schema inference.",
+    ),
+    if_changed: bool = typer.Option(
+        False,
+        "--if-changed",
+        help="Reuse existing schema observations for unchanged file hashes.",
+    ),
+    trust_db: bool = typer.Option(
+        False,
+        "--trust-db",
+        help="Allow metadata-based mount inference when resolving artifact paths.",
+    ),
+    mount: Optional[List[str]] = typer.Option(
+        None,
+        "--mount",
+        help=(
+            "Mount override mapping (repeatable): NAME=PATH. "
+            "Example: --mount workspace=/path/to/archive"
+        ),
+    ),
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
+) -> None:
+    """
+    Capture file schema metadata for an existing artifact record.
+
+    This is useful for artifacts logged before file schema profiling was enabled.
+    After capture, ``schema export`` and shell ``schema_stub`` can generate stubs
+    from the newly persisted schema profile.
+    """
+    selectors = [artifact_key, artifact_id]
+    if sum(1 for selector in selectors if selector is not None) != 1:
+        console.print(
+            "[red]Provide exactly one of --artifact-key or --artifact-id[/red]"
+        )
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR)
+    if run_id is not None and artifact_id is not None:
+        console.print(
+            "[red]--run-id can only be used with --artifact-key selection.[/red]"
+        )
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR)
+    if artifact_id is not None:
+        try:
+            uuid.UUID(artifact_id)
+        except ValueError:
+            console.print("[red]--artifact-id must be a UUID[/red]")
+            raise typer.Exit(CLI_EXIT_USAGE_ERROR)
+
+    resolved_db_path = find_db_path(db_path)
+    mount_overrides = _resolve_mount_overrides_or_exit(mount)
+    tracker = get_tracker(resolved_db_path, mounts=mount_overrides or None)
+    if artifact_id is not None:
+        artifact = tracker.get_artifact(artifact_id)
+    else:
+        if artifact_key is None:
+            console.print(
+                "[red]Internal selector validation failed: missing artifact key.[/red]"
+            )
+            raise typer.Exit(CLI_EXIT_USAGE_ERROR)
+        artifact = tracker.get_artifact(artifact_key, run_id=run_id)
+    if artifact is None:
+        if artifact_key is not None and run_id is not None:
+            console.print(
+                f"[red]Artifact '{artifact_key}' not found for run '{run_id}'.[/red]"
+            )
+        elif artifact_key is not None:
+            console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
+        else:
+            console.print(f"[red]Artifact '{artifact_id}' not found.[/red]")
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+
+    driver = artifact.driver
+    if driver not in ("csv", "parquet", "h5_table"):
+        console.print(
+            "[red]Only csv/parquet/h5_table artifacts support file schema capture; "
+            f"got driver '{driver}'.[/red]"
+        )
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR)
+
+    if artifact.run_id is None:
+        console.print(
+            "[red]Artifact has no producing run_id; cannot attach schema observation.[/red]"
+        )
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+    run = tracker.get_run(artifact.run_id)
+    if run is None:
+        console.print(
+            f"[red]Producing run '{artifact.run_id}' not found for artifact.[/red]"
+        )
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+
+    _ensure_tracker_mounts_for_artifact(tracker, artifact, trust_db=trust_db)
+    try:
+        resolved_path = _resolve_schema_capture_path(
+            tracker=tracker,
+            artifact=artifact,
+            run=run,
+            override_path=path,
+        )
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR) from exc
+
+    if not resolved_path.exists():
+        console.print(
+            f"[red]Artifact file does not exist at resolved path: {resolved_path}[/red]"
+        )
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+
+    tracker.artifact_schemas.profile_file_artifact(
+        artifact=artifact,
+        run=run,
+        resolved_path=str(resolved_path),
+        driver=cast(Literal["csv", "parquet", "h5_table"], driver),
+        sample_rows=sample_rows,
+        source="file",
+        reuse_if_unchanged=if_changed,
+    )
+
+    if not tracker.db:
+        console.print("[red]Tracker database not initialized.[/red]")
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+    fetched = tracker.db.get_artifact_schema_for_artifact(artifact_id=artifact.id)
+    if fetched is None:
+        console.print(
+            "[red]Schema capture did not produce a stored schema profile.[/red]"
+        )
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+
+    schema, fields = fetched
+    console.print(
+        "[green]Captured file schema for artifact "
+        f"'{artifact.key}' (schema_id={schema.id}, columns={len(fields)}).[/green]"
+    )
+    console.print(f"[dim]Profiled path: {resolved_path}[/dim]")
+
+
 @schema_app.command("export")
 def schema_export(
     schema_id: Optional[str] = typer.Option(
@@ -1080,42 +1327,64 @@ def _render_runs_table(
         console.print(table)
 
 
-def _render_artifacts_table(tracker: Tracker, run_id: str) -> None:
+def _render_artifacts_table(tracker: Tracker, run_id: str) -> List["Artifact"]:
     """Shared logic for displaying artifacts for a run."""
     run_artifacts = tracker.get_artifacts_for_run(run_id)
+    rendered: List["Artifact"] = []
 
     table = Table(title=f"Artifacts for Run [cyan]{run_id}[/cyan]")
+    table.add_column("Ref", style="dim", justify="right")
     table.add_column("Direction", style="yellow")
-    table.add_column("Key", style="green")
-    table.add_column("URI", style="dim")
+    table.add_column("Key", style="green", overflow="fold")
+    table.add_column("Artifact ID", style="cyan", overflow="fold")
+    table.add_column("URI", style="dim", overflow="fold")
     table.add_column("Driver")
     table.add_column("Hash", style="magenta")
 
     inputs = sorted(run_artifacts.inputs.values(), key=lambda x: x.key)
     outputs = sorted(run_artifacts.outputs.values(), key=lambda x: x.key)
+    ref_index = 1
 
     for artifact in inputs:
+        rendered.append(artifact)
         table.add_row(
+            str(ref_index),
             "[blue]Input[/blue]",
             artifact.key,
+            str(artifact.id),
             artifact.container_uri,
             artifact.driver,
             artifact.hash[:12] if artifact.hash else "N/A",
         )
+        ref_index += 1
 
     if inputs and outputs:
         table.add_section()
 
     for artifact in outputs:
+        rendered.append(artifact)
         table.add_row(
+            str(ref_index),
             "[green]Output[/green]",
             artifact.key,
+            str(artifact.id),
             artifact.container_uri,
             artifact.driver,
             artifact.hash[:12] if artifact.hash else "N/A",
         )
+        ref_index += 1
 
     console.print(table)
+    if rendered:
+        console.print("[dim]Artifact refs:[/dim]")
+        max_refs_to_show = 20
+        for index, artifact in enumerate(rendered[:max_refs_to_show], start=1):
+            console.print(f"[dim]  @{index}: {artifact.key} (id={artifact.id})[/dim]")
+        if len(rendered) > max_refs_to_show:
+            console.print(
+                f"[dim]  ... and {len(rendered) - max_refs_to_show} more artifact refs[/dim]"
+            )
+    return rendered
 
 
 def _render_artifact_query_table(results: List[Dict[str, Any]]) -> None:
@@ -1964,10 +2233,23 @@ def preview(
         "--trust-db",
         help="Allow metadata-based mount and run-dir inference for artifact resolution.",
     ),
+    mount: Optional[List[str]] = typer.Option(
+        None,
+        "--mount",
+        help=(
+            "Mount override mapping (repeatable): NAME=PATH. "
+            "Example: --mount workspace=/path/to/archive"
+        ),
+    ),
 ) -> None:
     """Shows a small preview of an artifact (tabular or array-like when supported)."""
     resolved_db_path = find_db_path(db_path)
-    tracker = get_tracker(resolved_db_path, run_dir=run_dir)
+    mount_overrides = _resolve_mount_overrides_or_exit(mount)
+    tracker = get_tracker(
+        resolved_db_path,
+        run_dir=run_dir,
+        mounts=mount_overrides or None,
+    )
 
     # Fetch artifact first to give a precise message (unsupported driver vs missing)
     artifact = tracker.get_artifact(artifact_key)
@@ -2092,11 +2374,62 @@ class ConsistShell(cmd.Cmd):
 
     intro = "Welcome to Consist Shell. Type help or ? to list commands.\n"
     prompt = "(consist) "
-    _RUN_COMPLETION_FLAGS: Tuple[str, ...] = ("--limit", "--model", "--status", "--tag")
-    _PREVIEW_COMPLETION_FLAGS: Tuple[str, ...] = ("--rows", "-n")
+    _RUN_COMPLETION_FLAGS: Tuple[str, ...] = (
+        "--limit",
+        "--model",
+        "--status",
+        "--tag",
+        "--json",
+    )
+    _ARTIFACT_COMPLETION_FLAGS: Tuple[str, ...] = (
+        "--param",
+        "--namespace",
+        "--key-prefix",
+        "--family-prefix",
+        "--limit",
+    )
+    _PREVIEW_COMPLETION_FLAGS: Tuple[str, ...] = ("--rows", "-n", "--hash")
     _SCENARIOS_COMPLETION_FLAGS: Tuple[str, ...] = ("--limit",)
+    _DB_SUBCOMMANDS: Tuple[str, ...] = (
+        "inspect",
+        "doctor",
+        "snapshot",
+        "rebuild",
+        "compact",
+        "export",
+        "merge",
+        "purge",
+        "fix-status",
+    )
+    _SCHEMA_SUBCOMMANDS: Tuple[str, ...] = ("capture-file", "export", "apply-fks")
+    _VIEWS_SUBCOMMANDS: Tuple[str, ...] = ("create",)
+    _CLI_ROOT_COMMANDS: Tuple[str, ...] = (
+        "search",
+        "validate",
+        "scenarios",
+        "scenario",
+        "runs",
+        "artifacts",
+        "lineage",
+        "summary",
+        "preview",
+        "show",
+        "schema",
+        "views",
+        "db",
+    )
+    _PASSTHROUGH_COMMANDS: Tuple[str, ...] = (
+        "search",
+        "validate",
+        "scenario",
+        "lineage",
+        "schema",
+        "views",
+        "db",
+    )
     _SCHEMA_STUB_COMPLETION_FLAGS: Tuple[str, ...] = (
         "--artifact-id",
+        "--hash",
         "--run-id",
         "--source",
         "--class-name",
@@ -2115,12 +2448,17 @@ class ConsistShell(cmd.Cmd):
         trust_db: bool = False,
         db_path: Optional[str] = None,
         run_dir: Optional[str] = None,
+        mount_overrides: Optional[Mapping[str, str]] = None,
     ):
         super().__init__()
         self.tracker = tracker
         self.trust_db = trust_db
         self.db_path = db_path
         self.run_dir = run_dir
+        self.mount_overrides = dict(mount_overrides or {})
+        self._last_run_ids: List[str] = []
+        self._last_artifact_ids: List[str] = []
+        self._last_artifact_run_id: Optional[str] = None
         self._history_path = Path.home() / ".consist" / "shell_history"
         self._history_saved = False
         self._load_history()
@@ -2141,6 +2479,89 @@ class ConsistShell(cmd.Cmd):
 
     def _is_first_argument(self, line: str, begidx: int) -> bool:
         return len(self._safe_split(line[:begidx])) <= 1
+
+    @staticmethod
+    def _has_option(args: Sequence[str], option_name: str) -> bool:
+        return any(
+            token == option_name or token.startswith(f"{option_name}=")
+            for token in args
+        )
+
+    @staticmethod
+    def _cli_command_path(args: Sequence[str]) -> tuple[str, ...]:
+        if not args:
+            return ()
+        if args[0] in {"db", "schema", "views"}:
+            if len(args) > 1 and not args[1].startswith("-"):
+                return args[0], args[1]
+            return (args[0],)
+        return (args[0],)
+
+    def _prepare_cli_args(self, args: List[str]) -> List[str]:
+        """Inject shell-level defaults when routed through Typer."""
+        prepared = list(args)
+        command_path = self._cli_command_path(prepared)
+        group_root_without_subcommand = command_path in {
+            ("db",),
+            ("schema",),
+            ("views",),
+        }
+
+        if (
+            self.db_path
+            and not group_root_without_subcommand
+            and not self._has_option(prepared, "--db-path")
+        ):
+            prepared.extend(["--db-path", self.db_path])
+
+        if (
+            command_path in {("preview",), ("validate",)}
+            and self.run_dir
+            and not self._has_option(prepared, "--run-dir")
+        ):
+            prepared.extend(["--run-dir", self.run_dir])
+
+        if (
+            command_path
+            in {
+                ("preview",),
+                ("validate",),
+                ("schema", "capture-file"),
+            }
+            and self.trust_db
+            and not self._has_option(prepared, "--trust-db")
+        ):
+            prepared.append("--trust-db")
+
+        if (
+            command_path in {("preview",), ("schema", "capture-file")}
+            and self.mount_overrides
+            and not self._has_option(prepared, "--mount")
+        ):
+            for name, root in self.mount_overrides.items():
+                prepared.extend(["--mount", f"{name}={root}"])
+
+        return prepared
+
+    def _invoke_cli(self, args: List[str]) -> None:
+        if not args:
+            return
+        if args[0] == "shell":
+            console.print("[red]Error: already inside Consist shell.[/red]")
+            return
+        try:
+            prepared = self._prepare_cli_args(args)
+            app(args=prepared, prog_name="consist", standalone_mode=False)
+        except typer.Exit:
+            return
+        except click.ClickException as exc:
+            console.print(f"[red]Error: {exc.format_message()}[/red]")
+        except Exception as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+
+    def _invoke_cli_command(self, command_name: str, arg: str) -> None:
+        command_args = [command_name, *self._safe_split(arg)]
+        self._invoke_cli(command_args)
 
     def _recent_run_ids(self, limit: int = _PICKER_LIMIT) -> List[str]:
         try:
@@ -2231,6 +2652,28 @@ class ConsistShell(cmd.Cmd):
     def _resolve_run_id(self, arg: str, *, command_name: str) -> Optional[str]:
         run_id = arg.strip()
         if run_id:
+            if run_id.startswith("#"):
+                if not self._last_run_ids:
+                    console.print(
+                        "[red]Error: no cached run refs. Run `runs` first.[/red]"
+                    )
+                    return None
+                raw_index = run_id[1:]
+                if not raw_index:
+                    console.print("[red]Error: run ref must look like #1[/red]")
+                    return None
+                try:
+                    index = int(raw_index)
+                except ValueError:
+                    console.print("[red]Error: run ref must look like #1[/red]")
+                    return None
+                if index < 1 or index > len(self._last_run_ids):
+                    console.print(
+                        "[red]Error: run ref out of range "
+                        f"(1-{len(self._last_run_ids)}).[/red]"
+                    )
+                    return None
+                return self._last_run_ids[index - 1]
             return run_id
         if not self._is_tty():
             console.print("[red]Error: run_id required[/red]")
@@ -2244,7 +2687,7 @@ class ConsistShell(cmd.Cmd):
 
     def _resolve_artifact_key(self, args: List[str]) -> Optional[str]:
         if args:
-            return args[0]
+            return self._resolve_artifact_ref(args[0])
         if not self._is_tty():
             console.print("[red]Error: artifact_key required[/red]")
             return None
@@ -2255,11 +2698,88 @@ class ConsistShell(cmd.Cmd):
             prompt="Choose artifact number (Enter to cancel): ",
         )
 
+    def _resolve_artifact_ref(self, value: str) -> Optional[str]:
+        token = value.strip()
+        if not token.startswith("@"):
+            return token
+        if not self._last_artifact_ids:
+            console.print(
+                "[red]Error: no cached artifact refs. Run `artifacts <run_id>` first.[/red]"
+            )
+            return None
+        raw_index = token[1:]
+        if not raw_index:
+            console.print("[red]Error: artifact ref must look like @1[/red]")
+            return None
+        try:
+            index = int(raw_index)
+        except ValueError:
+            console.print("[red]Error: artifact ref must look like @1[/red]")
+            return None
+        if index < 1 or index > len(self._last_artifact_ids):
+            console.print(
+                "[red]Error: artifact ref out of range "
+                f"(1-{len(self._last_artifact_ids)}).[/red]"
+            )
+            return None
+        return self._last_artifact_ids[index - 1]
+
+    def _lookup_artifact_by_hash_prefix(
+        self, hash_prefix: str, *, command_name: str, run_id: Optional[str] = None
+    ) -> Optional["Artifact"]:
+        candidate = hash_prefix.strip()
+        if not candidate:
+            console.print("[red]Error: --hash requires a non-empty prefix.[/red]")
+            return None
+        if run_id is None:
+            run_id = self._last_artifact_run_id
+
+        try:
+            from consist.models.artifact import Artifact
+
+            with _tracker_session(self.tracker) as session:
+                statement = select(Artifact).where(
+                    col(Artifact.hash).is_not(None),
+                    col(Artifact.hash).startswith(candidate),
+                )
+                if run_id is not None:
+                    statement = statement.where(col(Artifact.run_id) == run_id)
+                statement = statement.order_by(col(Artifact.created_at).desc()).limit(6)
+                matches = session.exec(statement).all()
+        except Exception as exc:
+            console.print(f"[red]Error: failed hash lookup: {exc}[/red]")
+            return None
+
+        if not matches:
+            scope_text = f" in run '{run_id}'" if run_id else ""
+            console.print(
+                f"[red]No artifact found for hash prefix '{candidate}'{scope_text} "
+                f"while running {command_name}.[/red]"
+            )
+            return None
+
+        if len(matches) > 1:
+            scope_text = f" in run '{run_id}'" if run_id else ""
+            console.print(
+                f"[red]Hash prefix '{candidate}' is ambiguous{scope_text}. "
+                f"Use a longer prefix for {command_name}.[/red]"
+            )
+            for artifact in matches[:5]:
+                console.print(
+                    "[dim]  "
+                    f"{artifact.hash} (key={artifact.key}, id={artifact.id}, run={artifact.run_id})"
+                    "[/dim]"
+                )
+            return None
+
+        return matches[0]
+
     def _parse_schema_stub_args(self, arg: str) -> Dict[str, Any]:
         args = self._safe_split(arg)
         parsed: Dict[str, Any] = {
             "artifact_key": None,
             "artifact_id": None,
+            "hash_prefix": None,
             "run_id": None,
             "source": None,
             "class_name": None,
@@ -2289,6 +2809,16 @@ class ConsistShell(cmd.Cmd):
                     raise ValueError("--artifact-id requires a UUID value")
                 parsed["artifact_id"] = args[i + 1]
                 i += 2
+                continue
+            if token == "--hash":
+                if i + 1 >= len(args):
+                    raise ValueError("--hash requires a prefix value")
+                parsed["hash_prefix"] = args[i + 1]
+                i += 2
+                continue
+            if token.startswith("--hash="):
+                parsed["hash_prefix"] = token.split("=", 1)[1]
+                i += 1
                 continue
             if token == "--run-id":
                 if i + 1 >= len(args):
@@ -2327,13 +2857,21 @@ class ConsistShell(cmd.Cmd):
 
         artifact_key = parsed["artifact_key"]
         artifact_id = parsed["artifact_id"]
+        hash_prefix = parsed["hash_prefix"]
         run_id = parsed["run_id"]
         source = parsed["source"]
 
-        if artifact_key is None and artifact_id is None:
-            raise ValueError("artifact_key required (or provide --artifact-id).")
-        if artifact_key is not None and artifact_id is not None:
-            raise ValueError("Provide either artifact_key or --artifact-id, not both.")
+        selector_count = sum(
+            1 for value in (artifact_key, artifact_id, hash_prefix) if value is not None
+        )
+        if selector_count == 0:
+            raise ValueError(
+                "artifact_key required (or provide --artifact-id or --hash)."
+            )
+        if selector_count > 1:
+            raise ValueError(
+                "Provide exactly one selector: artifact_key, --artifact-id, or --hash."
+            )
         if artifact_id is not None:
             try:
                 uuid.UUID(str(artifact_id))
@@ -2363,18 +2901,81 @@ class ConsistShell(cmd.Cmd):
         """Alias for quit. Usage: q"""
         return self.do_quit(arg)
 
+    def do_cli(self, arg: str) -> None:
+        """Run any consist CLI command. Usage: cli <command> [args...]"""
+        args = self._safe_split(arg)
+        if not args:
+            console.print("[red]Error: provide a command, e.g. `cli db inspect`.[/red]")
+            return
+        self._invoke_cli(args)
+
+    def do_consist(self, arg: str) -> None:
+        """Alias for cli. Usage: consist <command> [args...]"""
+        self.do_cli(arg)
+
+    def do_context(self, arg: str) -> None:
+        """Show active shell defaults used for routed commands."""
+        del arg
+        defaults = Table(title="Shell Context")
+        defaults.add_column("Setting", style="cyan")
+        defaults.add_column("Value", style="green")
+        defaults.add_row("db_path", self.db_path or "(auto)")
+        defaults.add_row("run_dir", self.run_dir or "(tracker default)")
+        defaults.add_row("trust_db", str(self.trust_db))
+        defaults.add_row(
+            "mount_overrides",
+            ", ".join(
+                f"{name}={root}" for name, root in sorted(self.mount_overrides.items())
+            )
+            or "(none)",
+        )
+        defaults.add_row("tracker_run_dir", str(getattr(self.tracker, "run_dir", "")))
+        console.print(defaults)
+
+    def do_search(self, arg: str) -> None:
+        """Search runs by id/model/tags. Usage: search <query> [--limit N]"""
+        self._invoke_cli_command("search", arg)
+
+    def do_validate(self, arg: str) -> None:
+        """Validate artifact files. Usage: validate [--fix] [--run-dir PATH]"""
+        self._invoke_cli_command("validate", arg)
+
+    def do_scenario(self, arg: str) -> None:
+        """Show runs for one scenario. Usage: scenario <scenario_id>"""
+        self._invoke_cli_command("scenario", arg)
+
+    def do_lineage(self, arg: str) -> None:
+        """Show artifact lineage. Usage: lineage <artifact_key>"""
+        self._invoke_cli_command("lineage", arg)
+
+    def do_db(self, arg: str) -> None:
+        """Run DB maintenance commands. Usage: db <subcommand> [args...]"""
+        self._invoke_cli_command("db", arg)
+
+    def do_schema(self, arg: str) -> None:
+        """Run schema subcommands. Usage: schema <capture-file|export|apply-fks> ..."""
+        self._invoke_cli_command("schema", arg)
+
+    def do_views(self, arg: str) -> None:
+        """Run view subcommands. Usage: views create ..."""
+        self._invoke_cli_command("views", arg)
+
     def do_runs(self, arg: str) -> None:
-        """List recent runs. Usage: runs [--limit N] [--model NAME] [--status STATUS] [--tag TAG]"""
+        """List recent runs. Usage: runs [--limit N] [--model NAME] [--status STATUS] [--tag TAG] [--json]"""
         try:
             args = self._safe_split(arg)
             limit = 10
             model_name = None
             status = None
             tags: List[str] = []
+            json_output = False
 
             i = 0
             while i < len(args):
-                if args[i] == "--limit" and i + 1 < len(args):
+                token = args[i]
+                if token == "--limit":
+                    if i + 1 >= len(args):
+                        raise ValueError("--limit requires a value")
                     limit = _parse_bounded_int(
                         args[i + 1],
                         name="limit",
@@ -2382,27 +2983,93 @@ class ConsistShell(cmd.Cmd):
                         maximum=MAX_CLI_LIMIT,
                     )
                     i += 2
-                elif args[i] == "--model" and i + 1 < len(args):
+                elif token == "--model":
+                    if i + 1 >= len(args):
+                        raise ValueError("--model requires a value")
                     model_name = args[i + 1]
                     i += 2
-                elif args[i] == "--status" and i + 1 < len(args):
+                elif token == "--status":
+                    if i + 1 >= len(args):
+                        raise ValueError("--status requires a value")
                     status = args[i + 1]
                     i += 2
-                elif args[i] == "--tag" and i + 1 < len(args):
+                elif token == "--tag":
+                    if i + 1 >= len(args):
+                        raise ValueError("--tag requires a value")
                     tags.append(args[i + 1])
                     i += 2
-                else:
+                elif token == "--json":
+                    json_output = True
                     i += 1
+                elif token.startswith("-"):
+                    raise ValueError(f"Unknown option: {token}")
+                else:
+                    raise ValueError(f"Unexpected argument: {token}")
+
+            if json_output:
+                with _tracker_session(self.tracker) as session:
+                    results = queries.get_runs(
+                        session,
+                        limit=limit,
+                        model_name=model_name,
+                        tags=tags if tags else None,
+                        status=status,
+                    )
+                    payload = []
+                    for run in results:
+                        created_at = getattr(run, "created_at", None)
+                        payload.append(
+                            {
+                                "id": getattr(run, "id", None),
+                                "model": getattr(run, "model_name", None),
+                                "status": getattr(run, "status", None),
+                                "scenario_id": getattr(run, "parent_run_id", None),
+                                "year": getattr(run, "year", None),
+                                "created_at": (
+                                    created_at.isoformat() if created_at else None
+                                ),
+                                "duration_seconds": getattr(
+                                    run, "duration_seconds", None
+                                ),
+                                "tags": getattr(run, "tags", None),
+                                "meta": getattr(run, "meta", None),
+                            }
+                        )
+                output_json(payload)
+                return
 
             _render_runs_table(
                 self.tracker, limit, model_name, tags if tags else None, status
             )
+            with _tracker_session(self.tracker) as session:
+                cached_runs = queries.get_runs(
+                    session,
+                    limit=limit,
+                    model_name=model_name,
+                    tags=tags if tags else None,
+                    status=status,
+                )
+            self._last_run_ids = [
+                str(getattr(run, "id"))
+                for run in cached_runs
+                if getattr(run, "id", None) is not None
+            ]
+            if self._last_run_ids:
+                console.print("[dim]Run refs:[/dim]")
+                for index, run_id in enumerate(self._last_run_ids, start=1):
+                    console.print(f"[dim]  #{index}: {run_id}[/dim]")
+                console.print("[dim]Tip: use show #<n> or artifacts #<n>.[/dim]")
         except Exception as exc:
             console.print(f"[red]Error: {exc}[/red]")
 
     def do_show(self, arg: str) -> None:
         """Show details for a run. Usage: show <run_id>"""
-        run_id = self._resolve_run_id(arg, command_name="show")
+        args = self._safe_split(arg)
+        if args and (len(args) != 1 or args[0].startswith("-")):
+            self._invoke_cli_command("show", arg)
+            return
+
+        run_id = self._resolve_run_id(args[0] if args else "", command_name="show")
         if run_id is None:
             return
 
@@ -2416,8 +3083,13 @@ class ConsistShell(cmd.Cmd):
             console.print(f"[red]Error: {exc}[/red]")
 
     def do_artifacts(self, arg: str) -> None:
-        """Show artifacts for a run. Usage: artifacts <run_id>"""
-        run_id = self._resolve_run_id(arg, command_name="artifacts")
+        """Show artifacts for a run or query by facets. Usage: artifacts <run_id> | artifacts --param ..."""
+        args = self._safe_split(arg)
+        if args and (len(args) != 1 or args[0].startswith("-")):
+            self._invoke_cli_command("artifacts", arg)
+            return
+
+        run_id = self._resolve_run_id(args[0] if args else "", command_name="artifacts")
         if run_id is None:
             return
 
@@ -2426,22 +3098,42 @@ class ConsistShell(cmd.Cmd):
             if not run:
                 console.print(f"[red]Run '{run_id}' not found.[/red]")
                 return
-            _render_artifacts_table(self.tracker, run_id)
+            rendered = _render_artifacts_table(self.tracker, run_id)
+            self._last_artifact_run_id = run_id
+            self._last_artifact_ids = []
+            for artifact in rendered:
+                artifact_id = getattr(artifact, "id", None)
+                if artifact_id is not None:
+                    self._last_artifact_ids.append(str(artifact_id))
+            if self._last_artifact_ids:
+                console.print(
+                    "[dim]Tip: use preview @<n>, schema_profile @<n>, or "
+                    "schema_stub @<n> for exact artifact rows.[/dim]"
+                )
         except Exception as exc:
             console.print(f"[red]Error: {exc}[/red]")
 
     def do_preview(self, arg: str) -> None:
-        """Preview an artifact. Usage: preview <artifact_key> [--rows N]"""
+        """Preview an artifact. Usage: preview <artifact_key|artifact_id|@ref> [--rows N] | preview --hash <prefix>"""
         try:
             args = self._safe_split(arg)
-            artifact_key = self._resolve_artifact_key(args)
-            if artifact_key is None:
+            if any(
+                token in {"--db-path", "--run-dir", "--trust-db", "--mount"}
+                or token.startswith("--mount=")
+                for token in args
+            ):
+                self._invoke_cli_command("preview", arg)
                 return
 
             n_rows = 5
-            i = 1 if args else 0
+            artifact_selector: Optional[str] = None
+            hash_prefix: Optional[str] = None
+            i = 0
             while i < len(args):
-                if args[i] in {"--rows", "-n"} and i + 1 < len(args):
+                token = args[i]
+                if token in {"--rows", "-n"}:
+                    if i + 1 >= len(args):
+                        raise ValueError(f"{token} requires a value")
                     n_rows = _parse_bounded_int(
                         args[i + 1],
                         name="rows",
@@ -2449,12 +3141,51 @@ class ConsistShell(cmd.Cmd):
                         maximum=MAX_PREVIEW_ROWS,
                     )
                     i += 2
+                elif token == "--hash":
+                    if i + 1 >= len(args):
+                        raise ValueError("--hash requires a prefix value")
+                    hash_prefix = args[i + 1]
+                    i += 2
+                elif token.startswith("--hash="):
+                    hash_prefix = token.split("=", 1)[1]
+                    i += 1
                 else:
+                    if token.startswith("-"):
+                        raise ValueError(f"Unknown option: {token}")
+                    if artifact_selector is not None:
+                        raise ValueError(
+                            "preview accepts one selector (artifact_key|artifact_id|@ref) "
+                            "or use --hash."
+                        )
+                    artifact_selector = token
                     i += 1
 
-            artifact = self.tracker.get_artifact(artifact_key)
+            if artifact_selector is not None and hash_prefix is not None:
+                raise ValueError(
+                    "Provide either a positional selector or --hash, not both."
+                )
+
+            artifact = None
+            if hash_prefix is not None:
+                artifact = self._lookup_artifact_by_hash_prefix(
+                    hash_prefix, command_name="preview"
+                )
+            elif artifact_selector is not None:
+                artifact_key = self._resolve_artifact_ref(artifact_selector)
+                if artifact_key is None:
+                    return
+                artifact = self.tracker.get_artifact(artifact_key)
+            else:
+                artifact_key = self._resolve_artifact_key([])
+                if artifact_key is None:
+                    return
+                artifact = self.tracker.get_artifact(artifact_key)
+
             if not artifact:
-                console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
+                if hash_prefix is None:
+                    console.print(
+                        f"[red]Artifact '{artifact_selector or '(selected)'}' not found.[/red]"
+                    )
                 return
 
             _ensure_tracker_mounts_for_artifact(
@@ -2478,7 +3209,7 @@ class ConsistShell(cmd.Cmd):
             if data is None:
                 return
 
-            console.print(f"Preview: {artifact_key} [dim]({artifact.driver})[/dim]")
+            console.print(f"Preview: {artifact.key} [dim]({artifact.driver})[/dim]")
 
             if isinstance(data, duckdb.DuckDBPyRelation):
                 df = data.limit(n_rows).df()
@@ -2524,17 +3255,56 @@ class ConsistShell(cmd.Cmd):
             console.print(f"[red]Error: {exc}[/red]")
 
     def do_schema_profile(self, arg: str) -> None:
-        """Show artifact schema. Usage: schema_profile <artifact_key>"""
+        """Show artifact schema. Usage: schema_profile <artifact_key|artifact_id|@ref> | schema_profile --hash <prefix>"""
         try:
             args = self._safe_split(arg)
-            if not args:
+            artifact_selector: Optional[str] = None
+            hash_prefix: Optional[str] = None
+            i = 0
+            while i < len(args):
+                token = args[i]
+                if token == "--hash":
+                    if i + 1 >= len(args):
+                        raise ValueError("--hash requires a prefix value")
+                    hash_prefix = args[i + 1]
+                    i += 2
+                    continue
+                if token.startswith("--hash="):
+                    hash_prefix = token.split("=", 1)[1]
+                    i += 1
+                    continue
+                if token.startswith("-"):
+                    raise ValueError(f"Unknown option: {token}")
+                if artifact_selector is not None:
+                    raise ValueError(
+                        "schema_profile accepts one selector (artifact_key|artifact_id|@ref) "
+                        "or use --hash."
+                    )
+                artifact_selector = token
+                i += 1
+
+            if artifact_selector is not None and hash_prefix is not None:
+                raise ValueError(
+                    "Provide either a positional selector or --hash, not both."
+                )
+
+            if hash_prefix is not None:
+                artifact = self._lookup_artifact_by_hash_prefix(
+                    hash_prefix, command_name="schema_profile"
+                )
+            elif artifact_selector is not None:
+                artifact_key = self._resolve_artifact_ref(artifact_selector)
+                if artifact_key is None:
+                    return
+                artifact = self.tracker.get_artifact(artifact_key)
+            else:
                 console.print("[red]Error: artifact_key required[/red]")
                 return
-
-            artifact_key = args[0]
-            artifact = self.tracker.get_artifact(artifact_key)
             if not artifact:
-                console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
+                if artifact_selector is not None:
+                    console.print(
+                        f"[red]Artifact '{artifact_selector}' not found.[/red]"
+                    )
                 return
 
             _ensure_tracker_mounts_for_artifact(
@@ -2555,7 +3325,7 @@ class ConsistShell(cmd.Cmd):
                 if fetched is not None:
                     schema, fields = fetched
                     console.print(
-                        f"Schema: {artifact_key} [dim]({artifact.driver}, db profile)[/dim]"
+                        f"Schema: {artifact.key} [dim]({artifact.driver}, db profile)[/dim]"
                     )
                     _render_schema_profile(schema, fields)
                     return
@@ -2569,7 +3339,7 @@ class ConsistShell(cmd.Cmd):
             if data is None:
                 return
 
-            console.print(f"Schema: {artifact_key} [dim]({artifact.driver})[/dim]")
+            console.print(f"Schema: {artifact.key} [dim]({artifact.driver})[/dim]")
 
             if isinstance(data, duckdb.DuckDBPyRelation):
                 df = data.limit(1).df()
@@ -2620,15 +3390,27 @@ class ConsistShell(cmd.Cmd):
             console.print(f"[red]Error: {exc}[/red]")
 
     def do_schema_stub(self, arg: str) -> None:
-        """Export SQLModel schema stub. Usage: schema_stub <artifact_key>|--artifact-id UUID [--run-id RUN_ID] [--source file|duckdb|user_provided] [--class-name NAME] [--table-name NAME] [--include-system-cols] [--no-stats-comments] [--concrete]"""
+        """Export SQLModel schema stub. Usage: schema_stub <artifact_key|artifact_id|@ref>|--artifact-id UUID|--hash PREFIX [--run-id RUN_ID] [--source file|duckdb|user_provided] [--class-name NAME] [--table-name NAME] [--include-system-cols] [--no-stats-comments] [--concrete]"""
         try:
             parsed = self._parse_schema_stub_args(arg)
             artifact_key = parsed["artifact_key"]
             artifact_id = parsed["artifact_id"]
+            hash_prefix = parsed["hash_prefix"]
             run_id = parsed["run_id"]
             source = parsed["source"]
 
-            if artifact_id is not None:
+            if artifact_key is not None:
+                artifact_key = self._resolve_artifact_ref(artifact_key)
+                if artifact_key is None:
+                    return
+
+            if hash_prefix is not None:
+                artifact = self._lookup_artifact_by_hash_prefix(
+                    hash_prefix,
+                    command_name="schema_stub",
+                    run_id=run_id,
+                )
+            elif artifact_id is not None:
                 artifact = self.tracker.get_artifact(artifact_id)
             else:
                 artifact = self.tracker.get_artifact(artifact_key, run_id=run_id)
@@ -2639,6 +3421,10 @@ class ConsistShell(cmd.Cmd):
                     )
                 elif artifact_key is not None:
                     console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
+                elif hash_prefix is not None:
+                    console.print(
+                        f"[red]Artifact with hash prefix '{hash_prefix}' not found.[/red]"
+                    )
                 else:
                     console.print(f"[red]Artifact '{artifact_id}' not found.[/red]")
                 return
@@ -2704,7 +3490,9 @@ class ConsistShell(cmd.Cmd):
 
         if args:
             try:
-                if args[0] == "--limit" and len(args) > 1:
+                if args[0] == "--limit":
+                    if len(args) != 2:
+                        raise ValueError("Usage: scenarios [--limit N]")
                     limit = _parse_bounded_int(
                         args[1],
                         name="limit",
@@ -2712,14 +3500,16 @@ class ConsistShell(cmd.Cmd):
                         maximum=MAX_CLI_LIMIT,
                     )
                 else:
+                    if len(args) != 1:
+                        raise ValueError("Usage: scenarios [--limit N]")
                     limit = _parse_bounded_int(
                         args[0],
                         name="limit",
                         minimum=1,
                         maximum=MAX_CLI_LIMIT,
                     )
-            except ValueError:
-                console.print("[red]Error: limit must be an integer[/red]")
+            except ValueError as exc:
+                console.print(f"[red]Error: {exc}[/red]")
                 return
 
         try:
@@ -2766,6 +3556,8 @@ class ConsistShell(cmd.Cmd):
         self, text: str, line: str, begidx: int, endidx: int
     ) -> List[str]:
         del endidx
+        if text.startswith("-"):
+            return self._complete_choices(text, self._ARTIFACT_COMPLETION_FLAGS)
         if self._is_first_argument(line, begidx):
             return self._complete_choices(text, self._recent_run_ids())
         return []
@@ -2784,6 +3576,8 @@ class ConsistShell(cmd.Cmd):
         self, text: str, line: str, begidx: int, endidx: int
     ) -> List[str]:
         del endidx
+        if text.startswith("-"):
+            return self._complete_choices(text, ("--hash",))
         if self._is_first_argument(line, begidx):
             return self._complete_choices(text, self._recent_artifact_keys())
         return []
@@ -2808,6 +3602,59 @@ class ConsistShell(cmd.Cmd):
 
     def complete_cat(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
         return self.complete_preview(text, line, begidx, endidx)
+
+    def complete_db(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+        del endidx
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._DB_SUBCOMMANDS)
+        return []
+
+    def complete_schema(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del endidx
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._SCHEMA_SUBCOMMANDS)
+        return []
+
+    def complete_views(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        del endidx
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._VIEWS_SUBCOMMANDS)
+        return []
+
+    def complete_cli(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+        del endidx
+        if self._is_first_argument(line, begidx):
+            return self._complete_choices(text, self._CLI_ROOT_COMMANDS)
+        return []
+
+    def complete_consist(
+        self, text: str, line: str, begidx: int, endidx: int
+    ) -> List[str]:
+        return self.complete_cli(text, line, begidx, endidx)
+
+    def do_help(self, arg: str) -> None:
+        super().do_help(arg)
+        if arg.strip():
+            return
+        console.print(
+            "[dim]Tip: use `db ...`, `schema ...`, `views ...`, or `cli <command> ...` "
+            "to access full CLI features from the shell.[/dim]"
+        )
+        console.print(
+            "[dim]Shell defaults are applied automatically "
+            "(db_path/run_dir/trust_db/mounts). Use `context` to inspect them.[/dim]"
+        )
+
+    def default(self, line: str) -> None:
+        args = self._safe_split(line)
+        if args and args[0] in self._PASSTHROUGH_COMMANDS:
+            self._invoke_cli(args)
+            return
+        super().default(line)
 
     def postloop(self) -> None:
         self._save_history_once()
@@ -2843,6 +3690,14 @@ def shell(
         "--run-dir",
         help="Base directory for resolving relative artifact paths in shell preview/schema_profile.",
     ),
+    mount: Optional[List[str]] = typer.Option(
+        None,
+        "--mount",
+        help=(
+            "Mount override mapping (repeatable): NAME=PATH. "
+            "Example: --mount workspace=/path/to/archive"
+        ),
+    ),
     trust_db: bool = typer.Option(
         False,
         "--trust-db",
@@ -2854,16 +3709,28 @@ def shell(
     The database is loaded once and reused across shell commands.
     """
     resolved_db_path = find_db_path(db_path)
-    tracker = get_tracker(resolved_db_path, run_dir=run_dir)
+    mount_overrides = _resolve_mount_overrides_or_exit(mount)
+
+    tracker = get_tracker(
+        resolved_db_path,
+        run_dir=run_dir,
+        mounts=mount_overrides or None,
+    )
     resolved_db_path = getattr(tracker, "db_path", None)
     if not isinstance(resolved_db_path, str) or not resolved_db_path:
         resolved_db_path = find_db_path(db_path)
     console.print(f"[green]✓ Loaded database: {resolved_db_path}[/green]")
+    if mount_overrides:
+        mounts_text = ", ".join(
+            f"{name}={path}" for name, path in mount_overrides.items()
+        )
+        console.print(f"[dim]Using mount override(s): {mounts_text}[/dim]")
     ConsistShell(
         tracker,
         trust_db=trust_db,
         db_path=resolved_db_path,
         run_dir=run_dir,
+        mount_overrides=mount_overrides,
     ).cmdloop()
 
 
