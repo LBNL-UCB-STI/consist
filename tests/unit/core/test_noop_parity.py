@@ -84,3 +84,16 @@ def test_noop_and_real_infer_outputs_when_omitted(tracker, tmp_path: Path) -> No
     assert set(noop_result.outputs.keys()) == {"step"}
     assert real_result.outputs["step"].path == out_path
     assert noop_result.outputs["step"].path == out_path
+
+
+def test_noop_and_real_ignore_string_returns_when_outputs_omitted(tracker) -> None:
+    def step() -> str:
+        return "ok"
+
+    real_result = tracker.run(fn=step, name="step")
+
+    noop_tracker = consist.NoopTracker()
+    noop_result = noop_tracker.run(fn=step, name="step")
+
+    assert real_result.outputs == {}
+    assert noop_result.outputs == {}

@@ -66,7 +66,9 @@ def _sort_value(value: Any) -> tuple[int, Any]:
         return (3, value.timestamp())
     if isinstance(value, str):
         return (4, value)
-    return (5, repr(value))
+    if isinstance(value, tuple):
+        return (5, tuple(_sort_value(item) for item in value))
+    return (6, repr(value))
 
 
 @dataclass
@@ -138,7 +140,9 @@ class RunSet:
         Returns
         -------
         RunSet
-            New RunSet containing the provided runs.
+            New RunSet containing the provided runs. Field-based helpers work on
+            these sets, but facet-based helpers require a tracker-backed RunSet
+            created with ``RunSet.from_query(...)`` or ``Tracker.run_set(...)``.
         """
         return cls(runs=list(runs), label=label)
 
@@ -374,6 +378,14 @@ class RunSet:
                 else:
                     unresolved_fields.add(field_name)
 
+        if unresolved_fields and self._tracker is None:
+            missing = ", ".join(sorted(unresolved_fields))
+            raise RuntimeError(
+                "Facet-based RunSet operations require a tracker-backed RunSet. "
+                f"Could not resolve: {missing}. Build the RunSet with "
+                "RunSet.from_query(...) or Tracker.run_set(...)."
+            )
+
         if unresolved_fields:
             facets_by_run = self._load_facet_values(fields=unresolved_fields)
             for run in self.runs:
@@ -448,6 +460,32 @@ class AlignedPair:
     right: RunSet
     keys: List[Any]
 
+    def _resolve_diff_tracker(self) -> "Tracker":
+        left_tracker = self.left._tracker
+        right_tracker = self.right._tracker
+        if left_tracker is None and right_tracker is None:
+            raise RuntimeError(
+                "AlignedPair.config_diffs requires Tracker-backed RunSets. "
+                "Build RunSets with RunSet.from_query(...) first."
+            )
+        if left_tracker is None:
+            return right_tracker
+        if right_tracker is None:
+            return left_tracker
+        if left_tracker is right_tracker:
+            return left_tracker
+
+        left_db_path = getattr(left_tracker, "db_path", None)
+        right_db_path = getattr(right_tracker, "db_path", None)
+        if left_db_path is not None and right_db_path is not None:
+            if str(left_db_path) == str(right_db_path):
+                return left_tracker
+
+        raise RuntimeError(
+            "AlignedPair.config_diffs requires both RunSets to use the same "
+            "tracker/database."
+        )
+
     def pairs(self) -> Iterator[tuple[Run, Run]]:
         """
         Iterate over matched ``(left_run, right_run)`` pairs.
@@ -519,12 +557,7 @@ class AlignedPair:
         RuntimeError
             If neither RunSet is tracker-backed.
         """
-        tracker = self.left._tracker or self.right._tracker
-        if tracker is None:
-            raise RuntimeError(
-                "AlignedPair.config_diffs requires Tracker-backed RunSets. "
-                "Build RunSets with RunSet.from_query(...) first."
-            )
+        tracker = self._resolve_diff_tracker()
 
         rows: List[Dict[str, Any]] = []
         for on_value, (left_run, right_run) in zip(self.keys, self.pairs()):

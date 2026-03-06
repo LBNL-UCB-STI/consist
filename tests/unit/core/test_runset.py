@@ -232,3 +232,78 @@ def test_runset_empty_behavior_and_helpers(tracker: Tracker) -> None:
     assert aligned_empty.keys == []
     assert aligned_empty.to_frame().empty
     assert aligned_empty.config_diffs().empty
+
+
+def test_runset_from_runs_raises_for_facet_filters(tracker: Tracker) -> None:
+    _create_run(
+        tracker,
+        run_id="facet_run",
+        model="facet_model",
+        year=2025,
+        facet={"scenario": "base"},
+        config={"alpha": 1},
+    )
+    run = tracker.find_run(model="facet_model")
+    assert run is not None
+
+    runs = RunSet.from_runs([run], label="facetless")
+
+    with pytest.raises(RuntimeError, match="tracker-backed RunSet"):
+        runs.filter(scenario="base")
+
+
+def test_runset_latest_orders_grouped_numeric_keys_numerically(tracker: Tracker) -> None:
+    _create_run(
+        tracker,
+        run_id="year_10",
+        model="order_model",
+        year=10,
+        facet={"scenario": "base"},
+        config={"alpha": 10},
+    )
+    _create_run(
+        tracker,
+        run_id="year_2",
+        model="order_model",
+        year=2,
+        facet={"scenario": "base"},
+        config={"alpha": 2},
+    )
+
+    runs = RunSet.from_query(tracker, model="order_model", limit=20)
+    latest_grouped = runs.latest(group_by=["year"])
+
+    assert [run.year for run in latest_grouped] == [2, 10]
+
+
+def test_runset_config_diffs_requires_same_tracker_database(tmp_path) -> None:
+    left_root = tmp_path / "left"
+    right_root = tmp_path / "right"
+    left_root.mkdir()
+    right_root.mkdir()
+    left_tracker = Tracker(run_dir=left_root, db_path=left_root / "prov.duckdb")
+    right_tracker = Tracker(run_dir=right_root, db_path=right_root / "prov.duckdb")
+
+    _create_run(
+        left_tracker,
+        run_id="left_run",
+        model="compare_model",
+        year=2025,
+        facet={"scenario": "base"},
+        config={"alpha": 1},
+    )
+    _create_run(
+        right_tracker,
+        run_id="right_run",
+        model="compare_model",
+        year=2025,
+        facet={"scenario": "policy"},
+        config={"alpha": 2},
+    )
+
+    left = RunSet.from_query(left_tracker, model="compare_model")
+    right = RunSet.from_query(right_tracker, model="compare_model")
+    aligned = left.align(right, on="year")
+
+    with pytest.raises(RuntimeError, match="same tracker/database"):
+        aligned.config_diffs()

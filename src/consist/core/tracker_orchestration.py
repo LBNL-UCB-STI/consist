@@ -634,7 +634,7 @@ class RunTraceCoordinator:
         resolved_name: str,
         result: Any,
     ) -> Optional[Dict[str, Artifact]]:
-        if isinstance(result, (Artifact, str, Path)):
+        if isinstance(result, (Artifact, Path)):
             output_key = RunTraceCoordinator._default_output_key(
                 fn=fn,
                 resolved_name=resolved_name,
@@ -653,7 +653,7 @@ class RunTraceCoordinator:
             for output_key, output_value in result.items():
                 if not isinstance(output_key, str):
                     return None
-                if not isinstance(output_value, (Artifact, str, Path)):
+                if not isinstance(output_value, (Artifact, Path)):
                     return None
                 logged = RunTraceCoordinator._log_output_value(
                     tracker,
@@ -831,8 +831,9 @@ class RunTraceCoordinator:
             for output_key in outputs:
                 if output_key not in outputs_map and output_key in logged_outputs:
                     outputs_map[output_key] = logged_outputs[output_key]
-        elif not outputs_map and logged_outputs:
-            outputs_map = logged_outputs
+        elif logged_outputs:
+            for output_key, artifact in logged_outputs.items():
+                outputs_map.setdefault(output_key, artifact)
 
         return outputs_map
 

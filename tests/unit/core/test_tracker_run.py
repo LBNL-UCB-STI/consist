@@ -169,11 +169,53 @@ def test_tracker_run_infers_dict_artifact_outputs_when_outputs_omitted(tracker):
     assert result.outputs["test"].path.exists()
 
 
+def test_tracker_run_merges_manual_and_inferred_outputs_when_outputs_omitted(tracker):
+    calls: list[str] = []
+
+    def step(ctx) -> Path:
+        calls.append("called")
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        manual_path = ctx.run_dir / "manual.txt"
+        inferred_path = ctx.run_dir / "inferred.txt"
+        manual_path.write_text("manual\n")
+        inferred_path.write_text("inferred\n")
+        tracker.log_artifact(manual_path, key="manual", direction="output")
+        return inferred_path
+
+    first = tracker.run(
+        fn=step,
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    second = tracker.run(
+        fn=step,
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert calls == ["called"]
+    assert set(first.outputs.keys()) == {"manual", "step"}
+    assert set(second.outputs.keys()) == {"manual", "step"}
+
+
 def test_tracker_run_keeps_warning_for_non_artifact_return_when_outputs_omitted(
     tracker, caplog
 ):
     def step():
         return {"metric": 1}
+
+    with caplog.at_level(logging.WARNING):
+        result = tracker.run(fn=step)
+
+    assert result.outputs == {}
+    assert any(
+        "returned a value but no outputs were declared; ignoring return value."
+        in record.message
+        for record in caplog.records
+    )
+
+
+def test_tracker_run_ignores_string_return_when_outputs_omitted(tracker, caplog):
+    def step() -> str:
+        return "ok"
 
     with caplog.at_level(logging.WARNING):
         result = tracker.run(fn=step)

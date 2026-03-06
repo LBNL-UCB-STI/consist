@@ -528,7 +528,7 @@ def _run_noop_step(
             if isinstance(fn_name, str) and fn_name and fn_name != "<lambda>"
             else resolved_name
         )
-        if isinstance(result, (NoopArtifact, str, Path)):
+        if isinstance(result, (NoopArtifact, Path)):
             outputs_map[default_key] = _build_noop_artifact(result, key=default_key)
         elif isinstance(result, Mapping):
             inferred: Dict[str, NoopArtifact] = {}
@@ -536,7 +536,7 @@ def _run_noop_step(
                 if not isinstance(key, str):
                     inferred = {}
                     break
-                if not isinstance(value, (NoopArtifact, str, Path)):
+                if not isinstance(value, (NoopArtifact, Path)):
                     inferred = {}
                     break
                 inferred[key] = _build_noop_artifact(value, key=key)
