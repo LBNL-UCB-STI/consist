@@ -94,8 +94,27 @@ def test_shell_artifacts_no_arg_non_tty_errors_without_prompt(tmp_path, capsys) 
         shell.do_artifacts("")
 
     out = capsys.readouterr().out
+    normalized = " ".join(out.split())
     assert "run_id required" in out
+    assert "run `runs` first to populate shortcuts" in normalized
     fake_input.assert_not_called()
+
+
+def test_shell_preview_no_arg_non_tty_reports_next_steps(tmp_path, capsys) -> None:
+    tracker = MagicMock()
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+
+    shell.do_preview("")
+
+    out = capsys.readouterr().out
+    normalized = " ".join(out.split())
+    assert "artifact_key required" in out
+    assert "Run `artifacts <run_id>` first to populate @refs." in normalized
+    assert "Use `context` to inspect shell defaults." in normalized
 
 
 def test_shell_preview_picker_selects_artifact_in_tty_mode(tmp_path) -> None:
@@ -141,17 +160,31 @@ def test_shell_completions_include_aliases_flags_and_dynamic_values(tmp_path) ->
     assert "q" in shell.completenames("q")
     assert shell.complete_runs("--m", "runs --m", 5, 8) == ["--model"]
 
+    shell._last_run_ids = ["cached-run-1", "cached-run-2"]
+    shell._last_artifact_ids = ["artifact-id-1", "artifact-id-2"]
+
     with patch.object(shell, "_recent_run_ids", return_value=["run-1", "run-2"]):
         assert shell.complete_show("run-", "show run-", 5, 9) == ["run-1", "run-2"]
+        assert shell.complete_show("#", "show #", 5, 6) == ["#1", "#2"]
         assert shell.complete_artifacts("run-2", "artifacts run-2", 10, 15) == ["run-2"]
+        assert shell.complete_artifacts("#", "artifacts #", 10, 11) == ["#1", "#2"]
+        assert shell.complete_ls("#", "ls #", 3, 4) == ["#1", "#2"]
 
     with patch.object(
         shell, "_recent_artifact_keys", return_value=["artifact-1", "table-2"]
     ):
         assert shell.complete_preview("art", "preview art", 8, 11) == ["artifact-1"]
+        assert shell.complete_preview("@", "preview @", 8, 9) == ["@1", "@2"]
         assert shell.complete_schema_profile(
             "table", "schema_profile table", 15, 20
         ) == ["table-2"]
+        assert shell.complete_schema_profile(
+            "@", "schema_profile @", 15, 16
+        ) == ["@1", "@2"]
+        assert shell.complete_schema_stub("@", "schema_stub @", 12, 13) == [
+            "@1",
+            "@2",
+        ]
 
     assert shell.complete_schema_stub("--c", "schema_stub --c", 12, 15) == [
         "--class-name",
@@ -214,6 +247,26 @@ def test_shell_hash_lookup_rejects_empty_prefix(tmp_path, capsys) -> None:
     out = capsys.readouterr().out
     assert resolved is None
     assert "--hash requires a non-empty prefix." in out
+
+
+def test_shell_artifact_ref_missing_suggests_how_to_populate_refs(
+    tmp_path, capsys
+) -> None:
+    tracker = MagicMock()
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+    shell._last_run_ids = ["run-1"]
+
+    resolved = shell._resolve_artifact_ref("@1")
+
+    out = capsys.readouterr().out
+    assert resolved is None
+    assert "no cached artifact refs" in out
+    assert "artifacts <run_id>" in out
+    assert "artifacts #<n>" in out
 
 
 def test_shell_hash_lookup_reports_run_scoped_miss(tmp_path, capsys) -> None:
@@ -381,6 +434,26 @@ def test_shell_group_root_commands_do_not_inject_db_path(tmp_path) -> None:
     assert app_mock.call_args_list[0].kwargs["args"] == ["views"]
     assert app_mock.call_args_list[1].kwargs["args"] == ["schema"]
     assert app_mock.call_args_list[2].kwargs["args"] == ["db"]
+
+
+def test_shell_artifact_picker_empty_state_suggests_run_listing(
+    tmp_path, capsys
+) -> None:
+    tracker = MagicMock()
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+
+    with patch.object(shell, "_is_tty", return_value=True), patch.object(
+        shell, "_recent_artifact_keys", return_value=[]
+    ):
+        shell.do_preview("")
+
+    out = capsys.readouterr().out
+    assert "No artifacts available." in out
+    assert "Run `artifacts <run_id>` first to populate @refs." in out
 
 
 def test_shell_root_option_commands_do_not_inject_db_path(tmp_path) -> None:
