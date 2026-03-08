@@ -2477,6 +2477,16 @@ class ConsistShell(cmd.Cmd):
     def _complete_choices(text: str, options: Iterable[str]) -> List[str]:
         return [option for option in options if option.startswith(text)]
 
+    @staticmethod
+    def _unique_completion_options(options: Iterable[str]) -> List[str]:
+        seen: set[str] = set()
+        ordered: List[str] = []
+        for option in options:
+            if option not in seen:
+                seen.add(option)
+                ordered.append(option)
+        return ordered
+
     def _is_first_argument(self, line: str, begidx: int) -> bool:
         return len(self._safe_split(line[:begidx])) <= 1
 
@@ -2486,6 +2496,17 @@ class ConsistShell(cmd.Cmd):
             token == option_name or token.startswith(f"{option_name}=")
             for token in args
         )
+
+    def _cached_run_ref_tokens(self) -> List[str]:
+        return [f"#{index}" for index in range(1, len(self._last_run_ids) + 1)]
+
+    def _cached_artifact_ref_tokens(self) -> List[str]:
+        return [f"@{index}" for index in range(1, len(self._last_artifact_ids) + 1)]
+
+    def _artifact_ref_population_hint(self) -> str:
+        if self._last_run_ids:
+            return "Run `artifacts <run_id>` or `artifacts #<n>` first to populate @refs."
+        return "Run `artifacts <run_id>` first to populate @refs."
 
     @staticmethod
     def _cli_command_path(args: Sequence[str]) -> tuple[str, ...]:
@@ -2678,12 +2699,18 @@ class ConsistShell(cmd.Cmd):
                 return self._last_run_ids[index - 1]
             return run_id
         if not self._is_tty():
-            console.print("[red]Error: run_id required[/red]")
+            console.print(
+                "[red]Error: run_id required. Pass a run_id or #<n>, or run `runs` "
+                "first to populate shortcuts.[/red]"
+            )
             return None
         return self._select_from_list(
             f"Recent runs for [cyan]{command_name}[/cyan]:",
             self._recent_run_ids(),
-            missing_message="[yellow]No runs available.[/yellow]",
+            missing_message=(
+                "[yellow]No runs available. Pass an explicit run_id or use "
+                "`context` to inspect shell defaults.[/yellow]"
+            ),
             prompt="Choose run number (Enter to cancel): ",
         )
 
@@ -2691,12 +2718,19 @@ class ConsistShell(cmd.Cmd):
         if args:
             return self._resolve_artifact_ref(args[0])
         if not self._is_tty():
-            console.print("[red]Error: artifact_key required[/red]")
+            console.print(
+                "[red]Error: artifact_key required. Pass a key or @<n>. "
+                f"{self._artifact_ref_population_hint()} Use `context` to inspect "
+                "shell defaults.[/red]"
+            )
             return None
         return self._select_from_list(
             "Recent artifacts for [cyan]preview[/cyan]:",
             self._recent_artifact_keys(),
-            missing_message="[yellow]No artifacts available.[/yellow]",
+            missing_message=(
+                "[yellow]No artifacts available. "
+                f"{self._artifact_ref_population_hint()}[/yellow]"
+            ),
             prompt="Choose artifact number (Enter to cancel): ",
         )
 
@@ -2706,7 +2740,8 @@ class ConsistShell(cmd.Cmd):
             return token
         if not self._last_artifact_ids:
             console.print(
-                "[red]Error: no cached artifact refs. Run `artifacts <run_id>` first.[/red]"
+                "[red]Error: no cached artifact refs. "
+                f"{self._artifact_ref_population_hint()}[/red]"
             )
             return None
         raw_index = token[1:]
@@ -3298,7 +3333,11 @@ class ConsistShell(cmd.Cmd):
                     return
                 artifact = self.tracker.get_artifact(artifact_key)
             else:
-                console.print("[red]Error: artifact_key required[/red]")
+                console.print(
+                    "[red]Error: artifact_key required. Pass a key or @<n>, use "
+                    "`--hash <prefix>`, or run `artifacts <run_id>` first to "
+                    "populate artifact refs.[/red]"
+                )
                 return
             if not artifact:
                 if artifact_selector is not None:
@@ -3549,7 +3588,12 @@ class ConsistShell(cmd.Cmd):
     ) -> List[str]:
         del endidx
         if self._is_first_argument(line, begidx):
-            return self._complete_choices(text, self._recent_run_ids())
+            return self._complete_choices(
+                text,
+                self._unique_completion_options(
+                    [*self._cached_run_ref_tokens(), *self._recent_run_ids()]
+                ),
+            )
         return []
 
     def complete_artifacts(
@@ -3559,7 +3603,12 @@ class ConsistShell(cmd.Cmd):
         if text.startswith("-"):
             return self._complete_choices(text, self._ARTIFACT_COMPLETION_FLAGS)
         if self._is_first_argument(line, begidx):
-            return self._complete_choices(text, self._recent_run_ids())
+            return self._complete_choices(
+                text,
+                self._unique_completion_options(
+                    [*self._cached_run_ref_tokens(), *self._recent_run_ids()]
+                ),
+            )
         return []
 
     def complete_preview(
@@ -3569,7 +3618,12 @@ class ConsistShell(cmd.Cmd):
         if text.startswith("-"):
             return self._complete_choices(text, self._PREVIEW_COMPLETION_FLAGS)
         if self._is_first_argument(line, begidx):
-            return self._complete_choices(text, self._recent_artifact_keys())
+            return self._complete_choices(
+                text,
+                self._unique_completion_options(
+                    [*self._cached_artifact_ref_tokens(), *self._recent_artifact_keys()]
+                ),
+            )
         return []
 
     def complete_schema_profile(
@@ -3579,7 +3633,12 @@ class ConsistShell(cmd.Cmd):
         if text.startswith("-"):
             return self._complete_choices(text, ("--hash",))
         if self._is_first_argument(line, begidx):
-            return self._complete_choices(text, self._recent_artifact_keys())
+            return self._complete_choices(
+                text,
+                self._unique_completion_options(
+                    [*self._cached_artifact_ref_tokens(), *self._recent_artifact_keys()]
+                ),
+            )
         return []
 
     def complete_schema_stub(
@@ -3589,7 +3648,12 @@ class ConsistShell(cmd.Cmd):
         if text.startswith("-"):
             return self._complete_choices(text, self._SCHEMA_STUB_COMPLETION_FLAGS)
         if self._is_first_argument(line, begidx):
-            return self._complete_choices(text, self._recent_artifact_keys())
+            return self._complete_choices(
+                text,
+                self._unique_completion_options(
+                    [*self._cached_artifact_ref_tokens(), *self._recent_artifact_keys()]
+                ),
+            )
         return []
 
     def complete_ls(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
@@ -3597,7 +3661,12 @@ class ConsistShell(cmd.Cmd):
         if text.startswith("-"):
             return self._complete_choices(text, self._RUN_COMPLETION_FLAGS)
         if self._is_first_argument(line, begidx):
-            return self._complete_choices(text, self._recent_run_ids())
+            return self._complete_choices(
+                text,
+                self._unique_completion_options(
+                    [*self._cached_run_ref_tokens(), *self._recent_run_ids()]
+                ),
+            )
         return []
 
     def complete_cat(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
