@@ -223,6 +223,30 @@ def test_shell_hash_lookup_reports_run_scoped_miss(tmp_path, capsys) -> None:
         patch("consist.cli._READLINE", None),
     ):
         shell = ConsistShell(tracker)
+
+    with patch("consist.cli._tracker_session") as tracker_session:
+        session = tracker_session.return_value.__enter__.return_value
+        session.exec.return_value.all.return_value = []
+        resolved = shell._lookup_artifact_by_hash_prefix(
+            "deadbeef", command_name="preview", run_id="run-123"
+        )
+
+    out = capsys.readouterr().out
+    normalized = " ".join(out.split())
+    assert resolved is None
+    assert "No artifact found for hash prefix 'deadbeef' in run 'run-123'" in out
+    assert "while running preview." in normalized
+
+
+def test_shell_hash_lookup_does_not_inherit_last_artifact_run_scope(
+    tmp_path, capsys
+) -> None:
+    tracker = MagicMock()
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
     shell._last_artifact_run_id = "run-123"
 
     with patch("consist.cli._tracker_session") as tracker_session:
@@ -235,7 +259,8 @@ def test_shell_hash_lookup_reports_run_scoped_miss(tmp_path, capsys) -> None:
     out = capsys.readouterr().out
     normalized = " ".join(out.split())
     assert resolved is None
-    assert "No artifact found for hash prefix 'deadbeef' in run 'run-123'" in out
+    assert "No artifact found for hash prefix 'deadbeef'" in out
+    assert "run 'run-123'" not in out
     assert "while running preview." in normalized
 
 
@@ -356,6 +381,23 @@ def test_shell_group_root_commands_do_not_inject_db_path(tmp_path) -> None:
     assert app_mock.call_args_list[0].kwargs["args"] == ["views"]
     assert app_mock.call_args_list[1].kwargs["args"] == ["schema"]
     assert app_mock.call_args_list[2].kwargs["args"] == ["db"]
+
+
+def test_shell_root_option_commands_do_not_inject_db_path(tmp_path) -> None:
+    tracker = MagicMock()
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker, db_path="shell.db")
+
+    with patch("consist.cli.app") as app_mock:
+        shell.do_cli("--help")
+        shell.do_cli("--version")
+
+    assert app_mock.call_count == 2
+    assert app_mock.call_args_list[0].kwargs["args"] == ["--help"]
+    assert app_mock.call_args_list[1].kwargs["args"] == ["--version"]
 
 
 def test_shell_routed_schema_capture_file_applies_shell_defaults(tmp_path) -> None:

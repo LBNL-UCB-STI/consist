@@ -2506,9 +2506,11 @@ class ConsistShell(cmd.Cmd):
             ("schema",),
             ("views",),
         }
+        root_option_invocation = bool(prepared and prepared[0].startswith("-"))
 
         if (
             self.db_path
+            and not root_option_invocation
             and not group_root_without_subcommand
             and not self._has_option(prepared, "--db-path")
         ):
@@ -2731,8 +2733,6 @@ class ConsistShell(cmd.Cmd):
         if not candidate:
             console.print("[red]Error: --hash requires a non-empty prefix.[/red]")
             return None
-        if run_id is None:
-            run_id = self._last_artifact_run_id
 
         try:
             from consist.models.artifact import Artifact
