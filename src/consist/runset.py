@@ -143,6 +143,15 @@ class RunSet:
             New RunSet containing the provided runs. Field-based helpers work on
             these sets, but facet-based helpers require a tracker-backed RunSet
             created with ``RunSet.from_query(...)`` or ``Tracker.run_set(...)``.
+
+        Notes
+        -----
+        Use this constructor when you already have concrete ``Run`` objects and
+        only need field-based operations such as positional access or grouping on
+        built-in run attributes like ``year`` or ``status``. If you need facet-
+        aware helpers such as ``filter(scenario=...)`` or ``split_by("seed")``,
+        build the RunSet from a tracker-backed query instead so facet values can
+        be loaded from the provenance store.
         """
         return cls(runs=list(runs), label=label)
 
