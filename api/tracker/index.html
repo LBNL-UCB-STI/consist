@@ -2404,6 +2404,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#consist.core.tracker.Tracker.run_set" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        run_set
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#consist.core.tracker.Tracker.find_run" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3606,6 +3617,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#consist.core.tracker.Tracker.run_set" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        run_set
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#consist.core.tracker.Tracker.find_run" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4248,7 +4270,8 @@ executed, start here.</p>
 <ul>
 <li>You are building a reusable library or service and want explicit dependencies.</li>
 <li>You want direct control over lifecycle methods like <code>start_run</code>, <code>run</code>,
-  <code>scenario</code>, and query methods (<code>find_runs</code>, <code>get_artifact</code>, lineage helpers).</li>
+  <code>scenario</code>, and query methods (<code>find_runs</code>, <code>run_set</code>, <code>get_artifact</code>,
+  lineage helpers).</li>
 <li>You want to avoid relying on global context (<code>consist.use_tracker(...)</code>).</li>
 </ul>
 <h2 id="minimal-runnable-example">Minimal runnable example<a class="headerlink" href="#minimal-runnable-example" title="Permanent link">&para;</a></h2>
@@ -9299,6 +9322,104 @@ Supported forms:
       </tbody>
     </table>
 
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h2 id="consist.core.tracker.Tracker.run_set" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">run_set</span><span class="p">(</span><span class="n">label</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">filters</span><span class="p">)</span></code>
+
+<a href="#consist.core.tracker.Tracker.run_set" class="headerlink" title="Permanent link">&para;</a></h2>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Build a RunSet from <code>find_runs</code> filters.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>label</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Optional label attached to the returned RunSet.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>**filters</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" title="typing.Any" href="https://docs.python.org/3/library/typing.html#typing.Any">Any</a></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Filters forwarded to <code>find_runs</code>.</p>
+              </div>
+            </td>
+            <td>
+                  <code>{}</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    <p><span class="doc-section-title">Returns:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                  <code><a class="autorefs autorefs-internal" title="&lt;code&gt;consist.runset.RunSet&lt;/code&gt;
+
+
+  &lt;span class=&quot;doc doc-labels&quot;&gt;
+      &lt;small class=&quot;doc doc-label doc-label-dataclass&quot;&gt;&lt;code&gt;dataclass&lt;/code&gt;&lt;/small&gt;
+  &lt;/span&gt;" href="../runset/#consist.runset.RunSet">RunSet</a></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>A tracker-backed RunSet for fluent grouping/alignment analysis.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+<details class="note" open>
+  <summary>Notes</summary>
+  <p>This is equivalent to <code>RunSet.from_query(self, label=label, **filters)</code>.</p>
+</details>
 
     </div>
 

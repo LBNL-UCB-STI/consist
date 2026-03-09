@@ -2896,6 +2896,8 @@ Passing them raises <code>TypeError</code> (<code>unexpected keyword argument ..
 <li><a href="../tracker/"><code>consist.Tracker</code></a></li>
 <li><a href="../run/"><code>consist.Run</code></a></li>
 <li><a href="../artifact/"><code>consist.Artifact</code></a></li>
+<li><a href="../runset/#consist.runset.RunSet"><code>consist.RunSet</code></a></li>
+<li><a href="../runset/#consist.runset.AlignedPair"><code>consist.AlignedPair</code></a></li>
 <li><code>consist.CacheOptions</code>, <code>consist.OutputPolicyOptions</code>, <code>consist.ExecutionOptions</code></li>
 </ul>
 <h3 id="scenario-workflow-helpers">Scenario / workflow helpers<a class="headerlink" href="#scenario-workflow-helpers" title="Permanent link">&para;</a></h3>
@@ -2943,6 +2945,9 @@ Passing them raises <code>TypeError</code> (<code>unexpected keyword argument ..
 <li><a href="../api_helpers/#consist.api.register_views"><code>consist.register_views</code></a></li>
 <li><a href="../api_helpers/#consist.api.find_run"><code>consist.find_run</code></a></li>
 <li><a href="../api_helpers/#consist.api.find_runs"><code>consist.find_runs</code></a></li>
+<li><a href="../api_helpers/#consist.api.run_set"><code>consist.run_set</code></a></li>
+<li><a href="../tracker/#consist.core.tracker.Tracker.run_set"><code>Tracker.run_set(...)</code></a></li>
+<li><a href="../runset/#consist.runset.RunSet"><code>RunSet</code></a> and <a href="../runset/#consist.runset.AlignedPair"><code>AlignedPair</code></a></li>
 <li><a href="../tracker/#consist.core.tracker.Tracker.find_latest_run"><code>Tracker.find_latest_run(...)</code></a></li>
 <li><a href="../tracker/#consist.core.tracker.Tracker.diff_runs"><code>Tracker.diff_runs(...)</code></a></li>
 <li><a href="../tracker/#consist.core.tracker.Tracker.get_run_inputs"><code>Tracker.get_run_inputs(...)</code></a> / <a href="../tracker/#consist.core.tracker.Tracker.get_run_outputs"><code>Tracker.get_run_outputs(...)</code></a></li>
@@ -2973,7 +2978,7 @@ as needed.</p>
 </ul>
 <h4 id="querying-and-history">Querying and history<a class="headerlink" href="#querying-and-history" title="Permanent link">&para;</a></h4>
 <ul>
-<li><code>find_runs</code>, <code>find_run</code>, <code>find_latest_run</code>, <code>get_latest_run_id</code></li>
+<li><code>find_runs</code>, <code>run_set</code>, <code>find_run</code>, <code>find_latest_run</code>, <code>get_latest_run_id</code></li>
 <li><code>find_artifacts</code>, <code>get_artifact</code>, <code>get_artifacts_for_run</code></li>
 <li><code>find_artifacts_by_params</code>, <code>get_artifact_kv</code>, <code>register_artifact_facet_parser</code></li>
 <li><code>get_run</code>, <code>get_run_config</code>, <code>get_run_inputs</code>, <code>get_run_outputs</code></li>

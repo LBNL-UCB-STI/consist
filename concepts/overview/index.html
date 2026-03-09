@@ -800,10 +800,32 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#input-mappings-and-auto-loading" class="md-nav__link">
+  <a href="#recommended-pattern-file-based-io" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Input mappings and auto-loading
+        Recommended pattern: file-based I/O
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#when-to-use-output_paths" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When to use output_paths
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#auto-loading-inputs-as-dataframes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Auto-loading inputs as DataFrames
       
     </span>
   </a>
@@ -2447,10 +2469,32 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#input-mappings-and-auto-loading" class="md-nav__link">
+  <a href="#recommended-pattern-file-based-io" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Input mappings and auto-loading
+        Recommended pattern: file-based I/O
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#when-to-use-output_paths" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When to use output_paths
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#auto-loading-inputs-as-dataframes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Auto-loading inputs as DataFrames
       
     </span>
   </a>
@@ -2559,7 +2603,7 @@
 <p><strong>Example</strong>: In a parameter sweep testing 20 demand elasticity values, the first run executes preprocessing and the demand model. Runs 2–20 cache-hit on preprocessing (same inputs, same code) but cache-miss on the demand model (different elasticity). Consist skips 19 preprocessing executions.</p>
 <hr />
 <h2 id="provenance-lineage">Provenance &amp; Lineage<a class="headerlink" href="#provenance-lineage" title="Permanent link">&para;</a></h2>
-<p><strong>Provenance</strong>: The complete history of a result—code version, configuration, input data, and compute environment. Consist records provenance automatically for every run.</p>
+<p><strong>Provenance</strong>: The complete history of a result—code version, configuration, input data, and compute environment. Consist records provenance for every tracked run.</p>
 <p><strong>Lineage</strong>: The dependency chain showing which run created an artifact, which inputs that run consumed, and which runs produced those inputs.</p>
 <pre class="mermaid"><code>graph TD
     Raw[Raw Data] --&gt; Step1[Run: Clean]
@@ -2634,42 +2678,41 @@ live in the linked specialized pages.</p>
 <hr />
 <h2 id="how-inputs-and-outputs-are-treated">How Inputs and Outputs Are Treated<a class="headerlink" href="#how-inputs-and-outputs-are-treated" title="Permanent link">&para;</a></h2>
 <p><strong>Inputs</strong> are files or values that influence computation. File inputs are hashed by content or metadata depending on the hashing strategy (<code>full</code> vs <code>fast</code>).</p>
-<p><strong>Outputs</strong> are named artifacts declared via <code>consist.run(...)</code> or <code>tracker.run(...)</code>. Consist stores their paths and provenance metadata for lookup and querying.</p>
-<p>Prefer <code>consist.output_path(...)</code> / <code>consist.output_dir(...)</code> (or injected <code>RunContext.output_path(...)</code> / <code>RunContext.output_dir(...)</code>) for outputs. These helpers apply managed path policy, honor <code>artifact_dir</code> overrides, and reduce manual path bugs while keeping artifacts portable.</p>
-<h3 id="input-mappings-and-auto-loading">Input mappings and auto-loading<a class="headerlink" href="#input-mappings-and-auto-loading" title="Permanent link">&para;</a></h3>
-<p>Inputs can be passed as a list (hash-only) or a mapping (hash + parameter
-injection). When using a mapping, Consist matches input keys to function
-parameters and auto-loads artifacts by default. To pass raw paths instead, use
-<code>execution_options=ExecutionOptions(load_inputs=False, runtime_kwargs={...})</code>.</p>
-<p>Concrete example:</p>
+<p><strong>Outputs</strong> are named artifacts registered via a function's <code>dict[str, Path]</code>
+return value together with declared <code>outputs=[...]</code>, or explicitly via
+<code>output_paths</code>. Consist stores their paths and provenance metadata for lookup
+and querying.</p>
+<h3 id="recommended-pattern-file-based-io">Recommended pattern: file-based I/O<a class="headerlink" href="#recommended-pattern-file-based-io" title="Permanent link">&para;</a></h3>
+<p>The recommended pattern is for functions to accept file paths as inputs, write
+output files, and return a <code>dict[str, Path]</code> mapping artifact keys to output
+paths. Declare the matching artifact keys in <code>outputs=[...]</code> when calling
+<code>tracker.run(...)</code>; Consist then logs those returned paths as artifacts.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">pandas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pd</span>
-</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">ExecutionOptions</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
 </span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
-</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="k">def</span><span class="w"> </span><span class="nf">summarize_trips</span><span class="p">(</span><span class="n">trips_df</span><span class="p">):</span>
-</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>    <span class="k">return</span> <span class="n">trips_df</span><span class="p">[</span><span class="s2">&quot;distance_miles&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
-</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>
-</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="n">result</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>  <span class="c1"># (1)!</span>
-</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    <span class="n">fn</span><span class="o">=</span><span class="n">summarize_trips</span><span class="p">,</span>
-</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;trips_df&quot;</span><span class="p">:</span> <span class="n">trips_artifact</span><span class="p">},</span>
-</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="p">)</span>
-</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>
-</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="k">def</span><span class="w"> </span><span class="nf">summarize_trips_from_path</span><span class="p">(</span><span class="n">trips_path</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
-</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>    <span class="n">df</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_parquet</span><span class="p">(</span><span class="n">trips_path</span><span class="p">)</span>
-</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>    <span class="k">return</span> <span class="n">df</span><span class="p">[</span><span class="s2">&quot;distance_miles&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
-</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>
-</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="n">result</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>  <span class="c1"># (2)!</span>
-</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>    <span class="n">fn</span><span class="o">=</span><span class="n">summarize_trips_from_path</span><span class="p">,</span>
-</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;trips_path&quot;</span><span class="p">:</span> <span class="n">trips_artifact</span><span class="p">},</span>
-</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a>    <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span>
-</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a>        <span class="n">load_inputs</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
-</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>        <span class="n">runtime_kwargs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;trips_path&quot;</span><span class="p">:</span> <span class="n">trips_artifact</span><span class="o">.</span><span class="n">path</span><span class="p">},</span>
-</span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>    <span class="p">),</span>
-</span><span id="__span-0-23"><a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a><span class="p">)</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="k">def</span><span class="w"> </span><span class="nf">summarize_trips</span><span class="p">(</span><span class="n">trips_path</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Path</span><span class="p">]:</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>    <span class="n">df</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_parquet</span><span class="p">(</span><span class="n">trips_path</span><span class="p">)</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    <span class="n">out</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;./summary.parquet&quot;</span><span class="p">)</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    <span class="n">df</span><span class="o">.</span><span class="n">groupby</span><span class="p">(</span><span class="s2">&quot;mode&quot;</span><span class="p">)[</span><span class="s2">&quot;distance_miles&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span><span class="o">.</span><span class="n">to_frame</span><span class="p">()</span><span class="o">.</span><span class="n">to_parquet</span><span class="p">(</span><span class="n">out</span><span class="p">)</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;summary&quot;</span><span class="p">:</span> <span class="n">out</span><span class="p">}</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="n">result</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>    <span class="n">fn</span><span class="o">=</span><span class="n">summarize_trips</span><span class="p">,</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;trips_path&quot;</span><span class="p">:</span> <span class="n">trips_artifact</span><span class="p">},</span>  <span class="c1"># path resolved from artifact; hashed for cache identity</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>    <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;summary&quot;</span><span class="p">],</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="p">)</span>
 </span></code></pre></div>
-<ol>
-<li>Auto-loading: mapping keys match function params, so Consist loads the DataFrame.</li>
-<li>No auto-loading: you get the raw path and load it yourself.</li>
-</ol>
+<p>The function is a plain Python callable: testable without a tracker, honest about its I/O, and readable without framework knowledge.</p>
+<h3 id="when-to-use-output_paths">When to use <code>output_paths</code><a class="headerlink" href="#when-to-use-output_paths" title="Permanent link">&para;</a></h3>
+<p>If a function writes files but returns <code>None</code> (e.g., a legacy tool or subprocess wrapper), register outputs explicitly:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">result</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>    <span class="n">fn</span><span class="o">=</span><span class="n">run_legacy_model</span><span class="p">,</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;config&quot;</span><span class="p">:</span> <span class="n">config_artifact</span><span class="p">},</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>    <span class="n">output_paths</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;results&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;./model_output.csv&quot;</span><span class="p">)},</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="p">)</span>
+</span></code></pre></div>
+<h3 id="auto-loading-inputs-as-dataframes">Auto-loading inputs as DataFrames<a class="headerlink" href="#auto-loading-inputs-as-dataframes" title="Permanent link">&para;</a></h3>
+<p>If you prefer to receive a DataFrame directly instead of a path, Consist can load the artifact's file and inject it as the parameter value (default <code>load_inputs=True</code>). This is convenient for short scripts but hides the I/O boundary — prefer the path-based pattern for pipelines where the function boundary matters.</p>
 <hr />
 <h2 id="next-steps">Next Steps<a class="headerlink" href="#next-steps" title="Permanent link">&para;</a></h2>
 <ul>

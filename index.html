@@ -2490,10 +2490,6 @@
   <img src="assets/logo.png" alt="Consist" width="320" class="logo-light">
 </p>
 
-<p align="center" class="tagline">
-  Track provenance. Skip redundant computation. Query results across runs.
-</p>
-
 <hr />
 <div id="home-page"></div>
 
@@ -2513,7 +2509,6 @@ pipeline, then into deeper usage patterns.</p>
 <h2 id="prerequisites">Prerequisites<a class="headerlink" href="#prerequisites" title="Permanent link">&para;</a></h2>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-</div>
 <ul>
 <li>Python 3.11+</li>
 <li>Base install:
@@ -2523,15 +2518,19 @@ from a local clone, run <code>pip install -e ".[parquet]"</code></li>
 <li>See <a href="getting-started/installation/">Installation</a> for complete options,
 including source installs and optional extras.</li>
 </ul>
+</div>
 <hr />
 <h2 id="what-is-consist">What is Consist?<a class="headerlink" href="#what-is-consist" title="Permanent link">&para;</a></h2>
-<p>Consist is a Python library for <strong>automatic provenance tracking and intelligent
-caching</strong> in scientific simulation workflows.</p>
+<p>Consist is a Python library for <strong>provenance tracking and intelligent caching</strong>
+in scientific simulation workflows. Tasks are ordinary Python functions;
+Consist records lineage without restructuring your code or introducing implicit
+dependencies.</p>
 <p>It helps you:</p>
 <ul>
-<li>Track <strong>provenance</strong> (code, config, and inputs for each run)</li>
-<li>Reuse previous results on cache hits</li>
-<li>Query across runs using DuckDB-backed views</li>
+<li>Answer "what exactly produced this result?"—code version, config, and inputs, all queryable after the fact</li>
+<li>Skip redundant computation: cache hits fire automatically when code, config, and inputs are unchanged</li>
+<li>Wire multi-step pipelines explicitly via artifact references, not name-based injection or global state</li>
+<li>Query and compare results across runs using DuckDB-backed SQL</li>
 <li>Keep pipelines portable across machines via URI + mount resolution</li>
 </ul>
 <hr />
@@ -2545,7 +2544,7 @@ deeper work.</p>
 <li><strong>Simulation developers</strong>: <a href="architecture/">Architecture</a>,
   <a href="integrations/config_adapters/">Config Adapters</a>,
   <a href="containers-guide/">Container Integration</a></li>
-<li><strong>Practitioners and MPO staff</strong>: <a href="cli-reference/">CLI Reference</a>,
+<li><strong>Pipeline operators</strong>: <a href="cli-reference/">CLI Reference</a>,
   <a href="db-maintenance/">DB Maintenance Guide</a>,
   <a href="troubleshooting/">Troubleshooting</a></li>
 <li><strong>Researchers</strong>: <a href="concepts/data-materialization/">Data Materialization</a>,
