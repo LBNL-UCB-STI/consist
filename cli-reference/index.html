@@ -2941,9 +2941,13 @@ See the dedicated guide: <a href="../db-maintenance/">DB Maintenance Guide</a>.<
 <p>Preview tabular artifacts (CSV, Parquet) without loading full data.</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>consist<span class="w"> </span>preview<span class="w"> </span>&lt;artifact_key&gt;
 </span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>consist<span class="w"> </span>preview<span class="w"> </span>&lt;artifact_key&gt;<span class="w"> </span>--rows<span class="w"> </span><span class="m">10</span>
-</span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a>consist<span class="w"> </span>preview<span class="w"> </span>&lt;artifact_key&gt;<span class="w"> </span>--run-dir<span class="w"> </span>/path/to/run_root
-</span><span id="__span-14-4"><a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a>consist<span class="w"> </span>preview<span class="w"> </span>&lt;artifact_key&gt;<span class="w"> </span>--trust-db<span class="w">  </span><span class="c1"># Allow metadata-based mount/run-dir inference</span>
+</span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a>consist<span class="w"> </span>preview<span class="w"> </span>--hash<span class="w"> </span>a1b2c3d4
+</span><span id="__span-14-4"><a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a>consist<span class="w"> </span>preview<span class="w"> </span>&lt;artifact_key&gt;<span class="w"> </span>--run-dir<span class="w"> </span>/path/to/run_root
+</span><span id="__span-14-5"><a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a>consist<span class="w"> </span>preview<span class="w"> </span>&lt;artifact_key&gt;<span class="w"> </span>--trust-db<span class="w">  </span><span class="c1"># Allow metadata-based mount/run-dir inference</span>
 </span></code></pre></div>
+<p>Hash lookup searches all artifacts by default. In shell workflows, use
+<code>schema_stub --run-id &lt;run_id&gt; --hash &lt;prefix&gt;</code> when you want to narrow selection
+to one run.</p>
 <h3 id="consist-validate">consist validate<a class="headerlink" href="#consist-validate" title="Permanent link">&para;</a></h3>
 <p>Check that artifacts in the database exist on disk.</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>consist<span class="w"> </span>validate
@@ -2961,11 +2965,33 @@ See the dedicated guide: <a href="../db-maintenance/">DB Maintenance Guide</a>.<
 </span></code></pre></div>
 <p>Inside the shell:
 <div class="language-text highlight"><pre><span></span><code><span id="__span-17-1"><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>(consist) runs --limit 5
-</span><span id="__span-17-2"><a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a>(consist) show abc123
-</span><span id="__span-17-3"><a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a>(consist) artifacts abc123
-</span><span id="__span-17-4"><a id="__codelineno-17-4" name="__codelineno-17-4" href="#__codelineno-17-4"></a>(consist) scenarios
-</span><span id="__span-17-5"><a id="__codelineno-17-5" name="__codelineno-17-5" href="#__codelineno-17-5"></a>(consist) exit
+</span><span id="__span-17-2"><a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a>(consist) show #1
+</span><span id="__span-17-3"><a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a>(consist) artifacts #1
+</span><span id="__span-17-4"><a id="__codelineno-17-4" name="__codelineno-17-4" href="#__codelineno-17-4"></a>(consist) preview @1
+</span><span id="__span-17-5"><a id="__codelineno-17-5" name="__codelineno-17-5" href="#__codelineno-17-5"></a>(consist) schema_profile @1
+</span><span id="__span-17-6"><a id="__codelineno-17-6" name="__codelineno-17-6" href="#__codelineno-17-6"></a>(consist) schema_stub --run-id abc123 --hash a1b2c3d4
+</span><span id="__span-17-7"><a id="__codelineno-17-7" name="__codelineno-17-7" href="#__codelineno-17-7"></a>(consist) preview --hash a1b2c3d4
+</span><span id="__span-17-8"><a id="__codelineno-17-8" name="__codelineno-17-8" href="#__codelineno-17-8"></a>(consist) context
+</span><span id="__span-17-9"><a id="__codelineno-17-9" name="__codelineno-17-9" href="#__codelineno-17-9"></a>(consist) scenarios
+</span><span id="__span-17-10"><a id="__codelineno-17-10" name="__codelineno-17-10" href="#__codelineno-17-10"></a>(consist) exit
 </span></code></pre></div></p>
+<p>Useful shell shortcuts:</p>
+<ul>
+<li><code>#&lt;n&gt;</code> refers to the nth cached run from the last <code>runs</code> output.</li>
+<li><code>@&lt;n&gt;</code> refers to the nth cached artifact from the last <code>artifacts &lt;run_id&gt;</code> output.</li>
+<li><code>context</code> prints the active shell defaults for <code>db_path</code>, <code>run_dir</code>,
+  <code>trust_db</code>, and mount overrides.</li>
+<li><code>preview --hash &lt;prefix&gt;</code> and <code>schema_profile --hash &lt;prefix&gt;</code> search all
+  artifacts by hash prefix.</li>
+<li><code>schema_stub --hash &lt;prefix&gt; --run-id &lt;run_id&gt;</code> narrows hash lookup to one run
+  when you want deterministic selection.</li>
+</ul>
+<p>Tips:</p>
+<ul>
+<li>Run <code>runs</code> first to populate <code>#&lt;n&gt;</code> run shortcuts.</li>
+<li>Run <code>artifacts &lt;run_id&gt;</code> or <code>artifacts #&lt;n&gt;</code> first to populate <code>@&lt;n&gt;</code> artifact
+  shortcuts.</li>
+</ul>
 <hr />
 <h2 id="scripting-with-json-output">Scripting with JSON Output<a class="headerlink" href="#scripting-with-json-output" title="Permanent link">&para;</a></h2>
 <p>Use <code>--json</code> for machine-readable output:</p>
