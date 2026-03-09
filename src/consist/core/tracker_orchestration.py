@@ -47,6 +47,7 @@ from consist.types import (
     DriverType,
     ExecutionOptions,
     FacetLike,
+    InputBindingMode,
     IdentityInputs,
     OutputPolicyOptions,
     RunInputRef,
@@ -134,7 +135,7 @@ class RunInvocationContext:
     container: Any
     runtime_kwargs: Optional[Mapping[str, Any]]
     inject_context: Optional[Union[bool, str]]
-    load_inputs: bool
+    input_binding: InputBindingMode
     resolved_inputs: List[ArtifactRef]
     input_artifacts_by_key: Dict[str, Artifact]
     run_id: str
@@ -454,31 +455,37 @@ class RunTraceCoordinator:
         config_plan = self._prepare_config_plan(
             adapter=invocation.adapter,
         )
-        load_inputs = invocation.load_inputs
-
-        if load_inputs is None:
-            load_inputs = isinstance(invocation.inputs, Mapping)
+        input_binding = invocation.input_binding
         if (
-            load_inputs
+            input_binding != "none"
             and invocation.inputs is not None
             and not isinstance(invocation.inputs, Mapping)
         ):
+            problem = (
+                "load_inputs=True requires inputs to be a dict."
+                if invocation.load_inputs is True and input_binding == "loaded"
+                else f"input_binding={input_binding!r} requires inputs to be a dict."
+            )
+            fix = (
+                "Pass inputs as a mapping (for example {'data': path}) or set "
+                "ExecutionOptions(load_inputs=False)."
+                if invocation.load_inputs is True and input_binding == "loaded"
+                else "Pass inputs as a mapping (for example {'data': path}) or use "
+                "input_binding='none' when inputs are identity-only."
+            )
             raise ValueError(
                 format_problem_cause_fix(
-                    problem="load_inputs=True requires inputs to be a dict.",
+                    problem=problem,
                     cause=(
-                        "Automatic parameter loading needs named inputs so Consist can "
+                        "Automatic input binding needs named inputs so Consist can "
                         "match function parameters."
                     ),
-                    fix=(
-                        "Pass inputs as a mapping (for example {'data': path}) or set "
-                        "ExecutionOptions(load_inputs=False)."
-                    ),
+                    fix=fix,
                 )
             )
 
         cache_hydration = invocation.cache_hydration
-        if cache_hydration is None and load_inputs:
+        if cache_hydration is None and input_binding != "none":
             cache_hydration = "inputs-missing"
 
         if (
@@ -567,7 +574,7 @@ class RunTraceCoordinator:
             container=invocation.container,
             runtime_kwargs=invocation.runtime_kwargs,
             inject_context=invocation.inject_context,
-            load_inputs=load_inputs,
+            input_binding=input_binding,
             resolved_inputs=resolved_inputs,
             input_artifacts_by_key=input_artifacts_by_key,
             run_id=run_id,
@@ -846,7 +853,7 @@ class RunTraceCoordinator:
         resolved_name: str,
         output_paths: Optional[Mapping[str, ArtifactRef]],
         container: Any,
-        load_inputs: bool,
+        input_binding: InputBindingMode,
         resolved_inputs: List[ArtifactRef],
         on_missing_outputs: Callable[[str, List[str]], None],
     ) -> RunResult:
@@ -854,17 +861,20 @@ class RunTraceCoordinator:
             raise RuntimeError(
                 "Container execution requires container and output_paths."
             )
-        if load_inputs:
+        if input_binding != "none":
             raise ValueError(
                 format_problem_cause_fix(
-                    problem="executor='container' does not support load_inputs.",
+                    problem=(
+                        "executor='container' does not support automatic input binding."
+                    ),
                     cause=(
-                        "Input auto-loading is only supported for Python "
-                        "callable execution."
+                        "Input binding is only supported for Python callable "
+                        "execution."
                     ),
                     fix=(
-                        "Disable load_inputs for container runs and pass input "
-                        "artifacts through inputs=... instead."
+                        "Use input_binding='none' (or legacy load_inputs=False) for "
+                        "container runs and pass inputs through inputs=... only for "
+                        "identity and lineage."
                     ),
                 )
             )
@@ -969,7 +979,7 @@ class RunTraceCoordinator:
         inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]],
         runtime_kwargs_dict: Optional[Mapping[str, Any]],
         inject_context: Optional[Union[bool, str]],
-        load_inputs: bool,
+        input_binding: InputBindingMode,
         input_artifacts_by_key: Dict[str, Artifact],
         capture_dir: Optional[Path],
         capture_pattern: str,
@@ -1046,7 +1056,7 @@ class RunTraceCoordinator:
             if param_name in runtime_kwargs:
                 call_kwargs[param_name] = runtime_kwargs[param_name]
                 continue
-            if load_inputs and isinstance(inputs, Mapping):
+            if input_binding != "none" and isinstance(inputs, Mapping):
                 if param_name in input_artifacts_by_key:
                     if param_name in config_dict:
                         logging.warning(
@@ -1056,12 +1066,36 @@ class RunTraceCoordinator:
                     artifact = input_artifacts_by_key[param_name]
                     if get_tracker_ref(artifact) is None:
                         set_tracker_ref(artifact, tracker)
-                    if artifact.driver in DriverType.tabular_drivers():
-                        from consist.api import load_df
-
-                        call_kwargs[param_name] = load_df(artifact, tracker=tracker)
+                    if input_binding == "paths":
+                        artifact_path = artifact.as_path(tracker=tracker)
+                        if not artifact_path.exists():
+                            raise ValueError(
+                                format_problem_cause_fix(
+                                    problem=(
+                                        "input_binding='paths' requires a materialized "
+                                        f"local path for input {param_name!r}."
+                                    ),
+                                    cause=(
+                                        "The bound input artifact does not currently "
+                                        "exist at a local filesystem path."
+                                    ),
+                                    fix=(
+                                        "Use cache_hydration='inputs-missing', ensure "
+                                        "the source path is accessible on this host, or "
+                                        "switch to input_binding='loaded'."
+                                    ),
+                                )
+                            )
+                        call_kwargs[param_name] = artifact_path
                     else:
-                        call_kwargs[param_name] = tracker.load(artifact)
+                        if artifact.driver in DriverType.tabular_drivers():
+                            from consist.api import load_df
+
+                            call_kwargs[param_name] = load_df(
+                                artifact, tracker=tracker
+                            )
+                        else:
+                            call_kwargs[param_name] = tracker.load(artifact)
                     continue
             if param_name in config_dict:
                 call_kwargs[param_name] = config_dict[param_name]
@@ -1284,7 +1318,7 @@ class RunTraceCoordinator:
         container = context.container
         runtime_kwargs_dict = context.runtime_kwargs
         inject_context = context.inject_context
-        load_inputs = context.load_inputs
+        input_binding = context.input_binding
         resolved_inputs = context.resolved_inputs
         input_artifacts_by_key = context.input_artifacts_by_key
         run_id = context.run_id
@@ -1345,7 +1379,7 @@ class RunTraceCoordinator:
                     resolved_name=resolved_name,
                     output_paths=output_paths,
                     container=container,
-                    load_inputs=load_inputs,
+                    input_binding=input_binding,
                     resolved_inputs=resolved_inputs,
                     on_missing_outputs=_handle_missing_outputs,
                 )
@@ -1359,7 +1393,7 @@ class RunTraceCoordinator:
                 inputs=inputs,
                 runtime_kwargs_dict=runtime_kwargs_dict,
                 inject_context=inject_context,
-                load_inputs=load_inputs,
+                input_binding=input_binding,
                 input_artifacts_by_key=input_artifacts_by_key,
                 capture_dir=capture_dir,
                 capture_pattern=capture_pattern,

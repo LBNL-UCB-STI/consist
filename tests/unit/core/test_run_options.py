@@ -27,6 +27,7 @@ def test_merge_run_options_merges_options_objects() -> None:
     assert merged.code_identity == "callable_module"
     assert merged.code_identity_extra_deps == ["helpers.py"]
     assert merged.output_missing == "error"
+    assert merged.input_binding is None
     assert merged.inject_context == "ctx"
 
 
@@ -42,6 +43,7 @@ def test_merge_run_options_defaults_to_empty_options() -> None:
     assert merged.code_identity_extra_deps is None
     assert merged.output_mismatch is None
     assert merged.output_missing is None
+    assert merged.input_binding is None
     assert merged.load_inputs is None
     assert merged.executor is None
     assert merged.container is None
@@ -65,11 +67,14 @@ def test_raise_legacy_policy_kwargs_error_has_migration_guidance() -> None:
 def test_resolve_runtime_kwargs_alias_merges_into_execution_options() -> None:
     resolved = resolve_runtime_kwargs_alias(
         api_name="Tracker.run",
-        execution_options=ExecutionOptions(load_inputs=True, inject_context="ctx"),
+        execution_options=ExecutionOptions(
+            input_binding="paths", load_inputs=True, inject_context="ctx"
+        ),
         runtime_kwargs={"threshold": 2},
     )
 
     assert resolved is not None
+    assert resolved.input_binding == "paths"
     assert resolved.load_inputs is True
     assert resolved.inject_context == "ctx"
     assert resolved.runtime_kwargs == {"threshold": 2}

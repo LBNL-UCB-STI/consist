@@ -29,6 +29,7 @@ from consist.types import (
     CodeIdentityMode,
     ExecutionOptions,
     FacetLike,
+    InputBindingMode,
     IdentityInputs,
     OutputPolicyOptions,
     RunInputRef,
@@ -666,12 +667,12 @@ class ScenarioContext:
 
         return resolved_inputs
 
-    def _promote_inputs_for_load(
+    def _promote_inputs_for_binding(
         self,
         inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]],
-        load_inputs: Optional[bool],
+        input_binding: InputBindingMode,
     ) -> Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]]:
-        if not load_inputs or inputs is None:
+        if input_binding == "none" or inputs is None:
             return inputs
         if isinstance(inputs, (list, tuple)):
             if all(isinstance(value, str) for value in inputs) and all(
@@ -770,6 +771,22 @@ class ScenarioContext:
         if fn is None and name is None:
             raise ValueError("ScenarioContext.run requires name when fn is None.")
 
+        invocation_inputs = inputs
+        requested_input_binding = (
+            execution_options.input_binding if execution_options is not None else None
+        )
+        if (
+            requested_input_binding is None
+            and execution_options is not None
+            and execution_options.load_inputs is True
+        ):
+            requested_input_binding = "loaded"
+        if requested_input_binding in {"loaded", "paths"}:
+            invocation_inputs = self._promote_inputs_for_binding(
+                invocation_inputs,
+                cast(InputBindingMode, requested_input_binding),
+            )
+
         resolved_invocation = resolve_run_invocation(
             fn=fn,
             name=name,
@@ -778,7 +795,7 @@ class ScenarioContext:
             config=config,
             adapter=adapter,
             identity_inputs=identity_inputs,
-            inputs=inputs,
+            inputs=invocation_inputs,
             input_keys=input_keys,
             optional_input_keys=optional_input_keys,
             tags=tags,
@@ -825,7 +842,7 @@ class ScenarioContext:
         resolved_cache_hydration = resolved_invocation.cache_hydration
         resolved_cache_version = resolved_invocation.cache_version
         resolved_validate_cached_outputs = resolved_invocation.validate_cached_outputs
-        resolved_load_inputs = resolved_invocation.load_inputs
+        resolved_input_binding = resolved_invocation.input_binding
         resolved_output_mismatch = resolved_invocation.output_mismatch
         resolved_output_missing = resolved_invocation.output_missing
         resolved_executor = resolved_invocation.executor
@@ -848,8 +865,8 @@ class ScenarioContext:
             else self.step_cache_hydration
         )
 
-        promoted_inputs = self._promote_inputs_for_load(
-            resolved_inputs, resolved_load_inputs
+        promoted_inputs = self._promote_inputs_for_binding(
+            resolved_inputs, resolved_input_binding
         )
         resolved_inputs = self._resolve_inputs(
             promoted_inputs, resolved_input_keys, resolved_optional_input_keys
@@ -909,7 +926,7 @@ class ScenarioContext:
                 output_missing=resolved_output_missing,
             ),
             execution_options=ExecutionOptions(
-                load_inputs=resolved_load_inputs,
+                input_binding=resolved_input_binding,
                 executor=resolved_executor,
                 container=resolved_container,
                 runtime_kwargs=runtime_kwargs_dict,

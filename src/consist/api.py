@@ -59,6 +59,7 @@ from consist.types import (
     CacheOptions,
     DriverType,
     ExecutionOptions,
+    InputBindingMode,
     IdentityInputs,
     OutputPolicyOptions,
 )
@@ -313,6 +314,7 @@ def define_step(
     cache_hydration: Optional[str] = None,
     cache_version: Optional[int] = None,
     validate_cached_outputs: Optional[str] = None,
+    input_binding: Optional[InputBindingMode] = None,
     load_inputs: Optional[bool] = None,
     tags: Optional[list[str]] = None,
     facet_from: Optional[list[str]] = None,
@@ -345,6 +347,7 @@ def define_step(
         cache_hydration=cache_hydration,
         cache_version=cache_version,
         validate_cached_outputs=validate_cached_outputs,
+        input_binding=input_binding,
         load_inputs=load_inputs,
         tags=tags,
         facet_from=facet_from,

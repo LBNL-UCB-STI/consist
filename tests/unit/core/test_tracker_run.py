@@ -55,6 +55,57 @@ def test_tracker_run_loads_inputs_and_injects_context(tracker, sample_csv):
     assert result.outputs["filtered"].path.exists()
 
 
+def test_tracker_run_binds_paths_with_input_binding_paths(tracker, sample_csv):
+    input_path = sample_csv("data.csv", rows=3)
+    seen: dict[str, Path] = {}
+
+    def step(data: Path, threshold: int) -> None:
+        seen["data"] = data
+        assert threshold == 2
+        frame = pd.read_csv(data)
+        assert list(frame["value"]) == [0, 1, 2]
+
+    tracker.run(
+        fn=step,
+        inputs={"data": input_path},
+        config={"threshold": 2},
+        execution_options=ExecutionOptions(input_binding="paths"),
+    )
+
+    assert seen["data"] == input_path
+
+
+def test_tracker_run_loads_inputs_with_input_binding_loaded(tracker, sample_csv):
+    input_path = sample_csv("data.csv", rows=3)
+    seen: dict[str, pd.DataFrame] = {}
+
+    def step(data: pd.DataFrame) -> None:
+        seen["data"] = data
+        assert list(data["value"]) == [0, 1, 2]
+
+    tracker.run(
+        fn=step,
+        inputs={"data": input_path},
+        execution_options=ExecutionOptions(input_binding="loaded"),
+    )
+
+    assert list(seen["data"]["value"]) == [0, 1, 2]
+
+
+def test_tracker_run_load_inputs_false_remains_identity_only(tracker, sample_csv):
+    input_path = sample_csv("data.csv", rows=2)
+
+    def step(data: Path) -> None:
+        raise AssertionError("step should never bind inputs automatically")
+
+    with pytest.raises(TypeError, match="missing 1 required positional argument"):
+        tracker.run(
+            fn=step,
+            inputs={"data": input_path},
+            execution_options=ExecutionOptions(load_inputs=False),
+        )
+
+
 def test_tracker_run_cache_hit_skips_callable(tracker):
     calls: list[str] = []
 

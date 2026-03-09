@@ -88,6 +88,37 @@ def test_run_rejects_load_inputs_true_with_non_mapping_inputs(tracker) -> None:
     assert "load_inputs=True requires inputs to be a dict" in message
 
 
+def test_run_rejects_conflicting_input_binding_and_load_inputs(tracker) -> None:
+    with pytest.raises(ValueError) as excinfo:
+        tracker.run(
+            fn=lambda data: None,
+            name="conflicting_input_binding",
+            inputs={"data": Path("any.csv")},
+            execution_options=ExecutionOptions(
+                input_binding="paths",
+                load_inputs=False,
+            ),
+        )
+
+    message = str(excinfo.value)
+    _assert_problem_cause_fix(message)
+    assert "both input_binding and load_inputs" in message
+
+
+def test_run_rejects_path_binding_with_non_mapping_inputs(tracker) -> None:
+    with pytest.raises(ValueError) as excinfo:
+        tracker.run(
+            fn=lambda data: None,
+            name="bad_path_binding",
+            inputs=[Path("any.csv")],
+            execution_options=ExecutionOptions(input_binding="paths"),
+        )
+
+    message = str(excinfo.value)
+    _assert_problem_cause_fix(message)
+    assert "input_binding='paths' requires inputs to be a dict" in message
+
+
 def test_run_rejects_invalid_executor_message_shape(tracker) -> None:
     with pytest.raises(ValueError) as excinfo:
         tracker.run(

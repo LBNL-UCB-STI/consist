@@ -16,7 +16,7 @@ from typing import (
 
 from consist.core.decorators import StepDefinition
 from consist.core.step_context import StepContext, format_step_name, resolve_metadata
-from consist.types import IdentityInputs
+from consist.types import IdentityInputs, InputBindingMode
 
 if TYPE_CHECKING:
     from consist.core.config_canonicalization import ConfigAdapter
@@ -42,6 +42,7 @@ class ResolvedStepMetadata:
     cache_hydration: Optional[str]
     cache_version: Optional[int]
     validate_cached_outputs: Optional[str]
+    input_binding: Optional[InputBindingMode]
     load_inputs: Optional[bool]
     facet_from: Optional[List[str]]
     facet_schema_version: Optional[Union[str, int]]
@@ -89,6 +90,7 @@ class MetadataResolver:
         cache_hydration: Optional[str],
         cache_version: Optional[int],
         validate_cached_outputs: Optional[str],
+        input_binding: Optional[InputBindingMode],
         load_inputs: Optional[bool],
         missing_name_error: str,
         adapter: Optional["ConfigAdapter"] = None,
@@ -187,6 +189,7 @@ class MetadataResolver:
         resolved_validate_cached_outputs = _resolve_meta(
             validate_cached_outputs, step_def.validate_cached_outputs
         )
+        resolved_input_binding = _resolve_meta(input_binding, step_def.input_binding)
         resolved_load_inputs = _resolve_meta(load_inputs, step_def.load_inputs)
         resolved_facet_from = _resolve_meta(facet_from, step_def.facet_from)
         if resolved_facet_from is not None:
@@ -214,6 +217,7 @@ class MetadataResolver:
             cache_hydration=resolved_cache_hydration,
             cache_version=resolved_cache_version,
             validate_cached_outputs=resolved_validate_cached_outputs,
+            input_binding=resolved_input_binding,
             load_inputs=resolved_load_inputs,
             facet_from=resolved_facet_from,
             facet_schema_version=resolved_facet_schema_version,
