@@ -16,6 +16,38 @@ for the recommended wrapper architecture.
 
 ---
 
+## Contents
+
+- [Choosing Your Pattern](#choosing-your-pattern)
+- [Pattern 1: Single-Step Runs (`run()`)](#pattern-1-single-step-runs-run)
+    - [Choosing an Input Binding Mode](#choosing-an-input-binding-mode)
+    - [Simple Example: Data Cleaning](#simple-example-data-cleaning)
+    - [Example with Config](#example-with-config)
+    - [Wrapping Legacy or Black-Box Tools](#wrapping-legacy-or-black-box-tools)
+- [Pattern 2: Multi-Step Workflows (`scenario()`)](#pattern-2-multi-step-workflows-scenario)
+    - [Understanding the Coupler](#understanding-the-coupler)
+    - [Simple Example: Two-Step Workflow](#simple-example-two-step-workflow)
+    - [Declaring Inputs: Disk Paths vs Explicit Step Links](#declaring-inputs-disk-paths-vs-explicit-step-links)
+    - [Decorator Defaults, Templates, and Schema Introspection](#decorator-defaults-templates-and-schema-introspection)
+    - [Passing Data Between Steps with the Coupler](#passing-data-between-steps-with-the-coupler)
+    - [Output Validation](#output-validation)
+    - [Selective Output Collection with `collect_by_keys()`](#selective-output-collection-with-collect_by_keys)
+    - [Example: Parameter Sweep in a Scenario](#example-parameter-sweep-in-a-scenario)
+- [Pattern 3: Container Integration](#pattern-3-container-integration)
+- [Advanced Patterns](#advanced-patterns)
+    - [Cache Hits and the Coupler](#cache-hits-and-the-coupler)
+    - [Cache Hydration](#cache-hydration)
+    - [Mixing Runs and Scenarios](#mixing-runs-and-scenarios)
+- [When Does Code Execute? Understanding `sc.run()` vs `sc.trace()`](#when-does-code-execute-understanding-scrun-vs-sctrace)
+- [Motivation: When Caching Saves Time](#motivation-when-caching-saves-time)
+- [Querying Results](#querying-results)
+    - [Finding Runs](#finding-runs)
+    - [Loading Artifacts](#loading-artifacts)
+    - [Cross-Run Queries with Views](#cross-run-queries-with-views)
+    - [Generating Schemas from Captured Data](#generating-schemas-from-captured-data)
+
+---
+
 ## Choosing Your Pattern
 
 Choose based on what you're building and how much structure you need:
@@ -24,7 +56,7 @@ Choose based on what you're building and how much structure you need:
 |-------------------------------------------------------------|---------------------------------|-----------------------------------------------------------------------------------------------------------------------------|
 | Single data processing step (clean, transform, aggregate)   | **`run`**                       | Simple: caches the entire function call with low overhead. Use for self-contained operations.                               |
 | Multi-step workflow (preprocessing → simulation → analysis) | **`scenario`**                  | Groups related steps, shares state via coupler, per-step caching. Use when steps have dependencies or shared configuration. |
-| Existing tool/model (subprocess, legacy code, container)    | **`container` or `depends_on`** | Wraps external executables, tracks container digest as cache key. Use for black-box tools.                                  |
+| Existing tool/model (subprocess, legacy code, container)    | **[`container` or `depends_on`](containers-guide.md)** | Wraps external executables, tracks container digest as cache key. Use for black-box tools.                                  |
 | Parameter sweep / sensitivity analysis                      | **`scenario`&nbsp;+&nbsp;loop** | Run the same step with different configs, compare results.                                                                  |
 | Multi-year simulation                                       | **`scenario`&nbsp;+&nbsp;loop** | Runs in years, each year caches independently, all years share scenario context.                                            |
 
@@ -424,7 +456,7 @@ preprocess_result = sc.run(
 sc.run(
     fn=analyze,
     inputs=consist.refs(preprocess_result, Keys.PREPROCESSED),
-    execution_options=ExecutionOptions(load_inputs=True),
+    execution_options=ExecutionOptions(input_binding="loaded"),
     outputs=[Keys.ANALYSIS],
 )
 
@@ -506,10 +538,7 @@ sc.coupler.require("beam/plans_in")       # global access still works
             fn=preprocess_data,
             inputs={"raw_path": Path("raw.csv")},
             outputs=["preprocessed"],
-            execution_options=ExecutionOptions(
-                load_inputs=False,
-                runtime_kwargs={"raw_path": Path("raw.csv")},
-            ),
+            execution_options=ExecutionOptions(input_binding="paths"),
         )
 
         sc.run(
@@ -521,12 +550,7 @@ sc.coupler.require("beam/plans_in")       # global access still works
                 )
             },
             outputs=["analysis"],
-            execution_options=ExecutionOptions(
-                load_inputs=False,
-                runtime_kwargs={
-                    "preprocessed_path": preprocess_result.outputs["preprocessed"].path
-                },
-            ),
+            execution_options=ExecutionOptions(input_binding="paths"),
         )
     ```
 
@@ -545,16 +569,13 @@ sc.run(
     name="preprocess",
     fn=preprocess_data,
     inputs={"raw": Path("raw.csv")},  # (1)!
-    execution_options=ExecutionOptions(
-        load_inputs=False,
-        runtime_kwargs={"raw": Path("raw.csv")},
-    ),
+    execution_options=ExecutionOptions(input_binding="paths"),
     outputs=["preprocessed"],
 )
 ```
 
-1. Hash the file as an input dependency, then pass the raw path explicitly with
-   `runtime_kwargs`.
+1. Hash the file as an input dependency; `input_binding="paths"` passes it to
+   the function as a local `Path` object automatically.
 Use this when you're loading data from disk for the first time and want the I/O
 boundary to stay obvious.
 
@@ -566,17 +587,17 @@ sc.run(
     name="analyze",
     fn=analyze_data,
     inputs={"preprocessed": consist.ref(preprocess_result, key="preprocessed")},  # (1)!
-    execution_options=ExecutionOptions(load_inputs=True),  # (2)!
+    execution_options=ExecutionOptions(input_binding="loaded"),  # (2)!
     outputs=["analysis"],
 )
 ```
 
 1. Explicitly link to one output from a prior `RunResult`.
-2. Auto-load inputs as function parameters.
+2. Auto-load inputs as hydrated objects (DataFrames, etc.) before calling the function.
 Use this when an upstream step already produced the artifact. With
-`execution_options=ExecutionOptions(load_inputs=True)`, each mapping key becomes
-a function parameter with loaded data. This is concise, but the more explicit
-path-based variant above is usually the better default for production pipelines.
+`input_binding="loaded"`, each mapping key becomes a function parameter with
+loaded data. This is concise, but the more explicit path-based variant above
+(`input_binding="paths"`) is usually the better default for production pipelines.
 
 Rule of thumb:
 - Use `consist.ref(...)` for one-off single links.
@@ -605,7 +626,7 @@ sc.run(
     name="analyze",
     fn=analyze_data,
     inputs=consist.refs(preprocess_result, {"cleaned_artifact": "preprocessed"}),
-    execution_options=ExecutionOptions(load_inputs=True),
+    execution_options=ExecutionOptions(input_binding="loaded"),
     outputs=["analysis"],
 )
 ```
@@ -710,7 +731,7 @@ with use_tracker(tracker):
                 fn=simulate_year,
                 inputs=simulation_inputs,
                 outputs=["persons"],
-                execution_options=ExecutionOptions(load_inputs=True),
+                execution_options=ExecutionOptions(input_binding="loaded"),
                 config={"year": year},
             )
 ```
@@ -880,7 +901,7 @@ Each threshold creates a separate run with its own cache entry. Re-run later? Co
 
 ## Pattern 3: Container Integration
 
-Use containers when you have existing tools, models, or legacy code that runs as a subprocess or Docker container. The image digest becomes part of the cache key.
+Use containers when you have existing tools, models, or legacy code that runs as a subprocess or Docker container. The image digest becomes part of the cache key. For the full reference, see the [Container Integration Guide](containers-guide.md).
 
 **When to use:**
 
@@ -1078,12 +1099,12 @@ with use_tracker(tracker):
             fn=prepare_land_use,
             inputs={"geojson_path": Path("land_use.geojson")},
             outputs=["zones"],
-            execution_options=ExecutionOptions(load_inputs=True),  # (2)!
+            execution_options=ExecutionOptions(input_binding="paths"),  # (2)!
         )
 ```
 
 1. This function only runs on cache miss; it prints on the first run.
-2. Auto-load `Path` into the function argument.
+2. Bind the named input as a local `Path` object into the function argument.
 3. Outputs are synced to the coupler automatically.
 
 ### Which Should You Use?
@@ -1110,9 +1131,9 @@ Choose based on your workflow needs:
 - Your step is fast enough that re-execution overhead doesn't matter
 
 **On large file inputs:** If your function receives multi-GB files, use
-`execution_options=ExecutionOptions(load_inputs=False, runtime_kwargs={...})`
+`execution_options=ExecutionOptions(input_binding="paths")`
 and `cache_options=CacheOptions(cache_hydration="inputs-missing")` to ensure
-input files are available on cache misses without re-loading on every run.
+input files are available on cache misses without loading them into memory.
 
 <details>
 <summary>Alternative: log file outputs inside the step</summary>
@@ -1135,8 +1156,7 @@ with use_tracker(tracker):
             fn=beam_preprocess,
             inputs={"data_file": Path("data.parquet")},
             execution_options=ExecutionOptions(
-                load_inputs=False,
-                runtime_kwargs={"data_file": Path("data.parquet")},
+                input_binding="paths",
                 inject_context=True,
             ),
         )
@@ -1284,5 +1304,5 @@ If you ingest tabular data into DuckDB, Consist can capture the observed schema 
 You can also opt into lightweight file schema capture when logging CSV/Parquet artifacts by passing `profile_file_schema=True` (and optionally `file_schema_sample_rows=`) to `log_artifact`. These captured schemas are stored in the provenance DB and remain available even if the original files move or are deleted.
 If you already have a content hash (e.g., after copying or moving a file), pass `content_hash=` to `log_artifact` to reuse it without re-hashing the file. For safety, Consist will not overwrite an existing, different hash unless you pass `force_hash_override=True`. To verify the hash against disk, use `validate_content_hash=True`.
 
-See `docs/schema-export.md` for the full workflow (CLI + Python) and column-name/`__tablename__` guidelines.
+See [Schema Export](schema-export.md) for the full workflow (CLI + Python) and column-name/`__tablename__` guidelines.
 See [Data Materialization Strategy](concepts/data-materialization.md) for ingestion tradeoffs and DB fallback behavior.

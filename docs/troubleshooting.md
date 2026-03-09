@@ -92,13 +92,13 @@ Common messages and fixes:
 
 ### "unexpected keyword argument 'hash_inputs'"
 
-- `Cause`: `hash_inputs` is no longer accepted on run/trace/scenario public surfaces.
-- `Fix`: use `identity_inputs=[...]`.
+- `Cause`: `hash_inputs` is no longer accepted on `run(...)`, `trace(...)`, and step-level `scenario.run(...)` / `scenario.trace(...)` surfaces.
+- `Fix`: on those surfaces, use `identity_inputs=[...]`. Scenario header contexts still route through `begin_run(...)`, where `hash_inputs` remains a legacy low-level option.
 
 ### "unexpected keyword argument 'config_plan'"
 
-- `Cause`: `config_plan` is no longer accepted on run/trace/scenario public surfaces.
-- `Fix`: pass `adapter=...` (and optional `identity_inputs=[...]`) instead.
+- `Cause`: `config_plan` is no longer accepted on `run(...)`, `trace(...)`, and step-level `scenario.run(...)` / `scenario.trace(...)` surfaces.
+- `Fix`: on those surfaces, pass `adapter=...` (and optional `identity_inputs=[...]`) instead. Scenario headers do not currently support header-level `adapter=...`.
 
 ### "identity_inputs/hash_inputs must be a list of paths."
 
@@ -110,10 +110,10 @@ Common messages and fixes:
 - `Cause`: one or more identity input paths are missing or unreadable.
 - `Fix`: verify every identity input path exists and is readable before running.
 
-### "load_inputs=True requires inputs to be a dict."
+### "load_inputs=True requires inputs to be a dict." / "input_binding=... requires inputs to be a dict."
 
-- `Cause`: auto-loading inputs into function parameters requires named inputs.
-- `Fix`: pass `inputs={\"param_name\": path_or_artifact}` or disable auto-loading with `ExecutionOptions(load_inputs=False)`.
+- `Cause`: automatic input binding requires named inputs so Consist can match function parameters.
+- `Fix`: pass `inputs={\"param_name\": path_or_artifact}`. To disable binding, use `ExecutionOptions(input_binding=\"none\")` (or legacy `ExecutionOptions(load_inputs=False)`).
 
 ### "cache_hydration='outputs-requested' requires output_paths."
 

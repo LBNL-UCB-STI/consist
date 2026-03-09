@@ -12,95 +12,6 @@ URIs, and historical path resolution work.
 
 ---
 
-## Getting Started with Mounts
-
-When you set up Consist for your research project, you'll define **mounts** — mappings from short names to directories on your filesystem. These mounts let each team member keep their data in different locations while sharing a common provenance database.
-
-**The Workflow**
-
-1. **Identify your data directories**: Where are your inputs? Where do you write outputs? Where is temporary scratch space?
-2. **Assign mount names**: Choose memorable names like `inputs`, `outputs`, `scratch`, `shared`.
-3. **Define mounts in your Tracker**: Map those names to real paths on each person's machine.
-4. **Log artifacts under mounts**: Instead of absolute paths, use URIs like `inputs://land_use.csv`.
-
-**Example for a Research Team**
-
-Suppose your team shares an ActivitySim project:
-
-```python
-from consist import Tracker
-from pathlib import Path
-
-# Shared setup (agreed upon by the team)
-tracker = Tracker(
-    run_dir="./runs",
-    db_path="./provenance.duckdb",
-    mounts={
-        "inputs": "/shared/data/activitysim_inputs",      # Shared NFS mount
-        "outputs": "/local/activitysim_outputs",          # Local SSD for speed
-        "scratch": "/scratch/users/YOUR_USERNAME",        # Temporary workspace
-    },
-)
-```
-
-**On each team member's machine**, the paths differ but mount names stay the same:
-
-```python
-# Alice's setup
-tracker = Tracker(
-    run_dir="./runs",
-    db_path="./provenance.duckdb",
-    mounts={
-        "inputs": "/mnt/nfs/activitysim_inputs",          # Alice's NFS mount point
-        "outputs": "/home/alice/activitysim_outputs",
-        "scratch": "/scratch/alice",
-    },
-)
-
-# Bob's setup
-tracker = Tracker(
-    run_dir="./runs",
-    db_path="./provenance.duckdb",
-    mounts={
-        "inputs": "/data/nfs/inputs",                     # Bob's mount point
-        "outputs": "/var/cache/bob/outputs",
-        "scratch": "/tmp/bob_scratch",
-    },
-)
-```
-
-When Alice runs a simulation and logs an output (inside a run context):
-
-```python
-with tracker.start_run("asim_baseline", model="activitysim"):
-    consist.log_artifact(
-        Path("/home/alice/activitysim_outputs/results.parquet"),
-        key="results",
-        direction="output",
-    )
-```
-
-Consist detects the mount and stores a portable URI:
-
-```
-outputs://results.parquet
-```
-
-When Bob retrieves this artifact, Consist resolves it using *his* mount configuration:
-
-```
-outputs:// → /var/cache/bob/outputs/ → /var/cache/bob/outputs/results.parquet
-```
-
-**Benefits**
-
-- **Portability**: Runs move between machines without breaking lineage.
-- **Flexibility**: Each user can customize their local paths for their hardware (local SSD, NFS, cloud storage).
-- **Shared provenance**: A single `provenance.duckdb` file shared across the team still works even if underlying filesystems differ.
-- **Isolation**: Temporary outputs stay local; shared data stays on shared infrastructure.
-
----
-
 ## Mounts at a glance
 
 Mounts map a short scheme name to a real path on disk:
@@ -126,6 +37,79 @@ scratch://temp/output.parquet
 ```
 
 This keeps provenance portable and lets each user remap mounts on their machine.
+
+---
+
+## Example: Shared Research Team
+
+Suppose your team shares a simulation project across machines with different
+filesystem layouts. Agree on mount *names* and let each person map them locally.
+
+```python
+# Shared setup (agreed upon by the team)
+tracker = Tracker(
+    run_dir="./runs",
+    db_path="./provenance.duckdb",
+    mounts={
+        "inputs": "/shared/data/activitysim_inputs",      # Shared NFS mount
+        "outputs": "/local/activitysim_outputs",          # Local SSD for speed
+        "scratch": "/scratch/users/YOUR_USERNAME",        # Temporary workspace
+    },
+)
+```
+
+**On each team member's machine**, the paths differ but mount names stay the same:
+
+```python
+# Alice's setup
+tracker = Tracker(
+    run_dir="./runs",
+    db_path="./provenance.duckdb",
+    mounts={
+        "inputs": "/mnt/nfs/activitysim_inputs",
+        "outputs": "/home/alice/activitysim_outputs",
+        "scratch": "/scratch/alice",
+    },
+)
+
+# Bob's setup
+tracker = Tracker(
+    run_dir="./runs",
+    db_path="./provenance.duckdb",
+    mounts={
+        "inputs": "/data/nfs/inputs",
+        "outputs": "/var/cache/bob/outputs",
+        "scratch": "/tmp/bob_scratch",
+    },
+)
+```
+
+When Alice logs an output (inside a run context):
+
+```python
+with tracker.start_run("asim_baseline", model="activitysim"):
+    consist.log_artifact(
+        Path("/home/alice/activitysim_outputs/results.parquet"),
+        key="results",
+        direction="output",
+    )
+```
+
+Consist detects the mount and stores a portable URI:
+
+```
+outputs://results.parquet
+```
+
+When Bob retrieves this artifact, Consist resolves it using *his* mount configuration:
+
+```
+outputs:// → /var/cache/bob/outputs/ → /var/cache/bob/outputs/results.parquet
+```
+
+This is **URI portability**, not automatic byte replication. Bob only gets a
+usable local file if his `outputs` mount points at the same underlying dataset,
+or if the artifact can be rehydrated another way.
 
 ---
 
@@ -161,22 +145,30 @@ Guidelines:
 
 - Keep container paths stable (`/inputs`, `/outputs`) across environments.
 - Keep host paths machine-specific via tracker mounts.
+- Keep host volume roots stable too if you want cross-machine cache reuse.
 - Keep `strict_mounts=True` unless you intentionally allow external paths.
+
+Current caveat: container cache identity includes the resolved host `volumes`
+mapping, not just the in-container mount points. If one machine uses
+`/shared/team_inputs` and another uses `/mnt/nfs/team_inputs`, those runs will
+not currently share the same container cache signature.
 
 For a complete runnable example using this mapping pattern, see
 [Container Integration Guide](containers-guide.md).
 
 ---
 
-## Workspace URIs (run-local outputs)
+## Run-local outputs
 
-Paths under the run directory are stored relative to the active run:
+Paths under the run directory are usually stored relative to the active run:
 
 ```
 ./outputs/<run_id>/model.csv
 ```
 
-Consist resolves these using the run's `_physical_run_dir` metadata field, which records the absolute run directory at execution time.
+Current runs typically store these as `./...` paths. Historical resolution also
+accepts `workspace://...` as an alias and uses the run's `_physical_run_dir`
+metadata field, which records the absolute run directory at execution time.
 
 | Scenario | Behavior |
 |----------|----------|
@@ -194,7 +186,7 @@ Consist resolves these using the run's `_physical_run_dir` metadata field, which
 When Consist needs bytes from a historical run (e.g., cache hydration or
 `inputs-missing`), it resolves paths in this order:
 
-1) If the URI uses `workspace://` or `./`, resolve relative to the original run’s
+1) If the URI uses `workspace://` or `./`, resolve relative to the original run's
    `_physical_run_dir`.
 2) If the URI uses a mount scheme (e.g., `inputs://`), resolve using the current
    tracker mounts.
@@ -231,10 +223,12 @@ Container runs and function runs differ on cache-hit file behavior:
 
 Portability implications:
 
-- If mounts are mapped correctly, container cache-hit materialization succeeds
-  on each machine's local host paths.
+- If mounts are mapped correctly, container cache-hit materialization can
+  succeed on each machine's local host paths.
 - If mounts are missing/misaligned, cache metadata can still exist but output
   file materialization may warn/skip.
+- If host volume roots differ across machines, container cache reuse may be
+  missed entirely because those host paths are part of the container signature.
 
 See [Container Integration Guide](containers-guide.md#cache-behavior-hydration)
 for container cache details and [Caching & Hydration](concepts/caching-and-hydration.md)
@@ -246,6 +240,8 @@ for non-container run policies.
 
 - Prefer mounts for shared data directories; avoid absolute paths in artifacts.
 - Keep run directories local and disposable; treat cached outputs as rehydratable.
+- Distinguish portable URIs from portable bytes: a remapped URI still needs an
+  accessible underlying file or a recovery path.
 - Use `cache_hydration="outputs-requested"` for only the outputs you need.
 - Use `cache_hydration="inputs-missing"` to backfill inputs when a run moves
   across machines or directories.

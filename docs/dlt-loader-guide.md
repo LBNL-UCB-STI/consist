@@ -27,15 +27,7 @@ pip install -e ".[ingest]"
 
 ### When to Use Each API
 
-| Criterion | Use DLT | Use Direct Logging |
-|-----------|---------|-------------------|
-| Dataset size | 100K+ rows | <10K rows |
-| Cross-run SQL queries | Required | Not needed |
-| Schema validation | Required | Not needed |
-| Data structure | Complex, nested, evolving | Simple flat files |
-| Source | Your workflow outputs | External data you don't control |
-
-**DLT example:**
+**Querying ingested data across runs:**
 ```python
 import consist
 from sqlmodel import select
@@ -47,7 +39,7 @@ rows = consist.run_query(
 )
 ```
 
-**Direct logging example:**
+**Logging a file without ingestion:**
 ```python
 with tracker.start_run("log_result", model="demo"):
     consist.log_artifact(result_path, key="my_result")
@@ -236,7 +228,7 @@ with tracker.start_run("log_csv", model="demo"):
 ### Zarr / NetCDF (Matrix Data)
 
 ```python
-# Zarr metadata is ingested as catalog (not raw data)
+# This logs the artifact only; it does not ingest metadata by itself.
 with tracker.start_run("log_zarr", model="demo"):
     tracker.log_artifact(
         Path("simulation_output.zarr"),
@@ -244,6 +236,9 @@ with tracker.start_run("log_zarr", model="demo"):
         driver="zarr",
     )
 ```
+
+To ingest metadata/catalog tables, run an ingestion path after logging rather
+than relying on `log_artifact(...)` alone.
 
 ---
 
@@ -489,13 +484,9 @@ with Session(tracker.engine) as session:
 
 ### Batch Size
 
-DLT loads data in batches. For large files, tune batch size:
+For large files, stream in chunks rather than loading the full file into memory:
 
 ```python
-# In tracker initialization (future feature):
-# tracker = Tracker(..., dlt_batch_size=50000)
-
-# Or split manually:
 for chunk in pd.read_csv("file.csv", chunksize=50000):
     consist.log_dataframe(chunk, key="data", schema=MySchema)
 ```

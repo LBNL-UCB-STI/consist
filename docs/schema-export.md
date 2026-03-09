@@ -13,6 +13,14 @@ Consist can capture the observed (post-ingest) schema of tabular artifacts and e
 - Messy column names are handled: the generated attribute name is sanitized, but the original DB column name is preserved via `Field(sa_column=Column("original", ...))` when needed.
 - Foreign keys are preserved if they were provided in a curated SQLModel schema (rendered as `Field(foreign_key="table.column")`).
 
+## Typical Workflow
+
+1. **Ingest** tabular data into DuckDB via `log_dataframe(..., schema=MySchema)` or enable lightweight file profiling with `profile_file_schema=True`. Consist captures the table structure automatically.
+2. **Export** the captured schema as a SQLModel stub (`consist.cli schema export ...`) and edit it to add primary keys, relationships, and normalization decisions.
+3. **Register** the curated model with a `Tracker` to activate a hybrid view for cross-run queries.
+
+---
+
 ## Abstract vs Concrete Exports
 
 By default, Consist exports SQLModel classes as **abstract** (`__abstract__ = True`). This keeps the stub **importable immediately**, because SQLAlchemy requires a primary key to map a concrete table/view, and many analysis tables don’t have an obvious primary key.
@@ -201,3 +209,11 @@ Use `--include-system-cols` if you need a faithful “as-ingested” representat
 Very wide tables can cause the stored JSON profile to truncate. Consist still persists per-field rows so schema export continues to work, and emits a warning when truncation occurs.
 
 If your upstream workflow produces sparse wide tables, consider reshaping to a long format before ingestion (or as a dedicated transformation step). Future Consist work may add first-class “pre/post ingestion transforms”, but schema export is designed to work even when the JSON blob is truncated.
+
+---
+
+## See Also
+
+- [DLT Loader Integration Guide](dlt-loader-guide.md) — Ingesting tabular data so schemas are captured
+- [Architecture: Data Virtualization](architecture.md#data-virtualization) — How hybrid views work
+- [Data Materialization Strategy](concepts/data-materialization.md)
