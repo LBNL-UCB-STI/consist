@@ -868,8 +868,7 @@ class RunTraceCoordinator:
                         "executor='container' does not support automatic input binding."
                     ),
                     cause=(
-                        "Input binding is only supported for Python callable "
-                        "execution."
+                        "Input binding is only supported for Python callable execution."
                     ),
                     fix=(
                         "Use input_binding='none' (or legacy load_inputs=False) for "
@@ -1091,9 +1090,7 @@ class RunTraceCoordinator:
                         if artifact.driver in DriverType.tabular_drivers():
                             from consist.api import load_df
 
-                            call_kwargs[param_name] = load_df(
-                                artifact, tracker=tracker
-                            )
+                            call_kwargs[param_name] = load_df(artifact, tracker=tracker)
                         else:
                             call_kwargs[param_name] = tracker.load(artifact)
                     continue

@@ -131,9 +131,7 @@ def test_tracker_run_loaded_binding_supports_ingested_inputs_without_local_path(
     assert list(seen["data"]["value"]) == [0, 1, 2]
 
 
-def test_tracker_run_path_binding_requires_materialized_local_path(
-    tracker, sample_csv
-):
+def test_tracker_run_path_binding_requires_materialized_local_path(tracker, sample_csv):
     input_path = sample_csv("ingested.csv", rows=3)
     with tracker.trace("produce_input") as t:
         artifact = t.log_artifact(input_path, key="data", direction="output")
@@ -141,7 +139,9 @@ def test_tracker_run_path_binding_requires_materialized_local_path(
     input_path.unlink()
 
     def step(data: Path) -> None:
-        raise AssertionError("step should not execute without a local materialized path")
+        raise AssertionError(
+            "step should not execute without a local materialized path"
+        )
 
     with pytest.raises(
         ValueError, match="input_binding='paths' requires a materialized local path"
