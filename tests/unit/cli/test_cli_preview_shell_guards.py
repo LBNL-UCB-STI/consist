@@ -284,6 +284,7 @@ def test_shell_schema_stub_reports_missing_captured_schema(capsys) -> None:
 
     out = capsys.readouterr().out
     assert "Captured schema not found for this artifact." in out
+    assert "consist schema capture-file --artifact-id artifact-id" in out
 
 
 def test_shell_schema_stub_surfaces_value_error(capsys) -> None:
@@ -308,7 +309,138 @@ def test_shell_schema_stub_rejects_key_and_artifact_id_together(capsys) -> None:
     )
 
     out = capsys.readouterr().out
-    assert "Provide either artifact_key or --artifact-id, not both." in out
+    assert "Provide exactly one selector" in out
+
+
+def test_shell_preview_supports_hash_selector(capsys) -> None:
+    tracker = MagicMock()
+    tracker.get_artifact.return_value = None
+    shell = ConsistShell(tracker)
+    shell._lookup_artifact_by_hash_prefix = MagicMock(
+        return_value=SimpleNamespace(
+            id="artifact-id-123",
+            key="resolved_by_hash",
+            run_id="run-1",
+            driver="csv",
+            container_uri="inputs://file.csv",
+            meta={},
+        )
+    )
+
+    with patch(
+        "consist.cli._load_artifact_with_diagnostics",
+        return_value=pd.DataFrame({"x": [1]}),
+    ):
+        shell.do_preview("--hash deadbeef")
+
+    shell._lookup_artifact_by_hash_prefix.assert_called_once_with(
+        "deadbeef", command_name="preview"
+    )
+
+
+def test_shell_preview_supports_hash_equals_selector(capsys) -> None:
+    tracker = MagicMock()
+    shell = ConsistShell(tracker)
+    shell._lookup_artifact_by_hash_prefix = MagicMock(
+        return_value=SimpleNamespace(
+            id="artifact-id-123",
+            key="resolved_by_hash",
+            run_id="run-1",
+            driver="csv",
+            container_uri="inputs://file.csv",
+            meta={},
+        )
+    )
+
+    with patch(
+        "consist.cli._load_artifact_with_diagnostics",
+        return_value=pd.DataFrame({"x": [1]}),
+    ):
+        shell.do_preview("--hash=deadbeef")
+
+    shell._lookup_artifact_by_hash_prefix.assert_called_once_with(
+        "deadbeef", command_name="preview"
+    )
+
+
+def test_shell_preview_rejects_hash_with_positional_selector(capsys) -> None:
+    shell = ConsistShell(MagicMock())
+
+    shell.do_preview("artifact_key --hash deadbeef")
+
+    out = capsys.readouterr().out
+    assert "Provide either a positional selector or --hash, not both." in out
+
+
+def test_shell_preview_requires_hash_value(capsys) -> None:
+    shell = ConsistShell(MagicMock())
+
+    shell.do_preview("--hash")
+
+    out = capsys.readouterr().out
+    assert "--hash requires a prefix value" in out
+
+
+def test_shell_schema_stub_supports_hash_selector(capsys) -> None:
+    tracker = MagicMock()
+    tracker.export_schema_sqlmodel.return_value = "class ExportedModel(SQLModel): ..."
+    shell = ConsistShell(tracker)
+    shell._lookup_artifact_by_hash_prefix = MagicMock(
+        return_value=SimpleNamespace(id="artifact-id-123")
+    )
+
+    shell.do_schema_stub("--hash deadbeef")
+
+    _ = capsys.readouterr().out
+    shell._lookup_artifact_by_hash_prefix.assert_called_once_with(
+        "deadbeef",
+        command_name="schema_stub",
+        run_id=None,
+    )
+    tracker.export_schema_sqlmodel.assert_called_once_with(
+        artifact_id="artifact-id-123",
+        class_name=None,
+        table_name=None,
+        abstract=True,
+        include_system_cols=False,
+        include_stats_comments=True,
+    )
+
+
+def test_shell_schema_stub_supports_hash_equals_selector(capsys) -> None:
+    tracker = MagicMock()
+    tracker.export_schema_sqlmodel.return_value = "class ExportedModel(SQLModel): ..."
+    shell = ConsistShell(tracker)
+    shell._lookup_artifact_by_hash_prefix = MagicMock(
+        return_value=SimpleNamespace(id="artifact-id-123")
+    )
+
+    shell.do_schema_stub("--hash=deadbeef")
+
+    _ = capsys.readouterr().out
+    shell._lookup_artifact_by_hash_prefix.assert_called_once_with(
+        "deadbeef",
+        command_name="schema_stub",
+        run_id=None,
+    )
+
+
+def test_shell_schema_stub_requires_hash_value(capsys) -> None:
+    shell = ConsistShell(MagicMock())
+
+    shell.do_schema_stub("--hash")
+
+    out = capsys.readouterr().out
+    assert "--hash requires a prefix value" in out
+
+
+def test_shell_schema_stub_rejects_hash_with_positional_selector(capsys) -> None:
+    shell = ConsistShell(MagicMock())
+
+    shell.do_schema_stub("artifact_key --hash deadbeef")
+
+    out = capsys.readouterr().out
+    assert "Provide exactly one selector" in out
 
 
 def test_shell_schema_stub_rejects_run_id_with_artifact_id(capsys) -> None:
@@ -331,6 +463,46 @@ def test_shell_schema_stub_rejects_invalid_source(capsys) -> None:
 
     out = capsys.readouterr().out
     assert "--source must be one of: file|duckdb|user_provided" in out
+
+
+def test_shell_schema_profile_supports_hash_selector_with_db_profile(capsys) -> None:
+    tracker = MagicMock()
+    tracker.mounts = {}
+    tracker.db = MagicMock()
+    tracker.db.get_artifact_schema_for_artifact.return_value = (
+        SimpleNamespace(summary_json={"column_count": 1}),
+        [SimpleNamespace(name="trip_id", logical_type="integer", nullable=False)],
+    )
+    shell = ConsistShell(tracker)
+    shell._lookup_artifact_by_hash_prefix = MagicMock(
+        return_value=SimpleNamespace(
+            id="artifact-id",
+            run_id=None,
+            key="trips",
+            driver="parquet",
+            container_uri="inputs://data/trips.parquet",
+            meta={},
+        )
+    )
+
+    shell.do_schema_profile("--hash deadbeef")
+
+    out = capsys.readouterr().out
+    shell._lookup_artifact_by_hash_prefix.assert_called_once_with(
+        "deadbeef", command_name="schema_profile"
+    )
+    assert "Schema: trips" in out
+    assert "trip_id" in out
+    assert "integer" in out
+
+
+def test_shell_schema_profile_rejects_hash_with_positional_selector(capsys) -> None:
+    shell = ConsistShell(MagicMock())
+
+    shell.do_schema_profile("artifact_key --hash deadbeef")
+
+    out = capsys.readouterr().out
+    assert "Provide either a positional selector or --hash, not both." in out
 
 
 def test_shell_schema_stub_uses_run_id_and_prints_selection_explainability(
@@ -416,3 +588,34 @@ def test_shell_schema_profile_unsupported_loaded_type_without_db_profile(
 
     out = capsys.readouterr().out
     assert "Schema not implemented for loaded type: object" in out
+
+
+def test_shell_schema_profile_h5_container_hint_for_unsupported_type(
+    capsys,
+) -> None:
+    """Shell schema_profile should point HDF5 containers at h5_table artifacts."""
+    tracker = MagicMock()
+    tracker.mounts = {}
+    tracker.db = MagicMock()
+    tracker.db.get_artifact_schema_for_artifact.return_value = None
+    tracker.get_artifact.return_value = SimpleNamespace(
+        id="artifact-id",
+        run_id=None,
+        key="h5_container",
+        driver="h5",
+        container_uri="inputs://data/pipeline.h5",
+        meta={},
+    )
+    shell = ConsistShell(tracker)
+    hdf_store_like = type("HDFStore", (), {})()
+
+    with (
+        patch("consist.load", return_value=hdf_store_like),
+        patch("consist.cli._optional_xarray", return_value=None),
+    ):
+        shell.do_schema_profile("h5_container")
+
+    out = capsys.readouterr().out
+    assert "Schema not implemented for loaded type: HDFStore" in out
+    assert "Container-level HDF5 schema is not supported." in out
+    assert "inspect sibling `h5_table` artifacts" in out

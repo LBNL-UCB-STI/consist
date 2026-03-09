@@ -228,9 +228,14 @@ Preview tabular artifacts (CSV, Parquet) without loading full data.
 ```bash
 consist preview <artifact_key>
 consist preview <artifact_key> --rows 10
+consist preview --hash a1b2c3d4
 consist preview <artifact_key> --run-dir /path/to/run_root
 consist preview <artifact_key> --trust-db  # Allow metadata-based mount/run-dir inference
 ```
+
+Hash lookup searches all artifacts by default. In shell workflows, use
+`schema_stub --run-id <run_id> --hash <prefix>` when you want to narrow selection
+to one run.
 
 ### consist validate
 
@@ -256,13 +261,38 @@ consist shell --trust-db  # Allow metadata-based mount/run-dir inference
 ```
 
 Inside the shell:
-```
+```text
 (consist) runs --limit 5
-(consist) show abc123
-(consist) artifacts abc123
+(consist) show #1
+(consist) artifacts #1
+(consist) preview @1
+(consist) schema_profile @1
+(consist) schema capture-file @1
+(consist) schema_stub --run-id abc123 --hash a1b2c3d4
+(consist) preview --hash a1b2c3d4
+(consist) context
 (consist) scenarios
 (consist) exit
 ```
+
+Useful shell shortcuts:
+
+- `#<n>` refers to the nth cached run from the last `runs` output.
+- `@<n>` refers to the nth cached artifact from the last `artifacts <run_id>` output.
+- `schema capture-file @<n>` and `schema capture-file --artifact-ref @<n>` reuse
+  cached shell artifact refs and route them to `--artifact-id`.
+- `context` prints the active shell defaults for `db_path`, `run_dir`,
+  `trust_db`, and mount overrides.
+- `preview --hash <prefix>` and `schema_profile --hash <prefix>` search all
+  artifacts by hash prefix.
+- `schema_stub --hash <prefix> --run-id <run_id>` narrows hash lookup to one run
+  when you want deterministic selection.
+
+Tips:
+
+- Run `runs` first to populate `#<n>` run shortcuts.
+- Run `artifacts <run_id>` or `artifacts #<n>` first to populate `@<n>` artifact
+  shortcuts.
 
 ---
 
