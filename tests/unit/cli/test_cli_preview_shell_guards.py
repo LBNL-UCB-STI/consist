@@ -284,6 +284,7 @@ def test_shell_schema_stub_reports_missing_captured_schema(capsys) -> None:
 
     out = capsys.readouterr().out
     assert "Captured schema not found for this artifact." in out
+    assert "consist schema capture-file --artifact-id artifact-id" in out
 
 
 def test_shell_schema_stub_surfaces_value_error(capsys) -> None:
@@ -587,3 +588,34 @@ def test_shell_schema_profile_unsupported_loaded_type_without_db_profile(
 
     out = capsys.readouterr().out
     assert "Schema not implemented for loaded type: object" in out
+
+
+def test_shell_schema_profile_h5_container_hint_for_unsupported_type(
+    capsys,
+) -> None:
+    """Shell schema_profile should point HDF5 containers at h5_table artifacts."""
+    tracker = MagicMock()
+    tracker.mounts = {}
+    tracker.db = MagicMock()
+    tracker.db.get_artifact_schema_for_artifact.return_value = None
+    tracker.get_artifact.return_value = SimpleNamespace(
+        id="artifact-id",
+        run_id=None,
+        key="h5_container",
+        driver="h5",
+        container_uri="inputs://data/pipeline.h5",
+        meta={},
+    )
+    shell = ConsistShell(tracker)
+    hdf_store_like = type("HDFStore", (), {})()
+
+    with (
+        patch("consist.load", return_value=hdf_store_like),
+        patch("consist.cli._optional_xarray", return_value=None),
+    ):
+        shell.do_schema_profile("h5_container")
+
+    out = capsys.readouterr().out
+    assert "Schema not implemented for loaded type: HDFStore" in out
+    assert "Container-level HDF5 schema is not supported." in out
+    assert "inspect sibling `h5_table` artifacts" in out

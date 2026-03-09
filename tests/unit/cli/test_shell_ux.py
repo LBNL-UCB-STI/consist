@@ -499,6 +499,70 @@ def test_shell_routed_schema_capture_file_applies_shell_defaults(tmp_path) -> No
     assert "workspace=/archive/workspace" in routed_args
 
 
+def test_shell_routed_schema_capture_file_accepts_cached_artifact_ref(tmp_path) -> None:
+    tracker = MagicMock()
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+    shell._last_artifact_ids = ["00000000-0000-0000-0000-000000000123"]
+
+    with patch("consist.cli.app") as app_mock:
+        shell.do_schema("capture-file @1")
+
+    app_mock.assert_called_once()
+    routed_args = app_mock.call_args.kwargs["args"]
+    assert routed_args[:4] == [
+        "schema",
+        "capture-file",
+        "--artifact-id",
+        "00000000-0000-0000-0000-000000000123",
+    ]
+
+
+def test_shell_routed_schema_capture_file_accepts_artifact_ref_option(
+    tmp_path,
+) -> None:
+    tracker = MagicMock()
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+    shell._last_artifact_ids = ["00000000-0000-0000-0000-000000000456"]
+
+    with patch("consist.cli.app") as app_mock:
+        shell.do_schema("capture-file --artifact-ref @1")
+
+    app_mock.assert_called_once()
+    routed_args = app_mock.call_args.kwargs["args"]
+    assert routed_args[:4] == [
+        "schema",
+        "capture-file",
+        "--artifact-id",
+        "00000000-0000-0000-0000-000000000456",
+    ]
+
+
+def test_shell_routed_schema_capture_file_rejects_invalid_artifact_ref_option(
+    tmp_path, capsys
+) -> None:
+    tracker = MagicMock()
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+
+    with patch("consist.cli.app") as app_mock:
+        shell.do_schema("capture-file --artifact-ref artifact_key")
+
+    out = capsys.readouterr().out
+    assert "--artifact-ref must look like @1" in out
+    app_mock.assert_not_called()
+
+
 def test_shell_artifacts_query_mode_routes_to_cli_parser(tmp_path) -> None:
     tracker = MagicMock()
     with (

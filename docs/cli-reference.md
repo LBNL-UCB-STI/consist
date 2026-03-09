@@ -267,6 +267,7 @@ Inside the shell:
 (consist) artifacts #1
 (consist) preview @1
 (consist) schema_profile @1
+(consist) schema capture-file @1
 (consist) schema_stub --run-id abc123 --hash a1b2c3d4
 (consist) preview --hash a1b2c3d4
 (consist) context
@@ -278,6 +279,8 @@ Useful shell shortcuts:
 
 - `#<n>` refers to the nth cached run from the last `runs` output.
 - `@<n>` refers to the nth cached artifact from the last `artifacts <run_id>` output.
+- `schema capture-file @<n>` and `schema capture-file --artifact-ref @<n>` reuse
+  cached shell artifact refs and route them to `--artifact-id`.
 - `context` prints the active shell defaults for `db_path`, `run_dir`,
   `trust_db`, and mount overrides.
 - `preview --hash <prefix>` and `schema_profile --hash <prefix>` search all
