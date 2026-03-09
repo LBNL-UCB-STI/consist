@@ -116,6 +116,35 @@ This default suits scientific workflows: large simulations benefit from avoiding
 | Run external tool that needs local files | `outputs-requested` | Copy only what you ask for; must list outputs explicitly |
 | Ensure all cached data is accessible locally | `outputs-all` | Copies everything; uses disk space but guarantees file paths exist |
 
+### How Input Binding Interacts with Hydration
+
+`cache_hydration` controls when bytes are materialized. `input_binding`
+controls what your callable receives. They are related, but they are not the
+same setting.
+
+| `input_binding` | Function receives | What hydration must guarantee |
+|-----------------|-------------------|-------------------------------|
+| `"paths"` | local `Path` objects | the input must exist as a usable local file or directory |
+| `"loaded"` | loaded `DataFrame` / Python objects | Consist can load from the filesystem or from ingested / DB-backed storage |
+| `"none"` | nothing automatically | no binding guarantee; inputs still affect identity and lineage |
+
+For recommended-path workflows:
+
+- Use `input_binding="paths"` when you want the callable to own its own I/O.
+- Use `input_binding="loaded"` when you want hydrated tabular/object inputs.
+- Use `input_binding="none"` for identity-only inputs or advanced wrappers.
+
+The key tradeoff is capability versus explicitness:
+
+- `"paths"` is the clearest mode, but it requires a local materialized path.
+- `"loaded"` is more flexible, because Consist can often hydrate from ingested
+  data or database-backed storage even when no local file is present.
+
+That is why path-oriented workflows often pair naturally with
+`cache_hydration="inputs-missing"` when work moves across run directories.
+Loaded workflows can often keep using `cache_hydration="metadata"` and let
+Consist load the bytes on demand.
+
 ### Signatures and Cache Behavior
 
 Every run's **signature** is derived from code hash, config hash, and input hash. If Consist finds a completed run with the same signature and valid outputs, the new run is a **cache hit** and reuses prior outputs.

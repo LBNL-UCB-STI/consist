@@ -90,8 +90,8 @@ class ExecutionOptions:
     corresponding primitive kwargs already do.
     """
 
-    input_binding: Optional[InputBindingMode] = None
     load_inputs: Optional[bool] = None
+    input_binding: Optional[InputBindingMode] = None
     executor: Optional[Literal["python", "container"]] = None
     container: Optional[Mapping[str, Any]] = None
     runtime_kwargs: Optional[Mapping[str, Any]] = None

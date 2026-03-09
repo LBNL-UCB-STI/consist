@@ -34,14 +34,24 @@ Choose based on what you're building and how much structure you need:
 
 Use `run()` when you have a self-contained operation: data cleaning, transformation, aggregation, or any callable that takes inputs and produces outputs. Consist caches the entire function call based on code version + config + input data.
 
-**Recommended default:** keep the function boundary honest. Pass file paths or
-artifact refs into the function body, perform I/O there, return
-`dict[str, Path]` for outputs, and declare the output keys in `outputs=[...]`.
-Today, named `inputs={...}` mappings auto-load by default, so explicit
-path-based functions usually pair `inputs=...` with
-`ExecutionOptions(load_inputs=False, runtime_kwargs=...)`. Auto-loading
-DataFrames and global tracker context are still available, but they are
-convenience layers, not the clearest starting point.
+**Recommended default:** use `ExecutionOptions(input_binding="paths")`. That
+keeps the function boundary honest: `inputs={...}` declares identity and
+lineage, and the callable receives those named inputs as local `Path` objects.
+Use `input_binding="loaded"` when you want Consist to hydrate tables or objects
+before calling the function. Use `input_binding="none"` when inputs are
+identity-only and you do not want automatic binding.
+
+### Choosing an Input Binding Mode
+
+| Mode | Function receives | Best for | Main tradeoff |
+|------|-------------------|----------|---------------|
+| `"paths"` | local `Path` objects | explicit filesystem workflows, subprocesses, existing code that already reads files | requires a usable local path |
+| `"loaded"` | loaded `DataFrame` / Python objects | tabular analysis, ingested artifacts, DB-backed hydration | hides the I/O boundary |
+| `"none"` | no automatic binding | advanced wrappers, identity-only dependencies | you must supply args some other way |
+
+`runtime_kwargs` still exists, but it should usually mean "runtime-only values
+that are not the declared named inputs." It is no longer the recommended way to
+pass paths into a path-based step.
 
 **When to use:**
 
@@ -80,7 +90,7 @@ convenience layers, not the clearest starting point.
     This is plain Python and it works, but there is no cache identity, no run
     record, and no answer to "which exact code/config/input produced this file?"
 
-=== "With Consist"
+=== "With Consist (Explicit Paths)"
 
     ``` python
     from pathlib import Path
@@ -102,10 +112,7 @@ convenience layers, not the clearest starting point.
         inputs={"raw_path": Path("raw.parquet")},
         config={"threshold": 0.5},
         outputs=["cleaned"],
-        execution_options=ExecutionOptions(
-            load_inputs=False,
-            runtime_kwargs={"raw_path": Path("raw.parquet")},
-        ),
+        execution_options=ExecutionOptions(input_binding="paths"),
     )
 
     cleaned_artifact = result.outputs["cleaned"]
@@ -115,7 +122,40 @@ convenience layers, not the clearest starting point.
 
     The function stays ordinary and testable. Consist adds the cache key,
     lineage, and queryable artifact record around the call, while
-    `load_inputs=False` keeps the file boundary explicit.
+    `input_binding="paths"` keeps the file boundary explicit.
+
+=== "With Consist (Auto-Loaded Data)"
+
+    ``` python
+    from pathlib import Path
+    import pandas as pd
+    from consist import ExecutionOptions, Tracker
+
+    tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+
+
+    def clean_data(raw: pd.DataFrame, threshold: float = 0.5) -> dict[str, Path]:
+        out_path = Path("./cleaned.parquet")
+        raw[raw["value"] > threshold].to_parquet(out_path)
+        return {"cleaned": out_path}
+
+
+    result = tracker.run(
+        fn=clean_data,
+        inputs={"raw": Path("raw.parquet")},
+        config={"threshold": 0.5},
+        outputs=["cleaned"],
+        execution_options=ExecutionOptions(input_binding="loaded"),
+    )
+
+    cleaned_artifact = result.outputs["cleaned"]
+    cleaned_df = pd.read_parquet(cleaned_artifact.path)
+    print(cleaned_artifact.path)
+    ```
+
+    This is convenient for tabular work: Consist loads the named input before
+    the function executes. Prefer it when you want hydrated objects rather than
+    explicit file boundaries.
 
 If you run it again with the same inputs and config, you should get a cache hit and no re-execution.
 
@@ -131,7 +171,7 @@ result = consist.run(
     outputs=["cleaned"],
     cache_options=CacheOptions(cache_mode="reuse", cache_hydration="inputs-missing"),
     output_policy=OutputPolicyOptions(output_missing="error"),
-    execution_options=ExecutionOptions(load_inputs=True),
+    execution_options=ExecutionOptions(input_binding="loaded"),
 )
 ```
 
@@ -185,8 +225,7 @@ with use_tracker(tracker):
         fn=clean_data,
         inputs={"raw_file": Path("raw.csv")},  # (1)!
         execution_options=ExecutionOptions(
-            load_inputs=False,
-            runtime_kwargs={"raw_file": Path("raw.csv")},
+            input_binding="paths",
             inject_context=True,
         ),
     )
@@ -251,16 +290,15 @@ with use_tracker(tracker):
         inputs={"upstream": Path("input.csv")},
         depends_on=[Path("config.yaml"), Path("parameters.json")],  # (1)!
         execution_options=ExecutionOptions(
-            load_inputs=False,
-            runtime_kwargs={"upstream": Path("input.csv")},  # (2)!
+            input_binding="paths",
             inject_context=True,
         ),
     )
 ```
 
 1. Hash these files too so config changes invalidate the cache.
-2. Pass raw paths at runtime with
-   `execution_options=ExecutionOptions(load_inputs=False, runtime_kwargs={...})`.
+2. `input_binding="paths"` passes raw paths to the legacy tool while still
+   keeping those inputs in cache identity and lineage.
 
 Captured outputs are keyed by filename stem (for example, `results.csv` -> `results`).
 
@@ -283,8 +321,7 @@ with use_tracker(tracker):
         inputs={"upstream": Path("input.csv")},  # (1)!
         depends_on=[Path("config.yaml")],
         execution_options=ExecutionOptions(
-            load_inputs=False,
-            runtime_kwargs={"upstream": Path("input.csv")},
+            input_binding="paths",
         ),
         capture_dir=Path("outputs"),
         capture_pattern="*.csv",
@@ -304,7 +341,7 @@ def clean_data(raw: pd.DataFrame, threshold: float = 0.5) -> pd.DataFrame:
     return raw[raw["value"] > threshold]
 ```
 
-When `inputs` is a mapping and `load_inputs=True`, Consist can hydrate those
+When `inputs` is a mapping and `input_binding="loaded"`, Consist hydrates those
 artifacts into function arguments for you. This is shorter, but it also hides
 the file boundary. Prefer the explicit `Path`-based pattern above when you want
 the workflow wiring to stay obvious.

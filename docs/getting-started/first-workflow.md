@@ -32,9 +32,13 @@ python setup_data.py
 
 ## Define the Pipeline
 
-Adding Consist requires minimal changes to existing functions — primarily adding
-a `dict[str, Path]` return and declaring the output keys in `tracker.run(...)`
-so the tracker knows what was produced.
+This tutorial uses `input_binding="paths"` throughout. That keeps the callable
+boundary explicit and makes it obvious which files each step reads and writes.
+If you prefer hydrated tables or objects instead, see the loaded-binding
+examples in the quickstart and usage guide.
+
+Adding Consist requires minimal changes to existing functions: return
+`dict[str, Path]`, declare `outputs=[...]`, and bind named inputs as paths.
 
 === "Without Consist"
 
@@ -77,7 +81,7 @@ so the tracker knows what was produced.
     of which `config.json` produced which `summary.json`, and no way to ask why
     results changed between runs.
 
-=== "With Consist"
+=== "With Consist (Explicit Paths)"
 
     Save the following as `workflow.py`:
 
@@ -116,13 +120,7 @@ so the tracker knows what was produced.
             "config_path": Path("./config.json"),
         },
         outputs=["cleaned"],
-        execution_options=ExecutionOptions(
-            load_inputs=False,
-            runtime_kwargs={
-                "raw_path": Path("./data/raw.csv"),
-                "config_path": Path("./config.json"),
-            },
-        ),
+        execution_options=ExecutionOptions(input_binding="paths"),
     )
     print(f"Clean: {clean_result.run.status}")
 
@@ -131,10 +129,7 @@ so the tracker knows what was produced.
         fn=summarize,
         inputs={"cleaned_path": consist.ref(clean_result, key="cleaned")},  # (3)!
         outputs=["summary"],
-        execution_options=ExecutionOptions(
-            load_inputs=False,
-            runtime_kwargs={"cleaned_path": clean_result.outputs["cleaned"].path},
-        ),
+        execution_options=ExecutionOptions(input_binding="paths"),
     )
     print(f"Summarize: {summary_result.run.status}")
 
@@ -145,10 +140,12 @@ so the tracker knows what was produced.
 
     1. The function now returns `{"cleaned": out_path}` and `tracker.run(...)`
        declares `outputs=["cleaned"]`, so Consist knows which artifact to log.
-    2. `inputs` declares the hashed dependencies, while `runtime_kwargs` passes the
-       raw `Path` values into the function body with `load_inputs=False`.
-    3. `consist.ref(...)` passes the upstream artifact explicitly, and the runtime
-       path comes from `clean_result.outputs["cleaned"].path`.
+    2. `inputs` declares the hashed dependencies, and
+       `input_binding="paths"` passes those named inputs into the function body
+       as local `Path` objects.
+    3. `consist.ref(...)` passes the upstream artifact explicitly. With
+       `input_binding="paths"`, Consist resolves that artifact to a local path
+       before calling `summarize`.
 
 ## Run and Observe Caching
 
