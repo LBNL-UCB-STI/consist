@@ -3,15 +3,12 @@ hide:
   - navigation
 ---
 
-#  
+#     
 
 <p align="center">
   <img src="assets/logo.png" alt="Consist" width="320" class="logo-light">
 </p>
 
-<p align="center" class="tagline">
-  Track provenance. Skip redundant computation. Query results across runs.
-</p>
 
 ---
 
@@ -35,26 +32,30 @@ pipeline, then into deeper usage patterns.
 ## Prerequisites
 
 !!! note
-- Python 3.11+
-- Base install:
-`pip install git+https://github.com/LBNL-UCB-STI/consist.git`
-- For the first workflow tutorial (Parquet writes):
-from a local clone, run `pip install -e ".[parquet]"`
-- See [Installation](getting-started/installation.md) for complete options,
-including source installs and optional extras.
+
+    - Python 3.11+
+    - Base install:
+    `pip install git+https://github.com/LBNL-UCB-STI/consist.git`
+    - For the first workflow tutorial (Parquet writes):
+    from a local clone, run `pip install -e ".[parquet]"`
+    - See [Installation](getting-started/installation.md) for complete options,
+    including source installs and optional extras.
 
 ---
 
 ## What is Consist?
 
-Consist is a Python library for **automatic provenance tracking and intelligent
-caching** in scientific simulation workflows.
+Consist is a Python library for **provenance tracking and intelligent caching**
+in scientific simulation workflows. Tasks are ordinary Python functions;
+Consist records lineage without restructuring your code or introducing implicit
+dependencies.
 
 It helps you:
 
-- Track **provenance** (code, config, and inputs for each run)
-- Reuse previous results on cache hits
-- Query across runs using DuckDB-backed views
+- Answer "what exactly produced this result?"—code version, config, and inputs, all queryable after the fact
+- Skip redundant computation: cache hits fire automatically when code, config, and inputs are unchanged
+- Wire multi-step pipelines explicitly via artifact references, not name-based injection or global state
+- Query and compare results across runs using DuckDB-backed SQL
 - Keep pipelines portable across machines via URI + mount resolution
 
 ---
@@ -69,7 +70,7 @@ deeper work.
     - **Simulation developers**: [Architecture](architecture.md),
       [Config Adapters](integrations/config_adapters.md),
       [Container Integration](containers-guide.md)
-    - **Practitioners and MPO staff**: [CLI Reference](cli-reference.md),
+    - **Pipeline operators**: [CLI Reference](cli-reference.md),
       [DB Maintenance Guide](db-maintenance.md),
       [Troubleshooting](troubleshooting.md)
     - **Researchers**: [Data Materialization](concepts/data-materialization.md),

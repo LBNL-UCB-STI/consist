@@ -1,4 +1,7 @@
 from pathlib import Path
+import pandas as pd
+
+import consist
 from consist import Tracker, output_path
 
 # ---------------------------------------------------------------------------------
@@ -77,10 +80,65 @@ def main():
             print("Policy Run Complete.")
 
     # 3. Post-Run Insight
-    # After the study is done, you can instantly compare key metrics across the scenario.
-    results = tracker.queries.pivot_facets(model="activitysim")
+    # After the study is done, summarize run-level metadata/facets.
+    results = tracker.run_set(model="activitysim", status="completed").to_frame()
+    summary_cols = ["run_id", "status", "model", "year", "network", "pop_growth"]
+    present_cols = [col for col in summary_cols if col in results.columns]
     print("\nStudy Results Summary:")
-    print(results)
+    print(results[present_cols])
+
+    # 4. Multi-run analysis with RunSet
+    # Build with both constructor styles: RunSet.from_query(...) and tracker.run_set(...).
+    all_runs = consist.RunSet.from_query(
+        tracker,
+        label="activitysim-runs",
+        model="activitysim",
+        status="completed",
+    )
+    policy_runs = (
+        tracker.run_set(label="policy-runs", model="activitysim", status="completed")
+        .filter(run_id="policy_rail_2040")
+        .latest(group_by=["model"])
+    )
+    baseline_runs = all_runs.filter(run_id="baseline_2040").latest(group_by=["model"])
+
+    by_run_id = all_runs.split_by("run_id")
+    print(
+        "Runs by run_id:",
+        {run_id: len(runset) for run_id, runset in by_run_id.items()},
+    )
+
+    aligned = baseline_runs.align(policy_runs, on="model")
+    print("\nAligned baseline/policy runs:")
+    print(aligned.to_frame())
+
+    print("\nConfig changes across aligned runs:")
+    print(aligned.config_diffs().query("status != 'same'"))
+
+    def compare_final_vmt(left_run, right_run, model_name):
+        left_vmt = float(
+            consist.load_df(
+                tracker.get_run_outputs(left_run.id)["final_vmt"], tracker=tracker
+            ).loc[0, "value"]
+        )
+        right_vmt = float(
+            consist.load_df(
+                tracker.get_run_outputs(right_run.id)["final_vmt"], tracker=tracker
+            ).loc[0, "value"]
+        )
+        return pd.DataFrame(
+            [
+                {
+                    "model": model_name,
+                    "baseline_vmt": left_vmt,
+                    "policy_vmt": right_vmt,
+                    "delta_vmt": right_vmt - left_vmt,
+                }
+            ]
+        )
+
+    print("\nAligned pair metrics (AlignedPair.apply):")
+    print(aligned.apply(compare_final_vmt))
 
 
 if __name__ == "__main__":
@@ -91,11 +149,15 @@ if __name__ == "__main__":
 # After running this script, try these commands in your terminal:
 #
 # 1. List all runs:
-#    consist runs list
+#    consist runs
 #
-# 2. View the provenance of a specific artifact:
-#    consist artifacts show <artifact_id>
+# 2. Inspect one run and its outputs:
+#    consist show baseline_2040
+#    consist artifacts baseline_2040
 #
-# 3. Export the results to a CSV for GIS/Tableau:
-#    consist query "SELECT * FROM run_config_kv" --format csv > results.csv
+# 3. Explore interactively:
+#    consist shell
+#    (consist) runs
+#    (consist) artifacts #1
+#    (consist) preview @1
 # ---------------------------------------------------------------------------------

@@ -10,9 +10,9 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-BSD--3--Clause-blue.svg" alt="License BSD 3-Clause"></a>
 </p>
 
-**Consist** is a provenance-first caching layer for scientific simulation workflows. It automatically records what code,
-configuration, and input data produced each output in your pipeline—eliminating redundant computation and making results
-searchable via SQL.
+**Consist** is a caching layer for scientific simulation workflows that makes provenance queryable. It automatically
+records what code, configuration, and input data produced each output in your pipeline—eliminating redundant computation
+and enabling post-hoc inspection of results via SQL.
 
 ### Why Consist?
 
@@ -21,6 +21,11 @@ Multi-run simulation workflows typically accumulate friction:
 - **Provenance ambiguity**: "Which configuration produced those results in Figure 3?"
 - **Redundant computation**: Re-running a 4-hour pipeline because you changed one unrelated parameter.
 - **Scattered outputs**: Finding and comparing results across scenario variants manually.
+- **Hidden wiring**: Tools with implicit dependencies (name-based injection, global state) are hard to debug and modify
+  when something breaks.
+
+Consist tracks lineage explicitly. Tasks are ordinary Python functions; dependencies flow through concrete values, not
+framework magic. Your pipeline remains inspectable and testable.
 
 ---
 
@@ -42,74 +47,107 @@ pip install git+https://github.com/LBNL-UCB-STI/consist.git
 ```python
 import consist
 from pathlib import Path
-from consist import Tracker
+from consist import ExecutionOptions, Tracker
 import pandas as pd
 
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
 
-def clean_data(raw: pd.DataFrame, threshold: float = 0.5) -> pd.DataFrame:
-    return raw[raw["value"] > threshold]
+def clean_data(raw: Path, threshold: float = 0.5) -> dict[str, Path]:
+    df = pd.read_parquet(raw)
+    out = Path("./cleaned.parquet")
+    df[df["value"] > threshold].to_parquet(out)
+    return {"cleaned": out}
 
 
-# Executes function and records inputs/config/outputs
+# Executes function and records inputs, config, and output artifact
 result = tracker.run(
     fn=clean_data,
-    inputs={"raw": Path("raw.csv")},  # Hashed for cache identity
-    config={"threshold": 0.5},  # Hashed for cache identity
+    inputs={"raw": Path("raw.parquet")},  # hashed for cache identity
+    config={"threshold": 0.5},  # hashed for cache identity
     outputs=["cleaned"],
+    execution_options=ExecutionOptions(
+        load_inputs=False,
+        runtime_kwargs={"raw": Path("raw.parquet")},
+    ),
 )
 
-# Second run with same inputs: instant cache hit, no execution
+# Second call with identical inputs: instant cache hit, no execution
 result = tracker.run(
     fn=clean_data,
-    inputs={"raw": Path("raw.csv")},
+    inputs={"raw": Path("raw.parquet")},
     config={"threshold": 0.5},
     outputs=["cleaned"],
+    execution_options=ExecutionOptions(
+        load_inputs=False,
+        runtime_kwargs={"raw": Path("raw.parquet")},
+    ),
 )
 
-# Artifact: file with provenance metadata attached
+# Artifact: the output file with provenance metadata attached
 artifact = result.outputs["cleaned"]
-print(artifact.path)  # -> PosixPath('.../runs/outputs/.../cleaned.parquet')
+print(artifact.path)  # -> PosixPath('./cleaned.parquet')
 
-# Load the data back as a DataFrame
+# Load as a DataFrame when needed
 cleaned_df = consist.load_df(artifact)
 ```
 
-**Summary**: Consist computes a fingerprint from your code version, config, and input files. If you change anything
-upstream, only affected downstream steps will re-execute.
+**Summary**: Consist computes a deterministic fingerprint from your code version, config, and input files. If you change
+anything upstream, only affected downstream steps will re-execute.
+
+### Multi-Step Pipeline
+
+Dependencies are explicit: the output of one step becomes the input of the next via a concrete reference, not name
+matching or injection.
 
 ```python
-def analyze_data(cleaned: pd.DataFrame) -> pd.DataFrame:
-    return cleaned.groupby("category", as_index=False)["value"].mean()
+def analyze_data(cleaned: Path) -> dict[str, Path]:
+    df = pd.read_parquet(cleaned)
+    out = Path("./analysis.parquet")
+    summary = df.groupby("category")["value"].mean()
+    summary.to_parquet(out)
+    return {"analysis": out}
 
 
 preprocess = tracker.run(
     fn=clean_data,
-    inputs={"raw": Path("raw.csv")},
+    inputs={"raw": Path("raw.parquet")},
+    config={"threshold": 0.5},
     outputs=["cleaned"],
+    execution_options=ExecutionOptions(
+        load_inputs=False,
+        runtime_kwargs={"raw": Path("raw.parquet")},
+    ),
 )
 analyze = tracker.run(
     fn=analyze_data,
-    inputs={"cleaned": consist.ref(preprocess, key="cleaned")},
+    inputs={"cleaned": consist.ref(preprocess, key="cleaned")},  # explicit artifact reference
     outputs=["analysis"],
+    execution_options=ExecutionOptions(
+        load_inputs=False,
+        runtime_kwargs={"cleaned": preprocess.outputs["cleaned"].path},
+    ),
 )
 ```
+
+Use `output_paths` when a function returns `None` but writes files, or when you need explicit destination control.
 
 ---
 
 ## Key Features
 
-- **Intelligent Caching**: Instant cache hits for matching fingerprints. If you change one parameter, only affected
-  downstream steps re-execute.
+- **Deterministic Caching**: Cache identity is based on an inspectable fingerprint of code, config, and inputs. Only
+  affected downstream steps re-execute when any upstream piece changes.
+- **Plain Python**: Tasks are ordinary Python functions—callable and testable without the tracker. The tracker is
+  additive and does not restructure your code.
 - **Complete Lineage**: Every result is tagged with the exact code and config that created it. Trace lineage from any
   output back to its sources.
 - **SQL-Native Analysis**: All metadata is indexed in DuckDB. Query across runs, join tables, and compare variants using
   standard SQL.
-- **Container Support**: Track Docker/Singularity containers as functions--image digests and mounts become part of the
-  cache signature.
-- **User Friendly CLI**: Inspect history (`consist runs`), trace lineage (`consist lineage`), and compare results
-  without writing code.
+- **HPC and Container Support**: Track Docker and Singularity containers as pure functions—image digests and mounted
+  volumes become part of the cache signature. Ideal for long-running jobs on shared compute.
+- **Queryable CLI**: Inspect history, trace lineage, and compare results from the command line after a job completes. No
+  code required.
 
 ---
 

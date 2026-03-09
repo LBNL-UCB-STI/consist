@@ -215,32 +215,104 @@ with Session(tracker.engine) as session:
 
 ---
 
-## Singularity / Apptainer Support
+## Singularity / Apptainer (HPC)
 
-If using Singularity (common on HPC clusters):
+Docker is unavailable on most HPC clusters due to privilege requirements.
+Singularity and its community fork Apptainer are the standard alternatives —
+both run rootless and are accepted on shared compute resources. Consist supports
+both with the same `run_container()` API; swap `backend_type="singularity"` for
+`backend_type="apptainer"` depending on which is installed (`which apptainer`).
+
+### Getting a `.sif` File
+
+The typical HPC workflow is to pull a Docker image and convert it to a Singularity
+Image File (`.sif`) on a machine where Docker is available, then transfer it to
+a shared filesystem the cluster can read:
+
+```bash
+# Pull from Docker Hub and convert (run locally or on a build/login node)
+singularity pull my_model.sif docker://my-org/my-model:v1.0
+
+# Or build from a definition file
+singularity build my_model.sif my_model.def
+```
+
+Place `.sif` files on a **shared filesystem** (e.g., `/project/containers/`) that
+all compute nodes can access. A node-local path breaks caching across nodes because
+the same file lives at different absolute paths.
+
+### Running with Consist
 
 ```python
+from pathlib import Path
+from consist import Tracker
 from consist.integrations.containers import run_container
+
+tracker = Tracker(
+    run_dir="/scratch/consist_runs",
+    db_path="/project/provenance.duckdb",
+    mounts={
+        "inputs": "/project/shared/inputs",
+        "runs": "/scratch/consist_runs",
+    },
+)
 
 result = run_container(
     tracker=tracker,
     run_id="hpc_job",
-    image="/path/to/my_model.sif",  # Local .sif file path
-    command=["python", "model.py", "--param", "value"],
+    image="/project/containers/my_model.sif",  # shared filesystem path
+    command=["python", "model.py", "--input", "/inputs/data.csv"],
     volumes={
-        "/scratch/inputs": "/inputs",
+        "/project/shared/inputs": "/inputs",
         "/scratch/outputs": "/outputs",
     },
-    inputs=[Path("/scratch/inputs/data.csv")],
-    outputs=["/scratch/outputs"],
-    backend_type="singularity",  # Use Singularity instead of Docker
+    inputs=[Path("/project/shared/inputs/data.csv")],
+    outputs=["/scratch/outputs/result.csv"],
+    backend_type="singularity",  # or "apptainer"
 )
 ```
 
-Key differences:
-- Image is typically a **local file path** (.sif) not a registry URL
-- Volume syntax is the same
-- Caching behavior is identical (based on image path digest)
+### Cache Identity for Local `.sif` Files
+
+For local `.sif` files, Consist uses the **absolute file path** as the cache
+identity — not the file's content. The path string is what gets hashed into the
+run signature.
+
+Practical implications:
+
+- Same `.sif` path, same content → cache hit ✓
+- Same `.sif` path, **file replaced in place** → **cache hit** (path unchanged — stale result)
+- New versioned filename (`my_model_v1.1.sif`) → cache miss ✓
+
+!!! danger "Overwriting a `.sif` in place silently reuses the old cache"
+    If you rebuild and overwrite `my_model.sif` at the same path, Consist sees
+    the same path string and returns cached outputs from the previous image.
+    **Always use versioned filenames** (`my_model_v1.0.sif`, `my_model_v1.1.sif`)
+    and never overwrite an existing `.sif`. The version is the only signal Consist
+    has that the image changed.
+
+### Alternative: `docker://` URIs (Recommended for Most Cases)
+
+Singularity and Apptainer can pull directly from Docker registries at runtime
+using `docker://` URIs, without creating a local `.sif` file:
+
+```python
+result = run_container(
+    tracker=tracker,
+    run_id="hpc_job",
+    image="docker://my-org/my-model:v1.0",  # pulled at runtime
+    command=["python", "model.py"],
+    volumes={"/scratch/inputs": "/inputs", "/scratch/outputs": "/outputs"},
+    inputs=[Path("/scratch/inputs/data.csv")],
+    outputs=["/scratch/outputs/result.csv"],
+    backend_type="singularity",
+)
+```
+
+The URI string (including the tag) becomes the cache identity. Bumping
+`v1.0` → `v1.1` causes an automatic cache miss — no local file management
+required. This avoids the overwrite hazard entirely and is the pattern used
+in production PILATES workflows.
 
 ---
 
@@ -449,54 +521,80 @@ tracker.end_run()
 
 ## Nested Containers (Inside Scenarios)
 
-Use `run_container()` inside `scenario()` for multi-step workflows:
+Use `run_container()` inside `tracker.scenario()` for multi-step workflows where
+each container step caches independently.
 
-```python
-import consist
-from consist import Tracker, use_tracker
-from consist.integrations.containers import run_container
+=== "Without Consist"
 
-tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+    ```python
+    import subprocess
 
-with use_tracker(tracker):
-    with consist.scenario("multi_model_workflow") as sc:
+    # Step 1: Preprocess
+    subprocess.run([
+        "singularity", "run",
+        "--bind", "/scratch/raw_data:/data",
+        "/containers/preprocess.sif",
+        "python", "preprocess.py",
+    ], check=True)
 
-        # Step 1: Data preprocessing (Python)
+    # Step 2: Model — assumes Step 1 wrote to a known path
+    subprocess.run([
+        "singularity", "run",
+        "--bind", "/project/configs:/configs",
+        "--bind", "/scratch/model_outputs:/outputs",
+        "/containers/activitysim.sif",
+        "python", "-m", "activitysim.core.workflow",
+    ], check=True)
+    ```
+
+    Both steps re-run every time. There is no record of which image version or
+    config produced which outputs, and no way to skip a step whose inputs haven't
+    changed.
+
+=== "With Consist"
+
+    ```python
+    from pathlib import Path
+    from consist import Tracker
+    from consist.integrations.containers import run_container
+
+    tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+
+    with tracker.scenario("multi_model_workflow") as sc:
+
+        # Step 1: Preprocess — cached by image digest + inputs
         preprocess_result = run_container(
             tracker=tracker,
             run_id="preprocess",
-            image="my-org/preprocess:v1",
+            image="/containers/preprocess.sif",
             command=["python", "preprocess.py"],
-            volumes={"./raw_data": "/data"},
-            inputs=[Path("./raw_data")],
-            outputs=["./preprocessed"],
+            volumes={"/scratch/raw_data": "/data"},
+            inputs=[Path("/scratch/raw_data")],
+            outputs=["/scratch/preprocessed"],
+            backend_type="singularity",
         )
         sc.coupler.set("preprocessed_data", preprocess_result.output)
 
-        # Step 2: Model execution (ActivitySim)
+        # Step 2: Model — skipped automatically if image + configs unchanged
         model_result = run_container(
             tracker=tracker,
             run_id="activitysim",
-            image="my-org/activitysim:v1",
+            image="/containers/activitysim.sif",
             command=["python", "-m", "activitysim.core.workflow"],
             volumes={
-                "./configs": "/configs",
-                "./model_outputs": "/outputs",
+                "/project/configs": "/configs",
+                "/scratch/model_outputs": "/outputs",
             },
-            inputs=[Path("./configs")],
-            outputs=["./model_outputs"],
+            inputs=[Path("/project/configs")],
+            outputs=["/scratch/model_outputs"],
+            backend_type="singularity",
         )
         sc.coupler.set("model_outputs", model_result.output)
+    ```
 
-        # Step 3: Analysis (Python)
-        with sc.trace(name="analysis"):
-            # Load previous results
-            preprocessed = consist.load_df(sc.coupler.require("preprocessed_data"))
-            model_output = consist.load_df(sc.coupler.require("model_outputs"))
-            # ... analysis code ...
-```
-
-Each container step caches independently. If preprocessing input hasn't changed, skip it. If model config hasn't changed, skip it.
+    Each container step caches independently. If preprocessing inputs haven't
+    changed, that step is skipped. Lineage links both steps to the scenario,
+    so you can query which image version and config produced any output.
 
 ---
 

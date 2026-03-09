@@ -8,7 +8,9 @@ A simplified model for a linear 5-zone city:
 
 Functions read and write DataFrames and xarray Datasets. No framework glue—
 iteration control, convergence checking, and provenance tracking are handled
-by the calling code.
+by the calling code. This module stays framework-free on purpose: notebooks and
+scripts add Consist tracking around these functions instead of burying model
+logic inside orchestration code.
 
 Skims are stored as xarray Datasets in zarr format to demonstrate array handling.
 """
