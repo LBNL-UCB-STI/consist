@@ -178,9 +178,10 @@ def test_shell_completions_include_aliases_flags_and_dynamic_values(tmp_path) ->
         assert shell.complete_schema_profile(
             "table", "schema_profile table", 15, 20
         ) == ["table-2"]
-        assert shell.complete_schema_profile(
-            "@", "schema_profile @", 15, 16
-        ) == ["@1", "@2"]
+        assert shell.complete_schema_profile("@", "schema_profile @", 15, 16) == [
+            "@1",
+            "@2",
+        ]
         assert shell.complete_schema_stub("@", "schema_stub @", 12, 13) == [
             "@1",
             "@2",
@@ -446,8 +447,9 @@ def test_shell_artifact_picker_empty_state_suggests_run_listing(
     ):
         shell = ConsistShell(tracker)
 
-    with patch.object(shell, "_is_tty", return_value=True), patch.object(
-        shell, "_recent_artifact_keys", return_value=[]
+    with (
+        patch.object(shell, "_is_tty", return_value=True),
+        patch.object(shell, "_recent_artifact_keys", return_value=[]),
     ):
         shell.do_preview("")
 

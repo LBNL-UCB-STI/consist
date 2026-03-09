@@ -2510,7 +2510,9 @@ class ConsistShell(cmd.Cmd):
 
     def _artifact_ref_population_hint(self) -> str:
         if self._last_run_ids:
-            return "Run `artifacts <run_id>` or `artifacts #<n>` first to populate @refs."
+            return (
+                "Run `artifacts <run_id>` or `artifacts #<n>` first to populate @refs."
+            )
         return "Run `artifacts <run_id>` first to populate @refs."
 
     @staticmethod
