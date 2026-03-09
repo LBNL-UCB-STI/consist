@@ -66,10 +66,7 @@ result = tracker.run(
     inputs={"raw": Path("raw.parquet")},  # hashed for cache identity
     config={"threshold": 0.5},  # hashed for cache identity
     outputs=["cleaned"],
-    execution_options=ExecutionOptions(
-        load_inputs=False,
-        runtime_kwargs={"raw": Path("raw.parquet")},
-    ),
+    execution_options=ExecutionOptions(input_binding="paths"),
 )
 
 # Second call with identical inputs: instant cache hit, no execution
@@ -78,10 +75,7 @@ result = tracker.run(
     inputs={"raw": Path("raw.parquet")},
     config={"threshold": 0.5},
     outputs=["cleaned"],
-    execution_options=ExecutionOptions(
-        load_inputs=False,
-        runtime_kwargs={"raw": Path("raw.parquet")},
-    ),
+    execution_options=ExecutionOptions(input_binding="paths"),
 )
 
 # Artifact: the output file with provenance metadata attached
@@ -91,6 +85,10 @@ print(artifact.path)  # -> PosixPath('./cleaned.parquet')
 # Load as a DataFrame when needed
 cleaned_df = consist.load_df(artifact)
 ```
+
+`input_binding="paths"` keeps the file boundary explicit: the function receives
+the local `Path` values named in `inputs`, while those same inputs still define
+cache identity and lineage.
 
 **Summary**: Consist computes a deterministic fingerprint from your code version, config, and input files. If you change
 anything upstream, only affected downstream steps will re-execute.
@@ -114,19 +112,13 @@ preprocess = tracker.run(
     inputs={"raw": Path("raw.parquet")},
     config={"threshold": 0.5},
     outputs=["cleaned"],
-    execution_options=ExecutionOptions(
-        load_inputs=False,
-        runtime_kwargs={"raw": Path("raw.parquet")},
-    ),
+    execution_options=ExecutionOptions(input_binding="paths"),
 )
 analyze = tracker.run(
     fn=analyze_data,
     inputs={"cleaned": consist.ref(preprocess, key="cleaned")},  # explicit artifact reference
     outputs=["analysis"],
-    execution_options=ExecutionOptions(
-        load_inputs=False,
-        runtime_kwargs={"cleaned": preprocess.outputs["cleaned"].path},
-    ),
+    execution_options=ExecutionOptions(input_binding="paths"),
 )
 ```
 
