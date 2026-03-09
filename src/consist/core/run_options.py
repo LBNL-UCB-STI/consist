@@ -8,6 +8,7 @@ from consist.types import (
     CacheOptions,
     CodeIdentityMode,
     ExecutionOptions,
+    InputBindingMode,
     OutputPolicyOptions,
 )
 
@@ -49,6 +50,7 @@ class ResolvedRunOptions:
     code_identity_extra_deps: Optional[list[str]]
     output_mismatch: Optional[str]
     output_missing: Optional[str]
+    input_binding: Optional[InputBindingMode]
     load_inputs: Optional[bool]
     executor: Optional[str]
     container: Optional[Mapping[str, Any]]
@@ -112,6 +114,7 @@ def resolve_runtime_kwargs_alias(
         return ExecutionOptions(runtime_kwargs=runtime_kwargs)
 
     return ExecutionOptions(
+        input_binding=execution_options.input_binding,
         load_inputs=execution_options.load_inputs,
         executor=execution_options.executor,
         container=execution_options.container,
@@ -144,6 +147,7 @@ def merge_run_options(
         code_identity_extra_deps=cache_obj.code_identity_extra_deps,
         output_mismatch=output_obj.output_mismatch,
         output_missing=output_obj.output_missing,
+        input_binding=exec_obj.input_binding,
         load_inputs=exec_obj.load_inputs,
         executor=exec_obj.executor,
         container=exec_obj.container,

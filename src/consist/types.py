@@ -51,6 +51,7 @@ CodeIdentityMode: TypeAlias = Literal[
     "callable_module",
     "callable_source",
 ]
+InputBindingMode: TypeAlias = Literal["loaded", "paths", "none"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +91,7 @@ class ExecutionOptions:
     """
 
     load_inputs: Optional[bool] = None
+    input_binding: Optional[InputBindingMode] = None
     executor: Optional[Literal["python", "container"]] = None
     container: Optional[Mapping[str, Any]] = None
     runtime_kwargs: Optional[Mapping[str, Any]] = None

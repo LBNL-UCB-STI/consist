@@ -22,6 +22,7 @@ from consist.types import (
     CodeIdentityMode,
     ExecutionOptions,
     FacetLike,
+    InputBindingMode,
     IdentityInputs,
     OutputPolicyOptions,
     RunInputRef,
@@ -89,8 +90,10 @@ class ResolvedRunInvocation:
         Effective policy for output count/shape mismatch.
     output_missing : Literal["warn", "error", "ignore"]
         Effective policy for missing expected outputs.
+    input_binding : {"loaded", "paths", "none"}
+        Effective input binding mode for callable execution.
     load_inputs : Optional[bool]
-        Effective input auto-loading preference.
+        Effective legacy input auto-loading preference retained for compatibility.
     executor : Literal["python", "container"]
         Effective execution backend.
     container : Optional[Mapping[str, Any]]
@@ -126,11 +129,65 @@ class ResolvedRunInvocation:
     code_identity_extra_deps: Optional[List[str]]
     output_mismatch: Literal["warn", "error", "ignore"]
     output_missing: Literal["warn", "error", "ignore"]
+    input_binding: InputBindingMode
     load_inputs: Optional[bool]
     executor: Literal["python", "container"]
     container: Optional[Mapping[str, Any]]
     runtime_kwargs: Optional[Dict[str, Any]]
     inject_context: Union[bool, str]
+
+
+def _resolve_input_binding(
+    *,
+    explicit_input_binding: Optional[InputBindingMode],
+    load_inputs: Optional[bool],
+    inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]],
+) -> InputBindingMode:
+    if explicit_input_binding is not None and load_inputs is not None:
+        raise ValueError(
+            format_problem_cause_fix(
+                problem=(
+                    "ExecutionOptions cannot set both input_binding and load_inputs."
+                ),
+                cause=(
+                    "These options both control how declared inputs bind into "
+                    "callable parameters."
+                ),
+                fix=(
+                    "Use input_binding='loaded' or 'paths' for new code, or keep "
+                    "only load_inputs=... for legacy behavior."
+                ),
+            )
+        )
+
+    if explicit_input_binding is not None:
+        if explicit_input_binding not in {"loaded", "paths", "none"}:
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem=(
+                        "execution_options.input_binding must be one of "
+                        "'loaded', 'paths', or 'none'. "
+                        f"Received {explicit_input_binding!r}."
+                    ),
+                    cause="An unsupported input binding mode was configured.",
+                    fix=(
+                        "Choose input_binding='loaded' for object hydration, "
+                        "'paths' for explicit file paths, or 'none' to disable "
+                        "automatic input binding."
+                    ),
+                )
+            )
+        binding = explicit_input_binding
+    elif load_inputs is True:
+        binding = "loaded"
+    elif load_inputs is False:
+        binding = "none"
+    elif isinstance(inputs, Mapping):
+        binding = "loaded"
+    else:
+        binding = "none"
+
+    return binding
 
 
 def resolve_run_invocation(
@@ -289,6 +346,7 @@ def resolve_run_invocation(
     code_identity_extra_deps = merged_options.code_identity_extra_deps
     output_mismatch = merged_options.output_mismatch
     output_missing = merged_options.output_missing
+    input_binding = merged_options.input_binding
     load_inputs = merged_options.load_inputs
     executor = merged_options.executor
     container = merged_options.container
@@ -479,6 +537,7 @@ def resolve_run_invocation(
         cache_hydration=cache_hydration,
         cache_version=cache_version,
         validate_cached_outputs=validate_cached_outputs,
+        input_binding=input_binding,
         load_inputs=load_inputs,
         missing_name_error=missing_name_error,
     )
@@ -519,6 +578,12 @@ def resolve_run_invocation(
             )
         )
 
+    resolved_input_binding = _resolve_input_binding(
+        explicit_input_binding=resolved.input_binding,
+        load_inputs=resolved.load_inputs,
+        inputs=resolved.inputs,
+    )
+
     return ResolvedRunInvocation(
         name=resolved.name,
         model=resolved.model,
@@ -549,6 +614,7 @@ def resolve_run_invocation(
         ),
         output_mismatch=cast(Literal["warn", "error", "ignore"], output_mismatch),
         output_missing=cast(Literal["warn", "error", "ignore"], output_missing),
+        input_binding=resolved_input_binding,
         load_inputs=resolved.load_inputs,
         executor=cast(Literal["python", "container"], executor),
         container=container,

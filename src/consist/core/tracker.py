@@ -1090,8 +1090,10 @@ class Tracker:
             Whether to profile ingested schemas for the config plan.
         inputs : Optional[Mapping[str, RunInputRef] | Iterable[RunInputRef]], optional
             Input files or artifacts.
-            - Dict: Maps names to paths/Artifacts. Auto-loads into function parameters (default load_inputs=True).
-            - List/Iterable: Hashed for cache key but not auto-loaded (use load_inputs=False).
+            - Dict: Maps names to paths/Artifacts. Named inputs can bind into function
+              parameters according to `execution_options.input_binding` (or legacy
+              `load_inputs`).
+            - List/Iterable: Hashed for cache key but not automatically bound.
         input_keys : Optional[Iterable[str] | str], optional
             Deprecated. Use `inputs` mapping instead.
         optional_input_keys : Optional[Iterable[str] | str], optional
@@ -1144,8 +1146,8 @@ class Tracker:
         output_policy : Optional[OutputPolicyOptions], optional
             Grouped output policies (`output_mismatch`, `output_missing`).
         execution_options : Optional[ExecutionOptions], optional
-            Grouped execution controls (`load_inputs`, `executor`, `container`,
-            `runtime_kwargs`, `inject_context`).
+            Grouped execution controls (`input_binding`, legacy `load_inputs`,
+            `executor`, `container`, `runtime_kwargs`, `inject_context`).
         runtime_kwargs : Optional[Mapping[str, Any]], optional
             Top-level alias for `execution_options.runtime_kwargs`. This is
             mutually exclusive with

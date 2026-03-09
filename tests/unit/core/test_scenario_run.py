@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
@@ -63,6 +65,29 @@ def test_scenario_run_resolves_coupler_inputs(tracker):
             fn=consume,
             inputs={"data": "data"},
             execution_options=ExecutionOptions(load_inputs=True),
+        )
+
+
+def test_scenario_run_promotes_coupler_inputs_for_path_binding(tracker):
+    def produce(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        out_path = ctx.run_dir / "data.csv"
+        pd.DataFrame({"value": [1, 2]}).to_csv(out_path, index=False)
+
+    def consume(data: Path) -> None:
+        frame = pd.read_csv(data)
+        assert list(frame["value"]) == [1, 2]
+
+    with tracker.scenario("scen_run_path_inputs") as sc:
+        sc.run(
+            fn=produce,
+            output_paths={"data": "data.csv"},
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        sc.run(
+            fn=consume,
+            inputs=["data"],
+            execution_options=ExecutionOptions(input_binding="paths"),
         )
 
 

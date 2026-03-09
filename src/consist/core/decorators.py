@@ -13,7 +13,7 @@ from typing import (
 )
 
 from consist.core.step_context import StepContext
-from consist.types import IdentityInputs
+from consist.types import IdentityInputs, InputBindingMode
 
 if TYPE_CHECKING:
     from consist.core.config_canonicalization import ConfigAdapter
@@ -55,6 +55,7 @@ class StepDefinition:
     validate_cached_outputs: Optional[MetaValue[str]] = None
 
     # Runtime
+    input_binding: Optional[MetaValue[InputBindingMode]] = None
     load_inputs: Optional[MetaValue[bool]] = None
 
     # Metadata
@@ -85,6 +86,7 @@ def define_step(
     cache_hydration: Optional[MetaValue[str]] = None,
     cache_version: Optional[MetaValue[int]] = None,
     validate_cached_outputs: Optional[MetaValue[str]] = None,
+    input_binding: Optional[MetaValue[InputBindingMode]] = None,
     load_inputs: Optional[MetaValue[bool]] = None,
     tags: Optional[MetaValue[List[str]]] = None,
     facet_from: Optional[MetaValue[List[str]]] = None,
@@ -128,6 +130,7 @@ def define_step(
                 cache_hydration=cache_hydration,
                 cache_version=cache_version,
                 validate_cached_outputs=validate_cached_outputs,
+                input_binding=input_binding,
                 load_inputs=load_inputs,
                 tags=tags,
                 facet_from=facet_from,
