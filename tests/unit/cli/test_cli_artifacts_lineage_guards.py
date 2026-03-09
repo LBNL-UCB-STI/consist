@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from typer.testing import CliRunner
@@ -146,6 +147,29 @@ def test_schema_capture_file_rejects_invalid_mount_override_syntax() -> None:
     assert result.exit_code == 2
     assert "Invalid --mount value" in result.stdout
     mock_get_tracker.assert_not_called()
+
+
+def test_schema_export_missing_schema_suggests_capture_file() -> None:
+    """`schema export` should suggest capture-file when no schema is persisted."""
+    with patch("consist.cli.get_tracker") as mock_get_tracker:
+        tracker = mock_get_tracker.return_value
+        tracker.get_artifact.return_value = SimpleNamespace(
+            id="00000000-0000-0000-0000-000000000999"
+        )
+        tracker.export_schema_sqlmodel.side_effect = KeyError("schema missing")
+
+        result = runner.invoke(
+            app,
+            ["schema", "export", "--artifact-key", "missing_schema_artifact"],
+        )
+
+    assert result.exit_code == 1
+    normalized = " ".join(result.stdout.split())
+    assert "Captured schema not found for the provided selector." in result.stdout
+    assert (
+        "consist schema capture-file --artifact-id "
+        "00000000-0000-0000-0000-000000000999" in normalized
+    )
 
 
 def test_artifacts_query_mode_surfaces_value_errors(cli_runner) -> None:

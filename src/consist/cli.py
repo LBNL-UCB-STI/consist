@@ -1157,6 +1157,11 @@ def schema_export(
         )
     except KeyError:
         console.print("[red]Captured schema not found for the provided selector.[/red]")
+        if artifact_id is not None:
+            console.print(
+                "[yellow]Try `consist schema capture-file --artifact-id "
+                f"{artifact_id}` to persist a file schema first.[/yellow]"
+            )
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
     except ValueError as e:
         console.print(f"[red]{e}[/red]")
@@ -2586,6 +2591,54 @@ class ConsistShell(cmd.Cmd):
         command_args = [command_name, *self._safe_split(arg)]
         self._invoke_cli(command_args)
 
+    def _normalize_schema_capture_file_shell_args(
+        self, args: Sequence[str]
+    ) -> Optional[List[str]]:
+        if not args or args[0] != "capture-file":
+            return list(args)
+
+        normalized = [args[0]]
+        i = 1
+        positional_consumed = False
+        while i < len(args):
+            token = args[i]
+            if token == "--artifact-ref":
+                if i + 1 >= len(args):
+                    raise ValueError("--artifact-ref requires a value")
+                raw_ref = args[i + 1]
+                if not raw_ref.startswith("@"):
+                    raise ValueError("--artifact-ref must look like @1")
+                artifact_id = self._resolve_artifact_ref(raw_ref)
+                if artifact_id is None:
+                    return None
+                normalized.extend(["--artifact-id", artifact_id])
+                i += 2
+                continue
+            if token.startswith("--artifact-ref="):
+                raw_ref = token.split("=", 1)[1]
+                if not raw_ref.startswith("@"):
+                    raise ValueError("--artifact-ref must look like @1")
+                artifact_id = self._resolve_artifact_ref(raw_ref)
+                if artifact_id is None:
+                    return None
+                normalized.extend(["--artifact-id", artifact_id])
+                i += 1
+                continue
+            if not positional_consumed and not token.startswith("-"):
+                positional_consumed = True
+                if token.startswith("@"):
+                    artifact_id = self._resolve_artifact_ref(token)
+                    if artifact_id is None:
+                        return None
+                    normalized.extend(["--artifact-id", artifact_id])
+                else:
+                    normalized.append(token)
+                i += 1
+                continue
+            normalized.append(token)
+            i += 1
+        return normalized
+
     def _recent_run_ids(self, limit: int = _PICKER_LIMIT) -> List[str]:
         try:
             from consist.models.run import Run
@@ -2989,7 +3042,14 @@ class ConsistShell(cmd.Cmd):
 
     def do_schema(self, arg: str) -> None:
         """Run schema subcommands. Usage: schema <capture-file|export|apply-fks> ..."""
-        self._invoke_cli_command("schema", arg)
+        try:
+            schema_args = self._safe_split(arg)
+            normalized = self._normalize_schema_capture_file_shell_args(schema_args)
+            if normalized is None:
+                return
+            self._invoke_cli(["schema", *normalized])
+        except ValueError as exc:
+            console.print(f"[red]Error: {exc}[/red]")
 
     def do_views(self, arg: str) -> None:
         """Run view subcommands. Usage: views create ..."""
@@ -3425,11 +3485,18 @@ class ConsistShell(cmd.Cmd):
             console.print(
                 f"[yellow]Schema not implemented for loaded type: {type(data).__name__}[/yellow]"
             )
+            if artifact.driver in {"h5", "hdf5"} or type(data).__name__ == "HDFStore":
+                console.print(
+                    "[yellow]Container-level HDF5 schema is not supported. Try "
+                    "`artifacts <run_id>` and inspect sibling `h5_table` artifacts."
+                    "[/yellow]"
+                )
         except Exception as exc:
             console.print(f"[red]Error: {exc}[/red]")
 
     def do_schema_stub(self, arg: str) -> None:
         """Export SQLModel schema stub. Usage: schema_stub <artifact_key|artifact_id|@ref>|--artifact-id UUID|--hash PREFIX [--run-id RUN_ID] [--source file|duckdb|user_provided] [--class-name NAME] [--table-name NAME] [--include-system-cols] [--no-stats-comments] [--concrete]"""
+        artifact: Any = None
         try:
             parsed = self._parse_schema_stub_args(arg)
             artifact_key = parsed["artifact_key"]
@@ -3508,6 +3575,12 @@ class ConsistShell(cmd.Cmd):
             print(code)
         except KeyError:
             console.print("[red]Captured schema not found for this artifact.[/red]")
+            resolved_artifact_id = getattr(artifact, "id", None)
+            if resolved_artifact_id:
+                console.print(
+                    "[yellow]Try `consist schema capture-file --artifact-id "
+                    f"{resolved_artifact_id}` to persist a file schema first.[/yellow]"
+                )
         except ValueError as exc:
             console.print(f"[red]Error: {exc}[/red]")
         except Exception as exc:
