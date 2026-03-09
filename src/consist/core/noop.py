@@ -521,6 +521,26 @@ def _run_noop_step(
                 outputs_map[str(outputs[0])] = _build_noop_artifact(
                     result, key=str(outputs[0])
                 )
+    elif outputs is None and output_paths is None and result is not None:
+        fn_name = getattr(fn, "__name__", None) if fn is not None else None
+        default_key = (
+            fn_name
+            if isinstance(fn_name, str) and fn_name and fn_name != "<lambda>"
+            else resolved_name
+        )
+        if isinstance(result, (NoopArtifact, Path)):
+            outputs_map[default_key] = _build_noop_artifact(result, key=default_key)
+        elif isinstance(result, Mapping):
+            inferred: Dict[str, NoopArtifact] = {}
+            for key, value in result.items():
+                if not isinstance(key, str):
+                    inferred = {}
+                    break
+                if not isinstance(value, (NoopArtifact, Path)):
+                    inferred = {}
+                    break
+                inferred[key] = _build_noop_artifact(value, key=key)
+            outputs_map.update(inferred)
 
     if outputs_map and on_outputs is not None:
         on_outputs(outputs_map)

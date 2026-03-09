@@ -124,6 +124,110 @@ def test_run_context_run_dir_is_created(tracker):
     assert result.outputs["out"].path.exists()
 
 
+def test_tracker_run_infers_single_artifact_output_when_outputs_omitted(tracker):
+    calls: list[str] = []
+
+    def clean_data(ctx) -> Path:
+        calls.append("called")
+        out_path = ctx.run_dir / "cleaned.parquet"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("cleaned\n")
+        return out_path
+
+    first = tracker.run(
+        fn=clean_data,
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    second = tracker.run(
+        fn=clean_data,
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert calls == ["called"]
+    assert set(first.outputs.keys()) == {"clean_data"}
+    assert first.outputs["clean_data"].path.exists()
+    assert second.cache_hit is True
+    assert set(second.outputs.keys()) == {"clean_data"}
+
+
+def test_tracker_run_infers_dict_artifact_outputs_when_outputs_omitted(tracker):
+    def split_data(ctx) -> dict[str, Path]:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        train_path = ctx.run_dir / "train.txt"
+        test_path = ctx.run_dir / "test.txt"
+        train_path.write_text("train\n")
+        test_path.write_text("test\n")
+        return {"train": train_path, "test": test_path}
+
+    result = tracker.run(
+        fn=split_data,
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert set(result.outputs.keys()) == {"train", "test"}
+    assert result.outputs["train"].path.exists()
+    assert result.outputs["test"].path.exists()
+
+
+def test_tracker_run_merges_manual_and_inferred_outputs_when_outputs_omitted(tracker):
+    calls: list[str] = []
+
+    def step(ctx) -> Path:
+        calls.append("called")
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        manual_path = ctx.run_dir / "manual.txt"
+        inferred_path = ctx.run_dir / "inferred.txt"
+        manual_path.write_text("manual\n")
+        inferred_path.write_text("inferred\n")
+        tracker.log_artifact(manual_path, key="manual", direction="output")
+        return inferred_path
+
+    first = tracker.run(
+        fn=step,
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    second = tracker.run(
+        fn=step,
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert calls == ["called"]
+    assert set(first.outputs.keys()) == {"manual", "step"}
+    assert set(second.outputs.keys()) == {"manual", "step"}
+
+
+def test_tracker_run_keeps_warning_for_non_artifact_return_when_outputs_omitted(
+    tracker, caplog
+):
+    def step():
+        return {"metric": 1}
+
+    with caplog.at_level(logging.WARNING):
+        result = tracker.run(fn=step)
+
+    assert result.outputs == {}
+    assert any(
+        "returned a value but no outputs were declared; ignoring return value."
+        in record.message
+        for record in caplog.records
+    )
+
+
+def test_tracker_run_ignores_string_return_when_outputs_omitted(tracker, caplog):
+    def step() -> str:
+        return "ok"
+
+    with caplog.at_level(logging.WARNING):
+        result = tracker.run(fn=step)
+
+    assert result.outputs == {}
+    assert any(
+        "returned a value but no outputs were declared; ignoring return value."
+        in record.message
+        for record in caplog.records
+    )
+
+
 def test_run_with_config_overrides_requires_supporting_adapter(tracker, tmp_path):
     with pytest.raises(
         TypeError, match="does not support run_with_config_overrides delegation"
