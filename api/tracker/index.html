@@ -5340,8 +5340,10 @@ intelligent caching based on code+config+inputs, and artifact logging.</p>
             <td>
               <div class="doc-md-description">
                 <p>Input files or artifacts.
-- Dict: Maps names to paths/Artifacts. Auto-loads into function parameters (default load_inputs=True).
-- List/Iterable: Hashed for cache key but not auto-loaded (use load_inputs=False).</p>
+- Dict: Maps names to paths/Artifacts. Named inputs can bind into function
+  parameters according to <code>execution_options.input_binding</code> (or legacy
+  <code>load_inputs</code>).
+- List/Iterable: Hashed for cache key but not automatically bound.</p>
               </div>
             </td>
             <td>
@@ -5684,8 +5686,8 @@ when <code>output_paths</code> is not provided.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Grouped execution controls (<code>load_inputs</code>, <code>executor</code>, <code>container</code>,
-<code>runtime_kwargs</code>, <code>inject_context</code>).</p>
+                <p>Grouped execution controls (<code>input_binding</code>, legacy <code>load_inputs</code>,
+<code>executor</code>, <code>container</code>, <code>runtime_kwargs</code>, <code>inject_context</code>).</p>
               </div>
             </td>
             <td>

@@ -895,6 +895,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#how-input-binding-interacts-with-hydration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How Input Binding Interacts with Hydration
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#signatures-and-cache-behavior" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2791,6 +2802,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#how-input-binding-interacts-with-hydration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How Input Binding Interacts with Hydration
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#signatures-and-cache-behavior" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3330,6 +3352,52 @@ for new workflow code.</p>
 </tr>
 </tbody>
 </table>
+<h3 id="how-input-binding-interacts-with-hydration">How Input Binding Interacts with Hydration<a class="headerlink" href="#how-input-binding-interacts-with-hydration" title="Permanent link">&para;</a></h3>
+<p><code>cache_hydration</code> controls when bytes are materialized. <code>input_binding</code>
+controls what your callable receives. They are related, but they are not the
+same setting.</p>
+<table>
+<thead>
+<tr>
+<th><code>input_binding</code></th>
+<th>Function receives</th>
+<th>What hydration must guarantee</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>"paths"</code></td>
+<td>local <code>Path</code> objects</td>
+<td>the input must exist as a usable local file or directory</td>
+</tr>
+<tr>
+<td><code>"loaded"</code></td>
+<td>loaded <code>DataFrame</code> / Python objects</td>
+<td>Consist can load from the filesystem or from ingested / DB-backed storage</td>
+</tr>
+<tr>
+<td><code>"none"</code></td>
+<td>nothing automatically</td>
+<td>no binding guarantee; inputs still affect identity and lineage</td>
+</tr>
+</tbody>
+</table>
+<p>For recommended-path workflows:</p>
+<ul>
+<li>Use <code>input_binding="paths"</code> when you want the callable to own its own I/O.</li>
+<li>Use <code>input_binding="loaded"</code> when you want hydrated tabular/object inputs.</li>
+<li>Use <code>input_binding="none"</code> for identity-only inputs or advanced wrappers.</li>
+</ul>
+<p>The key tradeoff is capability versus explicitness:</p>
+<ul>
+<li><code>"paths"</code> is the clearest mode, but it requires a local materialized path.</li>
+<li><code>"loaded"</code> is more flexible, because Consist can often hydrate from ingested
+  data or database-backed storage even when no local file is present.</li>
+</ul>
+<p>That is why path-oriented workflows often pair naturally with
+<code>cache_hydration="inputs-missing"</code> when work moves across run directories.
+Loaded workflows can often keep using <code>cache_hydration="metadata"</code> and let
+Consist load the bytes on demand.</p>
 <h3 id="signatures-and-cache-behavior">Signatures and Cache Behavior<a class="headerlink" href="#signatures-and-cache-behavior" title="Permanent link">&para;</a></h3>
 <p>Every run's <strong>signature</strong> is derived from code hash, config hash, and input hash. If Consist finds a completed run with the same signature and valid outputs, the new run is a <strong>cache hit</strong> and reuses prior outputs.</p>
 <h4 id="unified-identity-model-code-config-inputs">Unified identity model: code + config + inputs<a class="headerlink" href="#unified-identity-model-code-config-inputs" title="Permanent link">&para;</a></h4>
