@@ -141,6 +141,8 @@ with tracker.trace("inspect_summary", inputs={"data": Path("input.csv")}) as t:
 Combine `run(...)` and `trace(...)` in one workflow:
 
 ``` python
+import consist
+
 with tracker.scenario("demo_pipeline") as sc:
     step = sc.run(
         fn=summarize_values,

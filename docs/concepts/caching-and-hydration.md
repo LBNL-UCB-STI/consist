@@ -315,7 +315,7 @@ with use_tracker(tracker):
         fn=clean,
         inputs={"raw_file": Path("raw.csv")},
         outputs=["cleaned"],
-        execution_options=ExecutionOptions(load_inputs=True),
+        execution_options=ExecutionOptions(input_binding="loaded"),
     )
 ```
 

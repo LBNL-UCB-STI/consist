@@ -130,7 +130,7 @@ result = tracker.run(
 
 ### Auto-loading inputs as DataFrames
 
-If you prefer to receive a DataFrame directly instead of a path, Consist can load the artifact's file and inject it as the parameter value (default `load_inputs=True`). This is convenient for short scripts but hides the I/O boundary — prefer the path-based pattern for pipelines where the function boundary matters.
+If you prefer to receive a DataFrame directly instead of a path, use `input_binding="loaded"` and Consist will load the artifact for you before calling the function. This is convenient for short scripts but hides the I/O boundary — prefer `input_binding="paths"` for pipelines where the function boundary matters.
 
 ---
 

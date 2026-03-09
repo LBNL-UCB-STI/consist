@@ -11,7 +11,7 @@ Config adapters provide model-specific interfaces to discover, canonicalize, and
 | Queryable parameters | Calibration-sensitive values | Simple facets suffice |
 | File tracking | Need content hashing per file | No file artifacts needed |
 
-For in-memory configuration, see [Configuration, Identity, and Facets](../configs.md).
+For in-memory configuration, see [Config, Facets, and Identity Inputs](../concepts/config-management.md).
 
 ### Architecture
 
@@ -63,6 +63,6 @@ as a reference implementation.
 
 ## See Also
 
-- [Configuration, Identity, and Facets](../configs.md) — In-memory config and facets
+- [Config, Facets, and Identity Inputs](../concepts/config-management.md) — In-memory config, facets, and identity inputs
 - [Data Virtualization & Materialization Strategy](../concepts/data-materialization.md) — DLT-based data ingestion
 - [Caching and Artifact Hydration Patterns](../concepts/caching-and-hydration.md) — Run signature and cache identity

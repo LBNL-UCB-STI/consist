@@ -164,7 +164,7 @@ Consist provides three strategies for tracking configuration:
 
 Most workflows combine all three: identity config for full parameters, facet for filtering, and identity inputs for large external files.
 
-For detailed usage, see [Configuration, Identity, and Facets](configs.md).
+For detailed usage, see [Config, Facets, and Identity Inputs](concepts/config-management.md).
 
 **Database tables**:
 

@@ -50,15 +50,15 @@ Copyright &copy; 2026 The Regents of the University of California, through Lawre
 #   { "Markdown in 5min" = "markdown.md" },
 # ]
 nav = [
-  { "Home" = "index.md" },
-  { "Getting Started" = ["getting-started/installation.md", "getting-started/quickstart.md", "getting-started/first-workflow.md", { "Command Line Interface" = "cli-reference.md"}] },
-  { "Concepts" = ["concepts/overview.md", "concepts/config-management.md", "concepts/decorators-and-metadata.md", "concepts/caching-and-hydration.md", "concepts/data-materialization.md"] },
-  { "Guides" = ["usage-guide.md", "building-domain-tracker.md", "configs.md", "dlt-loader-guide.md", "containers-guide.md", "mounts-and-portability.md", "schema-export.md"] },
-  { "Integrations" = ["integrations/index.md", "integrations/containers.md", "integrations/dlt_loader.md", { "Config Adapters" = [{ "Overview" = "integrations/config_adapters.md" }, { "BEAM" = "integrations/config_adapters_beam.md" }, { "ActivitySim" = "integrations/config_adapters_activitysim.md" }] }] },
-  { "Examples" = "examples.md" },
-  { "Advanced" = ["advanced/index.md", "advanced/execution-style-decision-tree.md", "advanced/manual-lifecycle-and-decorators.md"] },
-  { "Support & Reference" = ["troubleshooting.md", "db-maintenance.md", "cli-error-style.md", "glossary.md", "architecture.md"] },
-  { "API Reference" = ["api/index.md", "api/essentials.md", "api/advanced.md", "api/public_api.md", "api/api_helpers.md", "api/tracker.md", "api/workflow.md", "api/artifact.md", "api/run.md", "api/indexing.md", "api/identity.md", "api/views.md", "api/matrix.md", "api/materialize.md"] },
+    { "Home" = "index.md" },
+    { "Getting Started" = ["getting-started/installation.md", "getting-started/quickstart.md", "getting-started/first-workflow.md", { "Command Line Interface" = "cli-reference.md" }] },
+    { "Concepts" = ["concepts/overview.md", "concepts/config-management.md", "concepts/decorators-and-metadata.md", "concepts/caching-and-hydration.md", "concepts/data-materialization.md"] },
+    { "Guides" = ["usage-guide.md", "building-domain-tracker.md", "dlt-loader-guide.md", "containers-guide.md", "mounts-and-portability.md", "schema-export.md"] },
+    { "Integrations" = ["integrations/index.md", "integrations/containers.md", "integrations/dlt_loader.md", { "Config Adapters" = [{ "Overview" = "integrations/config_adapters.md" }, { "BEAM" = "integrations/config_adapters_beam.md" }, { "ActivitySim" = "integrations/config_adapters_activitysim.md" }] }] },
+    { "Examples" = "examples.md" },
+    { "Advanced" = ["advanced/index.md", "advanced/execution-style-decision-tree.md", "advanced/manual-lifecycle-and-decorators.md"] },
+    { "Support & Reference" = ["troubleshooting.md", "db-maintenance.md", "cli-error-style.md", "glossary.md", "architecture.md"] },
+    { "API Reference" = ["api/index.md", "api/essentials.md", "api/advanced.md", "api/public_api.md", "api/api_helpers.md", "api/tracker.md", "api/workflow.md", "api/artifact.md", "api/run.md", "api/indexing.md", "api/identity.md", "api/views.md", "api/matrix.md", "api/materialize.md"] },
 ]
 
 # With the "extra_css" option you can add your own CSS styling to customizeo
@@ -130,7 +130,6 @@ features = [
     # dismiss it then they have read the announcement.
     # https://zensical.org/docs/setup/header/#announcement-bar
     "announce.dismiss",
-
     # If you have a repository configured and turn feature this on, Zensical
     # will generate an edit button for the page. This works for common
     # repository hosting services.
@@ -142,57 +141,47 @@ features = [
     # code for the current page.
     # https://zensical.org/docs/setup/repository/#code-actions
     "content.action.view",
-
     # Code annotations allow you to add an icon with a tooltip to your
     # code blocks to provide explanations at crucial points.
     # https://zensical.org/docs/authoring/code-blocks/#code-annotations
     "content.code.annotate",
-
     # This feature turns on a button in code blocks that allow users to
     # copy the content to their clipboard without first selecting it.
     # https://zensical.org/docs/authoring/code-blocks/#code-copy-button
     "content.code.copy",
-
     # Code blocks can include a button to allow for the selection of line
     # ranges by the user.
     # https://zensical.org/docs/authoring/code-blocks/#code-selection-button
     "content.code.select",
-
     # Zensical can render footnotes as inline tooltips, so the user can read
     # the footnote without leaving the context of the document.
     # https://zensical.org/docs/authoring/footnotes/#footnote-tooltips
     "content.footnote.tooltips",
-
     # If you have many content tabs that have the same titles (e.g., "Python",
     # "JavaScript", "Cobol"), this feature causes all of them to switch to
     # at the same time when the user chooses their language in one.
     # https://zensical.org/docs/authoring/content-tabs/#linked-content-tabs
     "content.tabs.link",
-
     # TODO: not sure I understand this one? Is there a demo of this in the docs?
     # https://zensical.org/docs/authoring/tooltips/#improved-tooltips
     "content.tooltips",
-
     # With this feature enabled, Zensical will automatically hide parts
     # of the header when the user scrolls past a certain point.
     # https://zensical.org/docs/setup/header/#automatic-hiding
-#    "header.autohide",
+    #    "header.autohide",
 
     # Turn on this feature to expand all collapsible sections in the
     # navigation sidebar by default.
     # https://zensical.org/docs/setup/navigation/#navigation-expansion
     "navigation.expand",
-
     # This feature turns on navigation elements in the footer that allow the
     # user to navigate to a next or previous page.
     # https://zensical.org/docs/setup/footer/#navigation
     "navigation.footer",
-
     # When section index pages are enabled, documents can be directly attached
     # to sections, which is particularly useful for providing overview pages.
     # https://zensical.org/docs/setup/navigation/#section-index-pages
     "navigation.indexes",
-
     # In order to provide a better user experience on slow connections when
     # using instant navigation, a progress indicator can be enabled.
     # https://zensical.org/docs/setup/navigation/#progress-indicator
@@ -202,7 +191,6 @@ features = [
     # above the title of each page
     # https://zensical.org/docs/setup/navigation/#navigation-path
     "navigation.path",
-
     # When pruning is enabled, only the visible navigation items are included
     # in the rendered HTML, reducing the size of the built site by 33% or more.
     # https://zensical.org/docs/setup/navigation/#navigation-pruning
@@ -212,12 +200,10 @@ features = [
     # the sidebar for viewports above 1220px, but remain as-is on mobile.
     # https://zensical.org/docs/setup/navigation/#navigation-sections
     "navigation.sections",
-
     # When tabs are enabled, top-level sections are rendered in a menu layer
     # below the header for viewports above 1220px, but remain as-is on mobile.
     # https://zensical.org/docs/setup/navigation/#navigation-tabs
     "navigation.tabs",
-
     # When sticky tabs are enabled, navigation tabs will lock below the header
     # and always remain visible when scrolling down.
     # https://zensical.org/docs/setup/navigation/#sticky-navigation-tabs
@@ -227,23 +213,19 @@ features = [
     # starts to scroll up again.
     # https://zensical.org/docs/setup/navigation/#back-to-top-button
     "navigation.top",
-
     # When anchor tracking is enabled, the URL in the address bar is
     # automatically updated with the active anchor as highlighted in the table
     # of contents.
     # https://zensical.org/docs/setup/navigation/#anchor-tracking
     "navigation.tracking",
-
     # When search highlighting is enabled and a user clicks on a search result,
     # Zensical will highlight all occurrences after following the link.
     # https://zensical.org/docs/setup/search/#search-highlighting
     "search.highlight",
-
     # When anchor following for the table of contents is enabled, the sidebar
     # is automatically scrolled so that the active anchor is always visible.
     # https://zensical.org/docs/setup/navigation/#anchor-following
-     "toc.follow",
-
+    "toc.follow",
     # When navigation integration for the table of contents is enabled, it is
     # always rendered as part of the navigation sidebar on the left.
     # https://zensical.org/docs/setup/navigation/#navigation-integration
