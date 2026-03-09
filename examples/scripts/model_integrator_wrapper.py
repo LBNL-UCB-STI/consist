@@ -149,11 +149,15 @@ if __name__ == "__main__":
 # After running this script, try these commands in your terminal:
 #
 # 1. List all runs:
-#    consist runs list
+#    consist runs
 #
-# 2. View the provenance of a specific artifact:
-#    consist artifacts show <artifact_id>
+# 2. Inspect one run and its outputs:
+#    consist show baseline_2040
+#    consist artifacts baseline_2040
 #
-# 3. Export the results to a CSV for GIS/Tableau:
-#    consist query "SELECT * FROM run_config_kv" --format csv > results.csv
+# 3. Explore interactively:
+#    consist shell
+#    (consist) runs
+#    (consist) artifacts #1
+#    (consist) preview @1
 # ---------------------------------------------------------------------------------

@@ -85,11 +85,17 @@ For a full term index, see the [Glossary](../glossary.md).
 
 **Inputs** are files or values that influence computation. File inputs are hashed by content or metadata depending on the hashing strategy (`full` vs `fast`).
 
-**Outputs** are named artifacts registered via a function's `dict[str, Path]` return value, or explicitly via `output_paths`. Consist stores their paths and provenance metadata for lookup and querying.
+**Outputs** are named artifacts registered via a function's `dict[str, Path]`
+return value together with declared `outputs=[...]`, or explicitly via
+`output_paths`. Consist stores their paths and provenance metadata for lookup
+and querying.
 
 ### Recommended pattern: file-based I/O
 
-The recommended pattern is for functions to accept file paths as inputs, write output files, and return a `dict[str, Path]` mapping artifact keys to output paths. Consist uses the return value to log artifacts — no separate `output_paths` argument required.
+The recommended pattern is for functions to accept file paths as inputs, write
+output files, and return a `dict[str, Path]` mapping artifact keys to output
+paths. Declare the matching artifact keys in `outputs=[...]` when calling
+`tracker.run(...)`; Consist then logs those returned paths as artifacts.
 
 ``` python
 import pandas as pd
@@ -104,6 +110,7 @@ def summarize_trips(trips_path: Path) -> dict[str, Path]:
 result = tracker.run(
     fn=summarize_trips,
     inputs={"trips_path": trips_artifact},  # path resolved from artifact; hashed for cache identity
+    outputs=["summary"],
 )
 ```
 

@@ -33,7 +33,8 @@ python setup_data.py
 ## Define the Pipeline
 
 Adding Consist requires minimal changes to existing functions — primarily adding
-a `dict[str, Path]` return so the tracker knows what was produced.
+a `dict[str, Path]` return and declaring the output keys in `tracker.run(...)`
+so the tracker knows what was produced.
 
 === "Without Consist"
 
@@ -85,7 +86,7 @@ a `dict[str, Path]` return so the tracker knows what was produced.
     import pandas as pd
     import json
     import consist
-    from consist import Tracker
+    from consist import ExecutionOptions, Tracker
 
     tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
@@ -114,6 +115,14 @@ a `dict[str, Path]` return so the tracker knows what was produced.
             "raw_path": Path("./data/raw.csv"),
             "config_path": Path("./config.json"),
         },
+        outputs=["cleaned"],
+        execution_options=ExecutionOptions(
+            load_inputs=False,
+            runtime_kwargs={
+                "raw_path": Path("./data/raw.csv"),
+                "config_path": Path("./config.json"),
+            },
+        ),
     )
     print(f"Clean: {clean_result.run.status}")
 
@@ -121,6 +130,11 @@ a `dict[str, Path]` return so the tracker knows what was produced.
     summary_result = tracker.run(
         fn=summarize,
         inputs={"cleaned_path": consist.ref(clean_result, key="cleaned")},  # (3)!
+        outputs=["summary"],
+        execution_options=ExecutionOptions(
+            load_inputs=False,
+            runtime_kwargs={"cleaned_path": clean_result.outputs["cleaned"].path},
+        ),
     )
     print(f"Summarize: {summary_result.run.status}")
 
@@ -129,12 +143,12 @@ a `dict[str, Path]` return so the tracker knows what was produced.
     print(f"Result: {final.to_dict()}")
     ```
 
-    1. The only change to the function body: return `{"cleaned": out_path}` instead
-       of `None`. Consist uses this to register the output artifact.
-    2. `inputs` maps parameter names to paths or artifacts. Each file's content hash
-       is included in the cache signature — no global path constants needed.
-    3. `consist.ref(...)` passes the upstream artifact directly. The dependency is an
-       explicit value, not a shared constant or implicit ordering assumption.
+    1. The function now returns `{"cleaned": out_path}` and `tracker.run(...)`
+       declares `outputs=["cleaned"]`, so Consist knows which artifact to log.
+    2. `inputs` declares the hashed dependencies, while `runtime_kwargs` passes the
+       raw `Path` values into the function body with `load_inputs=False`.
+    3. `consist.ref(...)` passes the upstream artifact explicitly, and the runtime
+       path comes from `clean_result.outputs["cleaned"].path`.
 
 ## Run and Observe Caching
 

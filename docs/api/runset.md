@@ -15,8 +15,8 @@ from consist import RunSet, Tracker
 
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
-baseline = RunSet.from_query(tracker, label="baseline", scenario_id="base")
-policy = RunSet.from_query(tracker, label="policy", scenario_id="policy")
+baseline = RunSet.from_query(tracker, label="baseline", parent_id="base")
+policy = RunSet.from_query(tracker, label="policy", parent_id="policy")
 
 pair = baseline.align(policy, on="year")
 diffs = pair.config_diffs(namespace="beam")

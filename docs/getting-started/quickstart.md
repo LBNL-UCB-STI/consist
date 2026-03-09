@@ -12,7 +12,7 @@ Save this as `quickstart_run.py`:
 
 ``` python
 from pathlib import Path
-from consist import Tracker
+from consist import ExecutionOptions, Tracker
 import consist
 
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
@@ -24,8 +24,24 @@ def square_value(input_file: Path) -> dict[str, Path]:
     print(f"executed square_value on {input_file}")
     return {"square": out}
 
-first = tracker.run(fn=square_value, inputs={"input_file": Path("input.txt")})
-second = tracker.run(fn=square_value, inputs={"input_file": Path("input.txt")})
+first = tracker.run(
+    fn=square_value,
+    inputs={"input_file": Path("input.txt")},
+    outputs=["square"],
+    execution_options=ExecutionOptions(
+        load_inputs=False,
+        runtime_kwargs={"input_file": Path("input.txt")},
+    ),
+)
+second = tracker.run(
+    fn=square_value,
+    inputs={"input_file": Path("input.txt")},
+    outputs=["square"],
+    execution_options=ExecutionOptions(
+        load_inputs=False,
+        runtime_kwargs={"input_file": Path("input.txt")},
+    ),
+)
 
 print(first.cache_hit, second.cache_hit)  # False, True
 ```
@@ -62,6 +78,11 @@ with tracker.scenario("demo_pipeline") as sc:
     step = sc.run(
         fn=square_value,
         inputs={"input_file": Path("input.txt")},
+        outputs=["square"],
+        execution_options=ExecutionOptions(
+            load_inputs=False,
+            runtime_kwargs={"input_file": Path("input.txt")},
+        ),
     )
 
     with sc.trace(

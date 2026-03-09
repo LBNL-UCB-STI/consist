@@ -1,3 +1,11 @@
+"""Plain simulation helpers used by the tutorial notebooks.
+
+These functions intentionally do not import Consist or know anything about
+trackers, runs, or artifacts. The notebooks and scripts wrap them with explicit
+provenance and cache wiring so the model logic stays readable and testable on
+its own.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -25,6 +33,11 @@ def build_sweep_registry(
     replicates_per_setting: int,
     seed: int,
 ) -> pd.DataFrame:
+    """Build a concrete parameter registry for the sweep.
+
+    The returned table is plain Pandas data. Calling code decides how each row
+    becomes a tracked run.
+    """
     df = make_parameter_sweep(
         prey_birth_rates=list(prey_birth_rates),
         predation_rates=list(predation_rates),
@@ -37,6 +50,7 @@ def build_sweep_registry(
 
 
 def make_run_id(*, scenario_id: str, sim_id: int) -> str:
+    """Return a deterministic run identifier for one sweep row."""
     return f"{scenario_id}_sim_{sim_id:04d}"
 
 
@@ -71,6 +85,7 @@ def aggregate_parquet(
     *,
     paths: Iterable[Path],
 ) -> pd.DataFrame:
+    """Read and concatenate a collection of parquet files."""
     frames = []
     for path in paths:
         frames.append(pd.read_parquet(path))
@@ -78,6 +93,7 @@ def aggregate_parquet(
 
 
 def write_parquet(df: pd.DataFrame, path: Path) -> Path:
+    """Write a dataframe to parquet and return the resolved output path."""
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(path, index=False)
     return path

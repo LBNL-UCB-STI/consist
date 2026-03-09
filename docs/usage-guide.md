@@ -34,6 +34,15 @@ Choose based on what you're building and how much structure you need:
 
 Use `run()` when you have a self-contained operation: data cleaning, transformation, aggregation, or any callable that takes inputs and produces outputs. Consist caches the entire function call based on code version + config + input data.
 
+**Recommended default:** keep the function boundary honest. Pass file paths or
+artifact refs into the function body, perform I/O there, return
+`dict[str, Path]` for outputs, and declare the output keys in `outputs=[...]`.
+Today, named `inputs={...}` mappings auto-load by default, so explicit
+path-based functions usually pair `inputs=...` with
+`ExecutionOptions(load_inputs=False, runtime_kwargs=...)`. Auto-loading
+DataFrames and global tracker context are still available, but they are
+convenience layers, not the clearest starting point.
+
 **When to use:**
 
 - Simple data transformations (filter, aggregate, merge)
@@ -48,39 +57,65 @@ Use `run()` when you have a self-contained operation: data cleaning, transformat
 
 ### Simple Example: Data Cleaning
 
-Here's the basic pattern:
+=== "Without Consist"
 
-``` python
-import consist
-from consist import Tracker, use_tracker
-from pathlib import Path
-import pandas as pd
+    ``` python
+    from pathlib import Path
+    import pandas as pd
 
-tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")  # (1)!
+    RAW = Path("raw.parquet")
+    CLEANED = Path("cleaned.parquet")
 
-def clean_data(raw: pd.DataFrame, threshold: float = 0.5) -> pd.DataFrame:  # (2)!
-    df = raw[raw["value"] > threshold]  # (3)!
-    return df
 
-with use_tracker(tracker):  # (4)!
-    result = consist.run(
+    def clean_data(raw_path: Path, threshold: float = 0.5) -> None:
+        df = pd.read_parquet(raw_path)
+        df[df["value"] > threshold].to_parquet(CLEANED)
+
+
+    clean_data(RAW, threshold=0.5)
+    cleaned_df = pd.read_parquet(CLEANED)
+    print(cleaned_df.head())
+    ```
+
+    This is plain Python and it works, but there is no cache identity, no run
+    record, and no answer to "which exact code/config/input produced this file?"
+
+=== "With Consist"
+
+    ``` python
+    from pathlib import Path
+    import pandas as pd
+    from consist import ExecutionOptions, Tracker
+
+    tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+
+
+    def clean_data(raw_path: Path, threshold: float = 0.5) -> dict[str, Path]:
+        df = pd.read_parquet(raw_path)
+        out_path = Path("./cleaned.parquet")
+        df[df["value"] > threshold].to_parquet(out_path)
+        return {"cleaned": out_path}
+
+
+    result = tracker.run(
         fn=clean_data,
-        inputs={"raw": Path("raw.csv")},
-        config={"threshold": 0.5},  # (5)!
+        inputs={"raw_path": Path("raw.parquet")},
+        config={"threshold": 0.5},
         outputs=["cleaned"],
+        execution_options=ExecutionOptions(
+            load_inputs=False,
+            runtime_kwargs={"raw_path": Path("raw.parquet")},
+        ),
     )
 
-cleaned_artifact = result.outputs["cleaned"]  # (6)!
-cleaned_df = consist.load_df(cleaned_artifact)
-print(f"Output: {cleaned_artifact.path}")
-```
+    cleaned_artifact = result.outputs["cleaned"]
+    cleaned_df = pd.read_parquet(cleaned_artifact.path)
+    print(cleaned_artifact.path)
+    ```
 
-1. Create the tracker for run metadata and caching.
-2. Define the function Consist will cache.
-3. Filter rows above the threshold.
-4. Run inside the tracker context so Consist can log provenance.
-5. `config` participates in the cache key.
-6. Access the cached output artifact and load data.
+    The function stays ordinary and testable. Consist adds the cache key,
+    lineage, and queryable artifact record around the call, while
+    `load_inputs=False` keeps the file boundary explicit.
 
 If you run it again with the same inputs and config, you should get a cache hit and no re-execution.
 
@@ -121,12 +156,18 @@ This reduces cache misses when unrelated files elsewhere in the repository chang
 Legacy run-policy kwargs are no longer supported on `run(...)` APIs. Use
 `cache_options=...`, `output_policy=...`, and `execution_options=...`.
 
-For file outputs, prefer managed helpers: use `consist.output_path(...)` in active runs, or `_consist_ctx.output_path(...)`/`_consist_ctx.output_dir(...)` when context is injected. Then call `_consist_ctx.log_output(...)` (or return the path when auto-output mapping applies).
+For file outputs, prefer returning `dict[str, Path]` and declaring
+`outputs=[...]` when you control the function body. Use managed helpers like
+`consist.output_path(...)`,
+`_consist_ctx.output_path(...)`, or `_consist_ctx.output_dir(...)` when you need
+Consist to allocate paths for you or when wrapping tools that do not return
+their outputs directly.
 
 <details>
-<summary>Alternative: keep raw file paths (no auto-load)</summary>
+<summary>Alternative: use injected context and managed output paths</summary>
 
-Use this when your function needs a `Path` and manages I/O directly (common for legacy tools or file-based APIs). Prefer `_consist_ctx.output_path(...)` so paths stay under the managed run output policy and honor `artifact_dir` overrides.
+Use this when Consist should allocate the output location for you, or when you
+are wrapping a file-writing tool that returns `None`.
 
 ``` python
 from consist import ExecutionOptions
@@ -254,16 +295,19 @@ with use_tracker(tracker):
 </details>
 
 <details>
-<summary>How input mappings become function arguments</summary>
+<summary>Alternative: auto-load tabular inputs into function arguments</summary>
 
-When `inputs` is a mapping, Consist matches keys to function parameters and auto-loads
-those artifacts (for example, a CSV becomes a DataFrame) into the call by default.
-If you keep auto-loading enabled (`execution_options=ExecutionOptions(load_inputs=True)`),
-`inputs={"upstream": ...}` becomes the `upstream`
-argument automatically.
+Auto-loading is convenient for short scripts and notebook-scale analysis:
 
-If you want raw paths instead of auto-loaded data, use
-`execution_options=ExecutionOptions(load_inputs=False, runtime_kwargs={...})`.
+``` python
+def clean_data(raw: pd.DataFrame, threshold: float = 0.5) -> pd.DataFrame:
+    return raw[raw["value"] > threshold]
+```
+
+When `inputs` is a mapping and `load_inputs=True`, Consist can hydrate those
+artifacts into function arguments for you. This is shorter, but it also hides
+the file boundary. Prefer the explicit `Path`-based pattern above when you want
+the workflow wiring to stay obvious.
 </details>
 
 The `depends_on` files are hashed as part of the cache key, so changing config.yaml invalidates the cache.
@@ -273,6 +317,11 @@ The `depends_on` files are hashed as part of the cache key, so changing config.y
 ## Pattern 2: Multi-Step Workflows (`scenario()`)
 
 Use `scenario()` when you have multiple interdependent steps that share state or configuration. Scenarios group steps into a coherent unit (a "run scenario"), while each step caches independently.
+
+**Recommended default:** keep step links explicit. Have each step return named
+artifact paths, then pass those outputs downstream with `consist.ref(...)` or
+`consist.refs(...)`. Reach for the coupler when you need scenario-scoped runtime
+state, optional branching, or trace-style orchestration.
 
 **When to use:**
 
@@ -362,42 +411,90 @@ sc.coupler.require("beam/plans_in")       # global access still works
 
 ### Simple Example: Two-Step Workflow
 
-``` python
-import consist
-from consist import ExecutionOptions, Tracker, use_tracker
-from pathlib import Path
-import pandas as pd
+=== "Without Consist"
 
-tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+    ``` python
+    from pathlib import Path
+    import pandas as pd
 
-def preprocess_data(raw: pd.DataFrame) -> pd.DataFrame:  # (1)!
-    df = raw[raw["value"] > 0.5]
-    return df
+    PREPROCESSED = Path("./preprocessed.parquet")
 
-def analyze_data(preprocessed: pd.DataFrame) -> pd.DataFrame:
-    summary = preprocessed.groupby("category", as_index=False)["value"].mean()
-    return summary
 
-with use_tracker(tracker):  # (2)!
-    with consist.scenario("my_analysis") as sc:
+    def preprocess_data(raw_path: Path) -> None:
+        df = pd.read_csv(raw_path)
+        df[df["value"] > 0.5].to_parquet(PREPROCESSED)
+
+
+    def analyze_data(preprocessed_path: Path) -> None:
+        df = pd.read_parquet(preprocessed_path)
+        summary = df.groupby("category", as_index=False)["value"].mean()
+        summary.to_parquet("./analysis.parquet")
+
+
+    preprocess_data(Path("raw.csv"))
+    analyze_data(PREPROCESSED)
+    ```
+
+    The dependency is real, but it is implicit. The second step only works
+    because the first one wrote to a shared path that both functions know about.
+
+=== "With Consist"
+
+    ``` python
+    from pathlib import Path
+    import pandas as pd
+    import consist
+    from consist import ExecutionOptions, Tracker
+
+    tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+
+
+    def preprocess_data(raw_path: Path) -> dict[str, Path]:
+        df = pd.read_csv(raw_path)
+        out_path = Path("./preprocessed.parquet")
+        df[df["value"] > 0.5].to_parquet(out_path)
+        return {"preprocessed": out_path}
+
+
+    def analyze_data(preprocessed_path: Path) -> dict[str, Path]:
+        df = pd.read_parquet(preprocessed_path)
+        out_path = Path("./analysis.parquet")
+        df.groupby("category", as_index=False)["value"].mean().to_parquet(out_path)
+        return {"analysis": out_path}
+
+
+    with tracker.scenario("my_analysis") as sc:
         preprocess_result = sc.run(
             name="preprocess",
             fn=preprocess_data,
-            inputs={"raw": Path("raw.csv")},
+            inputs={"raw_path": Path("raw.csv")},
             outputs=["preprocessed"],
+            execution_options=ExecutionOptions(
+                load_inputs=False,
+                runtime_kwargs={"raw_path": Path("raw.csv")},
+            ),
         )
 
         sc.run(
             name="analyze",
             fn=analyze_data,
-            inputs={"preprocessed": consist.ref(preprocess_result, key="preprocessed")},
-            execution_options=ExecutionOptions(load_inputs=True),
+            inputs={
+                "preprocessed_path": consist.ref(
+                    preprocess_result, key="preprocessed"
+                )
+            },
             outputs=["analysis"],
+            execution_options=ExecutionOptions(
+                load_inputs=False,
+                runtime_kwargs={
+                    "preprocessed_path": preprocess_result.outputs["preprocessed"].path
+                },
+            ),
         )
-```
+    ```
 
-1. Define steps as regular functions for `sc.run`.
-2. Execute the steps inside a scenario context.
+    Each step stays plain Python, but the link between them is now a named
+    artifact reference instead of an implicit shared path.
 
 All steps have `scenario_id="my_analysis"`, making it easy to query together. Change preprocess logic? The preprocess step re-runs; the analyze step re-runs only if the preprocessed artifact changes. Change raw.csv? Both re-execute.
 
@@ -405,18 +502,24 @@ All steps have `scenario_id="my_analysis"`, making it easy to query together. Ch
 
 The `inputs=` parameter supports two common forms:
 
-**Mapping form** (explicit paths from disk):
+**Mapping form** (declare hashed dependencies):
 ``` python
 sc.run(
     name="preprocess",
     fn=preprocess_data,
     inputs={"raw": Path("raw.csv")},  # (1)!
+    execution_options=ExecutionOptions(
+        load_inputs=False,
+        runtime_kwargs={"raw": Path("raw.csv")},
+    ),
     outputs=["preprocessed"],
 )
 ```
 
-1. Load from disk to create the initial artifact.
-Use this when you're loading data from disk for the first time.
+1. Hash the file as an input dependency, then pass the raw path explicitly with
+   `runtime_kwargs`.
+Use this when you're loading data from disk for the first time and want the I/O
+boundary to stay obvious.
 
 **Linked artifact form** (recommended for step-to-step coupling):
 ``` python
@@ -435,7 +538,8 @@ sc.run(
 2. Auto-load inputs as function parameters.
 Use this when an upstream step already produced the artifact. With
 `execution_options=ExecutionOptions(load_inputs=True)`, each mapping key becomes
-a function parameter with loaded data.
+a function parameter with loaded data. This is concise, but the more explicit
+path-based variant above is usually the better default for production pipelines.
 
 Rule of thumb:
 - Use `consist.ref(...)` for one-off single links.

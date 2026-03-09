@@ -47,7 +47,7 @@ pip install git+https://github.com/LBNL-UCB-STI/consist.git
 ```python
 import consist
 from pathlib import Path
-from consist import Tracker
+from consist import ExecutionOptions, Tracker
 import pandas as pd
 
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
@@ -65,6 +65,11 @@ result = tracker.run(
     fn=clean_data,
     inputs={"raw": Path("raw.parquet")},  # hashed for cache identity
     config={"threshold": 0.5},  # hashed for cache identity
+    outputs=["cleaned"],
+    execution_options=ExecutionOptions(
+        load_inputs=False,
+        runtime_kwargs={"raw": Path("raw.parquet")},
+    ),
 )
 
 # Second call with identical inputs: instant cache hit, no execution
@@ -72,6 +77,11 @@ result = tracker.run(
     fn=clean_data,
     inputs={"raw": Path("raw.parquet")},
     config={"threshold": 0.5},
+    outputs=["cleaned"],
+    execution_options=ExecutionOptions(
+        load_inputs=False,
+        runtime_kwargs={"raw": Path("raw.parquet")},
+    ),
 )
 
 # Artifact: the output file with provenance metadata attached
@@ -103,10 +113,20 @@ preprocess = tracker.run(
     fn=clean_data,
     inputs={"raw": Path("raw.parquet")},
     config={"threshold": 0.5},
+    outputs=["cleaned"],
+    execution_options=ExecutionOptions(
+        load_inputs=False,
+        runtime_kwargs={"raw": Path("raw.parquet")},
+    ),
 )
 analyze = tracker.run(
     fn=analyze_data,
     inputs={"cleaned": consist.ref(preprocess, key="cleaned")},  # explicit artifact reference
+    outputs=["analysis"],
+    execution_options=ExecutionOptions(
+        load_inputs=False,
+        runtime_kwargs={"cleaned": preprocess.outputs["cleaned"].path},
+    ),
 )
 ```
 
