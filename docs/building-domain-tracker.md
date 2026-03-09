@@ -1,15 +1,164 @@
 # Building a Domain Tracker
 
-Consist works well as a direct API, but teams usually get better long-term
-ergonomics by wrapping it in a domain-specific class.
+Consist works well as a direct API, but teams get better long-term ergonomics
+by wrapping it in a domain-specific class. A domain tracker centralizes all
+the wiring that would otherwise repeat at every callsite — tracker construction,
+default identity inputs, output key conventions — and exposes domain verbs
+instead of framework mechanics.
 
-Use this guide when you are building a reusable model tool (for example,
-calibration, policy testing, or scenario comparison) and want to expose
-domain verbs instead of low-level run wiring.
+## When to Wrap vs Use Direct APIs
 
-## Wrapper Class Pattern
+| Prefer | When |
+|---|---|
+| **Domain wrapper** | Shared codebase, repeated identity/runtime wiring, multiple callers of the same workflow |
+| **Direct Consist API** | One-off analysis scripts, debugging, prototyping new step boundaries |
 
-The core pattern is a wrapper class that owns a `Tracker`:
+Start direct for an initial spike. Promote to a wrapper once callsites begin
+repeating the same run wiring.
+
+---
+
+## Core Pattern
+
+The core pattern is a class that:
+
+1. Owns a `Tracker` internally
+2. Implements `__enter__` / `__exit__` to activate the tracker context
+3. Exposes domain methods that call Consist primitives
+
+```python
+from pathlib import Path
+from typing import Any
+
+import consist
+from consist import Tracker
+
+
+class SimulationTracker:
+    def __init__(self, *, workspace: Path) -> None:
+        self.workspace = workspace
+        self._tracker = Tracker(
+            run_dir=workspace / "runs",
+            db_path=workspace / "provenance.duckdb",
+        )
+        self._cm = None
+
+    def __enter__(self) -> "SimulationTracker":
+        self._cm = consist.use_tracker(self._tracker)
+        self._cm.__enter__()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._cm.__exit__(*exc)
+
+    # --- Domain methods ---
+
+    def run_model(self, *, name: str, config: dict, inputs: dict[str, Any]) -> Any:
+        """Run one scenario with consistent provenance wiring."""
+        return self._tracker.run(
+            fn=my_model_fn,
+            name=name,
+            config=config,
+            inputs=inputs,
+            outputs=["results"],
+        )
+
+    def find_best(self, *, metric: str, k: int = 5):
+        """Query top-k runs by a scalar metric stored in facets."""
+        from sqlalchemy import text
+        query = text("""
+            SELECT run_id, value_num
+            FROM global_tables.run_config_kv
+            WHERE key = :metric
+            ORDER BY value_num DESC
+            LIMIT :k
+        """)
+        return self._tracker.run_query(query.params(metric=metric, k=k))
+```
+
+Usage:
+
+```python
+with SimulationTracker(workspace=Path("./work")) as sim:
+    result = sim.run_model(
+        name="baseline",
+        config={"sample_rate": 0.1, "year": 2030},
+        inputs={"population": Path("data/population.parquet")},
+    )
+    top_runs = sim.find_best(metric="rmse", k=3)
+```
+
+The `__enter__` / `__exit__` pattern eliminates the need to call
+`consist.use_tracker(...)` inside every method. The tracker context is active
+for the lifetime of the `with` block; domain methods just call
+`self._tracker.run(...)` directly.
+
+---
+
+## Centralizing Defaults
+
+The wrapper is the right place to fix wiring that should not vary across
+callsites: the model name, default identity inputs, output keys, adapter.
+
+```python
+class SimulationTracker:
+    def __init__(self, *, workspace: Path, config_dir: Path) -> None:
+        self.workspace = workspace
+        self.config_dir = config_dir
+        self._tracker = Tracker(
+            run_dir=workspace / "runs",
+            db_path=workspace / "provenance.duckdb",
+        )
+        # Fixed for all runs — callers cannot forget these
+        self._identity_inputs = [("model_config", config_dir)]
+        self._cm = None
+
+    def __enter__(self) -> "SimulationTracker":
+        self._cm = consist.use_tracker(self._tracker)
+        self._cm.__enter__()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._cm.__exit__(*exc)
+
+    def run_model(self, *, name: str, config: dict) -> Any:
+        return self._tracker.run(
+            fn=my_model_fn,
+            name=name,
+            model="my_model",                          # fixed
+            config=config,
+            identity_inputs=self._identity_inputs,     # fixed
+            outputs=["results"],                       # fixed
+            execution_options=ExecutionOptions(
+                runtime_kwargs={"config_dir": self.config_dir}
+            ),
+        )
+```
+
+Callers supply domain inputs (`name`, `config`). The wrapper owns everything
+else. One missed `identity_inputs` in a direct call is a stale cache;
+the wrapper makes that impossible.
+
+---
+
+## Domain Verbs Over Framework Verbs
+
+Name your methods after model concepts, not Consist operations:
+
+| Framework call | Domain method |
+|---|---|
+| `tracker.run(fn=evaluate_fn, ...)` | `sim.evaluate(year=2030)` |
+| `tracker.run(fn=calibrate_fn, ...)` | `sim.calibrate(overrides={"coeff": 0.8})` |
+| `tracker.run_query(...)` | `sim.top_k_runs(metric="mode_share_error")` |
+
+Inside those methods, call Consist primitives (`run`, `scenario`, `trace`)
+and keep the wiring hidden from callers.
+
+---
+
+## Full Example
+
+A calibration workflow with multiple run types and a query helper:
 
 ```python
 from pathlib import Path
@@ -18,129 +167,97 @@ from typing import Any
 import consist
 from sqlalchemy import text
 from consist import ExecutionOptions, Tracker
-from consist.integrations.activitysim import ActivitySimConfigAdapter, ConfigOverrides
 
 
 class CalibrationTracker:
-    def __init__(self, *, workspace: Path, base_config_dir: Path) -> None:
+    """Domain tracker for a calibration workflow."""
+
+    def __init__(self, *, workspace: Path, config_dir: Path) -> None:
         self.workspace = workspace
-        self.base_config_dir = base_config_dir
-        self.tracker = Tracker(
+        self.config_dir = config_dir
+        self._tracker = Tracker(
             run_dir=workspace / "runs",
             db_path=workspace / "provenance.duckdb",
         )
-        self.adapter = ActivitySimConfigAdapter(root_dirs=[base_config_dir])
-        self.identity_inputs = [("asim_config", base_config_dir)]
+        self._identity_inputs = [("model_config", config_dir)]
+        self._cm = None
 
-    def evaluate(self, *, run_name: str, output_dir: Path) -> Any:
-        """Run a baseline evaluation with stable identity wiring."""
-        with consist.use_tracker(self.tracker):
-            return self.tracker.run(
-                fn=run_activitysim,  # your domain callable
-                name=run_name,
-                model="activitysim_calibration",
-                adapter=self.adapter,
-                identity_inputs=self.identity_inputs,
-                outputs=["persons", "trips", "metrics"],
-                execution_options=ExecutionOptions(
-                    runtime_kwargs={"config_dir": self.base_config_dir, "output_dir": output_dir}
-                ),
+    def __enter__(self) -> "CalibrationTracker":
+        self._cm = consist.use_tracker(self._tracker)
+        self._cm.__enter__()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._cm.__exit__(*exc)
+
+    def evaluate(self, *, run_name: str, config: dict, output_dir: Path) -> Any:
+        """Run a single evaluation with stable identity wiring."""
+        return self._tracker.run(
+            fn=run_model,
+            name=run_name,
+            model="my_model_calibration",
+            config=config,
+            identity_inputs=self._identity_inputs,
+            outputs=["persons", "trips", "metrics"],
+            execution_options=ExecutionOptions(
+                runtime_kwargs={
+                    "config_dir": self.config_dir,
+                    "output_dir": output_dir,
+                }
+            ),
+        )
+
+    def sweep(self, *, configs_by_label: dict[str, dict]) -> dict[str, Any]:
+        """Evaluate multiple configurations with one domain method."""
+        return {
+            label: self.evaluate(
+                run_name=f"sweep_{label}",
+                config=config,
+                output_dir=self.workspace / "outputs" / label,
             )
-
-    def run_sweep(self, *, overrides_by_label: dict[str, ConfigOverrides]) -> dict[str, Any]:
-        """Evaluate multiple override sets with one domain method."""
-        results: dict[str, Any] = {}
-        with consist.use_tracker(self.tracker):
-            for label, overrides in overrides_by_label.items():
-                results[label] = self.tracker.run_with_config_overrides(
-                    adapter=self.adapter,
-                    base_run_id="baseline_run_id",
-                    overrides=overrides,
-                    output_dir=self.workspace / "materialized",
-                    fn=run_activitysim,
-                    name=f"calibration_{label}",
-                    model="activitysim_calibration",
-                    outputs=["metrics"],
-                    override_runtime_kwargs={"config_dir": "selected_root_dir"},
-                    execution_options=ExecutionOptions(
-                        runtime_kwargs={"output_dir": self.workspace / "asim_outputs" / label}
-                    ),
-                )
-        return results
+            for label, config in configs_by_label.items()
+        }
 
     def query_top_k(self, *, metric: str, k: int = 5):
-        """Expose domain-level query helpers, not raw SQL plumbing."""
-        query = text(
-            """
-        SELECT run_id, value_num
-        FROM global_tables.run_config_kv
-        WHERE key = :metric
-        ORDER BY value_num DESC
-        LIMIT :k
-        """
-        )
-        return self.tracker.run_query(query.params(metric=metric, k=k))
+        """Return top-k runs ranked by a scalar metric."""
+        query = text("""
+            SELECT run_id, value_num
+            FROM global_tables.run_config_kv
+            WHERE key = :metric
+            ORDER BY value_num ASC
+            LIMIT :k
+        """)
+        return self._tracker.run_query(query.params(metric=metric, k=k))
 ```
 
-The wrapper centralizes:
-
-- tracker construction (`self.tracker = Tracker(...)`)
-- adapter setup
-- default `identity_inputs`
-- runtime kwargs injection
-- consistent output key conventions
-
-## Domain Verbs Over Framework Verbs
-
-Expose methods that match your model language:
-
-- `evaluate(...)`
-- `run_sweep(...)`
-- `query_top_k(...)`
-
-Inside those methods, call Consist primitives (`run`, `scenario`, `trace`,
-`run_with_config_overrides`) and keep implementation details hidden.
-
-This keeps downstream code focused on model intent, while still preserving full
-provenance/caching/query capability.
-
-## Hiding Adapter, Identity, and Runtime Wiring
-
-A useful rule: callers should supply domain inputs, not Consist mechanics.
-
-Good wrapper API:
+Usage:
 
 ```python
-cal = CalibrationTracker(workspace=Path("./work"), base_config_dir=Path("./configs"))
-result = cal.evaluate(run_name="baseline", output_dir=Path("./outputs/baseline"))
+with CalibrationTracker(
+    workspace=Path("./calibration_work"),
+    config_dir=Path("./configs/my_model"),
+) as cal:
+    baseline = cal.evaluate(
+        run_name="baseline",
+        config={"sample_rate": 0.1, "mode_choice_coeff": 0.5},
+        output_dir=Path("./outputs/baseline"),
+    )
+
+    sweep_results = cal.sweep(
+        configs_by_label={
+            "low_coeff":  {"sample_rate": 0.1, "mode_choice_coeff": 0.3},
+            "high_coeff": {"sample_rate": 0.1, "mode_choice_coeff": 0.8},
+        }
+    )
+
+    top_runs = cal.query_top_k(metric="mode_share_error", k=3)
 ```
 
-Leaky direct call shape (inside application code):
-
-```python
-tracker.run(
-    fn=run_activitysim,
-    adapter=adapter,
-    identity_inputs=[("asim_config", config_dir)],
-    execution_options=ExecutionOptions(runtime_kwargs={"config_dir": config_dir}),
-    ...
-)
-```
-
-Both are valid; wrapper style is easier to maintain across many callsites.
-
-## When to Wrap vs Use Direct APIs
-
-| Prefer | When |
-|---|---|
-| **Domain wrapper** | Shared codebase, repeated adapter/identity/runtime wiring, multiple users of the same model workflow |
-| **Direct Consist API** | One-off analysis scripts, debugging, prototyping new step boundaries, low-level experimentation |
-
-If you are onboarding a new project, start direct for a small spike, then
-promote to a wrapper once callsites begin repeating the same run wiring.
+---
 
 ## See Also
 
 - [Usage Guide](usage-guide.md)
 - [Workflow Contexts API](api/workflow.md)
+- [Config, Facets, and Identity Inputs](concepts/config-management.md)
 - [ActivitySim Config Adapter](integrations/config_adapters_activitysim.md)
