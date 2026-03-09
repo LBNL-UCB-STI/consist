@@ -50,9 +50,9 @@ The run signature is derived from:
 - the **code hash**
 
 A few run-level fields — `model`, `year`, and `iteration` — are also folded
-into the config hash under a reserved `__consist_run_fields__` key. This means
-changing `model`, `year`, or `iteration` will change the signature even if
-`config` is otherwise identical.
+into the config hash under a reserved `__consist_run_fields__` key. When set,
+`cache_epoch` and `cache_version` are included there too. This means changing
+those values will change the signature even if `config` is otherwise identical.
 
 ---
 
@@ -177,7 +177,7 @@ with use_tracker(tracker):
 Each entry in `identity_inputs` can be a bare path or a labeled tuple:
 
 ```python
-# Concise: bare paths (labels auto-derived from the path stem)
+# Concise: bare paths (labels auto-derived from the project-relative path when possible)
 identity_inputs = [config_root, coeffs_csv]
 
 # Explicit: labeled tuples (stable names in identity summaries)
@@ -194,7 +194,7 @@ Even though file content is not stored, Consist records the hash for debugging:
 ```python
 run = tracker.get_run("asim_baseline_001")
 print(run.meta["consist_hash_inputs"])
-# {"asim_config": "sha256:a1b2c3..."}
+# {"asim_config": "a1b2c3..."}
 print(run.identity_summary["identity_inputs"])
 ```
 
@@ -215,7 +215,7 @@ When you do need one, pass it via `adapter=`:
 ```python
 from consist.integrations.activitysim import ActivitySimConfigAdapter
 
-adapter = ActivitySimConfigAdapter()
+adapter = ActivitySimConfigAdapter(root_dirs=[overlay_dir])
 
 consist.run(
     fn=run_activitysim,

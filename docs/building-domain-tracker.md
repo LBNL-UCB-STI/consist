@@ -23,14 +23,13 @@ repeating the same run wiring.
 The core pattern is a class that:
 
 1. Owns a `Tracker` internally
-2. Implements `__enter__` / `__exit__` to activate the tracker context
-3. Exposes domain methods that call Consist primitives
+2. Exposes domain methods that call `self._tracker` methods directly
+3. Optionally adds `__enter__` / `__exit__` later if it wants active-tracker ergonomics
 
 ```python
 from pathlib import Path
 from typing import Any
 
-import consist
 from consist import Tracker
 
 
@@ -41,15 +40,6 @@ class SimulationTracker:
             run_dir=workspace / "runs",
             db_path=workspace / "provenance.duckdb",
         )
-        self._cm = None
-
-    def __enter__(self) -> "SimulationTracker":
-        self._cm = consist.use_tracker(self._tracker)
-        self._cm.__enter__()
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self._cm.__exit__(*exc)
 
     # --- Domain methods ---
 
@@ -79,19 +69,48 @@ class SimulationTracker:
 Usage:
 
 ```python
-with SimulationTracker(workspace=Path("./work")) as sim:
-    result = sim.run_model(
-        name="baseline",
-        config={"sample_rate": 0.1, "year": 2030},
-        inputs={"population": Path("data/population.parquet")},
-    )
-    top_runs = sim.find_best(metric="rmse", k=3)
+sim = SimulationTracker(workspace=Path("./work"))
+result = sim.run_model(
+    name="baseline",
+    config={"sample_rate": 0.1, "year": 2030},
+    inputs={"population": Path("data/population.parquet")},
+)
+top_runs = sim.find_best(metric="rmse", k=3)
 ```
 
-The `__enter__` / `__exit__` pattern eliminates the need to call
-`consist.use_tracker(...)` inside every method. The tracker context is active
-for the lifetime of the `with` block; domain methods just call
-`self._tracker.run(...)` directly.
+This is the simplest wrapper shape and is enough for many teams. Direct
+instance methods like `self._tracker.run(...)` and `self._tracker.run_query(...)`
+do not require a global active-tracker context.
+
+### Optional: context-managed wrapper
+
+Add `__enter__` / `__exit__` when your wrapper wants to call top-level
+`consist.*` helpers that resolve the active tracker implicitly, such as
+`consist.output_path(...)`, `consist.log_output(...)`, or `consist.scenario(...)`.
+
+```python
+import consist
+
+
+class SimulationTracker:
+    def __init__(self, *, workspace: Path) -> None:
+        self.workspace = workspace
+        self._tracker = Tracker(
+            run_dir=workspace / "runs",
+            db_path=workspace / "provenance.duckdb",
+        )
+        self._cm = None
+
+    def __enter__(self) -> "SimulationTracker":
+        self._cm = consist.use_tracker(self._tracker)
+        self._cm.__enter__()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._cm.__exit__(*exc)
+```
+
+That pattern is optional ergonomics, not a requirement for a domain wrapper.
 
 ---
 

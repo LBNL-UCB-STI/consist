@@ -5,8 +5,11 @@ of the quickstart recommended path.
 
 ## Manual lifecycle APIs
 
-Use when start/end boundaries are controlled externally (for example framework
-hooks in separate call sites):
+Use `Tracker.begin_run(...)` / `Tracker.end_run()` when start/end boundaries are
+controlled externally (for example framework hooks in separate call sites).
+
+Use `Tracker.start_run(...)` when you still want the same low-level lifecycle
+surface but can keep it in one context-managed call site:
 
 - `Tracker.start_run(...)`
 - `Tracker.begin_run(...)` / `Tracker.end_run()`

@@ -92,13 +92,13 @@ Common messages and fixes:
 
 ### "unexpected keyword argument 'hash_inputs'"
 
-- `Cause`: `hash_inputs` is no longer accepted on run/trace/scenario public surfaces.
-- `Fix`: use `identity_inputs=[...]`.
+- `Cause`: `hash_inputs` is no longer accepted on `run(...)`, `trace(...)`, and step-level `scenario.run(...)` / `scenario.trace(...)` surfaces.
+- `Fix`: on those surfaces, use `identity_inputs=[...]`. Scenario header contexts still route through `begin_run(...)`, where `hash_inputs` remains a legacy low-level option.
 
 ### "unexpected keyword argument 'config_plan'"
 
-- `Cause`: `config_plan` is no longer accepted on run/trace/scenario public surfaces.
-- `Fix`: pass `adapter=...` (and optional `identity_inputs=[...]`) instead.
+- `Cause`: `config_plan` is no longer accepted on `run(...)`, `trace(...)`, and step-level `scenario.run(...)` / `scenario.trace(...)` surfaces.
+- `Fix`: on those surfaces, pass `adapter=...` (and optional `identity_inputs=[...]`) instead. Scenario headers do not currently support header-level `adapter=...`.
 
 ### "identity_inputs/hash_inputs must be a list of paths."
 

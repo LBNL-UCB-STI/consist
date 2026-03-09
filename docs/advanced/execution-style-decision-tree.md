@@ -31,7 +31,11 @@ Start
  |
  +-- Need manual lifecycle split across call sites?
         |
-        +-- Use begin_run/end_run or start_run (Advanced only)
+        +-- Use begin_run/end_run (Advanced only)
+        |
+        +-- Need the same lifecycle as a context manager in one call site?
+               |
+               +-- Use start_run(...) (Advanced only)
 ```
 
 ## Rule of thumb

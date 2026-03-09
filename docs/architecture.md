@@ -114,7 +114,10 @@ Tracker detects mount: mounts={"inputs": "/mnt/data"}
 Stored URI: inputs://land_use.csv
 ```
 
-**Workspace URIs**: For run-specific output directories, Consist mounts the current run's directory as `workspace://`. Historical paths are resolved via metadata stored in `Run.meta["_physical_run_dir"]`.
+**Run-local paths**: For run-specific output directories, Consist typically stores
+paths relative to the run directory (for example `./outputs/...`). Historical
+resolution also accepts `workspace://...` aliases and uses metadata stored in
+`Run.meta["_physical_run_dir"]`.
 
 ---
 
@@ -122,7 +125,10 @@ Stored URI: inputs://land_use.csv
 
 Consist creates **hybrid views** that transparently union ingested ("hot") DuckDB rows with raw files ("cold") on disk, so you can query across runs without loading everything into memory. Register a SQLModel schema with `Tracker(schemas=[MySchema])` to activate a view that includes provenance columns (`consist_run_id`, `consist_year`, `consist_scenario_id`, `consist_artifact_id`) for filtering and grouping.
 
-For N-dimensional data (Zarr/NetCDF), `MatrixViewFactory` creates lazy xarray Datasets concatenated along a `run_id` dimension with `year`/`iteration` as coordinates.
+For N-dimensional data, `MatrixViewFactory` currently loads tracked **Zarr**
+stores as lazy xarray Datasets concatenated along a `run_id` dimension with
+`year`/`iteration` as coordinates. NetCDF metadata can still be cataloged
+elsewhere in Consist, but `Tracker.load_matrix(...)` is currently Zarr-focused.
 
 For schemas, ingestion, and query examples, see [DLT Loader Guide](dlt-loader-guide.md) and [Schema Export](schema-export.md).
 
@@ -130,11 +136,19 @@ For schemas, ingestion, and query examples, see [DLT Loader Guide](dlt-loader-gu
 
 ## Container Integration
 
-Containers are treated as pure functions. The cache signature extends the standard formula with container-specific components:
+Containers are treated as pure functions. The cache signature extends the
+standard formula with container-specific components including image digest,
+command, environment hash, backend, working directory, declared host `volumes`,
+and backend-specific extra args:
 
 ```
-signature = SHA256(image_digest || command || env_hash || mount_hashes || input_signatures)
+signature = SHA256(container_config || input_signatures)
 ```
+
+Current caveat: because the container config includes resolved host volume
+paths, cross-machine cache reuse requires those host roots to stay stable too.
+Changing `/shared/team_inputs` to `/mnt/nfs/team_inputs` changes the signature
+even if the in-container mount point remains `/inputs`.
 
 Supported backends: Docker, Singularity/Apptainer. For usage details, see [Container Integration Guide](containers-guide.md).
 

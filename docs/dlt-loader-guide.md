@@ -228,7 +228,7 @@ with tracker.start_run("log_csv", model="demo"):
 ### Zarr / NetCDF (Matrix Data)
 
 ```python
-# Zarr metadata is ingested as catalog (not raw data)
+# This logs the artifact only; it does not ingest metadata by itself.
 with tracker.start_run("log_zarr", model="demo"):
     tracker.log_artifact(
         Path("simulation_output.zarr"),
@@ -236,6 +236,9 @@ with tracker.start_run("log_zarr", model="demo"):
         driver="zarr",
     )
 ```
+
+To ingest metadata/catalog tables, run an ingestion path after logging rather
+than relying on `log_artifact(...)` alone.
 
 ---
 
