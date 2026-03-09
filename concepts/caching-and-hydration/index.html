@@ -316,7 +316,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../advanced/index.md" class="md-tabs__link">
+        <a href="../../advanced/" class="md-tabs__link">
           
   
   Advanced
@@ -718,7 +718,7 @@
   <span class="md-ellipsis">
     
   
-    Config Management: Caching vs. Filtering
+    Config, Facets, and Identity Inputs
   
 
     
@@ -1319,8 +1319,6 @@
       
         
       
-        
-      
     
     
     
@@ -1411,34 +1409,6 @@
     
   
     Building a Domain Tracker
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../configs/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Configuration, Identity, and Facets
   
 
     
@@ -1926,7 +1896,7 @@
         
           
           <div class="md-nav__link md-nav__container">
-            <a href="../../advanced/index.md" class="md-nav__link ">
+            <a href="../../advanced/" class="md-nav__link ">
               
   
   
@@ -1970,14 +1940,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../../advanced/execution-style-decision-tree.md" class="md-nav__link">
+      <a href="../../advanced/execution-style-decision-tree/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    Which execution style should I use?
   
 
     
@@ -1998,14 +1968,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../../advanced/manual-lifecycle-and-decorators.md" class="md-nav__link">
+      <a href="../../advanced/manual-lifecycle-and-decorators/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    Manual Lifecycle and Decorators
   
 
     
@@ -2343,14 +2313,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../../api/essentials.md" class="md-nav__link">
+      <a href="../../api/essentials/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    API Essentials
   
 
     
@@ -2371,14 +2341,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../../api/advanced.md" class="md-nav__link">
+      <a href="../../api/advanced/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    API Advanced
   
 
     
@@ -3551,7 +3521,7 @@ preferred pattern for new workflows.</p>
 </span><span id="__span-5-10"><a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a>        <span class="n">fn</span><span class="o">=</span><span class="n">clean</span><span class="p">,</span>
 </span><span id="__span-5-11"><a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a>        <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;raw_file&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;raw.csv&quot;</span><span class="p">)},</span>
 </span><span id="__span-5-12"><a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a>        <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;cleaned&quot;</span><span class="p">],</span>
-</span><span id="__span-5-13"><a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a>        <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span><span class="n">load_inputs</span><span class="o">=</span><span class="kc">True</span><span class="p">),</span>
+</span><span id="__span-5-13"><a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a>        <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span><span class="n">input_binding</span><span class="o">=</span><span class="s2">&quot;loaded&quot;</span><span class="p">),</span>
 </span><span id="__span-5-14"><a id="__codelineno-5-14" name="__codelineno-5-14" href="#__codelineno-5-14"></a>    <span class="p">)</span>
 </span></code></pre></div>
 <hr />

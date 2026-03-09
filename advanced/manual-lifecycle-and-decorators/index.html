@@ -12,13 +12,13 @@
         <meta name="author" content="Zach Needell">
       
       
-        <link rel="canonical" href="https://LBNL-UCB-STI.github.io/consist/api/views/">
+        <link rel="canonical" href="https://LBNL-UCB-STI.github.io/consist/advanced/manual-lifecycle-and-decorators/">
       
       
-        <link rel="prev" href="../identity/">
+        <link rel="prev" href="../execution-style-decision-tree/">
       
       
-        <link rel="next" href="../matrix/">
+        <link rel="next" href="../../troubleshooting/">
       
       
         
@@ -29,7 +29,7 @@
     
     
       
-        <title>Views - Consist</title>
+        <title>Manual Lifecycle and Decorators - Consist</title>
       
     
     
@@ -87,7 +87,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#views" class="md-skip">
+        <a href="#manual-lifecycle-and-decorators" class="md-skip">
           Skip to content
         </a>
       
@@ -120,7 +120,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Views
+              Manual Lifecycle and Decorators
             
           </span>
         </div>
@@ -310,11 +310,13 @@
   
   
   
+    
+  
   
     
     
-      <li class="md-tabs__item">
-        <a href="../../advanced/" class="md-tabs__link">
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
           
   
   Advanced
@@ -348,13 +350,11 @@
   
   
   
-    
-  
   
     
     
-      <li class="md-tabs__item md-tabs__item--active">
-        <a href="../" class="md-tabs__link">
+      <li class="md-tabs__item">
+        <a href="../../api/" class="md-tabs__link">
           
   
   API Reference
@@ -1386,6 +1386,8 @@
       
   
   
+    
+  
   
   
     
@@ -1403,22 +1405,23 @@
     
     
       
+        
+        
+      
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
       
         
         
-          
-        
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" checked>
         
           
           <div class="md-nav__link md-nav__container">
-            <a href="../../advanced/" class="md-nav__link ">
+            <a href="../" class="md-nav__link ">
               
   
   
@@ -1436,13 +1439,13 @@
             </a>
             
               
-              <label class="md-nav__link " for="__nav_7" id="__nav_7_label" tabindex="0">
+              <label class="md-nav__link " for="__nav_7" id="__nav_7_label" tabindex="">
                 <span class="md-nav__icon md-icon"></span>
               </label>
             
           </div>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="true">
           <label class="md-nav__title" for="__nav_7">
             <span class="md-nav__icon md-icon"></span>
             
@@ -1462,7 +1465,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../advanced/execution-style-decision-tree/" class="md-nav__link">
+      <a href="../execution-style-decision-tree/" class="md-nav__link">
         
   
   
@@ -1487,10 +1490,37 @@
                 
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="../../advanced/manual-lifecycle-and-decorators/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manual Lifecycle and Decorators
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
         
   
   
@@ -1506,6 +1536,49 @@
   
 
       </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#manual-lifecycle-apis" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Manual lifecycle APIs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-decorators" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step decorators
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -1735,8 +1808,6 @@
       
   
   
-    
-  
   
   
     
@@ -1776,23 +1847,22 @@
     
     
       
-        
-        
-      
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--nested">
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_9" checked>
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_9" >
         
           
           <div class="md-nav__link md-nav__container">
-            <a href="../" class="md-nav__link ">
+            <a href="../../api/" class="md-nav__link ">
               
   
   
@@ -1812,13 +1882,13 @@
             </a>
             
               
-              <label class="md-nav__link " for="__nav_9" id="__nav_9_label" tabindex="">
+              <label class="md-nav__link " for="__nav_9" id="__nav_9_label" tabindex="0">
                 <span class="md-nav__icon md-icon"></span>
               </label>
             
           </div>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_9_label" aria-expanded="true">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_9_label" aria-expanded="false">
           <label class="md-nav__title" for="__nav_9">
             <span class="md-nav__icon md-icon"></span>
             
@@ -1838,7 +1908,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../essentials/" class="md-nav__link">
+      <a href="../../api/essentials/" class="md-nav__link">
         
   
   
@@ -1866,7 +1936,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../advanced/" class="md-nav__link">
+      <a href="../../api/advanced/" class="md-nav__link">
         
   
   
@@ -1894,7 +1964,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../public_api/" class="md-nav__link">
+      <a href="../../api/public_api/" class="md-nav__link">
         
   
   
@@ -1922,7 +1992,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../api_helpers/" class="md-nav__link">
+      <a href="../../api/api_helpers/" class="md-nav__link">
         
   
   
@@ -1950,7 +2020,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../tracker/" class="md-nav__link">
+      <a href="../../api/tracker/" class="md-nav__link">
         
   
   
@@ -1978,7 +2048,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../workflow/" class="md-nav__link">
+      <a href="../../api/workflow/" class="md-nav__link">
         
   
   
@@ -2006,7 +2076,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../artifact/" class="md-nav__link">
+      <a href="../../api/artifact/" class="md-nav__link">
         
   
   
@@ -2034,7 +2104,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../run/" class="md-nav__link">
+      <a href="../../api/run/" class="md-nav__link">
         
   
   
@@ -2062,7 +2132,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../indexing/" class="md-nav__link">
+      <a href="../../api/indexing/" class="md-nav__link">
         
   
   
@@ -2090,7 +2160,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../identity/" class="md-nav__link">
+      <a href="../../api/identity/" class="md-nav__link">
         
   
   
@@ -2115,37 +2185,10 @@
                 
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Views
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="././" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../../api/views/" class="md-nav__link">
         
   
   
@@ -2161,93 +2204,6 @@
   
 
       </a>
-      
-        
-
-
-<nav class="md-nav md-nav--secondary" aria-label="On this page">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      On this page
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#view-registry" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        View Registry
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.core.views.ViewRegistry.register" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        register
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#view-factory" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        View Factory
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.core.views.ViewFactory.create_view_from_model" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        create_view_from_model
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.core.views.ViewFactory.create_hybrid_view" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        create_hybrid_view
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.core.views.ViewFactory.create_grouped_hybrid_view" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        create_grouped_hybrid_view
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -2260,7 +2216,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../matrix/" class="md-nav__link">
+      <a href="../../api/matrix/" class="md-nav__link">
         
   
   
@@ -2288,7 +2244,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../materialize/" class="md-nav__link">
+      <a href="../../api/materialize/" class="md-nav__link">
         
   
   
@@ -2344,10 +2300,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#view-registry" class="md-nav__link">
+  <a href="#manual-lifecycle-apis" class="md-nav__link">
     <span class="md-ellipsis">
       
-        View Registry
+        Manual lifecycle APIs
       
     </span>
   </a>
@@ -2355,54 +2311,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#consist.core.views.ViewRegistry.register" class="md-nav__link">
+  <a href="#step-decorators" class="md-nav__link">
     <span class="md-ellipsis">
       
-        register
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#view-factory" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        View Factory
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.core.views.ViewFactory.create_view_from_model" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        create_view_from_model
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.core.views.ViewFactory.create_hybrid_view" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        create_hybrid_view
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#consist.core.views.ViewFactory.create_grouped_hybrid_view" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        create_grouped_hybrid_view
+        Step decorators
       
     </span>
   </a>
@@ -2455,7 +2367,7 @@
         <a href="../" class="md-path__link">
           
   <span class="md-ellipsis">
-    API Reference
+    Advanced
   </span>
 
         </a>
@@ -2472,729 +2384,27 @@
                 
                   
 
-<h1 id="views">Views<a class="headerlink" href="#views" title="Permanent link">&para;</a></h1>
-<h2 id="view-registry">View Registry<a class="headerlink" href="#view-registry" title="Permanent link">&para;</a></h2>
-
-
-<div class="doc doc-object doc-class">
-
-
-
-
-    <div class="doc doc-contents first">
-
-
-
-        <p>Registry for dynamic view classes.
-Accessing a view (e.g. registry.Person) automatically refreshes
-the underlying DuckDB SQL definition to include new files.</p>
-<p>Use <code>register(model, key=...)</code> to add SQLModel schemas. Accessing the
-attribute returns a dynamic SQLModel view class that can be queried via
-<code>select(...)</code>.</p>
-
-
-
-
-
-
-
-
-
-
-
-<div class="doc doc-children">
-
-
-
-
-
-
-
-
-
-
-<div class="doc doc-object doc-function">
-
-
-<h2 id="consist.core.views.ViewRegistry.register" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">register</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
-
-<a href="#consist.core.views.ViewRegistry.register" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-
-    </div>
-
-</div>
-
-
-
-  </div>
-
-    </div>
-
-</div><h2 id="view-factory">View Factory<a class="headerlink" href="#view-factory" title="Permanent link">&para;</a></h2>
-
-
-<div class="doc doc-object doc-class">
-
-
-
-
-    <div class="doc doc-contents first">
-
-
-
-        <p>A factory class responsible for generating <strong>"Hybrid Views"</strong> in DuckDB, acting as
-Consist's <strong>"The Virtualizer"</strong> component.</p>
-<p>Hybrid Views combine data from materialized tables (often ingested via dlt)
-with data directly from file-based artifacts (e.g., Parquet, CSV),
-providing a unified SQL interface to query both "hot" and "cold" data
-transparently. This approach is central to Consist's flexible data access strategy.</p>
-
-
-<p><span class="doc-section-title">Attributes:</span></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Name</th>
-          <th>Type</th>
-          <th>Description</th>
-        </tr>
-      </thead>
-      <tbody>
-          <tr class="doc-section-item">
-            <td><code><span title="consist.core.views.ViewFactory.tracker">tracker</span></code></td>
-            <td>
-                  <code><span title="consist.core.tracker.Tracker">Tracker</span></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>An instance of the Consist <code>Tracker</code>, which provides access to the database
-engine, artifact resolution, and other run-time context necessary for
-view creation.</p>
-              </div>
-            </td>
-          </tr>
-      </tbody>
-    </table>
-
-
-
-
-
-
-
-
-
-
-
-<div class="doc doc-children">
-
-
-
-
-
-
-
-
-
-
-<div class="doc doc-object doc-function">
-
-
-<h2 id="consist.core.views.ViewFactory.create_view_from_model" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">create_view_from_model</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
-
-<a href="#consist.core.views.ViewFactory.create_view_from_model" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Creates both the SQL View and the Python SQLModel class for a given schema.</p>
-
-
-    </div>
-
-</div>
-
-<div class="doc doc-object doc-function">
-
-
-<h2 id="consist.core.views.ViewFactory.create_hybrid_view" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">create_hybrid_view</span><span class="p">(</span><span class="n">view_name</span><span class="p">,</span> <span class="n">concept_key</span><span class="p">,</span> <span class="n">driver_filter</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">schema_model</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
-
-<a href="#consist.core.views.ViewFactory.create_hybrid_view" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Creates or replaces a DuckDB SQL VIEW that combines "hot" and "cold" data for a given concept.</p>
-<p>This method generates a <strong>"Hybrid View"</strong> which allows transparent querying across
-different data storage types. It implements <strong>"View Optimization"</strong> by leveraging
-DuckDB's capabilities for vectorized reads from files. The resulting view uses
-<code>UNION ALL BY NAME</code> to gracefully handle <strong>"Schema Evolution"</strong> (different columns
-across runs or data sources) by nulling out missing columns.</p>
-<p>"Hot" data refers to records already materialized into a DuckDB table (e.g., via ingestion).
-"Cold" data refers to records still residing in file-based artifacts (e.g., Parquet, CSV).
-Identifiers are quoted for SQL safety; missing cold-file paths are skipped at view creation.</p>
-
-
-<p><span class="doc-section-title">Parameters:</span></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Name</th>
-          <th>Type</th>
-          <th>Description</th>
-          <th>Default</th>
-        </tr>
-      </thead>
-      <tbody>
-          <tr class="doc-section-item">
-            <td>
-                <code>view_name</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>The name to assign to the newly created or replaced SQL view. This is the name
-you will use in your SQL queries to access the combined data.</p>
-              </div>
-            </td>
-            <td>
-                <em>required</em>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>concept_key</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>The semantic key identifying the data concept (e.g., "households", "transactions").
-Artifacts and materialized tables matching this key will be included in the view.</p>
-              </div>
-            </td>
-            <td>
-                <em>required</em>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>driver_filter</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" title="typing.List" href="https://docs.python.org/3/library/typing.html#typing.List">List</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>An optional list of artifact drivers (e.g., "parquet", "csv") to include
-when querying "cold" data. If <code>None</code>, "parquet" and "csv" drivers are considered
-by default.</p>
-              </div>
-            </td>
-            <td>
-                  <code>None</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>schema_model</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Type" href="https://docs.python.org/3/library/typing.html#typing.Type">Type</a>[<span title="sqlmodel.SQLModel">SQLModel</span>]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>SQL table definition for underlying data</p>
-              </div>
-            </td>
-            <td>
-                  <code>None</code>
-            </td>
-          </tr>
-      </tbody>
-    </table>
-
-
-    <p><span class="doc-section-title">Returns:</span></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Type</th>
-          <th>Description</th>
-        </tr>
-      </thead>
-      <tbody>
-          <tr class="doc-section-item">
-            <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/functions.html#bool">bool</a></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>True if the view creation was attempted (even if the view ends up empty), False otherwise.</p>
-              </div>
-            </td>
-          </tr>
-      </tbody>
-    </table>
-
-
-<p><span class="doc-section-title">Raises:</span></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Type</th>
-          <th>Description</th>
-        </tr>
-      </thead>
-      <tbody>
-          <tr class="doc-section-item">
-            <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/exceptions.html#RuntimeError">RuntimeError</a></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>If the <code>Tracker</code>'s database engine is not configured (i.e., <code>db_path</code> was not
-provided during <code>Tracker</code> initialization).</p>
-              </div>
-            </td>
-          </tr>
-      </tbody>
-    </table>
-
-
-    </div>
-
-</div>
-
-<div class="doc doc-object doc-function">
-
-
-<h2 id="consist.core.views.ViewFactory.create_grouped_hybrid_view" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">create_grouped_hybrid_view</span><span class="p">(</span><span class="o">*</span><span class="p">,</span> <span class="n">view_name</span><span class="p">,</span> <span class="n">schema_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">schema_ids</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">schema_compatible</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">predicates</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">namespace</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">drivers</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">attach_facets</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">include_system_columns</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="s1">&#39;hybrid&#39;</span><span class="p">,</span> <span class="n">if_exists</span><span class="o">=</span><span class="s1">&#39;replace&#39;</span><span class="p">,</span> <span class="n">missing_files</span><span class="o">=</span><span class="s1">&#39;warn&#39;</span><span class="p">,</span> <span class="n">run_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">parent_run_id</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">status</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">year</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">iteration</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
-
-<a href="#consist.core.views.ViewFactory.create_grouped_hybrid_view" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Create a selector-driven hybrid view across many artifacts.</p>
-<p>This method powers schema-family analysis views where artifacts may have
-different keys but represent the same logical table. Selection is based
-on a required <code>schema_id</code> plus optional facet/run predicates.</p>
-<p>The resulting SQL view can combine:
-- hot rows from ingested <code>global_tables.*</code> relations,
-- cold rows from files (currently parquet/csv readers),
-- optional typed <code>facet_*</code> projection columns,
-- optional Consist system columns.</p>
-
-
-<p><span class="doc-section-title">Parameters:</span></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Name</th>
-          <th>Type</th>
-          <th>Description</th>
-          <th>Default</th>
-        </tr>
-      </thead>
-      <tbody>
-          <tr class="doc-section-item">
-            <td>
-                <code>view_name</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Name of the SQL view to create.</p>
-              </div>
-            </td>
-            <td>
-                <em>required</em>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>schema_id</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Primary selector for a single schema id.</p>
-              </div>
-            </td>
-            <td>
-                  <code>None</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>schema_ids</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" title="typing.List" href="https://docs.python.org/3/library/typing.html#typing.List">List</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Alternative selector for multiple schema ids.
-This is mainly used by higher-level model-class resolution in
-<code>Tracker.create_grouped_view</code>.</p>
-              </div>
-            </td>
-            <td>
-                  <code>None</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>schema_compatible</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/functions.html#bool">bool</a></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>If True, include artifacts observed with schema variants deemed
-compatible by field-name subset/superset matching.</p>
-              </div>
-            </td>
-            <td>
-                  <code>False</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>predicates</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" title="typing.List" href="https://docs.python.org/3/library/typing.html#typing.List">List</a>[<a class="autorefs autorefs-external" title="typing.Dict" href="https://docs.python.org/3/library/typing.html#typing.Dict">Dict</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>, <a class="autorefs autorefs-external" title="typing.Any" href="https://docs.python.org/3/library/typing.html#typing.Any">Any</a>]]]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Parsed ArtifactKV predicates (as produced by
-<code>Tracker._parse_artifact_param_expression</code>).</p>
-              </div>
-            </td>
-            <td>
-                  <code>None</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>namespace</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Default ArtifactKV namespace used when a predicate does not provide
-one explicitly.</p>
-              </div>
-            </td>
-            <td>
-                  <code>None</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>drivers</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" title="typing.List" href="https://docs.python.org/3/library/typing.html#typing.List">List</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Optional artifact-driver filter (e.g., <code>["parquet"]</code>).</p>
-              </div>
-            </td>
-            <td>
-                  <code>None</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>attach_facets</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" title="typing.List" href="https://docs.python.org/3/library/typing.html#typing.List">List</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Facet key paths to expose as typed columns named <code>facet_&lt;key&gt;</code>.</p>
-              </div>
-            </td>
-            <td>
-                  <code>None</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>include_system_columns</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/functions.html#bool">bool</a></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>If True, include <code>consist_run_id</code>, <code>consist_artifact_id</code>,
-<code>consist_year</code>, <code>consist_iteration</code>, and
-<code>consist_scenario_id</code>.</p>
-              </div>
-            </td>
-            <td>
-                  <code>True</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>mode</code>
-            </td>
-            <td>
-                  <code>(<span title="hybrid">hybrid</span>, <span title="hot_only">hot_only</span>, <span title="cold_only">cold_only</span>)</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Controls which storage tier(s) are included in the view.</p>
-              </div>
-            </td>
-            <td>
-                  <code>&#34;hybrid&#34;</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>if_exists</code>
-            </td>
-            <td>
-                  <code>(<span title="replace">replace</span>, <span title="error">error</span>)</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>View creation behavior when <code>view_name</code> already exists.</p>
-              </div>
-            </td>
-            <td>
-                  <code>&#34;replace&#34;</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>missing_files</code>
-            </td>
-            <td>
-                  <code>(<span title="warn">warn</span>, <span title="error">error</span>, <span title="skip_silent">skip_silent</span>)</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Policy for selected cold artifacts whose files no longer exist.</p>
-              </div>
-            </td>
-            <td>
-                  <code>&#34;warn&#34;</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>run_id</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Optional exact run-id filter.</p>
-              </div>
-            </td>
-            <td>
-                  <code>None</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>parent_run_id</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Optional parent/scenario run-id filter.</p>
-              </div>
-            </td>
-            <td>
-                  <code>None</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>model</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Optional run model-name filter.</p>
-              </div>
-            </td>
-            <td>
-                  <code>None</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>status</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a>]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Optional run status filter.</p>
-              </div>
-            </td>
-            <td>
-                  <code>None</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>year</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/functions.html#int">int</a>]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Optional run year filter.</p>
-              </div>
-            </td>
-            <td>
-                  <code>None</code>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                <code>iteration</code>
-            </td>
-            <td>
-                  <code><a class="autorefs autorefs-external" title="typing.Optional" href="https://docs.python.org/3/library/typing.html#typing.Optional">Optional</a>[<a class="autorefs autorefs-external" href="https://docs.python.org/3/library/functions.html#int">int</a>]</code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>Optional run iteration filter.</p>
-              </div>
-            </td>
-            <td>
-                  <code>None</code>
-            </td>
-          </tr>
-      </tbody>
-    </table>
-
-
-    <p><span class="doc-section-title">Returns:</span></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Type</th>
-          <th>Description</th>
-        </tr>
-      </thead>
-      <tbody>
-          <tr class="doc-section-item">
-            <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/functions.html#bool">bool</a></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p><code>True</code> when view creation is completed.</p>
-              </div>
-            </td>
-          </tr>
-      </tbody>
-    </table>
-
-
-<p><span class="doc-section-title">Raises:</span></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Type</th>
-          <th>Description</th>
-        </tr>
-      </thead>
-      <tbody>
-          <tr class="doc-section-item">
-            <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/exceptions.html#RuntimeError">RuntimeError</a></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>If the tracker is not configured with a database/engine.</p>
-              </div>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/exceptions.html#ValueError">ValueError</a></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>If policy arguments have unsupported values, or <code>if_exists="error"</code>
-and the view already exists.</p>
-              </div>
-            </td>
-          </tr>
-          <tr class="doc-section-item">
-            <td>
-                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/exceptions.html#FileNotFoundError">FileNotFoundError</a></code>
-            </td>
-            <td>
-              <div class="doc-md-description">
-                <p>If <code>missing_files="error"</code> and a selected cold file is missing.</p>
-              </div>
-            </td>
-          </tr>
-      </tbody>
-    </table>
-
-
-<details class="note" open>
-  <summary>Notes</summary>
-  <ul>
-<li>Empty selections still produce a valid typed empty view.</li>
-<li>Facet column types are inferred deterministically from indexed KV types:
-  bool -&gt; BOOLEAN, int -&gt; BIGINT, float/int mix -&gt; DOUBLE, otherwise VARCHAR.</li>
+<h1 id="manual-lifecycle-and-decorators">Manual Lifecycle and Decorators<a class="headerlink" href="#manual-lifecycle-and-decorators" title="Permanent link">&para;</a></h1>
+<p>These APIs are supported for integrations and framework glue, but are not part
+of the quickstart recommended path.</p>
+<h2 id="manual-lifecycle-apis">Manual lifecycle APIs<a class="headerlink" href="#manual-lifecycle-apis" title="Permanent link">&para;</a></h2>
+<p>Use <code>Tracker.begin_run(...)</code> / <code>Tracker.end_run()</code> when start/end boundaries are
+controlled externally (for example framework hooks in separate call sites).</p>
+<p>Use <code>Tracker.start_run(...)</code> when you still want the same low-level lifecycle
+surface but can keep it in one context-managed call site:</p>
+<ul>
+<li><code>Tracker.start_run(...)</code></li>
+<li><code>Tracker.begin_run(...)</code> / <code>Tracker.end_run()</code></li>
 </ul>
-</details>
-
-    </div>
-
-</div>
-
-
-
-  </div>
-
-    </div>
-
-</div>
+<p>Prefer <code>run(...)</code> and <code>trace(...)</code> when you can keep each step in one call site.</p>
+<h2 id="step-decorators">Step decorators<a class="headerlink" href="#step-decorators" title="Permanent link">&para;</a></h2>
+<p>Use when you want reusable callable metadata defaults:</p>
+<ul>
+<li><code>@define_step(...)</code></li>
+<li><code>@tracker.define_step(...)</code></li>
+</ul>
+<p>Decorator metadata can be useful in large shared step libraries, but introduces
+extra concepts compared to explicit <code>run(..., outputs=[...], config=...)</code>.</p>
 
 
 
@@ -3234,7 +2444,7 @@ and the view already exists.</p>
       <nav class="md-footer__inner md-grid" aria-label="Footer" >
         
           
-          <a href="../identity/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Identity Manager">
+          <a href="../execution-style-decision-tree/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Which execution style should I use?">
             <div class="md-footer__button md-icon">
               
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></svg>
@@ -3244,20 +2454,20 @@ and the view already exists.</p>
                 Previous
               </span>
               <div class="md-ellipsis">
-                Identity Manager
+                Which execution style should I use?
               </div>
             </div>
           </a>
         
         
           
-          <a href="../matrix/" class="md-footer__link md-footer__link--next" aria-label="Next: Matrix Views">
+          <a href="../../troubleshooting/" class="md-footer__link md-footer__link--next" aria-label="Next: Troubleshooting Guide">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                Matrix Views
+                Troubleshooting Guide
               </div>
             </div>
             <div class="md-footer__button md-icon">

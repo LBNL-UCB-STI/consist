@@ -15,7 +15,7 @@
         <link rel="canonical" href="https://LBNL-UCB-STI.github.io/consist/troubleshooting/">
       
       
-        <link rel="prev" href="../advanced/manual-lifecycle-and-decorators.md">
+        <link rel="prev" href="../advanced/manual-lifecycle-and-decorators/">
       
       
         <link rel="next" href="../db-maintenance/">
@@ -314,7 +314,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../advanced/index.md" class="md-tabs__link">
+        <a href="../advanced/" class="md-tabs__link">
           
   
   Advanced
@@ -715,7 +715,7 @@
   <span class="md-ellipsis">
     
   
-    Config Management: Caching vs. Filtering
+    Config, Facets, and Identity Inputs
   
 
     
@@ -841,8 +841,6 @@
       
         
       
-        
-      
     
     
     
@@ -933,34 +931,6 @@
     
   
     Building a Domain Tracker
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../configs/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Configuration, Identity, and Facets
   
 
     
@@ -1448,7 +1418,7 @@
         
           
           <div class="md-nav__link md-nav__container">
-            <a href="../advanced/index.md" class="md-nav__link ">
+            <a href="../advanced/" class="md-nav__link ">
               
   
   
@@ -1492,14 +1462,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../advanced/execution-style-decision-tree.md" class="md-nav__link">
+      <a href="../advanced/execution-style-decision-tree/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    Which execution style should I use?
   
 
     
@@ -1520,14 +1490,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../advanced/manual-lifecycle-and-decorators.md" class="md-nav__link">
+      <a href="../advanced/manual-lifecycle-and-decorators/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    Manual Lifecycle and Decorators
   
 
     
@@ -1752,10 +1722,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#load_inputstrue-requires-inputs-to-be-a-dict" class="md-nav__link">
+  <a href="#load_inputstrue-requires-inputs-to-be-a-dict-input_binding-requires-inputs-to-be-a-dict" class="md-nav__link">
     <span class="md-ellipsis">
       
-        "load_inputs=True requires inputs to be a dict."
+        "load_inputs=True requires inputs to be a dict." / "input_binding=... requires inputs to be a dict."
       
     </span>
   </a>
@@ -2431,14 +2401,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/essentials.md" class="md-nav__link">
+      <a href="../api/essentials/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    API Essentials
   
 
     
@@ -2459,14 +2429,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/advanced.md" class="md-nav__link">
+      <a href="../api/advanced/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    API Advanced
   
 
     
@@ -2890,10 +2860,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#load_inputstrue-requires-inputs-to-be-a-dict" class="md-nav__link">
+  <a href="#load_inputstrue-requires-inputs-to-be-a-dict-input_binding-requires-inputs-to-be-a-dict" class="md-nav__link">
     <span class="md-ellipsis">
       
-        "load_inputs=True requires inputs to be a dict."
+        "load_inputs=True requires inputs to be a dict." / "input_binding=... requires inputs to be a dict."
       
     </span>
   </a>
@@ -3481,13 +3451,13 @@ and manual materialization helpers) to isolate specific failure modes.</p>
 <p>Common messages and fixes:</p>
 <h3 id="unexpected-keyword-argument-hash_inputs">"unexpected keyword argument 'hash_inputs'"<a class="headerlink" href="#unexpected-keyword-argument-hash_inputs" title="Permanent link">&para;</a></h3>
 <ul>
-<li><code>Cause</code>: <code>hash_inputs</code> is no longer accepted on run/trace/scenario public surfaces.</li>
-<li><code>Fix</code>: use <code>identity_inputs=[...]</code>.</li>
+<li><code>Cause</code>: <code>hash_inputs</code> is no longer accepted on <code>run(...)</code>, <code>trace(...)</code>, and step-level <code>scenario.run(...)</code> / <code>scenario.trace(...)</code> surfaces.</li>
+<li><code>Fix</code>: on those surfaces, use <code>identity_inputs=[...]</code>. Scenario header contexts still route through <code>begin_run(...)</code>, where <code>hash_inputs</code> remains a legacy low-level option.</li>
 </ul>
 <h3 id="unexpected-keyword-argument-config_plan">"unexpected keyword argument 'config_plan'"<a class="headerlink" href="#unexpected-keyword-argument-config_plan" title="Permanent link">&para;</a></h3>
 <ul>
-<li><code>Cause</code>: <code>config_plan</code> is no longer accepted on run/trace/scenario public surfaces.</li>
-<li><code>Fix</code>: pass <code>adapter=...</code> (and optional <code>identity_inputs=[...]</code>) instead.</li>
+<li><code>Cause</code>: <code>config_plan</code> is no longer accepted on <code>run(...)</code>, <code>trace(...)</code>, and step-level <code>scenario.run(...)</code> / <code>scenario.trace(...)</code> surfaces.</li>
+<li><code>Fix</code>: on those surfaces, pass <code>adapter=...</code> (and optional <code>identity_inputs=[...]</code>) instead. Scenario headers do not currently support header-level <code>adapter=...</code>.</li>
 </ul>
 <h3 id="identity_inputshash_inputs-must-be-a-list-of-paths">"identity_inputs/hash_inputs must be a list of paths."<a class="headerlink" href="#identity_inputshash_inputs-must-be-a-list-of-paths" title="Permanent link">&para;</a></h3>
 <ul>
@@ -3499,10 +3469,10 @@ and manual materialization helpers) to isolate specific failure modes.</p>
 <li><code>Cause</code>: one or more identity input paths are missing or unreadable.</li>
 <li><code>Fix</code>: verify every identity input path exists and is readable before running.</li>
 </ul>
-<h3 id="load_inputstrue-requires-inputs-to-be-a-dict">"load_inputs=True requires inputs to be a dict."<a class="headerlink" href="#load_inputstrue-requires-inputs-to-be-a-dict" title="Permanent link">&para;</a></h3>
+<h3 id="load_inputstrue-requires-inputs-to-be-a-dict-input_binding-requires-inputs-to-be-a-dict">"load_inputs=True requires inputs to be a dict." / "input_binding=... requires inputs to be a dict."<a class="headerlink" href="#load_inputstrue-requires-inputs-to-be-a-dict-input_binding-requires-inputs-to-be-a-dict" title="Permanent link">&para;</a></h3>
 <ul>
-<li><code>Cause</code>: auto-loading inputs into function parameters requires named inputs.</li>
-<li><code>Fix</code>: pass <code>inputs={\"param_name\": path_or_artifact}</code> or disable auto-loading with <code>ExecutionOptions(load_inputs=False)</code>.</li>
+<li><code>Cause</code>: automatic input binding requires named inputs so Consist can match function parameters.</li>
+<li><code>Fix</code>: pass <code>inputs={\"param_name\": path_or_artifact}</code>. To disable binding, use <code>ExecutionOptions(input_binding=\"none\")</code> (or legacy <code>ExecutionOptions(load_inputs=False)</code>).</li>
 </ul>
 <h3 id="cache_hydrationoutputs-requested-requires-output_paths">"cache_hydration='outputs-requested' requires output_paths."<a class="headerlink" href="#cache_hydrationoutputs-requested-requires-output_paths" title="Permanent link">&para;</a></h3>
 <ul>
@@ -4154,7 +4124,7 @@ with tracker.start_run("sample_ingest", model="example"):
       <nav class="md-footer__inner md-grid" aria-label="Footer" >
         
           
-          <a href="../advanced/manual-lifecycle-and-decorators.md" class="md-footer__link md-footer__link--prev" aria-label="Previous: none">
+          <a href="../advanced/manual-lifecycle-and-decorators/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Manual Lifecycle and Decorators">
             <div class="md-footer__button md-icon">
               
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></svg>
@@ -4164,7 +4134,7 @@ with tracker.start_run("sample_ingest", model="example"):
                 Previous
               </span>
               <div class="md-ellipsis">
-                none
+                Manual Lifecycle and Decorators
               </div>
             </div>
           </a>

@@ -316,7 +316,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../advanced/index.md" class="md-tabs__link">
+        <a href="../../advanced/" class="md-tabs__link">
           
   
   Advanced
@@ -871,7 +871,7 @@
   <span class="md-ellipsis">
     
   
-    Config Management: Caching vs. Filtering
+    Config, Facets, and Identity Inputs
   
 
     
@@ -997,8 +997,6 @@
       
         
       
-        
-      
     
     
     
@@ -1089,34 +1087,6 @@
     
   
     Building a Domain Tracker
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../configs/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Configuration, Identity, and Facets
   
 
     
@@ -1604,7 +1574,7 @@
         
           
           <div class="md-nav__link md-nav__container">
-            <a href="../../advanced/index.md" class="md-nav__link ">
+            <a href="../../advanced/" class="md-nav__link ">
               
   
   
@@ -1648,14 +1618,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../../advanced/execution-style-decision-tree.md" class="md-nav__link">
+      <a href="../../advanced/execution-style-decision-tree/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    Which execution style should I use?
   
 
     
@@ -1676,14 +1646,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../../advanced/manual-lifecycle-and-decorators.md" class="md-nav__link">
+      <a href="../../advanced/manual-lifecycle-and-decorators/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    Manual Lifecycle and Decorators
   
 
     
@@ -2021,14 +1991,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../../api/essentials.md" class="md-nav__link">
+      <a href="../../api/essentials/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    API Essentials
   
 
     
@@ -2049,14 +2019,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../../api/advanced.md" class="md-nav__link">
+      <a href="../../api/advanced/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    API Advanced
   
 
     
@@ -2712,7 +2682,7 @@ paths. Declare the matching artifact keys in <code>outputs=[...]</code> when cal
 </span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="p">)</span>
 </span></code></pre></div>
 <h3 id="auto-loading-inputs-as-dataframes">Auto-loading inputs as DataFrames<a class="headerlink" href="#auto-loading-inputs-as-dataframes" title="Permanent link">&para;</a></h3>
-<p>If you prefer to receive a DataFrame directly instead of a path, Consist can load the artifact's file and inject it as the parameter value (default <code>load_inputs=True</code>). This is convenient for short scripts but hides the I/O boundary — prefer the path-based pattern for pipelines where the function boundary matters.</p>
+<p>If you prefer to receive a DataFrame directly instead of a path, use <code>input_binding="loaded"</code> and Consist will load the artifact for you before calling the function. This is convenient for short scripts but hides the I/O boundary — prefer <code>input_binding="paths"</code> for pipelines where the function boundary matters.</p>
 <hr />
 <h2 id="next-steps">Next Steps<a class="headerlink" href="#next-steps" title="Permanent link">&para;</a></h2>
 <ul>
@@ -2778,13 +2748,13 @@ paths. Declare the matching artifact keys in <code>outputs=[...]</code> when cal
         
         
           
-          <a href="../config-management/" class="md-footer__link md-footer__link--next" aria-label="Next: Config Management: Caching vs. Filtering">
+          <a href="../config-management/" class="md-footer__link md-footer__link--next" aria-label="Next: Config, Facets, and Identity Inputs">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                Config Management: Caching vs. Filtering
+                Config, Facets, and Identity Inputs
               </div>
             </div>
             <div class="md-footer__button md-icon">

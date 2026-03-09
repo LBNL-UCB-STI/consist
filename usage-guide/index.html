@@ -316,7 +316,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../advanced/index.md" class="md-tabs__link">
+        <a href="../advanced/" class="md-tabs__link">
           
   
   Advanced
@@ -715,7 +715,7 @@
   <span class="md-ellipsis">
     
   
-    Config Management: Caching vs. Filtering
+    Config, Facets, and Identity Inputs
   
 
     
@@ -843,8 +843,6 @@
       
         
       
-        
-      
     
     
     
@@ -959,6 +957,17 @@
       On this page
     </label>
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#contents" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Contents
+      
+    </span>
+  </a>
+  
+</li>
       
         <li class="md-nav__item">
   <a href="#choosing-your-pattern" class="md-nav__link">
@@ -1405,34 +1414,6 @@
     
   
     Building a Domain Tracker
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../configs/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Configuration, Identity, and Facets
   
 
     
@@ -1920,7 +1901,7 @@
         
           
           <div class="md-nav__link md-nav__container">
-            <a href="../advanced/index.md" class="md-nav__link ">
+            <a href="../advanced/" class="md-nav__link ">
               
   
   
@@ -1964,14 +1945,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../advanced/execution-style-decision-tree.md" class="md-nav__link">
+      <a href="../advanced/execution-style-decision-tree/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    Which execution style should I use?
   
 
     
@@ -1992,14 +1973,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../advanced/manual-lifecycle-and-decorators.md" class="md-nav__link">
+      <a href="../advanced/manual-lifecycle-and-decorators/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    Manual Lifecycle and Decorators
   
 
     
@@ -2337,14 +2318,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/essentials.md" class="md-nav__link">
+      <a href="../api/essentials/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    API Essentials
   
 
     
@@ -2365,14 +2346,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/advanced.md" class="md-nav__link">
+      <a href="../api/advanced/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    API Advanced
   
 
     
@@ -2727,6 +2708,17 @@
       On this page
     </label>
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#contents" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Contents
+      
+    </span>
+  </a>
+  
+</li>
       
         <li class="md-nav__item">
   <a href="#choosing-your-pattern" class="md-nav__link">
@@ -3226,6 +3218,45 @@ examples below in order.</p>
 <a href="../building-domain-tracker/#when-to-wrap-vs-use-direct-apis">Building a Domain Tracker</a>
 for the recommended wrapper architecture.</p>
 <hr />
+<h2 id="contents">Contents<a class="headerlink" href="#contents" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="#choosing-your-pattern">Choosing Your Pattern</a></li>
+<li><a href="#pattern-1-single-step-runs-run">Pattern 1: Single-Step Runs (<code>run()</code>)</a><ul>
+<li><a href="#choosing-an-input-binding-mode">Choosing an Input Binding Mode</a></li>
+<li><a href="#simple-example-data-cleaning">Simple Example: Data Cleaning</a></li>
+<li><a href="#example-with-config">Example with Config</a></li>
+<li><a href="#wrapping-legacy-or-black-box-tools">Wrapping Legacy or Black-Box Tools</a></li>
+</ul>
+</li>
+<li><a href="#pattern-2-multi-step-workflows-scenario">Pattern 2: Multi-Step Workflows (<code>scenario()</code>)</a><ul>
+<li><a href="#understanding-the-coupler">Understanding the Coupler</a></li>
+<li><a href="#simple-example-two-step-workflow">Simple Example: Two-Step Workflow</a></li>
+<li><a href="#declaring-inputs-disk-paths-vs-explicit-step-links">Declaring Inputs: Disk Paths vs Explicit Step Links</a></li>
+<li><a href="#decorator-defaults-templates-and-schema-introspection">Decorator Defaults, Templates, and Schema Introspection</a></li>
+<li><a href="#passing-data-between-steps-with-the-coupler">Passing Data Between Steps with the Coupler</a></li>
+<li><a href="#output-validation">Output Validation</a></li>
+<li><a href="#selective-output-collection-with-collect_by_keys">Selective Output Collection with <code>collect_by_keys()</code></a></li>
+<li><a href="#example-parameter-sweep-in-a-scenario">Example: Parameter Sweep in a Scenario</a></li>
+</ul>
+</li>
+<li><a href="#pattern-3-container-integration">Pattern 3: Container Integration</a></li>
+<li><a href="#advanced-patterns">Advanced Patterns</a><ul>
+<li><a href="#cache-hits-and-the-coupler">Cache Hits and the Coupler</a></li>
+<li><a href="#cache-hydration">Cache Hydration</a></li>
+<li><a href="#mixing-runs-and-scenarios">Mixing Runs and Scenarios</a></li>
+</ul>
+</li>
+<li><a href="#when-does-code-execute-understanding-scrun-vs-sctrace">When Does Code Execute? Understanding <code>sc.run()</code> vs <code>sc.trace()</code></a></li>
+<li><a href="#motivation-when-caching-saves-time">Motivation: When Caching Saves Time</a></li>
+<li><a href="#querying-results">Querying Results</a><ul>
+<li><a href="#finding-runs">Finding Runs</a></li>
+<li><a href="#loading-artifacts">Loading Artifacts</a></li>
+<li><a href="#cross-run-queries-with-views">Cross-Run Queries with Views</a></li>
+<li><a href="#generating-schemas-from-captured-data">Generating Schemas from Captured Data</a></li>
+</ul>
+</li>
+</ul>
+<hr />
 <h2 id="choosing-your-pattern">Choosing Your Pattern<a class="headerlink" href="#choosing-your-pattern" title="Permanent link">&para;</a></h2>
 <p>Choose based on what you're building and how much structure you need:</p>
 <table>
@@ -3249,7 +3280,7 @@ for the recommended wrapper architecture.</p>
 </tr>
 <tr>
 <td>Existing tool/model (subprocess, legacy code, container)</td>
-<td><strong><code>container</code> or <code>depends_on</code></strong></td>
+<td><strong><a href="../containers-guide/"><code>container</code> or <code>depends_on</code></a></strong></td>
 <td>Wraps external executables, tracks container digest as cache key. Use for black-box tools.</td>
 </tr>
 <tr>
@@ -3639,7 +3670,7 @@ direct <code>RunResult</code> inputs when an upstream step has multiple outputs.
 </span><span id="__span-10-16"><a id="__codelineno-10-16" name="__codelineno-10-16" href="#__codelineno-10-16"></a><span class="n">sc</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
 </span><span id="__span-10-17"><a id="__codelineno-10-17" name="__codelineno-10-17" href="#__codelineno-10-17"></a>    <span class="n">fn</span><span class="o">=</span><span class="n">analyze</span><span class="p">,</span>
 </span><span id="__span-10-18"><a id="__codelineno-10-18" name="__codelineno-10-18" href="#__codelineno-10-18"></a>    <span class="n">inputs</span><span class="o">=</span><span class="n">consist</span><span class="o">.</span><span class="n">refs</span><span class="p">(</span><span class="n">preprocess_result</span><span class="p">,</span> <span class="n">Keys</span><span class="o">.</span><span class="n">PREPROCESSED</span><span class="p">),</span>
-</span><span id="__span-10-19"><a id="__codelineno-10-19" name="__codelineno-10-19" href="#__codelineno-10-19"></a>    <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span><span class="n">load_inputs</span><span class="o">=</span><span class="kc">True</span><span class="p">),</span>
+</span><span id="__span-10-19"><a id="__codelineno-10-19" name="__codelineno-10-19" href="#__codelineno-10-19"></a>    <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span><span class="n">input_binding</span><span class="o">=</span><span class="s2">&quot;loaded&quot;</span><span class="p">),</span>
 </span><span id="__span-10-20"><a id="__codelineno-10-20" name="__codelineno-10-20" href="#__codelineno-10-20"></a>    <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="n">Keys</span><span class="o">.</span><span class="n">ANALYSIS</span><span class="p">],</span>
 </span><span id="__span-10-21"><a id="__codelineno-10-21" name="__codelineno-10-21" href="#__codelineno-10-21"></a><span class="p">)</span>
 </span><span id="__span-10-22"><a id="__codelineno-10-22" name="__codelineno-10-22" href="#__codelineno-10-22"></a>
@@ -3711,28 +3742,20 @@ because the first one wrote to a shared path that both functions know about.</p>
 </span><span id="__span-13-26"><a id="__codelineno-13-26" name="__codelineno-13-26" href="#__codelineno-13-26"></a>        <span class="n">fn</span><span class="o">=</span><span class="n">preprocess_data</span><span class="p">,</span>
 </span><span id="__span-13-27"><a id="__codelineno-13-27" name="__codelineno-13-27" href="#__codelineno-13-27"></a>        <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;raw_path&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;raw.csv&quot;</span><span class="p">)},</span>
 </span><span id="__span-13-28"><a id="__codelineno-13-28" name="__codelineno-13-28" href="#__codelineno-13-28"></a>        <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;preprocessed&quot;</span><span class="p">],</span>
-</span><span id="__span-13-29"><a id="__codelineno-13-29" name="__codelineno-13-29" href="#__codelineno-13-29"></a>        <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span>
-</span><span id="__span-13-30"><a id="__codelineno-13-30" name="__codelineno-13-30" href="#__codelineno-13-30"></a>            <span class="n">load_inputs</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
-</span><span id="__span-13-31"><a id="__codelineno-13-31" name="__codelineno-13-31" href="#__codelineno-13-31"></a>            <span class="n">runtime_kwargs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;raw_path&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;raw.csv&quot;</span><span class="p">)},</span>
-</span><span id="__span-13-32"><a id="__codelineno-13-32" name="__codelineno-13-32" href="#__codelineno-13-32"></a>        <span class="p">),</span>
-</span><span id="__span-13-33"><a id="__codelineno-13-33" name="__codelineno-13-33" href="#__codelineno-13-33"></a>    <span class="p">)</span>
-</span><span id="__span-13-34"><a id="__codelineno-13-34" name="__codelineno-13-34" href="#__codelineno-13-34"></a>
-</span><span id="__span-13-35"><a id="__codelineno-13-35" name="__codelineno-13-35" href="#__codelineno-13-35"></a>    <span class="n">sc</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
-</span><span id="__span-13-36"><a id="__codelineno-13-36" name="__codelineno-13-36" href="#__codelineno-13-36"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;analyze&quot;</span><span class="p">,</span>
-</span><span id="__span-13-37"><a id="__codelineno-13-37" name="__codelineno-13-37" href="#__codelineno-13-37"></a>        <span class="n">fn</span><span class="o">=</span><span class="n">analyze_data</span><span class="p">,</span>
-</span><span id="__span-13-38"><a id="__codelineno-13-38" name="__codelineno-13-38" href="#__codelineno-13-38"></a>        <span class="n">inputs</span><span class="o">=</span><span class="p">{</span>
-</span><span id="__span-13-39"><a id="__codelineno-13-39" name="__codelineno-13-39" href="#__codelineno-13-39"></a>            <span class="s2">&quot;preprocessed_path&quot;</span><span class="p">:</span> <span class="n">consist</span><span class="o">.</span><span class="n">ref</span><span class="p">(</span>
-</span><span id="__span-13-40"><a id="__codelineno-13-40" name="__codelineno-13-40" href="#__codelineno-13-40"></a>                <span class="n">preprocess_result</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;preprocessed&quot;</span>
-</span><span id="__span-13-41"><a id="__codelineno-13-41" name="__codelineno-13-41" href="#__codelineno-13-41"></a>            <span class="p">)</span>
-</span><span id="__span-13-42"><a id="__codelineno-13-42" name="__codelineno-13-42" href="#__codelineno-13-42"></a>        <span class="p">},</span>
-</span><span id="__span-13-43"><a id="__codelineno-13-43" name="__codelineno-13-43" href="#__codelineno-13-43"></a>        <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;analysis&quot;</span><span class="p">],</span>
-</span><span id="__span-13-44"><a id="__codelineno-13-44" name="__codelineno-13-44" href="#__codelineno-13-44"></a>        <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span>
-</span><span id="__span-13-45"><a id="__codelineno-13-45" name="__codelineno-13-45" href="#__codelineno-13-45"></a>            <span class="n">load_inputs</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
-</span><span id="__span-13-46"><a id="__codelineno-13-46" name="__codelineno-13-46" href="#__codelineno-13-46"></a>            <span class="n">runtime_kwargs</span><span class="o">=</span><span class="p">{</span>
-</span><span id="__span-13-47"><a id="__codelineno-13-47" name="__codelineno-13-47" href="#__codelineno-13-47"></a>                <span class="s2">&quot;preprocessed_path&quot;</span><span class="p">:</span> <span class="n">preprocess_result</span><span class="o">.</span><span class="n">outputs</span><span class="p">[</span><span class="s2">&quot;preprocessed&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">path</span>
-</span><span id="__span-13-48"><a id="__codelineno-13-48" name="__codelineno-13-48" href="#__codelineno-13-48"></a>            <span class="p">},</span>
-</span><span id="__span-13-49"><a id="__codelineno-13-49" name="__codelineno-13-49" href="#__codelineno-13-49"></a>        <span class="p">),</span>
-</span><span id="__span-13-50"><a id="__codelineno-13-50" name="__codelineno-13-50" href="#__codelineno-13-50"></a>    <span class="p">)</span>
+</span><span id="__span-13-29"><a id="__codelineno-13-29" name="__codelineno-13-29" href="#__codelineno-13-29"></a>        <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span><span class="n">input_binding</span><span class="o">=</span><span class="s2">&quot;paths&quot;</span><span class="p">),</span>
+</span><span id="__span-13-30"><a id="__codelineno-13-30" name="__codelineno-13-30" href="#__codelineno-13-30"></a>    <span class="p">)</span>
+</span><span id="__span-13-31"><a id="__codelineno-13-31" name="__codelineno-13-31" href="#__codelineno-13-31"></a>
+</span><span id="__span-13-32"><a id="__codelineno-13-32" name="__codelineno-13-32" href="#__codelineno-13-32"></a>    <span class="n">sc</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-13-33"><a id="__codelineno-13-33" name="__codelineno-13-33" href="#__codelineno-13-33"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;analyze&quot;</span><span class="p">,</span>
+</span><span id="__span-13-34"><a id="__codelineno-13-34" name="__codelineno-13-34" href="#__codelineno-13-34"></a>        <span class="n">fn</span><span class="o">=</span><span class="n">analyze_data</span><span class="p">,</span>
+</span><span id="__span-13-35"><a id="__codelineno-13-35" name="__codelineno-13-35" href="#__codelineno-13-35"></a>        <span class="n">inputs</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-13-36"><a id="__codelineno-13-36" name="__codelineno-13-36" href="#__codelineno-13-36"></a>            <span class="s2">&quot;preprocessed_path&quot;</span><span class="p">:</span> <span class="n">consist</span><span class="o">.</span><span class="n">ref</span><span class="p">(</span>
+</span><span id="__span-13-37"><a id="__codelineno-13-37" name="__codelineno-13-37" href="#__codelineno-13-37"></a>                <span class="n">preprocess_result</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;preprocessed&quot;</span>
+</span><span id="__span-13-38"><a id="__codelineno-13-38" name="__codelineno-13-38" href="#__codelineno-13-38"></a>            <span class="p">)</span>
+</span><span id="__span-13-39"><a id="__codelineno-13-39" name="__codelineno-13-39" href="#__codelineno-13-39"></a>        <span class="p">},</span>
+</span><span id="__span-13-40"><a id="__codelineno-13-40" name="__codelineno-13-40" href="#__codelineno-13-40"></a>        <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;analysis&quot;</span><span class="p">],</span>
+</span><span id="__span-13-41"><a id="__codelineno-13-41" name="__codelineno-13-41" href="#__codelineno-13-41"></a>        <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span><span class="n">input_binding</span><span class="o">=</span><span class="s2">&quot;paths&quot;</span><span class="p">),</span>
+</span><span id="__span-13-42"><a id="__codelineno-13-42" name="__codelineno-13-42" href="#__codelineno-13-42"></a>    <span class="p">)</span>
 </span></code></pre></div>
 <p>Each step stays plain Python, but the link between them is now a named
 artifact reference instead of an implicit shared path.</p>
@@ -3747,16 +3770,13 @@ artifact reference instead of an implicit shared path.</p>
 </span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;preprocess&quot;</span><span class="p">,</span>
 </span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a>    <span class="n">fn</span><span class="o">=</span><span class="n">preprocess_data</span><span class="p">,</span>
 </span><span id="__span-14-4"><a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;raw&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;raw.csv&quot;</span><span class="p">)},</span>  <span class="c1"># (1)!</span>
-</span><span id="__span-14-5"><a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a>    <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span>
-</span><span id="__span-14-6"><a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a>        <span class="n">load_inputs</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
-</span><span id="__span-14-7"><a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a>        <span class="n">runtime_kwargs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;raw&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;raw.csv&quot;</span><span class="p">)},</span>
-</span><span id="__span-14-8"><a id="__codelineno-14-8" name="__codelineno-14-8" href="#__codelineno-14-8"></a>    <span class="p">),</span>
-</span><span id="__span-14-9"><a id="__codelineno-14-9" name="__codelineno-14-9" href="#__codelineno-14-9"></a>    <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;preprocessed&quot;</span><span class="p">],</span>
-</span><span id="__span-14-10"><a id="__codelineno-14-10" name="__codelineno-14-10" href="#__codelineno-14-10"></a><span class="p">)</span>
+</span><span id="__span-14-5"><a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a>    <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span><span class="n">input_binding</span><span class="o">=</span><span class="s2">&quot;paths&quot;</span><span class="p">),</span>
+</span><span id="__span-14-6"><a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a>    <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;preprocessed&quot;</span><span class="p">],</span>
+</span><span id="__span-14-7"><a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a><span class="p">)</span>
 </span></code></pre></div></p>
 <ol>
-<li>Hash the file as an input dependency, then pass the raw path explicitly with
-   <code>runtime_kwargs</code>.
+<li>Hash the file as an input dependency; <code>input_binding="paths"</code> passes it to
+   the function as a local <code>Path</code> object automatically.
 Use this when you're loading data from disk for the first time and want the I/O
 boundary to stay obvious.</li>
 </ol>
@@ -3767,17 +3787,17 @@ boundary to stay obvious.</li>
 </span><span id="__span-15-4"><a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;analyze&quot;</span><span class="p">,</span>
 </span><span id="__span-15-5"><a id="__codelineno-15-5" name="__codelineno-15-5" href="#__codelineno-15-5"></a>    <span class="n">fn</span><span class="o">=</span><span class="n">analyze_data</span><span class="p">,</span>
 </span><span id="__span-15-6"><a id="__codelineno-15-6" name="__codelineno-15-6" href="#__codelineno-15-6"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;preprocessed&quot;</span><span class="p">:</span> <span class="n">consist</span><span class="o">.</span><span class="n">ref</span><span class="p">(</span><span class="n">preprocess_result</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;preprocessed&quot;</span><span class="p">)},</span>  <span class="c1"># (1)!</span>
-</span><span id="__span-15-7"><a id="__codelineno-15-7" name="__codelineno-15-7" href="#__codelineno-15-7"></a>    <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span><span class="n">load_inputs</span><span class="o">=</span><span class="kc">True</span><span class="p">),</span>  <span class="c1"># (2)!</span>
+</span><span id="__span-15-7"><a id="__codelineno-15-7" name="__codelineno-15-7" href="#__codelineno-15-7"></a>    <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span><span class="n">input_binding</span><span class="o">=</span><span class="s2">&quot;loaded&quot;</span><span class="p">),</span>  <span class="c1"># (2)!</span>
 </span><span id="__span-15-8"><a id="__codelineno-15-8" name="__codelineno-15-8" href="#__codelineno-15-8"></a>    <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;analysis&quot;</span><span class="p">],</span>
 </span><span id="__span-15-9"><a id="__codelineno-15-9" name="__codelineno-15-9" href="#__codelineno-15-9"></a><span class="p">)</span>
 </span></code></pre></div></p>
 <ol>
 <li>Explicitly link to one output from a prior <code>RunResult</code>.</li>
-<li>Auto-load inputs as function parameters.
+<li>Auto-load inputs as hydrated objects (DataFrames, etc.) before calling the function.
 Use this when an upstream step already produced the artifact. With
-<code>execution_options=ExecutionOptions(load_inputs=True)</code>, each mapping key becomes
-a function parameter with loaded data. This is concise, but the more explicit
-path-based variant above is usually the better default for production pipelines.</li>
+<code>input_binding="loaded"</code>, each mapping key becomes a function parameter with
+loaded data. This is concise, but the more explicit path-based variant above
+(<code>input_binding="paths"</code>) is usually the better default for production pipelines.</li>
 </ol>
 <p>Rule of thumb:
 - Use <code>consist.ref(...)</code> for one-off single links.
@@ -3801,7 +3821,7 @@ path-based variant above is usually the better default for production pipelines.
 </span><span id="__span-17-2"><a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;analyze&quot;</span><span class="p">,</span>
 </span><span id="__span-17-3"><a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a>    <span class="n">fn</span><span class="o">=</span><span class="n">analyze_data</span><span class="p">,</span>
 </span><span id="__span-17-4"><a id="__codelineno-17-4" name="__codelineno-17-4" href="#__codelineno-17-4"></a>    <span class="n">inputs</span><span class="o">=</span><span class="n">consist</span><span class="o">.</span><span class="n">refs</span><span class="p">(</span><span class="n">preprocess_result</span><span class="p">,</span> <span class="p">{</span><span class="s2">&quot;cleaned_artifact&quot;</span><span class="p">:</span> <span class="s2">&quot;preprocessed&quot;</span><span class="p">}),</span>
-</span><span id="__span-17-5"><a id="__codelineno-17-5" name="__codelineno-17-5" href="#__codelineno-17-5"></a>    <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span><span class="n">load_inputs</span><span class="o">=</span><span class="kc">True</span><span class="p">),</span>
+</span><span id="__span-17-5"><a id="__codelineno-17-5" name="__codelineno-17-5" href="#__codelineno-17-5"></a>    <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span><span class="n">input_binding</span><span class="o">=</span><span class="s2">&quot;loaded&quot;</span><span class="p">),</span>
 </span><span id="__span-17-6"><a id="__codelineno-17-6" name="__codelineno-17-6" href="#__codelineno-17-6"></a>    <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;analysis&quot;</span><span class="p">],</span>
 </span><span id="__span-17-7"><a id="__codelineno-17-7" name="__codelineno-17-7" href="#__codelineno-17-7"></a><span class="p">)</span>
 </span></code></pre></div></p>
@@ -3896,7 +3916,7 @@ function parameters so you don't need to call <code>coupler.require(...)</code> 
 </span><span id="__span-20-19"><a id="__codelineno-20-19" name="__codelineno-20-19" href="#__codelineno-20-19"></a>                <span class="n">fn</span><span class="o">=</span><span class="n">simulate_year</span><span class="p">,</span>
 </span><span id="__span-20-20"><a id="__codelineno-20-20" name="__codelineno-20-20" href="#__codelineno-20-20"></a>                <span class="n">inputs</span><span class="o">=</span><span class="n">simulation_inputs</span><span class="p">,</span>
 </span><span id="__span-20-21"><a id="__codelineno-20-21" name="__codelineno-20-21" href="#__codelineno-20-21"></a>                <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;persons&quot;</span><span class="p">],</span>
-</span><span id="__span-20-22"><a id="__codelineno-20-22" name="__codelineno-20-22" href="#__codelineno-20-22"></a>                <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span><span class="n">load_inputs</span><span class="o">=</span><span class="kc">True</span><span class="p">),</span>
+</span><span id="__span-20-22"><a id="__codelineno-20-22" name="__codelineno-20-22" href="#__codelineno-20-22"></a>                <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span><span class="n">input_binding</span><span class="o">=</span><span class="s2">&quot;loaded&quot;</span><span class="p">),</span>
 </span><span id="__span-20-23"><a id="__codelineno-20-23" name="__codelineno-20-23" href="#__codelineno-20-23"></a>                <span class="n">config</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;year&quot;</span><span class="p">:</span> <span class="n">year</span><span class="p">},</span>
 </span><span id="__span-20-24"><a id="__codelineno-20-24" name="__codelineno-20-24" href="#__codelineno-20-24"></a>            <span class="p">)</span>
 </span></code></pre></div>
@@ -4038,7 +4058,7 @@ function parameters so you don't need to call <code>coupler.require(...)</code> 
 <p>Each threshold creates a separate run with its own cache entry. Re-run later? Consist returns cached results for matching thresholds, skips setup (since input unchanged).</p>
 <hr />
 <h2 id="pattern-3-container-integration">Pattern 3: Container Integration<a class="headerlink" href="#pattern-3-container-integration" title="Permanent link">&para;</a></h2>
-<p>Use containers when you have existing tools, models, or legacy code that runs as a subprocess or Docker container. The image digest becomes part of the cache key.</p>
+<p>Use containers when you have existing tools, models, or legacy code that runs as a subprocess or Docker container. The image digest becomes part of the cache key. For the full reference, see the <a href="../containers-guide/">Container Integration Guide</a>.</p>
 <p><strong>When to use:</strong></p>
 <ul>
 <li>Running ActivitySim, SUMO, BEAM, or other external models</li>
@@ -4213,12 +4233,12 @@ or for scenario defaults via <code>step_cache_hydration=...</code>:</p>
 </span><span id="__span-33-10"><a id="__codelineno-33-10" name="__codelineno-33-10" href="#__codelineno-33-10"></a>            <span class="n">fn</span><span class="o">=</span><span class="n">prepare_land_use</span><span class="p">,</span>
 </span><span id="__span-33-11"><a id="__codelineno-33-11" name="__codelineno-33-11" href="#__codelineno-33-11"></a>            <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;geojson_path&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;land_use.geojson&quot;</span><span class="p">)},</span>
 </span><span id="__span-33-12"><a id="__codelineno-33-12" name="__codelineno-33-12" href="#__codelineno-33-12"></a>            <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;zones&quot;</span><span class="p">],</span>
-</span><span id="__span-33-13"><a id="__codelineno-33-13" name="__codelineno-33-13" href="#__codelineno-33-13"></a>            <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span><span class="n">load_inputs</span><span class="o">=</span><span class="kc">True</span><span class="p">),</span>  <span class="c1"># (2)!</span>
+</span><span id="__span-33-13"><a id="__codelineno-33-13" name="__codelineno-33-13" href="#__codelineno-33-13"></a>            <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span><span class="n">input_binding</span><span class="o">=</span><span class="s2">&quot;paths&quot;</span><span class="p">),</span>  <span class="c1"># (2)!</span>
 </span><span id="__span-33-14"><a id="__codelineno-33-14" name="__codelineno-33-14" href="#__codelineno-33-14"></a>        <span class="p">)</span>
 </span></code></pre></div>
 <ol>
 <li>This function only runs on cache miss; it prints on the first run.</li>
-<li>Auto-load <code>Path</code> into the function argument.</li>
+<li>Bind the named input as a local <code>Path</code> object into the function argument.</li>
 <li>Outputs are synced to the coupler automatically.</li>
 </ol>
 <h3 id="which-should-you-use">Which Should You Use?<a class="headerlink" href="#which-should-you-use" title="Permanent link">&para;</a></h3>
@@ -4264,9 +4284,9 @@ or for scenario defaults via <code>step_cache_hydration=...</code>:</p>
 - You want explicit control over what happens every run vs. only on cache miss
 - Your step is fast enough that re-execution overhead doesn't matter</p>
 <p><strong>On large file inputs:</strong> If your function receives multi-GB files, use
-<code>execution_options=ExecutionOptions(load_inputs=False, runtime_kwargs={...})</code>
+<code>execution_options=ExecutionOptions(input_binding="paths")</code>
 and <code>cache_options=CacheOptions(cache_hydration="inputs-missing")</code> to ensure
-input files are available on cache misses without re-loading on every run.</p>
+input files are available on cache misses without loading them into memory.</p>
 <details>
 <summary>Alternative: log file outputs inside the step</summary>
 
@@ -4287,11 +4307,10 @@ If your function writes files, log them with the injected context (and read inpu
 </span><span id="__span-34-13"><a id="__codelineno-34-13" name="__codelineno-34-13" href="#__codelineno-34-13"></a>            <span class="n">fn</span><span class="o">=</span><span class="n">beam_preprocess</span><span class="p">,</span>
 </span><span id="__span-34-14"><a id="__codelineno-34-14" name="__codelineno-34-14" href="#__codelineno-34-14"></a>            <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;data_file&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;data.parquet&quot;</span><span class="p">)},</span>
 </span><span id="__span-34-15"><a id="__codelineno-34-15" name="__codelineno-34-15" href="#__codelineno-34-15"></a>            <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span>
-</span><span id="__span-34-16"><a id="__codelineno-34-16" name="__codelineno-34-16" href="#__codelineno-34-16"></a>                <span class="n">load_inputs</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
-</span><span id="__span-34-17"><a id="__codelineno-34-17" name="__codelineno-34-17" href="#__codelineno-34-17"></a>                <span class="n">runtime_kwargs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;data_file&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;data.parquet&quot;</span><span class="p">)},</span>
-</span><span id="__span-34-18"><a id="__codelineno-34-18" name="__codelineno-34-18" href="#__codelineno-34-18"></a>                <span class="n">inject_context</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
-</span><span id="__span-34-19"><a id="__codelineno-34-19" name="__codelineno-34-19" href="#__codelineno-34-19"></a>            <span class="p">),</span>
-</span><span id="__span-34-20"><a id="__codelineno-34-20" name="__codelineno-34-20" href="#__codelineno-34-20"></a>        <span class="p">)</span>
+</span><span id="__span-34-16"><a id="__codelineno-34-16" name="__codelineno-34-16" href="#__codelineno-34-16"></a>                <span class="n">input_binding</span><span class="o">=</span><span class="s2">&quot;paths&quot;</span><span class="p">,</span>
+</span><span id="__span-34-17"><a id="__codelineno-34-17" name="__codelineno-34-17" href="#__codelineno-34-17"></a>                <span class="n">inject_context</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-34-18"><a id="__codelineno-34-18" name="__codelineno-34-18" href="#__codelineno-34-18"></a>            <span class="p">),</span>
+</span><span id="__span-34-19"><a id="__codelineno-34-19" name="__codelineno-34-19" href="#__codelineno-34-19"></a>        <span class="p">)</span>
 </span></code></pre></div>
 </details>
 
@@ -4410,7 +4429,7 @@ For more on ingestion and hybrid views, see <a href="../concepts/data-materializ
 <p>If you ingest tabular data into DuckDB, Consist can capture the observed schema and export an <strong>editable SQLModel stub</strong> so you can curate PK/FK constraints and then register the model for views. This is useful when you want a stable, documented schema for downstream analysis or audits.</p>
 <p>You can also opt into lightweight file schema capture when logging CSV/Parquet artifacts by passing <code>profile_file_schema=True</code> (and optionally <code>file_schema_sample_rows=</code>) to <code>log_artifact</code>. These captured schemas are stored in the provenance DB and remain available even if the original files move or are deleted.
 If you already have a content hash (e.g., after copying or moving a file), pass <code>content_hash=</code> to <code>log_artifact</code> to reuse it without re-hashing the file. For safety, Consist will not overwrite an existing, different hash unless you pass <code>force_hash_override=True</code>. To verify the hash against disk, use <code>validate_content_hash=True</code>.</p>
-<p>See <code>docs/schema-export.md</code> for the full workflow (CLI + Python) and column-name/<code>__tablename__</code> guidelines.
+<p>See <a href="../schema-export/">Schema Export</a> for the full workflow (CLI + Python) and column-name/<code>__tablename__</code> guidelines.
 See <a href="../concepts/data-materialization/">Data Materialization Strategy</a> for ingestion tradeoffs and DB fallback behavior.</p>
 
 

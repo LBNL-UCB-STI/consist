@@ -37,9 +37,6 @@
         <loc>https://LBNL-UCB-STI.github.io/consist/building-domain-tracker/</loc>
       </url>
       <url>
-        <loc>https://LBNL-UCB-STI.github.io/consist/configs/</loc>
-      </url>
-      <url>
         <loc>https://LBNL-UCB-STI.github.io/consist/dlt-loader-guide/</loc>
       </url>
       <url>
@@ -73,6 +70,15 @@
         <loc>https://LBNL-UCB-STI.github.io/consist/examples/</loc>
       </url>
       <url>
+        <loc>https://LBNL-UCB-STI.github.io/consist/advanced/</loc>
+      </url>
+      <url>
+        <loc>https://LBNL-UCB-STI.github.io/consist/advanced/execution-style-decision-tree/</loc>
+      </url>
+      <url>
+        <loc>https://LBNL-UCB-STI.github.io/consist/advanced/manual-lifecycle-and-decorators/</loc>
+      </url>
+      <url>
         <loc>https://LBNL-UCB-STI.github.io/consist/troubleshooting/</loc>
       </url>
       <url>
@@ -89,6 +95,12 @@
       </url>
       <url>
         <loc>https://LBNL-UCB-STI.github.io/consist/api/</loc>
+      </url>
+      <url>
+        <loc>https://LBNL-UCB-STI.github.io/consist/api/essentials/</loc>
+      </url>
+      <url>
+        <loc>https://LBNL-UCB-STI.github.io/consist/api/advanced/</loc>
       </url>
       <url>
         <loc>https://LBNL-UCB-STI.github.io/consist/api/public_api/</loc>

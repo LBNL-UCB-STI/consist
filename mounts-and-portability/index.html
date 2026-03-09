@@ -316,7 +316,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../advanced/index.md" class="md-tabs__link">
+        <a href="../advanced/" class="md-tabs__link">
           
   
   Advanced
@@ -715,7 +715,7 @@
   <span class="md-ellipsis">
     
   
-    Config Management: Caching vs. Filtering
+    Config, Facets, and Identity Inputs
   
 
     
@@ -843,8 +843,6 @@
       
         
       
-        
-      
     
     
     
@@ -936,34 +934,6 @@
     
   
     Building a Domain Tracker
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../configs/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Configuration, Identity, and Facets
   
 
     
@@ -1101,10 +1071,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#getting-started-with-mounts" class="md-nav__link">
+  <a href="#mounts-at-a-glance" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Getting Started with Mounts
+        Mounts at a glance
       
     </span>
   </a>
@@ -1112,10 +1082,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#mounts-at-a-glance" class="md-nav__link">
+  <a href="#example-shared-research-team" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Mounts at a glance
+        Example: Shared Research Team
       
     </span>
   </a>
@@ -1134,10 +1104,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#workspace-uris-run-local-outputs" class="md-nav__link">
+  <a href="#run-local-outputs" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Workspace URIs (run-local outputs)
+        Run-local outputs
       
     </span>
   </a>
@@ -1609,7 +1579,7 @@
         
           
           <div class="md-nav__link md-nav__container">
-            <a href="../advanced/index.md" class="md-nav__link ">
+            <a href="../advanced/" class="md-nav__link ">
               
   
   
@@ -1653,14 +1623,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../advanced/execution-style-decision-tree.md" class="md-nav__link">
+      <a href="../advanced/execution-style-decision-tree/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    Which execution style should I use?
   
 
     
@@ -1681,14 +1651,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../advanced/manual-lifecycle-and-decorators.md" class="md-nav__link">
+      <a href="../advanced/manual-lifecycle-and-decorators/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    Manual Lifecycle and Decorators
   
 
     
@@ -2026,14 +1996,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/essentials.md" class="md-nav__link">
+      <a href="../api/essentials/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    API Essentials
   
 
     
@@ -2054,14 +2024,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/advanced.md" class="md-nav__link">
+      <a href="../api/advanced/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    API Advanced
   
 
     
@@ -2418,10 +2388,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#getting-started-with-mounts" class="md-nav__link">
+  <a href="#mounts-at-a-glance" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Getting Started with Mounts
+        Mounts at a glance
       
     </span>
   </a>
@@ -2429,10 +2399,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#mounts-at-a-glance" class="md-nav__link">
+  <a href="#example-shared-research-team" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Mounts at a glance
+        Example: Shared Research Team
       
     </span>
   </a>
@@ -2451,10 +2421,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#workspace-uris-run-local-outputs" class="md-nav__link">
+  <a href="#run-local-outputs" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Workspace URIs (run-local outputs)
+        Run-local outputs
       
     </span>
   </a>
@@ -2602,94 +2572,79 @@ URIs, and historical path resolution work.</p>
 examples for path and URI mechanics.</p>
 </div>
 <hr />
-<h2 id="getting-started-with-mounts">Getting Started with Mounts<a class="headerlink" href="#getting-started-with-mounts" title="Permanent link">&para;</a></h2>
-<p>When you set up Consist for your research project, you'll define <strong>mounts</strong> — mappings from short names to directories on your filesystem. These mounts let each team member keep their data in different locations while sharing a common provenance database.</p>
-<p><strong>The Workflow</strong></p>
-<ol>
-<li><strong>Identify your data directories</strong>: Where are your inputs? Where do you write outputs? Where is temporary scratch space?</li>
-<li><strong>Assign mount names</strong>: Choose memorable names like <code>inputs</code>, <code>outputs</code>, <code>scratch</code>, <code>shared</code>.</li>
-<li><strong>Define mounts in your Tracker</strong>: Map those names to real paths on each person's machine.</li>
-<li><strong>Log artifacts under mounts</strong>: Instead of absolute paths, use URIs like <code>inputs://land_use.csv</code>.</li>
-</ol>
-<p><strong>Example for a Research Team</strong></p>
-<p>Suppose your team shares an ActivitySim project:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">Tracker</span>
-</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
-</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
-</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="c1"># Shared setup (agreed upon by the team)</span>
-</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span>
-</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    <span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;./runs&quot;</span><span class="p">,</span>
-</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">,</span>
-</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    <span class="n">mounts</span><span class="o">=</span><span class="p">{</span>
-</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>        <span class="s2">&quot;inputs&quot;</span><span class="p">:</span> <span class="s2">&quot;/shared/data/activitysim_inputs&quot;</span><span class="p">,</span>      <span class="c1"># Shared NFS mount</span>
-</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>        <span class="s2">&quot;outputs&quot;</span><span class="p">:</span> <span class="s2">&quot;/local/activitysim_outputs&quot;</span><span class="p">,</span>          <span class="c1"># Local SSD for speed</span>
-</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>        <span class="s2">&quot;scratch&quot;</span><span class="p">:</span> <span class="s2">&quot;/scratch/users/YOUR_USERNAME&quot;</span><span class="p">,</span>        <span class="c1"># Temporary workspace</span>
-</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>    <span class="p">},</span>
-</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="p">)</span>
-</span></code></pre></div>
-<p><strong>On each team member's machine</strong>, the paths differ but mount names stay the same:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="c1"># Alice&#39;s setup</span>
-</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span>
-</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>    <span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;./runs&quot;</span><span class="p">,</span>
-</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>    <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">,</span>
-</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>    <span class="n">mounts</span><span class="o">=</span><span class="p">{</span>
-</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>        <span class="s2">&quot;inputs&quot;</span><span class="p">:</span> <span class="s2">&quot;/mnt/nfs/activitysim_inputs&quot;</span><span class="p">,</span>          <span class="c1"># Alice&#39;s NFS mount point</span>
-</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>        <span class="s2">&quot;outputs&quot;</span><span class="p">:</span> <span class="s2">&quot;/home/alice/activitysim_outputs&quot;</span><span class="p">,</span>
-</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>        <span class="s2">&quot;scratch&quot;</span><span class="p">:</span> <span class="s2">&quot;/scratch/alice&quot;</span><span class="p">,</span>
-</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>    <span class="p">},</span>
-</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="p">)</span>
-</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>
-</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="c1"># Bob&#39;s setup</span>
-</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span>
-</span><span id="__span-1-14"><a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a>    <span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;./runs&quot;</span><span class="p">,</span>
-</span><span id="__span-1-15"><a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a>    <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">,</span>
-</span><span id="__span-1-16"><a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a>    <span class="n">mounts</span><span class="o">=</span><span class="p">{</span>
-</span><span id="__span-1-17"><a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a>        <span class="s2">&quot;inputs&quot;</span><span class="p">:</span> <span class="s2">&quot;/data/nfs/inputs&quot;</span><span class="p">,</span>                     <span class="c1"># Bob&#39;s mount point</span>
-</span><span id="__span-1-18"><a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a>        <span class="s2">&quot;outputs&quot;</span><span class="p">:</span> <span class="s2">&quot;/var/cache/bob/outputs&quot;</span><span class="p">,</span>
-</span><span id="__span-1-19"><a id="__codelineno-1-19" name="__codelineno-1-19" href="#__codelineno-1-19"></a>        <span class="s2">&quot;scratch&quot;</span><span class="p">:</span> <span class="s2">&quot;/tmp/bob_scratch&quot;</span><span class="p">,</span>
-</span><span id="__span-1-20"><a id="__codelineno-1-20" name="__codelineno-1-20" href="#__codelineno-1-20"></a>    <span class="p">},</span>
-</span><span id="__span-1-21"><a id="__codelineno-1-21" name="__codelineno-1-21" href="#__codelineno-1-21"></a><span class="p">)</span>
-</span></code></pre></div>
-<p>When Alice runs a simulation and logs an output (inside a run context):</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;asim_baseline&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;activitysim&quot;</span><span class="p">):</span>
-</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>    <span class="n">consist</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span>
-</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>        <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;/home/alice/activitysim_outputs/results.parquet&quot;</span><span class="p">),</span>
-</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>        <span class="n">key</span><span class="o">=</span><span class="s2">&quot;results&quot;</span><span class="p">,</span>
-</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>        <span class="n">direction</span><span class="o">=</span><span class="s2">&quot;output&quot;</span><span class="p">,</span>
-</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>    <span class="p">)</span>
-</span></code></pre></div>
-<p>Consist detects the mount and stores a portable URI:</p>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>outputs://results.parquet
-</span></code></pre></div>
-<p>When Bob retrieves this artifact, Consist resolves it using <em>his</em> mount configuration:</p>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>outputs:// → /var/cache/bob/outputs/ → /var/cache/bob/outputs/results.parquet
-</span></code></pre></div>
-<p><strong>Benefits</strong></p>
-<ul>
-<li><strong>Portability</strong>: Runs move between machines without breaking lineage.</li>
-<li><strong>Flexibility</strong>: Each user can customize their local paths for their hardware (local SSD, NFS, cloud storage).</li>
-<li><strong>Shared provenance</strong>: A single <code>provenance.duckdb</code> file shared across the team still works even if underlying filesystems differ.</li>
-<li><strong>Isolation</strong>: Temporary outputs stay local; shared data stays on shared infrastructure.</li>
-</ul>
-<hr />
 <h2 id="mounts-at-a-glance">Mounts at a glance<a class="headerlink" href="#mounts-at-a-glance" title="Permanent link">&para;</a></h2>
 <p>Mounts map a short scheme name to a real path on disk:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">Tracker</span>
-</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>
-</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span>
-</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>    <span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;./runs&quot;</span><span class="p">,</span>
-</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>    <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">,</span>
-</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>    <span class="n">mounts</span><span class="o">=</span><span class="p">{</span>
-</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>        <span class="s2">&quot;inputs&quot;</span><span class="p">:</span> <span class="s2">&quot;/shared/inputs&quot;</span><span class="p">,</span>
-</span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>        <span class="s2">&quot;scratch&quot;</span><span class="p">:</span> <span class="s2">&quot;/scratch/users/MY_USERNAME&quot;</span><span class="p">,</span>
-</span><span id="__span-5-9"><a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a>    <span class="p">},</span>
-</span><span id="__span-5-10"><a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">Tracker</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>    <span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;./runs&quot;</span><span class="p">,</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>    <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">,</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    <span class="n">mounts</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>        <span class="s2">&quot;inputs&quot;</span><span class="p">:</span> <span class="s2">&quot;/shared/inputs&quot;</span><span class="p">,</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>        <span class="s2">&quot;scratch&quot;</span><span class="p">:</span> <span class="s2">&quot;/scratch/users/MY_USERNAME&quot;</span><span class="p">,</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    <span class="p">},</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="p">)</span>
 </span></code></pre></div>
 <p>When you log a path under a mount, Consist stores a URI such as:</p>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>inputs://land_use.csv
-</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>scratch://temp/output.parquet
+<div class="language-text highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>inputs://land_use.csv
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>scratch://temp/output.parquet
 </span></code></pre></div>
 <p>This keeps provenance portable and lets each user remap mounts on their machine.</p>
+<hr />
+<h2 id="example-shared-research-team">Example: Shared Research Team<a class="headerlink" href="#example-shared-research-team" title="Permanent link">&para;</a></h2>
+<p>Suppose your team shares a simulation project across machines with different
+filesystem layouts. Agree on mount <em>names</em> and let each person map them locally.</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="c1"># Shared setup (agreed upon by the team)</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>    <span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;./runs&quot;</span><span class="p">,</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>    <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">,</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>    <span class="n">mounts</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>        <span class="s2">&quot;inputs&quot;</span><span class="p">:</span> <span class="s2">&quot;/shared/data/activitysim_inputs&quot;</span><span class="p">,</span>      <span class="c1"># Shared NFS mount</span>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>        <span class="s2">&quot;outputs&quot;</span><span class="p">:</span> <span class="s2">&quot;/local/activitysim_outputs&quot;</span><span class="p">,</span>          <span class="c1"># Local SSD for speed</span>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>        <span class="s2">&quot;scratch&quot;</span><span class="p">:</span> <span class="s2">&quot;/scratch/users/YOUR_USERNAME&quot;</span><span class="p">,</span>        <span class="c1"># Temporary workspace</span>
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>    <span class="p">},</span>
+</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="p">)</span>
+</span></code></pre></div>
+<p><strong>On each team member's machine</strong>, the paths differ but mount names stay the same:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="c1"># Alice&#39;s setup</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>    <span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;./runs&quot;</span><span class="p">,</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>    <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">,</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>    <span class="n">mounts</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>        <span class="s2">&quot;inputs&quot;</span><span class="p">:</span> <span class="s2">&quot;/mnt/nfs/activitysim_inputs&quot;</span><span class="p">,</span>
+</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>        <span class="s2">&quot;outputs&quot;</span><span class="p">:</span> <span class="s2">&quot;/home/alice/activitysim_outputs&quot;</span><span class="p">,</span>
+</span><span id="__span-3-8"><a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>        <span class="s2">&quot;scratch&quot;</span><span class="p">:</span> <span class="s2">&quot;/scratch/alice&quot;</span><span class="p">,</span>
+</span><span id="__span-3-9"><a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>    <span class="p">},</span>
+</span><span id="__span-3-10"><a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a><span class="p">)</span>
+</span><span id="__span-3-11"><a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>
+</span><span id="__span-3-12"><a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a><span class="c1"># Bob&#39;s setup</span>
+</span><span id="__span-3-13"><a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span>
+</span><span id="__span-3-14"><a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a>    <span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;./runs&quot;</span><span class="p">,</span>
+</span><span id="__span-3-15"><a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a>    <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;./provenance.duckdb&quot;</span><span class="p">,</span>
+</span><span id="__span-3-16"><a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a>    <span class="n">mounts</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-3-17"><a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a>        <span class="s2">&quot;inputs&quot;</span><span class="p">:</span> <span class="s2">&quot;/data/nfs/inputs&quot;</span><span class="p">,</span>
+</span><span id="__span-3-18"><a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a>        <span class="s2">&quot;outputs&quot;</span><span class="p">:</span> <span class="s2">&quot;/var/cache/bob/outputs&quot;</span><span class="p">,</span>
+</span><span id="__span-3-19"><a id="__codelineno-3-19" name="__codelineno-3-19" href="#__codelineno-3-19"></a>        <span class="s2">&quot;scratch&quot;</span><span class="p">:</span> <span class="s2">&quot;/tmp/bob_scratch&quot;</span><span class="p">,</span>
+</span><span id="__span-3-20"><a id="__codelineno-3-20" name="__codelineno-3-20" href="#__codelineno-3-20"></a>    <span class="p">},</span>
+</span><span id="__span-3-21"><a id="__codelineno-3-21" name="__codelineno-3-21" href="#__codelineno-3-21"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>When Alice logs an output (inside a run context):</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;asim_baseline&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;activitysim&quot;</span><span class="p">):</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>    <span class="n">consist</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>        <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;/home/alice/activitysim_outputs/results.parquet&quot;</span><span class="p">),</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>        <span class="n">key</span><span class="o">=</span><span class="s2">&quot;results&quot;</span><span class="p">,</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>        <span class="n">direction</span><span class="o">=</span><span class="s2">&quot;output&quot;</span><span class="p">,</span>
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>    <span class="p">)</span>
+</span></code></pre></div>
+<p>Consist detects the mount and stores a portable URI:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>outputs://results.parquet
+</span></code></pre></div>
+<p>When Bob retrieves this artifact, Consist resolves it using <em>his</em> mount configuration:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>outputs:// → /var/cache/bob/outputs/ → /var/cache/bob/outputs/results.parquet
+</span></code></pre></div>
+<p>This is <strong>URI portability</strong>, not automatic byte replication. Bob only gets a
+usable local file if his <code>outputs</code> mount points at the same underlying dataset,
+or if the artifact can be rehydrated another way.</p>
 <hr />
 <h2 id="container-volumes-aligned-with-mounts">Container volumes aligned with mounts<a class="headerlink" href="#container-volumes-aligned-with-mounts" title="Permanent link">&para;</a></h2>
 <p>When using <code>run_container(...)</code>, map container host volume roots from
@@ -2719,16 +2674,23 @@ examples for path and URI mechanics.</p>
 <ul>
 <li>Keep container paths stable (<code>/inputs</code>, <code>/outputs</code>) across environments.</li>
 <li>Keep host paths machine-specific via tracker mounts.</li>
+<li>Keep host volume roots stable too if you want cross-machine cache reuse.</li>
 <li>Keep <code>strict_mounts=True</code> unless you intentionally allow external paths.</li>
 </ul>
+<p>Current caveat: container cache identity includes the resolved host <code>volumes</code>
+mapping, not just the in-container mount points. If one machine uses
+<code>/shared/team_inputs</code> and another uses <code>/mnt/nfs/team_inputs</code>, those runs will
+not currently share the same container cache signature.</p>
 <p>For a complete runnable example using this mapping pattern, see
 <a href="../containers-guide/">Container Integration Guide</a>.</p>
 <hr />
-<h2 id="workspace-uris-run-local-outputs">Workspace URIs (run-local outputs)<a class="headerlink" href="#workspace-uris-run-local-outputs" title="Permanent link">&para;</a></h2>
-<p>Paths under the run directory are stored relative to the active run:</p>
+<h2 id="run-local-outputs">Run-local outputs<a class="headerlink" href="#run-local-outputs" title="Permanent link">&para;</a></h2>
+<p>Paths under the run directory are usually stored relative to the active run:</p>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>./outputs/&lt;run_id&gt;/model.csv
 </span></code></pre></div>
-<p>Consist resolves these using the run's <code>_physical_run_dir</code> metadata field, which records the absolute run directory at execution time.</p>
+<p>Current runs typically store these as <code>./...</code> paths. Historical resolution also
+accepts <code>workspace://...</code> as an alias and uses the run's <code>_physical_run_dir</code>
+metadata field, which records the absolute run directory at execution time.</p>
 <table>
 <thead>
 <tr>
@@ -2759,7 +2721,7 @@ examples for path and URI mechanics.</p>
 <h2 id="historical-path-resolution">Historical path resolution<a class="headerlink" href="#historical-path-resolution" title="Permanent link">&para;</a></h2>
 <p>When Consist needs bytes from a historical run (e.g., cache hydration or
 <code>inputs-missing</code>), it resolves paths in this order:</p>
-<p>1) If the URI uses <code>workspace://</code> or <code>./</code>, resolve relative to the original run’s
+<p>1) If the URI uses <code>workspace://</code> or <code>./</code>, resolve relative to the original run's
    <code>_physical_run_dir</code>.
 2) If the URI uses a mount scheme (e.g., <code>inputs://</code>), resolve using the current
    tracker mounts.
@@ -2787,10 +2749,12 @@ log a warning and proceed without materializing the files.</p>
 </ul>
 <p>Portability implications:</p>
 <ul>
-<li>If mounts are mapped correctly, container cache-hit materialization succeeds
-  on each machine's local host paths.</li>
+<li>If mounts are mapped correctly, container cache-hit materialization can
+  succeed on each machine's local host paths.</li>
 <li>If mounts are missing/misaligned, cache metadata can still exist but output
   file materialization may warn/skip.</li>
+<li>If host volume roots differ across machines, container cache reuse may be
+  missed entirely because those host paths are part of the container signature.</li>
 </ul>
 <p>See <a href="../containers-guide/#cache-behavior-hydration">Container Integration Guide</a>
 for container cache details and <a href="../concepts/caching-and-hydration/">Caching &amp; Hydration</a>
@@ -2800,6 +2764,8 @@ for non-container run policies.</p>
 <ul>
 <li>Prefer mounts for shared data directories; avoid absolute paths in artifacts.</li>
 <li>Keep run directories local and disposable; treat cached outputs as rehydratable.</li>
+<li>Distinguish portable URIs from portable bytes: a remapped URI still needs an
+  accessible underlying file or a recovery path.</li>
 <li>Use <code>cache_hydration="outputs-requested"</code> for only the outputs you need.</li>
 <li>Use <code>cache_hydration="inputs-missing"</code> to backfill inputs when a run moves
   across machines or directories.</li>

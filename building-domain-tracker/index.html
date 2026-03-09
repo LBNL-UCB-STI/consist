@@ -18,7 +18,7 @@
         <link rel="prev" href="../usage-guide/">
       
       
-        <link rel="next" href="../configs/">
+        <link rel="next" href="../dlt-loader-guide/">
       
       
         
@@ -316,7 +316,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../advanced/index.md" class="md-tabs__link">
+        <a href="../advanced/" class="md-tabs__link">
           
   
   Advanced
@@ -715,7 +715,7 @@
   <span class="md-ellipsis">
     
   
-    Config Management: Caching vs. Filtering
+    Config, Facets, and Identity Inputs
   
 
     
@@ -830,8 +830,6 @@
   
     
     
-      
-        
       
         
       
@@ -989,10 +987,49 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#wrapper-class-pattern" class="md-nav__link">
+  <a href="#when-to-wrap-vs-use-direct-apis" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Wrapper Class Pattern
+        When to Wrap vs Use Direct APIs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#core-pattern" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Core Pattern
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Core Pattern">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#optional-context-managed-wrapper" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Optional: context-managed wrapper
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#centralizing-defaults" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Centralizing Defaults
       
     </span>
   </a>
@@ -1011,21 +1048,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#hiding-adapter-identity-and-runtime-wiring" class="md-nav__link">
+  <a href="#full-example" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Hiding Adapter, Identity, and Runtime Wiring
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#when-to-wrap-vs-use-direct-apis" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        When to Wrap vs Use Direct APIs
+        Full Example
       
     </span>
   </a>
@@ -1047,34 +1073,6 @@
   
 </nav>
       
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../configs/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Configuration, Identity, and Facets
-  
-
-    
-  </span>
-  
-  
-
-      </a>
     </li>
   
 
@@ -1554,7 +1552,7 @@
         
           
           <div class="md-nav__link md-nav__container">
-            <a href="../advanced/index.md" class="md-nav__link ">
+            <a href="../advanced/" class="md-nav__link ">
               
   
   
@@ -1598,14 +1596,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../advanced/execution-style-decision-tree.md" class="md-nav__link">
+      <a href="../advanced/execution-style-decision-tree/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    Which execution style should I use?
   
 
     
@@ -1626,14 +1624,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../advanced/manual-lifecycle-and-decorators.md" class="md-nav__link">
+      <a href="../advanced/manual-lifecycle-and-decorators/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    Manual Lifecycle and Decorators
   
 
     
@@ -1971,14 +1969,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/essentials.md" class="md-nav__link">
+      <a href="../api/essentials/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    API Essentials
   
 
     
@@ -1999,14 +1997,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/advanced.md" class="md-nav__link">
+      <a href="../api/advanced/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    API Advanced
   
 
     
@@ -2363,10 +2361,49 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#wrapper-class-pattern" class="md-nav__link">
+  <a href="#when-to-wrap-vs-use-direct-apis" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Wrapper Class Pattern
+        When to Wrap vs Use Direct APIs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#core-pattern" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Core Pattern
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Core Pattern">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#optional-context-managed-wrapper" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Optional: context-managed wrapper
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#centralizing-defaults" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Centralizing Defaults
       
     </span>
   </a>
@@ -2385,21 +2422,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#hiding-adapter-identity-and-runtime-wiring" class="md-nav__link">
+  <a href="#full-example" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Hiding Adapter, Identity, and Runtime Wiring
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#when-to-wrap-vs-use-direct-apis" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        When to Wrap vs Use Direct APIs
+        Full Example
       
     </span>
   </a>
@@ -2481,117 +2507,11 @@
                   
 
 <h1 id="building-a-domain-tracker">Building a Domain Tracker<a class="headerlink" href="#building-a-domain-tracker" title="Permanent link">&para;</a></h1>
-<p>Consist works well as a direct API, but teams usually get better long-term
-ergonomics by wrapping it in a domain-specific class.</p>
-<p>Use this guide when you are building a reusable model tool (for example,
-calibration, policy testing, or scenario comparison) and want to expose
-domain verbs instead of low-level run wiring.</p>
-<h2 id="wrapper-class-pattern">Wrapper Class Pattern<a class="headerlink" href="#wrapper-class-pattern" title="Permanent link">&para;</a></h2>
-<p>The core pattern is a wrapper class that owns a <code>Tracker</code>:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
-</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span>
-</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
-</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
-</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sqlalchemy</span><span class="w"> </span><span class="kn">import</span> <span class="n">text</span>
-</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">ExecutionOptions</span><span class="p">,</span> <span class="n">Tracker</span>
-</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist.integrations.activitysim</span><span class="w"> </span><span class="kn">import</span> <span class="n">ActivitySimConfigAdapter</span><span class="p">,</span> <span class="n">ConfigOverrides</span>
-</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>
-</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>
-</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="k">class</span><span class="w"> </span><span class="nc">CalibrationTracker</span><span class="p">:</span>
-</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">workspace</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span> <span class="n">base_config_dir</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">workspace</span> <span class="o">=</span> <span class="n">workspace</span>
-</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">base_config_dir</span> <span class="o">=</span> <span class="n">base_config_dir</span>
-</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span>
-</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>            <span class="n">run_dir</span><span class="o">=</span><span class="n">workspace</span> <span class="o">/</span> <span class="s2">&quot;runs&quot;</span><span class="p">,</span>
-</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>            <span class="n">db_path</span><span class="o">=</span><span class="n">workspace</span> <span class="o">/</span> <span class="s2">&quot;provenance.duckdb&quot;</span><span class="p">,</span>
-</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>        <span class="p">)</span>
-</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">adapter</span> <span class="o">=</span> <span class="n">ActivitySimConfigAdapter</span><span class="p">(</span><span class="n">root_dirs</span><span class="o">=</span><span class="p">[</span><span class="n">base_config_dir</span><span class="p">])</span>
-</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">identity_inputs</span> <span class="o">=</span> <span class="p">[(</span><span class="s2">&quot;asim_config&quot;</span><span class="p">,</span> <span class="n">base_config_dir</span><span class="p">)]</span>
-</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a>
-</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">evaluate</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">run_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">output_dir</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>
-</span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a><span class="w">        </span><span class="sd">&quot;&quot;&quot;Run a baseline evaluation with stable identity wiring.&quot;&quot;&quot;</span>
-</span><span id="__span-0-23"><a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a>        <span class="k">with</span> <span class="n">consist</span><span class="o">.</span><span class="n">use_tracker</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">tracker</span><span class="p">):</span>
-</span><span id="__span-0-24"><a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a>            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">tracker</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
-</span><span id="__span-0-25"><a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a>                <span class="n">fn</span><span class="o">=</span><span class="n">run_activitysim</span><span class="p">,</span>  <span class="c1"># your domain callable</span>
-</span><span id="__span-0-26"><a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a>                <span class="n">name</span><span class="o">=</span><span class="n">run_name</span><span class="p">,</span>
-</span><span id="__span-0-27"><a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a>                <span class="n">model</span><span class="o">=</span><span class="s2">&quot;activitysim_calibration&quot;</span><span class="p">,</span>
-</span><span id="__span-0-28"><a id="__codelineno-0-28" name="__codelineno-0-28" href="#__codelineno-0-28"></a>                <span class="n">adapter</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">adapter</span><span class="p">,</span>
-</span><span id="__span-0-29"><a id="__codelineno-0-29" name="__codelineno-0-29" href="#__codelineno-0-29"></a>                <span class="n">identity_inputs</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">identity_inputs</span><span class="p">,</span>
-</span><span id="__span-0-30"><a id="__codelineno-0-30" name="__codelineno-0-30" href="#__codelineno-0-30"></a>                <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;persons&quot;</span><span class="p">,</span> <span class="s2">&quot;trips&quot;</span><span class="p">,</span> <span class="s2">&quot;metrics&quot;</span><span class="p">],</span>
-</span><span id="__span-0-31"><a id="__codelineno-0-31" name="__codelineno-0-31" href="#__codelineno-0-31"></a>                <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span>
-</span><span id="__span-0-32"><a id="__codelineno-0-32" name="__codelineno-0-32" href="#__codelineno-0-32"></a>                    <span class="n">runtime_kwargs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;config_dir&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">base_config_dir</span><span class="p">,</span> <span class="s2">&quot;output_dir&quot;</span><span class="p">:</span> <span class="n">output_dir</span><span class="p">}</span>
-</span><span id="__span-0-33"><a id="__codelineno-0-33" name="__codelineno-0-33" href="#__codelineno-0-33"></a>                <span class="p">),</span>
-</span><span id="__span-0-34"><a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a>            <span class="p">)</span>
-</span><span id="__span-0-35"><a id="__codelineno-0-35" name="__codelineno-0-35" href="#__codelineno-0-35"></a>
-</span><span id="__span-0-36"><a id="__codelineno-0-36" name="__codelineno-0-36" href="#__codelineno-0-36"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">run_sweep</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">overrides_by_label</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">ConfigOverrides</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
-</span><span id="__span-0-37"><a id="__codelineno-0-37" name="__codelineno-0-37" href="#__codelineno-0-37"></a><span class="w">        </span><span class="sd">&quot;&quot;&quot;Evaluate multiple override sets with one domain method.&quot;&quot;&quot;</span>
-</span><span id="__span-0-38"><a id="__codelineno-0-38" name="__codelineno-0-38" href="#__codelineno-0-38"></a>        <span class="n">results</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
-</span><span id="__span-0-39"><a id="__codelineno-0-39" name="__codelineno-0-39" href="#__codelineno-0-39"></a>        <span class="k">with</span> <span class="n">consist</span><span class="o">.</span><span class="n">use_tracker</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">tracker</span><span class="p">):</span>
-</span><span id="__span-0-40"><a id="__codelineno-0-40" name="__codelineno-0-40" href="#__codelineno-0-40"></a>            <span class="k">for</span> <span class="n">label</span><span class="p">,</span> <span class="n">overrides</span> <span class="ow">in</span> <span class="n">overrides_by_label</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
-</span><span id="__span-0-41"><a id="__codelineno-0-41" name="__codelineno-0-41" href="#__codelineno-0-41"></a>                <span class="n">results</span><span class="p">[</span><span class="n">label</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tracker</span><span class="o">.</span><span class="n">run_with_config_overrides</span><span class="p">(</span>
-</span><span id="__span-0-42"><a id="__codelineno-0-42" name="__codelineno-0-42" href="#__codelineno-0-42"></a>                    <span class="n">adapter</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">adapter</span><span class="p">,</span>
-</span><span id="__span-0-43"><a id="__codelineno-0-43" name="__codelineno-0-43" href="#__codelineno-0-43"></a>                    <span class="n">base_run_id</span><span class="o">=</span><span class="s2">&quot;baseline_run_id&quot;</span><span class="p">,</span>
-</span><span id="__span-0-44"><a id="__codelineno-0-44" name="__codelineno-0-44" href="#__codelineno-0-44"></a>                    <span class="n">overrides</span><span class="o">=</span><span class="n">overrides</span><span class="p">,</span>
-</span><span id="__span-0-45"><a id="__codelineno-0-45" name="__codelineno-0-45" href="#__codelineno-0-45"></a>                    <span class="n">output_dir</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">workspace</span> <span class="o">/</span> <span class="s2">&quot;materialized&quot;</span><span class="p">,</span>
-</span><span id="__span-0-46"><a id="__codelineno-0-46" name="__codelineno-0-46" href="#__codelineno-0-46"></a>                    <span class="n">fn</span><span class="o">=</span><span class="n">run_activitysim</span><span class="p">,</span>
-</span><span id="__span-0-47"><a id="__codelineno-0-47" name="__codelineno-0-47" href="#__codelineno-0-47"></a>                    <span class="n">name</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;calibration_</span><span class="si">{</span><span class="n">label</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
-</span><span id="__span-0-48"><a id="__codelineno-0-48" name="__codelineno-0-48" href="#__codelineno-0-48"></a>                    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;activitysim_calibration&quot;</span><span class="p">,</span>
-</span><span id="__span-0-49"><a id="__codelineno-0-49" name="__codelineno-0-49" href="#__codelineno-0-49"></a>                    <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;metrics&quot;</span><span class="p">],</span>
-</span><span id="__span-0-50"><a id="__codelineno-0-50" name="__codelineno-0-50" href="#__codelineno-0-50"></a>                    <span class="n">override_runtime_kwargs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;config_dir&quot;</span><span class="p">:</span> <span class="s2">&quot;selected_root_dir&quot;</span><span class="p">},</span>
-</span><span id="__span-0-51"><a id="__codelineno-0-51" name="__codelineno-0-51" href="#__codelineno-0-51"></a>                    <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span>
-</span><span id="__span-0-52"><a id="__codelineno-0-52" name="__codelineno-0-52" href="#__codelineno-0-52"></a>                        <span class="n">runtime_kwargs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;output_dir&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">workspace</span> <span class="o">/</span> <span class="s2">&quot;asim_outputs&quot;</span> <span class="o">/</span> <span class="n">label</span><span class="p">}</span>
-</span><span id="__span-0-53"><a id="__codelineno-0-53" name="__codelineno-0-53" href="#__codelineno-0-53"></a>                    <span class="p">),</span>
-</span><span id="__span-0-54"><a id="__codelineno-0-54" name="__codelineno-0-54" href="#__codelineno-0-54"></a>                <span class="p">)</span>
-</span><span id="__span-0-55"><a id="__codelineno-0-55" name="__codelineno-0-55" href="#__codelineno-0-55"></a>        <span class="k">return</span> <span class="n">results</span>
-</span><span id="__span-0-56"><a id="__codelineno-0-56" name="__codelineno-0-56" href="#__codelineno-0-56"></a>
-</span><span id="__span-0-57"><a id="__codelineno-0-57" name="__codelineno-0-57" href="#__codelineno-0-57"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">query_top_k</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">metric</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">k</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">5</span><span class="p">):</span>
-</span><span id="__span-0-58"><a id="__codelineno-0-58" name="__codelineno-0-58" href="#__codelineno-0-58"></a><span class="w">        </span><span class="sd">&quot;&quot;&quot;Expose domain-level query helpers, not raw SQL plumbing.&quot;&quot;&quot;</span>
-</span><span id="__span-0-59"><a id="__codelineno-0-59" name="__codelineno-0-59" href="#__codelineno-0-59"></a>        <span class="n">query</span> <span class="o">=</span> <span class="n">text</span><span class="p">(</span>
-</span><span id="__span-0-60"><a id="__codelineno-0-60" name="__codelineno-0-60" href="#__codelineno-0-60"></a><span class="w">            </span><span class="sd">&quot;&quot;&quot;</span>
-</span><span id="__span-0-61"><a id="__codelineno-0-61" name="__codelineno-0-61" href="#__codelineno-0-61"></a><span class="sd">        SELECT run_id, value_num</span>
-</span><span id="__span-0-62"><a id="__codelineno-0-62" name="__codelineno-0-62" href="#__codelineno-0-62"></a><span class="sd">        FROM global_tables.run_config_kv</span>
-</span><span id="__span-0-63"><a id="__codelineno-0-63" name="__codelineno-0-63" href="#__codelineno-0-63"></a><span class="sd">        WHERE key = :metric</span>
-</span><span id="__span-0-64"><a id="__codelineno-0-64" name="__codelineno-0-64" href="#__codelineno-0-64"></a><span class="sd">        ORDER BY value_num DESC</span>
-</span><span id="__span-0-65"><a id="__codelineno-0-65" name="__codelineno-0-65" href="#__codelineno-0-65"></a><span class="sd">        LIMIT :k</span>
-</span><span id="__span-0-66"><a id="__codelineno-0-66" name="__codelineno-0-66" href="#__codelineno-0-66"></a><span class="sd">        &quot;&quot;&quot;</span>
-</span><span id="__span-0-67"><a id="__codelineno-0-67" name="__codelineno-0-67" href="#__codelineno-0-67"></a>        <span class="p">)</span>
-</span><span id="__span-0-68"><a id="__codelineno-0-68" name="__codelineno-0-68" href="#__codelineno-0-68"></a>        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">tracker</span><span class="o">.</span><span class="n">run_query</span><span class="p">(</span><span class="n">query</span><span class="o">.</span><span class="n">params</span><span class="p">(</span><span class="n">metric</span><span class="o">=</span><span class="n">metric</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="n">k</span><span class="p">))</span>
-</span></code></pre></div>
-<p>The wrapper centralizes:</p>
-<ul>
-<li>tracker construction (<code>self.tracker = Tracker(...)</code>)</li>
-<li>adapter setup</li>
-<li>default <code>identity_inputs</code></li>
-<li>runtime kwargs injection</li>
-<li>consistent output key conventions</li>
-</ul>
-<h2 id="domain-verbs-over-framework-verbs">Domain Verbs Over Framework Verbs<a class="headerlink" href="#domain-verbs-over-framework-verbs" title="Permanent link">&para;</a></h2>
-<p>Expose methods that match your model language:</p>
-<ul>
-<li><code>evaluate(...)</code></li>
-<li><code>run_sweep(...)</code></li>
-<li><code>query_top_k(...)</code></li>
-</ul>
-<p>Inside those methods, call Consist primitives (<code>run</code>, <code>scenario</code>, <code>trace</code>,
-<code>run_with_config_overrides</code>) and keep implementation details hidden.</p>
-<p>This keeps downstream code focused on model intent, while still preserving full
-provenance/caching/query capability.</p>
-<h2 id="hiding-adapter-identity-and-runtime-wiring">Hiding Adapter, Identity, and Runtime Wiring<a class="headerlink" href="#hiding-adapter-identity-and-runtime-wiring" title="Permanent link">&para;</a></h2>
-<p>A useful rule: callers should supply domain inputs, not Consist mechanics.</p>
-<p>Good wrapper API:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">cal</span> <span class="o">=</span> <span class="n">CalibrationTracker</span><span class="p">(</span><span class="n">workspace</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;./work&quot;</span><span class="p">),</span> <span class="n">base_config_dir</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;./configs&quot;</span><span class="p">))</span>
-</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="n">result</span> <span class="o">=</span> <span class="n">cal</span><span class="o">.</span><span class="n">evaluate</span><span class="p">(</span><span class="n">run_name</span><span class="o">=</span><span class="s2">&quot;baseline&quot;</span><span class="p">,</span> <span class="n">output_dir</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;./outputs/baseline&quot;</span><span class="p">))</span>
-</span></code></pre></div>
-<p>Leaky direct call shape (inside application code):</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="n">tracker</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
-</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>    <span class="n">fn</span><span class="o">=</span><span class="n">run_activitysim</span><span class="p">,</span>
-</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>    <span class="n">adapter</span><span class="o">=</span><span class="n">adapter</span><span class="p">,</span>
-</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>    <span class="n">identity_inputs</span><span class="o">=</span><span class="p">[(</span><span class="s2">&quot;asim_config&quot;</span><span class="p">,</span> <span class="n">config_dir</span><span class="p">)],</span>
-</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>    <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span><span class="n">runtime_kwargs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;config_dir&quot;</span><span class="p">:</span> <span class="n">config_dir</span><span class="p">}),</span>
-</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>    <span class="o">...</span>
-</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="p">)</span>
-</span></code></pre></div>
-<p>Both are valid; wrapper style is easier to maintain across many callsites.</p>
+<p>Consist works well as a direct API, but teams get better long-term ergonomics
+by wrapping it in a domain-specific class. A domain tracker centralizes all
+the wiring that would otherwise repeat at every callsite — tracker construction,
+default identity inputs, output key conventions — and exposes domain verbs
+instead of framework mechanics.</p>
 <h2 id="when-to-wrap-vs-use-direct-apis">When to Wrap vs Use Direct APIs<a class="headerlink" href="#when-to-wrap-vs-use-direct-apis" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -2603,20 +2523,263 @@ provenance/caching/query capability.</p>
 <tbody>
 <tr>
 <td><strong>Domain wrapper</strong></td>
-<td>Shared codebase, repeated adapter/identity/runtime wiring, multiple users of the same model workflow</td>
+<td>Shared codebase, repeated identity/runtime wiring, multiple callers of the same workflow</td>
 </tr>
 <tr>
 <td><strong>Direct Consist API</strong></td>
-<td>One-off analysis scripts, debugging, prototyping new step boundaries, low-level experimentation</td>
+<td>One-off analysis scripts, debugging, prototyping new step boundaries</td>
 </tr>
 </tbody>
 </table>
-<p>If you are onboarding a new project, start direct for a small spike, then
-promote to a wrapper once callsites begin repeating the same run wiring.</p>
+<p>Start direct for an initial spike. Promote to a wrapper once callsites begin
+repeating the same run wiring.</p>
+<hr />
+<h2 id="core-pattern">Core Pattern<a class="headerlink" href="#core-pattern" title="Permanent link">&para;</a></h2>
+<p>The core pattern is a class that:</p>
+<ol>
+<li>Owns a <code>Tracker</code> internally</li>
+<li>Exposes domain methods that call <code>self._tracker</code> methods directly</li>
+<li>Optionally adds <code>__enter__</code> / <code>__exit__</code> later if it wants active-tracker ergonomics</li>
+</ol>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">Tracker</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="k">class</span><span class="w"> </span><span class="nc">SimulationTracker</span><span class="p">:</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">workspace</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">workspace</span> <span class="o">=</span> <span class="n">workspace</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>            <span class="n">run_dir</span><span class="o">=</span><span class="n">workspace</span> <span class="o">/</span> <span class="s2">&quot;runs&quot;</span><span class="p">,</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>            <span class="n">db_path</span><span class="o">=</span><span class="n">workspace</span> <span class="o">/</span> <span class="s2">&quot;provenance.duckdb&quot;</span><span class="p">,</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>        <span class="p">)</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>    <span class="c1"># --- Domain methods ---</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">run_model</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="nb">dict</span><span class="p">,</span> <span class="n">inputs</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a><span class="w">        </span><span class="sd">&quot;&quot;&quot;Run one scenario with consistent provenance wiring.&quot;&quot;&quot;</span>
+</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a>        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_tracker</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a>            <span class="n">fn</span><span class="o">=</span><span class="n">my_model_fn</span><span class="p">,</span>
+</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>            <span class="n">name</span><span class="o">=</span><span class="n">name</span><span class="p">,</span>
+</span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>            <span class="n">config</span><span class="o">=</span><span class="n">config</span><span class="p">,</span>
+</span><span id="__span-0-23"><a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a>            <span class="n">inputs</span><span class="o">=</span><span class="n">inputs</span><span class="p">,</span>
+</span><span id="__span-0-24"><a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a>            <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;results&quot;</span><span class="p">],</span>
+</span><span id="__span-0-25"><a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a>        <span class="p">)</span>
+</span><span id="__span-0-26"><a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a>
+</span><span id="__span-0-27"><a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">find_best</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">metric</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">k</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">5</span><span class="p">):</span>
+</span><span id="__span-0-28"><a id="__codelineno-0-28" name="__codelineno-0-28" href="#__codelineno-0-28"></a><span class="w">        </span><span class="sd">&quot;&quot;&quot;Query top-k runs by a scalar metric stored in facets.&quot;&quot;&quot;</span>
+</span><span id="__span-0-29"><a id="__codelineno-0-29" name="__codelineno-0-29" href="#__codelineno-0-29"></a>        <span class="kn">from</span><span class="w"> </span><span class="nn">sqlalchemy</span><span class="w"> </span><span class="kn">import</span> <span class="n">text</span>
+</span><span id="__span-0-30"><a id="__codelineno-0-30" name="__codelineno-0-30" href="#__codelineno-0-30"></a>        <span class="n">query</span> <span class="o">=</span> <span class="n">text</span><span class="p">(</span><span class="s2">&quot;&quot;&quot;</span>
+</span><span id="__span-0-31"><a id="__codelineno-0-31" name="__codelineno-0-31" href="#__codelineno-0-31"></a><span class="s2">            SELECT run_id, value_num</span>
+</span><span id="__span-0-32"><a id="__codelineno-0-32" name="__codelineno-0-32" href="#__codelineno-0-32"></a><span class="s2">            FROM global_tables.run_config_kv</span>
+</span><span id="__span-0-33"><a id="__codelineno-0-33" name="__codelineno-0-33" href="#__codelineno-0-33"></a><span class="s2">            WHERE key = :metric</span>
+</span><span id="__span-0-34"><a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a><span class="s2">            ORDER BY value_num DESC</span>
+</span><span id="__span-0-35"><a id="__codelineno-0-35" name="__codelineno-0-35" href="#__codelineno-0-35"></a><span class="s2">            LIMIT :k</span>
+</span><span id="__span-0-36"><a id="__codelineno-0-36" name="__codelineno-0-36" href="#__codelineno-0-36"></a><span class="s2">        &quot;&quot;&quot;</span><span class="p">)</span>
+</span><span id="__span-0-37"><a id="__codelineno-0-37" name="__codelineno-0-37" href="#__codelineno-0-37"></a>        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_tracker</span><span class="o">.</span><span class="n">run_query</span><span class="p">(</span><span class="n">query</span><span class="o">.</span><span class="n">params</span><span class="p">(</span><span class="n">metric</span><span class="o">=</span><span class="n">metric</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="n">k</span><span class="p">))</span>
+</span></code></pre></div>
+<p>Usage:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">sim</span> <span class="o">=</span> <span class="n">SimulationTracker</span><span class="p">(</span><span class="n">workspace</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;./work&quot;</span><span class="p">))</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="n">result</span> <span class="o">=</span> <span class="n">sim</span><span class="o">.</span><span class="n">run_model</span><span class="p">(</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;baseline&quot;</span><span class="p">,</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>    <span class="n">config</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;sample_rate&quot;</span><span class="p">:</span> <span class="mf">0.1</span><span class="p">,</span> <span class="s2">&quot;year&quot;</span><span class="p">:</span> <span class="mi">2030</span><span class="p">},</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;population&quot;</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;data/population.parquet&quot;</span><span class="p">)},</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="p">)</span>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="n">top_runs</span> <span class="o">=</span> <span class="n">sim</span><span class="o">.</span><span class="n">find_best</span><span class="p">(</span><span class="n">metric</span><span class="o">=</span><span class="s2">&quot;rmse&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span>
+</span></code></pre></div>
+<p>This is the simplest wrapper shape and is enough for many teams. Direct
+instance methods like <code>self._tracker.run(...)</code> and <code>self._tracker.run_query(...)</code>
+do not require a global active-tracker context.</p>
+<h3 id="optional-context-managed-wrapper">Optional: context-managed wrapper<a class="headerlink" href="#optional-context-managed-wrapper" title="Permanent link">&para;</a></h3>
+<p>Add <code>__enter__</code> / <code>__exit__</code> when your wrapper wants to call top-level
+<code>consist.*</code> helpers that resolve the active tracker implicitly, such as
+<code>consist.output_path(...)</code>, <code>consist.log_output(...)</code>, or <code>consist.scenario(...)</code>.</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="k">class</span><span class="w"> </span><span class="nc">SimulationTracker</span><span class="p">:</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">workspace</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">workspace</span> <span class="o">=</span> <span class="n">workspace</span>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>            <span class="n">run_dir</span><span class="o">=</span><span class="n">workspace</span> <span class="o">/</span> <span class="s2">&quot;runs&quot;</span><span class="p">,</span>
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>            <span class="n">db_path</span><span class="o">=</span><span class="n">workspace</span> <span class="o">/</span> <span class="s2">&quot;provenance.duckdb&quot;</span><span class="p">,</span>
+</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>        <span class="p">)</span>
+</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_cm</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>
+</span><span id="__span-2-13"><a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a>    <span class="k">def</span><span class="w"> </span><span class="fm">__enter__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">&quot;SimulationTracker&quot;</span><span class="p">:</span>
+</span><span id="__span-2-14"><a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_cm</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">use_tracker</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_tracker</span><span class="p">)</span>
+</span><span id="__span-2-15"><a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_cm</span><span class="o">.</span><span class="fm">__enter__</span><span class="p">()</span>
+</span><span id="__span-2-16"><a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a>        <span class="k">return</span> <span class="bp">self</span>
+</span><span id="__span-2-17"><a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a>
+</span><span id="__span-2-18"><a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a>    <span class="k">def</span><span class="w"> </span><span class="fm">__exit__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">exc</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-2-19"><a id="__codelineno-2-19" name="__codelineno-2-19" href="#__codelineno-2-19"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_cm</span><span class="o">.</span><span class="fm">__exit__</span><span class="p">(</span><span class="o">*</span><span class="n">exc</span><span class="p">)</span>
+</span></code></pre></div>
+<p>That pattern is optional ergonomics, not a requirement for a domain wrapper.</p>
+<hr />
+<h2 id="centralizing-defaults">Centralizing Defaults<a class="headerlink" href="#centralizing-defaults" title="Permanent link">&para;</a></h2>
+<p>The wrapper is the right place to fix wiring that should not vary across
+callsites: the model name, default identity inputs, output keys, adapter.</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">SimulationTracker</span><span class="p">:</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">workspace</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span> <span class="n">config_dir</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">workspace</span> <span class="o">=</span> <span class="n">workspace</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">config_dir</span> <span class="o">=</span> <span class="n">config_dir</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span>
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>            <span class="n">run_dir</span><span class="o">=</span><span class="n">workspace</span> <span class="o">/</span> <span class="s2">&quot;runs&quot;</span><span class="p">,</span>
+</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>            <span class="n">db_path</span><span class="o">=</span><span class="n">workspace</span> <span class="o">/</span> <span class="s2">&quot;provenance.duckdb&quot;</span><span class="p">,</span>
+</span><span id="__span-3-8"><a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>        <span class="p">)</span>
+</span><span id="__span-3-9"><a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>        <span class="c1"># Fixed for all runs — callers cannot forget these</span>
+</span><span id="__span-3-10"><a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_identity_inputs</span> <span class="o">=</span> <span class="p">[(</span><span class="s2">&quot;model_config&quot;</span><span class="p">,</span> <span class="n">config_dir</span><span class="p">)]</span>
+</span><span id="__span-3-11"><a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_cm</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-3-12"><a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a>
+</span><span id="__span-3-13"><a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>    <span class="k">def</span><span class="w"> </span><span class="fm">__enter__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">&quot;SimulationTracker&quot;</span><span class="p">:</span>
+</span><span id="__span-3-14"><a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_cm</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">use_tracker</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_tracker</span><span class="p">)</span>
+</span><span id="__span-3-15"><a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_cm</span><span class="o">.</span><span class="fm">__enter__</span><span class="p">()</span>
+</span><span id="__span-3-16"><a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a>        <span class="k">return</span> <span class="bp">self</span>
+</span><span id="__span-3-17"><a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a>
+</span><span id="__span-3-18"><a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a>    <span class="k">def</span><span class="w"> </span><span class="fm">__exit__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">exc</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-3-19"><a id="__codelineno-3-19" name="__codelineno-3-19" href="#__codelineno-3-19"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_cm</span><span class="o">.</span><span class="fm">__exit__</span><span class="p">(</span><span class="o">*</span><span class="n">exc</span><span class="p">)</span>
+</span><span id="__span-3-20"><a id="__codelineno-3-20" name="__codelineno-3-20" href="#__codelineno-3-20"></a>
+</span><span id="__span-3-21"><a id="__codelineno-3-21" name="__codelineno-3-21" href="#__codelineno-3-21"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">run_model</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>
+</span><span id="__span-3-22"><a id="__codelineno-3-22" name="__codelineno-3-22" href="#__codelineno-3-22"></a>        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_tracker</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-3-23"><a id="__codelineno-3-23" name="__codelineno-3-23" href="#__codelineno-3-23"></a>            <span class="n">fn</span><span class="o">=</span><span class="n">my_model_fn</span><span class="p">,</span>
+</span><span id="__span-3-24"><a id="__codelineno-3-24" name="__codelineno-3-24" href="#__codelineno-3-24"></a>            <span class="n">name</span><span class="o">=</span><span class="n">name</span><span class="p">,</span>
+</span><span id="__span-3-25"><a id="__codelineno-3-25" name="__codelineno-3-25" href="#__codelineno-3-25"></a>            <span class="n">model</span><span class="o">=</span><span class="s2">&quot;my_model&quot;</span><span class="p">,</span>                          <span class="c1"># fixed</span>
+</span><span id="__span-3-26"><a id="__codelineno-3-26" name="__codelineno-3-26" href="#__codelineno-3-26"></a>            <span class="n">config</span><span class="o">=</span><span class="n">config</span><span class="p">,</span>
+</span><span id="__span-3-27"><a id="__codelineno-3-27" name="__codelineno-3-27" href="#__codelineno-3-27"></a>            <span class="n">identity_inputs</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_identity_inputs</span><span class="p">,</span>     <span class="c1"># fixed</span>
+</span><span id="__span-3-28"><a id="__codelineno-3-28" name="__codelineno-3-28" href="#__codelineno-3-28"></a>            <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;results&quot;</span><span class="p">],</span>                       <span class="c1"># fixed</span>
+</span><span id="__span-3-29"><a id="__codelineno-3-29" name="__codelineno-3-29" href="#__codelineno-3-29"></a>            <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span>
+</span><span id="__span-3-30"><a id="__codelineno-3-30" name="__codelineno-3-30" href="#__codelineno-3-30"></a>                <span class="n">runtime_kwargs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;config_dir&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">config_dir</span><span class="p">}</span>
+</span><span id="__span-3-31"><a id="__codelineno-3-31" name="__codelineno-3-31" href="#__codelineno-3-31"></a>            <span class="p">),</span>
+</span><span id="__span-3-32"><a id="__codelineno-3-32" name="__codelineno-3-32" href="#__codelineno-3-32"></a>        <span class="p">)</span>
+</span></code></pre></div>
+<p>Callers supply domain inputs (<code>name</code>, <code>config</code>). The wrapper owns everything
+else. One missed <code>identity_inputs</code> in a direct call is a stale cache;
+the wrapper makes that impossible.</p>
+<hr />
+<h2 id="domain-verbs-over-framework-verbs">Domain Verbs Over Framework Verbs<a class="headerlink" href="#domain-verbs-over-framework-verbs" title="Permanent link">&para;</a></h2>
+<p>Name your methods after model concepts, not Consist operations:</p>
+<table>
+<thead>
+<tr>
+<th>Framework call</th>
+<th>Domain method</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tracker.run(fn=evaluate_fn, ...)</code></td>
+<td><code>sim.evaluate(year=2030)</code></td>
+</tr>
+<tr>
+<td><code>tracker.run(fn=calibrate_fn, ...)</code></td>
+<td><code>sim.calibrate(overrides={"coeff": 0.8})</code></td>
+</tr>
+<tr>
+<td><code>tracker.run_query(...)</code></td>
+<td><code>sim.top_k_runs(metric="mode_share_error")</code></td>
+</tr>
+</tbody>
+</table>
+<p>Inside those methods, call Consist primitives (<code>run</code>, <code>scenario</code>, <code>trace</code>)
+and keep the wiring hidden from callers.</p>
+<hr />
+<h2 id="full-example">Full Example<a class="headerlink" href="#full-example" title="Permanent link">&para;</a></h2>
+<p>A calibration workflow with multiple run types and a query helper:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sqlalchemy</span><span class="w"> </span><span class="kn">import</span> <span class="n">text</span>
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">ExecutionOptions</span><span class="p">,</span> <span class="n">Tracker</span>
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>
+</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a>
+</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a><span class="k">class</span><span class="w"> </span><span class="nc">CalibrationTracker</span><span class="p">:</span>
+</span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Domain tracker for a calibration workflow.&quot;&quot;&quot;</span>
+</span><span id="__span-4-11"><a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a>
+</span><span id="__span-4-12"><a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a>    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">workspace</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span> <span class="n">config_dir</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-4-13"><a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">workspace</span> <span class="o">=</span> <span class="n">workspace</span>
+</span><span id="__span-4-14"><a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">config_dir</span> <span class="o">=</span> <span class="n">config_dir</span>
+</span><span id="__span-4-15"><a id="__codelineno-4-15" name="__codelineno-4-15" href="#__codelineno-4-15"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span>
+</span><span id="__span-4-16"><a id="__codelineno-4-16" name="__codelineno-4-16" href="#__codelineno-4-16"></a>            <span class="n">run_dir</span><span class="o">=</span><span class="n">workspace</span> <span class="o">/</span> <span class="s2">&quot;runs&quot;</span><span class="p">,</span>
+</span><span id="__span-4-17"><a id="__codelineno-4-17" name="__codelineno-4-17" href="#__codelineno-4-17"></a>            <span class="n">db_path</span><span class="o">=</span><span class="n">workspace</span> <span class="o">/</span> <span class="s2">&quot;provenance.duckdb&quot;</span><span class="p">,</span>
+</span><span id="__span-4-18"><a id="__codelineno-4-18" name="__codelineno-4-18" href="#__codelineno-4-18"></a>        <span class="p">)</span>
+</span><span id="__span-4-19"><a id="__codelineno-4-19" name="__codelineno-4-19" href="#__codelineno-4-19"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_identity_inputs</span> <span class="o">=</span> <span class="p">[(</span><span class="s2">&quot;model_config&quot;</span><span class="p">,</span> <span class="n">config_dir</span><span class="p">)]</span>
+</span><span id="__span-4-20"><a id="__codelineno-4-20" name="__codelineno-4-20" href="#__codelineno-4-20"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_cm</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-4-21"><a id="__codelineno-4-21" name="__codelineno-4-21" href="#__codelineno-4-21"></a>
+</span><span id="__span-4-22"><a id="__codelineno-4-22" name="__codelineno-4-22" href="#__codelineno-4-22"></a>    <span class="k">def</span><span class="w"> </span><span class="fm">__enter__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">&quot;CalibrationTracker&quot;</span><span class="p">:</span>
+</span><span id="__span-4-23"><a id="__codelineno-4-23" name="__codelineno-4-23" href="#__codelineno-4-23"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_cm</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">use_tracker</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_tracker</span><span class="p">)</span>
+</span><span id="__span-4-24"><a id="__codelineno-4-24" name="__codelineno-4-24" href="#__codelineno-4-24"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_cm</span><span class="o">.</span><span class="fm">__enter__</span><span class="p">()</span>
+</span><span id="__span-4-25"><a id="__codelineno-4-25" name="__codelineno-4-25" href="#__codelineno-4-25"></a>        <span class="k">return</span> <span class="bp">self</span>
+</span><span id="__span-4-26"><a id="__codelineno-4-26" name="__codelineno-4-26" href="#__codelineno-4-26"></a>
+</span><span id="__span-4-27"><a id="__codelineno-4-27" name="__codelineno-4-27" href="#__codelineno-4-27"></a>    <span class="k">def</span><span class="w"> </span><span class="fm">__exit__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">exc</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-4-28"><a id="__codelineno-4-28" name="__codelineno-4-28" href="#__codelineno-4-28"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_cm</span><span class="o">.</span><span class="fm">__exit__</span><span class="p">(</span><span class="o">*</span><span class="n">exc</span><span class="p">)</span>
+</span><span id="__span-4-29"><a id="__codelineno-4-29" name="__codelineno-4-29" href="#__codelineno-4-29"></a>
+</span><span id="__span-4-30"><a id="__codelineno-4-30" name="__codelineno-4-30" href="#__codelineno-4-30"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">evaluate</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">run_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="nb">dict</span><span class="p">,</span> <span class="n">output_dir</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>
+</span><span id="__span-4-31"><a id="__codelineno-4-31" name="__codelineno-4-31" href="#__codelineno-4-31"></a><span class="w">        </span><span class="sd">&quot;&quot;&quot;Run a single evaluation with stable identity wiring.&quot;&quot;&quot;</span>
+</span><span id="__span-4-32"><a id="__codelineno-4-32" name="__codelineno-4-32" href="#__codelineno-4-32"></a>        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_tracker</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-4-33"><a id="__codelineno-4-33" name="__codelineno-4-33" href="#__codelineno-4-33"></a>            <span class="n">fn</span><span class="o">=</span><span class="n">run_model</span><span class="p">,</span>
+</span><span id="__span-4-34"><a id="__codelineno-4-34" name="__codelineno-4-34" href="#__codelineno-4-34"></a>            <span class="n">name</span><span class="o">=</span><span class="n">run_name</span><span class="p">,</span>
+</span><span id="__span-4-35"><a id="__codelineno-4-35" name="__codelineno-4-35" href="#__codelineno-4-35"></a>            <span class="n">model</span><span class="o">=</span><span class="s2">&quot;my_model_calibration&quot;</span><span class="p">,</span>
+</span><span id="__span-4-36"><a id="__codelineno-4-36" name="__codelineno-4-36" href="#__codelineno-4-36"></a>            <span class="n">config</span><span class="o">=</span><span class="n">config</span><span class="p">,</span>
+</span><span id="__span-4-37"><a id="__codelineno-4-37" name="__codelineno-4-37" href="#__codelineno-4-37"></a>            <span class="n">identity_inputs</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_identity_inputs</span><span class="p">,</span>
+</span><span id="__span-4-38"><a id="__codelineno-4-38" name="__codelineno-4-38" href="#__codelineno-4-38"></a>            <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;persons&quot;</span><span class="p">,</span> <span class="s2">&quot;trips&quot;</span><span class="p">,</span> <span class="s2">&quot;metrics&quot;</span><span class="p">],</span>
+</span><span id="__span-4-39"><a id="__codelineno-4-39" name="__codelineno-4-39" href="#__codelineno-4-39"></a>            <span class="n">execution_options</span><span class="o">=</span><span class="n">ExecutionOptions</span><span class="p">(</span>
+</span><span id="__span-4-40"><a id="__codelineno-4-40" name="__codelineno-4-40" href="#__codelineno-4-40"></a>                <span class="n">runtime_kwargs</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-4-41"><a id="__codelineno-4-41" name="__codelineno-4-41" href="#__codelineno-4-41"></a>                    <span class="s2">&quot;config_dir&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">config_dir</span><span class="p">,</span>
+</span><span id="__span-4-42"><a id="__codelineno-4-42" name="__codelineno-4-42" href="#__codelineno-4-42"></a>                    <span class="s2">&quot;output_dir&quot;</span><span class="p">:</span> <span class="n">output_dir</span><span class="p">,</span>
+</span><span id="__span-4-43"><a id="__codelineno-4-43" name="__codelineno-4-43" href="#__codelineno-4-43"></a>                <span class="p">}</span>
+</span><span id="__span-4-44"><a id="__codelineno-4-44" name="__codelineno-4-44" href="#__codelineno-4-44"></a>            <span class="p">),</span>
+</span><span id="__span-4-45"><a id="__codelineno-4-45" name="__codelineno-4-45" href="#__codelineno-4-45"></a>        <span class="p">)</span>
+</span><span id="__span-4-46"><a id="__codelineno-4-46" name="__codelineno-4-46" href="#__codelineno-4-46"></a>
+</span><span id="__span-4-47"><a id="__codelineno-4-47" name="__codelineno-4-47" href="#__codelineno-4-47"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">sweep</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">configs_by_label</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">dict</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+</span><span id="__span-4-48"><a id="__codelineno-4-48" name="__codelineno-4-48" href="#__codelineno-4-48"></a><span class="w">        </span><span class="sd">&quot;&quot;&quot;Evaluate multiple configurations with one domain method.&quot;&quot;&quot;</span>
+</span><span id="__span-4-49"><a id="__codelineno-4-49" name="__codelineno-4-49" href="#__codelineno-4-49"></a>        <span class="k">return</span> <span class="p">{</span>
+</span><span id="__span-4-50"><a id="__codelineno-4-50" name="__codelineno-4-50" href="#__codelineno-4-50"></a>            <span class="n">label</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">evaluate</span><span class="p">(</span>
+</span><span id="__span-4-51"><a id="__codelineno-4-51" name="__codelineno-4-51" href="#__codelineno-4-51"></a>                <span class="n">run_name</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;sweep_</span><span class="si">{</span><span class="n">label</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+</span><span id="__span-4-52"><a id="__codelineno-4-52" name="__codelineno-4-52" href="#__codelineno-4-52"></a>                <span class="n">config</span><span class="o">=</span><span class="n">config</span><span class="p">,</span>
+</span><span id="__span-4-53"><a id="__codelineno-4-53" name="__codelineno-4-53" href="#__codelineno-4-53"></a>                <span class="n">output_dir</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">workspace</span> <span class="o">/</span> <span class="s2">&quot;outputs&quot;</span> <span class="o">/</span> <span class="n">label</span><span class="p">,</span>
+</span><span id="__span-4-54"><a id="__codelineno-4-54" name="__codelineno-4-54" href="#__codelineno-4-54"></a>            <span class="p">)</span>
+</span><span id="__span-4-55"><a id="__codelineno-4-55" name="__codelineno-4-55" href="#__codelineno-4-55"></a>            <span class="k">for</span> <span class="n">label</span><span class="p">,</span> <span class="n">config</span> <span class="ow">in</span> <span class="n">configs_by_label</span><span class="o">.</span><span class="n">items</span><span class="p">()</span>
+</span><span id="__span-4-56"><a id="__codelineno-4-56" name="__codelineno-4-56" href="#__codelineno-4-56"></a>        <span class="p">}</span>
+</span><span id="__span-4-57"><a id="__codelineno-4-57" name="__codelineno-4-57" href="#__codelineno-4-57"></a>
+</span><span id="__span-4-58"><a id="__codelineno-4-58" name="__codelineno-4-58" href="#__codelineno-4-58"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">query_top_k</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">metric</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">k</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">5</span><span class="p">):</span>
+</span><span id="__span-4-59"><a id="__codelineno-4-59" name="__codelineno-4-59" href="#__codelineno-4-59"></a><span class="w">        </span><span class="sd">&quot;&quot;&quot;Return top-k runs ranked by a scalar metric.&quot;&quot;&quot;</span>
+</span><span id="__span-4-60"><a id="__codelineno-4-60" name="__codelineno-4-60" href="#__codelineno-4-60"></a>        <span class="n">query</span> <span class="o">=</span> <span class="n">text</span><span class="p">(</span><span class="s2">&quot;&quot;&quot;</span>
+</span><span id="__span-4-61"><a id="__codelineno-4-61" name="__codelineno-4-61" href="#__codelineno-4-61"></a><span class="s2">            SELECT run_id, value_num</span>
+</span><span id="__span-4-62"><a id="__codelineno-4-62" name="__codelineno-4-62" href="#__codelineno-4-62"></a><span class="s2">            FROM global_tables.run_config_kv</span>
+</span><span id="__span-4-63"><a id="__codelineno-4-63" name="__codelineno-4-63" href="#__codelineno-4-63"></a><span class="s2">            WHERE key = :metric</span>
+</span><span id="__span-4-64"><a id="__codelineno-4-64" name="__codelineno-4-64" href="#__codelineno-4-64"></a><span class="s2">            ORDER BY value_num ASC</span>
+</span><span id="__span-4-65"><a id="__codelineno-4-65" name="__codelineno-4-65" href="#__codelineno-4-65"></a><span class="s2">            LIMIT :k</span>
+</span><span id="__span-4-66"><a id="__codelineno-4-66" name="__codelineno-4-66" href="#__codelineno-4-66"></a><span class="s2">        &quot;&quot;&quot;</span><span class="p">)</span>
+</span><span id="__span-4-67"><a id="__codelineno-4-67" name="__codelineno-4-67" href="#__codelineno-4-67"></a>        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_tracker</span><span class="o">.</span><span class="n">run_query</span><span class="p">(</span><span class="n">query</span><span class="o">.</span><span class="n">params</span><span class="p">(</span><span class="n">metric</span><span class="o">=</span><span class="n">metric</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="n">k</span><span class="p">))</span>
+</span></code></pre></div>
+<p>Usage:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="k">with</span> <span class="n">CalibrationTracker</span><span class="p">(</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>    <span class="n">workspace</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;./calibration_work&quot;</span><span class="p">),</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>    <span class="n">config_dir</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;./configs/my_model&quot;</span><span class="p">),</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="p">)</span> <span class="k">as</span> <span class="n">cal</span><span class="p">:</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>    <span class="n">baseline</span> <span class="o">=</span> <span class="n">cal</span><span class="o">.</span><span class="n">evaluate</span><span class="p">(</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>        <span class="n">run_name</span><span class="o">=</span><span class="s2">&quot;baseline&quot;</span><span class="p">,</span>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>        <span class="n">config</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;sample_rate&quot;</span><span class="p">:</span> <span class="mf">0.1</span><span class="p">,</span> <span class="s2">&quot;mode_choice_coeff&quot;</span><span class="p">:</span> <span class="mf">0.5</span><span class="p">},</span>
+</span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>        <span class="n">output_dir</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;./outputs/baseline&quot;</span><span class="p">),</span>
+</span><span id="__span-5-9"><a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a>    <span class="p">)</span>
+</span><span id="__span-5-10"><a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a>
+</span><span id="__span-5-11"><a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a>    <span class="n">sweep_results</span> <span class="o">=</span> <span class="n">cal</span><span class="o">.</span><span class="n">sweep</span><span class="p">(</span>
+</span><span id="__span-5-12"><a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a>        <span class="n">configs_by_label</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-5-13"><a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a>            <span class="s2">&quot;low_coeff&quot;</span><span class="p">:</span>  <span class="p">{</span><span class="s2">&quot;sample_rate&quot;</span><span class="p">:</span> <span class="mf">0.1</span><span class="p">,</span> <span class="s2">&quot;mode_choice_coeff&quot;</span><span class="p">:</span> <span class="mf">0.3</span><span class="p">},</span>
+</span><span id="__span-5-14"><a id="__codelineno-5-14" name="__codelineno-5-14" href="#__codelineno-5-14"></a>            <span class="s2">&quot;high_coeff&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;sample_rate&quot;</span><span class="p">:</span> <span class="mf">0.1</span><span class="p">,</span> <span class="s2">&quot;mode_choice_coeff&quot;</span><span class="p">:</span> <span class="mf">0.8</span><span class="p">},</span>
+</span><span id="__span-5-15"><a id="__codelineno-5-15" name="__codelineno-5-15" href="#__codelineno-5-15"></a>        <span class="p">}</span>
+</span><span id="__span-5-16"><a id="__codelineno-5-16" name="__codelineno-5-16" href="#__codelineno-5-16"></a>    <span class="p">)</span>
+</span><span id="__span-5-17"><a id="__codelineno-5-17" name="__codelineno-5-17" href="#__codelineno-5-17"></a>
+</span><span id="__span-5-18"><a id="__codelineno-5-18" name="__codelineno-5-18" href="#__codelineno-5-18"></a>    <span class="n">top_runs</span> <span class="o">=</span> <span class="n">cal</span><span class="o">.</span><span class="n">query_top_k</span><span class="p">(</span><span class="n">metric</span><span class="o">=</span><span class="s2">&quot;mode_share_error&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span>
+</span></code></pre></div>
+<hr />
 <h2 id="see-also">See Also<a class="headerlink" href="#see-also" title="Permanent link">&para;</a></h2>
 <ul>
 <li><a href="../usage-guide/">Usage Guide</a></li>
 <li><a href="../api/workflow/">Workflow Contexts API</a></li>
+<li><a href="../concepts/config-management/">Config, Facets, and Identity Inputs</a></li>
 <li><a href="../integrations/config_adapters_activitysim/">ActivitySim Config Adapter</a></li>
 </ul>
 
@@ -2675,13 +2838,13 @@ promote to a wrapper once callsites begin repeating the same run wiring.</p>
         
         
           
-          <a href="../configs/" class="md-footer__link md-footer__link--next" aria-label="Next: Configuration, Identity, and Facets">
+          <a href="../dlt-loader-guide/" class="md-footer__link md-footer__link--next" aria-label="Next: DLT Loader Integration Guide">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                Configuration, Identity, and Facets
+                DLT Loader Integration Guide
               </div>
             </div>
             <div class="md-footer__button md-icon">

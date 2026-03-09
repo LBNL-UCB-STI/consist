@@ -15,7 +15,7 @@
         <link rel="canonical" href="https://LBNL-UCB-STI.github.io/consist/dlt-loader-guide/">
       
       
-        <link rel="prev" href="../configs/">
+        <link rel="prev" href="../building-domain-tracker/">
       
       
         <link rel="next" href="../containers-guide/">
@@ -316,7 +316,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../advanced/index.md" class="md-tabs__link">
+        <a href="../advanced/" class="md-tabs__link">
           
   
   Advanced
@@ -715,7 +715,7 @@
   <span class="md-ellipsis">
     
   
-    Config Management: Caching vs. Filtering
+    Config, Facets, and Identity Inputs
   
 
     
@@ -843,8 +843,6 @@
       
         
       
-        
-      
     
     
     
@@ -936,34 +934,6 @@
     
   
     Building a Domain Tracker
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../configs/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Configuration, Identity, and Facets
   
 
     
@@ -2048,7 +2018,7 @@
         
           
           <div class="md-nav__link md-nav__container">
-            <a href="../advanced/index.md" class="md-nav__link ">
+            <a href="../advanced/" class="md-nav__link ">
               
   
   
@@ -2092,14 +2062,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../advanced/execution-style-decision-tree.md" class="md-nav__link">
+      <a href="../advanced/execution-style-decision-tree/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    Which execution style should I use?
   
 
     
@@ -2120,14 +2090,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../advanced/manual-lifecycle-and-decorators.md" class="md-nav__link">
+      <a href="../advanced/manual-lifecycle-and-decorators/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    Manual Lifecycle and Decorators
   
 
     
@@ -2465,14 +2435,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/essentials.md" class="md-nav__link">
+      <a href="../api/essentials/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    API Essentials
   
 
     
@@ -2493,14 +2463,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../api/advanced.md" class="md-nav__link">
+      <a href="../api/advanced/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    none
+    API Advanced
   
 
     
@@ -3487,43 +3457,7 @@
 <hr />
 <h2 id="when-to-use-dlt-vs-direct-logging">When to Use DLT vs Direct Logging<a class="headerlink" href="#when-to-use-dlt-vs-direct-logging" title="Permanent link">&para;</a></h2>
 <h3 id="when-to-use-each-api">When to Use Each API<a class="headerlink" href="#when-to-use-each-api" title="Permanent link">&para;</a></h3>
-<table>
-<thead>
-<tr>
-<th>Criterion</th>
-<th>Use DLT</th>
-<th>Use Direct Logging</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Dataset size</td>
-<td>100K+ rows</td>
-<td>&lt;10K rows</td>
-</tr>
-<tr>
-<td>Cross-run SQL queries</td>
-<td>Required</td>
-<td>Not needed</td>
-</tr>
-<tr>
-<td>Schema validation</td>
-<td>Required</td>
-<td>Not needed</td>
-</tr>
-<tr>
-<td>Data structure</td>
-<td>Complex, nested, evolving</td>
-<td>Simple flat files</td>
-</tr>
-<tr>
-<td>Source</td>
-<td>Your workflow outputs</td>
-<td>External data you don't control</td>
-</tr>
-</tbody>
-</table>
-<p><strong>DLT example:</strong>
+<p><strong>Querying ingested data across runs:</strong>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">consist</span>
 </span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sqlmodel</span><span class="w"> </span><span class="kn">import</span> <span class="n">select</span>
 </span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>
@@ -3533,7 +3467,7 @@
 </span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>    <span class="n">tracker</span><span class="o">=</span><span class="n">tracker</span><span class="p">,</span>
 </span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="p">)</span>
 </span></code></pre></div></p>
-<p><strong>Direct logging example:</strong>
+<p><strong>Logging a file without ingestion:</strong>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;log_result&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;demo&quot;</span><span class="p">):</span>
 </span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>    <span class="n">consist</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="n">result_path</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;my_result&quot;</span><span class="p">)</span>
 </span></code></pre></div></p>
@@ -3715,7 +3649,7 @@
 </span><span id="__span-14-6"><a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a>    <span class="p">)</span>
 </span></code></pre></div>
 <h3 id="zarr-netcdf-matrix-data">Zarr / NetCDF (Matrix Data)<a class="headerlink" href="#zarr-netcdf-matrix-data" title="Permanent link">&para;</a></h3>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="c1"># Zarr metadata is ingested as catalog (not raw data)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="c1"># This logs the artifact only; it does not ingest metadata by itself.</span>
 </span><span id="__span-15-2"><a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;log_zarr&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;demo&quot;</span><span class="p">):</span>
 </span><span id="__span-15-3"><a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span>
 </span><span id="__span-15-4"><a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a>        <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;simulation_output.zarr&quot;</span><span class="p">),</span>
@@ -3723,6 +3657,8 @@
 </span><span id="__span-15-6"><a id="__codelineno-15-6" name="__codelineno-15-6" href="#__codelineno-15-6"></a>        <span class="n">driver</span><span class="o">=</span><span class="s2">&quot;zarr&quot;</span><span class="p">,</span>
 </span><span id="__span-15-7"><a id="__codelineno-15-7" name="__codelineno-15-7" href="#__codelineno-15-7"></a>    <span class="p">)</span>
 </span></code></pre></div>
+<p>To ingest metadata/catalog tables, run an ingestion path after logging rather
+than relying on <code>log_artifact(...)</code> alone.</p>
 <hr />
 <h2 id="data-quality-error-handling">Data Quality &amp; Error Handling<a class="headerlink" href="#data-quality-error-handling" title="Permanent link">&para;</a></h2>
 <h3 id="schema-enforcement-fail-on-issues">Schema Enforcement (Fail on Issues)<a class="headerlink" href="#schema-enforcement-fail-on-issues" title="Permanent link">&para;</a></h3>
@@ -3934,13 +3870,9 @@ name is the same</strong> (for example, when you pass <code>schema=MySchema</cod
 <hr />
 <h2 id="performance-tuning">Performance Tuning<a class="headerlink" href="#performance-tuning" title="Permanent link">&para;</a></h2>
 <h3 id="batch-size">Batch Size<a class="headerlink" href="#batch-size" title="Permanent link">&para;</a></h3>
-<p>DLT loads data in batches. For large files, tune batch size:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-30-1"><a id="__codelineno-30-1" name="__codelineno-30-1" href="#__codelineno-30-1"></a><span class="c1"># In tracker initialization (future feature):</span>
-</span><span id="__span-30-2"><a id="__codelineno-30-2" name="__codelineno-30-2" href="#__codelineno-30-2"></a><span class="c1"># tracker = Tracker(..., dlt_batch_size=50000)</span>
-</span><span id="__span-30-3"><a id="__codelineno-30-3" name="__codelineno-30-3" href="#__codelineno-30-3"></a>
-</span><span id="__span-30-4"><a id="__codelineno-30-4" name="__codelineno-30-4" href="#__codelineno-30-4"></a><span class="c1"># Or split manually:</span>
-</span><span id="__span-30-5"><a id="__codelineno-30-5" name="__codelineno-30-5" href="#__codelineno-30-5"></a><span class="k">for</span> <span class="n">chunk</span> <span class="ow">in</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="s2">&quot;file.csv&quot;</span><span class="p">,</span> <span class="n">chunksize</span><span class="o">=</span><span class="mi">50000</span><span class="p">):</span>
-</span><span id="__span-30-6"><a id="__codelineno-30-6" name="__codelineno-30-6" href="#__codelineno-30-6"></a>    <span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span><span class="n">chunk</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;data&quot;</span><span class="p">,</span> <span class="n">schema</span><span class="o">=</span><span class="n">MySchema</span><span class="p">)</span>
+<p>For large files, stream in chunks rather than loading the full file into memory:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-30-1"><a id="__codelineno-30-1" name="__codelineno-30-1" href="#__codelineno-30-1"></a><span class="k">for</span> <span class="n">chunk</span> <span class="ow">in</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="s2">&quot;file.csv&quot;</span><span class="p">,</span> <span class="n">chunksize</span><span class="o">=</span><span class="mi">50000</span><span class="p">):</span>
+</span><span id="__span-30-2"><a id="__codelineno-30-2" name="__codelineno-30-2" href="#__codelineno-30-2"></a>    <span class="n">consist</span><span class="o">.</span><span class="n">log_dataframe</span><span class="p">(</span><span class="n">chunk</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;data&quot;</span><span class="p">,</span> <span class="n">schema</span><span class="o">=</span><span class="n">MySchema</span><span class="p">)</span>
 </span></code></pre></div>
 <h3 id="indexing">Indexing<a class="headerlink" href="#indexing" title="Permanent link">&para;</a></h3>
 <p>After ingestion, create indexes for frequently queried columns:</p>
@@ -4089,7 +4021,7 @@ name is the same</strong> (for example, when you pass <code>schema=MySchema</cod
       <nav class="md-footer__inner md-grid" aria-label="Footer" >
         
           
-          <a href="../configs/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Configuration, Identity, and Facets">
+          <a href="../building-domain-tracker/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Building a Domain Tracker">
             <div class="md-footer__button md-icon">
               
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></svg>
@@ -4099,7 +4031,7 @@ name is the same</strong> (for example, when you pass <code>schema=MySchema</cod
                 Previous
               </span>
               <div class="md-ellipsis">
-                Configuration, Identity, and Facets
+                Building a Domain Tracker
               </div>
             </div>
           </a>
