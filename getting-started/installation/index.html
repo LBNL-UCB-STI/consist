@@ -570,15 +570,15 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#install-from-github-current" class="md-nav__link">
+  <a href="#install-from-pypi-recommended" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Install from GitHub (Current)
+        Install from PyPI (Recommended)
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Install from GitHub (Current)">
+    <nav class="md-nav" aria-label="Install from PyPI (Recommended)">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -602,6 +602,17 @@
     <span class="md-ellipsis">
       
         Install from Source
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#install-latest-github-main" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install Latest GitHub main
       
     </span>
   </a>
@@ -2372,15 +2383,15 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#install-from-github-current" class="md-nav__link">
+  <a href="#install-from-pypi-recommended" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Install from GitHub (Current)
+        Install from PyPI (Recommended)
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Install from GitHub (Current)">
+    <nav class="md-nav" aria-label="Install from PyPI (Recommended)">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -2404,6 +2415,17 @@
     <span class="md-ellipsis">
       
         Install from Source
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#install-latest-github-main" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install Latest GitHub main
       
     </span>
   </a>
@@ -2510,25 +2532,20 @@
 <h2 id="prerequisites">Prerequisites<a class="headerlink" href="#prerequisites" title="Permanent link">&para;</a></h2>
 <ul>
 <li>Python 3.11 or newer</li>
-<li>Git (for source installation and code version tracking)</li>
+<li>Git (only needed for source installs)</li>
 </ul>
-<h2 id="install-from-github-current">Install from GitHub (Current)<a class="headerlink" href="#install-from-github-current" title="Permanent link">&para;</a></h2>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>pip<span class="w"> </span>install<span class="w"> </span>git+https://github.com/LBNL-UCB-STI/consist.git
+<h2 id="install-from-pypi-recommended">Install from PyPI (Recommended)<a class="headerlink" href="#install-from-pypi-recommended" title="Permanent link">&para;</a></h2>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>pip<span class="w"> </span>install<span class="w"> </span>consist
 </span></code></pre></div>
-<blockquote>
-<p>We are currently preparing our initial PyPI release. Until then, install from
-GitHub.</p>
-</blockquote>
 <h3 id="optional-extras">Optional Extras<a class="headerlink" href="#optional-extras" title="Permanent link">&para;</a></h3>
-<p>If you have a local clone and want optional extras in editable mode:</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/LBNL-UCB-STI/consist.git
-</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="nb">cd</span><span class="w"> </span>consist
-</span></code></pre></div>
 <p>Install with DLT for data ingestion into DuckDB:</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span><span class="s2">&quot;.[ingest]&quot;</span>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;consist[ingest]&quot;</span>
 </span></code></pre></div>
 <p>Install with example notebook dependencies:</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span><span class="s2">&quot;.[examples]&quot;</span>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;consist[examples]&quot;</span>
+</span></code></pre></div>
+<p>Install with Parquet support for the getting-started tutorials:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;consist[parquet]&quot;</span>
 </span></code></pre></div>
 <h2 id="install-from-source">Install from Source<a class="headerlink" href="#install-from-source" title="Permanent link">&para;</a></h2>
 <p>Clone the repository and install in editable mode:</p>
@@ -2539,9 +2556,13 @@ GitHub.</p>
 <p>For development with ingestion support:</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span><span class="s2">&quot;.[ingest]&quot;</span>
 </span></code></pre></div>
+<h2 id="install-latest-github-main">Install Latest GitHub <code>main</code><a class="headerlink" href="#install-latest-github-main" title="Permanent link">&para;</a></h2>
+<p>Use this only if you specifically want unreleased changes:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>pip<span class="w"> </span>install<span class="w"> </span>git+https://github.com/LBNL-UCB-STI/consist.git
+</span></code></pre></div>
 <h2 id="verify-installation">Verify Installation<a class="headerlink" href="#verify-installation" title="Permanent link">&para;</a></h2>
 <p>Confirm Consist is installed correctly:</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>python<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;import consist; print(consist.__file__)&quot;</span>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>python<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;import consist; print(consist.__file__)&quot;</span>
 </span></code></pre></div>
 <p>This prints the path to the installed package.</p>
 <h2 id="tutorial-prerequisites">Tutorial Prerequisites<a class="headerlink" href="#tutorial-prerequisites" title="Permanent link">&para;</a></h2>
@@ -2549,9 +2570,8 @@ GitHub.</p>
 tutorials.</p>
 <p>The <a href="../first-workflow/">First Workflow</a> tutorial writes Parquet output via
 <code>pandas.DataFrame.to_parquet(...)</code>, which requires a Parquet engine such as
-<code>pyarrow</code>. From a local clone, install the optional Parquet extra before running
-that tutorial:</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span><span class="s2">&quot;.[parquet]&quot;</span>
+<code>pyarrow</code>. Install the optional Parquet extra before running that tutorial:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;consist[parquet]&quot;</span>
 </span></code></pre></div>
 <h2 id="next-steps">Next Steps<a class="headerlink" href="#next-steps" title="Permanent link">&para;</a></h2>
 <p>Proceed to the <a href="../quickstart/">Quickstart</a> to run your first cached workflow.</p>
