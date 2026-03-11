@@ -3,36 +3,32 @@
 ## Prerequisites
 
 - Python 3.11 or newer
-- Git (for source installation and code version tracking)
+- Git (only needed for source installs)
 
-## Install from GitHub (Current)
+## Install from PyPI (Recommended)
 
 ```bash
-pip install git+https://github.com/LBNL-UCB-STI/consist.git
+pip install consist
 ```
-
-> We are currently preparing our initial PyPI release. Until then, install from
-> GitHub.
 
 ### Optional Extras
-
-If you have a local clone and want optional extras in editable mode:
-
-```bash
-git clone https://github.com/LBNL-UCB-STI/consist.git
-cd consist
-```
 
 Install with DLT for data ingestion into DuckDB:
 
 ```bash
-pip install -e ".[ingest]"
+pip install "consist[ingest]"
 ```
 
 Install with example notebook dependencies:
 
 ```bash
-pip install -e ".[examples]"
+pip install "consist[examples]"
+```
+
+Install with Parquet support for the getting-started tutorials:
+
+```bash
+pip install "consist[parquet]"
 ```
 
 ## Install from Source
@@ -49,6 +45,14 @@ For development with ingestion support:
 
 ```bash
 pip install -e ".[ingest]"
+```
+
+## Install Latest GitHub `main`
+
+Use this only if you specifically want unreleased changes:
+
+```bash
+pip install git+https://github.com/LBNL-UCB-STI/consist.git
 ```
 
 ## Verify Installation
@@ -68,11 +72,10 @@ tutorials.
 
 The [First Workflow](first-workflow.md) tutorial writes Parquet output via
 `pandas.DataFrame.to_parquet(...)`, which requires a Parquet engine such as
-`pyarrow`. From a local clone, install the optional Parquet extra before running
-that tutorial:
+`pyarrow`. Install the optional Parquet extra before running that tutorial:
 
 ```bash
-pip install -e ".[parquet]"
+pip install "consist[parquet]"
 ```
 
 ## Next Steps

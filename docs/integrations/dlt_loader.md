@@ -1,8 +1,7 @@
 # DLT Loader
 
-Requires the optional `ingest` extra before using DLT features
-(from a local clone):
-`pip install -e ".[ingest]"`.
+Requires the optional `ingest` extra before using DLT features:
+`pip install "consist[ingest]"`.
 
 ::: consist.integrations.dlt_loader
     options:

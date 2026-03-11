@@ -32,13 +32,19 @@ framework magic. Your pipeline remains inspectable and testable.
 ## Installation
 
 ```bash
-# We are currently preparing our initial PyPI release.
-# Install from GitHub in the meantime:
-pip install git+https://github.com/LBNL-UCB-STI/consist.git
+pip install consist
 ```
 
-> [!WARNING]
-> Consist is in **Beta**. We are using it in production, but the API may still undergo breaking changes before v0.1.
+Optional extras:
+
+```bash
+pip install "consist[parquet]"
+pip install "consist[ingest]"
+```
+
+> [!NOTE]
+> Consist is pre-`1.0`. The library is ready for real workflows, but minor
+> releases may still include breaking changes while the API continues to settle.
 
 ---
 

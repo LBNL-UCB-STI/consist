@@ -70,10 +70,10 @@ Cold data lives only on disk; provenance metadata is tracked but data is not que
     ingestion control. Keep regular compute steps on the recommended path
     (`run`/`trace`/`scenario`).
 
-Install the optional DLT dependency from a local clone:
+Install the optional DLT dependency:
 
 ```bash
-pip install -e ".[ingest]"
+pip install "consist[ingest]"
 ```
 
 Basic usage:

@@ -2,11 +2,10 @@
 
 The DLT (Data Load Tool) integration enables robust, schema-validated ingestion of data into DuckDB with automatic provenance column injection. This guide covers when to use DLT, how to configure schemas, and best practices for data quality.
 
-Requires the optional `ingest` extra before using DLT features
-(from a local clone):
+Requires the optional `ingest` extra before using DLT features:
 
 ```bash
-pip install -e ".[ingest]"
+pip install "consist[ingest]"
 ```
 
 ---
@@ -564,9 +563,9 @@ df = df.drop_duplicates(subset=["id"])
 ImportError: No module named 'dlt'
 ```
 
-**Fix:** Install the ingest extras from a local clone:
+**Fix:** Install the ingest extras:
 ```bash
-pip install -e ".[ingest]"
+pip install "consist[ingest]"
 ```
 
 ### Null in Non-Optional Field

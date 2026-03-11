@@ -25,19 +25,16 @@ For non-recommended lifecycle/decorator APIs, see
 [Advanced Usage](advanced/index.md), especially
 [Manual Lifecycle and Decorators](advanced/manual-lifecycle-and-decorators.md).
 
-## Installation & PyPI Status
-
-> **Note:** We are currently preparing our initial PyPI release. Until then,
-> install directly from GitHub.
+## Installation
 
 ```bash
-pip install git+https://github.com/LBNL-UCB-STI/consist.git
+pip install consist
 ```
 
-If you are running notebooks from a local clone and need notebook tooling:
+If you are running notebooks and need notebook tooling:
 
 ```bash
-pip install -e ".[examples]"
+pip install "consist[examples]"
 ```
 
 For notebook/module layout details, see

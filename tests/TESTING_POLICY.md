@@ -65,5 +65,5 @@ Recommended sequence before merge:
 4. Optional focused coverage run for changed modules
 
 Use:
-`/Users/zaneedell/git/consist/.venv/bin/python -m ...`
+`.venv/bin/python -m ...`
 for consistent local behavior.

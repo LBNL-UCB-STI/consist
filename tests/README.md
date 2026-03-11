@@ -4,7 +4,7 @@ This guide explains how Consist tests are organized, how to run the right subset
 quickly, and where to add new coverage.
 
 For test quality standards and CI guardrails, see
-`/Users/zaneedell/git/consist/tests/TESTING_POLICY.md`.
+`tests/TESTING_POLICY.md`.
 
 ## Test Organization
 
@@ -41,22 +41,22 @@ Minimal full workflow sanity checks.
 ## Run Commands
 
 Use the project venv Python:
-`/Users/zaneedell/git/consist/.venv/bin/python`
+`.venv/bin/python`
 
 ```bash
 # Fast local sanity
-/Users/zaneedell/git/consist/.venv/bin/python -m pytest tests/unit
+.venv/bin/python -m pytest tests/unit
 
 # Main CI-equivalent scope (non-heavy)
-/Users/zaneedell/git/consist/.venv/bin/python -m pytest -m "not heavy" tests/unit tests/integration tests/e2e
+.venv/bin/python -m pytest -m "not heavy" tests/unit tests/integration tests/e2e
 
 # Focused subsystem examples
-/Users/zaneedell/git/consist/.venv/bin/python -m pytest tests/unit/cli tests/integration/workflow
-/Users/zaneedell/git/consist/.venv/bin/python -m pytest tests/unit/core/test_spatial_views.py tests/integration/artifacts/test_spatial_support.py
-/Users/zaneedell/git/consist/.venv/bin/python -m pytest tests/unit/integrations/test_dlt_loader_error_paths.py tests/integration/artifacts/test_dlt_loader.py
+.venv/bin/python -m pytest tests/unit/cli tests/integration/workflow
+.venv/bin/python -m pytest tests/unit/core/test_spatial_views.py tests/integration/artifacts/test_spatial_support.py
+.venv/bin/python -m pytest tests/unit/integrations/test_dlt_loader_error_paths.py tests/integration/artifacts/test_dlt_loader.py
 
 # Coverage
-/Users/zaneedell/git/consist/.venv/bin/python -m pytest tests/unit tests/integration tests/e2e --cov=src/consist --cov-report=term-missing
+.venv/bin/python -m pytest tests/unit tests/integration tests/e2e --cov=src/consist --cov-report=term-missing
 ```
 
 ## Markers
@@ -104,5 +104,5 @@ From `tests/conftest.py`:
 - Keep integration tests focused on real cross-module behavior, not parser details.
 - Run `pytest --collect-only` after creating/splitting files.
 - Run Ruff before committing:
-  - `/Users/zaneedell/git/consist/.venv/bin/python -m ruff check src tests`
-  - `/Users/zaneedell/git/consist/.venv/bin/python -m ruff format --check src tests`
+  - `.venv/bin/python -m ruff check src tests`
+  - `.venv/bin/python -m ruff format --check src tests`

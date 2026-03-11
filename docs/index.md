@@ -35,9 +35,9 @@ pipeline, then into deeper usage patterns.
 
     - Python 3.11+
     - Base install:
-    `pip install git+https://github.com/LBNL-UCB-STI/consist.git`
+    `pip install consist`
     - For the first workflow tutorial (Parquet writes):
-    from a local clone, run `pip install -e ".[parquet]"`
+    run `pip install "consist[parquet]"`
     - See [Installation](getting-started/installation.md) for complete options,
     including source installs and optional extras.
 

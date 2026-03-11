@@ -7,66 +7,41 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 ## [Unreleased]
 
-### Added
-
-- Add `consist db rebuild --mode minimal|full` behavior:
-  `minimal` restores run/artifact/link baseline and `full` performs best-effort
-  facet/schema/index restoration from JSON snapshots where possible
-  by @zneedell (PR link TBD).
-- Add `consist db purge --prune-cache` for safe, derivation-based pruning of
-  unscoped cache rows no longer referenced by surviving run-link rows
-  by @zneedell (PR link TBD).
-
-### Changed
-
-- Add explicit merge-time compatibility handling for `global_tables.*` during
-  `consist db merge`: `--conflict error` aborts on incompatible schemas while
-  `--conflict skip` skips incompatible tables with reporting in JSON and
-  non-JSON output by @zneedell (PR link TBD).
-- Document and enforce `--prune-cache` assumptions/no-op behavior:
-  pruning requires derivable references and assumes `content_hash` equivalence
-  across participating run-link/unscoped cache tables
-  by @zneedell (PR link TBD).
-
 ## [0.1.0] - Unreleased
 
 ### Added
 
-- Add `Run.identity_summary` for cache-identity debugging (hash components,
-  adapter contribution, identity-input digests, and run identity fields)
-  by @zneedell (PR link TBD).
-- Add migration coverage tests for adapter handoff, run/trace
-  identity kwargs parity, and identity-summary behavior
-  by @zneedell (PR link TBD).
-- Add one-line output accessors for run/artifact ergonomics:
-  `RunResult.output_path(...)`, `Artifact.as_path(...)`, and
-  `Artifact.as_df(...)` (with attached-tracker behavior and explicit-tracker
-  fallback) by @zneedell (PR link TBD).
-- Add top-level `runtime_kwargs={...}` alias on `run(...)`, normalized to
-  `ExecutionOptions.runtime_kwargs` with explicit conflict validation
-  by @zneedell (PR link TBD).
-- Add a new "Building a Domain Tracker" guide and docs navigation entry,
-  including wrapper patterns and direct-vs-wrapper guidance
-  by @zneedell (PR link TBD).
+- Add cache/debug ergonomics including `Run.identity_summary`,
+  `RunResult.output_path(...)`, `Artifact.as_path(...)`, `Artifact.as_df(...)`,
+  the top-level `runtime_kwargs={...}` alias, and the new domain-tracker guide
+  by @zneedell ([#67](https://github.com/LBNL-UCB-STI/consist/pull/67),
+  [#71](https://github.com/LBNL-UCB-STI/consist/pull/71)).
+- Add `RunSet` for comparing and querying groups of runs from the public API
+  by @zneedell ([#80](https://github.com/LBNL-UCB-STI/consist/pull/80)).
+- Add end-to-end DB maintenance workflows, including snapshot/export support,
+  merge compatibility checks, `consist db rebuild --mode minimal|full`, and
+  `consist db purge --prune-cache`
+  by @zneedell ([#74](https://github.com/LBNL-UCB-STI/consist/pull/74),
+  [#76](https://github.com/LBNL-UCB-STI/consist/pull/76)).
+- Add a clearer advanced/reference docs surface, including API pages for
+  essentials vs. advanced usage and the execution-style decision tree
+  by @zneedell ([#82](https://github.com/LBNL-UCB-STI/consist/pull/82),
+  [#85](https://github.com/LBNL-UCB-STI/consist/pull/85)).
 
 ### Changed
 
 - Establish a recommended-path docs/examples surface around
   `run(...)` / `trace(...)` / `scenario(...)`, while repositioning manual
   lifecycle and decorator-heavy patterns as advanced guidance
-  by @zneedell (PR link TBD).
+  by @zneedell ([#68](https://github.com/LBNL-UCB-STI/consist/pull/68),
+  [#82](https://github.com/LBNL-UCB-STI/consist/pull/82),
+  [#84](https://github.com/LBNL-UCB-STI/consist/pull/84),
+  [#85](https://github.com/LBNL-UCB-STI/consist/pull/85)).
 - Unify run/trace identity public surface around `adapter=` and
   `identity_inputs=` across `Tracker`, `ScenarioContext`, and top-level
-  `consist` wrappers by @zneedell (PR link TBD).
-- Route `trace(...)` through shared invocation resolution for identity and
-  options parity with `run(...)` (while preserving trace always-executes
-  semantics) by @zneedell (PR link TBD).
-- Shift config-adapter run/trace handoff to tracker-orchestrated adapter flow
-  (ActivitySim/BEAM/public docs now use `adapter=` handoff)
-  by @zneedell (PR link TBD).
-- Update user-facing docs for the unified identity model (`identity_inputs`,
-  adapter handoff, and `run.identity_summary`)
-  by @zneedell (PR link TBD).
+  `consist` wrappers, with `trace(...)` routed through shared invocation
+  resolution for parity with `run(...)`
+  by @zneedell ([#67](https://github.com/LBNL-UCB-STI/consist/pull/67)).
 - Remove deprecated `config_plan`/`hash_inputs` kwargs from run/trace/scenario
   and `define_step`, and add adapter-driven config override helpers
   (`run_with_config_overrides`, `get_config_bundle`, and new ActivitySim
@@ -74,20 +49,31 @@ The format is based on [Keep a Changelog], and this project adheres to
   `run_with_config_overrides(...)` runtime-kwarg auto-injection from
   materialized override roots (ActivitySim + BEAM), with
   `override_runtime_kwargs` customization and explicit runtime kwargs
-  precedence by @zneedell (PR link TBD).
-- Clarify concise and explicit input-linking forms in docs/examples:
-  `consist.refs(run_result)` / aliased refs mappings and bare-path vs labeled
-  tuple forms for `identity_inputs`
-  by @zneedell (PR link TBD).
+  precedence by @zneedell
+  ([#71](https://github.com/LBNL-UCB-STI/consist/pull/71)).
+- Clarify explicit path/input binding and linked-input forms across the README,
+  quickstart, tutorials, and notebooks
+  by @zneedell ([#72](https://github.com/LBNL-UCB-STI/consist/pull/72),
+  [#77](https://github.com/LBNL-UCB-STI/consist/pull/77),
+  [#84](https://github.com/LBNL-UCB-STI/consist/pull/84)).
+- Improve CLI discovery and interactive shell workflows, including safer
+  preview/shell guards and clearer user guidance
+  by @zneedell ([#83](https://github.com/LBNL-UCB-STI/consist/pull/83)).
 
 ### Fixed
 
 - Restore canonical `unexpected keyword argument` error shape for rejected
-  kwargs in run/scenario entrypoints by @zneedell (PR link TBD).
+  kwargs in run/scenario entrypoints
+  by @zneedell ([#84](https://github.com/LBNL-UCB-STI/consist/pull/84)).
 - Upgrade run/trace/scenario validation diagnostics to standardized
   `Problem` / `Cause` / `Fix` messages across identity/path/option failures,
   with matching tests and troubleshooting guidance
-  by @zneedell (PR link TBD).
+  by @zneedell ([#69](https://github.com/LBNL-UCB-STI/consist/pull/69)).
+- Harden integration and maintenance edge cases across schema export/stub
+  flows, adapter handoff, and DB repair/merge operations
+  by @zneedell ([#70](https://github.com/LBNL-UCB-STI/consist/pull/70),
+  [#75](https://github.com/LBNL-UCB-STI/consist/pull/75),
+  [#76](https://github.com/LBNL-UCB-STI/consist/pull/76)).
 
 ## [0.1.0-beta.3] - 2026-02-19
 
@@ -172,7 +158,7 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
 
-[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.0-beta.3...HEAD
+[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.0...HEAD
 
 [0.1.0]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.0-beta.3...v0.1.0
 

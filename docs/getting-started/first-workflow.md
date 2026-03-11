@@ -7,8 +7,8 @@ This tutorial builds a two-step data pipeline demonstrating artifact passing, ca
 Install Consist first and ensure your environment can write Parquet files:
 
 - Base installation instructions: [Installation](installation.md)
-- Parquet engine required for this tutorial (from a local clone):
-  `pip install -e ".[parquet]"`
+- Parquet engine required for this tutorial:
+  `pip install "consist[parquet]"`
 
 ## Create Input Data
 

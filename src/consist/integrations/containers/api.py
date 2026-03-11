@@ -31,14 +31,14 @@ from typing import Any, Dict, List, Literal, Optional, Union
 
 from sqlmodel import Session, select
 
-from consist.core.tracker import Tracker
 from consist.core.materialize import materialize_artifacts
-from consist.models.artifact import Artifact
+from consist.core.tracker import Tracker
+from consist.integrations.containers.backends import DockerBackend, SingularityBackend
 from consist.integrations.containers.models import (
     ContainerDefinition,
     _hash_environment,
 )
-from consist.integrations.containers.backends import DockerBackend, SingularityBackend
+from consist.models.artifact import Artifact
 from consist.models.run import RunArtifactLink
 from consist.types import ArtifactRef
 
