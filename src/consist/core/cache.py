@@ -105,6 +105,7 @@ class ActiveRunCacheOptions:
     cache_hydration: str = "metadata"  # "metadata" | "inputs-missing" | "outputs-requested" | "outputs-all"
     materialize_cached_output_paths: Optional[Dict[str, Path]] = None
     materialize_cached_outputs_dir: Optional[Path] = None
+    materialize_cached_outputs_source_root: Optional[Path] = None
     validate_cached_outputs: str = "lazy"  # "eager" | "lazy"
 
 
@@ -175,6 +176,7 @@ def _materialize_cached_outputs_via_run_api(
         result = tracker.materialize_run_outputs(
             cached_run.id,
             target_root=Path(active_options.materialize_cached_outputs_dir).resolve(),
+            source_root=active_options.materialize_cached_outputs_source_root,
             preserve_existing=True,
             on_missing="raise",
             db_fallback="if_ingested",
@@ -193,6 +195,7 @@ def _materialize_cached_outputs_via_run_api(
         result = tracker.materialize_run_outputs(
             cached_run.id,
             target_root=staged_root,
+            source_root=active_options.materialize_cached_outputs_source_root,
             keys=existing_keys,
             preserve_existing=False,
             on_missing="warn",
@@ -220,7 +223,7 @@ def _materialize_cached_outputs_via_run_api(
 
 def parse_materialize_cached_outputs_kwargs(
     kwargs: Dict[str, Any],
-) -> tuple[str, Optional[Dict[str, Path]], Optional[Path], str]:
+) -> tuple[str, Optional[Dict[str, Path]], Optional[Path], Optional[Path], str]:
     """
     Parse and validate cached-output materialization options from run kwargs.
 
@@ -246,6 +249,9 @@ def parse_materialize_cached_outputs_kwargs(
     )
     materialize_cached_outputs_dir_raw = kwargs.pop(
         "materialize_cached_outputs_dir", None
+    )
+    materialize_cached_outputs_source_root_raw = kwargs.pop(
+        "materialize_cached_outputs_source_root", None
     )
     validate_cached_outputs = str(kwargs.pop("validate_cached_outputs", "lazy")).lower()
 
@@ -285,10 +291,13 @@ def parse_materialize_cached_outputs_kwargs(
         if (
             materialize_cached_output_paths_raw is not None
             or materialize_cached_outputs_dir_raw is not None
+            or materialize_cached_outputs_source_root_raw is not None
         ):
             raise ValueError(
                 "cache_hydration does not accept materialize_cached_output_paths or "
-                "materialize_cached_outputs_dir in metadata/inputs-missing modes."
+                "materialize_cached_outputs_dir or "
+                "materialize_cached_outputs_source_root in metadata/inputs-missing "
+                "modes."
             )
 
     materialize_cached_output_paths: Optional[Dict[str, Path]] = None
@@ -303,11 +312,17 @@ def parse_materialize_cached_outputs_kwargs(
         if materialize_cached_outputs_dir_raw is not None
         else None
     )
+    materialize_cached_outputs_source_root: Optional[Path] = (
+        Path(materialize_cached_outputs_source_root_raw)
+        if materialize_cached_outputs_source_root_raw is not None
+        else None
+    )
 
     return (
         cache_hydration,
         materialize_cached_output_paths,
         materialize_cached_outputs_dir,
+        materialize_cached_outputs_source_root,
         validate_cached_outputs,
     )
 
@@ -405,7 +420,21 @@ def hydrate_cache_hit_outputs(
                 except Exception as exc:
                     if not _should_fallback_to_legacy_output_materialization(exc):
                         raise
+                    if active_options.materialize_cached_outputs_source_root is not None:
+                        raise RuntimeError(
+                            "cache-hydration source-root override requires the "
+                            "run-scoped output materialization path."
+                        ) from exc
                     should_use_legacy = True
+
+            if (
+                should_use_legacy
+                and active_options.materialize_cached_outputs_source_root is not None
+            ):
+                raise RuntimeError(
+                    "cache-hydration source-root override requires the run-scoped "
+                    "output materialization path."
+                )
 
             if should_use_legacy:
                 from consist.core.materialize import (
@@ -497,6 +526,8 @@ def hydrate_cache_hit_outputs(
             if materialized:
                 target_run.meta["materialized_outputs"] = materialized
     except Exception as e:
+        if active_options.materialize_cached_outputs_source_root is not None:
+            raise
         if active_options.cache_hydration == "outputs-all":
             raise
         logging.warning(

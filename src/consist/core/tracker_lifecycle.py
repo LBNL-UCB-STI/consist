@@ -237,6 +237,7 @@ class RunLifecycleCoordinator:
             cache_hydration,
             materialize_cached_output_paths,
             materialize_cached_outputs_dir,
+            materialize_cached_outputs_source_root,
             validate_cached_outputs,
         ) = parse_materialize_cached_outputs_kwargs(kwargs)
 
@@ -386,6 +387,9 @@ class RunLifecycleCoordinator:
             cache_hydration=cache_hydration,
             materialize_cached_output_paths=materialize_cached_output_paths,
             materialize_cached_outputs_dir=materialize_cached_outputs_dir,
+            materialize_cached_outputs_source_root=(
+                materialize_cached_outputs_source_root
+            ),
             validate_cached_outputs=validate_cached_outputs,
         )
 

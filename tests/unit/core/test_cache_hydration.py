@@ -300,6 +300,16 @@ def test_cache_hydration_policies_end_to_end(
 
     with pytest.raises(ValueError):
         with tracker_b.start_run(
+            "invalid_metadata_with_source_root",
+            model="producer",
+            cache_mode="reuse",
+            cache_hydration="metadata",
+            materialize_cached_outputs_source_root=tmp_path / "archive",
+        ):
+            pass
+
+    with pytest.raises(ValueError):
+        with tracker_b.start_run(
             "invalid_outputs_requested_with_dir",
             model="producer",
             cache_mode="reuse",
@@ -644,6 +654,102 @@ def test_hydrate_cache_hit_outputs_records_materialized_outputs_meta(
     assert run.meta["materialized_outputs"] == {"a": str(dest.resolve())}
 
 
+def test_outputs_all_uses_archive_source_root_for_mirror_recovery(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    run_dir_a = tmp_path / "runs_a"
+    run_dir_b = tmp_path / "runs_b"
+    archive_root = tmp_path / "archive"
+
+    tracker_a = Tracker(run_dir=run_dir_a, db_path=db_path)
+    _init_core_tables(tracker_a)
+
+    with tracker_a.start_run("producer", model="producer", cache_mode="overwrite"):
+        out_dir = tracker_a.run_dir / "outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        source_a = out_dir / "a.csv"
+        source_b = out_dir / "b.csv"
+        source_a.write_text("value\n1\n", encoding="utf-8")
+        source_b.write_text("value\n2\n", encoding="utf-8")
+        tracker_a.log_artifact(source_a, key="a", direction="output")
+        tracker_a.log_artifact(source_b, key="b", direction="output")
+
+    archive_outputs = archive_root / "outputs"
+    archive_outputs.mkdir(parents=True, exist_ok=True)
+    (archive_outputs / "a.csv").write_text("value\n1\n", encoding="utf-8")
+    (archive_outputs / "b.csv").write_text("value\n2\n", encoding="utf-8")
+
+    (run_dir_a / "outputs" / "a.csv").unlink()
+    (run_dir_a / "outputs" / "b.csv").unlink()
+
+    tracker_b = Tracker(run_dir=run_dir_b, db_path=db_path, allow_external_paths=True)
+    _init_core_tables(tracker_b)
+
+    restored_root = tmp_path / "restored_from_archive"
+    with tracker_b.start_run(
+        "archive_hit",
+        model="producer",
+        cache_mode="reuse",
+        cache_hydration="outputs-all",
+        materialize_cached_outputs_dir=restored_root,
+        materialize_cached_outputs_source_root=archive_root,
+    ) as t:
+        assert t.is_cached
+
+    assert (restored_root / "outputs" / "a.csv").read_text(encoding="utf-8") == "value\n1\n"
+    assert (restored_root / "outputs" / "b.csv").read_text(encoding="utf-8") == "value\n2\n"
+
+    if tracker_a.engine:
+        tracker_a.engine.dispose()
+    if tracker_b.engine:
+        tracker_b.engine.dispose()
+
+
+def test_outputs_requested_uses_archive_source_root_for_mirror_recovery(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    run_dir_a = tmp_path / "runs_a"
+    run_dir_b = tmp_path / "runs_b"
+    archive_root = tmp_path / "archive"
+
+    tracker_a = Tracker(run_dir=run_dir_a, db_path=db_path)
+    _init_core_tables(tracker_a)
+
+    with tracker_a.start_run("producer_req", model="producer", cache_mode="overwrite"):
+        out_dir = tracker_a.run_dir / "outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        source_a = out_dir / "a.csv"
+        source_a.write_text("value\n1\n", encoding="utf-8")
+        tracker_a.log_artifact(source_a, key="a", direction="output")
+
+    archive_outputs = archive_root / "outputs"
+    archive_outputs.mkdir(parents=True, exist_ok=True)
+    (archive_outputs / "a.csv").write_text("value\n1\n", encoding="utf-8")
+
+    (run_dir_a / "outputs" / "a.csv").unlink()
+
+    tracker_b = Tracker(run_dir=run_dir_b, db_path=db_path, allow_external_paths=True)
+    _init_core_tables(tracker_b)
+
+    requested_dest = tmp_path / "requested_from_archive.csv"
+    with tracker_b.start_run(
+        "archive_requested_hit",
+        model="producer",
+        cache_mode="reuse",
+        cache_hydration="outputs-requested",
+        materialize_cached_output_paths={"a": requested_dest},
+        materialize_cached_outputs_source_root=archive_root,
+    ) as t:
+        assert t.is_cached
+
+    assert requested_dest.read_text(encoding="utf-8") == "value\n1\n"
+
+    if tracker_a.engine:
+        tracker_a.engine.dispose()
+    if tracker_b.engine:
+        tracker_b.engine.dispose()
+
+
 def test_outputs_all_delegates_to_run_materialization_with_preserved_layout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -731,9 +837,11 @@ def test_outputs_all_delegates_to_run_materialization_with_preserved_layout(
     )
 
     out_dir = tmp_path / "restored_outputs"
+    archive_root = tmp_path / "archive_outputs"
     options = ActiveRunCacheOptions(
         cache_hydration="outputs-all",
         materialize_cached_outputs_dir=out_dir,
+        materialize_cached_outputs_source_root=archive_root,
     )
 
     hydrate_cache_hit_outputs(
@@ -754,7 +862,7 @@ def test_outputs_all_delegates_to_run_materialization_with_preserved_layout(
         {
             "run_id": "cached",
             "target_root": out_dir.resolve(),
-            "source_root": None,
+            "source_root": archive_root,
             "keys": None,
             "preserve_existing": True,
             "on_missing": "raise",
@@ -844,12 +952,14 @@ def test_outputs_requested_delegates_via_staging_and_warns_on_missing_keys(
     )
 
     destination = tmp_path / "requested.csv"
+    archive_root = tmp_path / "archive_outputs"
     options = ActiveRunCacheOptions(
         cache_hydration="outputs-requested",
         materialize_cached_output_paths={
             "a": destination,
             "missing": tmp_path / "missing.csv",
         },
+        materialize_cached_outputs_source_root=archive_root,
     )
 
     hydrate_cache_hit_outputs(
@@ -863,8 +973,66 @@ def test_outputs_requested_delegates_via_staging_and_warns_on_missing_keys(
     assert destination.read_text(encoding="utf-8") == "value\n1\n"
     assert run.meta["materialized_outputs"] == {"a": str(destination.resolve())}
     assert calls[0]["run_id"] == "cached"
+    assert calls[0]["source_root"] == archive_root
     assert calls[0]["keys"] == ["a"]
     assert calls[0]["preserve_existing"] is False
     assert calls[0]["on_missing"] == "warn"
     assert calls[0]["db_fallback"] == "if_ingested"
     assert any("missing keys" in record.message for record in caplog.records)
+
+
+def test_outputs_requested_source_root_does_not_warn_and_continue_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tracker = Tracker(run_dir=tmp_path / "active_runs", allow_external_paths=True)
+    artifact = Artifact(
+        key="a",
+        container_uri="./outputs/a.csv",
+        driver="csv",
+        run_id="producer",
+        meta={},
+    )
+    run = Run(
+        id="active",
+        model_name="model",
+        config_hash=None,
+        git_hash=None,
+        meta={},
+    )
+    cached_run = Run(
+        id="cached",
+        model_name="model",
+        config_hash=None,
+        git_hash=None,
+        meta={"_physical_run_dir": str(tmp_path / "historical_run")},
+    )
+
+    tracker.current_consist = ConsistRecord(run=run, config={})
+    tracker.get_artifacts_for_run = lambda _run_id: RunArtifacts(
+        inputs={}, outputs={"a": artifact}
+    )
+
+    def _raise_from_run_api(self, run_id: str, **kwargs):
+        raise AttributeError("unexpected delegated failure")
+
+    monkeypatch.setattr(
+        Tracker,
+        "materialize_run_outputs",
+        _raise_from_run_api,
+        raising=False,
+    )
+
+    options = ActiveRunCacheOptions(
+        cache_hydration="outputs-requested",
+        materialize_cached_output_paths={"a": tmp_path / "requested.csv"},
+        materialize_cached_outputs_source_root=tmp_path / "archive_outputs",
+    )
+
+    with pytest.raises(AttributeError, match="unexpected delegated failure"):
+        hydrate_cache_hit_outputs(
+            tracker=tracker,
+            run=run,
+            cached_run=cached_run,
+            options=options,
+            link_outputs=False,
+        )
