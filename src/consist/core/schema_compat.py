@@ -29,6 +29,9 @@ def backfill_artifact_content_ids(db: DatabaseManager) -> None:
 
     This is an explicit maintenance action rather than part of normal DB startup.
     Rows without a hash are left with NULL content_id.
+
+    This is intentionally compatibility-oriented code: it uses ``artifact.hash``
+    as the source of truth only to populate the newer shared content identity.
     """
     if not db._table_has_column(table_name="artifact", column_name="content_id"):
         return

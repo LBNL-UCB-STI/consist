@@ -3,6 +3,7 @@ from pathlib import Path
 from consist.core.persistence import DatabaseManager
 from consist.core.schema_compat import apply_content_identity_compatibility
 from consist.models.artifact import Artifact
+from consist.models.artifact_schema import ArtifactSchemaObservation, ArtifactSchema
 
 
 def test_find_artifact_content_reuses_existing_row(tmp_path: Path) -> None:
@@ -118,3 +119,42 @@ def test_content_id_backfill_is_explicit_not_automatic(tmp_path: Path) -> None:
     content = reopened.find_artifact_content(content_hash="shared_hash", driver="csv")
     assert content is not None
     assert after.content_id == content.id
+
+
+def test_find_schema_observation_for_content_id(tmp_path: Path) -> None:
+    db_path = tmp_path / "content_obs.db"
+    db = DatabaseManager(str(db_path))
+
+    # Create two artifacts that share content identity
+    content = db.get_or_create_artifact_content(content_hash="h123", driver="csv")
+    with db.session_scope() as session:
+        a = Artifact(
+            key="a",
+            container_uri="inputs://a.csv",
+            driver="csv",
+            hash="h123",
+            content_id=content.id,
+        )
+        b = Artifact(
+            key="b",
+            container_uri="inputs://b.csv",
+            driver="csv",
+            hash="h123",
+            content_id=content.id,
+        )
+        session.add(a)
+        session.add(b)
+        session.flush()
+
+        schema = ArtifactSchema(id="sid", summary_json={}, profile_version=1)
+        session.add(schema)
+        session.add(
+            ArtifactSchemaObservation(
+                artifact_id=a.id, schema_id=schema.id, source="file"
+            )
+        )
+        session.commit()
+
+    obs = db.find_schema_observation_for_content_id(content.id)
+    assert obs is not None
+    assert obs.schema_id == "sid"

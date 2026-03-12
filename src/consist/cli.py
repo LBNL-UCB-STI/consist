@@ -2831,6 +2831,8 @@ class ConsistShell(cmd.Cmd):
             from consist.models.artifact import Artifact
 
             with _tracker_session(self.tracker) as session:
+                # Intentional hash usage: this command is explicitly a hash-prefix
+                # lookup UX, so ``content_id`` would be the wrong identifier here.
                 statement = select(Artifact).where(
                     col(Artifact.hash).is_not(None),
                     col(Artifact.hash).startswith(candidate),

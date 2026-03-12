@@ -1961,7 +1961,8 @@ class Tracker:
             by `content_id`. Input-side behavior is unaffected.
         profile_file_schema : bool, default False
             If True, profile a lightweight schema for file-based tabular artifacts.
-            Use "if_changed" to skip profiling when a matching content hash already has a schema.
+            Use "if_changed" to skip profiling when matching content identity already
+            has a stored schema (prefers content_id; falls back to hash for legacy rows).
         file_schema_sample_rows : Optional[int], default None
             Maximum rows to sample when profiling file-based schemas.
         facet : Optional[FacetLike], optional
@@ -2494,7 +2495,10 @@ class Tracker:
         table_hash_chunk_rows : Optional[int], optional
             Chunk size for hashing large tables.
         profile_file_schema : bool | Literal["if_changed"], default False
-            Whether to profile table schema and store it as metadata.
+            Whether to profile table schema and store it as metadata. Use
+            ``"if_changed"`` to skip profiling when matching content identity
+            already has a schema (prefers ``content_id`` and falls back to hash
+            for legacy rows).
         file_schema_sample_rows : Optional[int], optional
             Number of rows to sample when profiling schema.
         **meta : Any

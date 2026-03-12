@@ -1227,6 +1227,10 @@ class DatabaseManager:
         """
         Finds the most recent artifact with the given content hash.
 
+        This helper is transitional. New same-content behavior inside Consist
+        should prefer ``content_id`` when available, but hash-based lookup
+        remains necessary for legacy rows and compatibility paths.
+
         Parameters
         ----------
         content_hash : str
@@ -1396,6 +1400,62 @@ class DatabaseManager:
                         col(ArtifactSchemaObservation.artifact_id) == col(Artifact.id),
                     )
                     .where(Artifact.hash == content_hash)
+                    .order_by(col(ArtifactSchemaObservation.observed_at).desc())
+                ).all()
+
+                if not observations:
+                    return None
+
+                user_provided_obs = next(
+                    (obs for obs in observations if obs.source == "user_provided"), None
+                )
+                if user_provided_obs:
+                    return user_provided_obs
+
+                if prefer_source:
+                    matching = next(
+                        (obs for obs in observations if obs.source == prefer_source),
+                        None,
+                    )
+                    if matching:
+                        return matching
+
+                for source in ("file", "duckdb"):
+                    matching = next(
+                        (obs for obs in observations if obs.source == source), None
+                    )
+                    if matching:
+                        return matching
+
+                return observations[0]
+
+        try:
+            return self.execute_with_retry(_query)
+        except Exception:
+            return None
+
+    def find_schema_observation_for_content_id(
+        self,
+        content_id: uuid.UUID,
+        *,
+        prefer_source: Optional[str] = None,
+    ) -> Optional[ArtifactSchemaObservation]:
+        """
+        Find the best schema observation for artifacts sharing a given content identity.
+
+        Preference order mirrors ``get_artifact_schema_for_artifact``:
+        user_provided > prefer_source (if set) > file > duckdb.
+        """
+
+        def _query() -> Optional[ArtifactSchemaObservation]:
+            with self.session_scope() as session:
+                observations = session.exec(
+                    select(ArtifactSchemaObservation)
+                    .join(
+                        Artifact,
+                        col(ArtifactSchemaObservation.artifact_id) == col(Artifact.id),
+                    )
+                    .where(Artifact.content_id == content_id)
                     .order_by(col(ArtifactSchemaObservation.observed_at).desc())
                 ).all()
 

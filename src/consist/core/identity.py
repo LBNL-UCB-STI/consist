@@ -444,7 +444,9 @@ class IdentityManager:
                     # Fallback to run_id if signature unknown
                     sig_parts.append(f"run:{artifact.run_id}")
 
-                # Mix in the artifact content hash if available to catch diverging data
+                # Intentional hash usage: run signatures must remain portable and
+                # deterministic across databases, so they use the raw checksum
+                # rather than the DB-local ``content_id`` foreign key.
                 if getattr(artifact, "hash", None):
                     sig_parts.append(f"hash:{artifact.hash}")
                 sig = "|".join(sig_parts)
