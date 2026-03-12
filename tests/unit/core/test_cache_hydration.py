@@ -654,7 +654,9 @@ def test_hydrate_cache_hit_outputs_records_materialized_outputs_meta(
     assert run.meta["materialized_outputs"] == {"a": str(dest.resolve())}
 
 
-def test_outputs_all_uses_archive_source_root_for_mirror_recovery(tmp_path: Path) -> None:
+def test_outputs_all_uses_archive_source_root_for_mirror_recovery(
+    tmp_path: Path,
+) -> None:
     db_path = str(tmp_path / "provenance.db")
     run_dir_a = tmp_path / "runs_a"
     run_dir_b = tmp_path / "runs_b"
@@ -695,8 +697,12 @@ def test_outputs_all_uses_archive_source_root_for_mirror_recovery(tmp_path: Path
     ) as t:
         assert t.is_cached
 
-    assert (restored_root / "outputs" / "a.csv").read_text(encoding="utf-8") == "value\n1\n"
-    assert (restored_root / "outputs" / "b.csv").read_text(encoding="utf-8") == "value\n2\n"
+    assert (restored_root / "outputs" / "a.csv").read_text(
+        encoding="utf-8"
+    ) == "value\n1\n"
+    assert (restored_root / "outputs" / "b.csv").read_text(
+        encoding="utf-8"
+    ) == "value\n2\n"
 
     if tracker_a.engine:
         tracker_a.engine.dispose()

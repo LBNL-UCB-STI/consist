@@ -420,7 +420,10 @@ def hydrate_cache_hit_outputs(
                 except Exception as exc:
                     if not _should_fallback_to_legacy_output_materialization(exc):
                         raise
-                    if active_options.materialize_cached_outputs_source_root is not None:
+                    if (
+                        active_options.materialize_cached_outputs_source_root
+                        is not None
+                    ):
                         raise RuntimeError(
                             "cache-hydration source-root override requires the "
                             "run-scoped output materialization path."
