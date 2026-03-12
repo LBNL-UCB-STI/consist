@@ -929,7 +929,10 @@ def schema_capture_file(
     if_changed: bool = typer.Option(
         False,
         "--if-changed",
-        help="Reuse existing schema observations for unchanged file hashes.",
+        help=(
+            "Reuse an existing schema observation when the file hash is unchanged. "
+            "This affects schema capture only, not artifact-row reuse."
+        ),
     ),
     trust_db: bool = typer.Option(
         False,
