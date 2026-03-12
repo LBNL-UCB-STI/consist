@@ -3678,6 +3678,61 @@ class Tracker:
             return artifact
         return None
 
+    def find_artifacts_with_same_content(
+        self, artifact: Union[Artifact, str, uuid.UUID]
+    ) -> List[Artifact]:
+        """
+        Return artifact occurrences that share the same content identity.
+
+        Parameters
+        ----------
+        artifact : Artifact | str | uuid.UUID
+            Artifact instance or artifact id to resolve.
+
+        Returns
+        -------
+        List[Artifact]
+            Artifacts sharing the same ``content_id``. Returns an empty list when
+            the artifact is unknown, has no content identity, or the database is not
+            configured.
+        """
+        if not self.db:
+            return []
+        target = (
+            artifact if isinstance(artifact, Artifact) else self.get_artifact(artifact)
+        )
+        if target is None or target.content_id is None:
+            return []
+        artifacts = self.db.find_artifacts_by_content_id(target.content_id)
+        for item in artifacts:
+            set_tracker_ref(item, self)
+        return artifacts
+
+    def find_runs_producing_same_content(
+        self, artifact: Union[Artifact, str, uuid.UUID]
+    ) -> List[str]:
+        """
+        Return run ids that produced artifacts with the same content identity.
+
+        Parameters
+        ----------
+        artifact : Artifact | str | uuid.UUID
+            Artifact instance or artifact id to resolve.
+
+        Returns
+        -------
+        List[str]
+            Run ids linked to output artifacts sharing the resolved ``content_id``.
+        """
+        if not self.db:
+            return []
+        target = (
+            artifact if isinstance(artifact, Artifact) else self.get_artifact(artifact)
+        )
+        if target is None or target.content_id is None:
+            return []
+        return self.db.find_runs_producing_content(target.content_id)
+
     def select_artifact_schema_for_artifact(
         self,
         *,

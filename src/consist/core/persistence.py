@@ -34,7 +34,11 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.pool import NullPool
 from sqlmodel import create_engine, Session, select, SQLModel, col, delete
 
-from consist.models.artifact import Artifact
+from consist.core.schema_compat import (
+    apply_content_identity_compatibility,
+    backfill_artifact_content_ids as compat_backfill_artifact_content_ids,
+)
+from consist.models.artifact import Artifact, ArtifactContent
 from consist.models.artifact_facet import ArtifactFacet
 from consist.models.artifact_kv import ArtifactKV
 from consist.models.artifact_schema import (
@@ -176,11 +180,14 @@ class DatabaseManager:
                     getattr(ArtifactSchemaField, "__table__"),
                     getattr(ArtifactSchemaObservation, "__table__"),
                     getattr(ArtifactSchemaRelation, "__table__"),
+                    getattr(ArtifactContent, "__table__"),
                 ],
             )
             # DuckDB self-referential FK on run.parent_run_id blocks status updates.
             self._relax_run_parent_fk()
-            # Lightweight migrations for additive schema changes.
+            # Lightweight compatibility hooks for older DBs. Keep these isolated so
+            # they can be removed without changing steady-state persistence behavior.
+            apply_content_identity_compatibility(self)
             self._ensure_artifact_schema_field_ordinal_position()
             self._ensure_schema_links_view()
 
@@ -196,6 +203,26 @@ class DatabaseManager:
                 ).fetchall()
             # DuckDB pragma_table_info returns: (cid, name, type, notnull, dflt_value, pk)
             return any(str(row[1]) == column_name for row in rows)
+        except Exception:
+            return False
+
+    def _table_has_index_on_column(self, *, table_name: str, column_name: str) -> bool:
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", table_name or ""):
+            return False
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", column_name or ""):
+            return False
+        try:
+            with self.engine.begin() as conn:
+                rows = conn.exec_driver_sql(
+                    """
+                    SELECT expressions
+                    FROM duckdb_indexes()
+                    WHERE table_name = ?
+                    """,
+                    (table_name,),
+                ).fetchall()
+            target_expression = f"[{column_name}]"
+            return any(str(row[0]) == target_expression for row in rows)
         except Exception:
             return False
 
@@ -1231,6 +1258,118 @@ class DatabaseManager:
             return self.execute_with_retry(_query)
         except Exception:
             return None
+
+    def get_or_create_artifact_content(
+        self,
+        *,
+        content_hash: str,
+        driver: str,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> ArtifactContent:
+        """
+        Lookup or create an ArtifactContent row for the given hash+driver pair.
+        """
+
+        def _query() -> ArtifactContent:
+            with self.session_scope() as session:
+                statement = (
+                    select(ArtifactContent)
+                    .where(ArtifactContent.content_hash == content_hash)
+                    .where(ArtifactContent.driver == driver)
+                )
+                existing = session.exec(statement.limit(1)).first()
+                if existing:
+                    return existing
+                row = ArtifactContent(
+                    content_hash=content_hash,
+                    driver=driver,
+                    meta=meta or {},
+                )
+                session.add(row)
+                session.commit()
+                session.refresh(row)
+                return row
+
+        try:
+            return self.execute_with_retry(_query)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to get or create ArtifactContent for hash={content_hash}: {exc}"
+            ) from exc
+
+    def find_artifact_content(
+        self,
+        *,
+        content_hash: str,
+        driver: Optional[str] = None,
+    ) -> Optional[ArtifactContent]:
+        """
+        Return an ArtifactContent row if one exists for the given hash (and optional driver).
+        """
+
+        def _query() -> Optional[ArtifactContent]:
+            with self.session_scope() as session:
+                statement = select(ArtifactContent).where(
+                    ArtifactContent.content_hash == content_hash
+                )
+                if driver is not None:
+                    statement = statement.where(ArtifactContent.driver == driver)
+                statement = statement.order_by(ArtifactContent.created_at.desc()).limit(
+                    1
+                )
+                return session.exec(statement).first()
+
+        try:
+            return self.execute_with_retry(_query)
+        except Exception:
+            return None
+
+    def backfill_artifact_content_ids(self) -> None:
+        """
+        Explicitly backfill content identities for older artifact rows.
+
+        This is kept outside of normal DB startup so compatibility work remains
+        easy to remove once legacy DB support is dropped.
+        """
+        compat_backfill_artifact_content_ids(self)
+
+    def find_artifacts_by_content_id(self, content_id: uuid.UUID) -> list[Artifact]:
+        """
+        Return all artifact occurrences referencing the supplied content identity.
+        """
+
+        def _query():
+            with self.session_scope() as session:
+                statement = (
+                    select(Artifact).where(Artifact.content_id == content_id)
+                ).order_by(Artifact.created_at.desc())
+                return session.exec(statement).all()
+
+        try:
+            return self.execute_with_retry(_query)
+        except Exception:
+            return []
+
+    def find_runs_producing_content(self, content_id: uuid.UUID) -> list[str]:
+        """
+        Return run IDs that produced the supplied content identity.
+        """
+
+        def _query():
+            with self.session_scope() as session:
+                statement = (
+                    select(RunArtifactLink.run_id)
+                    .join(Artifact, Artifact.id == RunArtifactLink.artifact_id)
+                    .where(RunArtifactLink.direction == "output")
+                    .where(Artifact.content_id == content_id)
+                    .distinct()
+                )
+                return list(session.exec(statement).all())
+
+        try:
+            return self.execute_with_retry(_query)
+        except Exception:
+            return []
 
     def find_schema_observation_for_hash(
         self,

@@ -210,6 +210,44 @@ class ArtifactManager:
         # Shared mutable state for nested helpers in this single create call.
         hash_state = _ContentHashState(effective_hash=content_hash)
 
+        is_output_reuse = direction == "output" and reuse_if_unchanged
+
+        def _warn_output_reuse_deprecated() -> None:
+            if not is_output_reuse:
+                return
+            logging.warning(
+                "[Consist] reuse_if_unchanged on outputs is deprecated; "
+                "a new artifact row is always created now and identical bytes share "
+                "identity via ArtifactContent (content_id)."
+            )
+            if reuse_scope == "any_uri":
+                logging.warning(
+                    "[Consist] reuse_scope='any_uri' is ignored for outputs; "
+                    "content_id equality governs deduplication instead."
+                )
+
+        def _attach_content_id(artifact: Artifact) -> None:
+            hash_value = hash_state.effective_hash or artifact.hash
+            effective_driver = driver or artifact.driver
+            if (
+                hash_value is None
+                or effective_driver is None
+                or self.tracker.db is None
+            ):
+                return
+            try:
+                content_row = self.tracker.db.get_or_create_artifact_content(
+                    content_hash=hash_value,
+                    driver=effective_driver,
+                )
+                artifact.content_id = content_row.id
+            except Exception as exc:
+                logging.warning(
+                    "[Consist] Failed to record artifact content identity for %s: %s",
+                    artifact.key,
+                    exc,
+                )
+
         def _compute_content_hash(
             *,
             raise_on_error: bool,
@@ -273,6 +311,8 @@ class ArtifactManager:
                 )
                 return
             artifact.hash = hash_state.effective_hash
+
+        _warn_output_reuse_deprecated()
 
         if isinstance(path, Artifact):
             artifact_obj = path
@@ -339,42 +379,6 @@ class ArtifactManager:
                         if meta:
                             artifact_obj.meta.update(meta)
 
-            if (
-                artifact_obj is None
-                and direction == "output"
-                and reuse_if_unchanged
-                and self.tracker.db
-            ):
-                if reuse_scope not in {"same_uri", "any_uri"}:
-                    raise ValueError(
-                        "reuse_scope must be one of: 'same_uri', 'any_uri'."
-                    )
-                if hash_state.effective_hash is None:
-                    _ensure_content_hash()
-                if hash_state.effective_hash is not None:
-                    if reuse_scope == "same_uri":
-                        parent = self.tracker.db.find_latest_artifact_at_uri(
-                            container_uri,
-                            driver=driver,
-                            table_path=table_path,
-                            array_path=array_path,
-                        )
-                        if parent and parent.hash == hash_state.effective_hash:
-                            artifact_obj = parent
-                    else:
-                        parent = self.tracker.db.find_latest_artifact_by_hash(
-                            hash_state.effective_hash, driver=driver
-                        )
-                        if parent is not None:
-                            artifact_obj = parent
-
-                if artifact_obj is not None:
-                    if driver:
-                        artifact_obj.driver = driver
-                    _apply_content_hash_override(artifact_obj)
-                    if meta:
-                        artifact_obj.meta.update(meta)
-
             if artifact_obj is None:
                 if hash_state.effective_hash is not None and validate_content_hash:
                     _validate_content_hash()
@@ -391,6 +395,11 @@ class ArtifactManager:
                     run_id=run_id,
                     meta=meta,
                 )
+
+        if artifact_obj.hash and hash_state.effective_hash is None:
+            hash_state.effective_hash = artifact_obj.hash
+
+        _attach_content_id(artifact_obj)
 
         if schema:
             artifact_obj.meta["schema_name"] = schema.__name__
