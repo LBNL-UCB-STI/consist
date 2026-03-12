@@ -105,9 +105,9 @@ def test_content_id_backfill_is_explicit_not_automatic(tmp_path: Path) -> None:
 
     assert before is not None
     assert before.content_id is None
-    assert reopened.find_artifact_content(
-        content_hash="shared_hash", driver="csv"
-    ) is None
+    assert (
+        reopened.find_artifact_content(content_hash="shared_hash", driver="csv") is None
+    )
 
     reopened.backfill_artifact_content_ids()
 

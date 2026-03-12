@@ -1314,9 +1314,9 @@ class DatabaseManager:
                 )
                 if driver is not None:
                     statement = statement.where(ArtifactContent.driver == driver)
-                statement = statement.order_by(ArtifactContent.created_at.desc()).limit(
-                    1
-                )
+                statement = statement.order_by(
+                    col(ArtifactContent.created_at).desc()
+                ).limit(1)
                 return session.exec(statement).first()
 
         try:
@@ -1342,7 +1342,7 @@ class DatabaseManager:
             with self.session_scope() as session:
                 statement = (
                     select(Artifact).where(Artifact.content_id == content_id)
-                ).order_by(Artifact.created_at.desc())
+                ).order_by(col(Artifact.created_at).desc())
                 return session.exec(statement).all()
 
         try:
@@ -1359,7 +1359,10 @@ class DatabaseManager:
             with self.session_scope() as session:
                 statement = (
                     select(RunArtifactLink.run_id)
-                    .join(Artifact, Artifact.id == RunArtifactLink.artifact_id)
+                    .join(
+                        Artifact,
+                        col(Artifact.id) == col(RunArtifactLink.artifact_id),
+                    )
                     .where(RunArtifactLink.direction == "output")
                     .where(Artifact.content_id == content_id)
                     .distinct()
