@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+from sqlmodel import Session
 import pytest
 
 from consist.core.tracker import Tracker
@@ -72,6 +73,7 @@ def test_h5_lineage_hashing_demo(tracker: Tracker, run_dir: Path) -> None:
 
     assert container_repeat.id != container_v1.id
     assert container_repeat.hash == container_v1.hash
+    assert container_repeat.content_id == container_v1.content_id
     assert container_repeat.meta.get("table_hashes_checked") is True
     assert all("table_hash" in t.meta for t in tables_repeat)
 
@@ -86,7 +88,9 @@ def test_h5_lineage_hashing_demo(tracker: Tracker, run_dir: Path) -> None:
 
     assert container_v2.id != container_v1.id
     assert container_v2.meta.get("table_hashes_checked") is False
-    assert container_v2.meta.get("table_hashes_skip_reason") == "file_hash_changed"
+    assert (
+        container_v2.meta.get("table_hashes_skip_reason") == "content_identity_changed"
+    )
     assert all("table_hash" not in t.meta for t in tables_v2)
 
     profile_path = run_dir / "inputs" / "profile.h5"
@@ -141,4 +145,49 @@ def test_h5_lineage_hashing_demo(tracker: Tracker, run_dir: Path) -> None:
         assert t.is_cached
         assert t.current_consist.cached_run is not None
         assert t.current_consist.cached_run.id == "h5_cache_seed"
-        assert container_hit.id == container_seed.id
+    assert container_hit.id == container_seed.id
+
+
+def test_h5_lineage_prefers_content_id_when_hash_missing(
+    tracker: Tracker, run_dir: Path
+) -> None:
+    """
+    Table hashing in "if_unchanged" mode prefers content identity over file hash.
+
+    This test clears the prior container's file hash while keeping shared
+    ``content_id`` and verifies that table hashing still runs on the repeat pass.
+    """
+    h5_path = run_dir / "inputs" / "demo_prefers_content.h5"
+    _write_h5(h5_path, people_values=[1, 2])
+
+    with tracker.start_run("h5_demo_ci_v1", model="demo", tags=["h5_ci", "input"]):
+        container_v1, tables_v1 = tracker.log_h5_container(
+            h5_path,
+            key="demo_ci",
+            direction="input",
+        )
+
+    assert container_v1.content_id is not None
+    assert tables_v1 and all("table_hash" in t.meta for t in tables_v1)
+
+    # Clear the prior container's file hash while preserving content identity.
+    with Session(tracker.engine) as session:
+        db_row = session.get(type(container_v1), container_v1.id)
+        assert db_row is not None
+        db_row.hash = None
+        session.add(db_row)
+        session.commit()
+
+    with tracker.start_run(
+        "h5_demo_ci_v1_repeat", model="demo", tags=["h5_ci", "repeat"]
+    ):
+        container_repeat, tables_repeat = tracker.log_h5_container(
+            h5_path,
+            key="demo_ci",
+            direction="input",
+        )
+
+    # Content identity should remain stable; table hashing should have been performed.
+    assert container_repeat.content_id == container_v1.content_id
+    assert container_repeat.meta.get("table_hashes_checked") is True
+    assert tables_repeat and all("table_hash" in t.meta for t in tables_repeat)

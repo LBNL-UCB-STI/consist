@@ -175,7 +175,7 @@ consist schema capture-file \
 Options:
 
 - `--sample-rows N`: rows to sample during inference (default `1000`)
-- `--if-changed`: reuse prior schema observation when artifact hash is unchanged
+- `--if-changed`: reuse a prior schema observation when the artifact hash is unchanged; this affects schema capture only, not artifact-row reuse
 - `--trust-db`: allow metadata-based mount inference when resolving paths
 - `--db-path`: explicit DB path
 

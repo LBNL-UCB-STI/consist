@@ -1106,10 +1106,13 @@ def log_artifact(
     validate_content_hash : bool, default False
         If True, verify `content_hash` against the on-disk data and raise on mismatch.
     reuse_if_unchanged : bool, default False
-        If True and logging an output, reuse a prior artifact row when the content hash matches.
+        Deprecated for outputs. Consist always creates a fresh output artifact row;
+        identical bytes are deduplicated via `artifact.content_id`. Setting this on
+        outputs emits a warning and does not reuse prior rows. Input-side behavior is
+        unaffected.
     reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
-        Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
-        while "any_uri" allows reuse across different URIs with the same hash.
+        Deprecated for outputs. `any_uri` is ignored for outputs; content identity
+        (`content_id`) governs deduplication. Input-side behavior is unaffected.
     facet : Optional[Any], optional
         Optional artifact-level facet payload (dict or Pydantic model).
     facet_schema_version : Optional[Union[str, int]], optional
@@ -1206,10 +1209,13 @@ def log_artifacts(
     facet_index : bool, default False
         Whether to index scalar artifact facet fields in ``artifact_kv``.
     reuse_if_unchanged : bool, default False
-        If True, reuse an existing logged artifact when the input path has not changed.
+        Deprecated for outputs. Batch output logging still creates a fresh artifact
+        row per call; identical bytes are deduplicated via ``artifact.content_id``.
+        Setting this on outputs emits a warning and does not reuse prior rows.
+        Input-side behavior is unaffected.
     reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
-        Control reuse lookup scope. "same_uri" only reuses when the URI matches,
-        while "any_uri" allows reuse across different URIs with the same content hash.
+        Deprecated for outputs. ``any_uri`` is ignored for outputs; deduplication is
+        governed by ``content_id`` instead. Input-side behavior is unaffected.
     enabled : bool, default True
         If False, returns noop artifact objects without requiring an active run.
     **shared_meta : Any
@@ -1413,10 +1419,10 @@ def log_output(
     validate_content_hash : bool, default False
         Re-hash the file on disk to ensure it matches the provided `content_hash`.
     reuse_if_unchanged : bool, default False
-        If True, and the content hash matches a previous run's output, Consist may
-        reuse that historical artifact record.
+        Deprecated for outputs. A fresh output artifact row is always created; identical
+        bytes share `content_id`. Setting this emits a warning and does not reuse prior rows.
     reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
-        Whether to restrict reuse to the exact same file path or any path with the same hash.
+        Deprecated for outputs. `any_uri` is ignored; deduplication is by `content_id`.
     facet : Optional[Any], optional
         Optional artifact-level facet payload.
     facet_schema_version : Optional[Union[str, int]], optional

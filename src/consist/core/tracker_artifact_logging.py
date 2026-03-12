@@ -74,9 +74,10 @@ class ArtifactLoggingCoordinator:
         validate_content_hash : bool, default False
             Whether provided content hash is validated against on-disk content.
         reuse_if_unchanged : bool, default False
-            Whether unchanged output artifacts should reuse existing rows.
+            Deprecated for outputs. A fresh output artifact row is always created; identical
+            bytes share `content_id`. Setting this on outputs emits a warning.
         reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
-            Reuse lookup scope when ``reuse_if_unchanged`` is enabled.
+            Deprecated for outputs. `any_uri` is ignored; deduplication is governed by `content_id`.
         profile_file_schema : bool | Literal["if_changed"] | None, optional
             Controls automatic file schema profiling behavior.
         file_schema_sample_rows : int | None, optional

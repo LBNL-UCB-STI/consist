@@ -1953,13 +1953,16 @@ class Tracker:
         validate_content_hash : bool, default False
             If True, verify `content_hash` against the on-disk data and raise on mismatch.
         reuse_if_unchanged : bool, default False
-            If True and logging an output, reuse a prior artifact row when the content hash matches.
+            Deprecated for outputs. Consist now always creates a fresh output artifact row;
+            identical bytes are deduplicated via `artifact.content_id`. Setting this on outputs
+            emits a warning and does not reuse prior rows. Input-side behavior is unaffected.
         reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
-            Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
-            while "any_uri" allows reuse across different URIs with the same hash.
+            Deprecated for outputs. `any_uri` is ignored for outputs; deduplication is governed
+            by `content_id`. Input-side behavior is unaffected.
         profile_file_schema : bool, default False
             If True, profile a lightweight schema for file-based tabular artifacts.
-            Use "if_changed" to skip profiling when a matching content hash already has a schema.
+            Use "if_changed" to skip profiling when matching content identity already
+            has a stored schema (prefers content_id; falls back to hash for legacy rows).
         file_schema_sample_rows : Optional[int], default None
             Maximum rows to sample when profiling file-based schemas.
         facet : Optional[FacetLike], optional
@@ -2127,10 +2130,13 @@ class Tracker:
         facet_index : bool, default False
             Whether to index scalar artifact facet values in ``artifact_kv``.
         reuse_if_unchanged : bool, default False
-            If True and logging outputs, reuse prior artifact rows when content hashes match.
+            Deprecated for outputs. Batch output logging still creates a fresh artifact
+            row per call; identical bytes are deduplicated via ``artifact.content_id``.
+            Setting this on outputs emits a warning and does not reuse prior rows.
+            Input-side behavior is unaffected.
         reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
-            Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
-            while "any_uri" allows reuse across different URIs with the same hash.
+            Deprecated for outputs. ``any_uri`` is ignored for outputs; deduplication
+            is governed by ``content_id`` instead. Input-side behavior is unaffected.
         **shared_meta : Any
             Metadata key-value pairs to apply to ALL logged artifacts.
             Useful for tagging a batch of related files.
@@ -2312,10 +2318,10 @@ class Tracker:
         validate_content_hash : bool, default False
             If True, verify `content_hash` against the on-disk data and raise on mismatch.
         reuse_if_unchanged : bool, default False
-            If True, reuse a prior output artifact row when the content hash matches.
+            Deprecated for outputs. A fresh output artifact row is always created; identical
+            bytes share `content_id`. Setting this emits a warning and does not reuse prior rows.
         reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
-            Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
-            while "any_uri" allows reuse across different URIs with the same hash.
+            Deprecated for outputs. `any_uri` is ignored; deduplication is by `content_id`.
         facet : Optional[FacetLike], optional
             Optional artifact-level facet payload for this output artifact.
         facet_schema_version : Optional[Union[str, int]], optional
@@ -2489,7 +2495,10 @@ class Tracker:
         table_hash_chunk_rows : Optional[int], optional
             Chunk size for hashing large tables.
         profile_file_schema : bool | Literal["if_changed"], default False
-            Whether to profile table schema and store it as metadata.
+            Whether to profile table schema and store it as metadata. Use
+            ``"if_changed"`` to skip profiling when matching content identity
+            already has a schema (prefers ``content_id`` and falls back to hash
+            for legacy rows).
         file_schema_sample_rows : Optional[int], optional
             Number of rows to sample when profiling schema.
         **meta : Any
@@ -3677,6 +3686,61 @@ class Tracker:
                 set_tracker_ref(artifact, self)
             return artifact
         return None
+
+    def find_artifacts_with_same_content(
+        self, artifact: Union[Artifact, str, uuid.UUID]
+    ) -> List[Artifact]:
+        """
+        Return artifact occurrences that share the same content identity.
+
+        Parameters
+        ----------
+        artifact : Artifact | str | uuid.UUID
+            Artifact instance or artifact id to resolve.
+
+        Returns
+        -------
+        List[Artifact]
+            Artifacts sharing the same ``content_id``. Returns an empty list when
+            the artifact is unknown, has no content identity, or the database is not
+            configured.
+        """
+        if not self.db:
+            return []
+        target = (
+            artifact if isinstance(artifact, Artifact) else self.get_artifact(artifact)
+        )
+        if target is None or target.content_id is None:
+            return []
+        artifacts = self.db.find_artifacts_by_content_id(target.content_id)
+        for item in artifacts:
+            set_tracker_ref(item, self)
+        return artifacts
+
+    def find_runs_producing_same_content(
+        self, artifact: Union[Artifact, str, uuid.UUID]
+    ) -> List[str]:
+        """
+        Return run ids that produced artifacts with the same content identity.
+
+        Parameters
+        ----------
+        artifact : Artifact | str | uuid.UUID
+            Artifact instance or artifact id to resolve.
+
+        Returns
+        -------
+        List[str]
+            Run ids linked to output artifacts sharing the resolved ``content_id``.
+        """
+        if not self.db:
+            return []
+        target = (
+            artifact if isinstance(artifact, Artifact) else self.get_artifact(artifact)
+        )
+        if target is None or target.content_id is None:
+            return []
+        return self.db.find_runs_producing_content(target.content_id)
 
     def select_artifact_schema_for_artifact(
         self,

@@ -156,6 +156,125 @@ def test_log_artifact_profiles_schema_if_changed(tracker, tmp_path):
     schema_b = tracker.db.get_artifact_schema_for_artifact(artifact_id=art_b.id)
     assert schema_a is not None
     assert schema_b is not None
+    # Content identity should be shared across distinct output rows.
+    assert art_a.content_id is not None and art_b.content_id is not None
+    assert art_a.content_id == art_b.content_id
     assert schema_a[0].id == schema_b[0].id
     assert len(schemas) == 1
     assert len(observations) == 2
+
+
+def test_profile_file_artifact_if_changed_prefers_content_id(tracker, tmp_path):
+    path_a = tmp_path / "data_content_a.csv"
+    path_b = tmp_path / "data_content_b.csv"
+    df = pd.DataFrame({"a": [1], "b": ["x"]})
+    df.to_csv(path_a, index=False)
+    df.to_csv(path_b, index=False)
+
+    with tracker.start_run("run_profile_content_id_a", model="test_model"):
+        art_a = tracker.log_artifact(path_a, key="data", direction="output")
+        run_a = tracker.current_consist.run
+        tracker.artifact_schemas.profile_file_artifact(
+            artifact=art_a,
+            run=run_a,
+            resolved_path=str(path_a),
+            source="file",
+            driver="csv",
+            sample_rows=1,
+        )
+
+    with tracker.start_run("run_profile_content_id_b", model="test_model"):
+        art_b = tracker.log_artifact(path_b, key="data", direction="output")
+        run_b = tracker.current_consist.run
+
+        assert art_a.content_id is not None
+        assert art_b.content_id == art_a.content_id
+
+        with Session(tracker.engine) as session:
+            persisted = session.get(type(art_b), art_b.id)
+            assert persisted is not None
+            persisted.hash = None
+            session.add(persisted)
+            session.commit()
+
+        art_b.hash = None
+
+        tracker.artifact_schemas.profile_file_artifact(
+            artifact=art_b,
+            run=run_b,
+            resolved_path=str(path_b),
+            source="file",
+            driver="csv",
+            sample_rows=1,
+            reuse_if_unchanged=True,
+        )
+
+    schema_a = tracker.db.get_artifact_schema_for_artifact(artifact_id=art_a.id)
+    schema_b = tracker.db.get_artifact_schema_for_artifact(artifact_id=art_b.id)
+
+    assert schema_a is not None
+    assert schema_b is not None
+    assert schema_a[0].id == schema_b[0].id
+
+
+def test_profile_file_artifact_if_changed_falls_back_to_hash_for_legacy_rows(
+    tracker, tmp_path
+):
+    path_a = tmp_path / "data_legacy_a.csv"
+    path_b = tmp_path / "data_legacy_b.csv"
+    df = pd.DataFrame({"a": [1], "b": ["x"]})
+    df.to_csv(path_a, index=False)
+    df.to_csv(path_b, index=False)
+
+    with tracker.start_run("run_profile_legacy_a", model="test_model"):
+        art_a = tracker.log_artifact(path_a, key="data", direction="output")
+        run_a = tracker.current_consist.run
+
+    # Simulate a legacy pre-backfill row: it has the same hash as the new content,
+    # but no content_id. The only reusable schema observation lives on that row.
+    with Session(tracker.engine) as session:
+        legacy_artifact = type(art_a)(
+            key="data_legacy",
+            container_uri="outputs://legacy_data.csv",
+            driver="csv",
+            hash=art_a.hash,
+            content_id=None,
+            run_id=run_a.id,
+        )
+        legacy_schema = ArtifactSchema(
+            id="schema_legacy_hash_only",
+            summary_json={"table_name": "legacy_table"},
+            profile_version=1,
+        )
+        legacy_obs = ArtifactSchemaObservation(
+            artifact_id=legacy_artifact.id,
+            schema_id=legacy_schema.id,
+            run_id=run_a.id,
+            source="file",
+        )
+        session.add(legacy_artifact)
+        session.add(legacy_schema)
+        session.add(legacy_obs)
+        session.commit()
+
+    with tracker.start_run("run_profile_legacy_b", model="test_model"):
+        art_b = tracker.log_artifact(path_b, key="data", direction="output")
+        run_b = tracker.current_consist.run
+
+        assert art_b.content_id is not None
+        assert art_b.hash == art_a.hash
+
+        tracker.artifact_schemas.profile_file_artifact(
+            artifact=art_b,
+            run=run_b,
+            resolved_path=str(path_b),
+            source="file",
+            driver="csv",
+            sample_rows=1,
+            reuse_if_unchanged=True,
+        )
+
+    schema_b = tracker.db.get_artifact_schema_for_artifact(artifact_id=art_b.id)
+
+    assert schema_b is not None
+    assert schema_b[0].id == "schema_legacy_hash_only"
