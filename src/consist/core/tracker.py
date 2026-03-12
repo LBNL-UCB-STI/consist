@@ -1953,10 +1953,12 @@ class Tracker:
         validate_content_hash : bool, default False
             If True, verify `content_hash` against the on-disk data and raise on mismatch.
         reuse_if_unchanged : bool, default False
-            If True and logging an output, reuse a prior artifact row when the content hash matches.
+            Deprecated for outputs. Consist now always creates a fresh output artifact row;
+            identical bytes are deduplicated via `artifact.content_id`. Setting this on outputs
+            emits a warning and does not reuse prior rows. Input-side behavior is unaffected.
         reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
-            Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
-            while "any_uri" allows reuse across different URIs with the same hash.
+            Deprecated for outputs. `any_uri` is ignored for outputs; deduplication is governed
+            by `content_id`. Input-side behavior is unaffected.
         profile_file_schema : bool, default False
             If True, profile a lightweight schema for file-based tabular artifacts.
             Use "if_changed" to skip profiling when a matching content hash already has a schema.
@@ -2127,10 +2129,13 @@ class Tracker:
         facet_index : bool, default False
             Whether to index scalar artifact facet values in ``artifact_kv``.
         reuse_if_unchanged : bool, default False
-            If True and logging outputs, reuse prior artifact rows when content hashes match.
+            Deprecated for outputs. Batch output logging still creates a fresh artifact
+            row per call; identical bytes are deduplicated via ``artifact.content_id``.
+            Setting this on outputs emits a warning and does not reuse prior rows.
+            Input-side behavior is unaffected.
         reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
-            Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
-            while "any_uri" allows reuse across different URIs with the same hash.
+            Deprecated for outputs. ``any_uri`` is ignored for outputs; deduplication
+            is governed by ``content_id`` instead. Input-side behavior is unaffected.
         **shared_meta : Any
             Metadata key-value pairs to apply to ALL logged artifacts.
             Useful for tagging a batch of related files.
@@ -2312,10 +2317,10 @@ class Tracker:
         validate_content_hash : bool, default False
             If True, verify `content_hash` against the on-disk data and raise on mismatch.
         reuse_if_unchanged : bool, default False
-            If True, reuse a prior output artifact row when the content hash matches.
+            Deprecated for outputs. A fresh output artifact row is always created; identical
+            bytes share `content_id`. Setting this emits a warning and does not reuse prior rows.
         reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
-            Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
-            while "any_uri" allows reuse across different URIs with the same hash.
+            Deprecated for outputs. `any_uri` is ignored; deduplication is by `content_id`.
         facet : Optional[FacetLike], optional
             Optional artifact-level facet payload for this output artifact.
         facet_schema_version : Optional[Union[str, int]], optional
