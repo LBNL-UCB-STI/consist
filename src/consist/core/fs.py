@@ -1,5 +1,5 @@
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional, Union, Dict
 
 
@@ -198,3 +198,73 @@ class FileSystemManager:
         # If it's "inputs://data.csv" and "inputs" points to a shared /data drive
         # that is mounted in the current config, standard resolution works fine.
         return self.resolve_uri(uri)
+
+    @staticmethod
+    def normalize_remappable_relative_path(rel_path: str) -> Optional[Path]:
+        """
+        Validate and normalize a remappable URI-relative path.
+
+        Returns ``None`` for absolute or path-traversing values because those do
+        not have a safe, portable layout contract for rematerialization.
+        """
+        candidate = rel_path.strip()
+        if not candidate:
+            return None
+
+        pure_path = PurePosixPath(candidate)
+        if pure_path.is_absolute():
+            return None
+        if ".." in pure_path.parts:
+            return None
+
+        normalized_parts = [part for part in pure_path.parts if part not in {"", "."}]
+        if not normalized_parts:
+            return None
+        return Path(*normalized_parts)
+
+    def get_historical_remap(
+        self,
+        uri: str,
+        *,
+        original_run_dir: Optional[str],
+        mounts_snapshot: Optional[Dict[str, str]] = None,
+        artifact_mount_root: Optional[str] = None,
+    ) -> Optional[tuple[Path, Path]]:
+        """
+        Derive a historical root plus portable relative layout for a URI.
+
+        This is stricter than ``resolve_historical_path(...)`` because it only
+        returns remappable layouts used by recovery-oriented materialization.
+        """
+        if uri.startswith("workspace://"):
+            relative_path = self.normalize_remappable_relative_path(
+                uri.replace("workspace://", "", 1).lstrip("/")
+            )
+            if relative_path is None or not original_run_dir:
+                return None
+            return Path(original_run_dir).resolve(), relative_path
+
+        if uri.startswith("./"):
+            relative_path = self.normalize_remappable_relative_path(uri[2:])
+            if relative_path is None or not original_run_dir:
+                return None
+            return Path(original_run_dir).resolve(), relative_path
+
+        if "://" not in uri:
+            return None
+
+        scheme, rel_path = uri.split("://", 1)
+        if scheme == "file":
+            return None
+
+        relative_path = self.normalize_remappable_relative_path(rel_path)
+        if relative_path is None:
+            return None
+
+        if mounts_snapshot and isinstance(mounts_snapshot.get(scheme), str):
+            return Path(mounts_snapshot[scheme]).resolve(), relative_path
+
+        if artifact_mount_root:
+            return Path(artifact_mount_root).resolve(), relative_path
+
+        return None
