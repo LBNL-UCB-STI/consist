@@ -107,11 +107,14 @@ from consist.types import (
 
 if TYPE_CHECKING:
     from consist.core.coupler import Coupler
+    from consist.core.materialize import MaterializationResult
     from consist.core.step_context import StepContext
     from consist.runset import RunSet
 
 AccessMode = Literal["standard", "analysis", "read_only"]
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_VALID_MATERIALIZE_ON_MISSING = {"warn", "raise"}
+_VALID_MATERIALIZE_DB_FALLBACK = {"never", "if_ingested"}
 
 
 def _is_safe_identifier(identifier: str) -> bool:
@@ -127,6 +130,38 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_materialize_output_keys(
+    keys: Sequence[str] | None,
+) -> tuple[str, ...] | None:
+    if keys is None:
+        return None
+    if isinstance(keys, (str, bytes)):
+        raise TypeError(
+            "keys must be a sequence of output-key strings, not a single str/bytes value."
+        )
+
+    normalized: list[str] = []
+    for key in keys:
+        if not isinstance(key, str):
+            raise TypeError(
+                "keys must contain only strings "
+                f"(got {type(key).__name__!s} in materialize_run_outputs)."
+            )
+        normalized.append(key)
+    return tuple(normalized)
+
+
+def _validate_materialize_option(
+    *,
+    name: str,
+    value: str,
+    allowed: set[str],
+) -> None:
+    if value not in allowed:
+        allowed_display = ", ".join(repr(item) for item in sorted(allowed))
+        raise ValueError(f"{name} must be one of: {allowed_display}")
 
 
 class Tracker:
@@ -4371,6 +4406,114 @@ class Tracker:
         if record is None:
             return None
         return record.config
+
+    def materialize_run_outputs(
+        self,
+        run_id: str,
+        *,
+        target_root: str | Path,
+        source_root: str | Path | None = None,
+        keys: Sequence[str] | None = None,
+        preserve_existing: bool = True,
+        on_missing: Literal["warn", "raise"] = "warn",
+        db_fallback: Literal["never", "if_ingested"] = "if_ingested",
+    ) -> "MaterializationResult":
+        """
+        Materialize the output artifacts linked to a historical run.
+
+        This is a recovery/export helper for rematerializing run-linked outputs
+        into a new filesystem root while preserving historical relative layout
+        where the underlying planner can derive it.
+
+        Parameters
+        ----------
+        run_id : str
+            Identifier of the run whose linked outputs should be restored.
+        target_root : str | Path
+            Destination root for rematerialized outputs.
+        source_root : str | Path | None, optional
+            Optional alternate root for filesystem-backed source recovery.
+        keys : Sequence[str] | None, optional
+            Optional subset of output keys to restore.
+        preserve_existing : bool, default True
+            If True, existing destinations are skipped rather than replaced.
+        on_missing : {"warn", "raise"}, default "warn"
+            Error handling policy for missing filesystem bytes or copy failures.
+        db_fallback : {"never", "if_ingested"}, default "if_ingested"
+            Whether ingested csv/parquet artifacts may be exported from DuckDB
+            when cold filesystem bytes are unavailable.
+
+        Returns
+        -------
+        MaterializationResult
+            Structured materialization outcome returned by the core planner and
+            executor.
+        """
+        normalized_keys = _normalize_materialize_output_keys(keys)
+        _validate_materialize_option(
+            name="on_missing",
+            value=on_missing,
+            allowed=_VALID_MATERIALIZE_ON_MISSING,
+        )
+        _validate_materialize_option(
+            name="db_fallback",
+            value=db_fallback,
+            allowed=_VALID_MATERIALIZE_DB_FALLBACK,
+        )
+
+        if self.db is None:
+            raise RuntimeError(
+                "Cannot materialize run outputs: tracker has no database configured."
+            )
+
+        run = self.get_run(run_id)
+        if run is None:
+            raise KeyError(f"Run {run_id!r} was not found.")
+
+        destination_root = Path(target_root).resolve()
+        if not self.allow_external_paths:
+            try:
+                destination_root.relative_to(self.run_dir)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Target root {destination_root} is outside allowed base "
+                    f"{self.run_dir}. Set allow_external_paths=True or "
+                    "CONSIST_ALLOW_EXTERNAL_PATHS=1 to override."
+                ) from exc
+
+        source_root_override = (
+            Path(source_root).resolve() if source_root is not None else None
+        )
+
+        from consist.core import materialize as materialize_core
+
+        plan, result = materialize_core.build_run_output_materialize_plan(
+            self,
+            run,
+            target_root=destination_root,
+            source_root=source_root_override,
+            keys=normalized_keys,
+            preserve_existing=preserve_existing,
+            db_fallback=db_fallback,
+        )
+
+        execution_result = materialize_core.materialize_planned_outputs(
+            plan,
+            tracker=self,
+            allowed_base=(None if self.allow_external_paths else self.run_dir),
+            on_missing=on_missing,
+            preserve_existing=preserve_existing,
+        )
+
+        result.materialized_from_filesystem.update(
+            execution_result.materialized_from_filesystem
+        )
+        result.materialized_from_db.update(execution_result.materialized_from_db)
+        result.skipped_existing.extend(execution_result.skipped_existing)
+        result.skipped_unmapped.extend(execution_result.skipped_unmapped)
+        result.skipped_missing_source.extend(execution_result.skipped_missing_source)
+        result.failed.extend(execution_result.failed)
+        return result
 
     def get_config_bundle(
         self,

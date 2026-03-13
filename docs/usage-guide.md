@@ -981,12 +981,24 @@ This means **your code doesn't need to handle cache hits differently**—the cou
 By default, Consist returns metadata-only cache hits (no file copies). You can opt in to materializing cached files when needed:
 
 - **`outputs-requested`**: Copy only specific cached outputs to paths you provide
-- **`outputs-all`**: Copy all cached outputs into a target directory
+- **`outputs-all`**: Copy all cached outputs into a target directory while preserving their historical relative layout
 - **`inputs-missing`**: When a cache miss occurs, backfill missing inputs from prior runs before executing
 
 **Note:** `outputs-requested` requires `output_paths=...` so Consist knows where to write the files.
 `inputs-missing` only works for inputs that are tracked artifacts (not raw paths), so Consist can find
 the prior run's files or reconstruct ingested tables.
+
+When cache-hit output files are gone, `outputs-all` and the new run-scoped
+output recovery API can reconstruct ingested CSV/Parquet outputs from DuckDB.
+For archive-mirror recovery or debug/export workflows, prefer the explicit
+`tracker.materialize_run_outputs(...)` API instead of overloading cache
+hydration.
+
+If you are using the low-level `tracker.start_run(...)` / `tracker.begin_run(...)`
+APIs directly, cache hydration also supports
+`materialize_cached_outputs_source_root=Path(...)` for `outputs-requested` and
+`outputs-all`. The higher-level `consist.run(...)` helpers do not expose that
+override separately.
 
 Set per-run via `cache_options=CacheOptions(cache_hydration=...)` (for `run(...)`)
 or for scenario defaults via `step_cache_hydration=...`:

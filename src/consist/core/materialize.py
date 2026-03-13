@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import logging
 import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Iterable, Literal, Sequence, TYPE_CHECKING
+from typing import Iterable, Literal, Sequence, TYPE_CHECKING, cast
 
 import pandas as pd
 from sqlalchemy import MetaData, Table, select
@@ -14,7 +15,54 @@ from sqlalchemy.exc import SQLAlchemyError
 from consist.models.artifact import Artifact
 
 if TYPE_CHECKING:
+    from consist.core.persistence import DatabaseManager
     from consist.core.tracker import Tracker
+
+
+@dataclass(slots=True)
+class MaterializationResult:
+    materialized_from_filesystem: dict[str, str] = field(default_factory=dict)
+    materialized_from_db: dict[str, str] = field(default_factory=dict)
+    skipped_existing: list[str] = field(default_factory=list)
+    skipped_unmapped: list[str] = field(default_factory=list)
+    skipped_missing_source: list[str] = field(default_factory=list)
+    failed: list[tuple[str, str]] = field(default_factory=list)
+
+    @property
+    def materialized(self) -> dict[str, str]:
+        return {
+            **self.materialized_from_filesystem,
+            **self.materialized_from_db,
+        }
+
+    @property
+    def has_failures(self) -> bool:
+        return bool(self.failed)
+
+    @property
+    def complete(self) -> bool:
+        return not (self.skipped_unmapped or self.skipped_missing_source or self.failed)
+
+    @property
+    def summary(self) -> str:
+        return (
+            f"materialized_fs={len(self.materialized_from_filesystem)} "
+            f"materialized_db={len(self.materialized_from_db)} "
+            f"skipped_existing={len(self.skipped_existing)} "
+            f"skipped_unmapped={len(self.skipped_unmapped)} "
+            f"skipped_missing_source={len(self.skipped_missing_source)} "
+            f"failed={len(self.failed)}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PlannedMaterialization:
+    artifact: Artifact
+    keys: tuple[str, ...]
+    source_kind: Literal["filesystem", "db_export"]
+    source_path: Path | None
+    destination: Path
+    relative_path: Path
 
 
 def _ensure_destination_not_symlink(path: Path) -> None:
@@ -52,6 +100,384 @@ def _copy_dir_safe(source: Path, destination: Path) -> bool:
         shutil.rmtree(destination, ignore_errors=True)
         raise
     return True
+
+
+def _copy_dir_to_temp(source: Path, parent: Path) -> Path:
+    temporary_root = Path(tempfile.mkdtemp(dir=str(parent), prefix=".consist-dir-"))
+    tmp_destination = temporary_root / "payload"
+    shutil.copytree(source, tmp_destination, dirs_exist_ok=False)
+    return tmp_destination
+
+
+def _cleanup_path(path: Path) -> None:
+    if not path.exists():
+        return
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, ignore_errors=True)
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _replace_path(source: Path, destination: Path) -> None:
+    backup_path: Path | None = None
+    backup_root: Path | None = None
+    if destination.exists():
+        backup_root = Path(
+            tempfile.mkdtemp(
+                dir=str(destination.parent),
+                prefix=f".consist-backup-{destination.name}-",
+            )
+        )
+        backup_path = backup_root / "payload"
+        destination.rename(backup_path)
+
+    try:
+        os.replace(source, destination)
+    except Exception:
+        if backup_path is not None and backup_path.exists():
+            os.replace(backup_path, destination)
+        raise
+    else:
+        if backup_root is not None:
+            _cleanup_path(backup_root)
+
+
+def _materialize_path(
+    *,
+    source: Path,
+    destination: Path,
+    preserve_existing: bool,
+) -> tuple[bool, bool]:
+    """
+    Return ``(materialized, skipped_existing)`` for one filesystem operation.
+    """
+    _ensure_destination_not_symlink(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    if source == destination:
+        return True, False
+
+    if destination.exists():
+        if preserve_existing:
+            if source.is_dir() != destination.is_dir():
+                raise ValueError(
+                    f"Destination type mismatch for {destination}; refusing to overwrite."
+                )
+            return False, True
+
+        if destination.is_symlink():
+            raise ValueError(f"Symlink detected in destination path: {destination}")
+
+    if preserve_existing:
+        if source.is_dir():
+            copied = _copy_dir_safe(source, destination)
+        else:
+            copied = _copy_file_atomic(source, destination)
+        if copied or destination.exists():
+            return True, False
+        return False, True
+
+    if source.is_dir():
+        tmp_copy = _copy_dir_to_temp(source, destination.parent)
+        _replace_path(tmp_copy, destination)
+        _cleanup_path(tmp_copy.parent)
+        return True, False
+
+    fd, tmp_path = tempfile.mkstemp(dir=str(destination.parent))
+    os.close(fd)
+    tmp_path_obj = Path(tmp_path)
+    try:
+        shutil.copy2(source, tmp_path_obj)
+        _replace_path(tmp_path_obj, destination)
+    finally:
+        try:
+            tmp_path_obj.unlink()
+        except FileNotFoundError:
+            pass
+    return True, False
+
+
+def _validate_allowed_base(destination: Path, allowed_base: Path | None) -> None:
+    allowed_base_path = Path(allowed_base).resolve() if allowed_base else None
+    if allowed_base_path is None:
+        return
+    try:
+        destination.resolve().relative_to(allowed_base_path)
+    except ValueError as exc:
+        raise ValueError(
+            f"Destination path {destination.resolve()} is outside allowed base "
+            f"{allowed_base_path}. Set allow_external_paths=True or "
+            "CONSIST_ALLOW_EXTERNAL_PATHS=1 to override."
+        ) from exc
+
+
+def _get_output_artifacts_for_run(tracker: "Tracker", run_id: str) -> list[Artifact]:
+    db = cast("DatabaseManager | None", getattr(tracker, "db", None))
+    if db is None:
+        return []
+
+    get_raw_outputs = getattr(db, "get_output_artifacts_for_run", None)
+    if callable(get_raw_outputs):
+        return list(get_raw_outputs(run_id))
+
+    raw_rows = db.get_artifacts_for_run(run_id)
+    return [artifact for artifact, direction in raw_rows if direction == "output"]
+
+
+def _get_artifact_owning_run(
+    tracker: "Tracker",
+    *,
+    selected_run,
+    artifact: Artifact,
+):
+    artifact_run_id = getattr(artifact, "run_id", None)
+    if not artifact_run_id or artifact_run_id == selected_run.id:
+        return selected_run
+    db = cast("DatabaseManager | None", getattr(tracker, "db", None))
+    if db is None:
+        return selected_run
+    producing_run = db.get_run(str(artifact_run_id))
+    return producing_run or selected_run
+
+
+def _derive_historical_remap(
+    tracker: "Tracker",
+    *,
+    artifact: Artifact,
+    run,
+) -> tuple[Path, Path] | None:
+    meta = run.meta if isinstance(run.meta, dict) else {}
+    artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+
+    helper = getattr(tracker.fs, "get_historical_remap", None)
+    if callable(helper):
+        return helper(
+            artifact.container_uri,
+            original_run_dir=meta.get("_physical_run_dir"),
+            mounts_snapshot=meta.get("mounts"),
+            artifact_mount_root=artifact_meta.get("mount_root"),
+        )
+
+    return None
+
+
+def _source_identity(item: PlannedMaterialization) -> tuple[str, str]:
+    if item.source_kind == "filesystem":
+        assert item.source_path is not None
+        return ("filesystem", str(item.source_path.resolve()))
+    return ("db_export", str(item.artifact.id))
+
+
+def build_run_output_materialize_plan(
+    tracker: "Tracker",
+    run,
+    *,
+    target_root: Path,
+    source_root: Path | None,
+    keys: Sequence[str] | None,
+    preserve_existing: bool,
+    db_fallback: Literal["never", "if_ingested"],
+) -> tuple[list[PlannedMaterialization], MaterializationResult]:
+    result = MaterializationResult()
+    raw_outputs = _get_output_artifacts_for_run(tracker, run.id)
+
+    key_counts: dict[str, int] = {}
+    for artifact in raw_outputs:
+        key_counts[artifact.key] = key_counts.get(artifact.key, 0) + 1
+    duplicate_keys = sorted(key for key, count in key_counts.items() if count > 1)
+    if duplicate_keys:
+        raise ValueError(
+            "Run has duplicate output keys; run-scoped materialization is ambiguous: "
+            + ", ".join(repr(key) for key in duplicate_keys)
+        )
+
+    outputs_by_key = {artifact.key: artifact for artifact in raw_outputs}
+    if keys is not None:
+        requested_keys = list(keys)
+        missing_keys = [key for key in requested_keys if key not in outputs_by_key]
+        if missing_keys:
+            raise KeyError(
+                "Requested output keys were not found for run "
+                f"{run.id!r}: {', '.join(repr(key) for key in missing_keys)}"
+            )
+        selected_outputs = [outputs_by_key[key] for key in requested_keys]
+    else:
+        selected_outputs = list(raw_outputs)
+
+    planned_by_destination: dict[Path, PlannedMaterialization] = {}
+    conflicted_destinations: set[Path] = set()
+
+    for artifact in selected_outputs:
+        owning_run = _get_artifact_owning_run(
+            tracker, selected_run=run, artifact=artifact
+        )
+        remap = _derive_historical_remap(tracker, artifact=artifact, run=owning_run)
+        if remap is None:
+            result.skipped_unmapped.append(artifact.key)
+            continue
+
+        historical_root, relative_path = remap
+        destination = target_root / relative_path
+
+        historical_source = (historical_root / relative_path).resolve()
+        override_source = (
+            (source_root / relative_path).resolve() if source_root is not None else None
+        )
+
+        source_kind: Literal["filesystem", "db_export"]
+        source_path: Path | None
+        if override_source is not None and override_source.exists():
+            source_kind = "filesystem"
+            source_path = override_source
+        elif historical_source.exists():
+            source_kind = "filesystem"
+            source_path = historical_source
+        else:
+            artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+            if db_fallback == "if_ingested" and artifact_meta.get("is_ingested", False):
+                driver = str(artifact.driver or "").lower()
+                if driver not in {"csv", "parquet"}:
+                    result.failed.append(
+                        (
+                            artifact.key,
+                            "unsupported DB export for ingested driver "
+                            f"{artifact.driver!r}",
+                        )
+                    )
+                    continue
+                source_kind = "db_export"
+                source_path = None
+            else:
+                result.skipped_missing_source.append(artifact.key)
+                continue
+
+        planned = PlannedMaterialization(
+            artifact=artifact,
+            keys=(artifact.key,),
+            source_kind=source_kind,
+            source_path=source_path,
+            destination=destination,
+            relative_path=relative_path,
+        )
+
+        if destination in conflicted_destinations:
+            result.failed.append(
+                (
+                    artifact.key,
+                    f"destination collision at {destination}",
+                )
+            )
+            continue
+
+        existing = planned_by_destination.get(destination)
+        if existing is None:
+            planned_by_destination[destination] = planned
+            continue
+
+        if _source_identity(existing) == _source_identity(planned):
+            planned_by_destination[destination] = PlannedMaterialization(
+                artifact=existing.artifact,
+                keys=existing.keys + (artifact.key,),
+                source_kind=existing.source_kind,
+                source_path=existing.source_path,
+                destination=existing.destination,
+                relative_path=existing.relative_path,
+            )
+            continue
+
+        for key in existing.keys + (artifact.key,):
+            result.failed.append((key, f"destination collision at {destination}"))
+        conflicted_destinations.add(destination)
+        del planned_by_destination[destination]
+
+    plan: list[PlannedMaterialization] = []
+    for item in sorted(
+        planned_by_destination.values(),
+        key=lambda item: (str(item.destination), item.keys),
+    ):
+        if preserve_existing and item.destination.exists():
+            if item.destination.is_symlink():
+                for key in item.keys:
+                    result.failed.append(
+                        (
+                            key,
+                            f"Symlink detected in destination path: {item.destination}",
+                        )
+                    )
+            else:
+                result.skipped_existing.extend(item.keys)
+            continue
+        plan.append(item)
+    return plan, result
+
+
+def materialize_planned_outputs(
+    plan: Sequence[PlannedMaterialization],
+    *,
+    tracker: "Tracker",
+    allowed_base: Path | None,
+    on_missing: Literal["warn", "raise"] = "warn",
+    preserve_existing: bool = True,
+) -> MaterializationResult:
+    result = MaterializationResult()
+
+    for item in plan:
+        try:
+            _validate_allowed_base(item.destination, allowed_base)
+
+            if item.source_kind == "filesystem":
+                if item.source_path is None or not item.source_path.exists():
+                    raise FileNotFoundError(f"source path missing ({item.source_path})")
+                materialized, skipped_existing = _materialize_path(
+                    source=item.source_path,
+                    destination=item.destination,
+                    preserve_existing=preserve_existing,
+                )
+                if skipped_existing:
+                    result.skipped_existing.extend(item.keys)
+                    continue
+                if materialized:
+                    destination_str = str(item.destination.resolve())
+                    for key in item.keys:
+                        result.materialized_from_filesystem[key] = destination_str
+                continue
+
+            destination_str = materialize_ingested_artifact_from_db(
+                artifact=item.artifact,
+                tracker=tracker,
+                destination=item.destination,
+                overwrite=not preserve_existing,
+            )
+            for key in item.keys:
+                result.materialized_from_db[key] = destination_str
+
+        except FileNotFoundError as exc:
+            if on_missing == "raise":
+                raise
+            logging.warning(
+                "[Consist] Cannot materialize run output %s: %s",
+                ",".join(repr(key) for key in item.keys),
+                exc,
+            )
+            result.skipped_missing_source.extend(item.keys)
+        except (OSError, shutil.Error, RuntimeError, ValueError) as exc:
+            if on_missing == "raise":
+                raise RuntimeError(
+                    f"Failed to materialize run outputs for keys {item.keys!r}: {exc}"
+                ) from exc
+            logging.warning(
+                "[Consist] Failed to materialize run output %s -> %s: %s",
+                ",".join(repr(key) for key in item.keys),
+                item.destination,
+                exc,
+            )
+            for key in item.keys:
+                result.failed.append((key, str(exc)))
+
+    return result
 
 
 def materialize_artifacts(
@@ -283,6 +709,7 @@ def materialize_ingested_artifact_from_db(
     artifact: Artifact,
     tracker: "Tracker",
     destination: Path,
+    overwrite: bool = False,
 ) -> str:
     """
     Reconstruct an ingested artifact from the analytical database.
@@ -357,13 +784,45 @@ def materialize_ingested_artifact_from_db(
 
     stmt = select(table).where(table.c.consist_artifact_id == str(artifact.id))
     df = pd.read_sql(stmt, tracker.engine)
+    if df.empty:
+        raise FileNotFoundError(
+            f"No ingested rows found for artifact {artifact.key!r} ({artifact.id})."
+        )
 
     destination_path = Path(destination).resolve()
+    _ensure_destination_not_symlink(destination_path)
     destination_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if driver == "csv":
-        df.to_csv(destination_path, index=False)
-    else:
-        df.to_parquet(destination_path, index=False)
+    if destination_path.exists() and destination_path.is_dir():
+        if not overwrite:
+            raise ValueError(
+                f"Destination type mismatch for {destination_path}; refusing to overwrite."
+            )
+
+    fd, tmp_path = tempfile.mkstemp(dir=str(destination_path.parent))
+    os.close(fd)
+    tmp_path_obj = Path(tmp_path)
+    try:
+        if driver == "csv":
+            df.to_csv(tmp_path_obj, index=False)
+        else:
+            df.to_parquet(tmp_path_obj, index=False)
+
+        if destination_path.exists() and not overwrite:
+            tmp_path_obj.unlink(missing_ok=True)
+            return str(destination_path)
+
+        if overwrite:
+            _replace_path(tmp_path_obj, destination_path)
+        else:
+            try:
+                os.link(tmp_path_obj, destination_path)
+            except FileExistsError:
+                return str(destination_path)
+    finally:
+        try:
+            tmp_path_obj.unlink()
+        except FileNotFoundError:
+            pass
 
     return str(destination_path)

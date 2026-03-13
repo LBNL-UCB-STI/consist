@@ -377,7 +377,16 @@ If the original file is missing but the artifact was ingested, Consist reconstru
 
 ### Optional Cache-Hit Materialization
 
-Consist supports opt-in materialization: copying bytes from a cached artifact's resolved path to a destination you provide. This is copy-only—it does not reconstruct files from DuckDB.
+Consist supports opt-in cache-hit materialization when downstream code needs real
+files on disk.
+
+- `outputs-requested` still writes selected outputs to the explicit paths you
+  provide.
+- `outputs-all` now preserves the historical relative layout of the cached
+  outputs under the target directory instead of flattening everything to one
+  level.
+- When cold files are missing, cache-hit output recovery can reconstruct
+  ingested CSV/Parquet outputs from DuckDB before failing.
 
 Enable at run start:
 
@@ -387,6 +396,7 @@ with tracker.start_run(
     model="step",
     cache_hydration="outputs-all",
     materialize_cached_outputs_dir=Path("some/output/dir"),
+    materialize_cached_outputs_source_root=Path("/archive/outputs_mirror"),  # optional
 ):
     ...
 ```
@@ -425,7 +435,27 @@ Default is `cache_hydration="metadata"` (artifact hydration only). For
 | `outputs-all` | `materialize_cached_outputs_dir` | `materialize_cached_output_paths` |
 | `metadata` / `inputs-missing` | — | Both materialization args |
 
-`outputs-requested` logs a warning for missing keys. `outputs-all` raises `FileNotFoundError` if any cached output source file is missing.
+`outputs-requested` logs a warning for missing keys. `outputs-all` first tries
+the historical filesystem path and, for ingested CSV/Parquet outputs, DuckDB
+reconstruction. It raises only when the requested bytes still cannot be
+recovered.
+
+For archive-mirror recovery or export workflows, use the explicit run-scoped
+API instead of cache hydration:
+
+```python
+result = tracker.materialize_run_outputs(
+    "prior_run_id",
+    target_root=Path("restored_outputs"),
+    source_root=Path("/archive/outputs_mirror"),
+)
+```
+
+Cache hydration now exposes an archive-mirror override on the low-level
+`tracker.start_run(...)` / `tracker.begin_run(...)` path via
+`materialize_cached_outputs_source_root=...` for `outputs-requested` and
+`outputs-all`. The higher-level `consist.run(...)` / scenario helpers still do
+not expose a separate `source_root`-style knob.
 
 ### Containers Integration
 
@@ -440,7 +470,7 @@ The containers API defaults to copying cached outputs to requested host output p
 | Fast cache hits | `metadata` | Never | Default; paths may not exist in new run dirs |
 | Extend scenario in new `run_dir` | `inputs-missing` | Cache misses, missing inputs only | Ensures executing steps read cached inputs |
 | Materialize specific outputs | `outputs-requested` | Cache hits, requested outputs | Requires `materialize_cached_output_paths` or `output_paths` |
-| All outputs local | `outputs-all` | Cache hits, all outputs | Requires `materialize_cached_outputs_dir` |
+| All outputs local | `outputs-all` | Cache hits, all outputs | Preserves historical relative layout under `materialize_cached_outputs_dir` |
 
 Use `metadata` (the default) unless downstream tools require files on disk.
 

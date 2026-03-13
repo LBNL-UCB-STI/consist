@@ -1,9 +1,20 @@
 import logging
+import tempfile
 import weakref
 from copy import deepcopy
-from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Protocol, runtime_checkable, TYPE_CHECKING, cast
+from pathlib import Path
+from typing import (
+    Any,
+    Dict,
+    Literal,
+    Optional,
+    Protocol,
+    Sequence,
+    TYPE_CHECKING,
+    cast,
+    runtime_checkable,
+)
 
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifacts, ConsistRecord
@@ -34,6 +45,18 @@ class CacheHydrationContext(Protocol):
     def resolve_uri(self, uri: str) -> str: ...
 
     def get_artifacts_for_run(self, run_id: str) -> RunArtifacts: ...
+
+    def materialize_run_outputs(
+        self,
+        run_id: str,
+        *,
+        target_root: str | Path,
+        source_root: str | Path | None = None,
+        keys: Sequence[str] | None = None,
+        preserve_existing: bool = True,
+        on_missing: Literal["warn", "raise"] = "warn",
+        db_fallback: Literal["never", "if_ingested"] = "if_ingested",
+    ) -> Any: ...
 
 
 @runtime_checkable
@@ -82,12 +105,125 @@ class ActiveRunCacheOptions:
     cache_hydration: str = "metadata"  # "metadata" | "inputs-missing" | "outputs-requested" | "outputs-all"
     materialize_cached_output_paths: Optional[Dict[str, Path]] = None
     materialize_cached_outputs_dir: Optional[Path] = None
+    materialize_cached_outputs_source_root: Optional[Path] = None
     validate_cached_outputs: str = "lazy"  # "eager" | "lazy"
+
+
+def _can_delegate_run_output_materialization(tracker: CacheHydrationContext) -> bool:
+    return callable(getattr(tracker, "materialize_run_outputs", None))
+
+
+def _warn_on_partial_materialization_result(result: Any, *, policy: str) -> None:
+    missing = list(getattr(result, "skipped_missing_source", []) or [])
+    failed = list(getattr(result, "failed", []) or [])
+    if not missing and not failed:
+        return
+
+    summary = getattr(result, "summary", None)
+    detail = str(summary) if summary else f"missing={len(missing)} failed={len(failed)}"
+    logging.warning(
+        "[Consist] Cached output materialization completed with partial results "
+        "(policy=%s): %s",
+        policy,
+        detail,
+    )
+
+
+def _should_fallback_to_legacy_output_materialization(exc: Exception) -> bool:
+    message = str(exc)
+    partial_impl_markers = (
+        "build_run_output_materialize_plan",
+        "materialize_planned_outputs",
+        "MaterializationResult",
+    )
+    return (
+        isinstance(exc, AttributeError)
+        and any(marker in message for marker in partial_impl_markers)
+    ) or (
+        isinstance(exc, RuntimeError)
+        and "tracker has no database configured" in message
+    )
+
+
+def _materialize_cached_outputs_via_run_api(
+    *,
+    tracker: CacheHydrationContext,
+    cached_run: Run,
+    target_run: Run,
+    active_options: ActiveRunCacheOptions,
+    outputs_by_key: dict[str, Artifact],
+) -> Optional[dict[str, str]]:
+    requested_paths = active_options.materialize_cached_output_paths or {}
+    requested_keys = list(requested_paths)
+    hydrated_keys = set(outputs_by_key)
+    missing_keys = sorted(set(requested_keys) - hydrated_keys)
+    if missing_keys:
+        logging.warning(
+            "[Consist] Requested cached output materialization for missing keys: %s",
+            missing_keys,
+        )
+
+    allow_external_paths = bool(getattr(tracker, "allow_external_paths", False))
+    if isinstance(target_run.meta, dict) and "allow_external_paths" in target_run.meta:
+        allow_external_paths = bool(target_run.meta["allow_external_paths"])
+    allowed_base = None if allow_external_paths else tracker.run_dir
+
+    if active_options.cache_hydration == "outputs-all":
+        if not active_options.materialize_cached_outputs_dir:
+            raise ValueError(
+                "cache_hydration='outputs-all' requires materialize_cached_outputs_dir"
+            )
+        result = tracker.materialize_run_outputs(
+            cached_run.id,
+            target_root=Path(active_options.materialize_cached_outputs_dir).resolve(),
+            source_root=active_options.materialize_cached_outputs_source_root,
+            preserve_existing=True,
+            on_missing="raise",
+            db_fallback="if_ingested",
+        )
+        _warn_on_partial_materialization_result(result, policy="outputs-all")
+        return dict(getattr(result, "materialized", {}) or {})
+
+    existing_keys = [key for key in requested_keys if key in hydrated_keys]
+    if not existing_keys:
+        return {}
+
+    from consist.core.materialize import materialize_artifacts_from_sources
+
+    with tempfile.TemporaryDirectory(prefix="consist-cache-hit-") as tmp_dir:
+        staged_root = Path(tmp_dir)
+        result = tracker.materialize_run_outputs(
+            cached_run.id,
+            target_root=staged_root,
+            source_root=active_options.materialize_cached_outputs_source_root,
+            keys=existing_keys,
+            preserve_existing=False,
+            on_missing="warn",
+            db_fallback="if_ingested",
+        )
+        _warn_on_partial_materialization_result(result, policy="outputs-requested")
+
+        staged_items: list[tuple[Artifact, Path, Path]] = []
+        for key, staged_path in dict(getattr(result, "materialized", {}) or {}).items():
+            artifact = outputs_by_key.get(key)
+            destination = requested_paths.get(key)
+            if artifact is None or destination is None:
+                continue
+            staged_items.append((artifact, Path(staged_path), Path(destination)))
+
+        if not staged_items:
+            return {}
+
+        return materialize_artifacts_from_sources(
+            items=staged_items,
+            allowed_base=allowed_base,
+            on_missing="warn",
+        )
 
 
 def parse_materialize_cached_outputs_kwargs(
     kwargs: Dict[str, Any],
-) -> tuple[str, Optional[Dict[str, Path]], Optional[Path], str]:
+) -> tuple[str, Optional[Dict[str, Path]], Optional[Path], Optional[Path], str]:
     """
     Parse and validate cached-output materialization options from run kwargs.
 
@@ -113,6 +249,9 @@ def parse_materialize_cached_outputs_kwargs(
     )
     materialize_cached_outputs_dir_raw = kwargs.pop(
         "materialize_cached_outputs_dir", None
+    )
+    materialize_cached_outputs_source_root_raw = kwargs.pop(
+        "materialize_cached_outputs_source_root", None
     )
     validate_cached_outputs = str(kwargs.pop("validate_cached_outputs", "lazy")).lower()
 
@@ -152,10 +291,13 @@ def parse_materialize_cached_outputs_kwargs(
         if (
             materialize_cached_output_paths_raw is not None
             or materialize_cached_outputs_dir_raw is not None
+            or materialize_cached_outputs_source_root_raw is not None
         ):
             raise ValueError(
                 "cache_hydration does not accept materialize_cached_output_paths or "
-                "materialize_cached_outputs_dir in metadata/inputs-missing modes."
+                "materialize_cached_outputs_dir or "
+                "materialize_cached_outputs_source_root in metadata/inputs-missing "
+                "modes."
             )
 
     materialize_cached_output_paths: Optional[Dict[str, Path]] = None
@@ -170,11 +312,17 @@ def parse_materialize_cached_outputs_kwargs(
         if materialize_cached_outputs_dir_raw is not None
         else None
     )
+    materialize_cached_outputs_source_root: Optional[Path] = (
+        Path(materialize_cached_outputs_source_root_raw)
+        if materialize_cached_outputs_source_root_raw is not None
+        else None
+    )
 
     return (
         cache_hydration,
         materialize_cached_output_paths,
         materialize_cached_outputs_dir,
+        materialize_cached_outputs_source_root,
         validate_cached_outputs,
     )
 
@@ -253,90 +401,136 @@ def hydrate_cache_hit_outputs(
     # advanced workflows can opt in when callers expect host paths to exist.
     try:
         if active_options.cache_hydration in {"outputs-requested", "outputs-all"}:
-            from consist.core.materialize import (
-                build_materialize_items_for_keys,
-                materialize_artifacts_from_sources,
-            )
-
-            items: list[tuple[Artifact, Path, Path]] = []
-            on_missing = "warn"
-            db = getattr(tracker, "db", None)
-            run_dir_cache: dict[str, Optional[str]] = {}
-            fallback_run_dir = None
-            if cached_run.meta:
-                fallback_run_dir = cached_run.meta.get("_physical_run_dir")
-
-            if active_options.cache_hydration == "outputs-requested":
-                destinations = active_options.materialize_cached_output_paths or {}
-                requested_items = build_materialize_items_for_keys(
-                    record.outputs,
-                    destinations_by_key=destinations,
-                )
-                for art, dest in requested_items:
-                    original_run_dir = fallback_run_dir
-                    if db and art.run_id:
-                        run_id = str(art.run_id)
-                        if run_id not in run_dir_cache:
-                            run = db.get_run(run_id)
-                            run_dir_cache[run_id] = (
-                                run.meta.get("_physical_run_dir")
-                                if run and run.meta
-                                else None
-                            )
-                        original_run_dir = run_dir_cache.get(run_id)
-                    source = Path(
-                        tracker.fs.resolve_historical_path(
-                            art.container_uri, original_run_dir
+            materialized: dict[str, str] = {}
+            should_use_legacy = not _can_delegate_run_output_materialization(tracker)
+            if not should_use_legacy:
+                try:
+                    materialized = (
+                        _materialize_cached_outputs_via_run_api(
+                            tracker=tracker,
+                            cached_run=cached_run,
+                            target_run=target_run,
+                            active_options=active_options,
+                            outputs_by_key={
+                                artifact.key: artifact for artifact in record.outputs
+                            },
                         )
+                        or {}
                     )
-                    items.append((art, source, Path(dest)))
-                requested_keys = set(destinations.keys())
-                hydrated_keys = {a.key for a in record.outputs}
-                missing_keys = requested_keys - hydrated_keys
-                if missing_keys:
-                    logging.warning(
-                        "[Consist] Requested cached output materialization for missing keys: %s",
-                        sorted(missing_keys),
-                    )
-            else:  # outputs-all
-                on_missing = "raise"
-                if not active_options.materialize_cached_outputs_dir:
-                    raise ValueError(
-                        "cache_hydration='outputs-all' requires materialize_cached_outputs_dir"
-                    )
-                out_dir = Path(active_options.materialize_cached_outputs_dir).resolve()
-                for art in record.outputs:
-                    original_run_dir = fallback_run_dir
-                    if db and art.run_id:
-                        run_id = str(art.run_id)
-                        if run_id not in run_dir_cache:
-                            run = db.get_run(run_id)
-                            run_dir_cache[run_id] = (
-                                run.meta.get("_physical_run_dir")
-                                if run and run.meta
-                                else None
-                            )
-                        original_run_dir = run_dir_cache.get(run_id)
-                    source = Path(
-                        tracker.fs.resolve_historical_path(
-                            art.container_uri, original_run_dir
-                        )
-                    )
-                    items.append((art, source, out_dir / source.name))
+                except Exception as exc:
+                    if not _should_fallback_to_legacy_output_materialization(exc):
+                        raise
+                    if (
+                        active_options.materialize_cached_outputs_source_root
+                        is not None
+                    ):
+                        raise RuntimeError(
+                            "cache-hydration source-root override requires the "
+                            "run-scoped output materialization path."
+                        ) from exc
+                    should_use_legacy = True
 
-            allow_external_paths = bool(getattr(tracker, "allow_external_paths", False))
             if (
-                isinstance(target_run.meta, dict)
-                and "allow_external_paths" in target_run.meta
+                should_use_legacy
+                and active_options.materialize_cached_outputs_source_root is not None
             ):
-                allow_external_paths = bool(target_run.meta["allow_external_paths"])
-            allowed_base = None if allow_external_paths else tracker.run_dir
-            materialized = materialize_artifacts_from_sources(
-                items=items, allowed_base=allowed_base, on_missing=on_missing
-            )
+                raise RuntimeError(
+                    "cache-hydration source-root override requires the run-scoped "
+                    "output materialization path."
+                )
+
+            if should_use_legacy:
+                from consist.core.materialize import (
+                    build_materialize_items_for_keys,
+                    materialize_artifacts_from_sources,
+                )
+
+                items: list[tuple[Artifact, Path, Path]] = []
+                on_missing = "warn"
+                db = getattr(tracker, "db", None)
+                run_dir_cache: dict[str, Optional[str]] = {}
+                fallback_run_dir = None
+                if cached_run.meta:
+                    fallback_run_dir = cached_run.meta.get("_physical_run_dir")
+
+                if active_options.cache_hydration == "outputs-requested":
+                    destinations = active_options.materialize_cached_output_paths or {}
+                    requested_items = build_materialize_items_for_keys(
+                        record.outputs,
+                        destinations_by_key=destinations,
+                    )
+                    for art, dest in requested_items:
+                        original_run_dir = fallback_run_dir
+                        if db and art.run_id:
+                            run_id = str(art.run_id)
+                            if run_id not in run_dir_cache:
+                                run = db.get_run(run_id)
+                                run_dir_cache[run_id] = (
+                                    run.meta.get("_physical_run_dir")
+                                    if run and run.meta
+                                    else None
+                                )
+                            original_run_dir = run_dir_cache.get(run_id)
+                        source = Path(
+                            tracker.fs.resolve_historical_path(
+                                art.container_uri, original_run_dir
+                            )
+                        )
+                        items.append((art, source, Path(dest)))
+                    requested_keys = set(destinations.keys())
+                    hydrated_keys = {a.key for a in record.outputs}
+                    missing_keys = requested_keys - hydrated_keys
+                    if missing_keys:
+                        logging.warning(
+                            "[Consist] Requested cached output materialization for missing keys: %s",
+                            sorted(missing_keys),
+                        )
+                else:  # outputs-all
+                    on_missing = "raise"
+                    if not active_options.materialize_cached_outputs_dir:
+                        raise ValueError(
+                            "cache_hydration='outputs-all' requires materialize_cached_outputs_dir"
+                        )
+                    out_dir = Path(
+                        active_options.materialize_cached_outputs_dir
+                    ).resolve()
+                    for art in record.outputs:
+                        original_run_dir = fallback_run_dir
+                        if db and art.run_id:
+                            run_id = str(art.run_id)
+                            if run_id not in run_dir_cache:
+                                run = db.get_run(run_id)
+                                run_dir_cache[run_id] = (
+                                    run.meta.get("_physical_run_dir")
+                                    if run and run.meta
+                                    else None
+                                )
+                            original_run_dir = run_dir_cache.get(run_id)
+                        source = Path(
+                            tracker.fs.resolve_historical_path(
+                                art.container_uri, original_run_dir
+                            )
+                        )
+                        items.append((art, source, out_dir / source.name))
+
+                allow_external_paths = bool(
+                    getattr(tracker, "allow_external_paths", False)
+                )
+                if (
+                    isinstance(target_run.meta, dict)
+                    and "allow_external_paths" in target_run.meta
+                ):
+                    allow_external_paths = bool(target_run.meta["allow_external_paths"])
+                allowed_base = None if allow_external_paths else tracker.run_dir
+                materialized = materialize_artifacts_from_sources(
+                    items=items, allowed_base=allowed_base, on_missing=on_missing
+                )
+
             if materialized:
                 target_run.meta["materialized_outputs"] = materialized
     except Exception as e:
+        if active_options.materialize_cached_outputs_source_root is not None:
+            raise
         if active_options.cache_hydration == "outputs-all":
             raise
         logging.warning(
