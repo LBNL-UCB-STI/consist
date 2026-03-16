@@ -6,12 +6,13 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, Iterable, Literal, Mapping, Sequence, TYPE_CHECKING, cast
+from typing import Iterable, Literal, Mapping, Sequence, TYPE_CHECKING, cast
 
 import pandas as pd
 from sqlalchemy import MetaData, Table, select
 from sqlalchemy.exc import SQLAlchemyError
 
+from consist.core.stores import get_hot_data_engine
 from consist.models.artifact import Artifact
 
 if TYPE_CHECKING:
@@ -63,15 +64,6 @@ class PlannedMaterialization:
     source_path: Path | None
     destination: Path
     relative_path: Path
-
-
-def _resolve_hot_data_engine(*, tracker: "Tracker") -> Any:
-    hot_data_store = getattr(tracker, "hot_data_store", None)
-    if hot_data_store is not None:
-        store_engine = getattr(hot_data_store, "engine", None)
-        if store_engine is not None:
-            return store_engine
-    return getattr(tracker, "engine", None)
 
 
 def _ensure_destination_not_symlink(path: Path) -> None:
@@ -799,7 +791,7 @@ def materialize_ingested_artifact_from_db(
         If the artifact is not marked as ingested or uses an unsupported
         materialization driver.
     """
-    hot_data_engine = _resolve_hot_data_engine(tracker=tracker)
+    hot_data_engine = get_hot_data_engine(tracker)
     if not tracker or hot_data_engine is None:
         raise RuntimeError(
             "Cannot materialize ingested artifact: tracker has no DB engine."

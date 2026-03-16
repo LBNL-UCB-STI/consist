@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from consist.core.persistence import DatabaseManager
+from consist.core.stores import HotDataStore, MetadataStore
 from consist.core.tracker import Tracker
 
 
@@ -76,3 +77,22 @@ def test_no_db_path_has_no_stores_and_null_compatibility_aliases(
     assert tracker.db is None
     assert tracker.engine is None
     assert tracker.db_path is None
+
+
+def test_compatibility_aliases_derive_from_store_only_tracker_state(
+    tmp_path: Path,
+) -> None:
+    db = DatabaseManager(str(tmp_path / "store-only.duckdb"))
+    tracker = Tracker.__new__(Tracker)
+    tracker.metadata_store = MetadataStore(db=db)
+    tracker.hot_data_store = HotDataStore(
+        db_path=db.db_path,
+        metadata_store=tracker.metadata_store,
+    )
+
+    try:
+        assert tracker.db is db
+        assert tracker.engine is db.engine
+        assert tracker.db_path == db.db_path
+    finally:
+        db.engine.dispose()

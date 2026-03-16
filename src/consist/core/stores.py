@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.engine import Engine
 
 from consist.core.persistence import DatabaseManager
+
+if TYPE_CHECKING:
+    from consist.core.tracker import Tracker
 
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -95,3 +100,43 @@ class HotDataStore:
             return result is not None
         except Exception:
             return False
+
+
+def get_hot_data_store(tracker: "Tracker | None") -> HotDataStore | None:
+    if tracker is None:
+        return None
+    store = getattr(tracker, "hot_data_store", None)
+    if store is None:
+        return None
+    return store
+
+
+def get_hot_data_db_path(tracker: "Tracker | None") -> str | None:
+    store = get_hot_data_store(tracker)
+    if store is not None:
+        return os.fspath(store.db_path)
+    if tracker is None:
+        return None
+    db_path = getattr(tracker, "db_path", None)
+    if db_path is None:
+        return None
+    return os.fspath(db_path)
+
+
+def get_hot_data_engine(tracker: "Tracker | None") -> Engine | Any | None:
+    store = get_hot_data_store(tracker)
+    if store is not None:
+        return store.engine
+    if tracker is None:
+        return None
+    return getattr(tracker, "engine", None)
+
+
+def dispose_hot_data_engine(tracker: "Tracker | None") -> None:
+    store = get_hot_data_store(tracker)
+    if store is not None:
+        store.dispose_engine()
+        return
+    engine = get_hot_data_engine(tracker)
+    if engine is not None:
+        engine.dispose()

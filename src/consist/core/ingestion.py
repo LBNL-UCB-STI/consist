@@ -1,47 +1,14 @@
 import logging
-import os
 from typing import Any, Iterable, Optional, TYPE_CHECKING, Union
 
 from sqlmodel import SQLModel
 
+from consist.core.stores import dispose_hot_data_engine, get_hot_data_db_path
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
-
-
-def _resolve_hot_data_db_path(*, tracker: "Tracker") -> Optional[str]:
-    hot_data_store = getattr(tracker, "hot_data_store", None)
-    if hot_data_store is not None:
-        store_db_path = getattr(hot_data_store, "db_path", None)
-        if store_db_path is not None:
-            return os.fspath(store_db_path)
-    db_path = getattr(tracker, "db_path", None)
-    if db_path is None:
-        return None
-    return os.fspath(db_path)
-
-
-def _resolve_hot_data_engine(*, tracker: "Tracker") -> Any:
-    hot_data_store = getattr(tracker, "hot_data_store", None)
-    if hot_data_store is not None:
-        store_engine = getattr(hot_data_store, "engine", None)
-        if store_engine is not None:
-            return store_engine
-    return getattr(tracker, "engine", None)
-
-
-def _dispose_hot_data_engine(*, tracker: "Tracker") -> None:
-    hot_data_store = getattr(tracker, "hot_data_store", None)
-    if hot_data_store is not None:
-        dispose_engine = getattr(hot_data_store, "dispose_engine", None)
-        if callable(dispose_engine):
-            dispose_engine()
-            return
-    engine = _resolve_hot_data_engine(tracker=tracker)
-    if engine is not None:
-        engine.dispose()
 
 
 def resolve_ingest_run(
@@ -159,14 +126,14 @@ def ingest_artifact(
     RuntimeError
         If no database is configured.
     """
-    hot_data_db_path = _resolve_hot_data_db_path(tracker=tracker)
+    hot_data_db_path = get_hot_data_db_path(tracker)
     if hot_data_db_path is None:
         raise RuntimeError("Cannot ingest: db_path is not configured.")
 
     target_run = resolve_ingest_run(tracker=tracker, artifact=artifact, run=run)
     data_to_pass = resolve_ingest_data(tracker=tracker, artifact=artifact, data=data)
 
-    _dispose_hot_data_engine(tracker=tracker)
+    dispose_hot_data_engine(tracker)
 
     from consist.integrations.dlt_loader import ingest_artifact as ingest_with_dlt
 

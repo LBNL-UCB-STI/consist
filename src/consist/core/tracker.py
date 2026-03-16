@@ -1916,7 +1916,7 @@ class Tracker:
 
     def run_query(self, query: Executable) -> list:
         """
-        Execute a SQLModel/SQLAlchemy query via the tracker engine.
+        Execute a SQLModel/SQLAlchemy query via the metadata store.
 
         Parameters
         ----------
@@ -1933,9 +1933,10 @@ class Tracker:
         RuntimeError
             If no database is configured for this tracker.
         """
-        if not self.engine:
+        metadata_store = self.metadata_store
+        if metadata_store is None:
             raise RuntimeError("Database connection required.")
-        with Session(self.engine) as session:
+        with Session(metadata_store.engine) as session:
             return session.exec(cast(Any, query)).all()
 
     def find_latest_run(

@@ -49,6 +49,7 @@ from consist.core.decorators import (
 from consist.core.drivers import ARRAY_DRIVERS, TABLE_DRIVERS, ArrayInfo, TableInfo
 from consist.core.noop import NoopRunContext, NoopScenarioContext
 from consist.core.run_options import raise_legacy_policy_kwargs_error
+from consist.core.stores import get_hot_data_db_path
 from consist.core.views import _quote_ident, create_view_model
 from consist.core.workflow import OutputCapture, RunContext
 from consist.models.artifact import Artifact, get_tracker_ref
@@ -138,26 +139,6 @@ def _validate_materialize_option(
     if value not in allowed:
         allowed_display = ", ".join(repr(item) for item in sorted(allowed))
         raise ValueError(f"{name} must be one of: {allowed_display}")
-
-
-def _resolve_hot_data_store(tracker: Optional["Tracker"]) -> Any:
-    if tracker is None:
-        return None
-    return getattr(tracker, "hot_data_store", None)
-
-
-def _resolve_hot_data_db_path(tracker: Optional["Tracker"]) -> Optional[str]:
-    hot_data_store = _resolve_hot_data_store(tracker)
-    if hot_data_store is not None:
-        store_db_path = getattr(hot_data_store, "db_path", None)
-        if store_db_path is not None:
-            return os.fspath(store_db_path)
-    if tracker is None:
-        return None
-    db_path = getattr(tracker, "db_path", None)
-    if db_path is None:
-        return None
-    return os.fspath(db_path)
 
 
 LoadResult = Union[
@@ -2525,7 +2506,7 @@ def load(
                     f"Hint: add it to inputs=[...] when starting the run, or pass db_fallback='always'."
                 )
 
-        if not tracker or _resolve_hot_data_db_path(tracker) is None:
+        if not tracker or get_hot_data_db_path(tracker) is None:
             raise RuntimeError(
                 f"Artifact {artifact.key} is missing from disk, but marked as ingested. Provide a tracker with a DB connection to load it."
             )
@@ -2618,7 +2599,7 @@ def _load_from_db(
     """
     Recovers data for an artifact from the Consist DuckDB database as a Relation.
     """
-    hot_data_db_path = _resolve_hot_data_db_path(tracker)
+    hot_data_db_path = get_hot_data_db_path(tracker)
     if not hot_data_db_path:
         raise RuntimeError("Tracker has no DuckDB path configured.")
     table_name = artifact.meta.get("dlt_table_name") or artifact.key
