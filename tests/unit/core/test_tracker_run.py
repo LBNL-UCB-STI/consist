@@ -1224,6 +1224,7 @@ def test_tracker_run_propagates_start_run_optional_kwargs(tracker, monkeypatch):
             cache_mode="overwrite",
             cache_hydration="outputs-requested",
             cache_version=7,
+            materialize_cached_outputs_source_root=Path("/tmp/archive-root"),
         ),
         facet_schema_version="facet-v1",
         facet_index=False,
@@ -1236,6 +1237,9 @@ def test_tracker_run_propagates_start_run_optional_kwargs(tracker, monkeypatch):
     assert captured_start_kwargs["_consist_code_identity_callable"] is step
 
     assert "materialize_cached_outputs_dir" not in captured_start_kwargs
+    assert captured_start_kwargs["materialize_cached_outputs_source_root"] == Path(
+        "/tmp/archive-root"
+    )
     assert set(captured_start_kwargs["materialize_cached_output_paths"]) == {"out"}
     materialize_path = Path(
         str(captured_start_kwargs["materialize_cached_output_paths"]["out"])

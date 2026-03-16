@@ -4470,22 +4470,21 @@ class Tracker:
         if run is None:
             raise KeyError(f"Run {run_id!r} was not found.")
 
+        from consist.core import materialize as materialize_core
+
         destination_root = Path(target_root).resolve()
-        if not self.allow_external_paths:
-            try:
-                destination_root.relative_to(self.run_dir)
-            except ValueError as exc:
-                raise ValueError(
-                    f"Target root {destination_root} is outside allowed base "
-                    f"{self.run_dir}. Set allow_external_paths=True or "
-                    "CONSIST_ALLOW_EXTERNAL_PATHS=1 to override."
-                ) from exc
+        allowed_roots = materialize_core.build_allowed_materialization_roots(
+            run_dir=self.run_dir,
+            mounts=self.mounts,
+            allow_external_paths=self.allow_external_paths,
+        )
+        materialize_core.validate_allowed_materialization_destination(
+            destination_root, allowed_roots
+        )
 
         source_root_override = (
             Path(source_root).resolve() if source_root is not None else None
         )
-
-        from consist.core import materialize as materialize_core
 
         plan, result = materialize_core.build_run_output_materialize_plan(
             self,
@@ -4500,7 +4499,7 @@ class Tracker:
         execution_result = materialize_core.materialize_planned_outputs(
             plan,
             tracker=self,
-            allowed_base=(None if self.allow_external_paths else self.run_dir),
+            allowed_base=allowed_roots,
             on_missing=on_missing,
             preserve_existing=preserve_existing,
         )

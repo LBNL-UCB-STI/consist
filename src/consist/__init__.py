@@ -92,6 +92,7 @@ from consist.core.noop import (
     NoopScenarioContext,
     NoopTracker,
 )
+from consist.core.materialize import MaterializationResult
 from consist.runtime import create_tracker
 from consist.protocols import (
     ArtifactLike,
@@ -120,6 +121,7 @@ __all__ = [
     "NoopRunResult",
     "NoopScenarioContext",
     "NoopTracker",
+    "MaterializationResult",
     "create_tracker",
     "ArtifactLike",
     "RunIdentifiedResultLike",

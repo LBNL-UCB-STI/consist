@@ -10,6 +10,7 @@ from consist.types import (
     ExecutionOptions,
     InputBindingMode,
     OutputPolicyOptions,
+    PathLike,
 )
 
 
@@ -46,6 +47,7 @@ class ResolvedRunOptions:
     cache_version: Optional[int]
     cache_epoch: Optional[int]
     validate_cached_outputs: Optional[str]
+    materialize_cached_outputs_source_root: Optional[PathLike]
     code_identity: Optional[CodeIdentityMode]
     code_identity_extra_deps: Optional[list[str]]
     output_mismatch: Optional[str]
@@ -143,6 +145,9 @@ def merge_run_options(
         cache_version=cache_obj.cache_version,
         cache_epoch=cache_obj.cache_epoch,
         validate_cached_outputs=cache_obj.validate_cached_outputs,
+        materialize_cached_outputs_source_root=(
+            cache_obj.materialize_cached_outputs_source_root
+        ),
         code_identity=cache_obj.code_identity,
         code_identity_extra_deps=cache_obj.code_identity_extra_deps,
         output_mismatch=output_obj.output_mismatch,

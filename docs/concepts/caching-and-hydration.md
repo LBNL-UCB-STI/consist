@@ -451,11 +451,17 @@ result = tracker.materialize_run_outputs(
 )
 ```
 
-Cache hydration now exposes an archive-mirror override on the low-level
-`tracker.start_run(...)` / `tracker.begin_run(...)` path via
+Cache hydration exposes an archive-mirror override via
 `materialize_cached_outputs_source_root=...` for `outputs-requested` and
-`outputs-all`. The higher-level `consist.run(...)` / scenario helpers still do
-not expose a separate `source_root`-style knob.
+`outputs-all`. On the recommended path, pass it through
+`cache_options=CacheOptions(materialize_cached_outputs_source_root=...)` on
+`consist.run(...)`, `Tracker.run(...)`, or scenario steps. The same override is
+also available on low-level `tracker.start_run(...)` /
+`tracker.begin_run(...)` flows.
+
+For explicit historical output recovery, `tracker.materialize_run_outputs(...)`
+accepts `target_root` under either the tracker `run_dir` or any configured
+tracker mount root without requiring `allow_external_paths=True`.
 
 ### Containers Integration
 

@@ -539,6 +539,45 @@ def test_outputs_requested_uses_historical_mount_metadata_when_current_mount_is_
     )
 
 
+def test_outputs_requested_allows_current_mount_root_without_external_paths(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    run_dir_a = tmp_path / "runs_a"
+    run_dir_b = tmp_path / "runs_b"
+    workspace_root = tmp_path / "workspace_mount"
+
+    tracker_a = Tracker(run_dir=run_dir_a, db_path=db_path)
+    _init_core_tables(tracker_a)
+    with tracker_a.start_run(
+        "producer_mount_hit", model="producer", cache_mode="overwrite"
+    ):
+        out_dir = tracker_a.run_dir / "outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "out.csv"
+        out_path.write_text("value\n1\n", encoding="utf-8")
+        tracker_a.log_artifact(out_path, key="out", direction="output")
+
+    tracker_b = Tracker(
+        run_dir=run_dir_b,
+        db_path=db_path,
+        mounts={"workspace": str(workspace_root)},
+    )
+    _init_core_tables(tracker_b)
+
+    dest = workspace_root / "restored.csv"
+    with tracker_b.start_run(
+        "requested_hit_mount_root",
+        model="producer",
+        cache_mode="reuse",
+        cache_hydration="outputs-requested",
+        materialize_cached_output_paths={"out": dest},
+    ) as t:
+        assert t.is_cached
+
+    assert dest.read_text(encoding="utf-8") == "value\n1\n"
+
+
 def test_outputs_requested_warns_on_moved_run_dir(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

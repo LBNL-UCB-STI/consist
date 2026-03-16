@@ -231,9 +231,14 @@ This preserves historical relative layout under `target_root`. If the original
 cold files are missing but the outputs were ingested, Consist can reconstruct
 CSV/Parquet outputs from DuckDB.
 
-For low-level cache-hit hydration with `tracker.start_run(...)`, you can also
-point `cache_hydration="outputs-all"` or `"outputs-requested"` at an archive
-mirror via `materialize_cached_outputs_source_root=Path(...)`.
+For archive-mirror cache-hit hydration, you can either pass
+`cache_options=CacheOptions(materialize_cached_outputs_source_root=Path(...))`
+on `run(...)` / scenario steps, or use the same
+`materialize_cached_outputs_source_root=Path(...)` override on low-level
+`tracker.start_run(...)` flows.
+
+`tracker.materialize_run_outputs(...)` can also restore into a configured mount
+root without enabling `allow_external_paths=True`.
 
 ---
 

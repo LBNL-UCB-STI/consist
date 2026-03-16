@@ -41,6 +41,7 @@ class CacheHydrationContext(Protocol):
     current_consist: Optional[ConsistRecord]
     db: Optional[CacheDb]
     fs: CacheFs
+    mounts: Dict[str, str]
 
     def resolve_uri(self, uri: str) -> str: ...
 
@@ -88,6 +89,7 @@ class CacheMaterializationContext(Protocol):
     db: Optional[CacheDb]
     fs: CacheFs
     run_dir: Path
+    mounts: Dict[str, str]
 
     def resolve_uri(self, uri: str) -> str: ...
 
@@ -111,6 +113,28 @@ class ActiveRunCacheOptions:
 
 def _can_delegate_run_output_materialization(tracker: CacheHydrationContext) -> bool:
     return callable(getattr(tracker, "materialize_run_outputs", None))
+
+
+def _allowed_materialization_roots(
+    tracker: CacheMaterializationContext,
+    *,
+    target_run: Run | None = None,
+) -> tuple[Path, ...] | None:
+    from consist.core.materialize import build_allowed_materialization_roots
+
+    allow_external_paths = bool(getattr(tracker, "allow_external_paths", False))
+    if (
+        target_run is not None
+        and isinstance(target_run.meta, dict)
+        and "allow_external_paths" in target_run.meta
+    ):
+        allow_external_paths = bool(target_run.meta["allow_external_paths"])
+
+    return build_allowed_materialization_roots(
+        run_dir=tracker.run_dir,
+        mounts=getattr(tracker, "mounts", {}),
+        allow_external_paths=allow_external_paths,
+    )
 
 
 def _warn_on_partial_materialization_result(result: Any, *, policy: str) -> None:
@@ -163,10 +187,7 @@ def _materialize_cached_outputs_via_run_api(
             missing_keys,
         )
 
-    allow_external_paths = bool(getattr(tracker, "allow_external_paths", False))
-    if isinstance(target_run.meta, dict) and "allow_external_paths" in target_run.meta:
-        allow_external_paths = bool(target_run.meta["allow_external_paths"])
-    allowed_base = None if allow_external_paths else tracker.run_dir
+    allowed_roots = _allowed_materialization_roots(tracker, target_run=target_run)
 
     if active_options.cache_hydration == "outputs-all":
         if not active_options.materialize_cached_outputs_dir:
@@ -190,7 +211,12 @@ def _materialize_cached_outputs_via_run_api(
 
     from consist.core.materialize import materialize_artifacts_from_sources
 
-    with tempfile.TemporaryDirectory(prefix="consist-cache-hit-") as tmp_dir:
+    staging_parent = tracker.run_dir.resolve()
+    staging_parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="consist-cache-hit-",
+        dir=str(staging_parent),
+    ) as tmp_dir:
         staged_root = Path(tmp_dir)
         result = tracker.materialize_run_outputs(
             cached_run.id,
@@ -216,7 +242,7 @@ def _materialize_cached_outputs_via_run_api(
 
         return materialize_artifacts_from_sources(
             items=staged_items,
-            allowed_base=allowed_base,
+            allowed_base=allowed_roots,
             on_missing="warn",
         )
 
@@ -513,15 +539,9 @@ def hydrate_cache_hit_outputs(
                         )
                         items.append((art, source, out_dir / source.name))
 
-                allow_external_paths = bool(
-                    getattr(tracker, "allow_external_paths", False)
+                allowed_base = _allowed_materialization_roots(
+                    tracker, target_run=target_run
                 )
-                if (
-                    isinstance(target_run.meta, dict)
-                    and "allow_external_paths" in target_run.meta
-                ):
-                    allow_external_paths = bool(target_run.meta["allow_external_paths"])
-                allowed_base = None if allow_external_paths else tracker.run_dir
                 materialized = materialize_artifacts_from_sources(
                     items=items, allowed_base=allowed_base, on_missing=on_missing
                 )
@@ -673,7 +693,11 @@ def materialize_missing_inputs(
 
         materialized.update(
             materialize_artifacts_from_sources(
-                items, allowed_base=tracker.run_dir, on_missing="warn"
+                items,
+                allowed_base=_allowed_materialization_roots(
+                    tracker, target_run=tracker.current_consist.run
+                ),
+                on_missing="warn",
             )
         )
         for artifact, _, destination in items:

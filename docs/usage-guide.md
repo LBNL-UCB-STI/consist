@@ -994,11 +994,16 @@ For archive-mirror recovery or debug/export workflows, prefer the explicit
 `tracker.materialize_run_outputs(...)` API instead of overloading cache
 hydration.
 
-If you are using the low-level `tracker.start_run(...)` / `tracker.begin_run(...)`
-APIs directly, cache hydration also supports
+For archive-mirror recovery, cache hydration supports
 `materialize_cached_outputs_source_root=Path(...)` for `outputs-requested` and
-`outputs-all`. The higher-level `consist.run(...)` helpers do not expose that
-override separately.
+`outputs-all`. You can pass it through
+`cache_options=CacheOptions(materialize_cached_outputs_source_root=...)` on
+`consist.run(...)`, `Tracker.run(...)`, and scenario steps, or via the low-level
+`tracker.start_run(...)` / `tracker.begin_run(...)` APIs directly.
+
+When you use the explicit `tracker.materialize_run_outputs(...)` API, `target_root`
+may be either the tracker `run_dir` or any configured tracker mount root without
+needing `allow_external_paths=True`.
 
 Set per-run via `cache_options=CacheOptions(cache_hydration=...)` (for `run(...)`)
 or for scenario defaults via `step_cache_hydration=...`:

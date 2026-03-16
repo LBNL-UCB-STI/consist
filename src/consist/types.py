@@ -67,6 +67,7 @@ class CacheOptions:
     cache_version: Optional[int] = None
     cache_epoch: Optional[int] = None
     validate_cached_outputs: Optional[str] = None
+    materialize_cached_outputs_source_root: Optional[PathLike] = None
     code_identity: Optional[CodeIdentityMode] = None
     code_identity_extra_deps: Optional[list[str]] = None
 

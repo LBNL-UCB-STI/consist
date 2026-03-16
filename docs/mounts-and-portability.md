@@ -260,12 +260,16 @@ for non-container run policies.
 - Use `cache_hydration="outputs-requested"` for only the outputs you need.
 - Use `cache_hydration="inputs-missing"` to backfill inputs when a run moves
   across machines or directories.
-- For low-level `tracker.start_run(...)` / `tracker.begin_run(...)` workflows,
-  use `materialize_cached_outputs_source_root=...` with
-  `cache_hydration="outputs-requested"` or `"outputs-all"` to hydrate from an
-  archive mirror instead of the original cold path.
+- For archive-mirror cache hydration, use
+  `cache_options=CacheOptions(materialize_cached_outputs_source_root=...)` on
+  `run(...)` / scenario steps, or pass
+  `materialize_cached_outputs_source_root=...` on low-level
+  `tracker.start_run(...)` / `tracker.begin_run(...)` workflows.
 - Use `tracker.materialize_run_outputs(..., source_root=...)` when you need to
   restore historical outputs from an archive mirror into a new root.
+- `tracker.materialize_run_outputs(...)` accepts `target_root` under either the
+  tracker `run_dir` or a configured mount root. Other destinations still require
+  `allow_external_paths=True`.
 
 ---
 

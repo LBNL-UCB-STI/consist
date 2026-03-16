@@ -6,7 +6,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Iterable, Literal, Sequence, TYPE_CHECKING, cast
+from typing import Iterable, Literal, Mapping, Sequence, TYPE_CHECKING, cast
 
 import pandas as pd
 from sqlalchemy import MetaData, Table, select
@@ -200,18 +200,75 @@ def _materialize_path(
     return True, False
 
 
-def _validate_allowed_base(destination: Path, allowed_base: Path | None) -> None:
-    allowed_base_path = Path(allowed_base).resolve() if allowed_base else None
-    if allowed_base_path is None:
+def build_allowed_materialization_roots(
+    *,
+    run_dir: Path,
+    mounts: Mapping[str, str] | None = None,
+    allow_external_paths: bool,
+) -> tuple[Path, ...] | None:
+    if allow_external_paths:
+        return None
+
+    roots: list[Path] = []
+    for candidate in [Path(run_dir), *(Path(root) for root in (mounts or {}).values())]:
+        resolved = candidate.resolve()
+        if resolved not in roots:
+            roots.append(resolved)
+    return tuple(roots)
+
+
+def _normalize_allowed_roots(
+    allowed_base: Path | Sequence[Path] | None,
+) -> tuple[Path, ...] | None:
+    if allowed_base is None:
+        return None
+    if isinstance(allowed_base, Path):
+        return (allowed_base.resolve(),)
+
+    roots: list[Path] = []
+    for root in allowed_base:
+        resolved = Path(root).resolve()
+        if resolved not in roots:
+            roots.append(resolved)
+    return tuple(roots)
+
+
+def validate_allowed_materialization_destination(
+    destination: Path,
+    allowed_base: Path | Sequence[Path] | None,
+) -> None:
+    allowed_roots = _normalize_allowed_roots(allowed_base)
+    if not allowed_roots:
         return
-    try:
-        destination.resolve().relative_to(allowed_base_path)
-    except ValueError as exc:
+
+    resolved_destination = destination.resolve()
+    for root in allowed_roots:
+        try:
+            resolved_destination.relative_to(root)
+            return
+        except ValueError:
+            continue
+
+    if len(allowed_roots) == 1:
+        allowed_root = allowed_roots[0]
         raise ValueError(
-            f"Destination path {destination.resolve()} is outside allowed base "
-            f"{allowed_base_path}. Set allow_external_paths=True or "
+            f"Destination path {resolved_destination} is outside allowed base "
+            f"{allowed_root}. Set allow_external_paths=True or "
             "CONSIST_ALLOW_EXTERNAL_PATHS=1 to override."
-        ) from exc
+        )
+
+    allowed_display = ", ".join(str(root) for root in allowed_roots)
+    raise ValueError(
+        f"Destination path {resolved_destination} is outside allowed roots: "
+        f"{allowed_display}. Set allow_external_paths=True or "
+        "CONSIST_ALLOW_EXTERNAL_PATHS=1 to override."
+    )
+
+
+def _validate_allowed_base(
+    destination: Path, allowed_base: Path | Sequence[Path] | None
+) -> None:
+    validate_allowed_materialization_destination(destination, allowed_base)
 
 
 def _get_output_artifacts_for_run(tracker: "Tracker", run_id: str) -> list[Artifact]:
@@ -418,7 +475,7 @@ def materialize_planned_outputs(
     plan: Sequence[PlannedMaterialization],
     *,
     tracker: "Tracker",
-    allowed_base: Path | None,
+    allowed_base: Path | Sequence[Path] | None,
     on_missing: Literal["warn", "raise"] = "warn",
     preserve_existing: bool = True,
 ) -> MaterializationResult:
@@ -577,7 +634,7 @@ def materialize_artifacts(
 def materialize_artifacts_from_sources(
     items: Sequence[tuple[Artifact, Path, Path]],
     *,
-    allowed_base: Path | None,
+    allowed_base: Path | Sequence[Path] | None,
     on_missing: Literal["warn", "raise"] = "warn",
 ) -> dict[str, str]:
     """
@@ -607,20 +664,10 @@ def materialize_artifacts_from_sources(
         absolute filesystem paths.
     """
     materialized: dict[str, str] = {}
-    allowed_base_path = Path(allowed_base).resolve() if allowed_base else None
-
     for artifact, source, destination in items:
         source_path = Path(source).resolve()
         destination_path = Path(destination).resolve()
-        if allowed_base_path is not None:
-            try:
-                destination_path.relative_to(allowed_base_path)
-            except ValueError as exc:
-                raise ValueError(
-                    f"Destination path {destination_path} is outside allowed base "
-                    f"{allowed_base_path}. Set allow_external_paths=True or "
-                    "CONSIST_ALLOW_EXTERNAL_PATHS=1 to override."
-                ) from exc
+        validate_allowed_materialization_destination(destination_path, allowed_base)
         _ensure_destination_not_symlink(destination_path)
         destination_path.parent.mkdir(parents=True, exist_ok=True)
 
