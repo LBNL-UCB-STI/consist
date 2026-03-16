@@ -929,7 +929,10 @@ def schema_capture_file(
     if_changed: bool = typer.Option(
         False,
         "--if-changed",
-        help="Reuse existing schema observations for unchanged file hashes.",
+        help=(
+            "Reuse an existing schema observation when the file hash is unchanged. "
+            "This affects schema capture only, not artifact-row reuse."
+        ),
     ),
     trust_db: bool = typer.Option(
         False,
@@ -2828,6 +2831,8 @@ class ConsistShell(cmd.Cmd):
             from consist.models.artifact import Artifact
 
             with _tracker_session(self.tracker) as session:
+                # Intentional hash usage: this command is explicitly a hash-prefix
+                # lookup UX, so ``content_id`` would be the wrong identifier here.
                 statement = select(Artifact).where(
                     col(Artifact.hash).is_not(None),
                     col(Artifact.hash).startswith(candidate),

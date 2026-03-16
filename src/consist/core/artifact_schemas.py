@@ -8,9 +8,11 @@ from typing import (
     Optional,
     Literal,
     Type,
+    cast,
     get_args,
     get_origin,
 )
+from uuid import UUID
 
 from consist.models.artifact import Artifact
 from consist.models.run import Run
@@ -505,7 +507,9 @@ class ArtifactSchemaManager:
         sample_rows : Optional[int]
             Maximum rows to sample when inferring schema.
         reuse_if_unchanged : bool, default False
-            If True, reuse a prior schema observation when the artifact hash matches.
+            If True, reuse a prior schema observation when the artifact content
+            identity matches. This prefers ``artifact.content_id`` and falls back
+            to hash-based lookup for legacy rows.
         source : str, default "file"
             Source label for the schema observation.
 
@@ -557,10 +561,19 @@ class ArtifactSchemaManager:
                     )
                     return
 
-            if reuse_if_unchanged and artifact.hash and self.tracker.db:
-                prior_obs = self.tracker.db.find_schema_observation_for_hash(
-                    artifact.hash
-                )
+            if reuse_if_unchanged and self.tracker.db:
+                prior_obs = None
+                # Prefer content identity when available, but still fall back to
+                # hash-based lookup when the matching schema observation lives on a
+                # legacy row that has not been backfilled with content_id yet.
+                if getattr(artifact, "content_id", None) is not None:
+                    prior_obs = self.tracker.db.find_schema_observation_for_content_id(
+                        cast(UUID, artifact.content_id)
+                    )
+                if prior_obs is None and getattr(artifact, "hash", None):
+                    prior_obs = self.tracker.db.find_schema_observation_for_hash(
+                        cast(str, artifact.hash)
+                    )
                 if prior_obs is not None:
                     schema_bundle = self.tracker.db.get_artifact_schema(
                         schema_id=prior_obs.schema_id, backfill_ordinals=False

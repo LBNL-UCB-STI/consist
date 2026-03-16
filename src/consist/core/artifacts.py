@@ -210,6 +210,44 @@ class ArtifactManager:
         # Shared mutable state for nested helpers in this single create call.
         hash_state = _ContentHashState(effective_hash=content_hash)
 
+        is_output_reuse = direction == "output" and reuse_if_unchanged
+
+        def _warn_output_reuse_deprecated() -> None:
+            if not is_output_reuse:
+                return
+            logging.warning(
+                "[Consist] reuse_if_unchanged on outputs is deprecated; "
+                "a new artifact row is always created now and identical bytes share "
+                "identity via ArtifactContent (content_id)."
+            )
+            if reuse_scope == "any_uri":
+                logging.warning(
+                    "[Consist] reuse_scope='any_uri' is ignored for outputs; "
+                    "content_id equality governs deduplication instead."
+                )
+
+        def _attach_content_id(artifact: Artifact) -> None:
+            hash_value = hash_state.effective_hash or artifact.hash
+            effective_driver = driver or artifact.driver
+            if (
+                hash_value is None
+                or effective_driver is None
+                or self.tracker.db is None
+            ):
+                return
+            try:
+                content_row = self.tracker.db.get_or_create_artifact_content(
+                    content_hash=hash_value,
+                    driver=effective_driver,
+                )
+                artifact.content_id = content_row.id
+            except Exception as exc:
+                logging.warning(
+                    "[Consist] Failed to record artifact content identity for %s: %s",
+                    artifact.key,
+                    exc,
+                )
+
         def _compute_content_hash(
             *,
             raise_on_error: bool,
@@ -273,6 +311,8 @@ class ArtifactManager:
                 )
                 return
             artifact.hash = hash_state.effective_hash
+
+        _warn_output_reuse_deprecated()
 
         if isinstance(path, Artifact):
             artifact_obj = path
@@ -339,42 +379,6 @@ class ArtifactManager:
                         if meta:
                             artifact_obj.meta.update(meta)
 
-            if (
-                artifact_obj is None
-                and direction == "output"
-                and reuse_if_unchanged
-                and self.tracker.db
-            ):
-                if reuse_scope not in {"same_uri", "any_uri"}:
-                    raise ValueError(
-                        "reuse_scope must be one of: 'same_uri', 'any_uri'."
-                    )
-                if hash_state.effective_hash is None:
-                    _ensure_content_hash()
-                if hash_state.effective_hash is not None:
-                    if reuse_scope == "same_uri":
-                        parent = self.tracker.db.find_latest_artifact_at_uri(
-                            container_uri,
-                            driver=driver,
-                            table_path=table_path,
-                            array_path=array_path,
-                        )
-                        if parent and parent.hash == hash_state.effective_hash:
-                            artifact_obj = parent
-                    else:
-                        parent = self.tracker.db.find_latest_artifact_by_hash(
-                            hash_state.effective_hash, driver=driver
-                        )
-                        if parent is not None:
-                            artifact_obj = parent
-
-                if artifact_obj is not None:
-                    if driver:
-                        artifact_obj.driver = driver
-                    _apply_content_hash_override(artifact_obj)
-                    if meta:
-                        artifact_obj.meta.update(meta)
-
             if artifact_obj is None:
                 if hash_state.effective_hash is not None and validate_content_hash:
                     _validate_content_hash()
@@ -391,6 +395,11 @@ class ArtifactManager:
                     run_id=run_id,
                     meta=meta,
                 )
+
+        if artifact_obj.hash and hash_state.effective_hash is None:
+            hash_state.effective_hash = artifact_obj.hash
+
+        _attach_content_id(artifact_obj)
 
         if schema:
             artifact_obj.meta["schema_name"] = schema.__name__
@@ -532,7 +541,12 @@ class ArtifactManager:
             - A list of table names to include (exact match)
             If None, all tables are included.
         hash_tables : {"always", "if_unchanged", "never"}, default "if_unchanged"
-            Controls whether per-table hashes are computed.
+            Controls whether per-table hashes are computed. When set to
+            ``"if_unchanged"``, Consist prefers content identity to decide whether
+            the container is unchanged: if ``prior_container.content_id`` equals the
+            new container's ``content_id``, table hashing is performed even if one
+            side is missing a file hash. If content identity is unavailable,
+            legacy hash-based behavior is used as a fallback.
         table_hash_chunk_rows : Optional[int], optional
             Rows per chunk when hashing tables (defaults to dataset chunking or 1024).
         **meta : Any
@@ -578,6 +592,7 @@ class ArtifactManager:
 
         table_artifacts: List[Artifact] = []
         should_hash_tables = False
+        skip_reason: Optional[str] = None
         if hash_tables not in {"always", "if_unchanged", "never"}:
             raise ValueError(
                 "hash_tables must be one of: 'always', 'if_unchanged', 'never'."
@@ -587,18 +602,32 @@ class ArtifactManager:
         elif hash_tables == "if_unchanged":
             if prior_container is None:
                 should_hash_tables = True
-            elif prior_container.hash and container.hash:
-                should_hash_tables = prior_container.hash == container.hash
+            else:
+                # Prefer content identity when available. This allows table hashing
+                # to proceed even if a file hash is missing on one side.
+                if (
+                    getattr(prior_container, "content_id", None) is not None
+                    and getattr(container, "content_id", None) is not None
+                ):
+                    should_hash_tables = (
+                        prior_container.content_id == container.content_id
+                    )
+                    if not should_hash_tables:
+                        skip_reason = "content_identity_changed"
+                elif prior_container.hash and container.hash:
+                    # Fallback to legacy hash equality when content identity is not available.
+                    should_hash_tables = prior_container.hash == container.hash
+                    if not should_hash_tables:
+                        skip_reason = "file_hash_changed"
+                else:
+                    skip_reason = "file_hash_unavailable"
 
         container.meta["table_hashes_checked"] = should_hash_tables
         if not should_hash_tables and hash_tables != "always":
             if hash_tables == "never":
                 container.meta["table_hashes_skip_reason"] = "disabled"
-            elif prior_container is not None:
-                if prior_container.hash and container.hash:
-                    container.meta["table_hashes_skip_reason"] = "file_hash_changed"
-                else:
-                    container.meta["table_hashes_skip_reason"] = "file_hash_unavailable"
+            elif prior_container is not None and skip_reason is not None:
+                container.meta["table_hashes_skip_reason"] = skip_reason
 
         if discover_tables:
             if table_filter is None:
@@ -678,7 +707,8 @@ class ArtifactManager:
             Rows per chunk when hashing tables (defaults to dataset chunking or 1024).
         profile_file_schema : bool, default False
             Whether to profile and persist a lightweight schema for the table.
-            Use "if_changed" to skip profiling when a matching content hash already has a schema.
+            Use "if_changed" to skip profiling when matching content identity already
+            has a stored schema (prefers content_id; falls back to hash for legacy rows).
         file_schema_sample_rows : Optional[int], optional
             Maximum rows to sample when profiling the schema.
         **meta : Any

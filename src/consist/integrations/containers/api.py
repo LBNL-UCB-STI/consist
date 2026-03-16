@@ -82,6 +82,8 @@ def _hash_inputs(tracker: Tracker, items: List[ArtifactRef]) -> List[str]:
                 if run:
                     if run.config_hash:
                         sig_parts.append(f"conf:{run.config_hash}")
+            # Intentional hash usage: container signatures need a portable content
+            # fingerprint, not a tracker-local ``content_id``.
             if item.hash:
                 sig_parts.append(f"hash:{item.hash}")
             if not sig_parts:

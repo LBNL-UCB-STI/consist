@@ -260,6 +260,8 @@ def _dataset_version_facet_from_artifact(
     artifact: Artifact,
 ) -> Optional[dict[str, Any]]:
     version = None
+    # Intentional hash usage: OpenLineage datasetVersion should be a portable
+    # content fingerprint, not a Consist-internal ``content_id``.
     if artifact.hash:
         version = artifact.hash
     elif isinstance(getattr(artifact, "meta", None), dict):
@@ -283,6 +285,7 @@ def _consist_dataset_facet(artifact: Artifact) -> Optional[dict[str, Any]]:
         "key": artifact.key,
         "uri": artifact.container_uri,
         "driver": artifact.driver,
+        # Intentional exposure of the raw checksum for external/debug consumers.
         "hash": artifact.hash,
     }
     if isinstance(getattr(artifact, "meta", None), dict):

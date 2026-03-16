@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Literal, Optional
 
 from pydantic import PrivateAttr
-from sqlalchemy import JSON, Column
+from sqlalchemy import JSON, Column, UniqueConstraint
 from sqlalchemy.dialects.postgresql import (
     UUID as PG_UUID,
 )  # Import for potential postgresql compatibility
@@ -155,6 +155,12 @@ class Artifact(SQLModel, table=True):
         default=None,
         index=True,
         description="SHA256 content hash of the artifact's data",
+    )
+    content_id: Optional[uuid.UUID] = Field(
+        default=None,
+        index=True,
+        sa_type=UUIDType,
+        description="Pointer to shared ArtifactContent metadata when available",
     )
 
     # Lineage
@@ -365,3 +371,43 @@ class Artifact(SQLModel, table=True):
             A string in the format "Artifact(key=..., path=...)".
         """
         return f"Artifact(key={self.key}, path={self.container_uri})"
+
+
+class ArtifactContent(SQLModel, table=True):
+    """
+    Content-centric metadata for deduplicated bytes shared across artifacts.
+
+    Each row represents a unique `(content_hash, driver)` tuple that multiple artifact
+    occurrences can reference.
+    """
+
+    __tablename__ = "artifact_content"
+    __table_args__ = (UniqueConstraint("content_hash", "driver"),)
+
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        primary_key=True,
+        sa_type=UUIDType,
+        sa_column_kwargs={"autoincrement": False},
+    )
+    content_hash: str = Field(
+        index=True, description="SHA256 hash identifying the content payload."
+    )
+    driver: str = Field(
+        index=True, description="Driver used to interpret the content (e.g., parquet)."
+    )
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Timestamp when this content identity was first recorded.",
+    )
+    meta: Dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON),
+        description="Optional content-scoped metadata such as schema fingerprints.",
+    )
+
+    def __str__(self) -> str:
+        return (
+            f"ArtifactContent(hash={self.content_hash}, "
+            f"driver={self.driver}, id={self.id})"
+        )
