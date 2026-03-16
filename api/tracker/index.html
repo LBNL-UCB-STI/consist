@@ -7568,7 +7568,9 @@ the path on disk.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>If True and logging an output, reuse a prior artifact row when the content hash matches.</p>
+                <p>Deprecated for outputs. Consist now always creates a fresh output artifact row;
+identical bytes are deduplicated via <code>artifact.content_id</code>. Setting this on outputs
+emits a warning and does not reuse prior rows. Input-side behavior is unaffected.</p>
               </div>
             </td>
             <td>
@@ -7584,8 +7586,8 @@ the path on disk.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
-while "any_uri" allows reuse across different URIs with the same hash.</p>
+                <p>Deprecated for outputs. <code>any_uri</code> is ignored for outputs; deduplication is governed
+by <code>content_id</code>. Input-side behavior is unaffected.</p>
               </div>
             </td>
             <td>
@@ -7602,7 +7604,8 @@ while "any_uri" allows reuse across different URIs with the same hash.</p>
             <td>
               <div class="doc-md-description">
                 <p>If True, profile a lightweight schema for file-based tabular artifacts.
-Use "if_changed" to skip profiling when a matching content hash already has a schema.</p>
+Use "if_changed" to skip profiling when matching content identity already
+has a stored schema (prefers content_id; falls back to hash for legacy rows).</p>
               </div>
             </td>
             <td>
@@ -7905,7 +7908,10 @@ from each file's extension individually.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>If True and logging outputs, reuse prior artifact rows when content hashes match.</p>
+                <p>Deprecated for outputs. Batch output logging still creates a fresh artifact
+row per call; identical bytes are deduplicated via <code>artifact.content_id</code>.
+Setting this on outputs emits a warning and does not reuse prior rows.
+Input-side behavior is unaffected.</p>
               </div>
             </td>
             <td>
@@ -7921,8 +7927,8 @@ from each file's extension individually.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
-while "any_uri" allows reuse across different URIs with the same hash.</p>
+                <p>Deprecated for outputs. <code>any_uri</code> is ignored for outputs; deduplication
+is governed by <code>content_id</code> instead. Input-side behavior is unaffected.</p>
               </div>
             </td>
             <td>
@@ -8349,7 +8355,8 @@ the path on disk.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>If True, reuse a prior output artifact row when the content hash matches.</p>
+                <p>Deprecated for outputs. A fresh output artifact row is always created; identical
+bytes share <code>content_id</code>. Setting this emits a warning and does not reuse prior rows.</p>
               </div>
             </td>
             <td>
@@ -8365,8 +8372,7 @@ the path on disk.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
-while "any_uri" allows reuse across different URIs with the same hash.</p>
+                <p>Deprecated for outputs. <code>any_uri</code> is ignored; deduplication is by <code>content_id</code>.</p>
               </div>
             </td>
             <td>
@@ -13878,7 +13884,10 @@ skips hashing when a table appears unchanged based on lightweight checks.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Whether to profile table schema and store it as metadata.</p>
+                <p>Whether to profile table schema and store it as metadata. Use
+<code>"if_changed"</code> to skip profiling when matching content identity
+already has a schema (prefers <code>content_id</code> and falls back to hash
+for legacy rows).</p>
               </div>
             </td>
             <td>

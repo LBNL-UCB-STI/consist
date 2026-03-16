@@ -5646,7 +5646,10 @@ the path on disk.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>If True and logging an output, reuse a prior artifact row when the content hash matches.</p>
+                <p>Deprecated for outputs. Consist always creates a fresh output artifact row;
+identical bytes are deduplicated via <code>artifact.content_id</code>. Setting this on
+outputs emits a warning and does not reuse prior rows. Input-side behavior is
+unaffected.</p>
               </div>
             </td>
             <td>
@@ -5662,8 +5665,8 @@ the path on disk.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Scope for output reuse checks. "same_uri" restricts reuse to the same URI,
-while "any_uri" allows reuse across different URIs with the same hash.</p>
+                <p>Deprecated for outputs. <code>any_uri</code> is ignored for outputs; content identity
+(<code>content_id</code>) governs deduplication. Input-side behavior is unaffected.</p>
               </div>
             </td>
             <td>
@@ -5963,7 +5966,10 @@ chosen by the caller (not inferred from filenames).</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>If True, reuse an existing logged artifact when the input path has not changed.</p>
+                <p>Deprecated for outputs. Batch output logging still creates a fresh artifact
+row per call; identical bytes are deduplicated via <code>artifact.content_id</code>.
+Setting this on outputs emits a warning and does not reuse prior rows.
+Input-side behavior is unaffected.</p>
               </div>
             </td>
             <td>
@@ -5979,8 +5985,8 @@ chosen by the caller (not inferred from filenames).</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Control reuse lookup scope. "same_uri" only reuses when the URI matches,
-while "any_uri" allows reuse across different URIs with the same content hash.</p>
+                <p>Deprecated for outputs. <code>any_uri</code> is ignored for outputs; deduplication is
+governed by <code>content_id</code> instead. Input-side behavior is unaffected.</p>
               </div>
             </td>
             <td>
@@ -6523,8 +6529,8 @@ is a file path.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>If True, and the content hash matches a previous run's output, Consist may
-reuse that historical artifact record.</p>
+                <p>Deprecated for outputs. A fresh output artifact row is always created; identical
+bytes share <code>content_id</code>. Setting this emits a warning and does not reuse prior rows.</p>
               </div>
             </td>
             <td>
@@ -6540,7 +6546,7 @@ reuse that historical artifact record.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Whether to restrict reuse to the exact same file path or any path with the same hash.</p>
+                <p>Deprecated for outputs. <code>any_uri</code> is ignored; deduplication is by <code>content_id</code>.</p>
               </div>
             </td>
             <td>
