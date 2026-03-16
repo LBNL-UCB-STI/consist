@@ -6,7 +6,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Iterable, Literal, Mapping, Sequence, TYPE_CHECKING, cast
+from typing import Any, Iterable, Literal, Mapping, Sequence, TYPE_CHECKING, cast
 
 import pandas as pd
 from sqlalchemy import MetaData, Table, select
@@ -63,6 +63,15 @@ class PlannedMaterialization:
     source_path: Path | None
     destination: Path
     relative_path: Path
+
+
+def _resolve_hot_data_engine(*, tracker: "Tracker") -> Any:
+    hot_data_store = getattr(tracker, "hot_data_store", None)
+    if hot_data_store is not None:
+        store_engine = getattr(hot_data_store, "engine", None)
+        if store_engine is not None:
+            return store_engine
+    return getattr(tracker, "engine", None)
 
 
 def _ensure_destination_not_symlink(path: Path) -> None:
@@ -790,7 +799,8 @@ def materialize_ingested_artifact_from_db(
         If the artifact is not marked as ingested or uses an unsupported
         materialization driver.
     """
-    if not tracker or not tracker.engine:
+    hot_data_engine = _resolve_hot_data_engine(tracker=tracker)
+    if not tracker or hot_data_engine is None:
         raise RuntimeError(
             "Cannot materialize ingested artifact: tracker has no DB engine."
         )
@@ -817,7 +827,7 @@ def materialize_ingested_artifact_from_db(
             table_name,
             metadata,
             schema="global_tables",
-            autoload_with=tracker.engine,
+            autoload_with=hot_data_engine,
         )
     except SQLAlchemyError as e:
         raise RuntimeError(
@@ -830,7 +840,7 @@ def materialize_ingested_artifact_from_db(
         )
 
     stmt = select(table).where(table.c.consist_artifact_id == str(artifact.id))
-    df = pd.read_sql(stmt, tracker.engine)
+    df = pd.read_sql(stmt, hot_data_engine)
     if df.empty:
         raise FileNotFoundError(
             f"No ingested rows found for artifact {artifact.key!r} ({artifact.id})."

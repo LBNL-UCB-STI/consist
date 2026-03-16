@@ -140,6 +140,26 @@ def _validate_materialize_option(
         raise ValueError(f"{name} must be one of: {allowed_display}")
 
 
+def _resolve_hot_data_store(tracker: Optional["Tracker"]) -> Any:
+    if tracker is None:
+        return None
+    return getattr(tracker, "hot_data_store", None)
+
+
+def _resolve_hot_data_db_path(tracker: Optional["Tracker"]) -> Optional[str]:
+    hot_data_store = _resolve_hot_data_store(tracker)
+    if hot_data_store is not None:
+        store_db_path = getattr(hot_data_store, "db_path", None)
+        if store_db_path is not None:
+            return os.fspath(store_db_path)
+    if tracker is None:
+        return None
+    db_path = getattr(tracker, "db_path", None)
+    if db_path is None:
+        return None
+    return os.fspath(db_path)
+
+
 LoadResult = Union[
     duckdb.DuckDBPyRelation,
     pd.DataFrame,
@@ -2505,7 +2525,7 @@ def load(
                     f"Hint: add it to inputs=[...] when starting the run, or pass db_fallback='always'."
                 )
 
-        if not tracker or not tracker.engine:
+        if not tracker or _resolve_hot_data_db_path(tracker) is None:
             raise RuntimeError(
                 f"Artifact {artifact.key} is missing from disk, but marked as ingested. Provide a tracker with a DB connection to load it."
             )
@@ -2598,13 +2618,14 @@ def _load_from_db(
     """
     Recovers data for an artifact from the Consist DuckDB database as a Relation.
     """
-    if not tracker.db_path:
+    hot_data_db_path = _resolve_hot_data_db_path(tracker)
+    if not hot_data_db_path:
         raise RuntimeError("Tracker has no DuckDB path configured.")
     table_name = artifact.meta.get("dlt_table_name") or artifact.key
     if not isinstance(table_name, str) or not table_name:
         raise RuntimeError(f"Invalid table name for DuckDB load: {table_name!r}")
     artifact_id = str(artifact.id).replace("'", "''")
-    conn = duckdb.connect(tracker.db_path, read_only=True)
+    conn = duckdb.connect(hot_data_db_path, read_only=True)
     quoted_table = _quote_ident(table_name)
     relation = conn.sql(
         f"SELECT * FROM global_tables.{quoted_table} "
