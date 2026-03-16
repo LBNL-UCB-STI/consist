@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from uuid import uuid4
 
 from consist.api import _load_from_db, load
+from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
 
 
@@ -39,9 +41,12 @@ def test_load_from_db_uses_hot_data_store_db_path(
         driver="csv",
         meta={"is_ingested": True, "dlt_table_name": "My Table"},
     )
-    tracker = SimpleNamespace(
-        db_path=None,
-        hot_data_store=SimpleNamespace(db_path=hot_db_path),
+    tracker = cast(
+        Tracker,
+        SimpleNamespace(
+            db_path=None,
+            hot_data_store=SimpleNamespace(db_path=hot_db_path),
+        ),
     )
 
     _load_from_db(artifact, tracker, nrows=5)
@@ -65,14 +70,17 @@ def test_load_allows_hot_data_store_without_tracker_engine(
         driver="csv",
         meta={"is_ingested": True, "dlt_table_name": "My Table"},
     )
-    tracker = SimpleNamespace(
-        hot_data_store=SimpleNamespace(
-            db_path=str(tmp_path / "hot.duckdb"),
+    tracker = cast(
+        Tracker,
+        SimpleNamespace(
+            hot_data_store=SimpleNamespace(
+                db_path=str(tmp_path / "hot.duckdb"),
+            ),
+            engine=None,
+            db_path=None,
+            current_consist=None,
+            resolve_uri=lambda _uri: resolved_path,
         ),
-        engine=None,
-        db_path=None,
-        current_consist=None,
-        resolve_uri=lambda _uri: resolved_path,
     )
 
     monkeypatch.setattr("consist.api._load_from_db", lambda *_args, **_kwargs: sentinel)
@@ -113,11 +121,14 @@ def test_load_falls_back_to_tracker_db_path_when_hot_store_absent(
         driver="csv",
         meta={"is_ingested": True, "dlt_table_name": "legacy_table"},
     )
-    tracker = SimpleNamespace(
-        db_path=db_path,
-        hot_data_store=None,
-        current_consist=None,
-        resolve_uri=lambda _uri: str(tmp_path / "missing.csv"),
+    tracker = cast(
+        Tracker,
+        SimpleNamespace(
+            db_path=db_path,
+            hot_data_store=None,
+            current_consist=None,
+            resolve_uri=lambda _uri: str(tmp_path / "missing.csv"),
+        ),
     )
 
     load(artifact, tracker=tracker, db_fallback="always", nrows=7)

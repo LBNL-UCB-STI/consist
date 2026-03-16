@@ -15,12 +15,15 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union, cast
 
 from pydantic import BaseModel
 
 from consist.core.cache import (
     ActiveRunCacheOptions,
+    CacheHydrationContext,
+    CacheMaterializationContext,
+    CacheValidationContext,
     hydrate_cache_hit_outputs,
     materialize_missing_inputs,
     parse_materialize_cached_outputs_kwargs,
@@ -494,7 +497,7 @@ class RunLifecycleCoordinator:
             if cached_run:
                 t0 = time.perf_counter()
                 cache_valid = validate_cached_run_outputs(
-                    tracker=tracker,
+                    tracker=cast(CacheValidationContext, tracker),
                     run=cached_run,
                     options=tracker._active_run_cache_options,
                 )
@@ -505,7 +508,7 @@ class RunLifecycleCoordinator:
             if cached_run and cache_valid:
                 t0 = time.perf_counter()
                 cached_items = hydrate_cache_hit_outputs(
-                    tracker=tracker,
+                    tracker=cast(CacheHydrationContext, tracker),
                     run=run,
                     cached_run=cached_run,
                     options=tracker._active_run_cache_options,
@@ -534,7 +537,8 @@ class RunLifecycleCoordinator:
 
         if not tracker.current_consist.cached_run:
             materialize_missing_inputs(
-                tracker=tracker, options=tracker._active_run_cache_options
+                tracker=cast(CacheMaterializationContext, tracker),
+                options=tracker._active_run_cache_options,
             )
 
         tracker._flush_json()
