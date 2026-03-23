@@ -1818,6 +1818,35 @@ class DatabaseManager:
         except Exception:
             return []
 
+    def get_output_artifacts_for_run(self, run_id: str) -> List[Artifact]:
+        """
+        Return raw output-linked artifacts for a run without key collapsing.
+
+        This preserves duplicate output rows so higher-level planning code can
+        detect ambiguous duplicate keys before projecting into dict form.
+        """
+
+        def _query():
+            with self.session_scope() as session:
+                statement = (
+                    select(Artifact)
+                    .join(
+                        RunArtifactLink,
+                        Artifact.id == RunArtifactLink.artifact_id,  # ty: ignore[invalid-argument-type]
+                    )
+                    .where(RunArtifactLink.run_id == run_id)
+                    .where(RunArtifactLink.direction == "output")
+                    .order_by(
+                        col(Artifact.created_at), col(Artifact.key), col(Artifact.id)
+                    )
+                )
+                return list(session.exec(statement).all())
+
+        try:
+            return self.execute_with_retry(_query)
+        except Exception:
+            return []
+
     def find_artifacts(
         self,
         *,

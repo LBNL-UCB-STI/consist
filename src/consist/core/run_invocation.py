@@ -25,6 +25,7 @@ from consist.types import (
     InputBindingMode,
     IdentityInputs,
     OutputPolicyOptions,
+    PathLike,
     RunInputRef,
 )
 
@@ -82,6 +83,8 @@ class ResolvedRunInvocation:
         Effective cache epoch override.
     validate_cached_outputs : str
         Effective cached-output validation mode.
+    materialize_cached_outputs_source_root : Optional[PathLike]
+        Optional archive/mirror root forwarded to cache-hit output hydration.
     code_identity : Optional[CodeIdentityMode]
         Effective code identity mode.
     code_identity_extra_deps : Optional[List[str]]
@@ -125,6 +128,7 @@ class ResolvedRunInvocation:
     cache_version: Optional[int]
     cache_epoch: Optional[int]
     validate_cached_outputs: str
+    materialize_cached_outputs_source_root: Optional[PathLike]
     code_identity: Optional[CodeIdentityMode]
     code_identity_extra_deps: Optional[List[str]]
     output_mismatch: Literal["warn", "error", "ignore"]
@@ -342,6 +346,9 @@ def resolve_run_invocation(
     cache_version = merged_options.cache_version
     cache_epoch = merged_options.cache_epoch
     validate_cached_outputs = merged_options.validate_cached_outputs
+    materialize_cached_outputs_source_root = (
+        merged_options.materialize_cached_outputs_source_root
+    )
     code_identity = merged_options.code_identity
     code_identity_extra_deps = merged_options.code_identity_extra_deps
     output_mismatch = merged_options.output_mismatch
@@ -606,6 +613,7 @@ def resolve_run_invocation(
         cache_version=resolved.cache_version,
         cache_epoch=cache_epoch,
         validate_cached_outputs=resolved_validate_cached_outputs,
+        materialize_cached_outputs_source_root=(materialize_cached_outputs_source_root),
         code_identity=code_identity,
         code_identity_extra_deps=(
             list(code_identity_extra_deps)

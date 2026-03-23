@@ -214,20 +214,31 @@ result = consist.run(
 )
 ```
 
-Or materialize manually:
+Or use the explicit run-scoped recovery API when you need to rebuild a prior
+run's outputs into a new directory or recover from an archive mirror:
 
 ```python
 from pathlib import Path
 
-result = consist.run(...)
-if result.cache_hit:
-    from consist.core.materialize import materialize_artifacts
-    artifacts_to_load = [
-        (artifact, Path(tracker.run_dir) / "rehydrated" / artifact.path.name)
-        for artifact in result.outputs.values()
-    ]
-    materialize_artifacts(tracker, artifacts_to_load)
+restored = tracker.materialize_run_outputs(
+    "prior_run_id",
+    target_root=Path("rehydrated"),
+    source_root=Path("/archive/outputs_mirror"),  # optional
+)
 ```
+
+This preserves historical relative layout under `target_root`. If the original
+cold files are missing but the outputs were ingested, Consist can reconstruct
+CSV/Parquet outputs from DuckDB.
+
+For archive-mirror cache-hit hydration, you can either pass
+`cache_options=CacheOptions(materialize_cached_outputs_source_root=Path(...))`
+on `run(...)` / scenario steps, or use the same
+`materialize_cached_outputs_source_root=Path(...)` override on low-level
+`tracker.start_run(...)` flows.
+
+`tracker.materialize_run_outputs(...)` can also restore into a configured mount
+root without enabling `allow_external_paths=True`.
 
 ---
 

@@ -77,6 +77,7 @@ with tracker.scenario("baseline") as sc:
 - [`consist.Tracker`](tracker.md)
 - [`consist.Run`](run.md)
 - [`consist.Artifact`](artifact.md)
+- [`consist.MaterializationResult`](materialize.md#consist.core.materialize.MaterializationResult)
 - [`consist.RunSet`](runset.md#consist.runset.RunSet)
 - [`consist.AlignedPair`](runset.md#consist.runset.AlignedPair)
 - `consist.CacheOptions`, `consist.OutputPolicyOptions`, `consist.ExecutionOptions`
@@ -112,6 +113,7 @@ Scenario defaults like `name_template` and `cache_epoch` are configured via `con
 - [`consist.load`](api_helpers.md#consist.api.load)
 - [`consist.capture_outputs`](api_helpers.md#consist.api.capture_outputs)
 - [`consist.get_artifact`](api_helpers.md#consist.api.get_artifact)
+- [`consist.materialize_run_outputs`](api_helpers.md#consist.api.materialize_run_outputs)
 - [`consist.register_artifact_facet_parser`](api_helpers.md#consist.api.register_artifact_facet_parser)
 - [`consist.cached_output`](api_helpers.md#consist.api.cached_output)
 - [`consist.cached_artifacts`](api_helpers.md#consist.api.cached_artifacts)

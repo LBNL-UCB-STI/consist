@@ -6,6 +6,7 @@
       show_root_heading: false
       show_root_toc_entry: false
       members:
+        - MaterializationResult
         - materialize_artifacts
         - materialize_artifacts_from_sources
         - build_materialize_items_for_keys

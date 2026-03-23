@@ -17,6 +17,7 @@ from typing import (
     Mapping,
     Optional,
     Protocol,
+    Sequence,
     TYPE_CHECKING,
     Type,
     TypeVar,
@@ -66,6 +67,7 @@ from consist.types import (
 
 if TYPE_CHECKING:
     from consist.core.config_canonicalization import ConfigAdapter
+    from consist.core.materialize import MaterializationResult
     from consist.core.step_context import StepContext
     from consist.runset import RunSet
 
@@ -92,6 +94,8 @@ except ImportError:
     gpd = None
 
 T = TypeVar("T", bound=SQLModel)
+_VALID_MATERIALIZE_ON_MISSING = {"warn", "raise"}
+_VALID_MATERIALIZE_DB_FALLBACK = {"never", "if_ingested"}
 
 
 class OpenMatrixFileLike(Protocol):
@@ -102,6 +106,38 @@ class OpenMatrixFileLike(Protocol):
     def __getitem__(self, key: str) -> Any: ...
 
     def close(self) -> None: ...
+
+
+def _normalize_materialize_output_keys(
+    keys: Sequence[str] | None,
+) -> tuple[str, ...] | None:
+    if keys is None:
+        return None
+    if isinstance(keys, (str, bytes)):
+        raise TypeError(
+            "keys must be a sequence of output-key strings, not a single str/bytes value."
+        )
+
+    normalized: list[str] = []
+    for key in keys:
+        if not isinstance(key, str):
+            raise TypeError(
+                "keys must contain only strings "
+                f"(got {type(key).__name__!s} in materialize_run_outputs)."
+            )
+        normalized.append(key)
+    return tuple(normalized)
+
+
+def _validate_materialize_option(
+    *,
+    name: str,
+    value: str,
+    allowed: set[str],
+) -> None:
+    if value not in allowed:
+        allowed_display = ", ".join(repr(item) for item in sorted(allowed))
+        raise ValueError(f"{name} must be one of: {allowed_display}")
 
 
 LoadResult = Union[
@@ -1006,6 +1042,68 @@ def get_run_result(
     """
     tr = _resolve_tracker(tracker)
     return tr.get_run_result(run_id, keys=keys, validate=validate)
+
+
+def materialize_run_outputs(
+    run_id: str,
+    *,
+    target_root: str | Path,
+    source_root: str | Path | None = None,
+    keys: Sequence[str] | None = None,
+    preserve_existing: bool = True,
+    on_missing: Literal["warn", "raise"] = "warn",
+    db_fallback: Literal["never", "if_ingested"] = "if_ingested",
+    tracker: Optional["Tracker"] = None,
+) -> "MaterializationResult":
+    """
+    Materialize the linked outputs of a historical run into a new root.
+
+    Parameters
+    ----------
+    run_id : str
+        Identifier of the run whose outputs should be restored.
+    target_root : str | Path
+        Destination root for rematerialized outputs.
+    source_root : str | Path | None, optional
+        Optional alternate source root for filesystem-backed recovery.
+    keys : Sequence[str] | None, optional
+        Optional subset of output keys to restore.
+    preserve_existing : bool, default True
+        If True, existing destinations are preserved and reported as skipped.
+    on_missing : {"warn", "raise"}, default "warn"
+        Missing-source handling policy forwarded to the tracker.
+    db_fallback : {"never", "if_ingested"}, default "if_ingested"
+        DB export fallback policy forwarded to the tracker.
+    tracker : Optional[Tracker], optional
+        Tracker instance to use. If omitted, resolves the active/default tracker.
+
+    Returns
+    -------
+    MaterializationResult
+        Structured materialization outcome for the selected run outputs.
+    """
+    normalized_keys = _normalize_materialize_output_keys(keys)
+    _validate_materialize_option(
+        name="on_missing",
+        value=on_missing,
+        allowed=_VALID_MATERIALIZE_ON_MISSING,
+    )
+    _validate_materialize_option(
+        name="db_fallback",
+        value=db_fallback,
+        allowed=_VALID_MATERIALIZE_DB_FALLBACK,
+    )
+
+    tr = _resolve_tracker(tracker)
+    return tr.materialize_run_outputs(
+        run_id,
+        target_root=target_root,
+        source_root=source_root,
+        keys=normalized_keys,
+        preserve_existing=preserve_existing,
+        on_missing=on_missing,
+        db_fallback=db_fallback,
+    )
 
 
 def get_artifact(

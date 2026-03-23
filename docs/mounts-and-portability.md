@@ -195,6 +195,21 @@ When Consist needs bytes from a historical run (e.g., cache hydration or
 If a mount is missing or points somewhere else, materialization will warn and skip
 missing files rather than crashing (unless explicitly set to raise).
 
+For the newer `tracker.materialize_run_outputs(...)` recovery path, output layout
+resolution is more conservative and history-aware:
+
+1) `workspace://...` and `./...` are re-rooted under the producing run's
+   `_physical_run_dir`.
+2) mount-backed output URIs such as `outputs://...` prefer the historical mount
+   snapshot stored in `run.meta["mounts"]`.
+3) if that snapshot is unavailable, Consist falls back to
+   `artifact.meta["mount_root"]` when present.
+4) absolute paths and `file://...` URIs are treated as unmapped rather than
+   being silently reinterpreted.
+
+This is what allows run-scoped output recovery to preserve historical relative
+layout even when current mounts differ from the machine that produced the run.
+
 ---
 
 ## Sharing a database across machines
@@ -245,6 +260,16 @@ for non-container run policies.
 - Use `cache_hydration="outputs-requested"` for only the outputs you need.
 - Use `cache_hydration="inputs-missing"` to backfill inputs when a run moves
   across machines or directories.
+- For archive-mirror cache hydration, use
+  `cache_options=CacheOptions(materialize_cached_outputs_source_root=...)` on
+  `run(...)` / scenario steps, or pass
+  `materialize_cached_outputs_source_root=...` on low-level
+  `tracker.start_run(...)` / `tracker.begin_run(...)` workflows.
+- Use `tracker.materialize_run_outputs(..., source_root=...)` when you need to
+  restore historical outputs from an archive mirror into a new root.
+- `tracker.materialize_run_outputs(...)` accepts `target_root` under either the
+  tracker `run_dir` or a configured mount root. Other destinations still require
+  `allow_external_paths=True`.
 
 ---
 

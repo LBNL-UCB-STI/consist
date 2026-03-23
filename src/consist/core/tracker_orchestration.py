@@ -269,6 +269,7 @@ class RunTraceCoordinator:
         code_identity_callable: Optional[Callable[..., Any]] = None,
         materialize_cached_output_paths: Optional[Dict[str, Path]] = None,
         materialize_cached_outputs_dir: Optional[Path] = None,
+        materialize_cached_outputs_source_root: Optional[Path] = None,
     ) -> Dict[str, Any]:
         """Build the kwargs payload passed into ``tracker.start_run``."""
         start_kwargs: Dict[str, Any] = {
@@ -305,6 +306,9 @@ class RunTraceCoordinator:
             "cache_hydration": cache_hydration,
             "materialize_cached_output_paths": materialize_cached_output_paths,
             "materialize_cached_outputs_dir": materialize_cached_outputs_dir,
+            "materialize_cached_outputs_source_root": (
+                materialize_cached_outputs_source_root
+            ),
         }
         for key, value in optional_values.items():
             if value is not None:
@@ -559,6 +563,11 @@ class RunTraceCoordinator:
             ),
             materialize_cached_output_paths=materialize_cached_output_paths,
             materialize_cached_outputs_dir=materialize_cached_outputs_dir,
+            materialize_cached_outputs_source_root=(
+                Path(invocation.materialize_cached_outputs_source_root)
+                if invocation.materialize_cached_outputs_source_root is not None
+                else None
+            ),
         )
 
         return RunInvocationContext(
@@ -1654,6 +1663,12 @@ class RunTraceCoordinator:
             parent_run_id=parent_run_id,
             materialize_cached_output_paths=materialize_cached_output_paths,
             materialize_cached_outputs_dir=materialize_cached_outputs_dir,
+            materialize_cached_outputs_source_root=(
+                Path(resolved_invocation.materialize_cached_outputs_source_root)
+                if resolved_invocation.materialize_cached_outputs_source_root
+                is not None
+                else None
+            ),
         )
 
         def _handle_missing_outputs(label: str, missing: List[str]) -> None:
