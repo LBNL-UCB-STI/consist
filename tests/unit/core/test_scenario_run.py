@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import pytest
@@ -89,6 +90,68 @@ def test_scenario_run_promotes_coupler_inputs_for_path_binding(tracker):
             inputs=["data"],
             execution_options=ExecutionOptions(input_binding="paths"),
         )
+
+
+def test_scenario_run_accepts_binding_result(tracker, tmp_path):
+    explicit_input = tmp_path / "raw.csv"
+    pd.DataFrame({"value": [10, 20]}).to_csv(explicit_input, index=False)
+
+    def produce(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        out_path = ctx.run_dir / "data.csv"
+        pd.DataFrame({"value": [1, 2]}).to_csv(out_path, index=False)
+
+    def consume(raw: pd.DataFrame, data: pd.DataFrame) -> None:
+        assert list(raw["value"]) == [10, 20]
+        assert list(data["value"]) == [1, 2]
+
+    with tracker.scenario("scen_binding_result") as sc:
+        sc.run(
+            fn=produce,
+            output_paths={"data": "data.csv"},
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        result = sc.run(
+            fn=consume,
+            binding=consist.BindingResult(
+                inputs={"raw": explicit_input},
+                input_keys=["data"],
+                optional_input_keys=["missing"],
+                metadata={"source": "binding-plan"},
+            ),
+            execution_options=ExecutionOptions(load_inputs=True),
+        )
+
+    assert result.cache_hit is False
+
+
+@pytest.mark.parametrize(
+    ("primitive_kwargs", "expected_fragment"),
+    [
+        ({"inputs": {"raw": "raw.csv"}}, "inputs"),
+        ({"input_keys": ["data"]}, "input_keys"),
+        ({"optional_input_keys": ["data"]}, "optional_input_keys"),
+    ],
+)
+def test_scenario_run_rejects_mixed_binding_and_primitive_input_kwargs(
+    tracker, tmp_path, primitive_kwargs: dict[str, Any], expected_fragment: str
+):
+    binding = consist.BindingResult(inputs={"raw": tmp_path / "raw.csv"})
+
+    with tracker.scenario("scen_binding_conflict") as sc:
+        with pytest.raises(ValueError) as exc_info:
+            sc.run(
+                fn=lambda: None,
+                name="noop",
+                binding=binding,
+                execution_options=ExecutionOptions(load_inputs=True),
+                **primitive_kwargs,
+            )
+
+    message = str(exc_info.value)
+    _assert_problem_cause_fix(message)
+    assert "binding" in message
+    assert expected_fragment in message
 
 
 def test_scenario_trace_updates_coupler(tracker):

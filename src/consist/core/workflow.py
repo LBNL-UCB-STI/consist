@@ -25,6 +25,7 @@ from consist.core.input_utils import coerce_input_map
 from consist.core.run_invocation import resolve_run_invocation
 from consist.types import (
     ArtifactRef,
+    BindingResult,
     CacheOptions,
     CodeIdentityMode,
     ExecutionOptions,
@@ -729,6 +730,7 @@ class ScenarioContext:
         ] = None,
         input_keys: Optional[Iterable[str] | str] = None,
         optional_input_keys: Optional[Iterable[str] | str] = None,
+        binding: Optional[BindingResult] = None,
         depends_on: Optional[List[RunInputRef]] = None,
         tags: Optional[List[str]] = None,
         facet: Optional[FacetLike] = None,
@@ -771,7 +773,35 @@ class ScenarioContext:
         if fn is None and name is None:
             raise ValueError("ScenarioContext.run requires name when fn is None.")
 
-        invocation_inputs = inputs
+        if binding is not None:
+            if (
+                inputs is not None
+                or input_keys is not None
+                or optional_input_keys is not None
+            ):
+                raise ValueError(
+                    format_problem_cause_fix(
+                        problem=(
+                            "ScenarioContext.run received both binding and primitive "
+                            "input kwargs."
+                        ),
+                        cause=(
+                            "binding=... is a complete execution envelope for "
+                            "scenario inputs, so it cannot be combined with "
+                            "inputs=..., input_keys=..., or optional_input_keys=...."
+                        ),
+                        fix=(
+                            "Pass either binding=BindingResult(...) or the primitive "
+                            "input kwargs, but not both."
+                        ),
+                    )
+                )
+            invocation_inputs = binding.inputs
+            input_keys = binding.input_keys
+            optional_input_keys = binding.optional_input_keys
+        else:
+            invocation_inputs = inputs
+
         requested_input_binding = (
             execution_options.input_binding if execution_options is not None else None
         )
