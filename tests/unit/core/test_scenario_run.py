@@ -125,6 +125,128 @@ def test_scenario_run_accepts_binding_result(tracker, tmp_path):
     assert result.cache_hit is False
 
 
+def test_scenario_run_binding_result_supports_path_binding(
+    tracker, tmp_path
+):
+    raw_path = tmp_path / "raw.csv"
+    pd.DataFrame({"value": [10, 20]}).to_csv(raw_path, index=False)
+
+    def produce(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        out_path = ctx.run_dir / "data.csv"
+        pd.DataFrame({"value": [1, 2]}).to_csv(out_path, index=False)
+
+    def consume(raw: Path, data: Path) -> None:
+        assert isinstance(raw, Path)
+        assert isinstance(data, Path)
+        assert list(pd.read_csv(raw)["value"]) == [10, 20]
+        assert list(pd.read_csv(data)["value"]) == [1, 2]
+
+    with tracker.scenario("scen_binding_paths") as sc:
+        sc.run(
+            fn=produce,
+            output_paths={"data": "data.csv"},
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        result = sc.run(
+            fn=consume,
+            binding=consist.BindingResult(
+                inputs={"raw": raw_path},
+                input_keys=["data"],
+            ),
+            execution_options=ExecutionOptions(input_binding="paths"),
+        )
+
+    assert result.cache_hit is False
+
+
+def test_scenario_run_binding_result_metadata_is_inert(
+    tracker, tmp_path
+):
+    raw_path = tmp_path / "raw.csv"
+    pd.DataFrame({"value": [7, 8]}).to_csv(raw_path, index=False)
+    calls: list[str] = []
+
+    def consume(raw: pd.DataFrame) -> None:
+        calls.append("called")
+        assert list(raw["value"]) == [7, 8]
+
+    with tracker.scenario("scen_binding_metadata") as sc:
+        first = sc.run(
+            fn=consume,
+            name="consume",
+            binding=consist.BindingResult(
+                inputs={"raw": raw_path},
+                metadata={"source": "first-plan"},
+            ),
+            execution_options=ExecutionOptions(load_inputs=True),
+        )
+        second = sc.run(
+            fn=consume,
+            name="consume",
+            binding=consist.BindingResult(
+                inputs={"raw": raw_path},
+                metadata={"source": "second-plan"},
+            ),
+            execution_options=ExecutionOptions(load_inputs=True),
+        )
+
+    assert calls == ["called"]
+    assert first.cache_hit is False
+    assert second.cache_hit is True
+    assert (first.run.meta or {}).get("source") is None
+    assert (second.run.meta or {}).get("source") is None
+    assert first.run.identity_summary["signature"] == second.run.identity_summary[
+        "signature"
+    ]
+    assert first.run.identity_summary["input_hash"] == second.run.identity_summary[
+        "input_hash"
+    ]
+    assert first.run.identity_summary["inputs"] == second.run.identity_summary[
+        "inputs"
+    ]
+    assert tracker.get_run_config_kv(first.run.id, prefix="source") == []
+    assert set(tracker.get_artifacts_for_run(first.run.id).inputs) == {"raw"}
+
+
+def test_scenario_run_binding_result_matches_primitive_cache_behavior(
+    tracker, tmp_path
+):
+    raw_path = tmp_path / "raw.csv"
+    pd.DataFrame({"value": [1, 2, 3]}).to_csv(raw_path, index=False)
+    calls: list[str] = []
+
+    def consume(raw: pd.DataFrame) -> None:
+        calls.append("called")
+        assert list(raw["value"]) == [1, 2, 3]
+
+    with tracker.scenario("scen_binding_cache_parity_primitive") as primitive_sc:
+        primitive = primitive_sc.run(
+            fn=consume,
+            name="consume",
+            inputs={"raw": raw_path},
+            execution_options=ExecutionOptions(load_inputs=True),
+        )
+
+    with tracker.scenario("scen_binding_cache_parity_binding") as binding_sc:
+        binding = binding_sc.run(
+            fn=consume,
+            name="consume",
+            binding=consist.BindingResult(inputs={"raw": raw_path}),
+            execution_options=ExecutionOptions(load_inputs=True),
+        )
+
+    assert calls == ["called"]
+    assert primitive.cache_hit is False
+    assert binding.cache_hit is True
+    assert primitive.run.identity_summary["signature"] == binding.run.identity_summary[
+        "signature"
+    ]
+    assert primitive.run.identity_summary["input_hash"] == binding.run.identity_summary[
+        "input_hash"
+    ]
+
+
 @pytest.mark.parametrize(
     ("primitive_kwargs", "expected_fragment"),
     [

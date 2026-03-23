@@ -758,11 +758,29 @@ class ScenarioContext:
         is updated with step metadata and artifacts.
         Use ``execution_options.runtime_kwargs`` for runtime-only inputs and
         `consist.require_runtime_kwargs` to validate required keys.
+        Use ``binding=BindingResult(...)`` when a higher-level orchestrator has
+        already resolved the scenario inputs; `binding` is mutually exclusive
+        with `inputs`, `input_keys`, and `optional_input_keys`.
         Pass policy controls via ``cache_options``, ``output_policy``,
         and ``execution_options``.
 
         ``adapter`` and ``identity_inputs`` are the public identity-related
         kwargs.
+
+        Examples
+        --------
+        ```python
+        sc.run(
+            fn=step,
+            binding=BindingResult(inputs={"raw": raw_path}),
+        )
+
+        sc.run(
+            fn=step,
+            binding=BindingResult(input_keys=["data"]),
+            execution_options=ExecutionOptions(input_binding="paths"),
+        )
+        ```
         """
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
