@@ -3549,18 +3549,26 @@ DuckDB connection open until you close them.</p>
 </span><span id="__span-9-7"><a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a>    <span class="o">...</span>
 </span><span id="__span-9-8"><a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a><span class="p">)</span>
 </span></code></pre></div>
-<p>Or materialize manually:</p>
+<p>Or use the explicit run-scoped recovery API when you need to rebuild a prior
+run's outputs into a new directory or recover from an archive mirror:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
 </span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>
-</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="n">result</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>
-</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="k">if</span> <span class="n">result</span><span class="o">.</span><span class="n">cache_hit</span><span class="p">:</span>
-</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a>    <span class="kn">from</span><span class="w"> </span><span class="nn">consist.core.materialize</span><span class="w"> </span><span class="kn">import</span> <span class="n">materialize_artifacts</span>
-</span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a>    <span class="n">artifacts_to_load</span> <span class="o">=</span> <span class="p">[</span>
-</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a>        <span class="p">(</span><span class="n">artifact</span><span class="p">,</span> <span class="n">Path</span><span class="p">(</span><span class="n">tracker</span><span class="o">.</span><span class="n">run_dir</span><span class="p">)</span> <span class="o">/</span> <span class="s2">&quot;rehydrated&quot;</span> <span class="o">/</span> <span class="n">artifact</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">name</span><span class="p">)</span>
-</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a>        <span class="k">for</span> <span class="n">artifact</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">outputs</span><span class="o">.</span><span class="n">values</span><span class="p">()</span>
-</span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a>    <span class="p">]</span>
-</span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a>    <span class="n">materialize_artifacts</span><span class="p">(</span><span class="n">tracker</span><span class="p">,</span> <span class="n">artifacts_to_load</span><span class="p">)</span>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="n">restored</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">materialize_run_outputs</span><span class="p">(</span>
+</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a>    <span class="s2">&quot;prior_run_id&quot;</span><span class="p">,</span>
+</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a>    <span class="n">target_root</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;rehydrated&quot;</span><span class="p">),</span>
+</span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a>    <span class="n">source_root</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;/archive/outputs_mirror&quot;</span><span class="p">),</span>  <span class="c1"># optional</span>
+</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a><span class="p">)</span>
 </span></code></pre></div>
+<p>This preserves historical relative layout under <code>target_root</code>. If the original
+cold files are missing but the outputs were ingested, Consist can reconstruct
+CSV/Parquet outputs from DuckDB.</p>
+<p>For archive-mirror cache-hit hydration, you can either pass
+<code>cache_options=CacheOptions(materialize_cached_outputs_source_root=Path(...))</code>
+on <code>run(...)</code> / scenario steps, or use the same
+<code>materialize_cached_outputs_source_root=Path(...)</code> override on low-level
+<code>tracker.start_run(...)</code> flows.</p>
+<p><code>tracker.materialize_run_outputs(...)</code> can also restore into a configured mount
+root without enabling <code>allow_external_paths=True</code>.</p>
 <hr />
 <h3 id="same-inputsconfig-but-cache-not-found">"Same inputs/config but cache not found"<a class="headerlink" href="#same-inputsconfig-but-cache-not-found" title="Permanent link">&para;</a></h3>
 <p><strong>Symptom:</strong> Code hasn't changed, inputs haven't changed, but run re-executes instead of hitting cache.</p>

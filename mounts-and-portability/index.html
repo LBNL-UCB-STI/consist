@@ -2728,6 +2728,18 @@ metadata field, which records the absolute run directory at execution time.</p>
 3) Otherwise, treat the URI as an absolute path.</p>
 <p>If a mount is missing or points somewhere else, materialization will warn and skip
 missing files rather than crashing (unless explicitly set to raise).</p>
+<p>For the newer <code>tracker.materialize_run_outputs(...)</code> recovery path, output layout
+resolution is more conservative and history-aware:</p>
+<p>1) <code>workspace://...</code> and <code>./...</code> are re-rooted under the producing run's
+   <code>_physical_run_dir</code>.
+2) mount-backed output URIs such as <code>outputs://...</code> prefer the historical mount
+   snapshot stored in <code>run.meta["mounts"]</code>.
+3) if that snapshot is unavailable, Consist falls back to
+   <code>artifact.meta["mount_root"]</code> when present.
+4) absolute paths and <code>file://...</code> URIs are treated as unmapped rather than
+   being silently reinterpreted.</p>
+<p>This is what allows run-scoped output recovery to preserve historical relative
+layout even when current mounts differ from the machine that produced the run.</p>
 <hr />
 <h2 id="sharing-a-database-across-machines">Sharing a database across machines<a class="headerlink" href="#sharing-a-database-across-machines" title="Permanent link">&para;</a></h2>
 <p>Sharing a DuckDB provenance file across a team is supported, but you must keep
@@ -2769,6 +2781,16 @@ for non-container run policies.</p>
 <li>Use <code>cache_hydration="outputs-requested"</code> for only the outputs you need.</li>
 <li>Use <code>cache_hydration="inputs-missing"</code> to backfill inputs when a run moves
   across machines or directories.</li>
+<li>For archive-mirror cache hydration, use
+  <code>cache_options=CacheOptions(materialize_cached_outputs_source_root=...)</code> on
+  <code>run(...)</code> / scenario steps, or pass
+  <code>materialize_cached_outputs_source_root=...</code> on low-level
+  <code>tracker.start_run(...)</code> / <code>tracker.begin_run(...)</code> workflows.</li>
+<li>Use <code>tracker.materialize_run_outputs(..., source_root=...)</code> when you need to
+  restore historical outputs from an archive mirror into a new root.</li>
+<li><code>tracker.materialize_run_outputs(...)</code> accepts <code>target_root</code> under either the
+  tracker <code>run_dir</code> or a configured mount root. Other destinations still require
+  <code>allow_external_paths=True</code>.</li>
 </ul>
 <hr />
 <h2 id="troubleshooting">Troubleshooting<a class="headerlink" href="#troubleshooting" title="Permanent link">&para;</a></h2>

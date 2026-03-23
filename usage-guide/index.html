@@ -4129,12 +4129,26 @@ If you prefer the same API as `consist.run`, you can use the container executor:
 <p>By default, Consist returns metadata-only cache hits (no file copies). You can opt in to materializing cached files when needed:</p>
 <ul>
 <li><strong><code>outputs-requested</code></strong>: Copy only specific cached outputs to paths you provide</li>
-<li><strong><code>outputs-all</code></strong>: Copy all cached outputs into a target directory</li>
+<li><strong><code>outputs-all</code></strong>: Copy all cached outputs into a target directory while preserving their historical relative layout</li>
 <li><strong><code>inputs-missing</code></strong>: When a cache miss occurs, backfill missing inputs from prior runs before executing</li>
 </ul>
 <p><strong>Note:</strong> <code>outputs-requested</code> requires <code>output_paths=...</code> so Consist knows where to write the files.
 <code>inputs-missing</code> only works for inputs that are tracked artifacts (not raw paths), so Consist can find
 the prior run's files or reconstruct ingested tables.</p>
+<p>When cache-hit output files are gone, <code>outputs-all</code> and the new run-scoped
+output recovery API can reconstruct ingested CSV/Parquet outputs from DuckDB.
+For archive-mirror recovery or debug/export workflows, prefer the explicit
+<code>tracker.materialize_run_outputs(...)</code> API instead of overloading cache
+hydration.</p>
+<p>For archive-mirror recovery, cache hydration supports
+<code>materialize_cached_outputs_source_root=Path(...)</code> for <code>outputs-requested</code> and
+<code>outputs-all</code>. You can pass it through
+<code>cache_options=CacheOptions(materialize_cached_outputs_source_root=...)</code> on
+<code>consist.run(...)</code>, <code>Tracker.run(...)</code>, and scenario steps, or via the low-level
+<code>tracker.start_run(...)</code> / <code>tracker.begin_run(...)</code> APIs directly.</p>
+<p>When you use the explicit <code>tracker.materialize_run_outputs(...)</code> API, <code>target_root</code>
+may be either the tracker <code>run_dir</code> or any configured tracker mount root without
+needing <code>allow_external_paths=True</code>.</p>
 <p>Set per-run via <code>cache_options=CacheOptions(cache_hydration=...)</code> (for <code>run(...)</code>)
 or for scenario defaults via <code>step_cache_hydration=...</code>:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-30-1"><a id="__codelineno-30-1" name="__codelineno-30-1" href="#__codelineno-30-1"></a><span class="k">with</span> <span class="n">use_tracker</span><span class="p">(</span><span class="n">tracker</span><span class="p">):</span>

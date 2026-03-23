@@ -3563,15 +3563,26 @@ preferred pattern for new workflows.</p>
 <p>With <code>cache_hydration="inputs-missing"</code>, Consist detects missing input paths, locates the original run directory from provenance, and copies input bytes into the current <code>run_dir</code> before execution.</p>
 <p>If the original file is missing but the artifact was ingested, Consist reconstructs inputs from DuckDB for CSV and Parquet artifacts only. Other drivers raise a <code>ValueError</code> to avoid silent or lossy conversions.</p>
 <h3 id="optional-cache-hit-materialization">Optional Cache-Hit Materialization<a class="headerlink" href="#optional-cache-hit-materialization" title="Permanent link">&para;</a></h3>
-<p>Consist supports opt-in materialization: copying bytes from a cached artifact's resolved path to a destination you provide. This is copy-only—it does not reconstruct files from DuckDB.</p>
+<p>Consist supports opt-in cache-hit materialization when downstream code needs real
+files on disk.</p>
+<ul>
+<li><code>outputs-requested</code> still writes selected outputs to the explicit paths you
+  provide.</li>
+<li><code>outputs-all</code> now preserves the historical relative layout of the cached
+  outputs under the target directory instead of flattening everything to one
+  level.</li>
+<li>When cold files are missing, cache-hit output recovery can reconstruct
+  ingested CSV/Parquet outputs from DuckDB before failing.</li>
+</ul>
 <p>Enable at run start:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
 </span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>    <span class="s2">&quot;r2&quot;</span><span class="p">,</span>
 </span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;step&quot;</span><span class="p">,</span>
 </span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;outputs-all&quot;</span><span class="p">,</span>
 </span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>    <span class="n">materialize_cached_outputs_dir</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;some/output/dir&quot;</span><span class="p">),</span>
-</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="p">):</span>
-</span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>    <span class="o">...</span>
+</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>    <span class="n">materialize_cached_outputs_source_root</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;/archive/outputs_mirror&quot;</span><span class="p">),</span>  <span class="c1"># optional</span>
+</span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="p">):</span>
+</span><span id="__span-7-8"><a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>    <span class="o">...</span>
 </span></code></pre></div>
 <p>Materialize specific cached outputs by artifact key:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
@@ -3620,7 +3631,28 @@ preferred pattern for new workflows.</p>
 </tr>
 </tbody>
 </table>
-<p><code>outputs-requested</code> logs a warning for missing keys. <code>outputs-all</code> raises <code>FileNotFoundError</code> if any cached output source file is missing.</p>
+<p><code>outputs-requested</code> logs a warning for missing keys. <code>outputs-all</code> first tries
+the historical filesystem path and, for ingested CSV/Parquet outputs, DuckDB
+reconstruction. It raises only when the requested bytes still cannot be
+recovered.</p>
+<p>For archive-mirror recovery or export workflows, use the explicit run-scoped
+API instead of cache hydration:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="n">result</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">materialize_run_outputs</span><span class="p">(</span>
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>    <span class="s2">&quot;prior_run_id&quot;</span><span class="p">,</span>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a>    <span class="n">target_root</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;restored_outputs&quot;</span><span class="p">),</span>
+</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a>    <span class="n">source_root</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;/archive/outputs_mirror&quot;</span><span class="p">),</span>
+</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>Cache hydration exposes an archive-mirror override via
+<code>materialize_cached_outputs_source_root=...</code> for <code>outputs-requested</code> and
+<code>outputs-all</code>. On the recommended path, pass it through
+<code>cache_options=CacheOptions(materialize_cached_outputs_source_root=...)</code> on
+<code>consist.run(...)</code>, <code>Tracker.run(...)</code>, or scenario steps. The same override is
+also available on low-level <code>tracker.start_run(...)</code> /
+<code>tracker.begin_run(...)</code> flows.</p>
+<p>For explicit historical output recovery, <code>tracker.materialize_run_outputs(...)</code>
+accepts <code>target_root</code> under either the tracker <code>run_dir</code> or any configured
+tracker mount root without requiring <code>allow_external_paths=True</code>.</p>
 <h3 id="containers-integration">Containers Integration<a class="headerlink" href="#containers-integration" title="Permanent link">&para;</a></h3>
 <p>The containers API defaults to copying cached outputs to requested host output paths so downstream tooling sees real files. This uses the same copy-based materialization helper as core runs, but containers default to "requested outputs" because the caller explicitly provides host output paths.</p>
 <hr />
@@ -3657,7 +3689,7 @@ preferred pattern for new workflows.</p>
 <td>All outputs local</td>
 <td><code>outputs-all</code></td>
 <td>Cache hits, all outputs</td>
-<td>Requires <code>materialize_cached_outputs_dir</code></td>
+<td>Preserves historical relative layout under <code>materialize_cached_outputs_dir</code></td>
 </tr>
 </tbody>
 </table>
@@ -3721,62 +3753,62 @@ preferred pattern for new workflows.</p>
 </ul>
 <p>For run-level identity debugging (including <code>identity_inputs</code> digests and
 adapter metadata), inspect <code>run.identity_summary</code>:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="n">run</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">get_run</span><span class="p">(</span><span class="s2">&quot;my_run_id&quot;</span><span class="p">)</span>
-</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="nb">print</span><span class="p">(</span><span class="n">run</span><span class="o">.</span><span class="n">identity_summary</span><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="n">run</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">get_run</span><span class="p">(</span><span class="s2">&quot;my_run_id&quot;</span><span class="p">)</span>
+</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="nb">print</span><span class="p">(</span><span class="n">run</span><span class="o">.</span><span class="n">identity_summary</span><span class="p">)</span>
 </span></code></pre></div>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>[cache_timing] signature_prefetch=2.1ms input_hashing=145.8ms cache_lookup=3.4ms validate=0.6ms hydration=0.2ms
+<div class="language-text highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>[cache_timing] signature_prefetch=2.1ms input_hashing=145.8ms cache_lookup=3.4ms validate=0.6ms hydration=0.2ms
 </span></code></pre></div>
 <p>If input hashing dominates, ingest large tabular inputs or pass Consist-produced artifacts instead of raw files.</p>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>[cache_debug] hit=True signature=7e9c1c inputs=3 outputs=2 hydration=metadata
+<div class="language-text highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>[cache_debug] hit=True signature=7e9c1c inputs=3 outputs=2 hydration=metadata
 </span></code></pre></div>
 <p>If downstream tools need files, select an outputs hydration mode. Use <code>validate_cached_outputs="eager"</code> for strict output existence checks.</p>
 <hr />
 <h2 id="pattern-5-shared-input-bundles">Pattern 5: Shared Input Bundles<a class="headerlink" href="#pattern-5-shared-input-bundles" title="Permanent link">&para;</a></h2>
 <p>Package all required inputs in a standalone DuckDB file. Create a "bundle" run that logs inputs as outputs and ingests them. Share the DB file to reproduce inputs without shipping original raw files.</p>
 <h3 id="bundle-creation-producer">Bundle Creation (Producer)<a class="headerlink" href="#bundle-creation-producer" title="Permanent link">&para;</a></h3>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span><span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;bundle_build&quot;</span><span class="p">,</span> <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;inputs.duckdb&quot;</span><span class="p">)</span>
-</span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>
-</span><span id="__span-13-3"><a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;inputs_bundle_v1&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;input_bundle&quot;</span><span class="p">,</span> <span class="n">cache_mode</span><span class="o">=</span><span class="s2">&quot;overwrite&quot;</span><span class="p">):</span>
-</span><span id="__span-13-4"><a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a>    <span class="n">households</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="s2">&quot;households.csv&quot;</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;households&quot;</span><span class="p">,</span> <span class="n">direction</span><span class="o">=</span><span class="s2">&quot;output&quot;</span><span class="p">)</span>
-</span><span id="__span-13-5"><a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a>    <span class="n">persons</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="s2">&quot;persons.csv&quot;</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;persons&quot;</span><span class="p">,</span> <span class="n">direction</span><span class="o">=</span><span class="s2">&quot;output&quot;</span><span class="p">)</span>
-</span><span id="__span-13-6"><a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">ingest</span><span class="p">(</span><span class="n">households</span><span class="p">)</span>
-</span><span id="__span-13-7"><a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">ingest</span><span class="p">(</span><span class="n">persons</span><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span><span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;bundle_build&quot;</span><span class="p">,</span> <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;inputs.duckdb&quot;</span><span class="p">)</span>
+</span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>
+</span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span><span class="s2">&quot;inputs_bundle_v1&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;input_bundle&quot;</span><span class="p">,</span> <span class="n">cache_mode</span><span class="o">=</span><span class="s2">&quot;overwrite&quot;</span><span class="p">):</span>
+</span><span id="__span-14-4"><a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a>    <span class="n">households</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="s2">&quot;households.csv&quot;</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;households&quot;</span><span class="p">,</span> <span class="n">direction</span><span class="o">=</span><span class="s2">&quot;output&quot;</span><span class="p">)</span>
+</span><span id="__span-14-5"><a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a>    <span class="n">persons</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">log_artifact</span><span class="p">(</span><span class="s2">&quot;persons.csv&quot;</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="s2">&quot;persons&quot;</span><span class="p">,</span> <span class="n">direction</span><span class="o">=</span><span class="s2">&quot;output&quot;</span><span class="p">)</span>
+</span><span id="__span-14-6"><a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">ingest</span><span class="p">(</span><span class="n">households</span><span class="p">)</span>
+</span><span id="__span-14-7"><a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a>    <span class="n">tracker</span><span class="o">.</span><span class="n">ingest</span><span class="p">(</span><span class="n">persons</span><span class="p">)</span>
 </span></code></pre></div>
 <p>Run the bundle creation code once. Share <code>inputs.duckdb</code> with collaborators—they do not need the original CSV files.</p>
 <h3 id="bundle-consumption-consumer">Bundle Consumption (Consumer)<a class="headerlink" href="#bundle-consumption-consumer" title="Permanent link">&para;</a></h3>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span><span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;runs&quot;</span><span class="p">,</span> <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;inputs.duckdb&quot;</span><span class="p">)</span>
-</span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>
-</span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a><span class="n">bundle_outputs</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">load_input_bundle</span><span class="p">(</span><span class="s2">&quot;inputs_bundle_v1&quot;</span><span class="p">)</span>
-</span><span id="__span-14-4"><a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a><span class="n">inputs</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">bundle_outputs</span><span class="o">.</span><span class="n">values</span><span class="p">())</span>
-</span><span id="__span-14-5"><a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a>
-</span><span id="__span-14-6"><a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
-</span><span id="__span-14-7"><a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a>    <span class="s2">&quot;simulate&quot;</span><span class="p">,</span>
-</span><span id="__span-14-8"><a id="__codelineno-14-8" name="__codelineno-14-8" href="#__codelineno-14-8"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;simulate&quot;</span><span class="p">,</span>
-</span><span id="__span-14-9"><a id="__codelineno-14-9" name="__codelineno-14-9" href="#__codelineno-14-9"></a>    <span class="n">inputs</span><span class="o">=</span><span class="n">inputs</span><span class="p">,</span>
-</span><span id="__span-14-10"><a id="__codelineno-14-10" name="__codelineno-14-10" href="#__codelineno-14-10"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;inputs-missing&quot;</span><span class="p">,</span>
-</span><span id="__span-14-11"><a id="__codelineno-14-11" name="__codelineno-14-11" href="#__codelineno-14-11"></a><span class="p">):</span>
-</span><span id="__span-14-12"><a id="__codelineno-14-12" name="__codelineno-14-12" href="#__codelineno-14-12"></a>    <span class="o">...</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">Tracker</span><span class="p">(</span><span class="n">run_dir</span><span class="o">=</span><span class="s2">&quot;runs&quot;</span><span class="p">,</span> <span class="n">db_path</span><span class="o">=</span><span class="s2">&quot;inputs.duckdb&quot;</span><span class="p">)</span>
+</span><span id="__span-15-2"><a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>
+</span><span id="__span-15-3"><a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a><span class="n">bundle_outputs</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">load_input_bundle</span><span class="p">(</span><span class="s2">&quot;inputs_bundle_v1&quot;</span><span class="p">)</span>
+</span><span id="__span-15-4"><a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a><span class="n">inputs</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">bundle_outputs</span><span class="o">.</span><span class="n">values</span><span class="p">())</span>
+</span><span id="__span-15-5"><a id="__codelineno-15-5" name="__codelineno-15-5" href="#__codelineno-15-5"></a>
+</span><span id="__span-15-6"><a id="__codelineno-15-6" name="__codelineno-15-6" href="#__codelineno-15-6"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
+</span><span id="__span-15-7"><a id="__codelineno-15-7" name="__codelineno-15-7" href="#__codelineno-15-7"></a>    <span class="s2">&quot;simulate&quot;</span><span class="p">,</span>
+</span><span id="__span-15-8"><a id="__codelineno-15-8" name="__codelineno-15-8" href="#__codelineno-15-8"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;simulate&quot;</span><span class="p">,</span>
+</span><span id="__span-15-9"><a id="__codelineno-15-9" name="__codelineno-15-9" href="#__codelineno-15-9"></a>    <span class="n">inputs</span><span class="o">=</span><span class="n">inputs</span><span class="p">,</span>
+</span><span id="__span-15-10"><a id="__codelineno-15-10" name="__codelineno-15-10" href="#__codelineno-15-10"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;inputs-missing&quot;</span><span class="p">,</span>
+</span><span id="__span-15-11"><a id="__codelineno-15-11" name="__codelineno-15-11" href="#__codelineno-15-11"></a><span class="p">):</span>
+</span><span id="__span-15-12"><a id="__codelineno-15-12" name="__codelineno-15-12" href="#__codelineno-15-12"></a>    <span class="o">...</span>
 </span></code></pre></div>
 <p>The bundle is identified by <code>run_id</code> only—no hard-coded hashes. With <code>cache_hydration="inputs-missing"</code>, Consist reconstructs CSV/Parquet inputs from the shared DuckDB file if original bytes are missing.</p>
 <h3 id="multi-model-workflows">Multi-Model Workflows<a class="headerlink" href="#multi-model-workflows" title="Permanent link">&para;</a></h3>
 <p>Bundles contain inputs for multiple downstream steps. Each run selects the inputs it needs:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="n">bundle_outputs</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">load_input_bundle</span><span class="p">(</span><span class="s2">&quot;inputs_bundle_v1&quot;</span><span class="p">)</span>
-</span><span id="__span-15-2"><a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>
-</span><span id="__span-15-3"><a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
-</span><span id="__span-15-4"><a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a>    <span class="s2">&quot;model_a&quot;</span><span class="p">,</span>
-</span><span id="__span-15-5"><a id="__codelineno-15-5" name="__codelineno-15-5" href="#__codelineno-15-5"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;model_a&quot;</span><span class="p">,</span>
-</span><span id="__span-15-6"><a id="__codelineno-15-6" name="__codelineno-15-6" href="#__codelineno-15-6"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">[</span><span class="n">bundle_outputs</span><span class="p">[</span><span class="s2">&quot;input_a&quot;</span><span class="p">]],</span>
-</span><span id="__span-15-7"><a id="__codelineno-15-7" name="__codelineno-15-7" href="#__codelineno-15-7"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;inputs-missing&quot;</span><span class="p">,</span>
-</span><span id="__span-15-8"><a id="__codelineno-15-8" name="__codelineno-15-8" href="#__codelineno-15-8"></a><span class="p">):</span>
-</span><span id="__span-15-9"><a id="__codelineno-15-9" name="__codelineno-15-9" href="#__codelineno-15-9"></a>    <span class="o">...</span>
-</span><span id="__span-15-10"><a id="__codelineno-15-10" name="__codelineno-15-10" href="#__codelineno-15-10"></a>
-</span><span id="__span-15-11"><a id="__codelineno-15-11" name="__codelineno-15-11" href="#__codelineno-15-11"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
-</span><span id="__span-15-12"><a id="__codelineno-15-12" name="__codelineno-15-12" href="#__codelineno-15-12"></a>    <span class="s2">&quot;model_b&quot;</span><span class="p">,</span>
-</span><span id="__span-15-13"><a id="__codelineno-15-13" name="__codelineno-15-13" href="#__codelineno-15-13"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;model_b&quot;</span><span class="p">,</span>
-</span><span id="__span-15-14"><a id="__codelineno-15-14" name="__codelineno-15-14" href="#__codelineno-15-14"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">[</span><span class="n">bundle_outputs</span><span class="p">[</span><span class="s2">&quot;input_b&quot;</span><span class="p">]],</span>
-</span><span id="__span-15-15"><a id="__codelineno-15-15" name="__codelineno-15-15" href="#__codelineno-15-15"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;inputs-missing&quot;</span><span class="p">,</span>
-</span><span id="__span-15-16"><a id="__codelineno-15-16" name="__codelineno-15-16" href="#__codelineno-15-16"></a><span class="p">):</span>
-</span><span id="__span-15-17"><a id="__codelineno-15-17" name="__codelineno-15-17" href="#__codelineno-15-17"></a>    <span class="o">...</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-16-1"><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="n">bundle_outputs</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">load_input_bundle</span><span class="p">(</span><span class="s2">&quot;inputs_bundle_v1&quot;</span><span class="p">)</span>
+</span><span id="__span-16-2"><a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>
+</span><span id="__span-16-3"><a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
+</span><span id="__span-16-4"><a id="__codelineno-16-4" name="__codelineno-16-4" href="#__codelineno-16-4"></a>    <span class="s2">&quot;model_a&quot;</span><span class="p">,</span>
+</span><span id="__span-16-5"><a id="__codelineno-16-5" name="__codelineno-16-5" href="#__codelineno-16-5"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;model_a&quot;</span><span class="p">,</span>
+</span><span id="__span-16-6"><a id="__codelineno-16-6" name="__codelineno-16-6" href="#__codelineno-16-6"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">[</span><span class="n">bundle_outputs</span><span class="p">[</span><span class="s2">&quot;input_a&quot;</span><span class="p">]],</span>
+</span><span id="__span-16-7"><a id="__codelineno-16-7" name="__codelineno-16-7" href="#__codelineno-16-7"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;inputs-missing&quot;</span><span class="p">,</span>
+</span><span id="__span-16-8"><a id="__codelineno-16-8" name="__codelineno-16-8" href="#__codelineno-16-8"></a><span class="p">):</span>
+</span><span id="__span-16-9"><a id="__codelineno-16-9" name="__codelineno-16-9" href="#__codelineno-16-9"></a>    <span class="o">...</span>
+</span><span id="__span-16-10"><a id="__codelineno-16-10" name="__codelineno-16-10" href="#__codelineno-16-10"></a>
+</span><span id="__span-16-11"><a id="__codelineno-16-11" name="__codelineno-16-11" href="#__codelineno-16-11"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">start_run</span><span class="p">(</span>
+</span><span id="__span-16-12"><a id="__codelineno-16-12" name="__codelineno-16-12" href="#__codelineno-16-12"></a>    <span class="s2">&quot;model_b&quot;</span><span class="p">,</span>
+</span><span id="__span-16-13"><a id="__codelineno-16-13" name="__codelineno-16-13" href="#__codelineno-16-13"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;model_b&quot;</span><span class="p">,</span>
+</span><span id="__span-16-14"><a id="__codelineno-16-14" name="__codelineno-16-14" href="#__codelineno-16-14"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">[</span><span class="n">bundle_outputs</span><span class="p">[</span><span class="s2">&quot;input_b&quot;</span><span class="p">]],</span>
+</span><span id="__span-16-15"><a id="__codelineno-16-15" name="__codelineno-16-15" href="#__codelineno-16-15"></a>    <span class="n">cache_hydration</span><span class="o">=</span><span class="s2">&quot;inputs-missing&quot;</span><span class="p">,</span>
+</span><span id="__span-16-16"><a id="__codelineno-16-16" name="__codelineno-16-16" href="#__codelineno-16-16"></a><span class="p">):</span>
+</span><span id="__span-16-17"><a id="__codelineno-16-17" name="__codelineno-16-17" href="#__codelineno-16-17"></a>    <span class="o">...</span>
 </span></code></pre></div>
 
 
