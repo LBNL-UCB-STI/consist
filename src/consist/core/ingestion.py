@@ -3,6 +3,7 @@ from typing import Any, Iterable, Optional, TYPE_CHECKING, Union
 
 from sqlmodel import SQLModel
 
+from consist.core.stores import dispose_hot_data_engine, get_hot_data_db_path
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 
@@ -125,21 +126,21 @@ def ingest_artifact(
     RuntimeError
         If no database is configured.
     """
-    if tracker.db_path is None:
+    hot_data_db_path = get_hot_data_db_path(tracker)
+    if hot_data_db_path is None:
         raise RuntimeError("Cannot ingest: db_path is not configured.")
 
     target_run = resolve_ingest_run(tracker=tracker, artifact=artifact, run=run)
     data_to_pass = resolve_ingest_data(tracker=tracker, artifact=artifact, data=data)
 
-    if tracker.engine:
-        tracker.engine.dispose()
+    dispose_hot_data_engine(tracker)
 
     from consist.integrations.dlt_loader import ingest_artifact as ingest_with_dlt
 
     info, resource_name = ingest_with_dlt(
         artifact=artifact,
         run_context=target_run,
-        db_path=tracker.db_path,
+        db_path=hot_data_db_path,
         data_iterable=data_to_pass,
         schema_model=schema,
         lock_retries=tracker._dlt_lock_retries,

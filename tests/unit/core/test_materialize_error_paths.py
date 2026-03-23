@@ -1,6 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -186,3 +187,58 @@ def test_materialize_ingested_artifact_from_db_rejects_invalid_or_empty_table_na
             tracker=tracker,
             destination=tmp_path / "reconstructed.csv",
         )
+
+
+def test_materialize_ingested_artifact_from_db_uses_hot_data_store_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = Artifact(
+        key="ingested_csv",
+        container_uri="./ingested_csv.csv",
+        driver="csv",
+        meta={"is_ingested": True},
+    )
+    hot_engine = object()
+    tracker = SimpleNamespace(
+        engine=None,
+        hot_data_store=SimpleNamespace(engine=hot_engine),
+    )
+
+    class _Column:
+        def __eq__(self, _other):
+            return True
+
+    class _Columns(dict):
+        def __getattr__(self, name: str):
+            return self[name]
+
+    reflected_table = SimpleNamespace(
+        c=_Columns(consist_artifact_id=_Column()),
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_table(*_args, **kwargs):
+        captured["autoload_with"] = kwargs.get("autoload_with")
+        return reflected_table
+
+    class _Statement:
+        def where(self, *_args, **_kwargs):
+            return self
+
+    monkeypatch.setattr("consist.core.materialize.Table", _fake_table)
+    monkeypatch.setattr("consist.core.materialize.select", lambda _table: _Statement())
+    monkeypatch.setattr(
+        "consist.core.materialize.pd.read_sql",
+        lambda *_args, **_kwargs: pd.DataFrame({"value": [1]}),
+    )
+
+    output = tmp_path / "reconstructed.csv"
+    result = materialize_ingested_artifact_from_db(
+        artifact=artifact,
+        tracker=tracker,
+        destination=output,
+    )
+
+    assert captured["autoload_with"] is hot_engine
+    assert Path(result).resolve() == output.resolve()

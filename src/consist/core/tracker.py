@@ -84,6 +84,7 @@ from consist.core.error_messages import format_problem_cause_fix
 from consist.core.spatial_views import SpatialMetadataView
 from consist.core.queries import RunQueryService
 from consist.core.settings import ConsistSettings
+from consist.core.stores import HotDataStore, MetadataStore
 from consist.core.workflow import OutputCapture, ScenarioContext
 from consist.models.artifact import Artifact, set_tracker_ref
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
@@ -174,8 +175,12 @@ class Tracker:
 
     2.  Logging "Artifacts" (input files, output data, etc.) and their relationships to runs.
 
-    3.  Implementing a **dual-write mechanism**, logging provenance to both human-readable JSON files (`consist.json`)
-        and an analytical DuckDB database (`provenance.duckdb`).
+    3.  Implementing a **dual-write mechanism**, logging provenance to both
+        human-readable JSON files (`consist.json`) and a DuckDB-backed store.
+        In this refactor phase, one configured ``db_path`` still points to a
+        single local DuckDB file used by both internal stores:
+        ``metadata_store`` (runs/artifacts/lineage metadata) and
+        ``hot_data_store`` (`global_tables.*` ingest/load surfaces).
 
     4.  Providing **path virtualization** to make runs portable across different environments,
         as described in the "Path Resolution & Mounts" architectural section.
@@ -226,8 +231,9 @@ class Tracker:
             The root directory for all workflow outputs. Consist will manage
             run-specific subdirectories and JSON provenance logs under this path.
         db_path : Optional[str | os.PathLike[str]], default None
-            Filesystem path to the DuckDB provenance database. If provided, enables
-            SQL-native analysis and high-performance cache lookups.
+            Filesystem path to the backing DuckDB file. In this refactor phase,
+            this single path configures both metadata persistence and hot-data
+            ingestion/query storage in single-store mode.
         mounts : Optional[Dict[str, str]], default None
             A mapping of URI schemes (e.g., 'inputs://') to absolute filesystem roots.
             This facilitates environment-independent path resolution and portability.
@@ -275,7 +281,12 @@ class Tracker:
             allow_external_paths = _env_bool("CONSIST_ALLOW_EXTERNAL_PATHS", False)
         self.allow_external_paths = bool(allow_external_paths)
 
-        self.db_path = os.fspath(db_path) if db_path is not None else None
+        configured_db_path = os.fspath(db_path) if db_path is not None else None
+        self.metadata_store: MetadataStore | None = None
+        self.hot_data_store: HotDataStore | None = None
+        self._compat_db: DatabaseManager | None = None
+        self._compat_db_path: str | None = configured_db_path
+
         self.identity = IdentityManager(
             project_root=project_root, hashing_strategy=hashing_strategy
         )
@@ -287,19 +298,27 @@ class Tracker:
         self._db_lock_base_sleep_seconds = self.settings.db_lock_base_sleep_seconds
         self._db_lock_max_sleep_seconds = self.settings.db_lock_max_sleep_seconds
 
-        self.db = None
-        if self.db_path:
-            self.db = DatabaseManager(
-                self.db_path,
+        if configured_db_path:
+            metadata_db = DatabaseManager(
+                configured_db_path,
                 lock_retries=self._db_lock_retries,
                 lock_base_sleep_seconds=self._db_lock_base_sleep_seconds,
                 lock_max_sleep_seconds=self._db_lock_max_sleep_seconds,
             )
+            self.metadata_store = MetadataStore(db=metadata_db)
+            self.hot_data_store = HotDataStore(
+                db_path=configured_db_path,
+                metadata_store=self.metadata_store,
+            )
+
         self.persistence = ProvenanceWriter(self)
 
+        metadata_db = self.metadata_store.db if self.metadata_store else None
         self.artifacts = ArtifactManager(self)
-        self.config_facets = ConfigFacetManager(db=self.db, identity=self.identity)
-        self.artifact_facets = ArtifactFacetManager(db=self.db, identity=self.identity)
+        self.config_facets = ConfigFacetManager(db=metadata_db, identity=self.identity)
+        self.artifact_facets = ArtifactFacetManager(
+            db=metadata_db, identity=self.identity
+        )
         self.artifact_schemas = ArtifactSchemaManager(self)
         self.queries = RunQueryService(self)
         self.lineage = LineageService(self)
@@ -323,7 +342,7 @@ class Tracker:
         # tracker was initialized with schemas=[MyDataSchema, ...].
         self._registered_schemas: Dict[str, Type[SQLModel]] = {}
         if schemas:
-            if not self.db:
+            if not self.metadata_store:
                 logging.warning(
                     "[Consist] Schemas provided but no database configured. Views will not be created."
                 )
@@ -363,7 +382,7 @@ class Tracker:
             project_root_path = Path(project_root) if project_root else Path.cwd()
             namespace = openlineage_namespace or project_root_path.resolve().name
             schema_resolver = None
-            db = self.db
+            db = metadata_db
             if db is not None:
 
                 def schema_resolver(
@@ -399,19 +418,89 @@ class Tracker:
             self._lifecycle = None
 
     @property
+    def db(self) -> DatabaseManager | None:
+        """
+        Compatibility accessor for the metadata ``DatabaseManager``.
+
+        New code should prefer ``tracker.metadata_store``.
+        """
+        metadata_store = getattr(self, "metadata_store", None)
+        if metadata_store is not None:
+            return metadata_store.db
+        return getattr(self, "_compat_db", None)
+
+    @db.setter
+    def db(self, value: DatabaseManager | None) -> None:
+        metadata_store = getattr(self, "metadata_store", None)
+        if metadata_store is not None:
+            if value is metadata_store.db:
+                return
+            raise AttributeError(
+                "tracker.db is a compatibility accessor in single-store mode and "
+                "cannot be reassigned independently of metadata_store."
+            )
+        self._compat_db = value
+
+    @property
+    def db_path(self) -> str | None:
+        """
+        Compatibility accessor for the configured backing DuckDB path.
+
+        New code should prefer ``tracker.hot_data_store.db_path`` or
+        ``tracker.metadata_store.db_path``.
+        """
+        hot_store = getattr(self, "hot_data_store", None)
+        if hot_store is not None:
+            return hot_store.db_path
+        metadata_store = getattr(self, "metadata_store", None)
+        if metadata_store is not None:
+            return metadata_store.db_path
+        return getattr(self, "_compat_db_path", None)
+
+    @db_path.setter
+    def db_path(self, value: str | os.PathLike[str] | None) -> None:
+        normalized = os.fspath(value) if value is not None else None
+        hot_store = getattr(self, "hot_data_store", None)
+        metadata_store = getattr(self, "metadata_store", None)
+
+        active_path = None
+        if hot_store is not None:
+            active_path = hot_store.db_path
+        elif metadata_store is not None:
+            active_path = metadata_store.db_path
+
+        if active_path is not None:
+            if normalized == active_path:
+                return
+            raise AttributeError(
+                "tracker.db_path is a compatibility accessor in single-store mode "
+                "and cannot be reassigned independently of the stores."
+            )
+        self._compat_db_path = normalized
+
+    @property
     def engine(self):
         """
         Return the SQLAlchemy engine used by this tracker.
 
-        Use this for advanced, low-level database access when the higher-level
-        tracker/query helpers are insufficient.
+        This is a single-store compatibility alias. New code should prefer
+        explicit ``metadata_store`` / ``hot_data_store`` ownership boundaries.
 
         Returns
         -------
         Optional[Engine]
             The SQLAlchemy engine if a database is configured, otherwise ``None``.
         """
-        return self.db.engine if self.db else None
+        hot_store = getattr(self, "hot_data_store", None)
+        if hot_store is not None:
+            return hot_store.engine
+        metadata_store = getattr(self, "metadata_store", None)
+        if metadata_store is not None:
+            return metadata_store.engine
+        db = getattr(self, "db", None)
+        if db is None:
+            return None
+        return db.engine
 
     @property
     def registered_schemas(self) -> Mapping[str, Type[SQLModel]]:
@@ -1827,7 +1916,7 @@ class Tracker:
 
     def run_query(self, query: Executable) -> list:
         """
-        Execute a SQLModel/SQLAlchemy query via the tracker engine.
+        Execute a SQLModel/SQLAlchemy query via the metadata store.
 
         Parameters
         ----------
@@ -1844,9 +1933,10 @@ class Tracker:
         RuntimeError
             If no database is configured for this tracker.
         """
-        if not self.engine:
+        metadata_store = self.metadata_store
+        if metadata_store is None:
             raise RuntimeError("Database connection required.")
-        with Session(self.engine) as session:
+        with Session(metadata_store.engine) as session:
             return session.exec(cast(Any, query)).all()
 
     def find_latest_run(
@@ -3322,6 +3412,11 @@ class Tracker:
         return artifacts_by_key
 
     def _ingest_cache_hit(self, table_name: str, content_hash: str) -> bool:
+        store = getattr(self, "hot_data_store", None)
+        if store is not None:
+            return store.ingest_cache_hit(table_name, content_hash)
+
+        # Compatibility fallback for legacy/partial tracker stubs.
         if self.engine is None:
             return False
         if not _is_safe_identifier(table_name):

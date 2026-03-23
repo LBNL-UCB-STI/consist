@@ -19,6 +19,8 @@ from consist.models.run import Run
 from consist.core.identity import IdentityManager
 
 if TYPE_CHECKING:
+    from sqlalchemy.engine import Engine
+    from consist.core.persistence import DatabaseManager
     from consist.core.tracker import Tracker
     from sqlmodel import SQLModel
 
@@ -57,6 +59,24 @@ class ArtifactSchemaManager:
 
     def __init__(self, tracker: Tracker):
         self.tracker = tracker
+
+    def _metadata_db(self) -> DatabaseManager | None:
+        metadata_store = getattr(self.tracker, "metadata_store", None)
+        if metadata_store is not None:
+            store_db = getattr(metadata_store, "db", None)
+            if store_db is not None:
+                return cast("DatabaseManager", store_db)
+        # Compatibility alias for single-store mode while migration is in progress.
+        return cast("DatabaseManager | None", getattr(self.tracker, "db", None))
+
+    def _hot_engine(self) -> Engine | None:
+        hot_data_store = getattr(self.tracker, "hot_data_store", None)
+        if hot_data_store is not None:
+            store_engine = getattr(hot_data_store, "engine", None)
+            if store_engine is not None:
+                return cast("Engine", store_engine)
+        # Compatibility alias for single-store mode while migration is in progress.
+        return cast("Engine | None", getattr(self.tracker, "engine", None))
 
     def _type_annotation_to_logical_type(self, annotation: Any) -> str:
         """
@@ -166,7 +186,8 @@ class ArtifactSchemaManager:
           are not extracted; the persisted schema uses field names only. If you need
           actual database column names, pass the schema explicitly to ingest().
         """
-        if not self.tracker.db or not self.tracker.engine:
+        metadata_db = self._metadata_db()
+        if metadata_db is None:
             return
 
         try:
@@ -332,14 +353,14 @@ class ArtifactSchemaManager:
             ]
 
             # 4. Persist schema and fields to database
-            self.tracker.db.upsert_artifact_schema(
+            metadata_db.upsert_artifact_schema(
                 schema_row, field_rows_with_schema_id, relation_rows
             )
 
             # 5. Record an observation linking this artifact to the schema
             # This is how we track that multiple sources (file, duckdb, user_provided)
             # have observed/defined schemas for the same artifact
-            self.tracker.db.insert_artifact_schema_observation(
+            metadata_db.insert_artifact_schema_observation(
                 ArtifactSchemaObservation(
                     artifact_id=artifact.id,
                     schema_id=schema_id,
@@ -365,7 +386,7 @@ class ArtifactSchemaManager:
                     "profile_version": 1,
                 },
             }
-            self.tracker.db.update_artifact_meta(artifact, meta_updates)
+            metadata_db.update_artifact_meta(artifact, meta_updates)
 
             logging.info(
                 "[Consist] Stored user-provided schema for artifact=%s (schema_id=%s, source=%s)",
@@ -398,7 +419,9 @@ class ArtifactSchemaManager:
         This is intended to capture the post-ingest schema (after dlt normalization),
         rather than file-side dtypes.
         """
-        if not self.tracker.db or not self.tracker.engine:
+        metadata_db = self._metadata_db()
+        hot_engine = self._hot_engine()
+        if metadata_db is None or hot_engine is None:
             return
 
         try:
@@ -410,7 +433,7 @@ class ArtifactSchemaManager:
             from consist.tools.schema_profile import profile_duckdb_table
 
             result = profile_duckdb_table(
-                engine=self.tracker.engine,
+                engine=hot_engine,
                 identity=self.tracker.identity,
                 table_schema=table_schema,
                 table_name=table_name,
@@ -447,8 +470,8 @@ class ArtifactSchemaManager:
                 for f in result.fields
             ]
 
-            self.tracker.db.upsert_artifact_schema(schema_row, field_rows, [])
-            self.tracker.db.insert_artifact_schema_observation(
+            metadata_db.upsert_artifact_schema(schema_row, field_rows, [])
+            metadata_db.insert_artifact_schema_observation(
                 ArtifactSchemaObservation(
                     artifact_id=artifact.id,
                     schema_id=result.schema_id,
@@ -465,7 +488,7 @@ class ArtifactSchemaManager:
             if result.inline_profile_json is not None:
                 meta_updates["schema_profile"] = result.inline_profile_json
 
-            self.tracker.db.update_artifact_meta(artifact, meta_updates)
+            metadata_db.update_artifact_meta(artifact, meta_updates)
 
         except Exception as e:
             logging.warning(
@@ -517,7 +540,8 @@ class ArtifactSchemaManager:
         -------
         None
         """
-        if not self.tracker.db:
+        metadata_db = self._metadata_db()
+        if metadata_db is None:
             return
 
         try:
@@ -561,26 +585,26 @@ class ArtifactSchemaManager:
                     )
                     return
 
-            if reuse_if_unchanged and self.tracker.db:
+            if reuse_if_unchanged:
                 prior_obs = None
                 # Prefer content identity when available, but still fall back to
                 # hash-based lookup when the matching schema observation lives on a
                 # legacy row that has not been backfilled with content_id yet.
                 if getattr(artifact, "content_id", None) is not None:
-                    prior_obs = self.tracker.db.find_schema_observation_for_content_id(
+                    prior_obs = metadata_db.find_schema_observation_for_content_id(
                         cast(UUID, artifact.content_id)
                     )
                 if prior_obs is None and getattr(artifact, "hash", None):
-                    prior_obs = self.tracker.db.find_schema_observation_for_hash(
+                    prior_obs = metadata_db.find_schema_observation_for_hash(
                         cast(str, artifact.hash)
                     )
                 if prior_obs is not None:
-                    schema_bundle = self.tracker.db.get_artifact_schema(
+                    schema_bundle = metadata_db.get_artifact_schema(
                         schema_id=prior_obs.schema_id, backfill_ordinals=False
                     )
                     if schema_bundle is not None:
                         schema_row, _fields = schema_bundle
-                        self.tracker.db.insert_artifact_schema_observation(
+                        metadata_db.insert_artifact_schema_observation(
                             ArtifactSchemaObservation(
                                 artifact_id=artifact.id,
                                 schema_id=schema_row.id,
@@ -595,7 +619,7 @@ class ArtifactSchemaManager:
                         }
                         if _is_inline_profile(schema_row.profile_json):
                             meta_updates["schema_profile"] = schema_row.profile_json
-                        self.tracker.db.update_artifact_meta(artifact, meta_updates)
+                        metadata_db.update_artifact_meta(artifact, meta_updates)
                         return
 
             result = profile_file_schema(
@@ -642,8 +666,8 @@ class ArtifactSchemaManager:
                 for f in result.fields
             ]
 
-            self.tracker.db.upsert_artifact_schema(schema_row, field_rows, [])
-            self.tracker.db.insert_artifact_schema_observation(
+            metadata_db.upsert_artifact_schema(schema_row, field_rows, [])
+            metadata_db.insert_artifact_schema_observation(
                 ArtifactSchemaObservation(
                     artifact_id=artifact.id,
                     schema_id=result.schema_id,
@@ -660,7 +684,7 @@ class ArtifactSchemaManager:
             if result.inline_profile_json is not None:
                 meta_updates["schema_profile"] = result.inline_profile_json
 
-            self.tracker.db.update_artifact_meta(artifact, meta_updates)
+            metadata_db.update_artifact_meta(artifact, meta_updates)
 
         except Exception as e:
             logging.warning(

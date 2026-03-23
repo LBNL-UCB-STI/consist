@@ -139,6 +139,10 @@ class OpenMatrixMetadataView:
         RuntimeError
             If the Tracker instance does not have a configured database connection.
         """
+        # TODO(metadata-hot-store): This metadata query currently relies on the
+        # single-store compatibility engine because it joins metadata tables and
+        # `global_tables.*` in one query. Leave it deferred until cross-store
+        # query surfaces are redesigned intentionally.
         if not self.tracker.engine:
             raise RuntimeError("Database connection required.")
         base_table = _qualified_table("global_tables", concept_key)

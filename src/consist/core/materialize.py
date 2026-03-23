@@ -12,6 +12,7 @@ import pandas as pd
 from sqlalchemy import MetaData, Table, select
 from sqlalchemy.exc import SQLAlchemyError
 
+from consist.core.stores import get_hot_data_engine
 from consist.models.artifact import Artifact
 
 if TYPE_CHECKING:
@@ -790,7 +791,8 @@ def materialize_ingested_artifact_from_db(
         If the artifact is not marked as ingested or uses an unsupported
         materialization driver.
     """
-    if not tracker or not tracker.engine:
+    hot_data_engine = get_hot_data_engine(tracker)
+    if not tracker or hot_data_engine is None:
         raise RuntimeError(
             "Cannot materialize ingested artifact: tracker has no DB engine."
         )
@@ -817,7 +819,7 @@ def materialize_ingested_artifact_from_db(
             table_name,
             metadata,
             schema="global_tables",
-            autoload_with=tracker.engine,
+            autoload_with=hot_data_engine,
         )
     except SQLAlchemyError as e:
         raise RuntimeError(
@@ -830,7 +832,7 @@ def materialize_ingested_artifact_from_db(
         )
 
     stmt = select(table).where(table.c.consist_artifact_id == str(artifact.id))
-    df = pd.read_sql(stmt, tracker.engine)
+    df = pd.read_sql(stmt, hot_data_engine)
     if df.empty:
         raise FileNotFoundError(
             f"No ingested rows found for artifact {artifact.key!r} ({artifact.id})."

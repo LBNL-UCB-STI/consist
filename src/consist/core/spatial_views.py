@@ -57,6 +57,10 @@ class SpatialMetadataView:
         year : Optional[int], optional
             Optional year filter.
         """
+        # TODO(metadata-hot-store): This metadata query still depends on the
+        # single-store compatibility engine because it joins metadata tables and
+        # `global_tables.*` in one query. Keep it deferred until cross-store
+        # query surfaces are redesigned intentionally.
         if not self.tracker.engine:
             raise RuntimeError("Database connection required.")
         _validate_concept_key(concept_key)

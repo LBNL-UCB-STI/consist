@@ -562,6 +562,10 @@ class ViewFactory:
             If the `Tracker`'s database engine is not configured (i.e., `db_path` was not
             provided during `Tracker` initialization).
         """
+        # TODO(metadata-hot-store): This hybrid-view surface still assumes the
+        # metadata tables and `global_tables.*` are reachable through one engine.
+        # Keep it on the compatibility alias in single-store mode until the
+        # deferred cross-store query redesign is intentionally tackled.
         if not self.tracker.engine:
             raise RuntimeError("Cannot create views: No database engine configured.")
 
