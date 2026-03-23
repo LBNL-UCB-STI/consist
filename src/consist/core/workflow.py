@@ -758,9 +758,12 @@ class ScenarioContext:
         is updated with step metadata and artifacts.
         Use ``execution_options.runtime_kwargs`` for runtime-only inputs and
         `consist.require_runtime_kwargs` to validate required keys.
-        Use ``binding=BindingResult(...)`` when a higher-level orchestrator has
-        already resolved the scenario inputs; `binding` is mutually exclusive
-        with `inputs`, `input_keys`, and `optional_input_keys`.
+        For direct workflow code, prefer primitive `inputs=` kwargs and, when
+        needed, the direct `input_keys=` / `optional_input_keys=` compatibility
+        surfaces. For complex or externally orchestrated workflows that already
+        resolved the binding plan, pass ``binding=BindingResult(...)`` instead;
+        `binding` is an execution envelope and is mutually exclusive with the
+        primitive input kwargs.
         Pass policy controls via ``cache_options``, ``output_policy``,
         and ``execution_options``.
 
@@ -769,18 +772,38 @@ class ScenarioContext:
 
         Examples
         --------
+        Direct workflow code:
+
         ```python
         sc.run(
             fn=step,
-            binding=BindingResult(inputs={"raw": raw_path}),
+            inputs={"raw": raw_path},
+            execution_options=ExecutionOptions(input_binding="paths"),
         )
 
         sc.run(
             fn=step,
-            binding=BindingResult(input_keys=["data"]),
+            inputs={"raw": consist.ref(previous_result, key="raw")},
+            execution_options=ExecutionOptions(input_binding="loaded"),
+        )
+        ```
+
+        Orchestrator-facing execution envelope:
+
+        ```python
+        sc.run(
+            fn=step,
+            binding=BindingResult(
+                inputs={"raw": raw_path},
+                input_keys=["data"],
+                optional_input_keys=["maybe"],
+            ),
             execution_options=ExecutionOptions(input_binding="paths"),
         )
         ```
+
+        `binding` cannot be combined with primitive `inputs`, `input_keys`, or
+        `optional_input_keys`.
         """
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")

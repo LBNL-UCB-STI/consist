@@ -125,9 +125,7 @@ def test_scenario_run_accepts_binding_result(tracker, tmp_path):
     assert result.cache_hit is False
 
 
-def test_scenario_run_binding_result_supports_path_binding(
-    tracker, tmp_path
-):
+def test_scenario_run_binding_result_supports_path_binding(tracker, tmp_path):
     raw_path = tmp_path / "raw.csv"
     pd.DataFrame({"value": [10, 20]}).to_csv(raw_path, index=False)
 
@@ -160,9 +158,7 @@ def test_scenario_run_binding_result_supports_path_binding(
     assert result.cache_hit is False
 
 
-def test_scenario_run_binding_result_metadata_is_inert(
-    tracker, tmp_path
-):
+def test_scenario_run_binding_result_metadata_is_inert(tracker, tmp_path):
     raw_path = tmp_path / "raw.csv"
     pd.DataFrame({"value": [7, 8]}).to_csv(raw_path, index=False)
     calls: list[str] = []
@@ -196,15 +192,15 @@ def test_scenario_run_binding_result_metadata_is_inert(
     assert second.cache_hit is True
     assert (first.run.meta or {}).get("source") is None
     assert (second.run.meta or {}).get("source") is None
-    assert first.run.identity_summary["signature"] == second.run.identity_summary[
-        "signature"
-    ]
-    assert first.run.identity_summary["input_hash"] == second.run.identity_summary[
-        "input_hash"
-    ]
-    assert first.run.identity_summary["inputs"] == second.run.identity_summary[
-        "inputs"
-    ]
+    assert (
+        first.run.identity_summary["signature"]
+        == second.run.identity_summary["signature"]
+    )
+    assert (
+        first.run.identity_summary["input_hash"]
+        == second.run.identity_summary["input_hash"]
+    )
+    assert first.run.identity_summary["inputs"] == second.run.identity_summary["inputs"]
     assert tracker.get_run_config_kv(first.run.id, prefix="source") == []
     assert set(tracker.get_artifacts_for_run(first.run.id).inputs) == {"raw"}
 
@@ -239,12 +235,14 @@ def test_scenario_run_binding_result_matches_primitive_cache_behavior(
     assert calls == ["called"]
     assert primitive.cache_hit is False
     assert binding.cache_hit is True
-    assert primitive.run.identity_summary["signature"] == binding.run.identity_summary[
-        "signature"
-    ]
-    assert primitive.run.identity_summary["input_hash"] == binding.run.identity_summary[
-        "input_hash"
-    ]
+    assert (
+        primitive.run.identity_summary["signature"]
+        == binding.run.identity_summary["signature"]
+    )
+    assert (
+        primitive.run.identity_summary["input_hash"]
+        == binding.run.identity_summary["input_hash"]
+    )
 
 
 @pytest.mark.parametrize(
