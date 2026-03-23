@@ -4334,8 +4334,12 @@ and <code>digest</code>.</p>
 <p>Logging "Artifacts" (input files, output data, etc.) and their relationships to runs.</p>
 </li>
 <li>
-<p>Implementing a <strong>dual-write mechanism</strong>, logging provenance to both human-readable JSON files (<code>consist.json</code>)
-    and an analytical DuckDB database (<code>provenance.duckdb</code>).</p>
+<p>Implementing a <strong>dual-write mechanism</strong>, logging provenance to both
+    human-readable JSON files (<code>consist.json</code>) and a DuckDB-backed store.
+    In this refactor phase, one configured <code>db_path</code> still points to a
+    single local DuckDB file used by both internal stores:
+    <code>metadata_store</code> (runs/artifacts/lineage metadata) and
+    <code>hot_data_store</code> (<code>global_tables.*</code> ingest/load surfaces).</p>
 </li>
 <li>
 <p>Providing <strong>path virtualization</strong> to make runs portable across different environments,
@@ -4535,8 +4539,8 @@ class object.</p>
     <div class="doc doc-contents ">
 
         <p>Return the SQLAlchemy engine used by this tracker.</p>
-<p>Use this for advanced, low-level database access when the higher-level
-tracker/query helpers are insufficient.</p>
+<p>This is a single-store compatibility alias. New code should prefer
+explicit <code>metadata_store</code> / <code>hot_data_store</code> ownership boundaries.</p>
 
 
     <p><span class="doc-section-title">Returns:</span></p>
@@ -14503,7 +14507,7 @@ Mounted URIs are validated to prevent path traversal outside the mount root.</p>
 
     <div class="doc doc-contents ">
 
-        <p>Execute a SQLModel/SQLAlchemy query via the tracker engine.</p>
+        <p>Execute a SQLModel/SQLAlchemy query via the metadata store.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
