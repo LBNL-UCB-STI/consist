@@ -18,7 +18,7 @@ For tiered guidance:
 | [`Tracker.run`](tracker.md#consist.core.tracker.Tracker.run) | You want explicit tracker ownership in app/library code | Same core behavior as `consist.run` |
 | [`Tracker.trace`](tracker.md#consist.core.tracker.Tracker.trace) | You need inline execution with explicit tracker control | Block executes every time |
 | [`consist.scenario`](api_helpers.md#consist.api.scenario) | You need multi-step workflows with shared scenario context | Returns [`ScenarioContext`](workflow.md#consist.core.workflow.ScenarioContext) |
-| [`ScenarioContext.run`](workflow.md#consist.core.workflow.ScenarioContext.run) | You are inside a scenario and want cache-aware steps | Step-level equivalent of `Tracker.run` |
+| [`ScenarioContext.run`](workflow.md#consist.core.workflow.ScenarioContext.run) | You are inside a scenario and want cache-aware steps | Step-level equivalent of `Tracker.run`; also accepts `binding=BindingResult(...)` for orchestrator-resolved inputs |
 | [`ScenarioContext.trace`](workflow.md#consist.core.workflow.ScenarioContext.trace) | You are inside a scenario and need inline step execution | Step-level equivalent of `Tracker.trace` |
 
 ## Relationship: `consist.scenario`, `consist.run`, and `Tracker.run`
@@ -27,6 +27,10 @@ For tiered guidance:
 - `Tracker.run(...)` is the explicit class method for a single cache-aware step.
 - `consist.scenario(...)` creates a scenario context; inside it, call `sc.run(...)`
   for cache-aware steps or `sc.trace(...)` for inline blocks that execute each time.
+  If an external planner has already resolved the step bindings, pass
+  `binding=BindingResult(...)` to `sc.run(...)` instead of unpacking primitive
+  input kwargs. That is the preferred scenario-level envelope for complex or
+  externally orchestrated workflows.
 
 ## Run/trace identity kwargs (public surface)
 
@@ -81,6 +85,7 @@ with tracker.scenario("baseline") as sc:
 - [`consist.RunSet`](runset.md#consist.runset.RunSet)
 - [`consist.AlignedPair`](runset.md#consist.runset.AlignedPair)
 - `consist.CacheOptions`, `consist.OutputPolicyOptions`, `consist.ExecutionOptions`
+- `consist.BindingResult` (execution envelope for orchestrator-resolved scenario inputs)
 
 ### Scenario / workflow helpers
 
@@ -95,6 +100,7 @@ with tracker.scenario("baseline") as sc:
 - [`consist.output_path`](api_helpers.md#consist.api.output_path)
 - [`ScenarioContext`](workflow.md#consist.core.workflow.ScenarioContext) (returned by `consist.scenario(...)`)
   - `run_id`, `config`, `inputs`, `add_input`, `declare_outputs`, `require_outputs`, `collect_by_keys`, `run`, `trace`
+  - `run(..., binding=BindingResult(...))` for resolved orchestrator plans
 - [`RunContext`](workflow.md#consist.core.workflow.RunContext) (injected via `execution_options=ExecutionOptions(inject_context=True)`)
   - `run_dir`, `output_dir`, `output_path`, `inputs`, `load`, `log_artifact`, `log_artifacts`, `log_input`, `log_output`, `log_meta`, `capture_outputs`
 - [`Coupler`](workflow.md#consist.core.coupler.Coupler) (available at `scenario.coupler`)

@@ -80,6 +80,7 @@ from consist.api import (
 
 # Types
 from consist.types import (
+    BindingResult,
     CacheOptions,
     DriverType,
     ExecutionOptions,
@@ -112,6 +113,7 @@ __all__ = [
     "RunSet",
     "AlignedPair",
     # Types
+    "BindingResult",
     "DriverType",
     "CacheOptions",
     "OutputPolicyOptions",

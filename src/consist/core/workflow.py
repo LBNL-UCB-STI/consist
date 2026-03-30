@@ -25,6 +25,7 @@ from consist.core.input_utils import coerce_input_map
 from consist.core.run_invocation import resolve_run_invocation
 from consist.types import (
     ArtifactRef,
+    BindingResult,
     CacheOptions,
     CodeIdentityMode,
     ExecutionOptions,
@@ -729,6 +730,7 @@ class ScenarioContext:
         ] = None,
         input_keys: Optional[Iterable[str] | str] = None,
         optional_input_keys: Optional[Iterable[str] | str] = None,
+        binding: Optional[BindingResult] = None,
         depends_on: Optional[List[RunInputRef]] = None,
         tags: Optional[List[str]] = None,
         facet: Optional[FacetLike] = None,
@@ -756,11 +758,52 @@ class ScenarioContext:
         is updated with step metadata and artifacts.
         Use ``execution_options.runtime_kwargs`` for runtime-only inputs and
         `consist.require_runtime_kwargs` to validate required keys.
+        For direct workflow code, prefer primitive `inputs=` kwargs and, when
+        needed, the direct `input_keys=` / `optional_input_keys=` compatibility
+        surfaces. For complex or externally orchestrated workflows that already
+        resolved the binding plan, pass ``binding=BindingResult(...)`` instead;
+        `binding` is an execution envelope and is mutually exclusive with the
+        primitive input kwargs.
         Pass policy controls via ``cache_options``, ``output_policy``,
         and ``execution_options``.
 
         ``adapter`` and ``identity_inputs`` are the public identity-related
         kwargs.
+
+        Examples
+        --------
+        Direct workflow code:
+
+        ```python
+        sc.run(
+            fn=step,
+            inputs={"raw": raw_path},
+            execution_options=ExecutionOptions(input_binding="paths"),
+        )
+
+        sc.run(
+            fn=step,
+            inputs={"raw": consist.ref(previous_result, key="raw")},
+            execution_options=ExecutionOptions(input_binding="loaded"),
+        )
+        ```
+
+        Orchestrator-facing execution envelope:
+
+        ```python
+        sc.run(
+            fn=step,
+            binding=BindingResult(
+                inputs={"raw": raw_path},
+                input_keys=["data"],
+                optional_input_keys=["maybe"],
+            ),
+            execution_options=ExecutionOptions(input_binding="paths"),
+        )
+        ```
+
+        `binding` cannot be combined with primitive `inputs`, `input_keys`, or
+        `optional_input_keys`.
         """
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
@@ -771,7 +814,35 @@ class ScenarioContext:
         if fn is None and name is None:
             raise ValueError("ScenarioContext.run requires name when fn is None.")
 
-        invocation_inputs = inputs
+        if binding is not None:
+            if (
+                inputs is not None
+                or input_keys is not None
+                or optional_input_keys is not None
+            ):
+                raise ValueError(
+                    format_problem_cause_fix(
+                        problem=(
+                            "ScenarioContext.run received both binding and primitive "
+                            "input kwargs."
+                        ),
+                        cause=(
+                            "binding=... is a complete execution envelope for "
+                            "scenario inputs, so it cannot be combined with "
+                            "inputs=..., input_keys=..., or optional_input_keys=...."
+                        ),
+                        fix=(
+                            "Pass either binding=BindingResult(...) or the primitive "
+                            "input kwargs, but not both."
+                        ),
+                    )
+                )
+            invocation_inputs = binding.inputs
+            input_keys = binding.input_keys
+            optional_input_keys = binding.optional_input_keys
+        else:
+            invocation_inputs = inputs
+
         requested_input_binding = (
             execution_options.input_binding if execution_options is not None else None
         )
