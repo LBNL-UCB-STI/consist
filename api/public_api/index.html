@@ -2807,7 +2807,7 @@ more verbose, lower-level, or easier to misuse.</p>
 <tr>
 <td><a href="../workflow/#consist.core.workflow.ScenarioContext.run"><code>ScenarioContext.run</code></a></td>
 <td>You are inside a scenario and want cache-aware steps</td>
-<td>Step-level equivalent of <code>Tracker.run</code></td>
+<td>Step-level equivalent of <code>Tracker.run</code>; also accepts <code>binding=BindingResult(...)</code> for orchestrator-resolved inputs</td>
 </tr>
 <tr>
 <td><a href="../workflow/#consist.core.workflow.ScenarioContext.trace"><code>ScenarioContext.trace</code></a></td>
@@ -2821,7 +2821,11 @@ more verbose, lower-level, or easier to misuse.</p>
 <li><code>consist.run(...)</code> resolves the active/default tracker and then calls <code>Tracker.run(...)</code>.</li>
 <li><code>Tracker.run(...)</code> is the explicit class method for a single cache-aware step.</li>
 <li><code>consist.scenario(...)</code> creates a scenario context; inside it, call <code>sc.run(...)</code>
-  for cache-aware steps or <code>sc.trace(...)</code> for inline blocks that execute each time.</li>
+  for cache-aware steps or <code>sc.trace(...)</code> for inline blocks that execute each time.
+  If an external planner has already resolved the step bindings, pass
+  <code>binding=BindingResult(...)</code> to <code>sc.run(...)</code> instead of unpacking primitive
+  input kwargs. That is the preferred scenario-level envelope for complex or
+  externally orchestrated workflows.</li>
 </ul>
 <h2 id="runtrace-identity-kwargs-public-surface">Run/trace identity kwargs (public surface)<a class="headerlink" href="#runtrace-identity-kwargs-public-surface" title="Permanent link">&para;</a></h2>
 <p>Run/trace APIs share these public identity kwargs:</p>
@@ -2870,6 +2874,7 @@ Passing them raises <code>TypeError</code> (<code>unexpected keyword argument ..
 <li><a href="../runset/#consist.runset.RunSet"><code>consist.RunSet</code></a></li>
 <li><a href="../runset/#consist.runset.AlignedPair"><code>consist.AlignedPair</code></a></li>
 <li><code>consist.CacheOptions</code>, <code>consist.OutputPolicyOptions</code>, <code>consist.ExecutionOptions</code></li>
+<li><code>consist.BindingResult</code> (execution envelope for orchestrator-resolved scenario inputs)</li>
 </ul>
 <h3 id="scenario-workflow-helpers">Scenario / workflow helpers<a class="headerlink" href="#scenario-workflow-helpers" title="Permanent link">&para;</a></h3>
 <ul>
@@ -2884,6 +2889,7 @@ Passing them raises <code>TypeError</code> (<code>unexpected keyword argument ..
 <li><a href="../api_helpers/#consist.api.output_path"><code>consist.output_path</code></a></li>
 <li><a href="../workflow/#consist.core.workflow.ScenarioContext"><code>ScenarioContext</code></a> (returned by <code>consist.scenario(...)</code>)</li>
 <li><code>run_id</code>, <code>config</code>, <code>inputs</code>, <code>add_input</code>, <code>declare_outputs</code>, <code>require_outputs</code>, <code>collect_by_keys</code>, <code>run</code>, <code>trace</code></li>
+<li><code>run(..., binding=BindingResult(...))</code> for resolved orchestrator plans</li>
 <li><a href="../workflow/#consist.core.workflow.RunContext"><code>RunContext</code></a> (injected via <code>execution_options=ExecutionOptions(inject_context=True)</code>)</li>
 <li><code>run_dir</code>, <code>output_dir</code>, <code>output_path</code>, <code>inputs</code>, <code>load</code>, <code>log_artifact</code>, <code>log_artifacts</code>, <code>log_input</code>, <code>log_output</code>, <code>log_meta</code>, <code>capture_outputs</code></li>
 <li><a href="../workflow/#consist.core.coupler.Coupler"><code>Coupler</code></a> (available at <code>scenario.coupler</code>)</li>

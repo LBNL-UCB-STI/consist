@@ -2439,6 +2439,11 @@ for new projects and onboarding docs/examples.</p>
   <a href="../workflow/#consist.core.workflow.ScenarioContext.run"><code>ScenarioContext.run</code></a>,
   <a href="../workflow/#consist.core.workflow.ScenarioContext.trace"><code>ScenarioContext.trace</code></a></li>
 </ul>
+<p>If you already have a resolved binding plan from a planner or orchestrator,
+pass <code>binding=BindingResult(...)</code> to <code>ScenarioContext.run(...)</code>. That envelope
+is the preferred scenario-level path for complex or externally orchestrated
+workflows. Keep using <code>consist.ref(...)</code> / <code>consist.refs(...)</code> for direct
+step-to-step wiring and primitive <code>inputs=</code> kwargs for ordinary scenario code.</p>
 <h2 id="essential-helpers">Essential helpers<a class="headerlink" href="#essential-helpers" title="Permanent link">&para;</a></h2>
 <ul>
 <li>Tracker setup and context:
@@ -2447,6 +2452,8 @@ for new projects and onboarding docs/examples.</p>
 <li>Linking artifacts:
   <a href="../api_helpers/#consist.api.ref"><code>consist.ref</code></a>,
   <a href="../api_helpers/#consist.api.refs"><code>consist.refs</code></a></li>
+<li>Resolved scenario bindings:
+  <code>consist.BindingResult</code></li>
 <li>Managed output paths:
   <a href="../api_helpers/#consist.api.output_path"><code>consist.output_path</code></a>,
   <a href="../api_helpers/#consist.api.output_dir"><code>consist.output_dir</code></a></li>
