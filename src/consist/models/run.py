@@ -105,6 +105,8 @@ class Run(SQLModel, table=True):
         description (Optional[str]): Human-readable description of the run's purpose or outcome.
         year (Optional[int]): The simulation or data year, if applicable.
         iteration (Optional[int]): The iteration number, if applicable.
+        stage (Optional[str]): The workflow stage, if applicable.
+        phase (Optional[str]): The lifecycle phase, if applicable.
         tags (List[str]): A list of string labels for categorization and filtering (e.g., ["production", "urbansim"]).
         config_hash (Optional[str]): A hash of the run's configuration, used for caching.
         git_hash (Optional[str]): The Git commit hash of the code version used for the run.
@@ -138,6 +140,8 @@ class Run(SQLModel, table=True):
     )
     year: Optional[int] = Field(default=None, index=True)
     iteration: Optional[int] = Field(default=None, index=True)
+    stage: Optional[str] = Field(default=None, index=True)
+    phase: Optional[str] = Field(default=None, index=True)
 
     # Tags (for filtering and categorization)
     # Note: DuckDB supports arrays natively. For SQLite compatibility, this would need JSON storage.
@@ -214,8 +218,8 @@ class Run(SQLModel, table=True):
             "model": self.model_name,
             "year": self.year,
             "iteration": self.iteration,
-            "phase": meta.get("phase"),
-            "stage": meta.get("stage"),
+            "phase": self.phase if self.phase is not None else meta.get("phase"),
+            "stage": self.stage if self.stage is not None else meta.get("stage"),
             "cache_epoch": meta.get("cache_epoch"),
             "cache_version": meta.get("cache_version"),
         }

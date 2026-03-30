@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from sqlmodel import col, select
 
 from consist.models.artifact import Artifact, ArtifactContent
+from consist.models.run import Run
 
 if TYPE_CHECKING:
     from consist.core.persistence import DatabaseManager
@@ -21,6 +22,18 @@ def apply_content_identity_compatibility(db: DatabaseManager) -> None:
     """
     _ensure_artifact_content_id_column(db)
     _ensure_artifact_content_id_index(db)
+
+
+def apply_run_stage_phase_compatibility(db: DatabaseManager) -> None:
+    """
+    Apply additive schema compatibility for run stage/phase support.
+
+    The columns are added lazily for older databases and legacy rows are
+    backfilled from ``run.meta`` when possible.
+    """
+    _ensure_run_stage_phase_columns(db)
+    _ensure_run_stage_phase_indexes(db)
+    backfill_run_stage_phase_from_meta(db)
 
 
 def backfill_artifact_content_ids(db: DatabaseManager) -> None:
@@ -76,6 +89,50 @@ def backfill_artifact_content_ids(db: DatabaseManager) -> None:
         logging.warning("Failed to backfill artifact.content_id values: %s", exc)
 
 
+def backfill_run_stage_phase_from_meta(db: DatabaseManager) -> None:
+    """
+    Best-effort backfill of `run.stage` and `run.phase` from legacy metadata.
+
+    Existing rows are only updated when the canonical columns are null and the
+    mirrored JSON metadata contains a string value.
+    """
+    if not db._table_has_column(table_name="run", column_name="stage"):
+        return
+    if not db._table_has_column(table_name="run", column_name="phase"):
+        return
+
+    try:
+        with db.session_scope() as session:
+            runs = session.exec(
+                select(Run).where((Run.stage.is_(None)) | (Run.phase.is_(None)))
+            ).all()
+            changed = False
+            for run in runs:
+                meta = run.meta if isinstance(run.meta, dict) else {}
+                if run.stage is None:
+                    stage = meta.get("stage")
+                    if isinstance(stage, str):
+                        run.stage = stage
+                        changed = True
+                if run.phase is None:
+                    phase = meta.get("phase")
+                    if isinstance(phase, str):
+                        run.phase = phase
+                        changed = True
+                if run.stage is not None:
+                    meta["stage"] = run.stage
+                if run.phase is not None:
+                    meta["phase"] = run.phase
+                if meta is not run.meta:
+                    run.meta = meta
+                    changed = True
+                session.add(run)
+            if changed:
+                session.commit()
+    except Exception as exc:
+        logging.warning("Failed to backfill run.stage/run.phase values: %s", exc)
+
+
 def _ensure_artifact_content_id_column(db: DatabaseManager) -> None:
     """Ensure `artifact.content_id` exists for additive content identity support."""
     if db._table_has_column(table_name="artifact", column_name="content_id"):
@@ -100,3 +157,39 @@ def _ensure_artifact_content_id_index(db: DatabaseManager) -> None:
             )
     except Exception as exc:
         logging.warning("Failed to create artifact.content_id index: %s", exc)
+
+
+def _ensure_run_stage_phase_columns(db: DatabaseManager) -> None:
+    """Ensure `run.stage` and `run.phase` exist for additive workflow support."""
+    if not db._table_has_column(table_name="run", column_name="stage"):
+        try:
+            with db.engine.begin() as conn:
+                conn.exec_driver_sql("ALTER TABLE run ADD COLUMN stage VARCHAR")
+        except Exception as exc:
+            logging.warning("Failed to add run.stage column: %s", exc)
+    if not db._table_has_column(table_name="run", column_name="phase"):
+        try:
+            with db.engine.begin() as conn:
+                conn.exec_driver_sql("ALTER TABLE run ADD COLUMN phase VARCHAR")
+        except Exception as exc:
+            logging.warning("Failed to add run.phase column: %s", exc)
+
+
+def _ensure_run_stage_phase_indexes(db: DatabaseManager) -> None:
+    """Ensure upgraded databases also index `run.stage` and `run.phase`."""
+    if db._table_has_column(table_name="run", column_name="stage") and not db._table_has_index_on_column(
+        table_name="run", column_name="stage"
+    ):
+        try:
+            with db.engine.begin() as conn:
+                conn.exec_driver_sql("CREATE INDEX idx_run_stage ON run(stage)")
+        except Exception as exc:
+            logging.warning("Failed to create run.stage index: %s", exc)
+    if db._table_has_column(table_name="run", column_name="phase") and not db._table_has_index_on_column(
+        table_name="run", column_name="phase"
+    ):
+        try:
+            with db.engine.begin() as conn:
+                conn.exec_driver_sql("CREATE INDEX idx_run_phase ON run(phase)")
+        except Exception as exc:
+            logging.warning("Failed to create run.phase index: %s", exc)

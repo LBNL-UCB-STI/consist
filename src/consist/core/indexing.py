@@ -11,6 +11,8 @@ RunIndexField: TypeAlias = Literal[
     "status",
     "year",
     "iteration",
+    "stage",
+    "phase",
     "parent_run_id",
     "config_hash",
     "input_hash",

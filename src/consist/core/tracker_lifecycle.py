@@ -362,12 +362,16 @@ class RunLifecycleCoordinator:
             validate_run_meta(kwargs)
 
         now = datetime.now(UTC)
+        run_stage = kwargs.get("stage")
+        run_phase = kwargs.get("phase")
         run = Run(
             id=run_id,
             model_name=model,
             description=description,
             year=year,
             iteration=iteration,
+            stage=run_stage if isinstance(run_stage, str) else None,
+            phase=run_phase if isinstance(run_phase, str) else None,
             parent_run_id=parent_run_id,
             tags=tags or [],
             status="running",

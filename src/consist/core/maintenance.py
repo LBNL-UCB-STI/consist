@@ -2247,6 +2247,23 @@ class DatabaseMaintenance:
                 with self.db.session_scope() as session:
                     run_exists = session.get(Run, run_id) is not None
                     if not run_exists:
+                        stage = run.stage
+                        if stage is None and isinstance(run.meta, dict):
+                            meta_stage = run.meta.get("stage")
+                            if isinstance(meta_stage, str):
+                                stage = meta_stage
+                        phase = run.phase
+                        if phase is None and isinstance(run.meta, dict):
+                            meta_phase = run.meta.get("phase")
+                            if isinstance(meta_phase, str):
+                                phase = meta_phase
+                        meta_payload = (
+                            dict(run.meta) if isinstance(run.meta, dict) else {}
+                        )
+                        if stage is not None:
+                            meta_payload["stage"] = stage
+                        if phase is not None:
+                            meta_payload["phase"] = phase
                         session.add(
                             Run(
                                 id=run_id,
@@ -2256,14 +2273,14 @@ class DatabaseMaintenance:
                                 description=run.description,
                                 year=run.year,
                                 iteration=run.iteration,
+                                stage=stage,
+                                phase=phase,
                                 tags=list(run.tags or []),
                                 config_hash=getattr(run, "config_hash", None),
                                 git_hash=getattr(run, "git_hash", None),
                                 input_hash=run.input_hash,
                                 signature=run.signature,
-                                meta=dict(run.meta)
-                                if isinstance(run.meta, dict)
-                                else {},
+                                meta=meta_payload,
                                 started_at=run.started_at,
                                 ended_at=run.ended_at,
                                 created_at=run.created_at,
