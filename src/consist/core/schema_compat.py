@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from sqlmodel import col, select
 
 from consist.models.artifact import Artifact, ArtifactContent
-from consist.models.run import Run
+from consist.models.run import Run, resolve_canonical_run_meta_field
 
 if TYPE_CHECKING:
     from consist.core.persistence import DatabaseManager
@@ -104,21 +104,21 @@ def backfill_run_stage_phase_from_meta(db: DatabaseManager) -> None:
     try:
         with db.session_scope() as session:
             runs = session.exec(
-                select(Run).where((Run.stage.is_(None)) | (Run.phase.is_(None)))
+                select(Run).where(
+                    (col(Run.stage).is_(None)) | (col(Run.phase).is_(None))
+                )
             ).all()
             changed = False
             for run in runs:
                 meta = run.meta if isinstance(run.meta, dict) else {}
-                if run.stage is None:
-                    stage = meta.get("stage")
-                    if isinstance(stage, str):
-                        run.stage = stage
-                        changed = True
-                if run.phase is None:
-                    phase = meta.get("phase")
-                    if isinstance(phase, str):
-                        run.phase = phase
-                        changed = True
+                stage = resolve_canonical_run_meta_field(run, "stage")
+                if run.stage != stage:
+                    run.stage = stage
+                    changed = True
+                phase = resolve_canonical_run_meta_field(run, "phase")
+                if run.phase != phase:
+                    run.phase = phase
+                    changed = True
                 if run.stage is not None:
                     meta["stage"] = run.stage
                 if run.phase is not None:
@@ -177,17 +177,17 @@ def _ensure_run_stage_phase_columns(db: DatabaseManager) -> None:
 
 def _ensure_run_stage_phase_indexes(db: DatabaseManager) -> None:
     """Ensure upgraded databases also index `run.stage` and `run.phase`."""
-    if db._table_has_column(table_name="run", column_name="stage") and not db._table_has_index_on_column(
+    if db._table_has_column(
         table_name="run", column_name="stage"
-    ):
+    ) and not db._table_has_index_on_column(table_name="run", column_name="stage"):
         try:
             with db.engine.begin() as conn:
                 conn.exec_driver_sql("CREATE INDEX idx_run_stage ON run(stage)")
         except Exception as exc:
             logging.warning("Failed to create run.stage index: %s", exc)
-    if db._table_has_column(table_name="run", column_name="phase") and not db._table_has_index_on_column(
+    if db._table_has_column(
         table_name="run", column_name="phase"
-    ):
+    ) and not db._table_has_index_on_column(table_name="run", column_name="phase"):
         try:
             with db.engine.begin() as conn:
                 conn.exec_driver_sql("CREATE INDEX idx_run_phase ON run(phase)")

@@ -25,11 +25,7 @@ from typing import (
     Union,
     runtime_checkable,
 )
-
-try:
-    from pydantic import BaseModel
-except Exception:  # pragma: no cover
-    BaseModel = object  # type: ignore[misc,assignment]
+from pydantic import BaseModel
 
 if TYPE_CHECKING:  # pragma: no cover
     from consist.models.artifact import Artifact

@@ -23,11 +23,7 @@ from typing import (
 )
 
 import duckdb
-
-try:
-    from pydantic import BaseModel
-except Exception:  # pragma: no cover
-    BaseModel = object  # type: ignore[misc,assignment]
+from pydantic import BaseModel
 
 
 class TableInfo(BaseModel):

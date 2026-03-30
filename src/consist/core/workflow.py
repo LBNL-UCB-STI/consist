@@ -855,7 +855,7 @@ class ScenarioContext:
         if requested_input_binding in {"loaded", "paths"}:
             invocation_inputs = self._promote_inputs_for_binding(
                 invocation_inputs,
-                cast(InputBindingMode, requested_input_binding),
+                requested_input_binding,
             )
 
         resolved_invocation = resolve_run_invocation(
@@ -1150,13 +1150,13 @@ class ScenarioContext:
         if value is None:
             return []
         if isinstance(value, list):
-            return list(value)
+            return [item for item in value if isinstance(item, Artifact)]
         if isinstance(value, tuple):
-            return list(value)
+            return [item for item in value if isinstance(item, Artifact)]
         if isinstance(value, Mapping):
-            return list(value.values())
+            return [item for item in value.values() if isinstance(item, Artifact)]
         if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
-            return list(value)
+            return [item for item in value if isinstance(item, Artifact)]
         return []
 
     def _extract_facet_from_config(

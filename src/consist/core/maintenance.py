@@ -19,7 +19,12 @@ from consist.core.identity import IdentityManager
 from consist.models.artifact import Artifact
 from consist.models.artifact_kv import ArtifactKV
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaObservation
-from consist.models.run import ConsistRecord, Run, RunArtifactLink
+from consist.models.run import (
+    ConsistRecord,
+    Run,
+    RunArtifactLink,
+    resolve_canonical_run_meta_field,
+)
 from consist.models.run_config_kv import RunConfigKV
 
 if TYPE_CHECKING:
@@ -40,7 +45,7 @@ class PurgePlan:
     json_files: list[Path]
     disk_files: list[Path]
     ingested_data: dict[str, int]
-    ingested_table_modes: dict[str, str]
+    ingested_table_modes: dict[str, GlobalTableMode]
 
 
 @dataclass(slots=True)
@@ -60,7 +65,7 @@ class ExportResult:
     artifact_count: int
     out_path: Path
     ingested_rows: dict[str, int]
-    ingested_table_modes: dict[str, str]
+    ingested_table_modes: dict[str, GlobalTableMode]
     unscoped_cache_tables_skipped: list[str]
     snapshots_copied: int
 
@@ -2247,16 +2252,8 @@ class DatabaseMaintenance:
                 with self.db.session_scope() as session:
                     run_exists = session.get(Run, run_id) is not None
                     if not run_exists:
-                        stage = run.stage
-                        if stage is None and isinstance(run.meta, dict):
-                            meta_stage = run.meta.get("stage")
-                            if isinstance(meta_stage, str):
-                                stage = meta_stage
-                        phase = run.phase
-                        if phase is None and isinstance(run.meta, dict):
-                            meta_phase = run.meta.get("phase")
-                            if isinstance(meta_phase, str):
-                                phase = meta_phase
+                        stage = resolve_canonical_run_meta_field(run, "stage")
+                        phase = resolve_canonical_run_meta_field(run, "phase")
                         meta_payload = (
                             dict(run.meta) if isinstance(run.meta, dict) else {}
                         )

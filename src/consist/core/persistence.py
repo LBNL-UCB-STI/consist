@@ -49,7 +49,11 @@ from consist.models.artifact_schema import (
     ArtifactSchemaRelation,
 )
 from consist.models.config_facet import ConfigFacet
-from consist.models.run import Run, RunArtifactLink
+from consist.models.run import (
+    Run,
+    RunArtifactLink,
+    resolve_canonical_run_meta_field,
+)
 from consist.models.run_config_kv import RunConfigKV
 
 if TYPE_CHECKING:
@@ -258,8 +262,9 @@ class DatabaseManager:
             return
 
         for field in ("stage", "phase"):
-            value = getattr(run, field, None)
+            value = resolve_canonical_run_meta_field(run, field)
             if value is not None:
+                setattr(run, field, value)
                 run.meta[field] = value
                 continue
 

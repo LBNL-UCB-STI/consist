@@ -1,15 +1,28 @@
 import uuid
-from typing import Dict, Any, Iterable, TYPE_CHECKING, Set, Optional, Union
+from typing import Any, Callable, Dict, Iterable, Optional, TYPE_CHECKING, Set, Union
+
+if TYPE_CHECKING:
+    from rich.tree import Tree as RichTree
+else:  # pragma: no cover - type-only import fallback
+    RichTree = Any
 
 try:
-    from rich.tree import Tree
-    from rich import print as rprint
+    from rich.tree import Tree as _RichTreeClass
+    from rich import print as _rich_print
+
+    RichTreeClass: Any = _RichTreeClass
+    rich_print: Callable[..., None] = _rich_print
 
     _RICH_AVAILABLE = True
 except ImportError:  # pragma: no cover - rich is optional at runtime
-    Tree = None  # type: ignore[assignment]
-    rprint = None  # type: ignore[assignment]
+    RichTreeClass: Any = None
+
+    def rich_print(*objects: Any, **kwargs: Any) -> None:
+        print(*objects, **kwargs)
+
     _RICH_AVAILABLE = False
+
+rprint: Callable[..., None] = rich_print
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
@@ -189,7 +202,7 @@ def print_lineage(
             print(formatted)
         return
 
-    def _add_node(parent: "Tree", node: Dict[str, Any]) -> None:
+    def _add_node(parent: "RichTree", node: Dict[str, Any]) -> None:
         artifact = node.get("artifact")
         if artifact is None:
             return
@@ -227,7 +240,8 @@ def print_lineage(
             if isinstance(input_node, dict):
                 _add_node(run_branch, input_node)
 
-    tree = Tree("[bold]Lineage[/bold]")
+    assert RichTreeClass is not None
+    tree = RichTreeClass("[bold]Lineage[/bold]")
     _add_node(tree, lineage)
     rprint(tree)
 
