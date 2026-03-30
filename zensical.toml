@@ -312,6 +312,10 @@ filters = ["!^_"]
 ## ----------------------------------------------------------------------------
 ## The "extra" section contains miscellaneous settings.
 ## ----------------------------------------------------------------------------
+[project.extra.version]
+provider = "mike"
+default = "latest"
+
 [[project.extra.social]]
 icon = "fontawesome/brands/github"
 link = "https://github.com/LBNL-UCB-STI/consist"
