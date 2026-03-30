@@ -162,6 +162,7 @@ with tracker.scenario("demo_pipeline") as sc:
 
 ## Next Steps
 
+- **[Usage Guide](../usage-guide.md)** for choosing the right pattern for your real workflow
 - **[First Workflow](first-workflow.md)** for a larger two-step pipeline
 - **[API Essentials](../api/essentials.md)** for the recommended API surface
 - **[Building a Domain Tracker](../building-domain-tracker.md)** for reusable wrapper design

@@ -1,10 +1,14 @@
 # Usage Guide
 
-Consist provides flexible patterns for tracking provenance in scientific workflows. This guide walks you through the main usage patterns, from simple single-step runs to complex multi-year simulations. Each section is written to help:
+Use this guide to choose the right Consist pattern for the workflow you are
+building, then copy the matching example and adapt it.
 
-- **Developers** integrating Consist into a simulation tool
-- **Practitioners** running tools and wanting clearer inputs/outputs
-- **Researchers** managing multi-stage pipelines and reproducibility
+Use this guide when you need to decide:
+
+- whether to start with `run(...)` or move to `scenario(...)`
+- when to use `input_binding="paths"` versus `"loaded"`
+- how to wrap an external tool, container, or legacy file-writing step
+- how to scale from a single cached step to multi-step or multi-year workflows
 
 **New to Consist?** Start with the
 [quickstart tutorial](getting-started/quickstart.md), then work through the
@@ -20,37 +24,22 @@ for the recommended wrapper architecture.
 
 - [Choosing Your Pattern](#choosing-your-pattern)
 - [Pattern 1: Single-Step Runs (`run()`)](#pattern-1-single-step-runs-run)
-    - [Choosing an Input Binding Mode](#choosing-an-input-binding-mode)
-    - [Simple Example: Data Cleaning](#simple-example-data-cleaning)
-    - [Example with Config](#example-with-config)
-    - [Wrapping Legacy or Black-Box Tools](#wrapping-legacy-or-black-box-tools)
 - [Pattern 2: Multi-Step Workflows (`scenario()`)](#pattern-2-multi-step-workflows-scenario)
-    - [Understanding the Coupler](#understanding-the-coupler)
-    - [Simple Example: Two-Step Workflow](#simple-example-two-step-workflow)
-    - [Declaring Inputs: Disk Paths vs Explicit Step Links](#declaring-inputs-disk-paths-vs-explicit-step-links)
-    - [Decorator Defaults, Templates, and Schema Introspection](#decorator-defaults-templates-and-schema-introspection)
-    - [Passing Data Between Steps with the Coupler](#passing-data-between-steps-with-the-coupler)
-    - [Output Validation](#output-validation)
-    - [Selective Output Collection with `collect_by_keys()`](#selective-output-collection-with-collect_by_keys)
-    - [Example: Parameter Sweep in a Scenario](#example-parameter-sweep-in-a-scenario)
 - [Pattern 3: Container Integration](#pattern-3-container-integration)
 - [Advanced Patterns](#advanced-patterns)
-    - [Cache Hits and the Coupler](#cache-hits-and-the-coupler)
-    - [Cache Hydration](#cache-hydration)
-    - [Mixing Runs and Scenarios](#mixing-runs-and-scenarios)
 - [When Does Code Execute? Understanding `sc.run()` vs `sc.trace()`](#when-does-code-execute-understanding-scrun-vs-sctrace)
-- [Motivation: When Caching Saves Time](#motivation-when-caching-saves-time)
 - [Querying Results](#querying-results)
-    - [Finding Runs](#finding-runs)
-    - [Loading Artifacts](#loading-artifacts)
-    - [Cross-Run Queries with Views](#cross-run-queries-with-views)
-    - [Generating Schemas from Captured Data](#generating-schemas-from-captured-data)
 
 ---
 
 ## Choosing Your Pattern
 
 Choose based on what you're building and how much structure you need:
+
+**Recommended default:** start with
+`run(..., execution_options=ExecutionOptions(input_binding="paths"))`, then
+move to `scenario(...)` when you need explicit step-to-step links, shared
+workflow state, or per-step caching across a larger pipeline.
 
 | Your Workflow                                               | Pattern                         | Why                                                                                                                         |
 |-------------------------------------------------------------|---------------------------------|-----------------------------------------------------------------------------------------------------------------------------|

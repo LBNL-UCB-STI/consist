@@ -1,18 +1,19 @@
 ---
 hide:
   - navigation
----
-
-#     
-
-<p align="center">
-  <img src="assets/logo.png" alt="Consist" width="320" class="logo-light">
-</p>
-
-
+  - title
 ---
 
 <div id="home-page"></div>
+
+<div class="home-hero">
+  <picture class="home-hero__logo">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="assets/logo.png">
+    <img src="assets/logo.png" alt="Consist" width="320">
+  </picture>
+  <p class="tagline">Provenance tracking and intelligent caching for scientific simulation workflows.</p>
+</div>
 
 ## Start Here
 
@@ -29,8 +30,6 @@ Follow this path in order if you are new to Consist:
 This path takes you from a fresh environment to a working multi-step cached
 pipeline, then into deeper usage patterns.
 
-## Prerequisites
-
 !!! note
 
     - Python 3.11+
@@ -40,8 +39,6 @@ pipeline, then into deeper usage patterns.
     run `pip install "consist[parquet]"`
     - See [Installation](getting-started/installation.md) for complete options,
     including source installs and optional extras.
-
----
 
 ## What is Consist?
 
@@ -57,8 +54,6 @@ It helps you:
 - Wire multi-step pipelines explicitly via artifact references, not name-based injection or global state
 - Query and compare results across runs using DuckDB-backed SQL
 - Keep pipelines portable across machines via URI + mount resolution
-
----
 
 ## Secondary Navigation
 
@@ -102,13 +97,11 @@ deeper work.
 | Share a reproducible study             | [Mounts & Portability](mounts-and-portability.md)                                       |
 | Integrate with ActivitySim/BEAM/MATSim | [Config Adapters](integrations/config_adapters.md) or [Containers](containers-guide.md) |
 
----
-
 ## Built on Open Standards
 
 Consist relies on modern, high-performance data engineering tools:
 
-- **[DuckDB](https://duckdb.org/)**: The "SQLite for Analytics" powers our lightning-fast provenance queries and data
+- **[DuckDB](https://duckdb.org/)**: A fast and powerful embedded database that enables provenance queries and data 
   virtualization.
 - **[SQLModel](https://sqlmodel.tiangolo.com/)**: Combines SQLAlchemy and Pydantic for robust, type-safe data modeling
   and schema validation.
@@ -116,8 +109,6 @@ Consist relies on modern, high-performance data engineering tools:
   your provenance database.
 - **[Apache Parquet & Zarr](https://parquet.apache.org/)**: Industry-standard formats for efficient, compressed storage
   of tabular and multi-dimensional scientific data.
-
----
 
 ## Learn More
 

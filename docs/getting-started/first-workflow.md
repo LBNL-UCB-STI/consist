@@ -216,6 +216,7 @@ This workflow demonstrated:
 
 ## Next Steps
 
+- **[Usage Guide](../usage-guide.md)** — Broader pattern guide for `run(...)`, `scenario(...)`, and external tool wrappers
 - **[Core Concepts](../concepts/overview.md)** — Mental model for runs, artifacts, and signatures
 - **[Config Management](../concepts/config-management.md)** — Control which parameters affect caching
 - **[Caching & Hydration](../concepts/caching-and-hydration.md)** — Advanced cache strategies and data recovery
