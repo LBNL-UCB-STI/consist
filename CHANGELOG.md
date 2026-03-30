@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## [Unreleased]
+
+### Changed
+
+- Promote `stage` and `phase` to first-class run dimensions with query support
+  in `find_runs(...)` and `find_latest_run(...)`. Legacy JSON metadata mirrors
+  remain for compatibility, and DB rebuild paths restore canonical fields from
+  snapshot metadata when available.
+
 ## [0.1.0] - 2026-03-11
 
 ### Added

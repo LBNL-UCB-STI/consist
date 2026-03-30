@@ -151,6 +151,10 @@ Scenario defaults like `name_template` and `cache_epoch` are configured via `con
 - Matrix utilities: [`Tracker.load_matrix(...)`](tracker.md#consist.core.tracker.Tracker.load_matrix), [`MatrixViewFactory`](matrix.md#consist.core.matrix.MatrixViewFactory)
 - Schema export: [`Tracker.export_schema_sqlmodel(...)`](tracker.md#consist.core.tracker.Tracker.export_schema_sqlmodel)
 
+Run lookup helpers treat `stage` and `phase` as first-class run dimensions, so
+you can filter historical runs with either `consist.find_runs(...)` or
+`Tracker.find_latest_run(...)` without treating those values as opaque metadata.
+
 ### Tracker methods (complete public surface)
 
 This section enumerates all non-underscore `Tracker` methods. If you're new to Consist,

@@ -70,7 +70,11 @@ When troubleshooting provenance DB health, prefer this safe sequence:
      ```
 
      `minimal` restores run/artifact/link baseline.
-     `full` additionally attempts facet/schema/index restoration where snapshot content and DB schema compatibility allow.
+     `full` additionally attempts facet/schema/index restoration where snapshot
+     content and DB schema compatibility allow.
+     `stage` and `phase` are restored into canonical run columns when present in
+     the snapshot metadata, with legacy `run.meta` values preserved for
+     compatibility.
 
 4. **Compact after bulk changes:**
 

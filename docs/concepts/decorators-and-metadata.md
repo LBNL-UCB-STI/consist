@@ -63,6 +63,11 @@ Callable metadata can use:
 - `runtime_kwargs` for raw runtime access
 - `consist_settings`, `consist_workspace`, `consist_state` for Consist internals
 
+When `phase` or `stage` are passed into a run entry point, they are persisted as
+canonical `Run` columns and mirrored into `run.meta` for compatibility with
+older databases and snapshot records. Treat them as workflow dimensions, not
+opaque metadata.
+
 ---
 
 ## StepContext Runtime Contract

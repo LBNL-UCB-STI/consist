@@ -24,6 +24,9 @@ a tracker object to every call.
   `consist.run_set`, `consist.get_run_result`, `consist.config_run_query`,
   `consist.config_run_rows`
 
+`consist.find_runs(...)` and `consist.find_run(...)` forward all standard run
+filters, including `stage=` and `phase=` for workflow-level queries.
+
 ## Minimal runnable helper workflow
 
 ```python

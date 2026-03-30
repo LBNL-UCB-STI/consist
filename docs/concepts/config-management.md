@@ -54,6 +54,10 @@ into the config hash under a reserved `__consist_run_fields__` key. When set,
 `cache_epoch` and `cache_version` are included there too. This means changing
 those values will change the signature even if `config` is otherwise identical.
 
+`stage` and `phase` are separate first-class run dimensions, not facets. They
+live on `Run`, are queryable with `find_runs(stage=..., phase=...)`, and are
+mirrored into `run.meta` only for backward compatibility with older databases.
+
 ---
 
 ## Facets

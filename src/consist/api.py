@@ -1729,7 +1729,8 @@ def find_runs(
     tracker : Optional[Tracker], optional
         Tracker instance to query; defaults to the active tracker.
     **filters : Any
-        Filter values forwarded to ``Tracker.find_runs``.
+        Filter values forwarded to ``Tracker.find_runs``. This includes
+        workflow filters such as ``stage`` and ``phase``.
 
     Returns
     -------
