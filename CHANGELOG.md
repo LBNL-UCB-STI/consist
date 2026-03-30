@@ -10,8 +10,9 @@ The format is based on [Keep a Changelog], and this project adheres to
 ### Changed
 
 - Promote `stage` and `phase` to first-class run dimensions with query support
-  in `find_runs(...)` and `find_latest_run(...)`. Legacy JSON metadata mirrors
-  remain for compatibility, and DB rebuild paths restore canonical fields from
+  in `find_runs(...)` and `find_latest_run(...)`, including the top-level
+  `consist.find_latest_run(...)` helper. Legacy JSON metadata mirrors remain
+  for compatibility, and DB rebuild paths restore canonical fields from
   snapshot metadata when available.
 
 ## [0.1.0] - 2026-03-11

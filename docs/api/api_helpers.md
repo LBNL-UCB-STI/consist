@@ -20,12 +20,14 @@ a tracker object to every call.
   `consist.output_path`
 - Artifact logging/loading: `consist.log_artifact`, `consist.log_dataframe`,
   `consist.load`, `consist.load_df`
-- Querying: `consist.find_run`, `consist.find_runs`, `consist.run_query`,
-  `consist.run_set`, `consist.get_run_result`, `consist.config_run_query`,
+- Querying: `consist.find_run`, `consist.find_runs`,
+  `consist.find_latest_run`, `consist.run_query`, `consist.run_set`,
+  `consist.get_run_result`, `consist.config_run_query`,
   `consist.config_run_rows`
 
-`consist.find_runs(...)` and `consist.find_run(...)` forward all standard run
-filters, including `stage=` and `phase=` for workflow-level queries.
+`consist.find_runs(...)`, `consist.find_run(...)`, and
+`consist.find_latest_run(...)` forward standard run filters, including
+`stage=` and `phase=` for workflow-level queries.
 
 ## Minimal runnable helper workflow
 
@@ -89,6 +91,7 @@ For class-level equivalents, see [Tracker](tracker.md) and
         - register_views
         - find_run
         - find_runs
+        - find_latest_run
         - run_set
         - db_session
         - run_query
