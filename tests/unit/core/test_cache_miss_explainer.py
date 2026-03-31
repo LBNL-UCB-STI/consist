@@ -23,7 +23,7 @@ def _artifact(
     content_id: uuid.UUID | None = None,
     table_path: str | None = None,
     array_path: str | None = None,
-    ) -> Artifact:
+) -> Artifact:
     """Create a minimal artifact for focused explainer tests.
 
     The cache-miss explainer only looks at a small subset of artifact identity
@@ -905,9 +905,7 @@ def test_cache_miss_explanation_marks_candidate_outputs_invalid(tracker, caplog)
         "git_hash",
     ]
     assert explanation["mismatched_components"] == []
-    assert explanation["details"] == {
-        "candidate_output_validation_failure": True
-    }
+    assert explanation["details"] == {"candidate_output_validation_failure": True}
     assert any(
         "[Consist][cache] miss explanation: reason=candidate_outputs_invalid"
         in record.message

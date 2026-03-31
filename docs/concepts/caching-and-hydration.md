@@ -180,6 +180,60 @@ print(summary["identity_inputs"])
 Use this as the canonical explanation for "why this run did or did not reuse
 cache."
 
+If a run re-executed and you want the reason in plain language, Consist also
+records a structured cache miss explanation on the run itself:
+
+```python
+run = tracker.get_run("my_run_id")
+explanation = run.meta.get("cache_miss_explanation")
+
+print(explanation["reason"])
+print(explanation["candidate_run_id"])
+print(explanation["matched_components"])
+print(explanation["mismatched_components"])
+print(explanation.get("details", {}))
+```
+
+The explanation is best read alongside `run.identity_summary`:
+
+- `run.identity_summary` tells you the hashes and identity inputs that formed
+  the cache key.
+- `run.meta["cache_miss_explanation"]` tells you why the key did not reuse a
+  prior run, and which likely constituent fields changed.
+
+Typical `reason` values are:
+
+- `config_changed`
+- `inputs_changed`
+- `code_changed`
+- `config_and_inputs_changed`
+- `config_and_code_changed`
+- `inputs_and_code_changed`
+- `all_components_changed`
+- `candidate_outputs_invalid`
+- `no_similar_prior_run`
+
+The `details` payload is intentionally best-effort. Common keys are:
+
+- `identity_inputs_changed`: named digest inputs that changed
+- `config_keys_changed` / `config_keys_added` / `config_keys_removed`: config
+  facet or snapshot keys that changed
+- `adapter_identity_changed`: adapter metadata that changed
+- `input_keys_added` / `input_keys_removed`: input artifact keys that changed
+- `input_artifact_changes`: per-key input drift details such as
+  upstream-run changes, content-hash changes, content-id changes, or container
+  location changes
+- `code_identity_changed`: code-identity mode inputs that changed
+- `code_identity_mode_changed`: code-identity mode changed, such as
+  `repo_git` to `callable_module`
+- `code_identity_extra_deps_changed`: callable extra-dependency drift
+- `repo_git_identity_changed` or `code_hash_changed`: code hash changed, with
+  or without richer metadata
+- `fallbacks_used`: which fallback sources were used to build the explanation
+
+If you only need a quick read, start with `reason`, then check `details` only
+when you need the specific fields that likely changed.
+
 #### Code Identity Modes
 
 By default, code hash uses repository Git state (`repo_git`). For function-shaped runs, you can opt into callable-scoped code identity with `CacheOptions`:

@@ -4960,9 +4960,7 @@ class Tracker:
         Return recent completed runs for a model, newest first.
         """
         if self.db:
-            return self.db.find_recent_completed_runs_for_model(
-                model_name, limit=limit
-            )
+            return self.db.find_recent_completed_runs_for_model(model_name, limit=limit)
         return []
 
     def get_artifact_lineage(

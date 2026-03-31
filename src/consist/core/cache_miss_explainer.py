@@ -116,7 +116,9 @@ def _identity_input_map(run: Run) -> dict[str, Any]:
     return {}
 
 
-def _changed_keys(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, list[str]]:
+def _changed_keys(
+    left: Mapping[str, Any], right: Mapping[str, Any]
+) -> dict[str, list[str]]:
     left_keys = set(left)
     right_keys = set(right)
     changed = sorted(key for key in left_keys & right_keys if left[key] != right[key])
@@ -203,7 +205,11 @@ def _build_code_details(run: Run, candidate: Run) -> dict[str, Any]:
     prior_code_identity = _code_identity_inputs(candidate)
     current_mode = current_code_identity.get("mode")
     prior_mode = prior_code_identity.get("mode")
-    if current_mode != prior_mode and current_mode is not None and prior_mode is not None:
+    if (
+        current_mode != prior_mode
+        and current_mode is not None
+        and prior_mode is not None
+    ):
         details["code_identity_mode_changed"] = [prior_mode, current_mode]
 
     current_extra_deps = current_code_identity.get("extra_deps")
@@ -394,11 +400,7 @@ def _artifact_change_labels(
 
     current_run_id = getattr(current, "run_id", None)
     candidate_run_id = getattr(candidate, "run_id", None)
-    if (
-        current_run_id
-        and candidate_run_id
-        and current_run_id != candidate_run_id
-    ):
+    if current_run_id and candidate_run_id and current_run_id != candidate_run_id:
         current_signature = _resolve_run_signature(tracker, current_run_id)
         candidate_signature = _resolve_run_signature(tracker, candidate_run_id)
         if current_signature is None or candidate_signature is None:
@@ -417,11 +419,9 @@ def _artifact_change_labels(
     ):
         labels.append("input_location_changed")
 
-    if (
-        getattr(current, "table_path", None) != getattr(candidate, "table_path", None)
-        or getattr(current, "array_path", None)
-        != getattr(candidate, "array_path", None)
-    ):
+    if getattr(current, "table_path", None) != getattr(
+        candidate, "table_path", None
+    ) or getattr(current, "array_path", None) != getattr(candidate, "array_path", None):
         labels.append("container_member_changed")
 
     return labels
@@ -473,7 +473,9 @@ def _build_input_details(
         )
         if "upstream_run_changed" in labels:
             change_entry["current_run_id"] = getattr(current_artifact, "run_id", None)
-            change_entry["candidate_run_id"] = getattr(candidate_artifact, "run_id", None)
+            change_entry["candidate_run_id"] = getattr(
+                candidate_artifact, "run_id", None
+            )
             if current_signature is not None:
                 change_entry["current_run_signature"] = current_signature
             if candidate_signature is not None:
@@ -608,14 +610,17 @@ def _should_include_input_details(
     fallback noise would contradict the top-level explanation.
     """
 
-    if reason in {"inputs_changed", "config_and_inputs_changed", "inputs_and_code_changed", "all_components_changed"}:
+    if reason in {
+        "inputs_changed",
+        "config_and_inputs_changed",
+        "inputs_and_code_changed",
+        "all_components_changed",
+    }:
         return True
     return "input_hash" in set(mismatched_components)
 
 
-def _config_snapshot_diff(
-    left: Any, right: Any
-) -> tuple[dict[str, list[str]], bool]:
+def _config_snapshot_diff(left: Any, right: Any) -> tuple[dict[str, list[str]], bool]:
     left_payload = _flatten_config_payload(_normalize_config_source(left))
     right_payload = _flatten_config_payload(_normalize_config_source(right))
     return _diff_flattened_payloads(left_payload, right_payload), bool(
@@ -663,7 +668,9 @@ def _build_config_details(
         return details
 
     current_consist = getattr(tracker, "current_consist", None)
-    current_config = getattr(current_consist, "config", None) if current_consist else None
+    current_config = (
+        getattr(current_consist, "config", None) if current_consist else None
+    )
     candidate_config = _safe_get_run_config(tracker, candidate.id)
     snapshot_diff, has_snapshot_payload = _config_snapshot_diff(
         current_config, candidate_config
@@ -788,7 +795,9 @@ class CacheMissExplainer:
 
         matched, mismatched = _match_components(run, candidate)
         code_details = _build_code_details(run, candidate)
-        reason = _classify_reason(mismatched, code_changed=_has_code_changes(code_details))
+        reason = _classify_reason(
+            mismatched, code_changed=_has_code_changes(code_details)
+        )
         if reason == "exact_match_lookup_inconclusive":
             confidence = "low"
         elif reason == "code_changed" and "code_hash_changed" in code_details:
