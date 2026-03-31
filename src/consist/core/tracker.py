@@ -4953,6 +4953,18 @@ class Tracker:
             return self.db.find_matching_run(config_hash, input_hash, git_hash)
         return None
 
+    def find_recent_completed_runs_for_model(
+        self, model_name: str, *, limit: int = 20
+    ) -> list[Run]:
+        """
+        Return recent completed runs for a model, newest first.
+        """
+        if self.db:
+            return self.db.find_recent_completed_runs_for_model(
+                model_name, limit=limit
+            )
+        return []
+
     def get_artifact_lineage(
         self,
         artifact_key_or_id: Union[str, uuid.UUID],

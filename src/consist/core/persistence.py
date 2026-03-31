@@ -1570,6 +1570,37 @@ class DatabaseManager:
             logging.warning(f"Cache lookup failed: {e}")
             return None
 
+    def find_recent_completed_runs_for_model(
+        self, model_name: str, *, limit: int = 20
+    ) -> list[Run]:
+        def _query():
+            with self.session_scope() as session:
+                statement = (
+                    select(Run)
+                    .where(Run.status == "completed")
+                    .where(Run.model_name == model_name)
+                    .order_by(col(Run.created_at).desc())
+                    .limit(limit)
+                )
+                results = session.exec(statement).all()
+                for run in results:
+                    _ = run.meta
+                    _ = run.tags
+                    session.expunge(run)
+                return results
+
+        try:
+            return self.execute_with_retry(
+                _query, operation_name="find_recent_completed_runs_for_model"
+            )
+        except Exception as e:
+            logging.warning(
+                "Failed to find recent completed runs for model %s: %s",
+                model_name,
+                e,
+            )
+            return []
+
     def find_run_by_signature(self, signature: str) -> Optional[Run]:
         """Find a completed run by its composite signature."""
 
