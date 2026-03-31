@@ -23,7 +23,14 @@ def _artifact(
     content_id: uuid.UUID | None = None,
     table_path: str | None = None,
     array_path: str | None = None,
-) -> Artifact:
+    ) -> Artifact:
+    """Create a minimal artifact for focused explainer tests.
+
+    The cache-miss explainer only looks at a small subset of artifact identity
+    fields, so this helper keeps the tests compact while making the relevant
+    inputs explicit at each call site.
+    """
+
     return Artifact(
         key=key,
         run_id=run_id,
@@ -117,6 +124,233 @@ def test_cache_miss_explanation_records_identity_input_digest_changes():
 
     assert explanation.reason == "config_changed"
     assert explanation.details["identity_inputs_changed"] == ["scenario_cfg"]
+
+
+def test_cache_miss_explanation_records_callable_identity_mode_drift():
+    """Callable identity mode changes should be reported as a code-side miss cause.
+
+    This covers the case where the top-level code hash stays the same, but the
+    code-identity strategy itself changes between runs. The explainer should say
+    the miss is code-related and point to the mode change explicitly.
+    """
+
+    current = Run(
+        id="current",
+        model_name="code_model",
+        config_hash="config",
+        input_hash="input",
+        git_hash="code_hash",
+        meta={"code_identity": "callable_module"},
+    )
+    candidate = Run(
+        id="candidate",
+        model_name="code_model",
+        config_hash="config",
+        input_hash="input",
+        git_hash="code_hash",
+        status="completed",
+        meta={"code_identity": "repo_git"},
+    )
+
+    class StubTracker:
+        db = object()
+        current_consist = None
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            assert model_name == "code_model"
+            assert limit == 20
+            return [candidate]
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert explanation.reason == "code_changed"
+    assert explanation.details["code_identity_mode_changed"] == [
+        "repo_git",
+        "callable_module",
+    ]
+    assert explanation.details["code_identity_changed"] == ["mode"]
+
+
+def test_cache_miss_explanation_records_callable_extra_deps_drift():
+    """Callable extra dependency changes should be reported as code drift.
+
+    The top-level code hash remains the same here, so the explainer needs to use
+    the extra dependency metadata to explain why the current run no longer
+    matches the prior one.
+    """
+
+    current = Run(
+        id="current",
+        model_name="code_model",
+        config_hash="config",
+        input_hash="input",
+        git_hash="code_hash",
+        meta={"code_identity": "callable_module", "code_identity_extra_deps": ["a"]},
+    )
+    candidate = Run(
+        id="candidate",
+        model_name="code_model",
+        config_hash="config",
+        input_hash="input",
+        git_hash="code_hash",
+        status="completed",
+        meta={"code_identity": "callable_module", "code_identity_extra_deps": ["b"]},
+    )
+
+    class StubTracker:
+        db = object()
+        current_consist = None
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            assert model_name == "code_model"
+            assert limit == 20
+            return [candidate]
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert explanation.reason == "code_changed"
+    assert explanation.details["code_identity_extra_deps_changed"] == {
+        "current": ["a"],
+        "candidate": ["b"],
+    }
+    assert explanation.details["code_identity_changed"] == ["extra_deps"]
+
+
+def test_cache_miss_explanation_falls_back_to_code_hash_when_metadata_missing():
+    """Without richer code metadata, a changed git hash should still be explained.
+
+    This guards the fallback path for older or sparse records: even if the runs
+    do not carry explicit code identity metadata, the explainer should still say
+    that the repo/code identity changed when the git hashes differ.
+    """
+
+    current = Run(
+        id="current",
+        model_name="code_model",
+        config_hash="config",
+        input_hash="input",
+        git_hash="git_hash_v2",
+    )
+    candidate = Run(
+        id="candidate",
+        model_name="code_model",
+        config_hash="config",
+        input_hash="input",
+        git_hash="git_hash_v1",
+        status="completed",
+    )
+
+    class StubTracker:
+        db = object()
+        current_consist = None
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            assert model_name == "code_model"
+            assert limit == 20
+            return [candidate]
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert explanation.reason == "code_changed"
+    assert explanation.details["repo_git_identity_changed"] is True
+    assert explanation.details["code_hash_changed"] is True
+    assert "code_identity_changed" not in explanation.details
+
+
+def test_cache_miss_explanation_uses_generic_code_hash_label_for_callable_modes():
+    """Callable-mode code hash changes should avoid repo-specific wording.
+
+    Both runs explicitly use a callable-based identity mode, so a changed code
+    hash means the callable-derived identity changed, not necessarily the Git
+    repository identity. The explanation should therefore use the generic
+    ``code_hash_changed`` hint and avoid the more specific
+    ``repo_git_identity_changed`` label.
+    """
+
+    current = Run(
+        id="current",
+        model_name="code_model",
+        config_hash="config",
+        input_hash="input",
+        git_hash="callable_hash_v2",
+        meta={"code_identity": "callable_module"},
+    )
+    candidate = Run(
+        id="candidate",
+        model_name="code_model",
+        config_hash="config",
+        input_hash="input",
+        git_hash="callable_hash_v1",
+        status="completed",
+        meta={"code_identity": "callable_module"},
+    )
+
+    class StubTracker:
+        db = object()
+        current_consist = None
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            assert model_name == "code_model"
+            assert limit == 20
+            return [candidate]
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert explanation.reason == "code_changed"
+    assert explanation.details["code_hash_changed"] is True
+    assert "repo_git_identity_changed" not in explanation.details
+
+
+def test_cache_miss_explanation_is_quiet_when_code_metadata_is_absent():
+    """Missing code metadata should not fabricate code-side drift details.
+
+    The only thing changing here is the top-level config hash. Because neither
+    run has explicit code identity metadata and the git hash is unchanged, the
+    explainer should stay on the config path and avoid emitting code-side hints.
+    """
+
+    current = Run(
+        id="current",
+        model_name="code_model",
+        config_hash="config_current",
+        input_hash="input",
+        git_hash="code_hash",
+    )
+    candidate = Run(
+        id="candidate",
+        model_name="code_model",
+        config_hash="config_candidate",
+        input_hash="input",
+        git_hash="code_hash",
+        status="completed",
+    )
+
+    class StubTracker:
+        db = object()
+        current_consist = None
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            assert model_name == "code_model"
+            assert limit == 20
+            return [candidate]
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert explanation.reason == "config_changed"
+    assert "code_identity_changed" not in explanation.details
+    assert "code_identity_mode_changed" not in explanation.details
+    assert "code_identity_extra_deps_changed" not in explanation.details
+    assert "repo_git_identity_changed" not in explanation.details
 
 
 def test_cache_miss_explanation_records_input_key_added():

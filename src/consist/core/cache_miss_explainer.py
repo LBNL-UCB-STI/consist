@@ -152,6 +152,83 @@ def _changed_adapter_identity(run: Run, candidate: Run) -> list[str]:
     ]
 
 
+def _code_identity_summary(run: Run) -> dict[str, Any]:
+    summary = run.identity_summary
+    if isinstance(summary, dict):
+        code_identity = summary.get("code_identity")
+        if isinstance(code_identity, dict):
+            return code_identity
+    return {}
+
+
+def _code_identity_inputs(run: Run) -> dict[str, Any]:
+    code_identity = _get_run_meta_value(run, "code_identity")
+    extra_deps = _get_run_meta_value(run, "code_identity_extra_deps")
+    summary = _code_identity_summary(run)
+    payload: dict[str, Any] = {}
+
+    if isinstance(code_identity, str) and code_identity:
+        payload["mode"] = code_identity
+    elif isinstance(summary.get("mode"), str) and summary["mode"]:
+        payload["mode"] = summary["mode"]
+
+    if isinstance(extra_deps, list) and all(isinstance(dep, str) for dep in extra_deps):
+        payload["extra_deps"] = list(extra_deps)
+    elif isinstance(summary.get("extra_deps"), list) and all(
+        isinstance(dep, str) for dep in summary["extra_deps"]
+    ):
+        payload["extra_deps"] = list(summary["extra_deps"])
+
+    return payload
+
+
+def _changed_code_identity_inputs(run: Run, candidate: Run) -> list[str]:
+    current = _code_identity_inputs(run)
+    prior = _code_identity_inputs(candidate)
+    diff = _changed_keys(current, prior)
+    labels = set()
+    for value in diff.values():
+        labels.update(value)
+    return sorted(labels)
+
+
+def _build_code_details(run: Run, candidate: Run) -> dict[str, Any]:
+    details: dict[str, Any] = {}
+
+    changed_code_identity_inputs = _changed_code_identity_inputs(run, candidate)
+    if changed_code_identity_inputs:
+        details["code_identity_changed"] = changed_code_identity_inputs
+
+    current_code_identity = _code_identity_inputs(run)
+    prior_code_identity = _code_identity_inputs(candidate)
+    current_mode = current_code_identity.get("mode")
+    prior_mode = prior_code_identity.get("mode")
+    if current_mode != prior_mode and current_mode is not None and prior_mode is not None:
+        details["code_identity_mode_changed"] = [prior_mode, current_mode]
+
+    current_extra_deps = current_code_identity.get("extra_deps")
+    prior_extra_deps = prior_code_identity.get("extra_deps")
+    if current_extra_deps != prior_extra_deps and (
+        current_extra_deps is not None or prior_extra_deps is not None
+    ):
+        details["code_identity_extra_deps_changed"] = {
+            "current": current_extra_deps,
+            "candidate": prior_extra_deps,
+        }
+
+    if run.git_hash != candidate.git_hash:
+        if current_mode == "repo_git" and prior_mode == "repo_git":
+            details["repo_git_identity_changed"] = True
+        if (
+            "code_identity_changed" not in details
+            and "code_identity_mode_changed" not in details
+            and "code_identity_extra_deps_changed" not in details
+        ):
+            details["code_hash_changed"] = True
+
+    return details
+
+
 def _strip_internal_config_keys(payload: Any) -> Any:
     if isinstance(payload, dict):
         return {
@@ -437,6 +514,69 @@ def _build_input_details(
     return details
 
 
+def _has_code_details(details: dict[str, Any]) -> bool:
+    return any(
+        key in details
+        for key in (
+            "repo_git_identity_changed",
+            "code_identity_changed",
+            "code_identity_mode_changed",
+            "code_identity_extra_deps_changed",
+            "code_hash_changed",
+        )
+    )
+
+
+def _has_code_changes(code_details: dict[str, Any]) -> bool:
+    return _has_code_details(code_details)
+
+
+def _classify_reason(
+    mismatched_components: Sequence[str],
+    *,
+    code_changed: bool = False,
+) -> str:
+    """Map identity mismatches to a best-effort miss reason."""
+
+    mismatched = set(mismatched_components)
+    if code_changed:
+        if not mismatched:
+            return "code_changed"
+        if mismatched == {"config_hash"}:
+            return "config_and_code_changed"
+        if mismatched == {"input_hash"}:
+            return "inputs_and_code_changed"
+        if mismatched == {"config_hash", "input_hash"}:
+            return "all_components_changed"
+        if mismatched == {"git_hash"}:
+            return "code_changed"
+        if mismatched == {"config_hash", "git_hash"}:
+            return "config_and_code_changed"
+        if mismatched == {"input_hash", "git_hash"}:
+            return "inputs_and_code_changed"
+        if mismatched == {"config_hash", "input_hash", "git_hash"}:
+            return "all_components_changed"
+        return "code_changed"
+
+    if not mismatched:
+        return "exact_match_lookup_inconclusive"
+    if mismatched == {"config_hash"}:
+        return "config_changed"
+    if mismatched == {"input_hash"}:
+        return "inputs_changed"
+    if mismatched == {"git_hash"}:
+        return "code_changed"
+    if mismatched == {"config_hash", "input_hash"}:
+        return "config_and_inputs_changed"
+    if mismatched == {"config_hash", "git_hash"}:
+        return "config_and_code_changed"
+    if mismatched == {"input_hash", "git_hash"}:
+        return "inputs_and_code_changed"
+    if mismatched == {"config_hash", "input_hash", "git_hash"}:
+        return "all_components_changed"
+    return "no_similar_prior_run"
+
+
 def _merge_detail_payloads(*payloads: dict[str, Any]) -> dict[str, Any]:
     merged: dict[str, Any] = {}
     fallbacks: list[str] = []
@@ -552,35 +692,6 @@ def _match_components(run: Run, candidate: Run) -> tuple[list[str], list[str]]:
     return matched, mismatched
 
 
-def _classify_reason(mismatched_components: Sequence[str]) -> str:
-    """Map top-level identity mismatches to a Phase 1 reason code.
-
-    An empty mismatch set means the fallback candidate search found a run whose
-    identity matches exactly even though the primary exact-match lookup did not
-    produce a reusable cache hit. That case is reported separately so the
-    explanation does not incorrectly claim that no similar run exists.
-    """
-
-    mismatched = set(mismatched_components)
-    if not mismatched:
-        return "exact_match_lookup_inconclusive"
-    if mismatched == {"config_hash"}:
-        return "config_changed"
-    if mismatched == {"input_hash"}:
-        return "inputs_changed"
-    if mismatched == {"git_hash"}:
-        return "code_changed"
-    if mismatched == {"config_hash", "input_hash"}:
-        return "config_and_inputs_changed"
-    if mismatched == {"config_hash", "git_hash"}:
-        return "config_and_code_changed"
-    if mismatched == {"input_hash", "git_hash"}:
-        return "inputs_and_code_changed"
-    if mismatched == {"config_hash", "input_hash", "git_hash"}:
-        return "all_components_changed"
-    return "no_similar_prior_run"
-
-
 def _best_candidate(run: Run, candidates: Sequence[Run]) -> tuple[Run | None, int]:
     """Select the closest prior run using Phase 1 scoring rules.
 
@@ -676,9 +787,12 @@ class CacheMissExplainer:
             )
 
         matched, mismatched = _match_components(run, candidate)
-        reason = _classify_reason(mismatched)
+        code_details = _build_code_details(run, candidate)
+        reason = _classify_reason(mismatched, code_changed=_has_code_changes(code_details))
         if reason == "exact_match_lookup_inconclusive":
             confidence = "low"
+        elif reason == "code_changed" and "code_hash_changed" in code_details:
+            confidence = "medium"
         else:
             confidence = "high" if len(matched) >= 2 else "medium" if matched else "low"
         detail_payloads = [_build_config_details(self._tracker, run, candidate)]
@@ -687,6 +801,8 @@ class CacheMissExplainer:
             mismatched_components=mismatched,
         ):
             detail_payloads.append(_build_input_details(self._tracker, run, candidate))
+        if code_details:
+            detail_payloads.append(code_details)
         details = _merge_detail_payloads(*detail_payloads)
         return CacheMissExplanation(
             reason=reason,
