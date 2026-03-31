@@ -4,7 +4,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional, Protocol, Sequence, runtime_checkable
 
-from consist.models.run import Run
+from consist.models.artifact import Artifact
+from consist.models.run import Run, RunArtifacts
 
 
 @runtime_checkable
@@ -50,6 +51,8 @@ class CacheMissExplainerContext(Protocol):
     def get_run_config(
         self, run_id: str, *, allow_missing: bool = False
     ) -> Optional[dict[str, Any]]: ...
+
+    def get_artifacts_for_run(self, run_id: str) -> RunArtifacts: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +244,235 @@ def _safe_get_run_config(
     return None
 
 
+def _safe_get_run_artifacts(
+    tracker: CacheMissExplainerContext, run_id: str
+) -> Optional[Any]:
+    getter = getattr(tracker, "get_artifacts_for_run", None)
+    if getter is None:
+        return None
+    try:
+        artifacts = getter(run_id)
+    except Exception:
+        return None
+    if hasattr(artifacts, "inputs"):
+        return artifacts
+    return None
+
+
+def _artifact_map_from_inputs(
+    inputs: Any,
+) -> dict[str, Artifact]:
+    if isinstance(inputs, dict):
+        return {
+            key: artifact
+            for key, artifact in inputs.items()
+            if isinstance(key, str) and isinstance(artifact, Artifact)
+        }
+    if isinstance(inputs, list):
+        return {
+            artifact.key: artifact
+            for artifact in inputs
+            if isinstance(artifact, Artifact) and isinstance(artifact.key, str)
+        }
+    return {}
+
+
+def _current_input_artifacts(tracker: CacheMissExplainerContext) -> dict[str, Artifact]:
+    current_consist = getattr(tracker, "current_consist", None)
+    if current_consist is None:
+        return {}
+    return _artifact_map_from_inputs(getattr(current_consist, "inputs", None))
+
+
+def _resolve_run_signature(
+    tracker: CacheMissExplainerContext, run_id: Optional[str]
+) -> Optional[str]:
+    if not run_id:
+        return None
+    resolver = getattr(tracker, "_resolve_run_signature", None)
+    if resolver is None:
+        return None
+    try:
+        signature = resolver(run_id)
+    except Exception:
+        return None
+    if isinstance(signature, str):
+        return signature
+    return None
+
+
+def _artifact_content_id(artifact: Artifact) -> Optional[str]:
+    content_id = getattr(artifact, "content_id", None)
+    if content_id is None:
+        return None
+    return str(content_id)
+
+
+def _artifact_change_labels(
+    tracker: CacheMissExplainerContext,
+    current: Artifact,
+    candidate: Artifact,
+) -> list[str]:
+    labels: list[str] = []
+
+    current_run_id = getattr(current, "run_id", None)
+    candidate_run_id = getattr(candidate, "run_id", None)
+    if (
+        current_run_id
+        and candidate_run_id
+        and current_run_id != candidate_run_id
+    ):
+        current_signature = _resolve_run_signature(tracker, current_run_id)
+        candidate_signature = _resolve_run_signature(tracker, candidate_run_id)
+        if current_signature is None or candidate_signature is None:
+            labels.append("upstream_run_changed")
+        elif current_signature != candidate_signature:
+            labels.append("upstream_run_changed")
+
+    if getattr(current, "hash", None) != getattr(candidate, "hash", None):
+        labels.append("artifact_hash_changed")
+
+    if _artifact_content_id(current) != _artifact_content_id(candidate):
+        labels.append("artifact_content_id_changed")
+
+    if getattr(current, "container_uri", None) != getattr(
+        candidate, "container_uri", None
+    ):
+        labels.append("input_location_changed")
+
+    if (
+        getattr(current, "table_path", None) != getattr(candidate, "table_path", None)
+        or getattr(current, "array_path", None)
+        != getattr(candidate, "array_path", None)
+    ):
+        labels.append("container_member_changed")
+
+    return labels
+
+
+def _build_input_details(
+    tracker: CacheMissExplainerContext,
+    run: Run,
+    candidate: Run,
+) -> dict[str, Any]:
+    del run
+    details: dict[str, Any] = {}
+    current_inputs = _current_input_artifacts(tracker)
+    candidate_artifacts = _safe_get_run_artifacts(tracker, candidate.id)
+    if candidate_artifacts is None:
+        details["fallbacks_used"] = ["candidate_input_artifacts_unavailable"]
+        return details
+    candidate_inputs = _artifact_map_from_inputs(
+        getattr(candidate_artifacts, "inputs", None)
+    )
+
+    if not current_inputs and not candidate_inputs:
+        return details
+
+    current_keys = set(current_inputs)
+    candidate_keys = set(candidate_inputs)
+
+    added_keys = sorted(current_keys - candidate_keys)
+    removed_keys = sorted(candidate_keys - current_keys)
+    if added_keys:
+        details["input_keys_added"] = added_keys
+    if removed_keys:
+        details["input_keys_removed"] = removed_keys
+
+    shared_keys = sorted(current_keys & candidate_keys)
+    input_changes: list[dict[str, Any]] = []
+    for key in shared_keys:
+        current_artifact = current_inputs[key]
+        candidate_artifact = candidate_inputs[key]
+        labels = _artifact_change_labels(tracker, current_artifact, candidate_artifact)
+        if not labels:
+            continue
+        change_entry: dict[str, Any] = {"key": key, "changes": labels}
+        current_signature = _resolve_run_signature(
+            tracker, getattr(current_artifact, "run_id", None)
+        )
+        candidate_signature = _resolve_run_signature(
+            tracker, getattr(candidate_artifact, "run_id", None)
+        )
+        if "upstream_run_changed" in labels:
+            change_entry["current_run_id"] = getattr(current_artifact, "run_id", None)
+            change_entry["candidate_run_id"] = getattr(candidate_artifact, "run_id", None)
+            if current_signature is not None:
+                change_entry["current_run_signature"] = current_signature
+            if candidate_signature is not None:
+                change_entry["candidate_run_signature"] = candidate_signature
+        if "artifact_hash_changed" in labels:
+            change_entry["current_hash"] = getattr(current_artifact, "hash", None)
+            change_entry["candidate_hash"] = getattr(candidate_artifact, "hash", None)
+        if "artifact_content_id_changed" in labels:
+            change_entry["current_content_id"] = _artifact_content_id(current_artifact)
+            change_entry["candidate_content_id"] = _artifact_content_id(
+                candidate_artifact
+            )
+        if "input_location_changed" in labels:
+            change_entry["current_container_uri"] = getattr(
+                current_artifact, "container_uri", None
+            )
+            change_entry["candidate_container_uri"] = getattr(
+                candidate_artifact, "container_uri", None
+            )
+        if "container_member_changed" in labels:
+            change_entry["current_table_path"] = getattr(
+                current_artifact, "table_path", None
+            )
+            change_entry["candidate_table_path"] = getattr(
+                candidate_artifact, "table_path", None
+            )
+            change_entry["current_array_path"] = getattr(
+                current_artifact, "array_path", None
+            )
+            change_entry["candidate_array_path"] = getattr(
+                candidate_artifact, "array_path", None
+            )
+        input_changes.append(change_entry)
+
+    if input_changes:
+        details["input_artifact_changes"] = input_changes
+
+    return details
+
+
+def _merge_detail_payloads(*payloads: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    fallbacks: list[str] = []
+    for payload in payloads:
+        if not payload:
+            continue
+        for key, value in payload.items():
+            if key == "fallbacks_used":
+                if isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, str) and item not in fallbacks:
+                            fallbacks.append(item)
+                continue
+            merged[key] = value
+    if fallbacks:
+        merged["fallbacks_used"] = fallbacks
+    return merged
+
+
+def _should_include_input_details(
+    *,
+    reason: str,
+    mismatched_components: Sequence[str],
+) -> bool:
+    """Return whether input-side detail can plausibly explain this miss.
+
+    Input hints are useful only when inputs actually contributed to the miss. For
+    config-only misses and cache-validation failures, including input drift or
+    fallback noise would contradict the top-level explanation.
+    """
+
+    if reason in {"inputs_changed", "config_and_inputs_changed", "inputs_and_code_changed", "all_components_changed"}:
+        return True
+    return "input_hash" in set(mismatched_components)
+
+
 def _config_snapshot_diff(
     left: Any, right: Any
 ) -> tuple[dict[str, list[str]], bool]:
@@ -423,7 +655,10 @@ class CacheMissExplainer:
         if cached_run is not None and cache_valid is False:
             matched, mismatched = _match_components(run, cached_run)
             details = {"candidate_output_validation_failure": True}
-            details.update(_build_config_details(self._tracker, run, cached_run))
+            details = _merge_detail_payloads(
+                details,
+                _build_config_details(self._tracker, run, cached_run),
+            )
             return CacheMissExplanation(
                 reason="candidate_outputs_invalid",
                 candidate_run_id=cached_run.id,
@@ -446,7 +681,13 @@ class CacheMissExplainer:
             confidence = "low"
         else:
             confidence = "high" if len(matched) >= 2 else "medium" if matched else "low"
-        details = _build_config_details(self._tracker, run, candidate)
+        detail_payloads = [_build_config_details(self._tracker, run, candidate)]
+        if _should_include_input_details(
+            reason=reason,
+            mismatched_components=mismatched,
+        ):
+            detail_payloads.append(_build_input_details(self._tracker, run, candidate))
+        details = _merge_detail_payloads(*detail_payloads)
         return CacheMissExplanation(
             reason=reason,
             candidate_run_id=candidate.id,

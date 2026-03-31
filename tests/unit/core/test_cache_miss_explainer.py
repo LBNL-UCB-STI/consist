@@ -1,13 +1,39 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
 from consist.core.cache_miss_explainer import CacheMissExplainer
+from consist.models.artifact import Artifact
 from consist.models.run import Run
 from consist.types import CacheOptions
 from consist.types import ExecutionOptions
+
+
+def _artifact(
+    *,
+    key: str,
+    run_id: str | None = None,
+    container_uri: str = "inputs://shared.csv",
+    driver: str = "csv",
+    hash_value: str | None = None,
+    content_id: uuid.UUID | None = None,
+    table_path: str | None = None,
+    array_path: str | None = None,
+) -> Artifact:
+    return Artifact(
+        key=key,
+        run_id=run_id,
+        container_uri=container_uri,
+        driver=driver,
+        hash=hash_value,
+        content_id=content_id,
+        table_path=table_path,
+        array_path=array_path,
+    )
 
 
 def test_cache_miss_explanation_records_changed_components(tracker, caplog):
@@ -91,6 +117,293 @@ def test_cache_miss_explanation_records_identity_input_digest_changes():
 
     assert explanation.reason == "config_changed"
     assert explanation.details["identity_inputs_changed"] == ["scenario_cfg"]
+
+
+def test_cache_miss_explanation_records_input_key_added():
+    """A new current-run input key should be reported as an added input.
+
+    The baseline candidate only has ``base`` while the current run has both
+    ``base`` and ``extra``. The desired behavior is that the explanation points
+    to ``extra`` as a newly introduced input rather than reporting a generic
+    inputs_changed reason with no constituent detail.
+    """
+
+    current_input = _artifact(key="base", run_id=None)
+    extra_current_input = _artifact(key="extra", run_id=None)
+    candidate_input = _artifact(key="base", run_id=None)
+
+    class StubTracker:
+        db = object()
+        current_consist = SimpleNamespace(
+            inputs=[current_input, extra_current_input], config={}
+        )
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            assert model_name == "input_model"
+            assert limit == 20
+            return [candidate]
+
+        def get_artifacts_for_run(self, run_id: str):
+            assert run_id == "candidate"
+            return SimpleNamespace(inputs={"base": candidate_input})
+
+    current = Run(
+        id="current",
+        model_name="input_model",
+        config_hash="config",
+        input_hash="current_input",
+        git_hash="code",
+    )
+    candidate = Run(
+        id="candidate",
+        model_name="input_model",
+        config_hash="config",
+        input_hash="candidate_input",
+        git_hash="code",
+        status="completed",
+    )
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert explanation.reason == "inputs_changed"
+    assert explanation.details["input_keys_added"] == ["extra"]
+    assert "input_keys_removed" not in explanation.details
+
+
+def test_cache_miss_explanation_records_input_key_removed():
+    """A missing current-run input key should be reported as a removed input.
+
+    Here the prior candidate consumed ``base`` and ``extra`` but the current run
+    only consumes ``base``. The explanation should describe that as the current
+    run having removed ``extra`` from its input set.
+    """
+
+    current_input = _artifact(key="base", run_id=None)
+    candidate_input = _artifact(key="base", run_id=None)
+    extra_candidate_input = _artifact(key="extra", run_id=None)
+
+    class StubTracker:
+        db = object()
+        current_consist = SimpleNamespace(inputs=[current_input], config={})
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            assert model_name == "input_model"
+            assert limit == 20
+            return [candidate]
+
+        def get_artifacts_for_run(self, run_id: str):
+            assert run_id == "candidate"
+            return SimpleNamespace(
+                inputs={"base": candidate_input, "extra": extra_candidate_input}
+            )
+
+    current = Run(
+        id="current",
+        model_name="input_model",
+        config_hash="config",
+        input_hash="current_input",
+        git_hash="code",
+    )
+    candidate = Run(
+        id="candidate",
+        model_name="input_model",
+        config_hash="config",
+        input_hash="candidate_input",
+        git_hash="code",
+        status="completed",
+    )
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert explanation.reason == "inputs_changed"
+    assert explanation.details["input_keys_removed"] == ["extra"]
+    assert "input_keys_added" not in explanation.details
+
+
+def test_cache_miss_explanation_records_upstream_run_changed():
+    """Different producer run signatures should be surfaced as upstream drift.
+
+    The artifacts intentionally keep the same key and raw content-ish markers so
+    the only meaningful distinction is the producing run identity. The desired
+    behavior is that the explanation says the upstream run changed and includes
+    the resolved signatures for both producers.
+    """
+
+    current_input = _artifact(
+        key="upstream",
+        run_id="producer_v2",
+        hash_value="same_hash",
+        content_id=uuid.uuid4(),
+    )
+    candidate_input = _artifact(
+        key="upstream",
+        run_id="producer_v1",
+        hash_value="same_hash",
+        content_id=uuid.uuid4(),
+    )
+
+    class StubTracker:
+        db = object()
+        current_consist = SimpleNamespace(inputs=[current_input], config={})
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            assert model_name == "upstream_model"
+            assert limit == 20
+            return [candidate]
+
+        def get_artifacts_for_run(self, run_id: str):
+            assert run_id == "candidate"
+            return SimpleNamespace(inputs={"upstream": candidate_input})
+
+        def _resolve_run_signature(self, run_id: str) -> str | None:
+            return {
+                "producer_v1": "sig_v1",
+                "producer_v2": "sig_v2",
+            }.get(run_id)
+
+    current = Run(
+        id="current",
+        model_name="upstream_model",
+        config_hash="config",
+        input_hash="current_input",
+        git_hash="code",
+    )
+    candidate = Run(
+        id="candidate",
+        model_name="upstream_model",
+        config_hash="config",
+        input_hash="candidate_input",
+        git_hash="code",
+        status="completed",
+    )
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert explanation.reason == "inputs_changed"
+    change = explanation.details["input_artifact_changes"][0]
+    assert change["key"] == "upstream"
+    assert "upstream_run_changed" in change["changes"]
+    assert change["current_run_signature"] == "sig_v2"
+    assert change["candidate_run_signature"] == "sig_v1"
+
+
+def test_cache_miss_explanation_records_content_hash_and_id_drift():
+    """Raw file drift should call out hash and content-id changes together.
+
+    This case represents the same logical input key pointing at different raw
+    bytes. The explanation should surface the concrete artifact-level reasons
+    instead of collapsing them into a generic inputs_changed label.
+    """
+
+    current_input = _artifact(
+        key="raw",
+        run_id=None,
+        container_uri="inputs://raw_v2.csv",
+        hash_value="hash_v2",
+        content_id=uuid.uuid4(),
+    )
+    candidate_input = _artifact(
+        key="raw",
+        run_id=None,
+        container_uri="inputs://raw_v1.csv",
+        hash_value="hash_v1",
+        content_id=uuid.uuid4(),
+    )
+
+    class StubTracker:
+        db = object()
+        current_consist = SimpleNamespace(inputs=[current_input], config={})
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            assert model_name == "raw_model"
+            assert limit == 20
+            return [candidate]
+
+        def get_artifacts_for_run(self, run_id: str):
+            assert run_id == "candidate"
+            return SimpleNamespace(inputs={"raw": candidate_input})
+
+    current = Run(
+        id="current",
+        model_name="raw_model",
+        config_hash="config",
+        input_hash="current_input",
+        git_hash="code",
+    )
+    candidate = Run(
+        id="candidate",
+        model_name="raw_model",
+        config_hash="config",
+        input_hash="candidate_input",
+        git_hash="code",
+        status="completed",
+    )
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert explanation.reason == "inputs_changed"
+    change = explanation.details["input_artifact_changes"][0]
+    assert change["key"] == "raw"
+    assert "artifact_hash_changed" in change["changes"]
+    assert "artifact_content_id_changed" in change["changes"]
+    assert "input_location_changed" in change["changes"]
+
+
+def test_cache_miss_explanation_gracefully_handles_missing_candidate_inputs():
+    """Missing candidate artifact history should not break the explainer.
+
+    The desired behavior is graceful degradation: keep the top-level reason,
+    record that candidate input artifacts were unavailable, and avoid crashing or
+    inventing input change details.
+    """
+
+    current_input = _artifact(key="base", run_id=None)
+
+    class StubTracker:
+        db = object()
+        current_consist = SimpleNamespace(inputs=[current_input], config={})
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            assert model_name == "fallback_model"
+            assert limit == 20
+            return [candidate]
+
+        def get_artifacts_for_run(self, run_id: str):
+            raise RuntimeError("history unavailable")
+
+    current = Run(
+        id="current",
+        model_name="fallback_model",
+        config_hash="config",
+        input_hash="current_input",
+        git_hash="code",
+    )
+    candidate = Run(
+        id="candidate",
+        model_name="fallback_model",
+        config_hash="config",
+        input_hash="candidate_input",
+        git_hash="code",
+        status="completed",
+    )
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert explanation.reason == "inputs_changed"
+    assert explanation.details["fallbacks_used"] == [
+        "candidate_input_artifacts_unavailable"
+    ]
+    assert "input_artifact_changes" not in explanation.details
 
 
 def test_cache_miss_explanation_records_adapter_identity_changes(
@@ -366,6 +679,55 @@ def test_cache_miss_explanation_marks_candidate_outputs_invalid(tracker, caplog)
         in record.message
         for record in caplog.records
     )
+    assert "input_artifact_changes" not in explanation["details"]
+    assert explanation["details"].get("fallbacks_used") is None
+
+
+def test_cache_miss_explanation_does_not_attach_input_details_to_config_only_miss():
+    """Config-only misses should not include unrelated input-side detail payloads.
+
+    The current and candidate runs deliberately differ only in config hash. Even
+    if candidate input artifacts are unavailable, the explanation should stay
+    focused on config drift and avoid adding input fallback noise.
+    """
+
+    current = Run(
+        id="current",
+        model_name="config_only_model",
+        config_hash="config_current",
+        input_hash="shared_input_hash",
+        git_hash="shared_code_hash",
+    )
+    candidate = Run(
+        id="candidate",
+        model_name="config_only_model",
+        config_hash="config_candidate",
+        input_hash="shared_input_hash",
+        git_hash="shared_code_hash",
+        status="completed",
+    )
+
+    class StubTracker:
+        db = object()
+        current_consist = SimpleNamespace(inputs=[_artifact(key="base")], config={})
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            assert model_name == "config_only_model"
+            assert limit == 20
+            return [candidate]
+
+        def get_artifacts_for_run(self, run_id: str):
+            raise RuntimeError("should not be consulted for config-only misses")
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert explanation.reason == "config_changed"
+    assert "input_artifact_changes" not in explanation.details
+    assert "input_keys_added" not in explanation.details
+    assert "input_keys_removed" not in explanation.details
+    assert explanation.details.get("fallbacks_used") is None
 
 
 def test_cache_miss_explanation_handles_empty_mismatch_fallback() -> None:
