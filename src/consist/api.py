@@ -1729,7 +1729,8 @@ def find_runs(
     tracker : Optional[Tracker], optional
         Tracker instance to query; defaults to the active tracker.
     **filters : Any
-        Filter values forwarded to ``Tracker.find_runs``.
+        Filter values forwarded to ``Tracker.find_runs``. This includes
+        workflow filters such as ``stage`` and ``phase``.
 
     Returns
     -------
@@ -1738,6 +1739,27 @@ def find_runs(
     """
     tr = tracker or current_tracker()
     return tr.find_runs(**filters)
+
+
+def find_latest_run(tracker: Optional["Tracker"] = None, **filters: Any) -> Run:
+    """
+    Convenience proxy for ``Tracker.find_latest_run``.
+
+    Parameters
+    ----------
+    tracker : Optional[Tracker], optional
+        Tracker instance to query; defaults to the active tracker.
+    **filters : Any
+        Filter values forwarded to ``Tracker.find_latest_run``. This includes
+        workflow filters such as ``stage`` and ``phase``.
+
+    Returns
+    -------
+    Run
+        The latest matching run.
+    """
+    tr = tracker or current_tracker()
+    return tr.find_latest_run(**filters)
 
 
 def run_set(

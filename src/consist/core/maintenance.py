@@ -19,7 +19,12 @@ from consist.core.identity import IdentityManager
 from consist.models.artifact import Artifact
 from consist.models.artifact_kv import ArtifactKV
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaObservation
-from consist.models.run import ConsistRecord, Run, RunArtifactLink
+from consist.models.run import (
+    ConsistRecord,
+    Run,
+    RunArtifactLink,
+    resolve_canonical_run_meta_field,
+)
 from consist.models.run_config_kv import RunConfigKV
 
 if TYPE_CHECKING:
@@ -40,7 +45,7 @@ class PurgePlan:
     json_files: list[Path]
     disk_files: list[Path]
     ingested_data: dict[str, int]
-    ingested_table_modes: dict[str, str]
+    ingested_table_modes: dict[str, GlobalTableMode]
 
 
 @dataclass(slots=True)
@@ -60,7 +65,7 @@ class ExportResult:
     artifact_count: int
     out_path: Path
     ingested_rows: dict[str, int]
-    ingested_table_modes: dict[str, str]
+    ingested_table_modes: dict[str, GlobalTableMode]
     unscoped_cache_tables_skipped: list[str]
     snapshots_copied: int
 
@@ -2247,6 +2252,15 @@ class DatabaseMaintenance:
                 with self.db.session_scope() as session:
                     run_exists = session.get(Run, run_id) is not None
                     if not run_exists:
+                        stage = resolve_canonical_run_meta_field(run, "stage")
+                        phase = resolve_canonical_run_meta_field(run, "phase")
+                        meta_payload = (
+                            dict(run.meta) if isinstance(run.meta, dict) else {}
+                        )
+                        if stage is not None:
+                            meta_payload["stage"] = stage
+                        if phase is not None:
+                            meta_payload["phase"] = phase
                         session.add(
                             Run(
                                 id=run_id,
@@ -2256,14 +2270,14 @@ class DatabaseMaintenance:
                                 description=run.description,
                                 year=run.year,
                                 iteration=run.iteration,
+                                stage=stage,
+                                phase=phase,
                                 tags=list(run.tags or []),
                                 config_hash=getattr(run, "config_hash", None),
                                 git_hash=getattr(run, "git_hash", None),
                                 input_hash=run.input_hash,
                                 signature=run.signature,
-                                meta=dict(run.meta)
-                                if isinstance(run.meta, dict)
-                                else {},
+                                meta=meta_payload,
                                 started_at=run.started_at,
                                 ended_at=run.ended_at,
                                 created_at=run.created_at,

@@ -1301,6 +1301,8 @@ runs_by_year = consist.find_runs(
     tracker=tracker,
     parent_id="baseline",
     model="simulate",
+    stage="supply_demand_loop",
+    phase="traffic_assignment",
     index_by="year"
 )
 result_2030 = runs_by_year[2030]

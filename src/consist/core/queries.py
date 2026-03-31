@@ -23,6 +23,8 @@ class RunQueryService:
         tags: Optional[List[str]] = None,
         year: Optional[int] = None,
         iteration: Optional[int] = None,
+        stage: Optional[str] = None,
+        phase: Optional[str] = None,
         model: Optional[str] = None,
         status: Optional[str] = None,
         parent_id: Optional[str] = None,
@@ -34,7 +36,17 @@ class RunQueryService:
         runs: List[Run] = []
         if self._tracker.db:
             runs = self._tracker.db.find_runs(
-                tags, year, iteration, model, status, parent_id, metadata, limit, name
+                tags,
+                year,
+                iteration,
+                stage,
+                phase,
+                model,
+                status,
+                parent_id,
+                metadata,
+                limit,
+                name,
             )
 
         if index_by:
@@ -104,6 +116,8 @@ class RunQueryService:
         model: Optional[str] = None,
         status: Optional[str] = None,
         year: Optional[int] = None,
+        stage: Optional[str] = None,
+        phase: Optional[str] = None,
         tags: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         limit: int = 10_000,
@@ -113,6 +127,8 @@ class RunQueryService:
             model=model,
             status=status,
             year=year,
+            stage=stage,
+            phase=phase,
             tags=tags,
             metadata=metadata,
             limit=limit,

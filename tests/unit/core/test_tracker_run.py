@@ -942,6 +942,61 @@ def test_tracker_get_config_bundle_adapter_filter_uses_artifact_metadata(tracker
     assert resolved == bundle_path.resolve()
 
 
+def test_tracker_find_runs_filters_stage_and_phase(tracker):
+    with tracker.start_run(
+        "stage_phase_match",
+        "workflow_model",
+        year=2025,
+        iteration=2,
+        stage="supply_demand_loop",
+        phase="traffic_assignment",
+    ):
+        pass
+
+    with tracker.start_run(
+        "stage_phase_other",
+        "workflow_model",
+        year=2025,
+        iteration=2,
+        stage="supply_demand_loop",
+        phase="sketch",
+    ):
+        pass
+
+    runs = tracker.find_runs(
+        year=2025,
+        iteration=2,
+        stage="supply_demand_loop",
+        phase="traffic_assignment",
+        status="completed",
+        limit=10,
+    )
+
+    assert [run.id for run in runs] == ["stage_phase_match"]
+    assert runs[0].stage == "supply_demand_loop"
+    assert runs[0].phase == "traffic_assignment"
+    assert runs[0].meta["stage"] == "supply_demand_loop"
+    assert runs[0].meta["phase"] == "traffic_assignment"
+
+
+def test_tracker_log_meta_syncs_stage_and_phase(tracker):
+    with tracker.start_run("meta_sync", "workflow_model"):
+        tracker.log_meta(stage="rematerialization", phase="remap", note="ok")
+        assert tracker.current_consist is not None
+        run = tracker.current_consist.run
+        assert run.stage == "rematerialization"
+        assert run.phase == "remap"
+        assert run.meta["stage"] == "rematerialization"
+        assert run.meta["phase"] == "remap"
+
+    persisted = tracker.get_run("meta_sync")
+    assert persisted is not None
+    assert persisted.stage == "rematerialization"
+    assert persisted.phase == "remap"
+    assert persisted.meta["stage"] == "rematerialization"
+    assert persisted.meta["phase"] == "remap"
+
+
 def test_tracker_get_config_bundle_allow_missing_returns_none(tracker):
     with tracker.start_run("bundle_missing_allow", "bundle_model"):
         pass

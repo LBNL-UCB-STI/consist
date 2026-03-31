@@ -38,3 +38,67 @@ def test_db_methods_use_session_scope(tmp_path):
         assert result is not None
         assert result.id == "run1"
         assert scope.call_count == 1
+
+
+def test_run_stage_phase_backfill_on_database_open(tmp_path):
+    db_path = tmp_path / "run_stage_phase_backfill.db"
+    legacy_db = DatabaseManager(str(db_path))
+    now = datetime(2025, 1, 1, 12, 0)
+    legacy_run = Run(
+        id="legacy_run",
+        model_name="model",
+        config_hash=None,
+        git_hash=None,
+        status="completed",
+        stage=None,
+        phase=None,
+        meta={"stage": "supply_demand_loop", "phase": "traffic_assignment"},
+        created_at=now,
+        started_at=now,
+        ended_at=now,
+    )
+    with legacy_db.session_scope() as session:
+        session.add(legacy_run)
+        session.commit()
+
+    legacy_db.engine.dispose()
+    reopened = DatabaseManager(str(db_path))
+    found = reopened.find_runs(
+        stage="supply_demand_loop",
+        phase="traffic_assignment",
+        status="completed",
+        limit=10,
+    )
+
+    assert [run.id for run in found] == ["legacy_run"]
+    assert found[0].stage == "supply_demand_loop"
+    assert found[0].phase == "traffic_assignment"
+    assert found[0].meta["stage"] == "supply_demand_loop"
+    assert found[0].meta["phase"] == "traffic_assignment"
+
+
+def test_sync_run_prefers_canonical_stage_phase_over_stale_meta(tmp_path):
+    db = DatabaseManager(str(tmp_path / "run_stage_phase_sync.db"))
+    now = datetime(2025, 1, 1, 12, 0)
+    run = Run(
+        id="canonical_stage_phase",
+        model_name="model",
+        config_hash=None,
+        git_hash=None,
+        status="completed",
+        stage="canonical_stage",
+        phase="canonical_phase",
+        meta={"stage": "stale_stage", "phase": "stale_phase"},
+        created_at=now,
+        started_at=now,
+        ended_at=now,
+    )
+
+    db.sync_run(run)
+
+    persisted = db.get_run("canonical_stage_phase")
+    assert persisted is not None
+    assert persisted.stage == "canonical_stage"
+    assert persisted.phase == "canonical_phase"
+    assert persisted.meta["stage"] == "canonical_stage"
+    assert persisted.meta["phase"] == "canonical_phase"

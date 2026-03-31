@@ -2347,6 +2347,37 @@ def test_rebuild_from_json_full_mode_populates_run_config_kv(
     assert rows[2].value_json == [1, 2]
 
 
+def test_rebuild_from_json_restores_canonical_stage_phase(
+    maintenance: DatabaseMaintenance, tmp_path: Path
+) -> None:
+    json_dir = tmp_path / "rebuild_stage_phase_restore"
+    json_dir.mkdir(parents=True, exist_ok=True)
+    (json_dir / "stage_phase_run.json").write_text(
+        json.dumps(
+            _snapshot_payload(
+                run_id="stage_phase_run",
+                run_meta={
+                    "stage": "supply_demand_loop",
+                    "phase": "traffic_assignment",
+                },
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    result = maintenance.rebuild_from_json(json_dir, dry_run=False)
+
+    assert result.errors == []
+    with maintenance.db.session_scope() as session:
+        restored = session.get(Run, "stage_phase_run")
+
+    assert restored is not None
+    assert restored.stage == "supply_demand_loop"
+    assert restored.phase == "traffic_assignment"
+    assert restored.meta["stage"] == "supply_demand_loop"
+    assert restored.meta["phase"] == "traffic_assignment"
+
+
 def test_rebuild_from_json_full_mode_populates_artifact_schema_observation(
     maintenance: DatabaseMaintenance, tmp_path: Path
 ) -> None:

@@ -32,6 +32,45 @@ def test_find_latest_run_by_created_at(tracker):
     assert latest.id == "run_b"
 
 
+def test_find_latest_run_filters_stage_and_phase(tracker):
+    with tracker.start_run(
+        "run_stage_old",
+        "demo_stage_phase",
+        parent_run_id="scenario_stage_phase",
+        iteration=1,
+        stage="supply_demand_loop",
+        phase="warm_start",
+    ):
+        pass
+    with tracker.start_run(
+        "run_stage_latest",
+        "demo_stage_phase",
+        parent_run_id="scenario_stage_phase",
+        iteration=2,
+        stage="supply_demand_loop",
+        phase="traffic_assignment",
+    ):
+        pass
+    with tracker.start_run(
+        "run_stage_other",
+        "demo_stage_phase",
+        parent_run_id="scenario_stage_phase",
+        iteration=3,
+        stage="supply_demand_loop",
+        phase="sketch",
+    ):
+        pass
+
+    latest = tracker.find_latest_run(
+        parent_id="scenario_stage_phase",
+        model="demo_stage_phase",
+        stage="supply_demand_loop",
+        phase="traffic_assignment",
+        status="completed",
+    )
+    assert latest.id == "run_stage_latest"
+
+
 def test_get_latest_run_id(tracker):
     with tracker.start_run(
         "run_latest", "demo_latest", parent_run_id="scenario_latest", iteration=3

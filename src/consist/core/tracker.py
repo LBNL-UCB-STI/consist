@@ -1035,8 +1035,13 @@ class Tracker:
             Optional schema version tag for the persisted facet.
         facet_index : bool, default True
             Whether to flatten and index facet keys/values for DB querying.
+        stage : Optional[str], optional
+            Optional workflow stage label persisted on the run.
+        phase : Optional[str], optional
+            Optional lifecycle phase label persisted on the run.
         **kwargs : Any
-            Additional metadata. Special keywords `year` and `iteration` can be used.
+            Additional metadata. Special keywords `year`, `iteration`, `stage`,
+            and `phase` can be used.
             Metadata keys/values are validated and size-limited; use
             CONSIST_MAX_METADATA_ITEMS/KEY_LENGTH/VALUE_LENGTH to override.
 
@@ -1113,7 +1118,7 @@ class Tracker:
             - `description`: Optional[str]
             - `cache_mode`: str ("reuse", "overwrite", "readonly")
             - `facet`, `facet_from`, `hash_inputs`, `facet_schema_version`, `facet_index`
-            - `year`, `iteration`
+            - `year`, `iteration`, `stage`, `phase`
 
         Yields
         ------
@@ -1802,6 +1807,8 @@ class Tracker:
         tags: Optional[List[str]] = None,
         year: Optional[int] = None,
         iteration: Optional[int] = None,
+        stage: Optional[str] = None,
+        phase: Optional[str] = None,
         model: Optional[str] = None,
         status: Optional[str] = None,
         parent_id: Optional[str] = None,
@@ -1821,6 +1828,10 @@ class Tracker:
             Filter by run year.
         iteration : Optional[int], optional
             Filter by run iteration.
+        stage : Optional[str], optional
+            Filter by run stage.
+        phase : Optional[str], optional
+            Filter by run phase.
         model : Optional[str], optional
             Filter by run model name.
         status : Optional[str], optional
@@ -1856,6 +1867,8 @@ class Tracker:
             tags=tags,
             year=year,
             iteration=iteration,
+            stage=stage,
+            phase=phase,
             model=model,
             status=status,
             parent_id=parent_id,
@@ -1946,6 +1959,8 @@ class Tracker:
         model: Optional[str] = None,
         status: Optional[str] = None,
         year: Optional[int] = None,
+        stage: Optional[str] = None,
+        phase: Optional[str] = None,
         tags: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         limit: int = 10_000,
@@ -1967,6 +1982,10 @@ class Tracker:
             Filter by run status.
         year : Optional[int], optional
             Filter by run year.
+        stage : Optional[str], optional
+            Filter by run stage.
+        phase : Optional[str], optional
+            Filter by run phase.
         tags : Optional[List[str]], optional
             Filter runs that contain all provided tags.
         metadata : Optional[Dict[str, Any]], optional
@@ -1979,6 +1998,8 @@ class Tracker:
             model=model,
             status=status,
             year=year,
+            stage=stage,
+            phase=phase,
             tags=tags,
             metadata=metadata,
             limit=limit,
@@ -5340,6 +5361,10 @@ class Tracker:
             self.current_consist.run.meta = {}
 
         normalized = self.identity.normalize_json(kwargs)
+        for field in ("stage", "phase"):
+            value = normalized.get(field)
+            if isinstance(value, str) or value is None:
+                setattr(self.current_consist.run, field, value)
         self.current_consist.run.meta.update(normalized)
 
         # 2. Persist

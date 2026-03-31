@@ -36,6 +36,7 @@ from sqlmodel import create_engine, Session, select, SQLModel, col, delete
 
 from consist.core.schema_compat import (
     apply_content_identity_compatibility,
+    apply_run_stage_phase_compatibility,
     backfill_artifact_content_ids as compat_backfill_artifact_content_ids,
 )
 from consist.models.artifact import Artifact, ArtifactContent
@@ -48,7 +49,11 @@ from consist.models.artifact_schema import (
     ArtifactSchemaRelation,
 )
 from consist.models.config_facet import ConfigFacet
-from consist.models.run import Run, RunArtifactLink
+from consist.models.run import (
+    Run,
+    RunArtifactLink,
+    resolve_canonical_run_meta_field,
+)
 from consist.models.run_config_kv import RunConfigKV
 
 if TYPE_CHECKING:
@@ -188,6 +193,7 @@ class DatabaseManager:
             # Lightweight compatibility hooks for older DBs. Keep these isolated so
             # they can be removed without changing steady-state persistence behavior.
             apply_content_identity_compatibility(self)
+            apply_run_stage_phase_compatibility(self)
             self._ensure_artifact_schema_field_ordinal_position()
             self._ensure_schema_links_view()
 
@@ -246,6 +252,28 @@ class DatabaseManager:
             logging.warning(
                 "Failed to add artifact_schema_field.ordinal_position column: %s", e
             )
+
+    @staticmethod
+    def _sync_run_stage_phase(run: Run) -> None:
+        """Keep `Run.stage`/`Run.phase` aligned with mirrored JSON metadata."""
+        if run.meta is None:
+            run.meta = {}
+        if not isinstance(run.meta, dict):
+            return
+
+        for field in ("stage", "phase"):
+            value = resolve_canonical_run_meta_field(run, field)
+            if value is not None:
+                setattr(run, field, value)
+                run.meta[field] = value
+                continue
+
+            if field not in run.meta:
+                continue
+
+            meta_value = run.meta.get(field)
+            if isinstance(meta_value, str) or meta_value is None:
+                setattr(run, field, meta_value)
 
     def _ensure_schema_links_view(self) -> None:
         """Create or replace the portable schema link view."""
@@ -544,6 +572,7 @@ class DatabaseManager:
 
         def _do_sync():
             with self.session_scope() as session:
+                self._sync_run_stage_phase(run)
                 # Use merge for a simple upsert. DuckDB's MERGE semantics via SQLModel
                 # handle inserts and updates in one call and avoid stale state issues.
                 logging.debug(
@@ -573,6 +602,7 @@ class DatabaseManager:
                 current = db_run.meta or {}
                 current.update(meta_updates)
                 db_run.meta = current
+                self._sync_run_stage_phase(db_run)
                 session.add(db_run)
                 session.commit()
 
@@ -1900,6 +1930,8 @@ class DatabaseManager:
         tags: Optional[List[str]] = None,
         year: Optional[int] = None,
         iteration: Optional[int] = None,
+        stage: Optional[str] = None,
+        phase: Optional[str] = None,
         model: Optional[str] = None,
         status: Optional[str] = None,
         parent_id: Optional[str] = None,
@@ -1919,6 +1951,10 @@ class DatabaseManager:
                     statement = statement.where(Run.year == year)
                 if iteration is not None:
                     statement = statement.where(Run.iteration == iteration)
+                if stage is not None:
+                    statement = statement.where(Run.stage == stage)
+                if phase is not None:
+                    statement = statement.where(Run.phase == phase)
                 if parent_id:
                     statement = statement.where(Run.parent_run_id == parent_id)
                 if name:
