@@ -8,6 +8,13 @@ from consist.models.run import Run
 
 @runtime_checkable
 class CacheMissExplainerDb(Protocol):
+    """Database-facing surface required by the cache-miss explainer.
+
+    The Phase 1 explainer only needs a lightweight historical lookup: recent
+    completed runs for the same model. The concrete tracker/database layer can
+    provide richer helpers later without changing this protocol.
+    """
+
     def find_recent_completed_runs_for_model(
         self, model_name: str, *, limit: int = 20
     ) -> list[Run]: ...
@@ -15,6 +22,13 @@ class CacheMissExplainerDb(Protocol):
 
 @runtime_checkable
 class CacheMissExplainerContext(Protocol):
+    """Tracker-like context required by :class:`CacheMissExplainer`.
+
+    The explainer intentionally depends on a very small interface so it can stay
+    decoupled from the full tracker lifecycle implementation and remain easy to
+    test in isolation.
+    """
+
     db: Optional[CacheMissExplainerDb]
 
     def find_recent_completed_runs_for_model(
@@ -24,6 +38,14 @@ class CacheMissExplainerContext(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class CacheMissExplanation:
+    """Structured Phase 1 explanation payload for a cache miss.
+
+    This model captures only top-level miss classification: which identity
+    components matched, which differed, which prior run was used for comparison,
+    and a coarse confidence value. Rich config/input/code detail is intentionally
+    deferred to later phases.
+    """
+
     status: Literal["miss"] = "miss"
     reason: str = "no_similar_prior_run"
     candidate_run_id: str | None = None
@@ -33,6 +55,8 @@ class CacheMissExplanation:
     confidence: Literal["low", "medium", "high"] = "medium"
 
     def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation for ``run.meta`` storage."""
+
         return {
             "status": self.status,
             "reason": self.reason,
@@ -70,6 +94,14 @@ def _match_components(run: Run, candidate: Run) -> tuple[list[str], list[str]]:
 
 
 def _classify_reason(mismatched_components: Sequence[str]) -> str:
+    """Map top-level identity mismatches to a Phase 1 reason code.
+
+    An empty mismatch set means the fallback candidate search found a run whose
+    identity matches exactly even though the primary exact-match lookup did not
+    produce a reusable cache hit. That case is reported separately so the
+    explanation does not incorrectly claim that no similar run exists.
+    """
+
     mismatched = set(mismatched_components)
     if not mismatched:
         return "exact_match_lookup_inconclusive"
@@ -91,6 +123,13 @@ def _classify_reason(mismatched_components: Sequence[str]) -> str:
 
 
 def _best_candidate(run: Run, candidates: Sequence[Run]) -> tuple[Run | None, int]:
+    """Select the closest prior run using Phase 1 scoring rules.
+
+    Candidates are ranked first by the number of matching top-level identity
+    components and then by recency. This keeps the query logic simple while
+    producing a useful comparison target for miss explanations.
+    """
+
     best_run: Run | None = None
     best_score = -1
     best_created_at = None
@@ -116,7 +155,16 @@ def _best_candidate(run: Run, candidates: Sequence[Run]) -> tuple[Run | None, in
 
 
 class CacheMissExplainer:
+    """Best-effort classifier for cache misses after lookup or validation failure.
+
+    The explainer does not participate in cache correctness. It runs only after
+    the lifecycle has already decided that the current run is not a reusable
+    cache hit, and it produces metadata/logging intended for debugging.
+    """
+
     def __init__(self, tracker: CacheMissExplainerContext) -> None:
+        """Bind the tracker-like context used for historical candidate lookup."""
+
         self._tracker = tracker
 
     def explain(
@@ -126,6 +174,25 @@ class CacheMissExplainer:
         cached_run: Run | None = None,
         cache_valid: bool | None = None,
     ) -> CacheMissExplanation:
+        """Build a Phase 1 explanation for the current cache miss.
+
+        Parameters
+        ----------
+        run : Run
+            The in-progress run that just missed the cache.
+        cached_run : Run | None, optional
+            Exact-match candidate returned by cache lookup, if any.
+        cache_valid : bool | None, optional
+            Output-validation result for ``cached_run``. When this is ``False``,
+            the miss is classified as ``candidate_outputs_invalid``.
+
+        Returns
+        -------
+        CacheMissExplanation
+            Structured top-level miss metadata suitable for persistence in
+            ``run.meta["cache_miss_explanation"]``.
+        """
+
         if cached_run is not None and cache_valid is False:
             matched, mismatched = _match_components(run, cached_run)
             return CacheMissExplanation(
@@ -159,6 +226,8 @@ class CacheMissExplainer:
         )
 
     def _select_candidate(self, run: Run) -> Run | None:
+        """Return the most relevant same-model completed run for comparison."""
+
         candidates = self._tracker.find_recent_completed_runs_for_model(
             run.model_name, limit=20
         )
