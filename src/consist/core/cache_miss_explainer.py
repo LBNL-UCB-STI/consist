@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional, Protocol, Sequence, runtime_checkable
 
@@ -30,10 +31,25 @@ class CacheMissExplainerContext(Protocol):
     """
 
     db: Optional[CacheMissExplainerDb]
+    current_consist: Any
 
     def find_recent_completed_runs_for_model(
         self, model_name: str, *, limit: int = 20
     ) -> list[Run]: ...
+
+    def get_config_values(
+        self,
+        run_id: str,
+        *,
+        namespace: Optional[str] = None,
+        prefix: Optional[str] = None,
+        keys: Optional[Sequence[str]] = None,
+        limit: int = 10_000,
+    ) -> dict[str, Any]: ...
+
+    def get_run_config(
+        self, run_id: str, *, allow_missing: bool = False
+    ) -> Optional[dict[str, Any]]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +93,217 @@ def _component_names(run: Run) -> dict[str, Optional[str]]:
         "input_hash": run.input_hash,
         "git_hash": run.git_hash,
     }
+
+
+def _meta_dict(run: Run) -> dict[str, Any]:
+    meta = run.meta
+    if isinstance(meta, dict):
+        return meta
+    return {}
+
+
+def _get_run_meta_value(run: Run, key: str) -> Any:
+    return _meta_dict(run).get(key)
+
+
+def _identity_input_map(run: Run) -> dict[str, Any]:
+    value = _get_run_meta_value(run, "consist_hash_inputs")
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+def _changed_keys(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, list[str]]:
+    left_keys = set(left)
+    right_keys = set(right)
+    changed = sorted(key for key in left_keys & right_keys if left[key] != right[key])
+    # The explainer treats ``left`` as the current run and ``right`` as the
+    # comparison candidate, so added/removed are oriented relative to the
+    # current run's config.
+    added = sorted(left_keys - right_keys)
+    removed = sorted(right_keys - left_keys)
+    result: dict[str, list[str]] = {}
+    if changed:
+        result["changed"] = changed
+    if added:
+        result["added"] = added
+    if removed:
+        result["removed"] = removed
+    return result
+
+
+def _changed_identity_inputs(run: Run, candidate: Run) -> list[str]:
+    diff = _changed_keys(_identity_input_map(run), _identity_input_map(candidate))
+    labels = set()
+    for value in diff.values():
+        labels.update(value)
+    return sorted(labels)
+
+
+def _changed_adapter_identity(run: Run, candidate: Run) -> list[str]:
+    fields = ("config_adapter", "config_adapter_version", "config_bundle_hash")
+    return [
+        field
+        for field in fields
+        if _get_run_meta_value(run, field) != _get_run_meta_value(candidate, field)
+    ]
+
+
+def _strip_internal_config_keys(payload: Any) -> Any:
+    if isinstance(payload, dict):
+        return {
+            key: _strip_internal_config_keys(value)
+            for key, value in payload.items()
+            if not str(key).startswith("__consist_")
+        }
+    if isinstance(payload, list):
+        return [_strip_internal_config_keys(value) for value in payload]
+    if isinstance(payload, tuple):
+        return tuple(_strip_internal_config_keys(value) for value in payload)
+    return payload
+
+
+def _flatten_config_payload(
+    payload: Any,
+    *,
+    prefix: str = "",
+    flattened: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    if flattened is None:
+        flattened = {}
+
+    if not isinstance(payload, Mapping):
+        if prefix:
+            flattened[prefix] = payload
+        return flattened
+
+    for raw_key, value in payload.items():
+        key = str(raw_key).replace(".", r"\.")
+        flattened_key = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, Mapping):
+            _flatten_config_payload(value, prefix=flattened_key, flattened=flattened)
+        else:
+            flattened[flattened_key] = value
+    return flattened
+
+
+def _diff_flattened_payloads(
+    left: Mapping[str, Any], right: Mapping[str, Any]
+) -> dict[str, list[str]]:
+    diff = _changed_keys(left, right)
+    return {
+        key: value
+        for key, value in (
+            ("config_keys_changed", diff.get("changed", [])),
+            ("config_keys_added", diff.get("added", [])),
+            ("config_keys_removed", diff.get("removed", [])),
+        )
+        if value
+    }
+
+
+def _normalize_config_source(payload: Any) -> dict[str, Any]:
+    if payload is None:
+        return {}
+    stripped = _strip_internal_config_keys(payload)
+    if isinstance(stripped, dict):
+        return stripped
+    return {}
+
+
+def _safe_get_config_values(
+    tracker: CacheMissExplainerContext, run_id: str
+) -> dict[str, Any]:
+    getter = getattr(tracker, "get_config_values", None)
+    if getter is None:
+        return {}
+    try:
+        values = getter(run_id)
+    except Exception:
+        return {}
+    if isinstance(values, dict):
+        return values
+    return {}
+
+
+def _safe_get_run_config(
+    tracker: CacheMissExplainerContext, run_id: str
+) -> Optional[dict[str, Any]]:
+    getter = getattr(tracker, "get_run_config", None)
+    if getter is None:
+        return None
+    try:
+        config = getter(run_id, allow_missing=True)
+    except Exception:
+        return None
+    if isinstance(config, dict):
+        return config
+    return None
+
+
+def _config_snapshot_diff(
+    left: Any, right: Any
+) -> tuple[dict[str, list[str]], bool]:
+    left_payload = _flatten_config_payload(_normalize_config_source(left))
+    right_payload = _flatten_config_payload(_normalize_config_source(right))
+    return _diff_flattened_payloads(left_payload, right_payload), bool(
+        left_payload or right_payload
+    )
+
+
+def _config_facet_diff(
+    tracker: CacheMissExplainerContext,
+    run: Run,
+    candidate: Run,
+) -> tuple[dict[str, list[str]], bool]:
+    current_consist = getattr(tracker, "current_consist", None)
+    left_facet = {}
+    if current_consist is not None:
+        facet = getattr(current_consist, "facet", None)
+        if isinstance(facet, dict):
+            left_facet = facet
+    right_facet = _safe_get_config_values(tracker, candidate.id)
+    if not left_facet or not right_facet:
+        return {}, False
+    diff, has_payload = _config_snapshot_diff(left_facet, right_facet)
+    return diff, has_payload
+
+
+def _build_config_details(
+    tracker: CacheMissExplainerContext,
+    run: Run,
+    candidate: Run,
+) -> dict[str, Any]:
+    details: dict[str, Any] = {}
+
+    changed_identity_inputs = _changed_identity_inputs(run, candidate)
+    if changed_identity_inputs:
+        details["identity_inputs_changed"] = changed_identity_inputs
+
+    changed_adapter_identity = _changed_adapter_identity(run, candidate)
+    if changed_adapter_identity:
+        details["adapter_identity_changed"] = changed_adapter_identity
+
+    facet_diff, has_facet_payload = _config_facet_diff(tracker, run, candidate)
+    if facet_diff:
+        details.update(facet_diff)
+        details["fallbacks_used"] = ["config_facet"]
+        return details
+
+    current_consist = getattr(tracker, "current_consist", None)
+    current_config = getattr(current_consist, "config", None) if current_consist else None
+    candidate_config = _safe_get_run_config(tracker, candidate.id)
+    snapshot_diff, has_snapshot_payload = _config_snapshot_diff(
+        current_config, candidate_config
+    )
+    if snapshot_diff:
+        details.update(snapshot_diff)
+        if has_facet_payload:
+            details["fallbacks_used"] = ["config_facet", "json_snapshot"]
+        elif has_snapshot_payload:
+            details["fallbacks_used"] = ["json_snapshot"]
+
+    return details
 
 
 def _match_components(run: Run, candidate: Run) -> tuple[list[str], list[str]]:
@@ -195,12 +422,14 @@ class CacheMissExplainer:
 
         if cached_run is not None and cache_valid is False:
             matched, mismatched = _match_components(run, cached_run)
+            details = {"candidate_output_validation_failure": True}
+            details.update(_build_config_details(self._tracker, run, cached_run))
             return CacheMissExplanation(
                 reason="candidate_outputs_invalid",
                 candidate_run_id=cached_run.id,
                 matched_components=matched,
                 mismatched_components=mismatched,
-                details={"candidate_output_validation_failure": True},
+                details=details,
                 confidence="high",
             )
 
@@ -217,11 +446,13 @@ class CacheMissExplainer:
             confidence = "low"
         else:
             confidence = "high" if len(matched) >= 2 else "medium" if matched else "low"
+        details = _build_config_details(self._tracker, run, candidate)
         return CacheMissExplanation(
             reason=reason,
             candidate_run_id=candidate.id,
             matched_components=matched,
             mismatched_components=mismatched,
+            details=details,
             confidence=confidence,
         )
 
