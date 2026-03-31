@@ -2740,6 +2740,9 @@ merge shards, rebuild from JSON snapshots, or compact database storage.</p>
 <h3 id="minimal"><code>minimal</code><a class="headerlink" href="#minimal" title="Permanent link">&para;</a></h3>
 <ul>
 <li>Restores baseline provenance tables (<code>run</code>, <code>artifact</code>, <code>run_artifact_link</code>).</li>
+<li>Restores canonical run dimensions such as <code>stage</code> and <code>phase</code> when they are
+  present in the JSON snapshot metadata, while keeping the legacy <code>run.meta</code>
+  mirror for compatibility.</li>
 <li>Best for core recovery when optional index tables are not required.</li>
 </ul>
 <h3 id="full"><code>full</code><a class="headerlink" href="#full" title="Permanent link">&para;</a></h3>
@@ -2753,6 +2756,9 @@ merge shards, rebuild from JSON snapshots, or compact database storage.</p>
 <li>Restoration is compatibility-gated against table schema and intentionally
   best-effort. Missing optional structures are skipped rather than treated as
   fatal rebuild errors.</li>
+<li>This is the supported restore path for historical snapshots; it rebuilds the
+  DB from JSON run records rather than depending on a separate
+  <code>Run.from_snapshot()</code> API.</li>
 </ul>
 <p>Example:</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>consist<span class="w"> </span>db<span class="w"> </span>rebuild<span class="w"> </span>--json-dir<span class="w"> </span>./consist_runs<span class="w"> </span>--mode<span class="w"> </span>minimal<span class="w"> </span>--db-path<span class="w"> </span>./provenance.duckdb

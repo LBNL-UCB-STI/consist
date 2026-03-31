@@ -2923,6 +2923,7 @@ Passing them raises <code>TypeError</code> (<code>unexpected keyword argument ..
 <li><a href="../api_helpers/#consist.api.register_views"><code>consist.register_views</code></a></li>
 <li><a href="../api_helpers/#consist.api.find_run"><code>consist.find_run</code></a></li>
 <li><a href="../api_helpers/#consist.api.find_runs"><code>consist.find_runs</code></a></li>
+<li><a href="../api_helpers/#consist.api.find_latest_run"><code>consist.find_latest_run</code></a></li>
 <li><a href="../api_helpers/#consist.api.run_set"><code>consist.run_set</code></a></li>
 <li><a href="../tracker/#consist.core.tracker.Tracker.run_set"><code>Tracker.run_set(...)</code></a></li>
 <li><a href="../runset/#consist.runset.RunSet"><code>RunSet</code></a> and <a href="../runset/#consist.runset.AlignedPair"><code>AlignedPair</code></a></li>
@@ -2939,6 +2940,10 @@ Passing them raises <code>TypeError</code> (<code>unexpected keyword argument ..
 <li>Matrix utilities: <a href="../tracker/#consist.core.tracker.Tracker.load_matrix"><code>Tracker.load_matrix(...)</code></a>, <a href="../matrix/#consist.core.matrix.MatrixViewFactory"><code>MatrixViewFactory</code></a></li>
 <li>Schema export: <a href="../tracker/#consist.core.tracker.Tracker.export_schema_sqlmodel"><code>Tracker.export_schema_sqlmodel(...)</code></a></li>
 </ul>
+<p>Run lookup helpers treat <code>stage</code> and <code>phase</code> as first-class run dimensions, so
+you can filter historical runs with <code>consist.find_runs(...)</code>,
+<code>consist.find_latest_run(...)</code>, or <code>Tracker.find_latest_run(...)</code> without
+treating those values as opaque metadata.</p>
 <h3 id="tracker-methods-complete-public-surface">Tracker methods (complete public surface)<a class="headerlink" href="#tracker-methods-complete-public-surface" title="Permanent link">&para;</a></h3>
 <p>This section enumerates all non-underscore <code>Tracker</code> methods. If you're new to Consist,
 start with the <strong>Core</strong> and <strong>Logging/Loading</strong> groups and reach for <strong>Advanced</strong> only

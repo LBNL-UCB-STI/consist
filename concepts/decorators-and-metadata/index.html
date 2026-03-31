@@ -2622,6 +2622,10 @@ or <code>tracker.run(...)</code> calls.</p>
 <li><code>runtime_kwargs</code> for raw runtime access</li>
 <li><code>consist_settings</code>, <code>consist_workspace</code>, <code>consist_state</code> for Consist internals</li>
 </ul>
+<p>When <code>phase</code> or <code>stage</code> are passed into a run entry point, they are persisted as
+canonical <code>Run</code> columns and mirrored into <code>run.meta</code> for compatibility with
+older databases and snapshot records. Treat them as workflow dimensions, not
+opaque metadata.</p>
 <hr />
 <h2 id="stepcontext-runtime-contract">StepContext Runtime Contract<a class="headerlink" href="#stepcontext-runtime-contract" title="Permanent link">&para;</a></h2>
 <p><code>StepContext</code> now separates workflow runtime objects from Consist internal objects.

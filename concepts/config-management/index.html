@@ -2836,6 +2836,9 @@ the cache stays stable when config dicts are built in different orders.</p>
 into the config hash under a reserved <code>__consist_run_fields__</code> key. When set,
 <code>cache_epoch</code> and <code>cache_version</code> are included there too. This means changing
 those values will change the signature even if <code>config</code> is otherwise identical.</p>
+<p><code>stage</code> and <code>phase</code> are separate first-class run dimensions, not facets. They
+live on <code>Run</code>, are queryable with <code>find_runs(stage=..., phase=...)</code>, and are
+mirrored into <code>run.meta</code> only for backward compatibility with older databases.</p>
 <hr />
 <h2 id="facets">Facets<a class="headerlink" href="#facets" title="Permanent link">&para;</a></h2>
 <p>Facets are compact, queryable config subsets persisted to DuckDB. They do not

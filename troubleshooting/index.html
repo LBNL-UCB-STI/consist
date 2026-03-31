@@ -3432,7 +3432,11 @@ and manual materialization helpers) to isolate specific failure modes.</p>
 </span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>consist<span class="w"> </span>db<span class="w"> </span>rebuild<span class="w"> </span>--json-dir<span class="w"> </span>./runs/consist_runs<span class="w"> </span>--mode<span class="w"> </span>full<span class="w"> </span>--db-path<span class="w"> </span>./provenance.duckdb
 </span></code></pre></div>
 <p><code>minimal</code> restores run/artifact/link baseline.
- <code>full</code> additionally attempts facet/schema/index restoration where snapshot content and DB schema compatibility allow.</p>
+ <code>full</code> additionally attempts facet/schema/index restoration where snapshot
+ content and DB schema compatibility allow.
+ <code>stage</code> and <code>phase</code> are restored into canonical run columns when present in
+ the snapshot metadata, with legacy <code>run.meta</code> values preserved for
+ compatibility.</p>
 </li>
 <li>
 <p><strong>Compact after bulk changes:</strong></p>
