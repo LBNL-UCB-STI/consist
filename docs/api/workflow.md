@@ -46,6 +46,12 @@ with tracker.scenario("baseline") as sc:
 `config_plan` and `hash_inputs` are not accepted on scenario step run/trace
 surfaces. Use `adapter` and `identity_inputs`.
 
+`Tracker.scenario(...)` and `consist.scenario(...)` also accept
+`step_tags=[...]` and `step_facet={...}` to apply default tags/facets to every
+child step in the scenario. These defaults apply to `run(...)` and `trace(...)`
+children only, not to the scenario header itself, and per-step values take
+precedence on conflicts.
+
 ## BindingResult execution envelopes
 
 `ScenarioContext.run(...)` also accepts `binding=BindingResult(...)` for

@@ -28,6 +28,7 @@ class RunQueryService:
         model: Optional[str] = None,
         status: Optional[str] = None,
         parent_id: Optional[str] = None,
+        facet: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         limit: int = 100,
         index_by: Optional[Union[str, IndexBySpec]] = None,
@@ -44,6 +45,7 @@ class RunQueryService:
                 model,
                 status,
                 parent_id,
+                facet,
                 metadata,
                 limit,
                 name,
@@ -119,6 +121,7 @@ class RunQueryService:
         stage: Optional[str] = None,
         phase: Optional[str] = None,
         tags: Optional[List[str]] = None,
+        facet: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         limit: int = 10_000,
     ) -> Run:
@@ -130,6 +133,7 @@ class RunQueryService:
             stage=stage,
             phase=phase,
             tags=tags,
+            facet=facet,
             metadata=metadata,
             limit=limit,
         )

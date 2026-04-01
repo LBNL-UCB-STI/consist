@@ -21,6 +21,7 @@ import hashlib
 import json
 from pathlib import Path
 
+import consist
 from pydantic import BaseModel
 
 
@@ -87,6 +88,101 @@ def test_get_config_helpers_return_typed_values(tracker):
         tracker.get_config_value("run_with_helpers", "missing", default="fallback")
         == "fallback"
     )
+
+
+def test_find_runs_supports_mixed_run_fields_and_facet_predicates(tracker):
+    tracker.begin_run(
+        "run_a_iter_1",
+        "demo_model",
+        year=2030,
+        iteration=1,
+        stage="restart",
+        facet={"scenario_id": "scenario_a", "seed": 17},
+    )
+    tracker.end_run()
+
+    tracker.begin_run(
+        "run_a_iter_2",
+        "demo_model",
+        year=2030,
+        iteration=2,
+        stage="restart",
+        facet={"scenario_id": "scenario_a", "seed": 17},
+    )
+    tracker.end_run()
+
+    tracker.begin_run(
+        "run_a_other_seed",
+        "demo_model",
+        year=2030,
+        iteration=3,
+        stage="restart",
+        facet={"scenario_id": "scenario_a", "seed": 99},
+    )
+    tracker.end_run()
+
+    tracker.begin_run(
+        "run_b_iter_4",
+        "demo_model",
+        year=2030,
+        iteration=4,
+        stage="restart",
+        facet={"scenario_id": "scenario_b", "seed": 17},
+    )
+    tracker.end_run()
+
+    runs = tracker.find_runs(
+        model="demo_model",
+        year=2030,
+        stage="restart",
+        status="completed",
+        facet={"scenario_id": "scenario_a", "seed": 17},
+    )
+
+    assert [run.id for run in runs] == ["run_a_iter_2", "run_a_iter_1"]
+
+
+def test_find_latest_run_supports_facet_predicates(tracker):
+    tracker.begin_run(
+        "run_a_iter_1",
+        "demo_model",
+        year=2030,
+        iteration=1,
+        stage="restart",
+        facet={"scenario_id": "scenario_a", "seed": 17},
+    )
+    tracker.end_run()
+
+    tracker.begin_run(
+        "run_a_iter_2",
+        "demo_model",
+        year=2030,
+        iteration=2,
+        stage="restart",
+        facet={"scenario_id": "scenario_a", "seed": 17},
+    )
+    tracker.end_run()
+
+    tracker.begin_run(
+        "run_b_iter_3",
+        "demo_model",
+        year=2030,
+        iteration=3,
+        stage="restart",
+        facet={"scenario_id": "scenario_b", "seed": 17},
+    )
+    tracker.end_run()
+
+    latest = consist.find_latest_run(
+        tracker=tracker,
+        model="demo_model",
+        year=2030,
+        stage="restart",
+        status="completed",
+        facet={"scenario_id": "scenario_a", "seed": 17},
+    )
+
+    assert latest.id == "run_a_iter_2"
 
 
 def test_hash_inputs_affects_config_hash_but_ignores_dotfiles(tracker, run_dir: Path):
@@ -346,3 +442,42 @@ def test_facet_size_guardrail_skips_db_persistence_but_keeps_json(tracker):
 
     assert "config_facet_id" not in payload["run"]["meta"]
     assert tracker.get_config_facets() == []
+
+
+def test_find_runs_facet_predicates_require_kv_index_rows(tracker):
+    tracker.begin_run(
+        "run_indexed",
+        "m",
+        facet={"scenario_id": "baseline", "seed": 1},
+    )
+    tracker.end_run()
+
+    tracker.begin_run(
+        "run_not_indexed_flag",
+        "m",
+        facet={"scenario_id": "baseline", "seed": 1},
+        facet_index=False,
+    )
+    tracker.end_run()
+
+    tracker.begin_run(
+        "run_not_indexed_guardrail",
+        "m",
+        facet={"scenario_id": "overflow", **{f"k{i}": i for i in range(600)}},
+    )
+    tracker.end_run()
+
+    indexed_matches = tracker.find_runs(
+        model="m",
+        facet={"scenario_id": "baseline", "seed": 1},
+    )
+    overflow_matches = tracker.find_runs(
+        model="m",
+        facet={"scenario_id": "overflow"},
+    )
+
+    assert [run.id for run in indexed_matches] == ["run_indexed"]
+    assert overflow_matches == []
+    assert tracker.get_config_facets()
+    assert tracker.get_run_config_kv("run_not_indexed_flag") == []
+    assert tracker.get_run_config_kv("run_not_indexed_guardrail") == []
