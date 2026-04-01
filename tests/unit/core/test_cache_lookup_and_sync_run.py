@@ -11,6 +11,8 @@ def test_tracker_find_matching_run_prefers_signature(tracker, monkeypatch):
         id="cached_sig_hit",
         model_name="model",
         status="completed",
+        config_hash=None,
+        git_hash=None,
     )
     signature_calls: list[str] = []
     legacy_calls = 0
@@ -69,6 +71,8 @@ def test_db_sync_run_skips_readback_when_not_debug(tmp_path, monkeypatch):
         id="sync_run_no_debug",
         model_name="model",
         status="completed",
+        config_hash=None,
+        git_hash=None,
         created_at=now,
         started_at=now,
         ended_at=now,
@@ -111,6 +115,8 @@ def test_db_sync_run_keeps_readback_when_debug(tmp_path, monkeypatch):
         id="sync_run_debug",
         model_name="model",
         status="completed",
+        config_hash=None,
+        git_hash=None,
         created_at=now,
         started_at=now,
         ended_at=now,

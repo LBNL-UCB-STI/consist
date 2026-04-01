@@ -782,6 +782,66 @@ class DatabaseManager:
         except Exception as e:
             logging.warning(f"Failed to upsert artifact schema {schema.id}: {e}")
 
+    def persist_artifact_schema_profile(
+        self,
+        *,
+        artifact: Artifact,
+        schema: ArtifactSchema,
+        fields: List[ArtifactSchemaField],
+        observation: ArtifactSchemaObservation,
+        meta_updates: Dict[str, Any],
+        relations: Optional[List[ArtifactSchemaRelation]] = None,
+    ) -> None:
+        """
+        Persist schema rows, observation, and artifact metadata in one transaction.
+
+        This is intended for schema profiling paths that always perform these writes
+        together, reducing round trips compared with calling the individual helpers
+        one-by-one.
+        """
+
+        def _persist():
+            with self.session_scope() as session:
+                db_art = session.merge(artifact)
+                session.merge(schema)
+                session.exec(
+                    delete(ArtifactSchemaField).where(
+                        ArtifactSchemaField.schema_id == schema.id  # ty: ignore[invalid-argument-type]
+                    )
+                )
+                if fields:
+                    session.add_all(fields)
+
+                session.exec(
+                    delete(ArtifactSchemaRelation).where(
+                        ArtifactSchemaRelation.schema_id == schema.id  # ty: ignore[invalid-argument-type]
+                    )
+                )
+                if relations:
+                    session.add_all(relations)
+
+                session.add(observation)
+
+                current_meta = db_art.meta or {}
+                current_meta.update(meta_updates)
+                db_art.meta = current_meta
+                session.add(db_art)
+                session.commit()
+
+                artifact.meta = current_meta
+
+        try:
+            self.execute_with_retry(
+                _persist, operation_name="persist_artifact_schema_profile"
+            )
+        except Exception as e:
+            logging.warning(
+                "Failed to persist artifact schema profile artifact=%s schema=%s: %s",
+                getattr(artifact, "id", None),
+                getattr(schema, "id", None),
+                e,
+            )
+
     def insert_artifact_schema_observation(
         self, observation: ArtifactSchemaObservation
     ) -> None:

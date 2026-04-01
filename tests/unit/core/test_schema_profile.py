@@ -320,6 +320,66 @@ def test_profile_user_provided_schema_persists_relations_and_hash(tracker, sampl
             assert rel.to_field == "id"
 
 
+def test_profile_user_provided_schema_uses_combined_persistence_helper(
+    tracker, sample_csv, monkeypatch
+):
+    class UserSchema(SQLModel):
+        id: int
+        name: str
+
+    combined_calls = 0
+    upsert_calls = 0
+    observation_calls = 0
+    meta_calls = 0
+
+    original_combined = tracker.db.persist_artifact_schema_profile
+    original_upsert = tracker.db.upsert_artifact_schema
+    original_observation = tracker.db.insert_artifact_schema_observation
+    original_meta = tracker.db.update_artifact_meta
+
+    def counting_combined(**kwargs):
+        nonlocal combined_calls
+        combined_calls += 1
+        return original_combined(**kwargs)
+
+    def counting_upsert(*args, **kwargs):
+        nonlocal upsert_calls
+        upsert_calls += 1
+        return original_upsert(*args, **kwargs)
+
+    def counting_observation(*args, **kwargs):
+        nonlocal observation_calls
+        observation_calls += 1
+        return original_observation(*args, **kwargs)
+
+    def counting_meta(*args, **kwargs):
+        nonlocal meta_calls
+        meta_calls += 1
+        return original_meta(*args, **kwargs)
+
+    monkeypatch.setattr(
+        tracker.db, "persist_artifact_schema_profile", counting_combined
+    )
+    monkeypatch.setattr(tracker.db, "upsert_artifact_schema", counting_upsert)
+    monkeypatch.setattr(
+        tracker.db, "insert_artifact_schema_observation", counting_observation
+    )
+    monkeypatch.setattr(tracker.db, "update_artifact_meta", counting_meta)
+
+    with tracker.start_run("user_schema_combined_helper", "demo") as t:
+        artifact = t.log_artifact(
+            sample_csv("user_schema_combined.csv"),
+            key="user_schema_combined",
+            schema=UserSchema,
+        )
+
+    assert artifact.meta.get("schema_name") == "UserSchema"
+    assert combined_calls == 1
+    assert upsert_calls == 0
+    assert observation_calls == 0
+    assert meta_calls == 0
+
+
 def test_schema_links_view_returns_relations(tracker, sample_csv):
     class HouseSchema(SQLModel):
         house_id: int
