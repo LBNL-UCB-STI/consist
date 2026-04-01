@@ -581,11 +581,12 @@ class DatabaseManager:
                 )
                 session.merge(run)
                 session.commit()
-                # Read-back to verify persisted status for diagnostics
-                persisted = session.get(Run, run.id)
-                logging.debug(
-                    f"[DB sync_run] persisted run={run.id} status={getattr(persisted, 'status', None)}"
-                )
+                if logging.getLogger().isEnabledFor(logging.DEBUG):
+                    # Only pay for the diagnostic read-back when debug logging is enabled.
+                    persisted = session.get(Run, run.id)
+                    logging.debug(
+                        f"[DB sync_run] persisted run={run.id} status={getattr(persisted, 'status', None)}"
+                    )
 
         try:
             self.execute_with_retry(_do_sync, operation_name="sync_run")

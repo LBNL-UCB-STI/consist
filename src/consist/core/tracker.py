@@ -4954,7 +4954,12 @@ class Tracker:
         return self.load(artifact, **kwargs)
 
     def find_matching_run(
-        self, config_hash: str, input_hash: str, git_hash: str
+        self,
+        config_hash: str,
+        input_hash: str,
+        git_hash: str,
+        *,
+        signature: Optional[str] = None,
     ) -> Optional[Run]:
         """
         Find a previously completed run that matches the identity hashes.
@@ -4967,6 +4972,10 @@ class Tracker:
             Hash of the run inputs.
         git_hash : str
             Git commit hash captured with the run.
+        signature : str | None, optional
+            Composite run signature. When provided, Consist attempts a direct
+            signature lookup first and falls back to the legacy component-hash
+            lookup for compatibility with older rows.
 
         Returns
         -------
@@ -4974,6 +4983,10 @@ class Tracker:
             The matching run, or ``None`` if not found or if no database is configured.
         """
         if self.db:
+            if signature:
+                matched = self.db.find_run_by_signature(signature)
+                if matched is not None:
+                    return matched
             return self.db.find_matching_run(config_hash, input_hash, git_hash)
         return None
 

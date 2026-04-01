@@ -500,6 +500,7 @@ class RunLifecycleCoordinator:
                         config_hash=config_h,
                         input_hash=input_h,
                         git_hash=git_h,
+                        signature=run.signature,
                     )
                 _log_timing("find_matching_run", t0)
             cache_valid = False
