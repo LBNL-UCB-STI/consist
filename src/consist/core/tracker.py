@@ -3401,14 +3401,15 @@ class Tracker:
         profile_schema: bool,
     ) -> Dict[str, Artifact]:
         artifacts_by_key: Dict[str, Artifact] = {}
-        for spec in contribution.artifacts:
-            art = self.log_artifact(
-                spec.path,
-                key=spec.key,
-                direction=spec.direction,
-                **spec.meta,
-            )
-            artifacts_by_key[spec.key] = art
+        with self.persistence.batch_artifact_writes():
+            for spec in contribution.artifacts:
+                art = self.log_artifact(
+                    spec.path,
+                    key=spec.key,
+                    direction=spec.direction,
+                    **spec.meta,
+                )
+                artifacts_by_key[spec.key] = art
 
         if ingest:
             for spec in contribution.ingestables:

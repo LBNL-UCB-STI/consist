@@ -660,9 +660,17 @@ class ArtifactManager:
                 if direction == "input"
                 else self.tracker.current_consist.outputs
             )
-            for table_artifact in table_artifacts:
-                target.append(table_artifact)
-                self.tracker.persistence.sync_artifact(table_artifact, direction)
+            with self.tracker.persistence.batch_artifact_writes():
+                for table_artifact in table_artifacts:
+                    target.append(table_artifact)
+                    self.tracker.persistence.sync_artifact(table_artifact, direction)
+
+                container.meta["table_count"] = len(table_artifacts)
+                container.meta["table_ids"] = [str(t.id) for t in table_artifacts]
+
+                self.tracker.persistence.flush_json()
+                self.tracker.persistence.sync_artifact(container, direction)
+            return container, table_artifacts
 
         container.meta["table_count"] = len(table_artifacts)
         container.meta["table_ids"] = [str(t.id) for t in table_artifacts]

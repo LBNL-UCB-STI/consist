@@ -432,12 +432,13 @@ class RunLifecycleCoordinator:
             raise RuntimeError("Cannot start run: no active consist record.")
 
         if inputs:
-            for item in inputs:
-                if isinstance(item, Artifact):
-                    tracker.log_artifact(item, direction="input")
-                else:
-                    key = Path(item).stem
-                    tracker.log_artifact(item, key=key, direction="input")
+            with tracker.persistence.batch_artifact_writes():
+                for item in inputs:
+                    if isinstance(item, Artifact):
+                        tracker.log_artifact(item, direction="input")
+                    else:
+                        key = Path(item).stem
+                        tracker.log_artifact(item, key=key, direction="input")
 
         if not run.parent_run_id:
             parent_candidates = [

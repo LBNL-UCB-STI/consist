@@ -666,18 +666,19 @@ class RunTraceCoordinator:
 
         if isinstance(result, dict):
             inferred: Dict[str, Artifact] = {}
-            for output_key, output_value in result.items():
-                if not isinstance(output_key, str):
-                    return None
-                if not isinstance(output_value, (Artifact, Path)):
-                    return None
-                logged = RunTraceCoordinator._log_output_value(
-                    tracker,
-                    output_key,
-                    cast(Optional[ArtifactRef], output_value),
-                )
-                if logged is not None:
-                    inferred[output_key] = logged
+            with tracker.persistence.batch_artifact_writes():
+                for output_key, output_value in result.items():
+                    if not isinstance(output_key, str):
+                        return None
+                    if not isinstance(output_value, (Artifact, Path)):
+                        return None
+                    logged = RunTraceCoordinator._log_output_value(
+                        tracker,
+                        output_key,
+                        cast(Optional[ArtifactRef], output_value),
+                    )
+                    if logged is not None:
+                        inferred[output_key] = logged
             return inferred
 
         return None
@@ -695,23 +696,26 @@ class RunTraceCoordinator:
         if output_paths is None:
             return outputs_map
 
-        for output_key, ref in output_paths.items():
-            ref_path = self._helpers.resolve_output_path(tracker, ref, output_base_dir)
-            if not ref_path.exists():
-                on_missing_outputs(f"Run {resolved_name!r}", [str(output_key)])
-                continue
-            if isinstance(ref, Artifact):
-                outputs_map[output_key] = tracker.log_artifact(
-                    ref,
-                    key=output_key,
-                    direction="output",
+        with tracker.persistence.batch_artifact_writes():
+            for output_key, ref in output_paths.items():
+                ref_path = self._helpers.resolve_output_path(
+                    tracker, ref, output_base_dir
                 )
-            else:
-                outputs_map[output_key] = tracker.log_artifact(
-                    ref_path,
-                    key=output_key,
-                    direction="output",
-                )
+                if not ref_path.exists():
+                    on_missing_outputs(f"Run {resolved_name!r}", [str(output_key)])
+                    continue
+                if isinstance(ref, Artifact):
+                    outputs_map[output_key] = tracker.log_artifact(
+                        ref,
+                        key=output_key,
+                        direction="output",
+                    )
+                else:
+                    outputs_map[output_key] = tracker.log_artifact(
+                        ref_path,
+                        key=output_key,
+                        direction="output",
+                    )
         return outputs_map
 
     def _normalize_run_outputs(
@@ -741,28 +745,30 @@ class RunTraceCoordinator:
             if result is None:
                 pass
             elif isinstance(result, dict):
-                for output_key, output_value in result.items():
-                    logged = self._log_output_value(
-                        tracker,
-                        str(output_key),
-                        cast(Optional[ArtifactRef], output_value),
-                    )
-                    if logged is not None:
-                        outputs_map[str(output_key)] = logged
+                with tracker.persistence.batch_artifact_writes():
+                    for output_key, output_value in result.items():
+                        logged = self._log_output_value(
+                            tracker,
+                            str(output_key),
+                            cast(Optional[ArtifactRef], output_value),
+                        )
+                        if logged is not None:
+                            outputs_map[str(output_key)] = logged
             elif isinstance(result, (list, tuple)):
                 if len(result) != len(outputs):
                     on_output_mismatch(
                         "Output list length does not match declared outputs."
                     )
                 else:
-                    for output_key, output_value in zip(outputs, result):
-                        logged = self._log_output_value(
-                            tracker,
-                            output_key,
-                            cast(Optional[ArtifactRef], output_value),
-                        )
-                        if logged is not None:
-                            outputs_map[output_key] = logged
+                    with tracker.persistence.batch_artifact_writes():
+                        for output_key, output_value in zip(outputs, result):
+                            logged = self._log_output_value(
+                                tracker,
+                                output_key,
+                                cast(Optional[ArtifactRef], output_value),
+                            )
+                            if logged is not None:
+                                outputs_map[output_key] = logged
             elif isinstance(result, pd.DataFrame):
                 if len(outputs) != 1:
                     on_output_mismatch(

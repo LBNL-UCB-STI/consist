@@ -1346,19 +1346,27 @@ class ScenarioContext:
 
         # --- NEW: Create database links for parent scenario ---
         if self.tracker.db:
-            # Link ALL child artifacts to parent, regardless of deduplication
-            # The database merge() handles duplicate links gracefully
-            for artifact in child_outputs:
-                self.tracker.db.link_artifact_to_run(
-                    artifact_id=artifact.id, run_id=parent_run.id, direction="output"
+            output_ids = list(dict.fromkeys(artifact.id for artifact in child_outputs))
+            if output_ids:
+                self.tracker.db.link_artifacts_to_run_bulk(
+                    artifact_ids=output_ids,
+                    run_id=parent_run.id,
+                    direction="output",
                 )
 
-            for artifact in child_inputs:
-                # Only link as input if not already an output
-                if artifact.id not in parent_output_ids:
-                    self.tracker.db.link_artifact_to_run(
-                        artifact_id=artifact.id, run_id=parent_run.id, direction="input"
-                    )
+            input_ids = list(
+                dict.fromkeys(
+                    artifact.id
+                    for artifact in child_inputs
+                    if artifact.id not in parent_output_ids
+                )
+            )
+            if input_ids:
+                self.tracker.db.link_artifacts_to_run_bulk(
+                    artifact_ids=input_ids,
+                    run_id=parent_run.id,
+                    direction="input",
+                )
 
         self.tracker.current_consist = current_state
 
