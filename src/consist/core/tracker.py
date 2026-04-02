@@ -1978,12 +1978,14 @@ class Tracker:
         model: Optional[str] = None,
         status: Optional[str] = None,
         year: Optional[int] = None,
+        iteration: Optional[int] = None,
         stage: Optional[str] = None,
         phase: Optional[str] = None,
         tags: Optional[List[str]] = None,
         facet: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         limit: int = 10_000,
+        name: Optional[str] = None,
     ) -> Run:
         """
         Return the most recent run matching the filters.
@@ -2002,6 +2004,8 @@ class Tracker:
             Filter by run status.
         year : Optional[int], optional
             Filter by run year.
+        iteration : Optional[int], optional
+            Filter by run iteration.
         stage : Optional[str], optional
             Filter by run stage.
         phase : Optional[str], optional
@@ -2014,18 +2018,22 @@ class Tracker:
             Filter by exact matches in ``Run.meta`` (client-side filter).
         limit : int, default 10_000
             Maximum number of runs to consider.
+        name : Optional[str], optional
+            Filter by run description/name alias.
         """
         return self.queries.find_latest_run(
             parent_id=parent_id,
             model=model,
             status=status,
             year=year,
+            iteration=iteration,
             stage=stage,
             phase=phase,
             tags=tags,
             facet=facet,
             metadata=metadata,
             limit=limit,
+            name=name,
         )
 
     def get_latest_run_id(self, **kwargs) -> str:

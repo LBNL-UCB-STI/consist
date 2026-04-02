@@ -118,24 +118,28 @@ class RunQueryService:
         model: Optional[str] = None,
         status: Optional[str] = None,
         year: Optional[int] = None,
+        iteration: Optional[int] = None,
         stage: Optional[str] = None,
         phase: Optional[str] = None,
         tags: Optional[List[str]] = None,
         facet: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         limit: int = 10_000,
+        name: Optional[str] = None,
     ) -> Run:
         runs_result = self.find_runs(
             parent_id=parent_id,
             model=model,
             status=status,
             year=year,
+            iteration=iteration,
             stage=stage,
             phase=phase,
             tags=tags,
             facet=facet,
             metadata=metadata,
             limit=limit,
+            name=name,
         )
         runs = (
             list(runs_result.values()) if isinstance(runs_result, dict) else runs_result
