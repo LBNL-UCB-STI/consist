@@ -90,6 +90,47 @@ def test_get_config_helpers_return_typed_values(tracker):
     )
 
 
+def test_begin_run_uses_combined_config_facet_persistence(tracker, monkeypatch) -> None:
+    combined_calls = 0
+    upsert_calls = 0
+    kv_calls = 0
+
+    original_combined = tracker.db.persist_config_facet_bundle
+    original_upsert = tracker.db.upsert_config_facet
+    original_kv = tracker.db.insert_run_config_kv_bulk
+
+    def counting_combined(**kwargs):
+        nonlocal combined_calls
+        combined_calls += 1
+        return original_combined(**kwargs)
+
+    def counting_upsert(*args, **kwargs):
+        nonlocal upsert_calls
+        upsert_calls += 1
+        return original_upsert(*args, **kwargs)
+
+    def counting_kv(*args, **kwargs):
+        nonlocal kv_calls
+        kv_calls += 1
+        return original_kv(*args, **kwargs)
+
+    monkeypatch.setattr(tracker.db, "persist_config_facet_bundle", counting_combined)
+    monkeypatch.setattr(tracker.db, "upsert_config_facet", counting_upsert)
+    monkeypatch.setattr(tracker.db, "insert_run_config_kv_bulk", counting_kv)
+
+    tracker.begin_run(
+        "run_with_combined_facet",
+        "activitysim",
+        config={"internal": "not_indexed"},
+        facet={"household_sample_size": 250000, "num_processes": 25},
+    )
+    tracker.end_run()
+
+    assert combined_calls == 1
+    assert upsert_calls == 0
+    assert kv_calls == 0
+
+
 def test_find_runs_supports_mixed_run_fields_and_facet_predicates(tracker):
     tracker.begin_run(
         "run_a_iter_1",

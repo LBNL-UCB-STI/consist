@@ -646,6 +646,56 @@ class DatabaseManager:
         except Exception as e:
             logging.warning(f"Failed to upsert config facet {facet.id}: {e}")
 
+    def persist_config_facet_bundle(
+        self,
+        *,
+        facet: ConfigFacet,
+        kv_rows: Optional[List[RunConfigKV]] = None,
+    ) -> None:
+        """
+        Persist a config facet row and optional flattened KV rows together.
+
+        This keeps the common run/step facet path to a single DB transaction
+        instead of one upsert plus a second KV replace/insert pass.
+        """
+
+        def _persist():
+            with self.session_scope() as session:
+                existing = session.get(ConfigFacet, facet.id)
+                if existing is None:
+                    session.add(facet)
+                else:
+                    session.merge(facet)
+
+                if kv_rows:
+                    combos = {
+                        (row.run_id, row.facet_id, row.namespace)
+                        for row in kv_rows
+                        if row.run_id and row.facet_id and row.namespace
+                    }
+                    for run_id, facet_id, namespace in combos:
+                        session.exec(
+                            delete(RunConfigKV).where(
+                                col(RunConfigKV.run_id) == run_id,
+                                col(RunConfigKV.facet_id) == facet_id,
+                                col(RunConfigKV.namespace) == namespace,
+                            )
+                        )
+                    session.add_all(kv_rows)
+
+                session.commit()
+
+        try:
+            self.execute_with_retry(
+                _persist, operation_name="persist_config_facet_bundle"
+            )
+        except Exception as e:
+            logging.warning(
+                "Failed to persist config facet bundle facet=%s: %s",
+                getattr(facet, "id", None),
+                e,
+            )
+
     def upsert_artifact_facet(self, facet: ArtifactFacet) -> None:
         """Upserts an ArtifactFacet (deduped by facet.id)."""
 

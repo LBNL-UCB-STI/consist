@@ -76,7 +76,9 @@ class ArtifactFacetManager:
             id=facet_id,
             namespace=namespace,
             schema_name=schema_name,
-            schema_version=(str(schema_version) if schema_version is not None else None),
+            schema_version=(
+                str(schema_version) if schema_version is not None else None
+            ),
             facet_json=facet_dict,
         )
 
