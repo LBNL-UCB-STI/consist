@@ -1166,14 +1166,39 @@ class DatabaseManager:
 
         def _do_sync():
             with self.session_scope() as session:
+                existing_link = session.exec(
+                    select(RunArtifactLink)
+                    .where(RunArtifactLink.run_id == run_id)
+                    .where(RunArtifactLink.artifact_id == artifact.id)
+                ).first()
+
                 # Merge artifact (create or update)
                 session.merge(artifact)
+
+                if existing_link is not None:
+                    if existing_link.direction != direction:
+                        logging.warning(
+                            "[Consist] Ignoring attempt to link artifact_id=%s to run_id=%s as '%s' "
+                            "because it is already linked as '%s'. "
+                            "If this step truly produces a new output, write to a new path (preferred), "
+                            "or log a distinct Artifact instance rather than reusing the same Artifact reference.",
+                            artifact.id,
+                            run_id,
+                            direction,
+                            existing_link.direction,
+                        )
+                    session.commit()
+                    return
+
+                session.add(
+                    RunArtifactLink(
+                        run_id=run_id, artifact_id=artifact.id, direction=direction
+                    )
+                )
                 session.commit()
 
         try:
             self.execute_with_retry(_do_sync, operation_name="sync_artifact")
-            # Now create the link
-            self.link_artifact_to_run(artifact.id, run_id, direction)
         except Exception as e:
             logging.warning("Artifact sync failed: %s", e)
             logging.warning("Database sync failed: %s", e)
