@@ -380,6 +380,141 @@ def test_profile_user_provided_schema_uses_combined_persistence_helper(
     assert meta_calls == 0
 
 
+def test_profile_file_artifact_uses_combined_persistence_helper(
+    tracker, sample_csv, monkeypatch
+):
+    combined_calls = 0
+    upsert_calls = 0
+    observation_calls = 0
+    meta_calls = 0
+
+    original_combined = tracker.db.persist_artifact_schema_profile
+    original_upsert = tracker.db.upsert_artifact_schema
+    original_observation = tracker.db.insert_artifact_schema_observation
+    original_meta = tracker.db.update_artifact_meta
+
+    def counting_combined(**kwargs):
+        nonlocal combined_calls
+        combined_calls += 1
+        return original_combined(**kwargs)
+
+    def counting_upsert(*args, **kwargs):
+        nonlocal upsert_calls
+        upsert_calls += 1
+        return original_upsert(*args, **kwargs)
+
+    def counting_observation(*args, **kwargs):
+        nonlocal observation_calls
+        observation_calls += 1
+        return original_observation(*args, **kwargs)
+
+    def counting_meta(*args, **kwargs):
+        nonlocal meta_calls
+        meta_calls += 1
+        return original_meta(*args, **kwargs)
+
+    monkeypatch.setattr(
+        tracker.db, "persist_artifact_schema_profile", counting_combined
+    )
+    monkeypatch.setattr(tracker.db, "upsert_artifact_schema", counting_upsert)
+    monkeypatch.setattr(
+        tracker.db, "insert_artifact_schema_observation", counting_observation
+    )
+    monkeypatch.setattr(tracker.db, "update_artifact_meta", counting_meta)
+
+    with tracker.start_run("file_schema_combined_helper", "demo") as t:
+        artifact = t.log_artifact(
+            sample_csv("file_schema_combined.csv"),
+            key="file_schema_combined",
+        )
+        t.artifact_schemas.profile_file_artifact(
+            artifact=artifact,
+            run=t.current_consist.run,
+            resolved_path=str(artifact.path),
+            source="file",
+            driver="csv",
+            sample_rows=10,
+        )
+
+    assert combined_calls == 1
+    assert upsert_calls == 0
+    assert observation_calls == 0
+    assert meta_calls == 0
+
+
+def test_profile_file_artifact_reuse_uses_combined_observation_helper(
+    tracker, tmp_path, monkeypatch
+):
+    first_path = tmp_path / "schema_reuse_a.csv"
+    second_path = tmp_path / "schema_reuse_b.csv"
+    first_path.write_text("a,b\n1,x\n", encoding="utf-8")
+    second_path.write_text("a,b\n1,x\n", encoding="utf-8")
+
+    combined_reuse_calls = 0
+    observation_calls = 0
+    meta_calls = 0
+
+    original_combined_reuse = tracker.db.persist_artifact_schema_observation_bundle
+    original_observation = tracker.db.insert_artifact_schema_observation
+    original_meta = tracker.db.update_artifact_meta
+
+    def counting_combined_reuse(**kwargs):
+        nonlocal combined_reuse_calls
+        combined_reuse_calls += 1
+        return original_combined_reuse(**kwargs)
+
+    def counting_observation(*args, **kwargs):
+        nonlocal observation_calls
+        observation_calls += 1
+        return original_observation(*args, **kwargs)
+
+    def counting_meta(*args, **kwargs):
+        nonlocal meta_calls
+        meta_calls += 1
+        return original_meta(*args, **kwargs)
+
+    monkeypatch.setattr(
+        tracker.db,
+        "persist_artifact_schema_observation_bundle",
+        counting_combined_reuse,
+    )
+    monkeypatch.setattr(
+        tracker.db, "insert_artifact_schema_observation", counting_observation
+    )
+    monkeypatch.setattr(tracker.db, "update_artifact_meta", counting_meta)
+
+    with tracker.start_run("schema_reuse_first", "demo") as t:
+        first = t.log_artifact(first_path, key="schema_reuse_first")
+        t.artifact_schemas.profile_file_artifact(
+            artifact=first,
+            run=t.current_consist.run,
+            resolved_path=str(first_path),
+            source="file",
+            driver="csv",
+            sample_rows=10,
+        )
+
+    combined_reuse_calls = 0
+    observation_calls = 0
+    meta_calls = 0
+
+    with tracker.start_run("schema_reuse_second", "demo") as t:
+        second = t.log_artifact(second_path, key="schema_reuse_second")
+        t.artifact_schemas.profile_file_artifact(
+            artifact=second,
+            run=t.current_consist.run,
+            resolved_path=str(second_path),
+            source="file",
+            driver="csv",
+            sample_rows=10,
+            reuse_if_unchanged=True,
+        )
+
+    assert combined_reuse_calls == 1
+    assert observation_calls == 0
+    assert meta_calls == 0
+
+
 def test_schema_links_view_returns_relations(tracker, sample_csv):
     class HouseSchema(SQLModel):
         house_id: int

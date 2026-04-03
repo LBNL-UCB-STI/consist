@@ -304,7 +304,7 @@ def test_log_h5_container_batches_table_sync(tracker, run_dir: Path, monkeypatch
     assert container.key == "batched_tables"
     assert len(tables) == 2
     assert sync_batch_calls == 1
-    assert sync_single_calls == 1
+    assert sync_single_calls == 0
 
 
 def test_apply_config_contribution_batches_artifact_sync(

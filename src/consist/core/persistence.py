@@ -680,6 +680,87 @@ class DatabaseManager:
         except Exception as e:
             logging.warning(f"Failed to upsert artifact facet {facet.id}: {e}")
 
+    def persist_artifact_facet_bundle(
+        self,
+        *,
+        artifact: Artifact,
+        facet: ArtifactFacet,
+        meta_updates: Dict[str, Any],
+        kv_rows: Optional[List[ArtifactKV]] = None,
+    ) -> None:
+        """
+        Persist artifact facet rows, artifact metadata, and optional KV index together.
+
+        This is intended for the common hot path where a logged artifact attaches a
+        facet payload and optional flattened KV index immediately after the artifact
+        row itself has already been persisted.
+        """
+
+        def _persist():
+            with self.session_scope() as session:
+                db_art = session.merge(artifact)
+
+                existing = session.get(ArtifactFacet, facet.id)
+                if existing is None:
+                    session.add(facet)
+                else:
+                    if (
+                        existing.namespace is None
+                        and isinstance(facet.namespace, str)
+                        and facet.namespace
+                    ):
+                        existing.namespace = facet.namespace
+                    if (
+                        existing.schema_name is None
+                        and isinstance(facet.schema_name, str)
+                        and facet.schema_name
+                    ):
+                        existing.schema_name = facet.schema_name
+                    if (
+                        existing.schema_version is None
+                        and facet.schema_version is not None
+                    ):
+                        existing.schema_version = facet.schema_version
+                    session.add(existing)
+
+                current_meta = db_art.meta or {}
+                current_meta.update(meta_updates)
+                db_art.meta = current_meta
+                session.add(db_art)
+
+                if kv_rows:
+                    combos = {
+                        (row.artifact_id, row.facet_id, row.namespace)
+                        for row in kv_rows
+                        if row.artifact_id and row.facet_id
+                    }
+                    for artifact_id, facet_id, namespace in combos:
+                        filters = [
+                            col(ArtifactKV.artifact_id) == artifact_id,
+                            col(ArtifactKV.facet_id) == facet_id,
+                        ]
+                        if namespace is None:
+                            filters.append(col(ArtifactKV.namespace).is_(None))
+                        else:
+                            filters.append(col(ArtifactKV.namespace) == namespace)
+                        session.exec(delete(ArtifactKV).where(*filters))
+                    session.add_all(kv_rows)
+
+                session.commit()
+                artifact.meta = current_meta
+
+        try:
+            self.execute_with_retry(
+                _persist, operation_name="persist_artifact_facet_bundle"
+            )
+        except Exception as e:
+            logging.warning(
+                "Failed to persist artifact facet bundle artifact=%s facet=%s: %s",
+                getattr(artifact, "id", None),
+                getattr(facet, "id", None),
+                e,
+            )
+
     def insert_run_config_kv_bulk(self, rows: List[RunConfigKV]) -> None:
         """Bulk inserts RunConfigKV rows."""
         if not rows:
@@ -839,6 +920,45 @@ class DatabaseManager:
                 "Failed to persist artifact schema profile artifact=%s schema=%s: %s",
                 getattr(artifact, "id", None),
                 getattr(schema, "id", None),
+                e,
+            )
+
+    def persist_artifact_schema_observation_bundle(
+        self,
+        *,
+        artifact: Artifact,
+        observation: ArtifactSchemaObservation,
+        meta_updates: Dict[str, Any],
+    ) -> None:
+        """
+        Persist a schema observation plus artifact metadata in one transaction.
+
+        This is useful when schema reuse resolves to an existing schema row and only
+        the new observation + artifact metadata need to be recorded.
+        """
+
+        def _persist():
+            with self.session_scope() as session:
+                db_art = session.merge(artifact)
+                session.add(observation)
+
+                current_meta = db_art.meta or {}
+                current_meta.update(meta_updates)
+                db_art.meta = current_meta
+                session.add(db_art)
+                session.commit()
+
+                artifact.meta = current_meta
+
+        try:
+            self.execute_with_retry(
+                _persist, operation_name="persist_artifact_schema_observation_bundle"
+            )
+        except Exception as e:
+            logging.warning(
+                "Failed to persist artifact schema observation bundle artifact=%s schema=%s: %s",
+                getattr(artifact, "id", None),
+                getattr(observation, "schema_id", None),
                 e,
             )
 

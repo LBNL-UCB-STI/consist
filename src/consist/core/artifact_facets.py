@@ -72,16 +72,12 @@ class ArtifactFacetManager:
                 facet_bytes,
             )
             return
-        self._db.upsert_artifact_facet(
-            ArtifactFacet(
-                id=facet_id,
-                namespace=namespace,
-                schema_name=schema_name,
-                schema_version=(
-                    str(schema_version) if schema_version is not None else None
-                ),
-                facet_json=facet_dict,
-            )
+        facet_row = ArtifactFacet(
+            id=facet_id,
+            namespace=namespace,
+            schema_name=schema_name,
+            schema_version=(str(schema_version) if schema_version is not None else None),
+            facet_json=facet_dict,
         )
 
         updates: Dict[str, Any] = {
@@ -95,26 +91,30 @@ class ArtifactFacetManager:
         if artifact.meta is None:
             artifact.meta = {}
         artifact.meta.update(updates)
-        self._db.update_artifact_meta(artifact, updates)
 
-        if not index_kv:
-            return
-
-        rows = self.flatten_facet_to_kv_rows(
-            artifact_id=artifact.id,
-            facet_id=facet_id,
-            namespace=namespace,
-            facet_dict=facet_dict,
-        )
-        if len(rows) > max_kv_rows:
-            logging.info(
-                "[Consist] Skipping artifact facet KV indexing for artifact %s "
-                "(too many keys: %d).",
-                getattr(artifact, "id", None),
-                len(rows),
+        kv_rows: Optional[List[ArtifactKV]] = None
+        if index_kv:
+            kv_rows = self.flatten_facet_to_kv_rows(
+                artifact_id=artifact.id,
+                facet_id=facet_id,
+                namespace=namespace,
+                facet_dict=facet_dict,
             )
-            return
-        self._db.insert_artifact_kv_bulk(rows)
+            if len(kv_rows) > max_kv_rows:
+                logging.info(
+                    "[Consist] Skipping artifact facet KV indexing for artifact %s "
+                    "(too many keys: %d).",
+                    getattr(artifact, "id", None),
+                    len(kv_rows),
+                )
+                kv_rows = None
+
+        self._db.persist_artifact_facet_bundle(
+            artifact=artifact,
+            facet=facet_row,
+            meta_updates=updates,
+            kv_rows=kv_rows,
+        )
 
     def flatten_facet_to_kv_rows(
         self,

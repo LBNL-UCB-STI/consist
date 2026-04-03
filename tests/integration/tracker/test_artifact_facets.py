@@ -83,6 +83,61 @@ def test_log_artifacts_facets_are_deduplicated_by_json_hash(
     assert len({row.artifact_id for row in kv_rows}) == 2
 
 
+def test_log_output_uses_combined_artifact_facet_persistence(
+    tracker, run_dir: Path, monkeypatch
+) -> None:
+    out = run_dir / "combined_facet.parquet"
+    out.write_text("data")
+
+    combined_calls = 0
+    upsert_calls = 0
+    meta_calls = 0
+    kv_calls = 0
+
+    original_combined = tracker.db.persist_artifact_facet_bundle
+    original_upsert = tracker.db.upsert_artifact_facet
+    original_meta = tracker.db.update_artifact_meta
+    original_kv = tracker.db.insert_artifact_kv_bulk
+
+    def counting_combined(**kwargs):
+        nonlocal combined_calls
+        combined_calls += 1
+        return original_combined(**kwargs)
+
+    def counting_upsert(*args, **kwargs):
+        nonlocal upsert_calls
+        upsert_calls += 1
+        return original_upsert(*args, **kwargs)
+
+    def counting_meta(*args, **kwargs):
+        nonlocal meta_calls
+        meta_calls += 1
+        return original_meta(*args, **kwargs)
+
+    def counting_kv(*args, **kwargs):
+        nonlocal kv_calls
+        kv_calls += 1
+        return original_kv(*args, **kwargs)
+
+    monkeypatch.setattr(tracker.db, "persist_artifact_facet_bundle", counting_combined)
+    monkeypatch.setattr(tracker.db, "upsert_artifact_facet", counting_upsert)
+    monkeypatch.setattr(tracker.db, "update_artifact_meta", counting_meta)
+    monkeypatch.setattr(tracker.db, "insert_artifact_kv_bulk", counting_kv)
+
+    with tracker.start_run("run_combined_artifact_facet", "beam"):
+        tracker.log_output(
+            out,
+            key="combined_facet",
+            facet={"artifact_family": "beam_output", "iteration": 1},
+            facet_index=True,
+        )
+
+    assert combined_calls == 1
+    assert upsert_calls == 0
+    assert meta_calls == 0
+    assert kv_calls == 0
+
+
 def test_register_artifact_facet_parser_supports_legacy_keys(
     tracker, run_dir: Path
 ) -> None:
