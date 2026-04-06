@@ -5251,7 +5251,13 @@ class Tracker:
         """
         self.persistence.sync_run(run)
 
-    def _sync_artifact_to_db(self, artifact: Artifact, direction: str) -> None:
+    def _sync_artifact_to_db(
+        self,
+        artifact: Artifact,
+        direction: str,
+        *,
+        profile_label: Optional[str] = None,
+    ) -> None:
         """
         Synchronizes an `Artifact` object and its `RunArtifactLink` to the DuckDB database.
 
@@ -5271,7 +5277,11 @@ class Tracker:
             The direction of the artifact relative to the current run
             ("input" or "output").
         """
-        self.persistence.sync_artifact(artifact, direction)
+        self.persistence.sync_artifact(
+            artifact,
+            direction,
+            profile_label=profile_label,
+        )
 
     def history(
         self, limit: int = 10, tags: Optional[List[str]] = None

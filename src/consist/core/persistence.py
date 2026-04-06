@@ -1,3 +1,4 @@
+import atexit
 import time
 import random
 import logging
@@ -8,6 +9,7 @@ import json
 import shutil
 import tempfile
 import contextvars
+import threading
 from dataclasses import dataclass
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -88,6 +90,177 @@ class ArtifactSchemaSelection:
     selection_rule: str
 
 
+@dataclass
+class _DBProfileEntry:
+    count: int = 0
+    error_count: int = 0
+    total_seconds: float = 0.0
+    max_seconds: float = 0.0
+
+
+class _DBCallProfiler:
+    """Internal opt-in DB profiling helper for Consist maintainers.
+
+    This utility is enabled only when the ``CONSIST_DB_PROFILE_PATH``
+    environment variable is set. It records coarse timing/count information for
+    selected database helpers plus session lifecycle statistics, then writes a
+    JSON snapshot at process exit.
+
+    This profiler is intentionally internal implementation detail. It is not
+    part of the supported public API, is not covered by any compatibility
+    guarantee, and may change or disappear in a future release without notice.
+    End-user code should not depend on its JSON schema, output location, or the
+    specific set of profiled helper names.
+    """
+
+    def __init__(self) -> None:
+        self.output_path = os.environ.get("CONSIST_DB_PROFILE_PATH")
+        self.enabled = bool(self.output_path)
+        self._lock = threading.Lock()
+        self._registered = False
+        self._calls: dict[str, _DBProfileEntry] = {}
+        self._session_open_count = 0
+        self._session_reuse_count = 0
+        self._session_close_count = 0
+        self._session_live_total_seconds = 0.0
+        self._session_live_max_seconds = 0.0
+
+    def _ensure_registered(self) -> None:
+        """Register the exit hook lazily the first time profiling is used."""
+        if not self.enabled or self._registered:
+            return
+        atexit.register(self.dump)
+        self._registered = True
+
+    @contextmanager
+    def track(self, name: str) -> Iterator[None]:
+        """Record timing/error stats for one named internal DB helper call."""
+        if not self.enabled:
+            yield
+            return
+        self._ensure_registered()
+        started = time.perf_counter()
+        failed = False
+        try:
+            yield
+        except Exception:
+            failed = True
+            raise
+        finally:
+            elapsed = time.perf_counter() - started
+            with self._lock:
+                entry = self._calls.setdefault(name, _DBProfileEntry())
+                entry.count += 1
+                entry.total_seconds += elapsed
+                entry.max_seconds = max(entry.max_seconds, elapsed)
+                if failed:
+                    entry.error_count += 1
+
+    def note_session_open(self) -> None:
+        """Record creation of a new outer session_scope session."""
+        if not self.enabled:
+            return
+        self._ensure_registered()
+        with self._lock:
+            self._session_open_count += 1
+
+    def note_session_reuse(self) -> None:
+        """Record reuse of an already-active session_scope session."""
+        if not self.enabled:
+            return
+        self._ensure_registered()
+        with self._lock:
+            self._session_reuse_count += 1
+
+    def note_session_close(self, *, live_seconds: float) -> None:
+        """Record closure of an outer session and its lifetime."""
+        if not self.enabled:
+            return
+        self._ensure_registered()
+        with self._lock:
+            self._session_close_count += 1
+            self._session_live_total_seconds += live_seconds
+            self._session_live_max_seconds = max(
+                self._session_live_max_seconds, live_seconds
+            )
+
+    def dump(self) -> None:
+        """Write the collected internal profiling snapshot to JSON."""
+        if not self.enabled or not self.output_path:
+            return
+        with self._lock:
+            calls = {
+                name: {
+                    "count": entry.count,
+                    "error_count": entry.error_count,
+                    "total_seconds": round(entry.total_seconds, 6),
+                    "avg_milliseconds": round(
+                        (entry.total_seconds / entry.count) * 1000, 3
+                    )
+                    if entry.count
+                    else 0.0,
+                    "max_milliseconds": round(entry.max_seconds * 1000, 3),
+                }
+                for name, entry in sorted(
+                    self._calls.items(),
+                    key=lambda item: item[1].total_seconds,
+                    reverse=True,
+                )
+            }
+            payload = {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "session_scope": {
+                    "outer_session_open_count": self._session_open_count,
+                    "shared_session_reuse_count": self._session_reuse_count,
+                    "outer_session_close_count": self._session_close_count,
+                    "total_live_seconds": round(self._session_live_total_seconds, 6),
+                    "avg_live_milliseconds": round(
+                        (
+                            self._session_live_total_seconds
+                            / self._session_close_count
+                            * 1000
+                        ),
+                        3,
+                    )
+                    if self._session_close_count
+                    else 0.0,
+                    "max_live_milliseconds": round(
+                        self._session_live_max_seconds * 1000, 3
+                    ),
+                },
+                "calls": calls,
+            }
+        try:
+            output = Path(self.output_path)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n")
+        except Exception as exc:
+            logging.warning(
+                "Failed to write Consist DB profile to %s: %s", self.output_path, exc
+            )
+
+
+_DB_CALL_PROFILER = _DBCallProfiler()
+
+
+def _clone_artifact_content(row: ArtifactContent) -> ArtifactContent:
+    """Return a detached copy safe to reuse outside the originating session."""
+    return ArtifactContent(
+        id=row.id,
+        content_hash=row.content_hash,
+        driver=row.driver,
+        created_at=row.created_at,
+        meta=dict(row.meta or {}),
+    )
+
+
+def _profile_call_name(name: str, profile_label: Optional[str] = None) -> str:
+    """Build an internal profiler label, optionally with a caller sub-label."""
+    if not profile_label:
+        return name
+    return f"{name}[{profile_label}]"
+
+
 def _is_retryable_db_error(message: str) -> bool:
     normalized = message.lower()
     return any(marker in normalized for marker in _RETRYABLE_DB_ERROR_MARKERS)
@@ -166,6 +339,8 @@ class DatabaseManager:
         self._session_ctx: contextvars.ContextVar[Session | None] = (
             contextvars.ContextVar("consist_session", default=None)
         )
+        self._artifact_content_cache: dict[tuple[str, str], ArtifactContent] = {}
+        self._artifact_content_cache_lock = threading.Lock()
         self._init_schema()
 
     def _init_schema(self):
@@ -534,14 +709,27 @@ class DatabaseManager:
         """
         session = self._session_ctx.get()
         if session is not None:
-            yield session
+            _DB_CALL_PROFILER.note_session_reuse()
+            try:
+                yield session
+            except Exception:
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
+                raise
             return
         session = Session(self.engine)
         token = self._session_ctx.set(session)
+        _DB_CALL_PROFILER.note_session_open()
+        started = time.perf_counter()
         try:
             yield session
         finally:
             session.close()
+            _DB_CALL_PROFILER.note_session_close(
+                live_seconds=time.perf_counter() - started
+            )
             self._session_ctx.reset(token)
 
     # --- Write Operations ---
@@ -589,7 +777,8 @@ class DatabaseManager:
                     )
 
         try:
-            self.execute_with_retry(_do_sync, operation_name="sync_run")
+            with _DB_CALL_PROFILER.track("sync_run"):
+                self.execute_with_retry(_do_sync, operation_name="sync_run")
         except Exception as e:
             logging.warning("Database sync failed: %s", e)
 
@@ -686,9 +875,10 @@ class DatabaseManager:
                 session.commit()
 
         try:
-            self.execute_with_retry(
-                _persist, operation_name="persist_config_facet_bundle"
-            )
+            with _DB_CALL_PROFILER.track("persist_config_facet_bundle"):
+                self.execute_with_retry(
+                    _persist, operation_name="persist_config_facet_bundle"
+                )
         except Exception as e:
             logging.warning(
                 "Failed to persist config facet bundle facet=%s: %s",
@@ -800,9 +990,10 @@ class DatabaseManager:
                 artifact.meta = current_meta
 
         try:
-            self.execute_with_retry(
-                _persist, operation_name="persist_artifact_facet_bundle"
-            )
+            with _DB_CALL_PROFILER.track("persist_artifact_facet_bundle"):
+                self.execute_with_retry(
+                    _persist, operation_name="persist_artifact_facet_bundle"
+                )
         except Exception as e:
             logging.warning(
                 "Failed to persist artifact facet bundle artifact=%s facet=%s: %s",
@@ -810,6 +1001,112 @@ class DatabaseManager:
                 getattr(facet, "id", None),
                 e,
             )
+
+    def sync_artifact_with_facet_bundle(
+        self,
+        artifact: Artifact,
+        run_id: str,
+        direction: str,
+        *,
+        facet: ArtifactFacet,
+        meta_updates: Dict[str, Any],
+        kv_rows: Optional[List[ArtifactKV]] = None,
+    ) -> None:
+        """
+        Upsert an Artifact, its run link, and its facet bundle in one transaction.
+
+        This collapses the common faceted logging hot path into a single commit
+        without changing the conflict behavior for existing run-artifact links.
+        """
+
+        def _do_sync() -> None:
+            with self.session_scope() as session:
+                existing_link = session.exec(
+                    select(RunArtifactLink)
+                    .where(RunArtifactLink.run_id == run_id)
+                    .where(RunArtifactLink.artifact_id == artifact.id)
+                ).first()
+
+                if existing_link is None:
+                    session.add(
+                        RunArtifactLink(
+                            run_id=run_id,
+                            artifact_id=artifact.id,
+                            direction=direction,
+                        )
+                    )
+                elif existing_link.direction != direction:
+                    logging.warning(
+                        "[Consist] Ignoring attempt to link artifact_id=%s to run_id=%s as '%s' "
+                        "because it is already linked as '%s'. "
+                        "If this step truly produces a new output, write to a new path (preferred), "
+                        "or log a distinct Artifact instance rather than reusing the same Artifact reference.",
+                        artifact.id,
+                        run_id,
+                        direction,
+                        existing_link.direction,
+                    )
+
+                current_meta = artifact.meta or {}
+                current_meta.update(meta_updates)
+                artifact.meta = current_meta
+                db_art = session.merge(artifact)
+
+                existing_facet = session.get(ArtifactFacet, facet.id)
+                if existing_facet is None:
+                    session.add(facet)
+                else:
+                    if (
+                        existing_facet.namespace is None
+                        and isinstance(facet.namespace, str)
+                        and facet.namespace
+                    ):
+                        existing_facet.namespace = facet.namespace
+                    if (
+                        existing_facet.schema_name is None
+                        and isinstance(facet.schema_name, str)
+                        and facet.schema_name
+                    ):
+                        existing_facet.schema_name = facet.schema_name
+                    if (
+                        existing_facet.schema_version is None
+                        and facet.schema_version is not None
+                    ):
+                        existing_facet.schema_version = facet.schema_version
+                    session.add(existing_facet)
+
+                db_art.meta = current_meta
+                session.add(db_art)
+
+                if kv_rows:
+                    combos = {
+                        (row.artifact_id, row.facet_id, row.namespace)
+                        for row in kv_rows
+                        if row.artifact_id and row.facet_id
+                    }
+                    for artifact_id, facet_id, namespace in combos:
+                        filters = [
+                            col(ArtifactKV.artifact_id) == artifact_id,
+                            col(ArtifactKV.facet_id) == facet_id,
+                        ]
+                        if namespace is None:
+                            filters.append(col(ArtifactKV.namespace).is_(None))
+                        else:
+                            filters.append(col(ArtifactKV.namespace) == namespace)
+                        session.exec(delete(ArtifactKV).where(*filters))
+                    session.add_all(kv_rows)
+
+                session.commit()
+                artifact.meta = current_meta
+
+        try:
+            with _DB_CALL_PROFILER.track("sync_artifact_with_facet_bundle"):
+                self.execute_with_retry(
+                    _do_sync, operation_name="sync_artifact_with_facet_bundle"
+                )
+        except Exception as e:
+            logging.warning("Artifact sync failed: %s", e)
+            logging.warning("Database sync failed: %s", e)
 
     def insert_run_config_kv_bulk(self, rows: List[RunConfigKV]) -> None:
         """Bulk inserts RunConfigKV rows."""
@@ -962,9 +1259,10 @@ class DatabaseManager:
                 artifact.meta = current_meta
 
         try:
-            self.execute_with_retry(
-                _persist, operation_name="persist_artifact_schema_profile"
-            )
+            with _DB_CALL_PROFILER.track("persist_artifact_schema_profile"):
+                self.execute_with_retry(
+                    _persist, operation_name="persist_artifact_schema_profile"
+                )
         except Exception as e:
             logging.warning(
                 "Failed to persist artifact schema profile artifact=%s schema=%s: %s",
@@ -1001,9 +1299,11 @@ class DatabaseManager:
                 artifact.meta = current_meta
 
         try:
-            self.execute_with_retry(
-                _persist, operation_name="persist_artifact_schema_observation_bundle"
-            )
+            with _DB_CALL_PROFILER.track("persist_artifact_schema_observation_bundle"):
+                self.execute_with_retry(
+                    _persist,
+                    operation_name="persist_artifact_schema_observation_bundle",
+                )
         except Exception as e:
             logging.warning(
                 "Failed to persist artifact schema observation bundle artifact=%s schema=%s: %s",
@@ -1260,7 +1560,8 @@ class DatabaseManager:
                 session.commit()
 
         try:
-            self.execute_with_retry(_do_link, operation_name="link_artifacts_bulk")
+            with _DB_CALL_PROFILER.track("link_artifacts_to_run_bulk"):
+                self.execute_with_retry(_do_link, operation_name="link_artifacts_bulk")
         except Exception as e:
             logging.warning(
                 "Failed to link artifacts to run run_id=%s count=%s: %s",
@@ -1327,11 +1628,19 @@ class DatabaseManager:
                 session.commit()
 
         try:
-            self.execute_with_retry(_do_sync, operation_name="sync_run_with_links")
+            with _DB_CALL_PROFILER.track("sync_run_with_links"):
+                self.execute_with_retry(_do_sync, operation_name="sync_run_with_links")
         except Exception as e:
             logging.warning("Database sync failed: %s", e)
 
-    def sync_artifact(self, artifact: Artifact, run_id: str, direction: str) -> None:
+    def sync_artifact(
+        self,
+        artifact: Artifact,
+        run_id: str,
+        direction: str,
+        *,
+        profile_label: Optional[str] = None,
+    ) -> None:
         """Upserts an Artifact and links it to the Run."""
 
         def _do_sync():
@@ -1368,7 +1677,10 @@ class DatabaseManager:
                 session.commit()
 
         try:
-            self.execute_with_retry(_do_sync, operation_name="sync_artifact")
+            with _DB_CALL_PROFILER.track(
+                _profile_call_name("sync_artifact", profile_label)
+            ):
+                self.execute_with_retry(_do_sync, operation_name="sync_artifact")
         except Exception as e:
             logging.warning("Artifact sync failed: %s", e)
             logging.warning("Database sync failed: %s", e)
@@ -1439,7 +1751,8 @@ class DatabaseManager:
                 session.commit()
 
         try:
-            self.execute_with_retry(_do_sync, operation_name="sync_artifacts")
+            with _DB_CALL_PROFILER.track("sync_artifacts"):
+                self.execute_with_retry(_do_sync, operation_name="sync_artifacts")
         except Exception as e:
             logging.warning("Artifacts sync failed: %s", e)
             logging.warning("Database sync failed: %s", e)
@@ -1500,7 +1813,8 @@ class DatabaseManager:
                 return session.exec(statement).first()
 
         try:
-            return self.execute_with_retry(_query)
+            with _DB_CALL_PROFILER.track("find_latest_artifact_at_uri"):
+                return self.execute_with_retry(_query)
         except Exception:
             return None
 
@@ -1560,6 +1874,11 @@ class DatabaseManager:
         """
         Lookup or create an ArtifactContent row for the given hash+driver pair.
         """
+        cache_key = (content_hash, driver)
+        with self._artifact_content_cache_lock:
+            cached = self._artifact_content_cache.get(cache_key)
+        if cached is not None:
+            return _clone_artifact_content(cached)
 
         def _query() -> ArtifactContent:
             with self.session_scope() as session:
@@ -1577,12 +1896,24 @@ class DatabaseManager:
                     meta=meta or {},
                 )
                 session.add(row)
-                session.commit()
-                session.refresh(row)
-                return row
+                try:
+                    session.commit()
+                    session.refresh(row)
+                    return row
+                except Exception:
+                    session.rollback()
+                    existing = session.exec(statement.limit(1)).first()
+                    if existing is not None:
+                        return existing
+                    raise
 
         try:
-            return self.execute_with_retry(_query)
+            with _DB_CALL_PROFILER.track("get_or_create_artifact_content"):
+                row = self.execute_with_retry(_query)
+            cached_row = _clone_artifact_content(row)
+            with self._artifact_content_cache_lock:
+                self._artifact_content_cache[cache_key] = cached_row
+            return _clone_artifact_content(cached_row)
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to get or create ArtifactContent for hash={content_hash}: {exc}"
@@ -1611,7 +1942,8 @@ class DatabaseManager:
                 return session.exec(statement).first()
 
         try:
-            return self.execute_with_retry(_query)
+            with _DB_CALL_PROFILER.track("find_schema_observation_for_hash"):
+                return self.execute_with_retry(_query)
         except Exception:
             return None
 
@@ -1717,7 +2049,8 @@ class DatabaseManager:
                 return observations[0]
 
         try:
-            return self.execute_with_retry(_query)
+            with _DB_CALL_PROFILER.track("find_schema_observation_for_content_id"):
+                return self.execute_with_retry(_query)
         except Exception:
             return None
 
@@ -2037,7 +2370,8 @@ class DatabaseManager:
                 ).all()
                 return schema, fields
 
-        result = self.execute_with_retry(_query)
+        with _DB_CALL_PROFILER.track("get_artifact_schema"):
+            result = self.execute_with_retry(_query)
         if result is None:
             return None
         schema, fields = result
@@ -3146,6 +3480,14 @@ class ProvenanceWriter:
         self._artifact_batch_depth = 0
         self._batch_pending_json_flush = False
         self._batch_pending_artifacts: list[tuple["Artifact", str]] = []
+        self._batch_pending_artifact_facet_bundles: list[
+            tuple[
+                "Artifact",
+                ArtifactFacet,
+                Dict[str, Any],
+                Optional[List[ArtifactKV]],
+            ]
+        ] = []
 
     @contextmanager
     def batch_artifact_writes(self) -> Iterator[None]:
@@ -3159,6 +3501,7 @@ class ProvenanceWriter:
         if is_outermost:
             self._batch_pending_json_flush = False
             self._batch_pending_artifacts = []
+            self._batch_pending_artifact_facet_bundles = []
         self._artifact_batch_depth += 1
         try:
             yield
@@ -3169,13 +3512,19 @@ class ProvenanceWriter:
 
             pending_json_flush = self._batch_pending_json_flush
             pending_artifacts = list(self._batch_pending_artifacts)
+            pending_artifact_facet_bundles = list(
+                self._batch_pending_artifact_facet_bundles
+            )
             self._batch_pending_json_flush = False
             self._batch_pending_artifacts = []
+            self._batch_pending_artifact_facet_bundles = []
 
             if pending_json_flush:
                 self._flush_json_now()
             if pending_artifacts:
                 self._sync_artifacts_now(pending_artifacts)
+            if pending_artifact_facet_bundles:
+                self._persist_artifact_facet_bundles_now(pending_artifact_facet_bundles)
 
     def flush_json(self) -> None:
         """
@@ -3291,7 +3640,13 @@ class ProvenanceWriter:
             except Exception as e:
                 logging.warning("Database sync failed: %s", e)
 
-    def sync_artifact(self, artifact: "Artifact", direction: str) -> None:
+    def sync_artifact(
+        self,
+        artifact: "Artifact",
+        direction: str,
+        *,
+        profile_label: Optional[str] = None,
+    ) -> None:
         """
         Sync an Artifact and its run link to the database, if configured.
 
@@ -3311,7 +3666,43 @@ class ProvenanceWriter:
         if tracker.db and tracker.current_consist:
             try:
                 tracker.db.sync_artifact(
-                    artifact, tracker.current_consist.run.id, direction
+                    artifact,
+                    tracker.current_consist.run.id,
+                    direction,
+                    profile_label=profile_label,
+                )
+            except Exception as e:
+                logging.warning("Database sync failed: %s", e)
+
+    def sync_artifact_with_facet_bundle(
+        self,
+        artifact: "Artifact",
+        direction: str,
+        *,
+        facet: ArtifactFacet,
+        meta_updates: Dict[str, Any],
+        kv_rows: Optional[List[ArtifactKV]] = None,
+    ) -> None:
+        """
+        Sync an Artifact, run link, and facet bundle in one database transaction.
+        """
+        if self._artifact_batch_depth > 0:
+            self._batch_pending_artifacts.append((artifact, direction))
+            self._batch_pending_artifact_facet_bundles.append(
+                (artifact, facet, meta_updates, kv_rows)
+            )
+            return
+
+        tracker = self._tracker
+        if tracker.db and tracker.current_consist:
+            try:
+                tracker.db.sync_artifact_with_facet_bundle(
+                    artifact,
+                    tracker.current_consist.run.id,
+                    direction,
+                    facet=facet,
+                    meta_updates=meta_updates,
+                    kv_rows=kv_rows,
                 )
             except Exception as e:
                 logging.warning("Database sync failed: %s", e)
@@ -3334,6 +3725,27 @@ class ProvenanceWriter:
                     artifacts=artifacts,
                     run_id=run_id,
                     direction=direction,
+                )
+            except Exception as e:
+                logging.warning("Database sync failed: %s", e)
+
+    def _persist_artifact_facet_bundles_now(
+        self,
+        artifact_facet_bundles: Sequence[
+            tuple["Artifact", ArtifactFacet, Dict[str, Any], Optional[List[ArtifactKV]]]
+        ],
+    ) -> None:
+        tracker = self._tracker
+        if not tracker.db:
+            return
+
+        for artifact, facet, meta_updates, kv_rows in artifact_facet_bundles:
+            try:
+                tracker.db.persist_artifact_facet_bundle(
+                    artifact=artifact,
+                    facet=facet,
+                    meta_updates=meta_updates,
+                    kv_rows=kv_rows,
                 )
             except Exception as e:
                 logging.warning("Database sync failed: %s", e)

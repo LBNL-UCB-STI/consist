@@ -91,22 +91,33 @@ def test_scenario_parent_links_use_bulk_helper(
     input_path = tmp_path / "input.csv"
     input_path.write_text("x\n1\n", encoding="utf-8")
 
-    bulk_calls: list[tuple[str, tuple[str, ...], str]] = []
+    persistence_bulk_calls: list[tuple[str, tuple[str, ...], str]] = []
+    db_bulk_calls: list[tuple[str, tuple[str, ...], str]] = []
     single_parent_calls: list[tuple[str, str, str]] = []
 
-    original_bulk = tracker.db.link_artifacts_to_run_bulk
+    original_persistence_bulk = tracker.persistence.sync_run_with_links
+    original_db_bulk = tracker.db.link_artifacts_to_run_bulk
     original_single = tracker.db.link_artifact_to_run
 
-    def counting_bulk(*, artifact_ids, run_id, direction) -> None:
-        bulk_calls.append((run_id, tuple(str(a) for a in artifact_ids), direction))
-        original_bulk(artifact_ids=artifact_ids, run_id=run_id, direction=direction)
+    def counting_persistence_bulk(run, *, artifact_ids, direction) -> None:
+        persistence_bulk_calls.append(
+            (run.id, tuple(str(a) for a in artifact_ids), direction)
+        )
+        original_persistence_bulk(run, artifact_ids=artifact_ids, direction=direction)
+
+    def counting_db_bulk(*, artifact_ids, run_id, direction) -> None:
+        db_bulk_calls.append((run_id, tuple(str(a) for a in artifact_ids), direction))
+        original_db_bulk(artifact_ids=artifact_ids, run_id=run_id, direction=direction)
 
     def counting_single(artifact_id, run_id, direction) -> None:
         if run_id == "parent_bulk":
             single_parent_calls.append((str(artifact_id), run_id, direction))
         original_single(artifact_id, run_id, direction)
 
-    monkeypatch.setattr(tracker.db, "link_artifacts_to_run_bulk", counting_bulk)
+    monkeypatch.setattr(
+        tracker.persistence, "sync_run_with_links", counting_persistence_bulk
+    )
+    monkeypatch.setattr(tracker.db, "link_artifacts_to_run_bulk", counting_db_bulk)
     monkeypatch.setattr(tracker.db, "link_artifact_to_run", counting_single)
 
     def step(ctx) -> None:
@@ -122,12 +133,30 @@ def test_scenario_parent_links_use_bulk_helper(
             execution_options=ExecutionOptions(inject_context="ctx"),
         )
 
-    parent_bulk_calls = [call for call in bulk_calls if call[0] == "parent_bulk"]
-    assert sorted(direction for _, _, direction in parent_bulk_calls) == [
-        "input",
-        "output",
+    parent_persistence_calls = [
+        call for call in persistence_bulk_calls if call[0] == "parent_bulk"
     ]
+    parent_db_bulk_calls = [call for call in db_bulk_calls if call[0] == "parent_bulk"]
+    assert [direction for _, _, direction in parent_persistence_calls] == ["output"]
+    assert [direction for _, _, direction in parent_db_bulk_calls] == ["input"]
     assert single_parent_calls == []
+
+
+def test_scenario_exit_does_not_double_sync_header_run(tracker: Tracker, monkeypatch):
+    sync_run_calls = 0
+
+    original_sync_run = tracker.persistence.sync_run
+
+    def counting_sync_run(run) -> None:
+        nonlocal sync_run_calls
+        sync_run_calls += 1
+        original_sync_run(run)
+
+    with tracker.scenario("scenario_exit_sync_count") as _sc:
+        monkeypatch.setattr(tracker.persistence, "sync_run", counting_sync_run)
+        pass
+
+    assert sync_run_calls == 1
 
 
 def test_scenario_coupler_kw_not_serialized(tracker: Tracker):

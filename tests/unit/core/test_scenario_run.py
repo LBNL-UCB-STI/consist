@@ -301,11 +301,17 @@ def test_scenario_trace_updates_coupler_after_exit(tracker):
 
 
 def test_scenario_trace_batches_parent_link_inserts(tracker, monkeypatch):
+    persistence_bulk_calls: list[tuple[list[object], str]] = []
     bulk_calls: list[tuple[list[object], str]] = []
     single_calls = 0
 
+    original_persistence_bulk = tracker.persistence.sync_run_with_links
     original_bulk = tracker.db.link_artifacts_to_run_bulk
     original_single = tracker.db.link_artifact_to_run
+
+    def counting_persistence_bulk(run, *, artifact_ids, direction) -> None:
+        persistence_bulk_calls.append((list(artifact_ids), direction))
+        original_persistence_bulk(run, artifact_ids=artifact_ids, direction=direction)
 
     def counting_bulk(*, artifact_ids, run_id, direction) -> None:
         bulk_calls.append((list(artifact_ids), direction))
@@ -326,11 +332,16 @@ def test_scenario_trace_batches_parent_link_inserts(tracker, monkeypatch):
             in_path.write_text("in")
             t.log_artifact(in_path, key="in", direction="input")
 
+            monkeypatch.setattr(
+                tracker.persistence, "sync_run_with_links", counting_persistence_bulk
+            )
             monkeypatch.setattr(tracker.db, "link_artifacts_to_run_bulk", counting_bulk)
             monkeypatch.setattr(tracker.db, "link_artifact_to_run", counting_single)
 
+    assert persistence_bulk_calls
+    assert {direction for _, direction in persistence_bulk_calls} == {"output"}
     assert bulk_calls
-    assert {direction for _, direction in bulk_calls} == {"input", "output"}
+    assert {direction for _, direction in bulk_calls} == {"input"}
     assert single_calls == 0
 
 

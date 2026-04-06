@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union
 
 from consist.core.facet_common import (
@@ -15,6 +16,13 @@ from consist.models.artifact import Artifact
 from consist.models.artifact_facet import ArtifactFacet
 from consist.models.artifact_kv import ArtifactKV
 from consist.types import FacetLike
+
+
+@dataclass(frozen=True)
+class PreparedArtifactFacetBundle:
+    facet: ArtifactFacet
+    meta_updates: Dict[str, Any]
+    kv_rows: Optional[List[ArtifactKV]]
 
 
 class ArtifactFacetManager:
@@ -44,7 +52,7 @@ class ArtifactFacetManager:
             return None
         return normalize_facet_like(identity=self._identity, facet=facet)
 
-    def persist_facet(
+    def prepare_facet_bundle(
         self,
         *,
         artifact: Artifact,
@@ -55,10 +63,7 @@ class ArtifactFacetManager:
         index_kv: bool,
         max_facet_bytes: int = 16_384,
         max_kv_rows: int = 500,
-    ) -> None:
-        if not self._db:
-            return
-
+    ) -> Optional[PreparedArtifactFacetBundle]:
         canonical, facet_id = canonical_facet_json_and_id(
             identity=self._identity,
             facet_dict=facet_dict,
@@ -71,7 +76,7 @@ class ArtifactFacetManager:
                 getattr(artifact, "id", None),
                 facet_bytes,
             )
-            return
+            return None
         facet_row = ArtifactFacet(
             id=facet_id,
             namespace=namespace,
@@ -90,10 +95,6 @@ class ArtifactFacetManager:
         if schema_version is not None:
             updates["artifact_facet_schema_version"] = schema_version
 
-        if artifact.meta is None:
-            artifact.meta = {}
-        artifact.meta.update(updates)
-
         kv_rows: Optional[List[ArtifactKV]] = None
         if index_kv:
             kv_rows = self.flatten_facet_to_kv_rows(
@@ -111,11 +112,45 @@ class ArtifactFacetManager:
                 )
                 kv_rows = None
 
-        self._db.persist_artifact_facet_bundle(
-            artifact=artifact,
+        return PreparedArtifactFacetBundle(
             facet=facet_row,
             meta_updates=updates,
             kv_rows=kv_rows,
+        )
+
+    def persist_facet(
+        self,
+        *,
+        artifact: Artifact,
+        namespace: Optional[str],
+        facet_dict: Dict[str, Any],
+        schema_name: Optional[str],
+        schema_version: Optional[Union[str, int]],
+        index_kv: bool,
+        max_facet_bytes: int = 16_384,
+        max_kv_rows: int = 500,
+    ) -> None:
+        if not self._db:
+            return
+
+        bundle = self.prepare_facet_bundle(
+            artifact=artifact,
+            namespace=namespace,
+            facet_dict=facet_dict,
+            schema_name=schema_name,
+            schema_version=schema_version,
+            index_kv=index_kv,
+            max_facet_bytes=max_facet_bytes,
+            max_kv_rows=max_kv_rows,
+        )
+        if bundle is None:
+            return
+
+        self._db.persist_artifact_facet_bundle(
+            artifact=artifact,
+            facet=bundle.facet,
+            meta_updates=bundle.meta_updates,
+            kv_rows=bundle.kv_rows,
         )
 
     def flatten_facet_to_kv_rows(

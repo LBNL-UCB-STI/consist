@@ -1337,38 +1337,37 @@ class ScenarioContext:
 
         parent_run.meta["steps"].append(summary)
 
+        output_ids = list(dict.fromkeys(artifact.id for artifact in child_outputs))
+        input_ids = list(
+            dict.fromkeys(
+                artifact.id
+                for artifact in child_inputs
+                if artifact.id not in parent_output_ids
+            )
+        )
+
         # --- Force Flush ---
         current_state = self.tracker.current_consist
         self.tracker.current_consist = self._header_record
-
-        self.tracker.persistence.flush_json()
-        self.tracker.persistence.sync_run(parent_run)
-
-        # --- NEW: Create database links for parent scenario ---
-        if self.tracker.db:
-            output_ids = list(dict.fromkeys(artifact.id for artifact in child_outputs))
+        try:
+            self.tracker.persistence.flush_json()
             if output_ids:
-                self.tracker.db.link_artifacts_to_run_bulk(
+                self.tracker.persistence.sync_run_with_links(
+                    parent_run,
                     artifact_ids=output_ids,
-                    run_id=parent_run.id,
                     direction="output",
                 )
+            else:
+                self.tracker.persistence.sync_run(parent_run)
 
-            input_ids = list(
-                dict.fromkeys(
-                    artifact.id
-                    for artifact in child_inputs
-                    if artifact.id not in parent_output_ids
-                )
-            )
-            if input_ids:
+            if self.tracker.db and input_ids:
                 self.tracker.db.link_artifacts_to_run_bulk(
                     artifact_ids=input_ids,
                     run_id=parent_run.id,
                     direction="input",
                 )
-
-        self.tracker.current_consist = current_state
+        finally:
+            self.tracker.current_consist = current_state
 
     def __enter__(self) -> "ScenarioContext":
         # Enforce No Nesting
@@ -1452,33 +1451,6 @@ class ScenarioContext:
             f"[ScenarioContext] Ending header {self.run_id} with status={status}"
         )
         self.tracker.end_run(status=status, error=error_for_end_run)
-
-        # Defensive: ensure header status/meta are persisted even if future end_run
-        # behavior changes. We temporarily restore the header to flush/sync explicitly.
-        if self._header_record:
-            # Force the run object to reflect the final status before syncing.
-            self._header_record.run.status = status
-            self.tracker.current_consist = self._header_record
-            logging.debug(
-                "[ScenarioContext] Syncing header after end_run: "
-                f"id={self._header_record.run.id}, status={self._header_record.run.status}"
-            )
-            self.tracker.persistence.flush_json()
-            # Use a fresh Run clone to avoid any ORM identity/cache oddities
-            try:
-                from consist.models.run import Run
-
-                cloned = Run(**self._header_record.run.model_dump())
-                logging.debug(
-                    f"[ScenarioContext] Syncing cloned header run id={cloned.id} status={cloned.status}"
-                )
-                self.tracker.persistence.sync_run(cloned)
-            except Exception:
-                # Fallback to direct sync on the original object
-                logging.debug(
-                    f"[ScenarioContext] Syncing original header run id={self._header_record.run.id} status={self._header_record.run.status}"
-                )
-                self.tracker.persistence.sync_run(self._header_record.run)
 
         # 4. Final Cleanup
         # end_run sets current_consist to None, but we ensure it matches expected state
