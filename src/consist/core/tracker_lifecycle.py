@@ -29,6 +29,10 @@ from consist.core.cache import (
     parse_materialize_cached_outputs_kwargs,
     validate_cached_run_outputs,
 )
+from consist.core.cache_miss_explainer import (
+    CacheMissExplainer,
+    CacheMissExplainerContext,
+)
 from consist.core.context import pop_tracker, push_tracker
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.validation import (
@@ -528,6 +532,19 @@ class RunLifecycleCoordinator:
                         tracker._active_run_cache_options.cache_hydration,
                     )
             else:
+                explanation = CacheMissExplainer(
+                    cast(CacheMissExplainerContext, tracker)
+                ).explain(
+                    run,
+                    cached_run=cached_run,
+                    cache_valid=cache_valid if cached_run else None,
+                )
+                run.meta["cache_miss_explanation"] = explanation.as_dict()
+                logging.info(
+                    "[Consist][cache] miss explanation: reason=%s candidate=%s",
+                    explanation.reason,
+                    explanation.candidate_run_id,
+                )
                 if cached_run and not cache_valid and debug_cache:
                     logging.info(
                         "[Consist][cache] miss: cached run %s failed validation.",

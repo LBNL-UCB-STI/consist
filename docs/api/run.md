@@ -42,6 +42,20 @@ Use `run.identity_summary` to debug cache identity composition
 (`config_hash`, `input_hash`, `code_hash`, adapter metadata, and
 `identity_inputs` digests).
 
+If you are diagnosing a cache miss, also inspect
+`run.meta["cache_miss_explanation"]` on the completed run. It records the
+likely reason the run missed cache, such as config drift, input drift, code
+drift, validation failure, or the absence of a similar prior run.
+
+The payload is intentionally compact:
+
+- `reason` gives the broad miss category.
+- `candidate_run_id` points to the prior completed run that was compared, when
+  one exists.
+- `details` carries the concrete evidence, such as changed config keys, changed
+  input keys, code-identity drift, or `fallbacks_used` when the explainer had
+  to lean on fallback data.
+
 ::: consist.models.run.Run
     options:
       show_source: false
