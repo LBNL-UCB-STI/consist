@@ -641,6 +641,11 @@ def db_purge(
         "--delete-files",
         help="Delete artifact disk files listed in purge plan.",
     ),
+    unsafe_delete_targets: str = typer.Option(
+        "fail",
+        "--unsafe-delete-targets",
+        help="How to handle deletion targets outside the maintenance run_dir: fail or skip.",
+    ),
     yes: bool = typer.Option(
         False,
         "--yes",
@@ -653,6 +658,12 @@ def db_purge(
     ),
 ) -> None:
     """Purge run records, snapshots, and optional ingested/global data."""
+    if unsafe_delete_targets not in {"fail", "skip"}:
+        console.print(
+            "[red]--unsafe-delete-targets must be either 'fail' or 'skip'[/red]"
+        )
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR)
+
     maintenance = _maintenance_service(db_path)
     include_children = not no_children
 
@@ -671,6 +682,9 @@ def db_purge(
                 f"disk_files=enabled({len(preview.disk_files)})"
                 if delete_files
                 else "disk_files=disabled"
+            ),
+            (
+                f"unsafe_targets={len(preview.unsafe_json_files) + len(preview.unsafe_disk_files)}"
             ),
             (
                 f"ingested_global=enabled(rows~{scoped_ingested_rows})"
@@ -700,6 +714,7 @@ def db_purge(
         delete_ingested_data=delete_ingested_data,
         prune_cache=prune_cache,
         dry_run=dry_run,
+        unsafe_delete_targets=cast(Any, unsafe_delete_targets),
     )
     if json_output:
         output_json(asdict(result))
@@ -717,8 +732,22 @@ def db_purge(
     )
     summary.add_row("Snapshot JSON files", str(len(result.plan.json_files)))
     summary.add_row("Disk files", str(len(result.plan.disk_files)))
+    summary.add_row("Unsafe snapshot targets", str(len(result.plan.unsafe_json_files)))
+    summary.add_row("Unsafe disk targets", str(len(result.plan.unsafe_disk_files)))
+    summary.add_row(
+        "Skipped unsafe targets",
+        str(
+            len(result.skipped_unsafe_json_files)
+            + len(result.skipped_unsafe_disk_files)
+        ),
+    )
     summary.add_row("Ingested data skipped", str(result.ingested_data_skipped))
     console.print(summary)
+
+    if result.skipped_unsafe_json_files or result.skipped_unsafe_disk_files:
+        console.print(
+            "[yellow]Skipped unsafe filesystem deletion target(s) outside the maintenance run_dir.[/yellow]"
+        )
 
 
 @db_app.command("fix-status")

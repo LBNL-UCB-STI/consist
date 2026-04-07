@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from consist.core.persistence import DatabaseManager
 
 GlobalTableMode = Literal["run_scoped", "run_link", "unscoped_cache"]
+UnsafeDeleteTargetPolicy = Literal["fail", "skip"]
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 UTC = timezone.utc
 
@@ -44,6 +45,8 @@ class PurgePlan:
     orphaned_artifact_ids: list[uuid.UUID]
     json_files: list[Path]
     disk_files: list[Path]
+    unsafe_json_files: list[Path]
+    unsafe_disk_files: list[Path]
     ingested_data: dict[str, int]
     ingested_table_modes: dict[str, GlobalTableMode]
 
@@ -55,6 +58,8 @@ class PurgeResult:
     plan: PurgePlan
     executed: bool
     ingested_data_skipped: bool
+    skipped_unsafe_json_files: list[Path] = field(default_factory=list)
+    skipped_unsafe_disk_files: list[Path] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -146,6 +151,48 @@ class DatabaseMaintenance:
         """
         self.db = db
         self.run_dir = Path(run_dir)
+
+    def _deletion_allowed_roots(self) -> tuple[Path, ...]:
+        try:
+            return (self.run_dir.resolve(),)
+        except OSError:
+            return (self.run_dir,)
+
+    def _classify_delete_targets(
+        self, paths: Iterable[Path]
+    ) -> tuple[list[Path], list[Path]]:
+        allowed_roots = self._deletion_allowed_roots()
+        safe_paths: list[Path] = []
+        unsafe_paths: list[Path] = []
+        seen_safe: set[str] = set()
+        seen_unsafe: set[str] = set()
+
+        for raw_path in paths:
+            try:
+                resolved = raw_path.resolve()
+            except OSError:
+                resolved = raw_path
+
+            is_safe = False
+            for root in allowed_roots:
+                try:
+                    resolved.relative_to(root)
+                    is_safe = True
+                    break
+                except ValueError:
+                    continue
+
+            path_key = str(resolved)
+            if is_safe:
+                if path_key not in seen_safe:
+                    seen_safe.add(path_key)
+                    safe_paths.append(resolved)
+            else:
+                if path_key not in seen_unsafe:
+                    seen_unsafe.add(path_key)
+                    unsafe_paths.append(resolved)
+
+        return safe_paths, unsafe_paths
 
     def inspect(self) -> InspectReport:
         def _query() -> tuple[int, dict[str, int], int, int, list[str], list[str]]:
@@ -371,7 +418,7 @@ class DatabaseMaintenance:
                 ).all()
             runs_by_id = {run.id: run for run in runs}
 
-        json_files: list[Path] = []
+        json_candidates: list[Path] = []
         seen_json_paths: set[str] = set()
         for run_id in expanded_run_ids:
             snapshot_path = self._resolve_run_snapshot_path(
@@ -383,7 +430,12 @@ class DatabaseMaintenance:
             if path_key in seen_json_paths:
                 continue
             seen_json_paths.add(path_key)
-            json_files.append(snapshot_path)
+            json_candidates.append(snapshot_path)
+
+        json_files, unsafe_json_files = self._classify_delete_targets(json_candidates)
+        disk_files, unsafe_disk_files = self._classify_delete_targets(
+            self._resolve_artifact_disk_paths(orphaned_artifact_ids)
+        )
 
         discovered_tables = self._discover_global_tables()
         if expanded_run_ids:
@@ -403,7 +455,9 @@ class DatabaseMaintenance:
             child_run_ids=child_run_ids,
             orphaned_artifact_ids=orphaned_artifact_ids,
             json_files=json_files,
-            disk_files=self._resolve_artifact_disk_paths(orphaned_artifact_ids),
+            disk_files=disk_files,
+            unsafe_json_files=unsafe_json_files,
+            unsafe_disk_files=unsafe_disk_files,
             ingested_data=ingested_data,
             ingested_table_modes=ingested_table_modes,
         )
@@ -417,6 +471,7 @@ class DatabaseMaintenance:
         delete_ingested_data: bool,
         dry_run: bool,
         prune_cache: bool = False,
+        unsafe_delete_targets: UnsafeDeleteTargetPolicy = "fail",
     ) -> PurgeResult:
         plan = self.plan_purge(run_ids, include_children=include_children)
         ingested_candidates_exist = any(
@@ -429,6 +484,18 @@ class DatabaseMaintenance:
                 plan=plan,
                 executed=False,
                 ingested_data_skipped=ingested_data_skipped,
+            )
+
+        if unsafe_delete_targets not in {"fail", "skip"}:
+            raise ValueError("unsafe_delete_targets must be either 'fail' or 'skip'.")
+
+        blocked_paths = [*plan.unsafe_json_files, *plan.unsafe_disk_files]
+        if blocked_paths and unsafe_delete_targets == "fail":
+            blocked_display = ", ".join(str(path) for path in blocked_paths)
+            raise ValueError(
+                "Refusing purge filesystem deletion outside allowed roots "
+                f"({', '.join(str(root) for root in self._deletion_allowed_roots())}): "
+                f"{blocked_display}"
             )
 
         selected_run_ids = plan.run_ids
@@ -906,6 +973,12 @@ class DatabaseMaintenance:
             plan=plan,
             executed=True,
             ingested_data_skipped=ingested_data_skipped,
+            skipped_unsafe_json_files=(
+                list(plan.unsafe_json_files) if unsafe_delete_targets == "skip" else []
+            ),
+            skipped_unsafe_disk_files=(
+                list(plan.unsafe_disk_files) if unsafe_delete_targets == "skip" else []
+            ),
         )
 
     def fix_status(
