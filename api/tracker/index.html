@@ -15315,7 +15315,7 @@ or for retrieving artifact metadata by path.</p>
 
 
 <h2 id="consist.core.tracker.Tracker.find_matching_run" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">find_matching_run</span><span class="p">(</span><span class="n">config_hash</span><span class="p">,</span> <span class="n">input_hash</span><span class="p">,</span> <span class="n">git_hash</span><span class="p">)</span></code>
+            <code class="highlight language-python"><span class="n">find_matching_run</span><span class="p">(</span><span class="n">config_hash</span><span class="p">,</span> <span class="n">input_hash</span><span class="p">,</span> <span class="n">git_hash</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">signature</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
 
 <a href="#consist.core.tracker.Tracker.find_matching_run" class="headerlink" title="Permanent link">&para;</a></h2>
 
@@ -15382,6 +15382,24 @@ or for retrieving artifact metadata by path.</p>
             </td>
             <td>
                 <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>signature</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-external" href="https://docs.python.org/3/library/stdtypes.html#str">str</a> | None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Composite run signature. When provided, Consist attempts a direct
+signature lookup first and falls back to the legacy component-hash
+lookup for compatibility with older rows.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
             </td>
           </tr>
       </tbody>
