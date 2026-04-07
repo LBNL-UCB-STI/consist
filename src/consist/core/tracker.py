@@ -1035,13 +1035,10 @@ class Tracker:
             Optional schema version tag for the persisted facet.
         facet_index : bool, default True
             Whether to flatten and index facet keys/values for DB querying.
-        stage : Optional[str], optional
-            Optional workflow stage label persisted on the run.
-        phase : Optional[str], optional
-            Optional lifecycle phase label persisted on the run.
         **kwargs : Any
             Additional metadata. Special keywords `year`, `iteration`, `stage`,
-            and `phase` can be used.
+            and `phase` are recognized, with `stage` and `phase` persisted on
+            the run as workflow metadata.
             Metadata keys/values are validated and size-limited; use
             CONSIST_MAX_METADATA_ITEMS/KEY_LENGTH/VALUE_LENGTH to override.
 
