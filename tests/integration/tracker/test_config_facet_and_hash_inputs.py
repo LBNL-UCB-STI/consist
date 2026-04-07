@@ -21,6 +21,7 @@ import hashlib
 import json
 from pathlib import Path
 
+import consist
 from pydantic import BaseModel
 
 
@@ -87,6 +88,142 @@ def test_get_config_helpers_return_typed_values(tracker):
         tracker.get_config_value("run_with_helpers", "missing", default="fallback")
         == "fallback"
     )
+
+
+def test_begin_run_uses_combined_config_facet_persistence(tracker, monkeypatch) -> None:
+    combined_calls = 0
+    upsert_calls = 0
+    kv_calls = 0
+
+    original_combined = tracker.db.persist_config_facet_bundle
+    original_upsert = tracker.db.upsert_config_facet
+    original_kv = tracker.db.insert_run_config_kv_bulk
+
+    def counting_combined(**kwargs):
+        nonlocal combined_calls
+        combined_calls += 1
+        return original_combined(**kwargs)
+
+    def counting_upsert(*args, **kwargs):
+        nonlocal upsert_calls
+        upsert_calls += 1
+        return original_upsert(*args, **kwargs)
+
+    def counting_kv(*args, **kwargs):
+        nonlocal kv_calls
+        kv_calls += 1
+        return original_kv(*args, **kwargs)
+
+    monkeypatch.setattr(tracker.db, "persist_config_facet_bundle", counting_combined)
+    monkeypatch.setattr(tracker.db, "upsert_config_facet", counting_upsert)
+    monkeypatch.setattr(tracker.db, "insert_run_config_kv_bulk", counting_kv)
+
+    tracker.begin_run(
+        "run_with_combined_facet",
+        "activitysim",
+        config={"internal": "not_indexed"},
+        facet={"household_sample_size": 250000, "num_processes": 25},
+    )
+    tracker.end_run()
+
+    assert combined_calls == 1
+    assert upsert_calls == 0
+    assert kv_calls == 0
+
+
+def test_find_runs_supports_mixed_run_fields_and_facet_predicates(tracker):
+    tracker.begin_run(
+        "run_a_iter_1",
+        "demo_model",
+        year=2030,
+        iteration=1,
+        stage="restart",
+        facet={"scenario_id": "scenario_a", "seed": 17},
+    )
+    tracker.end_run()
+
+    tracker.begin_run(
+        "run_a_iter_2",
+        "demo_model",
+        year=2030,
+        iteration=2,
+        stage="restart",
+        facet={"scenario_id": "scenario_a", "seed": 17},
+    )
+    tracker.end_run()
+
+    tracker.begin_run(
+        "run_a_other_seed",
+        "demo_model",
+        year=2030,
+        iteration=3,
+        stage="restart",
+        facet={"scenario_id": "scenario_a", "seed": 99},
+    )
+    tracker.end_run()
+
+    tracker.begin_run(
+        "run_b_iter_4",
+        "demo_model",
+        year=2030,
+        iteration=4,
+        stage="restart",
+        facet={"scenario_id": "scenario_b", "seed": 17},
+    )
+    tracker.end_run()
+
+    runs = tracker.find_runs(
+        model="demo_model",
+        year=2030,
+        stage="restart",
+        status="completed",
+        facet={"scenario_id": "scenario_a", "seed": 17},
+    )
+
+    assert [run.id for run in runs] == ["run_a_iter_2", "run_a_iter_1"]
+
+
+def test_find_latest_run_supports_facet_predicates(tracker):
+    tracker.begin_run(
+        "run_a_iter_1",
+        "demo_model",
+        year=2030,
+        iteration=1,
+        stage="restart",
+        facet={"scenario_id": "scenario_a", "seed": 17},
+    )
+    tracker.end_run()
+
+    tracker.begin_run(
+        "run_a_iter_2",
+        "demo_model",
+        year=2030,
+        iteration=2,
+        stage="restart",
+        facet={"scenario_id": "scenario_a", "seed": 17},
+    )
+    tracker.end_run()
+
+    tracker.begin_run(
+        "run_b_iter_3",
+        "demo_model",
+        year=2030,
+        iteration=3,
+        stage="restart",
+        facet={"scenario_id": "scenario_b", "seed": 17},
+    )
+    tracker.end_run()
+
+    latest = consist.find_latest_run(
+        tracker=tracker,
+        model="demo_model",
+        year=2030,
+        stage="restart",
+        status="completed",
+        facet={"scenario_id": "scenario_a", "seed": 17},
+    )
+
+    assert latest.id == "run_a_iter_2"
 
 
 def test_hash_inputs_affects_config_hash_but_ignores_dotfiles(tracker, run_dir: Path):
@@ -346,3 +483,42 @@ def test_facet_size_guardrail_skips_db_persistence_but_keeps_json(tracker):
 
     assert "config_facet_id" not in payload["run"]["meta"]
     assert tracker.get_config_facets() == []
+
+
+def test_find_runs_facet_predicates_require_kv_index_rows(tracker):
+    tracker.begin_run(
+        "run_indexed",
+        "m",
+        facet={"scenario_id": "baseline", "seed": 1},
+    )
+    tracker.end_run()
+
+    tracker.begin_run(
+        "run_not_indexed_flag",
+        "m",
+        facet={"scenario_id": "baseline", "seed": 1},
+        facet_index=False,
+    )
+    tracker.end_run()
+
+    tracker.begin_run(
+        "run_not_indexed_guardrail",
+        "m",
+        facet={"scenario_id": "overflow", **{f"k{i}": i for i in range(600)}},
+    )
+    tracker.end_run()
+
+    indexed_matches = tracker.find_runs(
+        model="m",
+        facet={"scenario_id": "baseline", "seed": 1},
+    )
+    overflow_matches = tracker.find_runs(
+        model="m",
+        facet={"scenario_id": "overflow"},
+    )
+
+    assert [run.id for run in indexed_matches] == ["run_indexed"]
+    assert overflow_matches == []
+    assert tracker.get_config_facets()
+    assert tracker.get_run_config_kv("run_not_indexed_flag") == []
+    assert tracker.get_run_config_kv("run_not_indexed_guardrail") == []

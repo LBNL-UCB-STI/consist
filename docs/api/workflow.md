@@ -46,6 +46,67 @@ with tracker.scenario("baseline") as sc:
 `config_plan` and `hash_inputs` are not accepted on scenario step run/trace
 surfaces. Use `adapter` and `identity_inputs`.
 
+`Tracker.scenario(...)` and `consist.scenario(...)` also accept
+`step_tags=[...]` and `step_facet={...}` to apply default tags/facets to every
+child step in the scenario. These defaults apply to `run(...)` and `trace(...)`
+children only, not to the scenario header itself, and per-step values take
+precedence on conflicts.
+
+## BindingResult execution envelopes
+
+`ScenarioContext.run(...)` also accepts `binding=BindingResult(...)` for
+orchestrator-facing code that has already resolved a step's explicit inputs,
+required coupler keys, and optional coupler keys. Keep using primitive
+`inputs`/`input_keys`/`optional_input_keys` kwargs for direct workflow code; the
+`binding` envelope is the preferred path when the binding decision already
+lives outside Consist.
+
+`binding` is execution-only and mutually exclusive with the primitive input
+kwargs. It does not change `ScenarioContext.trace(...)`.
+
+```python
+from pathlib import Path
+import consist
+from consist import BindingResult, ExecutionOptions, Tracker
+
+tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+
+
+def prepare(raw: Path) -> dict[str, Path]:
+    out = consist.output_path("prepared", ext="parquet")
+    out.write_text("prepared\n")
+    return {"prepared": out}
+
+
+def analyze(prepared: Path) -> dict[str, Path]:
+    out = consist.output_path("analysis", ext="parquet")
+    out.write_text(prepared.read_text())
+    return {"analysis": out}
+
+
+with tracker.scenario("baseline") as sc:
+    prep = sc.run(
+        fn=prepare,
+        inputs={"raw": Path("raw.csv")},
+        execution_options=ExecutionOptions(input_binding="paths"),
+        outputs=["prepared"],
+    )
+
+    sc.run(
+        fn=analyze,
+        binding=BindingResult(
+            inputs={"prepared": consist.ref(prep, key="prepared")},
+            input_keys=["prepared"],
+        ),
+        execution_options=ExecutionOptions(input_binding="loaded"),
+        outputs=["analysis"],
+    )
+```
+
+For direct step-to-step workflow code, `consist.ref(...)` and `consist.refs(...)`
+remain the recommended default. Reach for `BindingResult` when a planner or
+external orchestrator has already compiled the binding decision.
+
 ## Minimal runnable scenario example
 
 ```python

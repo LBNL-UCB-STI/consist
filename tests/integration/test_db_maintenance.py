@@ -458,6 +458,82 @@ def test_db_maintenance_purge_prune_cache_keeps_shared_hashes(tmp_path: Path) ->
         db.engine.dispose()
 
 
+def test_db_maintenance_purge_rejects_unsafe_filesystem_targets(tmp_path: Path) -> None:
+    db = DatabaseManager(str(tmp_path / "purge_unsafe.duckdb"))
+    maintenance = DatabaseMaintenance(db, run_dir=tmp_path / "purge_runs")
+
+    artifact_id = uuid.uuid4()
+    outside_workspace = tmp_path / "outside_workspace"
+    outside_snapshot = outside_workspace / "consist_runs" / "unsafe_run.json"
+    outside_file = tmp_path / "outside-output.txt"
+    outside_snapshot.parent.mkdir(parents=True, exist_ok=True)
+    outside_snapshot.write_text(
+        json.dumps({"run": {"id": "unsafe_run"}}), encoding="utf-8"
+    )
+    outside_file.write_text("outside", encoding="utf-8")
+
+    try:
+        with maintenance.db.session_scope() as session:
+            session.add(
+                _run(
+                    id="unsafe_run",
+                    model_name="demo",
+                    meta={"_physical_run_dir": str(outside_workspace)},
+                )
+            )
+            session.add(
+                Artifact(
+                    id=artifact_id,
+                    key="unsafe_out",
+                    container_uri=outside_file.resolve().as_uri(),
+                    driver="txt",
+                    run_id="unsafe_run",
+                )
+            )
+            session.add(
+                RunArtifactLink(
+                    run_id="unsafe_run",
+                    artifact_id=artifact_id,
+                    direction="output",
+                )
+            )
+            session.commit()
+
+        plan = maintenance.plan_purge("unsafe_run", include_children=False)
+        assert plan.json_files == []
+        assert plan.disk_files == []
+        assert plan.unsafe_json_files == [outside_snapshot.resolve()]
+        assert plan.unsafe_disk_files == [outside_file.resolve()]
+
+        with pytest.raises(ValueError, match="outside allowed roots"):
+            maintenance.purge(
+                "unsafe_run",
+                include_children=False,
+                delete_files=True,
+                delete_ingested_data=False,
+                dry_run=False,
+            )
+
+        assert outside_snapshot.exists()
+        assert outside_file.exists()
+
+        skip_result = maintenance.purge(
+            "unsafe_run",
+            include_children=False,
+            delete_files=True,
+            delete_ingested_data=False,
+            dry_run=False,
+            unsafe_delete_targets="skip",
+        )
+        assert skip_result.executed is True
+        assert skip_result.skipped_unsafe_json_files == [outside_snapshot.resolve()]
+        assert skip_result.skipped_unsafe_disk_files == [outside_file.resolve()]
+        assert outside_snapshot.exists()
+        assert outside_file.exists()
+    finally:
+        db.engine.dispose()
+
+
 def test_db_maintenance_merge_conflict_error_mode_raises(tmp_path: Path) -> None:
     source_db = DatabaseManager(str(tmp_path / "merge_conflict_source.duckdb"))
     target_db = DatabaseManager(str(tmp_path / "merge_conflict_target.duckdb"))

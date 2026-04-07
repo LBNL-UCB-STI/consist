@@ -381,6 +381,51 @@ artifact paths, then pass those outputs downstream with `consist.ref(...)` or
 `consist.refs(...)`. Reach for the coupler when you need scenario-scoped runtime
 state, optional branching, or trace-style orchestration.
 
+### Compiled bindings for orchestrators
+
+When a planner or external orchestrator has already resolved a step's binding
+decision, pass that result to `sc.run(...)` as `BindingResult(...)`. Treat the
+binding object as an execution envelope, not a planning API: the planner lives
+outside Consist, and Consist executes the already-resolved binding.
+
+Keep the explicit `consist.ref(...)` / `consist.refs(...)` path as the
+recommended default for direct step-to-step workflow code. Use `BindingResult`
+when the binding plan is coming from a separate layer and you want to hand the
+resolved step contract to Consist in one object.
+
+```python
+from pathlib import Path
+import consist
+from consist import BindingResult, ExecutionOptions, Tracker
+
+tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+
+
+def prepare() -> dict[str, Path]:
+    out = consist.output_path("prepared", ext="txt")
+    out.write_text("ready\n")
+    return {"prepared": out}
+
+
+def consume(raw: Path, prepared: Path, maybe_aux: Path | None = None) -> None:
+    print(raw, prepared, maybe_aux)
+
+
+with tracker.scenario("orchestrated") as sc:
+    sc.run(fn=prepare, outputs=["prepared"])
+    binding = BindingResult(
+        inputs={"raw": Path("raw.csv")},
+        input_keys=["prepared"],
+        optional_input_keys=["maybe_aux"],
+    )
+
+    sc.run(
+        fn=consume,
+        binding=binding,
+        execution_options=ExecutionOptions(input_binding="paths"),
+    )
+```
+
 **When to use:**
 
 - Multi-step pipelines (preprocess → simulate → analyze)
@@ -622,7 +667,9 @@ sc.run(
 
 **Compatibility note**: Legacy key-indirection patterns (for example,
 `inputs=["preprocessed"]` and `input_keys=`) still work. Prefer explicit links
-with `consist.ref(...)`/`consist.refs(...)` in new code.
+with `consist.ref(...)`/`consist.refs(...)` in new code; reserve
+`BindingResult(...)` for complex or externally orchestrated workflows that
+already have a binding plan.
 
 <details>
 <summary>Alternative: inline steps with sc.trace</summary>
@@ -1243,6 +1290,8 @@ runs_by_year = consist.find_runs(
     tracker=tracker,
     parent_id="baseline",
     model="simulate",
+    stage="supply_demand_loop",
+    phase="traffic_assignment",
     index_by="year"
 )
 result_2030 = runs_by_year[2030]

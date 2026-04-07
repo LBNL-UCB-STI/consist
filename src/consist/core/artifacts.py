@@ -581,96 +581,97 @@ class ArtifactManager:
             except Exception:
                 prior_container = None
 
-        container = self.tracker.log_artifact(
-            str(path_obj),
-            key=key,
-            direction=direction,
-            driver="h5",
-            is_container=True,
-            **meta,
-        )
-
-        table_artifacts: List[Artifact] = []
-        should_hash_tables = False
-        skip_reason: Optional[str] = None
-        if hash_tables not in {"always", "if_unchanged", "never"}:
-            raise ValueError(
-                "hash_tables must be one of: 'always', 'if_unchanged', 'never'."
+        with self.tracker.persistence.batch_artifact_writes():
+            container = self.tracker.log_artifact(
+                str(path_obj),
+                key=key,
+                direction=direction,
+                driver="h5",
+                is_container=True,
+                **meta,
             )
-        if hash_tables == "always":
-            should_hash_tables = True
-        elif hash_tables == "if_unchanged":
-            if prior_container is None:
+
+            table_artifacts: List[Artifact] = []
+            should_hash_tables = False
+            skip_reason: Optional[str] = None
+            if hash_tables not in {"always", "if_unchanged", "never"}:
+                raise ValueError(
+                    "hash_tables must be one of: 'always', 'if_unchanged', 'never'."
+                )
+            if hash_tables == "always":
                 should_hash_tables = True
-            else:
-                # Prefer content identity when available. This allows table hashing
-                # to proceed even if a file hash is missing on one side.
-                if (
-                    getattr(prior_container, "content_id", None) is not None
-                    and getattr(container, "content_id", None) is not None
-                ):
-                    should_hash_tables = (
-                        prior_container.content_id == container.content_id
-                    )
-                    if not should_hash_tables:
-                        skip_reason = "content_identity_changed"
-                elif prior_container.hash and container.hash:
-                    # Fallback to legacy hash equality when content identity is not available.
-                    should_hash_tables = prior_container.hash == container.hash
-                    if not should_hash_tables:
-                        skip_reason = "file_hash_changed"
+            elif hash_tables == "if_unchanged":
+                if prior_container is None:
+                    should_hash_tables = True
                 else:
-                    skip_reason = "file_hash_unavailable"
+                    # Prefer content identity when available. This allows table hashing
+                    # to proceed even if a file hash is missing on one side.
+                    if (
+                        getattr(prior_container, "content_id", None) is not None
+                        and getattr(container, "content_id", None) is not None
+                    ):
+                        should_hash_tables = (
+                            prior_container.content_id == container.content_id
+                        )
+                        if not should_hash_tables:
+                            skip_reason = "content_identity_changed"
+                    elif prior_container.hash and container.hash:
+                        # Fallback to legacy hash equality when content identity is not available.
+                        should_hash_tables = prior_container.hash == container.hash
+                        if not should_hash_tables:
+                            skip_reason = "file_hash_changed"
+                    else:
+                        skip_reason = "file_hash_unavailable"
 
-        container.meta["table_hashes_checked"] = should_hash_tables
-        if not should_hash_tables and hash_tables != "always":
-            if hash_tables == "never":
-                container.meta["table_hashes_skip_reason"] = "disabled"
-            elif prior_container is not None and skip_reason is not None:
-                container.meta["table_hashes_skip_reason"] = skip_reason
+            container.meta["table_hashes_checked"] = should_hash_tables
+            if not should_hash_tables and hash_tables != "always":
+                if hash_tables == "never":
+                    container.meta["table_hashes_skip_reason"] = "disabled"
+                elif prior_container is not None and skip_reason is not None:
+                    container.meta["table_hashes_skip_reason"] = skip_reason
 
-        if discover_tables:
-            if table_filter is None:
+            if discover_tables:
+                if table_filter is None:
 
-                def filter_fn(name: str) -> bool:
-                    return True
+                    def filter_fn(name: str) -> bool:
+                        return True
 
-            elif isinstance(table_filter, list):
-                filter_set = set(table_filter)
+                elif isinstance(table_filter, list):
+                    filter_set = set(table_filter)
 
-                def filter_fn(name: str) -> bool:
-                    stripped = name.lstrip("/")
-                    return name in filter_set or stripped in filter_set
+                    def filter_fn(name: str) -> bool:
+                        stripped = name.lstrip("/")
+                        return name in filter_set or stripped in filter_set
 
-            else:
-                filter_fn = table_filter
+                else:
+                    filter_fn = table_filter
 
-            table_artifacts = self.scan_h5_container(
-                container,
-                path_obj,
-                key,
-                direction,
-                filter_fn,
-                hash_tables=should_hash_tables,
-                table_hash_chunk_rows=table_hash_chunk_rows,
-            )
+                table_artifacts = self.scan_h5_container(
+                    container,
+                    path_obj,
+                    key,
+                    direction,
+                    filter_fn,
+                    hash_tables=should_hash_tables,
+                    table_hash_chunk_rows=table_hash_chunk_rows,
+                )
 
-            target = (
-                self.tracker.current_consist.inputs
-                if direction == "input"
-                else self.tracker.current_consist.outputs
-            )
-            for table_artifact in table_artifacts:
-                target.append(table_artifact)
-                self.tracker.persistence.sync_artifact(table_artifact, direction)
+                target = (
+                    self.tracker.current_consist.inputs
+                    if direction == "input"
+                    else self.tracker.current_consist.outputs
+                )
+                for table_artifact in table_artifacts:
+                    target.append(table_artifact)
+                    self.tracker.persistence.sync_artifact(table_artifact, direction)
 
-        container.meta["table_count"] = len(table_artifacts)
-        container.meta["table_ids"] = [str(t.id) for t in table_artifacts]
+            container.meta["table_count"] = len(table_artifacts)
+            container.meta["table_ids"] = [str(t.id) for t in table_artifacts]
 
-        self.tracker.persistence.flush_json()
-        self.tracker.persistence.sync_artifact(container, direction)
+            self.tracker.persistence.flush_json()
+            self.tracker.persistence.sync_artifact(container, direction)
 
-        return container, table_artifacts
+            return container, table_artifacts
 
     def log_h5_table(
         self,

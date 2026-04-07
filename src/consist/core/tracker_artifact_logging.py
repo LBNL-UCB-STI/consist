@@ -28,6 +28,16 @@ class ArtifactLoggingCoordinator:
     def __init__(self, tracker: "Tracker") -> None:
         self._tracker = tracker
 
+    def _sync_profile_label(
+        self,
+        *,
+        artifact: Artifact,
+        direction: str,
+    ) -> str:
+        if artifact.driver == "h5_table":
+            return f"log_artifact:h5_table:{direction}"
+        return f"log_artifact:{direction}"
+
     def log_artifact(
         self,
         path: ArtifactRef,
@@ -139,6 +149,7 @@ class ArtifactLoggingCoordinator:
         )
 
         resolved_artifact_facet: Optional[Dict[str, Any]] = None
+        prepared_artifact_facet_bundle = None
         artifact_facet_payload: Optional[FacetLike] = facet
         if artifact_facet_payload is None and artifact_obj.key:
             artifact_facet_payload = (
@@ -147,6 +158,24 @@ class ArtifactLoggingCoordinator:
         if artifact_facet_payload is not None:
             resolved_artifact_facet = tracker.artifact_facets.resolve_facet_dict(
                 artifact_facet_payload
+            )
+        if resolved_artifact_facet is not None:
+            schema_version = facet_schema_version
+            if schema_version is None and isinstance(
+                artifact_facet_payload, HasFacetSchemaVersion
+            ):
+                schema_version = artifact_facet_payload.facet_schema_version
+            prepared_artifact_facet_bundle = (
+                tracker.artifact_facets.prepare_facet_bundle(
+                    artifact=artifact_obj,
+                    namespace=tracker.current_consist.run.model_name,
+                    facet_dict=resolved_artifact_facet,
+                    schema_name=tracker.artifact_facets.infer_schema_name(
+                        artifact_facet_payload
+                    ),
+                    schema_version=schema_version,
+                    index_kv=facet_index,
+                )
             )
 
         if isinstance(path, Artifact) and direction == "output":
@@ -185,23 +214,22 @@ class ArtifactLoggingCoordinator:
         # Preserve dual-write ordering so snapshot state reflects artifact links
         # before DB synchronization side effects occur.
         tracker._flush_json()
-        tracker._sync_artifact_to_db(artifact_obj, direction)
-
-        if resolved_artifact_facet is not None:
-            schema_version = facet_schema_version
-            if schema_version is None and isinstance(
-                artifact_facet_payload, HasFacetSchemaVersion
-            ):
-                schema_version = artifact_facet_payload.facet_schema_version
-            tracker.artifact_facets.persist_facet(
-                artifact=artifact_obj,
-                namespace=tracker.current_consist.run.model_name,
-                facet_dict=resolved_artifact_facet,
-                schema_name=tracker.artifact_facets.infer_schema_name(
-                    artifact_facet_payload
+        if prepared_artifact_facet_bundle is not None:
+            tracker.persistence.sync_artifact_with_facet_bundle(
+                artifact_obj,
+                direction,
+                facet=prepared_artifact_facet_bundle.facet,
+                meta_updates=prepared_artifact_facet_bundle.meta_updates,
+                kv_rows=prepared_artifact_facet_bundle.kv_rows,
+            )
+        else:
+            tracker._sync_artifact_to_db(
+                artifact_obj,
+                direction,
+                profile_label=self._sync_profile_label(
+                    artifact=artifact_obj,
+                    direction=direction,
                 ),
-                schema_version=schema_version,
-                index_kv=facet_index,
             )
 
         profile_mode = (

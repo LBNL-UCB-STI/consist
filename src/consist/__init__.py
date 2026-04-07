@@ -63,6 +63,7 @@ from consist.api import (
     register_views,
     find_run,
     find_runs,
+    find_latest_run,
     run_set,
     db_session,
     run_query,
@@ -80,6 +81,7 @@ from consist.api import (
 
 # Types
 from consist.types import (
+    BindingResult,
     CacheOptions,
     DriverType,
     ExecutionOptions,
@@ -112,6 +114,7 @@ __all__ = [
     "RunSet",
     "AlignedPair",
     # Types
+    "BindingResult",
     "DriverType",
     "CacheOptions",
     "OutputPolicyOptions",
@@ -175,6 +178,7 @@ __all__ = [
     "register_views",
     "find_run",
     "find_runs",
+    "find_latest_run",
     "run_set",
     "db_session",
     "run_query",

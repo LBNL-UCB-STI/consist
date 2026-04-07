@@ -12,6 +12,10 @@ executed, start here.
   lineage helpers).
 - You want to avoid relying on global context (`consist.use_tracker(...)`).
 
+Run lookup helpers expose workflow-aware filters such as `stage=` and
+`phase=`. Use those when you need to query by lifecycle step or pipeline stage
+instead of treating those values as opaque metadata.
+
 ## Minimal runnable example
 
 ```python
@@ -32,6 +36,13 @@ latest = tracker.find_latest_run(model=result.run.model_name)
 print(result.run.id)
 print(latest.id if latest else None)
 ```
+
+`find_runs(...)` and `find_latest_run(...)` accept `stage=` and `phase=` as
+first-class workflow filters, alongside the existing run dimensions such as
+`year`, `iteration`, `model`, and `status`. They also accept `facet=` for exact
+matches against persisted facet values. Consist mirrors the workflow values
+into `run.meta` for backward compatibility, but the canonical fields live on
+`Run`.
 
 For top-level wrappers around these methods, see [API Helpers](api_helpers.md).
 For grouped workflows, see [Workflow Contexts](workflow.md).

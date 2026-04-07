@@ -85,6 +85,80 @@ def test_scenario_context(tracker: Tracker):
     assert run.status == "completed"
 
 
+def test_scenario_parent_links_use_bulk_helper(
+    tracker: Tracker, tmp_path: Path, monkeypatch
+):
+    input_path = tmp_path / "input.csv"
+    input_path.write_text("x\n1\n", encoding="utf-8")
+
+    persistence_bulk_calls: list[tuple[str, tuple[str, ...], str]] = []
+    db_bulk_calls: list[tuple[str, tuple[str, ...], str]] = []
+    single_parent_calls: list[tuple[str, str, str]] = []
+
+    original_persistence_bulk = tracker.persistence.sync_run_with_links
+    original_db_bulk = tracker.db.link_artifacts_to_run_bulk
+    original_single = tracker.db.link_artifact_to_run
+
+    def counting_persistence_bulk(run, *, artifact_ids, direction) -> None:
+        persistence_bulk_calls.append(
+            (run.id, tuple(str(a) for a in artifact_ids), direction)
+        )
+        original_persistence_bulk(run, artifact_ids=artifact_ids, direction=direction)
+
+    def counting_db_bulk(*, artifact_ids, run_id, direction) -> None:
+        db_bulk_calls.append((run_id, tuple(str(a) for a in artifact_ids), direction))
+        original_db_bulk(artifact_ids=artifact_ids, run_id=run_id, direction=direction)
+
+    def counting_single(artifact_id, run_id, direction) -> None:
+        if run_id == "parent_bulk":
+            single_parent_calls.append((str(artifact_id), run_id, direction))
+        original_single(artifact_id, run_id, direction)
+
+    monkeypatch.setattr(
+        tracker.persistence, "sync_run_with_links", counting_persistence_bulk
+    )
+    monkeypatch.setattr(tracker.db, "link_artifacts_to_run_bulk", counting_db_bulk)
+    monkeypatch.setattr(tracker.db, "link_artifact_to_run", counting_single)
+
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        out_path = ctx.run_dir / "output.csv"
+        out_path.write_text("y\n2\n", encoding="utf-8")
+
+    with tracker.scenario("parent_bulk") as sc:
+        sc.run(
+            fn=step,
+            inputs=[input_path],
+            output_paths={"output": "output.csv"},
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+
+    parent_persistence_calls = [
+        call for call in persistence_bulk_calls if call[0] == "parent_bulk"
+    ]
+    parent_db_bulk_calls = [call for call in db_bulk_calls if call[0] == "parent_bulk"]
+    assert [direction for _, _, direction in parent_persistence_calls] == ["output"]
+    assert [direction for _, _, direction in parent_db_bulk_calls] == ["input"]
+    assert single_parent_calls == []
+
+
+def test_scenario_exit_does_not_double_sync_header_run(tracker: Tracker, monkeypatch):
+    sync_run_calls = 0
+
+    original_sync_run = tracker.persistence.sync_run
+
+    def counting_sync_run(run) -> None:
+        nonlocal sync_run_calls
+        sync_run_calls += 1
+        original_sync_run(run)
+
+    with tracker.scenario("scenario_exit_sync_count") as _sc:
+        monkeypatch.setattr(tracker.persistence, "sync_run", counting_sync_run)
+        pass
+
+    assert sync_run_calls == 1
+
+
 def test_scenario_coupler_kw_not_serialized(tracker: Tracker):
     """
     Ensure a coupler passed to scenario(...) is treated as runtime-only and
@@ -197,6 +271,83 @@ def test_scenario_trace_facet_from_config(tracker: Tracker):
     assert facet.facet_json["beta"] == pytest.approx(2)
     assert facet.facet_json["note"] == "ok"
     assert "extra" not in facet.facet_json
+
+
+def test_scenario_step_defaults_apply_to_child_steps_only(tracker: Tracker):
+    def step() -> None:
+        return None
+
+    with tracker.scenario(
+        "scen_step_defaults",
+        step_tags=["scenario:baseline", "seed:7"],
+        step_facet={"scenario_id": "baseline", "seed": 7},
+    ) as sc:
+        sc.run(
+            fn=step,
+            name="run_step",
+            run_id="scen_step_defaults_run_step",
+            tags=["custom", "scenario:baseline"],
+            facet={"seed": 8, "local": "run"},
+            cache_options=CacheOptions(cache_mode="overwrite"),
+        )
+
+        with sc.trace(
+            "trace_step",
+            run_id="scen_step_defaults_trace_step",
+            tags=["trace", "scenario:baseline"],
+            facet={"seed": 9, "local": "trace"},
+            cache_mode="overwrite",
+        ):
+            pass
+
+    header = tracker.get_run("scen_step_defaults")
+    assert header is not None
+    assert header.tags == ["scenario_header"]
+    assert "config_facet_id" not in (header.meta or {})
+
+    run_step = tracker.get_run("scen_step_defaults_run_step")
+    assert run_step is not None
+    assert run_step.tags == ["custom", "scenario:baseline", "seed:7"]
+    run_step_facet_id = run_step.meta["config_facet_id"]
+    run_step_facet = tracker.get_config_facet(run_step_facet_id)
+    assert run_step_facet is not None
+    assert run_step_facet.facet_json["scenario_id"] == "baseline"
+    assert run_step_facet.facet_json["seed"] == 8
+    assert run_step_facet.facet_json["local"] == "run"
+
+    trace_step = tracker.get_run("scen_step_defaults_trace_step")
+    assert trace_step is not None
+    assert trace_step.tags == ["trace", "scenario:baseline", "seed:7"]
+    trace_step_facet_id = trace_step.meta["config_facet_id"]
+    trace_step_facet = tracker.get_config_facet(trace_step_facet_id)
+    assert trace_step_facet is not None
+    assert trace_step_facet.facet_json["scenario_id"] == "baseline"
+    assert trace_step_facet.facet_json["seed"] == 9
+    assert trace_step_facet.facet_json["local"] == "trace"
+
+
+def test_scenario_step_facet_wins_over_facet_from_on_conflict(tracker: Tracker):
+    with tracker.scenario(
+        "scen_step_facet_conflict",
+        step_facet={"scenario_id": "baseline", "seed": 7},
+    ) as sc:
+        with sc.trace(
+            "trace_step",
+            run_id="scen_step_facet_conflict_trace_step",
+            config={"seed": 99, "sample": 0.2},
+            facet_from=["seed", "sample"],
+            cache_mode="overwrite",
+        ):
+            pass
+
+    trace_step = tracker.get_run("scen_step_facet_conflict_trace_step")
+    assert trace_step is not None
+    trace_step_facet_id = trace_step.meta["config_facet_id"]
+    trace_step_facet = tracker.get_config_facet(trace_step_facet_id)
+    assert trace_step_facet is not None
+    assert trace_step_facet.facet_json["scenario_id"] == "baseline"
+    assert trace_step_facet.facet_json["seed"] == 7
+    assert trace_step_facet.facet_json["sample"] == 0.2
 
 
 def test_step_log_dataframe_defaults_to_run_dir(tracker: Tracker):

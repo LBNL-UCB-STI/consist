@@ -38,6 +38,36 @@ def test_find_artifact_content_reuses_existing_row(tmp_path: Path) -> None:
     assert db.find_artifact_content(content_hash="shared_hash", driver="csv") is None
 
 
+def test_get_or_create_artifact_content_uses_in_memory_cache(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "content_identity_cache.db"
+    db = DatabaseManager(str(db_path))
+
+    session_calls = 0
+    original_session_scope = db.session_scope
+
+    def counting_session_scope():
+        nonlocal session_calls
+        session_calls += 1
+        return original_session_scope()
+
+    monkeypatch.setattr(db, "session_scope", counting_session_scope)
+
+    first = db.get_or_create_artifact_content(
+        content_hash="shared_hash",
+        driver="parquet",
+        meta={"source": "test"},
+    )
+    second = db.get_or_create_artifact_content(
+        content_hash="shared_hash",
+        driver="parquet",
+    )
+
+    assert first.id == second.id
+    assert session_calls == 1
+
+
 def test_content_identity_compatibility_recreates_index_idempotently(
     tmp_path: Path,
 ) -> None:

@@ -767,8 +767,10 @@ def test_plan_purge_includes_children_and_global_table_candidates(
     assert plan.run_ids == ["root", "child"]
     assert plan.child_run_ids == ["child"]
     assert plan.orphaned_artifact_ids == []
-    assert plan.json_files == [root_snapshot, child_snapshot]
+    assert plan.json_files == [root_snapshot]
     assert plan.disk_files == []
+    assert plan.unsafe_json_files == [child_snapshot.resolve()]
+    assert plan.unsafe_disk_files == []
     assert plan.ingested_data == {"cache_table": 0, "link_table": 1, "scoped_table": 2}
     assert plan.ingested_table_modes == {
         "cache_table": "unscoped_cache",
@@ -912,7 +914,7 @@ def test_purge_delete_files_removes_files_and_directories(
 ) -> None:
     file_artifact_id = uuid.uuid4()
     dir_artifact_id = uuid.uuid4()
-    run_workspace = tmp_path / "purge_delete_workspace"
+    run_workspace = maintenance.run_dir / "purge_delete_workspace"
     file_path = run_workspace / "outputs" / "delete_me.txt"
     dir_path = run_workspace / "outputs" / "delete_dir"
     nested_path = dir_path / "nested.txt"
@@ -972,8 +974,196 @@ def test_purge_delete_files_removes_files_and_directories(
         file_path.resolve(),
         dir_path.resolve(),
     }
+    assert result.plan.unsafe_disk_files == []
     assert not file_path.exists()
     assert not dir_path.exists()
+
+
+def test_purge_delete_files_rejects_file_uri_outside_run_dir(
+    maintenance: DatabaseMaintenance, tmp_path: Path
+) -> None:
+    artifact_id = uuid.uuid4()
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("outside", encoding="utf-8")
+
+    with maintenance.db.session_scope() as session:
+        session.add(_run(id="unsafe_file_uri_run", model_name="demo"))
+        session.add(
+            Artifact(
+                id=artifact_id,
+                key="unsafe_file_uri_artifact",
+                container_uri=outside_file.resolve().as_uri(),
+                driver="txt",
+                run_id="unsafe_file_uri_run",
+            )
+        )
+        session.add(
+            RunArtifactLink(
+                run_id="unsafe_file_uri_run",
+                artifact_id=artifact_id,
+                direction="output",
+            )
+        )
+        session.commit()
+
+    plan = maintenance.plan_purge("unsafe_file_uri_run", include_children=False)
+    assert plan.disk_files == []
+    assert plan.unsafe_disk_files == [outside_file.resolve()]
+
+    with pytest.raises(ValueError, match="outside allowed roots"):
+        maintenance.purge(
+            "unsafe_file_uri_run",
+            include_children=False,
+            delete_files=True,
+            delete_ingested_data=False,
+            dry_run=False,
+        )
+
+    assert outside_file.exists()
+
+
+def test_purge_delete_files_rejects_absolute_path_outside_run_dir(
+    maintenance: DatabaseMaintenance, tmp_path: Path
+) -> None:
+    artifact_id = uuid.uuid4()
+    outside_file = tmp_path / "absolute-outside.txt"
+    outside_file.write_text("outside", encoding="utf-8")
+
+    with maintenance.db.session_scope() as session:
+        session.add(_run(id="unsafe_absolute_run", model_name="demo"))
+        session.add(
+            Artifact(
+                id=artifact_id,
+                key="unsafe_absolute_artifact",
+                container_uri=str(outside_file.resolve()),
+                driver="txt",
+                run_id="unsafe_absolute_run",
+            )
+        )
+        session.add(
+            RunArtifactLink(
+                run_id="unsafe_absolute_run",
+                artifact_id=artifact_id,
+                direction="output",
+            )
+        )
+        session.commit()
+
+    plan = maintenance.plan_purge("unsafe_absolute_run", include_children=False)
+    assert plan.disk_files == []
+    assert plan.unsafe_disk_files == [outside_file.resolve()]
+
+    with pytest.raises(ValueError, match="outside allowed roots"):
+        maintenance.purge(
+            "unsafe_absolute_run",
+            include_children=False,
+            delete_files=True,
+            delete_ingested_data=False,
+            dry_run=False,
+        )
+
+    assert outside_file.exists()
+
+
+def test_purge_delete_files_rejects_snapshot_outside_run_dir(
+    maintenance: DatabaseMaintenance, tmp_path: Path
+) -> None:
+    outside_workspace = tmp_path / "outside_workspace"
+    snapshot_path = outside_workspace / "consist_runs" / "unsafe_snapshot_run.json"
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_path.write_text("{}", encoding="utf-8")
+
+    with maintenance.db.session_scope() as session:
+        session.add(
+            _run(
+                id="unsafe_snapshot_run",
+                model_name="demo",
+                meta={"_physical_run_dir": str(outside_workspace)},
+            )
+        )
+        session.commit()
+
+    plan = maintenance.plan_purge("unsafe_snapshot_run", include_children=False)
+    assert plan.json_files == []
+    assert plan.unsafe_json_files == [snapshot_path.resolve()]
+
+    with pytest.raises(ValueError, match="outside allowed roots"):
+        maintenance.purge(
+            "unsafe_snapshot_run",
+            include_children=False,
+            delete_files=False,
+            delete_ingested_data=False,
+            dry_run=False,
+        )
+
+    assert snapshot_path.exists()
+
+
+def test_purge_delete_files_skip_mode_deletes_safe_targets_and_reports_unsafe(
+    maintenance: DatabaseMaintenance, tmp_path: Path
+) -> None:
+    safe_artifact_id = uuid.uuid4()
+    unsafe_artifact_id = uuid.uuid4()
+    run_workspace = maintenance.run_dir / "skip_workspace"
+    safe_file = run_workspace / "outputs" / "safe.txt"
+    unsafe_file = tmp_path / "unsafe.txt"
+    safe_file.parent.mkdir(parents=True, exist_ok=True)
+    safe_file.write_text("safe", encoding="utf-8")
+    unsafe_file.write_text("unsafe", encoding="utf-8")
+
+    with maintenance.db.session_scope() as session:
+        session.add(
+            _run(
+                id="skip_mode_run",
+                model_name="demo",
+                meta={"_physical_run_dir": str(run_workspace)},
+            )
+        )
+        session.add_all(
+            [
+                Artifact(
+                    id=safe_artifact_id,
+                    key="safe_artifact",
+                    container_uri="./outputs/safe.txt",
+                    driver="txt",
+                    run_id="skip_mode_run",
+                ),
+                Artifact(
+                    id=unsafe_artifact_id,
+                    key="unsafe_artifact",
+                    container_uri=unsafe_file.resolve().as_uri(),
+                    driver="txt",
+                    run_id="skip_mode_run",
+                ),
+                RunArtifactLink(
+                    run_id="skip_mode_run",
+                    artifact_id=safe_artifact_id,
+                    direction="output",
+                ),
+                RunArtifactLink(
+                    run_id="skip_mode_run",
+                    artifact_id=unsafe_artifact_id,
+                    direction="output",
+                ),
+            ]
+        )
+        session.commit()
+
+    result = maintenance.purge(
+        "skip_mode_run",
+        include_children=False,
+        delete_files=True,
+        delete_ingested_data=False,
+        dry_run=False,
+        unsafe_delete_targets="skip",
+    )
+
+    assert result.executed is True
+    assert result.plan.disk_files == [safe_file.resolve()]
+    assert result.plan.unsafe_disk_files == [unsafe_file.resolve()]
+    assert result.skipped_unsafe_disk_files == [unsafe_file.resolve()]
+    assert not safe_file.exists()
+    assert unsafe_file.exists()
 
 
 def test_purge_executes_core_deletes_and_ingested_skip(
@@ -2345,6 +2535,37 @@ def test_rebuild_from_json_full_mode_populates_run_config_kv(
     assert rows[1].value_bool is True
     assert rows[2].value_type == "json"
     assert rows[2].value_json == [1, 2]
+
+
+def test_rebuild_from_json_restores_canonical_stage_phase(
+    maintenance: DatabaseMaintenance, tmp_path: Path
+) -> None:
+    json_dir = tmp_path / "rebuild_stage_phase_restore"
+    json_dir.mkdir(parents=True, exist_ok=True)
+    (json_dir / "stage_phase_run.json").write_text(
+        json.dumps(
+            _snapshot_payload(
+                run_id="stage_phase_run",
+                run_meta={
+                    "stage": "supply_demand_loop",
+                    "phase": "traffic_assignment",
+                },
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    result = maintenance.rebuild_from_json(json_dir, dry_run=False)
+
+    assert result.errors == []
+    with maintenance.db.session_scope() as session:
+        restored = session.get(Run, "stage_phase_run")
+
+    assert restored is not None
+    assert restored.stage == "supply_demand_loop"
+    assert restored.phase == "traffic_assignment"
+    assert restored.meta["stage"] == "supply_demand_loop"
+    assert restored.meta["phase"] == "traffic_assignment"
 
 
 def test_rebuild_from_json_full_mode_populates_artifact_schema_observation(

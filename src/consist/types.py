@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
+    Iterable,
     Mapping,
     Optional,
     Protocol,
@@ -24,11 +25,7 @@ from typing import (
     Union,
     runtime_checkable,
 )
-
-try:
-    from pydantic import BaseModel
-except Exception:  # pragma: no cover
-    BaseModel = object  # type: ignore[misc,assignment]
+from pydantic import BaseModel
 
 if TYPE_CHECKING:  # pragma: no cover
     from consist.models.artifact import Artifact
@@ -52,6 +49,22 @@ CodeIdentityMode: TypeAlias = Literal[
     "callable_source",
 ]
 InputBindingMode: TypeAlias = Literal["loaded", "paths", "none"]
+
+
+@dataclass(frozen=True, slots=True)
+class BindingResult:
+    """
+    Execution-envelope for resolved scenario bindings.
+
+    This object is intentionally narrow: it carries already-decided binding
+    inputs for a scenario step and optional debug metadata, but it does not
+    perform planning or affect execution semantics on its own.
+    """
+
+    inputs: Optional[Mapping[str, RunInputRef]] = None
+    input_keys: Optional[Union[Iterable[str], str]] = None
+    optional_input_keys: Optional[Union[Iterable[str], str]] = None
+    metadata: Optional[Mapping[str, Any]] = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -1035,8 +1035,13 @@ class Tracker:
             Optional schema version tag for the persisted facet.
         facet_index : bool, default True
             Whether to flatten and index facet keys/values for DB querying.
+        stage : Optional[str], optional
+            Optional workflow stage label persisted on the run.
+        phase : Optional[str], optional
+            Optional lifecycle phase label persisted on the run.
         **kwargs : Any
-            Additional metadata. Special keywords `year` and `iteration` can be used.
+            Additional metadata. Special keywords `year`, `iteration`, `stage`,
+            and `phase` can be used.
             Metadata keys/values are validated and size-limited; use
             CONSIST_MAX_METADATA_ITEMS/KEY_LENGTH/VALUE_LENGTH to override.
 
@@ -1113,7 +1118,7 @@ class Tracker:
             - `description`: Optional[str]
             - `cache_mode`: str ("reuse", "overwrite", "readonly")
             - `facet`, `facet_from`, `hash_inputs`, `facet_schema_version`, `facet_index`
-            - `year`, `iteration`
+            - `year`, `iteration`, `stage`, `phase`
 
         Yields
         ------
@@ -1680,6 +1685,8 @@ class Tracker:
         config: Optional[Dict[str, Any]] = None,
         tags: Optional[List[str]] = None,
         model: str = "scenario",
+        step_tags: Optional[List[str]] = None,
+        step_facet: Optional[Dict[str, Any]] = None,
         step_cache_hydration: Optional[str] = None,
         name_template: Optional[str] = None,
         cache_epoch: Optional[int] = None,
@@ -1708,6 +1715,16 @@ class Tracker:
             Tags for the scenario. "scenario_header" is automatically appended.
         model : str, default "scenario"
             The model name for the header run.
+        step_tags : Optional[List[str]], optional
+            Default tags applied to every child ``scenario.run(...)`` and
+            ``scenario.trace(...)`` call. These do not apply to the scenario
+            header run itself. Per-step ``tags=...`` values are preserved and
+            take precedence when duplicates exist.
+        step_facet : Optional[Dict[str, Any]], optional
+            Default facet mapping merged into every child ``scenario.run(...)``
+            and ``scenario.trace(...)`` call. These defaults do not apply to
+            the scenario header run itself. Per-step ``facet=...`` values win
+            on key collisions.
         step_cache_hydration : Optional[str], optional
             Default cache hydration policy for all scenario steps unless overridden
             in a specific `scenario.trace(...)` or `scenario.run(...)`.
@@ -1743,6 +1760,8 @@ class Tracker:
             config,
             tags,
             model,
+            step_tags=step_tags,
+            step_facet=step_facet,
             step_cache_hydration=step_cache_hydration,
             name_template=name_template,
             cache_epoch=cache_epoch,
@@ -1802,9 +1821,12 @@ class Tracker:
         tags: Optional[List[str]] = None,
         year: Optional[int] = None,
         iteration: Optional[int] = None,
+        stage: Optional[str] = None,
+        phase: Optional[str] = None,
         model: Optional[str] = None,
         status: Optional[str] = None,
         parent_id: Optional[str] = None,
+        facet: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         limit: int = 100,
         index_by: Optional[Union[str, IndexBySpec]] = None,
@@ -1821,12 +1843,19 @@ class Tracker:
             Filter by run year.
         iteration : Optional[int], optional
             Filter by run iteration.
+        stage : Optional[str], optional
+            Filter by run stage.
+        phase : Optional[str], optional
+            Filter by run phase.
         model : Optional[str], optional
             Filter by run model name.
         status : Optional[str], optional
             Filter by run status (e.g., "completed", "failed").
         parent_id : Optional[str], optional
             Filter by scenario/header parent id.
+        facet : Optional[Dict[str, Any]], optional
+            Filter by exact matches against persisted run facet values. Nested
+            mappings are matched by their flattened key paths.
         metadata : Optional[Dict[str, Any]], optional
             Filter by exact matches in `Run.meta` (client-side filter).
         limit : int, default 100
@@ -1856,9 +1885,12 @@ class Tracker:
             tags=tags,
             year=year,
             iteration=iteration,
+            stage=stage,
+            phase=phase,
             model=model,
             status=status,
             parent_id=parent_id,
+            facet=facet,
             metadata=metadata,
             limit=limit,
             index_by=index_by,
@@ -1946,9 +1978,14 @@ class Tracker:
         model: Optional[str] = None,
         status: Optional[str] = None,
         year: Optional[int] = None,
+        iteration: Optional[int] = None,
+        stage: Optional[str] = None,
+        phase: Optional[str] = None,
         tags: Optional[List[str]] = None,
+        facet: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         limit: int = 10_000,
+        name: Optional[str] = None,
     ) -> Run:
         """
         Return the most recent run matching the filters.
@@ -1967,21 +2004,36 @@ class Tracker:
             Filter by run status.
         year : Optional[int], optional
             Filter by run year.
+        iteration : Optional[int], optional
+            Filter by run iteration.
+        stage : Optional[str], optional
+            Filter by run stage.
+        phase : Optional[str], optional
+            Filter by run phase.
         tags : Optional[List[str]], optional
             Filter runs that contain all provided tags.
+        facet : Optional[Dict[str, Any]], optional
+            Filter by exact matches against persisted run facet values.
         metadata : Optional[Dict[str, Any]], optional
             Filter by exact matches in ``Run.meta`` (client-side filter).
         limit : int, default 10_000
             Maximum number of runs to consider.
+        name : Optional[str], optional
+            Filter by run description/name alias.
         """
         return self.queries.find_latest_run(
             parent_id=parent_id,
             model=model,
             status=status,
             year=year,
+            iteration=iteration,
+            stage=stage,
+            phase=phase,
             tags=tags,
+            facet=facet,
             metadata=metadata,
             limit=limit,
+            name=name,
         )
 
     def get_latest_run_id(self, **kwargs) -> str:
@@ -3357,14 +3409,15 @@ class Tracker:
         profile_schema: bool,
     ) -> Dict[str, Artifact]:
         artifacts_by_key: Dict[str, Artifact] = {}
-        for spec in contribution.artifacts:
-            art = self.log_artifact(
-                spec.path,
-                key=spec.key,
-                direction=spec.direction,
-                **spec.meta,
-            )
-            artifacts_by_key[spec.key] = art
+        with self.persistence.batch_artifact_writes():
+            for spec in contribution.artifacts:
+                art = self.log_artifact(
+                    spec.path,
+                    key=spec.key,
+                    direction=spec.direction,
+                    **spec.meta,
+                )
+                artifacts_by_key[spec.key] = art
 
         if ingest:
             for spec in contribution.ingestables:
@@ -4909,7 +4962,12 @@ class Tracker:
         return self.load(artifact, **kwargs)
 
     def find_matching_run(
-        self, config_hash: str, input_hash: str, git_hash: str
+        self,
+        config_hash: str,
+        input_hash: str,
+        git_hash: str,
+        *,
+        signature: Optional[str] = None,
     ) -> Optional[Run]:
         """
         Find a previously completed run that matches the identity hashes.
@@ -4922,6 +4980,10 @@ class Tracker:
             Hash of the run inputs.
         git_hash : str
             Git commit hash captured with the run.
+        signature : str | None, optional
+            Composite run signature. When provided, Consist attempts a direct
+            signature lookup first and falls back to the legacy component-hash
+            lookup for compatibility with older rows.
 
         Returns
         -------
@@ -4929,8 +4991,22 @@ class Tracker:
             The matching run, or ``None`` if not found or if no database is configured.
         """
         if self.db:
+            if signature:
+                matched = self.db.find_run_by_signature(signature)
+                if matched is not None:
+                    return matched
             return self.db.find_matching_run(config_hash, input_hash, git_hash)
         return None
+
+    def find_recent_completed_runs_for_model(
+        self, model_name: str, *, limit: int = 20
+    ) -> list[Run]:
+        """
+        Return recent completed runs for a model, newest first.
+        """
+        if self.db:
+            return self.db.find_recent_completed_runs_for_model(model_name, limit=limit)
+        return []
 
     def get_artifact_lineage(
         self,
@@ -5175,7 +5251,13 @@ class Tracker:
         """
         self.persistence.sync_run(run)
 
-    def _sync_artifact_to_db(self, artifact: Artifact, direction: str) -> None:
+    def _sync_artifact_to_db(
+        self,
+        artifact: Artifact,
+        direction: str,
+        *,
+        profile_label: Optional[str] = None,
+    ) -> None:
         """
         Synchronizes an `Artifact` object and its `RunArtifactLink` to the DuckDB database.
 
@@ -5195,7 +5277,11 @@ class Tracker:
             The direction of the artifact relative to the current run
             ("input" or "output").
         """
-        self.persistence.sync_artifact(artifact, direction)
+        self.persistence.sync_artifact(
+            artifact,
+            direction,
+            profile_label=profile_label,
+        )
 
     def history(
         self, limit: int = 10, tags: Optional[List[str]] = None
@@ -5340,6 +5426,10 @@ class Tracker:
             self.current_consist.run.meta = {}
 
         normalized = self.identity.normalize_json(kwargs)
+        for field in ("stage", "phase"):
+            value = normalized.get(field)
+            if isinstance(value, str) or value is None:
+                setattr(self.current_consist.run, field, value)
         self.current_consist.run.meta.update(normalized)
 
         # 2. Persist

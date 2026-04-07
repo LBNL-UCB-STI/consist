@@ -325,7 +325,8 @@ class ArtifactSchemaManager:
                 profile_json=hash_obj,
             )
 
-            # Update field_info rows with the computed schema_id
+            # TODO: Keep a single normalized intermediate and avoid rebuilding these
+            # field rows after schema_id is known if this path remains hot.
             field_rows_with_schema_id = [
                 ArtifactSchemaField(
                     schema_id=schema_id,
@@ -352,25 +353,7 @@ class ArtifactSchemaManager:
                 for rel in sorted_relations
             ]
 
-            # 4. Persist schema and fields to database
-            metadata_db.upsert_artifact_schema(
-                schema_row, field_rows_with_schema_id, relation_rows
-            )
-
-            # 5. Record an observation linking this artifact to the schema
-            # This is how we track that multiple sources (file, duckdb, user_provided)
-            # have observed/defined schemas for the same artifact
-            metadata_db.insert_artifact_schema_observation(
-                ArtifactSchemaObservation(
-                    artifact_id=artifact.id,
-                    schema_id=schema_id,
-                    run_id=run.id,
-                    source=source,
-                    sample_rows=None,
-                )
-            )
-
-            # 6. Update artifact metadata with the schema reference.
+            # 4. Persist schema rows, observation, and artifact metadata together.
             # Explicitly ensure schema_name is persisted so that ingest() can look it up
             # by name from the tracker's registered schemas. This enables the workflow
             # where log_artifact(..., schema=MySchema) is later followed by ingest()
@@ -386,7 +369,20 @@ class ArtifactSchemaManager:
                     "profile_version": 1,
                 },
             }
-            metadata_db.update_artifact_meta(artifact, meta_updates)
+            metadata_db.persist_artifact_schema_profile(
+                artifact=artifact,
+                schema=schema_row,
+                fields=field_rows_with_schema_id,
+                relations=relation_rows,
+                observation=ArtifactSchemaObservation(
+                    artifact_id=artifact.id,
+                    schema_id=schema_id,
+                    run_id=run.id,
+                    source=source,
+                    sample_rows=None,
+                ),
+                meta_updates=meta_updates,
+            )
 
             logging.info(
                 "[Consist] Stored user-provided schema for artifact=%s (schema_id=%s, source=%s)",
@@ -604,22 +600,23 @@ class ArtifactSchemaManager:
                     )
                     if schema_bundle is not None:
                         schema_row, _fields = schema_bundle
-                        metadata_db.insert_artifact_schema_observation(
-                            ArtifactSchemaObservation(
-                                artifact_id=artifact.id,
-                                schema_id=schema_row.id,
-                                run_id=run.id,
-                                source=prior_obs.source,
-                                sample_rows=prior_obs.sample_rows,
-                            )
-                        )
                         meta_updates: Dict[str, Any] = {
                             "schema_id": schema_row.id,
                             "schema_summary": schema_row.summary_json,
                         }
                         if _is_inline_profile(schema_row.profile_json):
                             meta_updates["schema_profile"] = schema_row.profile_json
-                        metadata_db.update_artifact_meta(artifact, meta_updates)
+                        metadata_db.persist_artifact_schema_observation_bundle(
+                            artifact=artifact,
+                            observation=ArtifactSchemaObservation(
+                                artifact_id=artifact.id,
+                                schema_id=schema_row.id,
+                                run_id=run.id,
+                                source=prior_obs.source,
+                                sample_rows=prior_obs.sample_rows,
+                            ),
+                            meta_updates=meta_updates,
+                        )
                         return
 
             result = profile_file_schema(
@@ -666,17 +663,6 @@ class ArtifactSchemaManager:
                 for f in result.fields
             ]
 
-            metadata_db.upsert_artifact_schema(schema_row, field_rows, [])
-            metadata_db.insert_artifact_schema_observation(
-                ArtifactSchemaObservation(
-                    artifact_id=artifact.id,
-                    schema_id=result.schema_id,
-                    run_id=run.id,
-                    source=result.summary.get("source", source),
-                    sample_rows=result.summary.get("sample_rows"),
-                )
-            )
-
             meta_updates: Dict[str, Any] = {
                 "schema_id": result.schema_id,
                 "schema_summary": result.summary,
@@ -684,7 +670,20 @@ class ArtifactSchemaManager:
             if result.inline_profile_json is not None:
                 meta_updates["schema_profile"] = result.inline_profile_json
 
-            metadata_db.update_artifact_meta(artifact, meta_updates)
+            metadata_db.persist_artifact_schema_profile(
+                artifact=artifact,
+                schema=schema_row,
+                fields=field_rows,
+                relations=[],
+                observation=ArtifactSchemaObservation(
+                    artifact_id=artifact.id,
+                    schema_id=result.schema_id,
+                    run_id=run.id,
+                    source=result.summary.get("source", source),
+                    sample_rows=result.summary.get("sample_rows"),
+                ),
+                meta_updates=meta_updates,
+            )
 
         except Exception as e:
             logging.warning(

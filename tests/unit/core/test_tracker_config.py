@@ -81,7 +81,7 @@ def test_tracker_config_validation_for_required_and_typed_fields(
     tmp_path: Path,
 ) -> None:
     with pytest.raises(ValidationError):
-        TrackerConfig()  # type: ignore[call-arg]
+        TrackerConfig.model_validate({})
 
     with pytest.raises(ValidationError):
         TrackerConfig(

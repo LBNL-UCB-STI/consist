@@ -11,6 +11,12 @@ for new projects and onboarding docs/examples.
   [`ScenarioContext.run`](workflow.md#consist.core.workflow.ScenarioContext.run),
   [`ScenarioContext.trace`](workflow.md#consist.core.workflow.ScenarioContext.trace)
 
+If you already have a resolved binding plan from a planner or orchestrator,
+pass `binding=BindingResult(...)` to `ScenarioContext.run(...)`. That envelope
+is the preferred scenario-level path for complex or externally orchestrated
+workflows. Keep using `consist.ref(...)` / `consist.refs(...)` for direct
+step-to-step wiring and primitive `inputs=` kwargs for ordinary scenario code.
+
 ## Essential helpers
 
 - Tracker setup and context:
@@ -19,6 +25,8 @@ for new projects and onboarding docs/examples.
 - Linking artifacts:
   [`consist.ref`](api_helpers.md#consist.api.ref),
   [`consist.refs`](api_helpers.md#consist.api.refs)
+- Resolved scenario bindings:
+  `consist.BindingResult`
 - Managed output paths:
   [`consist.output_path`](api_helpers.md#consist.api.output_path),
   [`consist.output_dir`](api_helpers.md#consist.api.output_dir)

@@ -70,7 +70,11 @@ When troubleshooting provenance DB health, prefer this safe sequence:
      ```
 
      `minimal` restores run/artifact/link baseline.
-     `full` additionally attempts facet/schema/index restoration where snapshot content and DB schema compatibility allow.
+     `full` additionally attempts facet/schema/index restoration where snapshot
+     content and DB schema compatibility allow.
+     `stage` and `phase` are restored into canonical run columns when present in
+     the snapshot metadata, with legacy `run.meta` values preserved for
+     compatibility.
 
 4. **Compact after bulk changes:**
 
@@ -214,6 +218,41 @@ result = consist.run(
 )
 ```
 
+### "I want to know why this run missed cache"
+
+**Symptom:** A run missed cache, but `cache_hit=False` only tells you that the
+signature did not match.
+
+**Root Cause:** The cache miss explanation is recorded on the completed run as
+`run.meta["cache_miss_explanation"]`.
+
+**Solution:**
+
+```python
+run = tracker.get_run("my_run_id")
+explanation = run.meta.get("cache_miss_explanation", {})
+
+print(explanation.get("reason"))
+print(explanation.get("candidate_run_id"))
+print(explanation.get("details", {}))
+```
+
+How to read it:
+
+- `reason` gives the broad miss category, such as `config_changed`,
+  `inputs_changed`, `code_changed`, or `candidate_outputs_invalid`.
+- `candidate_run_id` points to the prior completed run that was compared, if one
+  was found.
+- `details` contains the evidence. For config misses, look for changed config
+  keys or identity-input digests. For input misses, look for changed input keys
+  or per-artifact drift. For code misses, look for code-identity mode, extra
+  dependency, or code-hash changes.
+- `fallbacks_used` tells you when the explainer had to rely on a weaker source
+  like the JSON snapshot or missing artifact history.
+
+If `reason` is `no_similar_prior_run`, the explainer could not find a useful
+same-model comparison candidate yet.
+
 Or use the explicit run-scoped recovery API when you need to rebuild a prior
 run's outputs into a new directory or recover from an archive mirror:
 
@@ -271,6 +310,37 @@ prior_runs = tracker.find_runs()
 for run in prior_runs:
     print(f"Run {run.id}: signature={run.signature}")
 ```
+
+If you want a human-readable explanation for the miss, inspect the recorded
+cache miss payload on the run:
+
+```python
+run = tracker.get_run("my_run_id")
+explanation = run.meta.get("cache_miss_explanation", {})
+
+print(explanation.get("reason"))
+print(explanation.get("candidate_run_id"))
+print(explanation.get("matched_components"))
+print(explanation.get("mismatched_components"))
+print(explanation.get("details", {}))
+```
+
+How to interpret it:
+
+- `reason` is the top-level classification. It tells you whether the miss was
+  mostly about config, inputs, code, or validation.
+- `candidate_run_id` is the closest prior completed run Consist compared
+  against.
+- `matched_components` and `mismatched_components` show the high-level
+  identity hashes that matched or differed.
+- `details` gives the likely constituent cause, such as named config digest
+  inputs, config keys, input artifact keys, or code-identity metadata.
+- `fallbacks_used` inside `details` means Consist had to fall back to a less
+  structured source, so the explanation is still useful but less precise.
+
+For a quick first pass, pair this with `run.identity_summary` from the API
+reference. `identity_summary` tells you the hashes that formed the key; the
+cache miss explanation tells you which part of that key likely drifted.
 
 **Common causes:**
 - **Code changed:** Check git status, function definitions

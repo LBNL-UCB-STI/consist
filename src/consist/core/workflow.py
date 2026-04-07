@@ -10,6 +10,7 @@ from typing import (
     Dict,
     Any,
     Callable,
+    Literal,
     Mapping,
     Iterator,
     Union,
@@ -25,6 +26,7 @@ from consist.core.input_utils import coerce_input_map
 from consist.core.run_invocation import resolve_run_invocation
 from consist.types import (
     ArtifactRef,
+    BindingResult,
     CacheOptions,
     CodeIdentityMode,
     ExecutionOptions,
@@ -380,6 +382,8 @@ class ScenarioContext:
         self.model = model
         self.config_arg = config or {}
         self.tags = tags or []
+        self._step_tags = self._coerce_step_tags(kwargs.pop("step_tags", None))
+        self._step_facet = kwargs.pop("step_facet", None)
         self.kwargs = kwargs
         self.step_cache_hydration = step_cache_hydration
         self.name_template = name_template
@@ -597,6 +601,39 @@ class ScenarioContext:
             return [value]
         return list(value)
 
+    def _coerce_step_tags(self, value: Optional[Iterable[str]]) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raise TypeError("step_tags must be an iterable of strings, not a str.")
+        return list(value)
+
+    def _merge_step_tags(self, tags: Optional[List[str]]) -> Optional[List[str]]:
+        merged: list[str] = []
+        seen: set[str] = set()
+
+        for source in (tags, self._step_tags):
+            if not source:
+                continue
+            for tag in source:
+                if tag in seen:
+                    continue
+                seen.add(tag)
+                merged.append(tag)
+
+        return merged or None
+
+    def _merge_step_facet(self, facet: Optional[FacetLike]) -> Optional[FacetLike]:
+        if self._step_facet is None and facet is None:
+            return None
+
+        merged: Dict[str, Any] = {}
+        if self._step_facet is not None:
+            merged.update(self._coerce_mapping(self._step_facet, "step_facet"))
+        if facet is not None:
+            merged.update(self._coerce_mapping(facet, "facet"))
+        return self.tracker.identity.normalize_json(merged)
+
     def _resolve_input_value(self, value: RunInputRef) -> ArtifactRef:
         def _resolve_coupler_ref(ref: str) -> Optional[ArtifactRef]:
             if ref in self.coupler:
@@ -729,6 +766,7 @@ class ScenarioContext:
         ] = None,
         input_keys: Optional[Iterable[str] | str] = None,
         optional_input_keys: Optional[Iterable[str] | str] = None,
+        binding: Optional[BindingResult] = None,
         depends_on: Optional[List[RunInputRef]] = None,
         tags: Optional[List[str]] = None,
         facet: Optional[FacetLike] = None,
@@ -756,11 +794,52 @@ class ScenarioContext:
         is updated with step metadata and artifacts.
         Use ``execution_options.runtime_kwargs`` for runtime-only inputs and
         `consist.require_runtime_kwargs` to validate required keys.
+        For direct workflow code, prefer primitive `inputs=` kwargs and, when
+        needed, the direct `input_keys=` / `optional_input_keys=` compatibility
+        surfaces. For complex or externally orchestrated workflows that already
+        resolved the binding plan, pass ``binding=BindingResult(...)`` instead;
+        `binding` is an execution envelope and is mutually exclusive with the
+        primitive input kwargs.
         Pass policy controls via ``cache_options``, ``output_policy``,
         and ``execution_options``.
 
         ``adapter`` and ``identity_inputs`` are the public identity-related
         kwargs.
+
+        Examples
+        --------
+        Direct workflow code:
+
+        ```python
+        sc.run(
+            fn=step,
+            inputs={"raw": raw_path},
+            execution_options=ExecutionOptions(input_binding="paths"),
+        )
+
+        sc.run(
+            fn=step,
+            inputs={"raw": consist.ref(previous_result, key="raw")},
+            execution_options=ExecutionOptions(input_binding="loaded"),
+        )
+        ```
+
+        Orchestrator-facing execution envelope:
+
+        ```python
+        sc.run(
+            fn=step,
+            binding=BindingResult(
+                inputs={"raw": raw_path},
+                input_keys=["data"],
+                optional_input_keys=["maybe"],
+            ),
+            execution_options=ExecutionOptions(input_binding="paths"),
+        )
+        ```
+
+        `binding` cannot be combined with primitive `inputs`, `input_keys`, or
+        `optional_input_keys`.
         """
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
@@ -771,7 +850,35 @@ class ScenarioContext:
         if fn is None and name is None:
             raise ValueError("ScenarioContext.run requires name when fn is None.")
 
-        invocation_inputs = inputs
+        if binding is not None:
+            if (
+                inputs is not None
+                or input_keys is not None
+                or optional_input_keys is not None
+            ):
+                raise ValueError(
+                    format_problem_cause_fix(
+                        problem=(
+                            "ScenarioContext.run received both binding and primitive "
+                            "input kwargs."
+                        ),
+                        cause=(
+                            "binding=... is a complete execution envelope for "
+                            "scenario inputs, so it cannot be combined with "
+                            "inputs=..., input_keys=..., or optional_input_keys=...."
+                        ),
+                        fix=(
+                            "Pass either binding=BindingResult(...) or the primitive "
+                            "input kwargs, but not both."
+                        ),
+                    )
+                )
+            invocation_inputs = binding.inputs
+            input_keys = binding.input_keys
+            optional_input_keys = binding.optional_input_keys
+        else:
+            invocation_inputs = inputs
+
         requested_input_binding = (
             execution_options.input_binding if execution_options is not None else None
         )
@@ -784,7 +891,7 @@ class ScenarioContext:
         if requested_input_binding in {"loaded", "paths"}:
             invocation_inputs = self._promote_inputs_for_binding(
                 invocation_inputs,
-                cast(InputBindingMode, requested_input_binding),
+                requested_input_binding,
             )
 
         resolved_invocation = resolve_run_invocation(
@@ -850,6 +957,8 @@ class ScenarioContext:
         runtime_kwargs_dict = resolved_invocation.runtime_kwargs
         resolved_inject_context = resolved_invocation.inject_context
         cache_epoch = resolved_invocation.cache_epoch
+        resolved_tags = self._merge_step_tags(resolved_tags)
+        resolved_facet = self._merge_step_facet(resolved_facet)
 
         if run_id is None:
             run_id = f"{self.run_id}_{resolved_name}_{uuid.uuid4().hex[:8]}"
@@ -997,57 +1106,132 @@ class ScenarioContext:
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
 
-        resolved_model = model or name
+        output_mismatch_policy = cast(
+            Literal["warn", "error", "ignore"], output_mismatch
+        )
+        output_missing_policy = cast(Literal["warn", "error", "ignore"], output_missing)
+
+        resolved_invocation = resolve_run_invocation(
+            fn=None,
+            name=name,
+            model=model,
+            description=description,
+            config=config,
+            adapter=adapter,
+            identity_inputs=identity_inputs,
+            inputs=inputs,
+            input_keys=input_keys,
+            optional_input_keys=optional_input_keys,
+            tags=tags,
+            facet=facet,
+            facet_from=facet_from,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
+            year=year,
+            iteration=iteration,
+            phase=None,
+            stage=None,
+            outputs=outputs,
+            output_paths=output_paths,
+            cache_options=CacheOptions(
+                cache_mode=cache_mode,
+                cache_hydration=cache_hydration,
+                cache_version=cache_version,
+                cache_epoch=cache_epoch,
+                validate_cached_outputs=validate_cached_outputs,
+                code_identity=code_identity,
+                code_identity_extra_deps=code_identity_extra_deps,
+            ),
+            output_policy=OutputPolicyOptions(
+                output_mismatch=output_mismatch_policy,
+                output_missing=output_missing_policy,
+            ),
+            execution_options=None,
+            default_name_template=self.name_template,
+            allow_template=True,
+            apply_step_defaults=True,
+            consist_settings=self.tracker.settings,
+            consist_workspace=self.tracker.run_dir,
+            consist_state=self._header_record,
+            missing_name_error="ScenarioContext.trace requires a step name.",
+            python_missing_fn_error="Tracker.trace requires a callable fn.",
+            allow_python_without_fn=True,
+        )
+
+        resolved_name = resolved_invocation.name
+        resolved_model = resolved_invocation.model
+        resolved_description = resolved_invocation.description
+        resolved_config = resolved_invocation.config
+        resolved_adapter = resolved_invocation.adapter
+        resolved_identity_inputs = resolved_invocation.identity_inputs
+        resolved_tags = self._merge_step_tags(resolved_invocation.tags)
+        resolved_facet = self._merge_step_facet(resolved_invocation.facet)
+        resolved_outputs = resolved_invocation.outputs
+        resolved_output_paths = self._resolve_output_paths(
+            resolved_invocation.output_paths
+        )
+        resolved_inputs = self._resolve_inputs(
+            resolved_invocation.inputs,
+            resolved_invocation.input_keys,
+            resolved_invocation.optional_input_keys,
+        )
+        resolved_facet_from = resolved_invocation.facet_from
+        resolved_facet_schema_version = resolved_invocation.facet_schema_version
+        resolved_cache_mode = resolved_invocation.cache_mode
+        resolved_cache_hydration = resolved_invocation.cache_hydration
+        resolved_cache_version = resolved_invocation.cache_version
+        resolved_validate_cached_outputs = resolved_invocation.validate_cached_outputs
+        resolved_cache_epoch = resolved_invocation.cache_epoch
+
         if run_id is None:
-            run_id = f"{self.run_id}_{name}"
+            run_id = f"{self.run_id}_{resolved_name}"
         if parent_run_id is None:
             parent_run_id = self.run_id
 
         self._first_step_started = True
-        self._last_step_name = name
+        self._last_step_name = resolved_name
 
-        effective_cache_hydration = cache_hydration or self.step_cache_hydration
-
-        resolved_inputs = self._resolve_inputs(inputs, input_keys, optional_input_keys)
-        resolved_output_paths = self._resolve_output_paths(output_paths)
+        effective_cache_hydration = (
+            resolved_cache_hydration or self.step_cache_hydration
+        )
 
         try:
             self.tracker._active_coupler = self.coupler
             with self.tracker.trace(
-                name=name,
+                name=resolved_name,
                 run_id=run_id,
                 model=resolved_model,
-                description=description,
-                config=config,
-                adapter=adapter,
+                description=resolved_description,
+                config=resolved_config,
+                adapter=resolved_adapter,
                 config_plan_ingest=config_plan_ingest,
                 config_plan_profile_schema=config_plan_profile_schema,
                 inputs=resolved_inputs,
                 input_keys=None,
                 optional_input_keys=None,
                 depends_on=depends_on,
-                tags=tags,
-                facet=facet,
-                facet_from=facet_from,
-                facet_schema_version=facet_schema_version,
-                facet_index=facet_index,
-                identity_inputs=identity_inputs,
+                tags=resolved_tags,
+                facet=resolved_facet,
+                facet_from=resolved_facet_from,
+                facet_schema_version=resolved_facet_schema_version,
+                facet_index=resolved_invocation.facet_index,
+                identity_inputs=resolved_identity_inputs,
                 year=year,
                 iteration=iteration,
                 parent_run_id=parent_run_id,
-                outputs=outputs,
+                outputs=resolved_outputs,
                 output_paths=resolved_output_paths,
                 capture_dir=capture_dir,
                 capture_pattern=capture_pattern,
-                cache_mode=cache_mode,
+                cache_mode=resolved_cache_mode,
                 cache_hydration=effective_cache_hydration,
-                cache_version=cache_version,
-                cache_epoch=cache_epoch,
-                validate_cached_outputs=validate_cached_outputs,
-                code_identity=code_identity,
-                code_identity_extra_deps=code_identity_extra_deps,
-                output_mismatch=output_mismatch,
-                output_missing=output_missing,
+                cache_version=resolved_cache_version,
+                cache_epoch=resolved_cache_epoch,
+                validate_cached_outputs=resolved_validate_cached_outputs,
+                code_identity=resolved_invocation.code_identity,
+                code_identity_extra_deps=resolved_invocation.code_identity_extra_deps,
+                output_mismatch=resolved_invocation.output_mismatch,
+                output_missing=resolved_invocation.output_missing,
             ) as t:
                 if t.is_cached:
                     current_consist = t.current_consist
@@ -1079,13 +1263,13 @@ class ScenarioContext:
         if value is None:
             return []
         if isinstance(value, list):
-            return list(value)
+            return [item for item in value if isinstance(item, Artifact)]
         if isinstance(value, tuple):
-            return list(value)
+            return [item for item in value if isinstance(item, Artifact)]
         if isinstance(value, Mapping):
-            return list(value.values())
+            return [item for item in value.values() if isinstance(item, Artifact)]
         if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
-            return list(value)
+            return [item for item in value if isinstance(item, Artifact)]
         return []
 
     def _extract_facet_from_config(
@@ -1153,30 +1337,37 @@ class ScenarioContext:
 
         parent_run.meta["steps"].append(summary)
 
+        output_ids = list(dict.fromkeys(artifact.id for artifact in child_outputs))
+        input_ids = list(
+            dict.fromkeys(
+                artifact.id
+                for artifact in child_inputs
+                if artifact.id not in parent_output_ids
+            )
+        )
+
         # --- Force Flush ---
         current_state = self.tracker.current_consist
         self.tracker.current_consist = self._header_record
-
-        self.tracker.persistence.flush_json()
-        self.tracker.persistence.sync_run(parent_run)
-
-        # --- NEW: Create database links for parent scenario ---
-        if self.tracker.db:
-            # Link ALL child artifacts to parent, regardless of deduplication
-            # The database merge() handles duplicate links gracefully
-            for artifact in child_outputs:
-                self.tracker.db.link_artifact_to_run(
-                    artifact_id=artifact.id, run_id=parent_run.id, direction="output"
+        try:
+            self.tracker.persistence.flush_json()
+            if output_ids:
+                self.tracker.persistence.sync_run_with_links(
+                    parent_run,
+                    artifact_ids=output_ids,
+                    direction="output",
                 )
+            else:
+                self.tracker.persistence.sync_run(parent_run)
 
-            for artifact in child_inputs:
-                # Only link as input if not already an output
-                if artifact.id not in parent_output_ids:
-                    self.tracker.db.link_artifact_to_run(
-                        artifact_id=artifact.id, run_id=parent_run.id, direction="input"
-                    )
-
-        self.tracker.current_consist = current_state
+            if self.tracker.db and input_ids:
+                self.tracker.db.link_artifacts_to_run_bulk(
+                    artifact_ids=input_ids,
+                    run_id=parent_run.id,
+                    direction="input",
+                )
+        finally:
+            self.tracker.current_consist = current_state
 
     def __enter__(self) -> "ScenarioContext":
         # Enforce No Nesting
@@ -1260,33 +1451,6 @@ class ScenarioContext:
             f"[ScenarioContext] Ending header {self.run_id} with status={status}"
         )
         self.tracker.end_run(status=status, error=error_for_end_run)
-
-        # Defensive: ensure header status/meta are persisted even if future end_run
-        # behavior changes. We temporarily restore the header to flush/sync explicitly.
-        if self._header_record:
-            # Force the run object to reflect the final status before syncing.
-            self._header_record.run.status = status
-            self.tracker.current_consist = self._header_record
-            logging.debug(
-                "[ScenarioContext] Syncing header after end_run: "
-                f"id={self._header_record.run.id}, status={self._header_record.run.status}"
-            )
-            self.tracker.persistence.flush_json()
-            # Use a fresh Run clone to avoid any ORM identity/cache oddities
-            try:
-                from consist.models.run import Run
-
-                cloned = Run(**self._header_record.run.model_dump())
-                logging.debug(
-                    f"[ScenarioContext] Syncing cloned header run id={cloned.id} status={cloned.status}"
-                )
-                self.tracker.persistence.sync_run(cloned)
-            except Exception:
-                # Fallback to direct sync on the original object
-                logging.debug(
-                    f"[ScenarioContext] Syncing original header run id={self._header_record.run.id} status={self._header_record.run.status}"
-                )
-                self.tracker.persistence.sync_run(self._header_record.run)
 
         # 4. Final Cleanup
         # end_run sets current_consist to None, but we ensure it matches expected state

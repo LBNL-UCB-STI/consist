@@ -7,6 +7,7 @@ import pytest
 
 import consist
 import consist.core as consist_core
+import consist.core.materialize as consist_materialize
 from consist.api import materialize_run_outputs as materialize_run_outputs_api
 from consist.core.tracker import Tracker
 from consist.models.run import Run
@@ -135,10 +136,10 @@ def test_tracker_materialize_run_outputs_delegates_to_core_helpers(
         build_run_output_materialize_plan=_fake_plan,
         materialize_planned_outputs=_fake_execute,
         build_allowed_materialization_roots=(
-            consist_core.materialize.build_allowed_materialization_roots
+            consist_materialize.build_allowed_materialization_roots
         ),
         validate_allowed_materialization_destination=(
-            consist_core.materialize.validate_allowed_materialization_destination
+            consist_materialize.validate_allowed_materialization_destination
         ),
     )
     monkeypatch.setattr(consist_core, "materialize", fake_materialize_module)
@@ -209,10 +210,10 @@ def test_tracker_materialize_run_outputs_allows_external_target_root_when_config
             planner_result,
         ),
         build_allowed_materialization_roots=(
-            consist_core.materialize.build_allowed_materialization_roots
+            consist_materialize.build_allowed_materialization_roots
         ),
         validate_allowed_materialization_destination=(
-            consist_core.materialize.validate_allowed_materialization_destination
+            consist_materialize.validate_allowed_materialization_destination
         ),
     )
 
@@ -318,9 +319,7 @@ def test_api_materialize_run_outputs_delegates_with_default_tracker(
         },
     }
     assert consist.materialize_run_outputs is materialize_run_outputs_api
-    assert (
-        consist.MaterializationResult is consist_core.materialize.MaterializationResult
-    )
+    assert consist.MaterializationResult is consist_materialize.MaterializationResult
 
 
 def test_tracker_materialize_run_outputs_allows_configured_mount_roots(
@@ -365,10 +364,10 @@ def test_tracker_materialize_run_outputs_allows_configured_mount_roots(
 
     fake_materialize_module.materialize_planned_outputs = _fake_execute
     fake_materialize_module.build_allowed_materialization_roots = (
-        consist_core.materialize.build_allowed_materialization_roots
+        consist_materialize.build_allowed_materialization_roots
     )
     fake_materialize_module.validate_allowed_materialization_destination = (
-        consist_core.materialize.validate_allowed_materialization_destination
+        consist_materialize.validate_allowed_materialization_destination
     )
     monkeypatch.setattr(consist_core, "materialize", fake_materialize_module)
 

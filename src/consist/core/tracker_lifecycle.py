@@ -29,6 +29,10 @@ from consist.core.cache import (
     parse_materialize_cached_outputs_kwargs,
     validate_cached_run_outputs,
 )
+from consist.core.cache_miss_explainer import (
+    CacheMissExplainer,
+    CacheMissExplainerContext,
+)
 from consist.core.context import pop_tracker, push_tracker
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.validation import (
@@ -362,12 +366,16 @@ class RunLifecycleCoordinator:
             validate_run_meta(kwargs)
 
         now = datetime.now(UTC)
+        run_stage = kwargs.get("stage")
+        run_phase = kwargs.get("phase")
         run = Run(
             id=run_id,
             model_name=model,
             description=description,
             year=year,
             iteration=iteration,
+            stage=run_stage if isinstance(run_stage, str) else None,
+            phase=run_phase if isinstance(run_phase, str) else None,
             parent_run_id=parent_run_id,
             tags=tags or [],
             status="running",
@@ -424,12 +432,13 @@ class RunLifecycleCoordinator:
             raise RuntimeError("Cannot start run: no active consist record.")
 
         if inputs:
-            for item in inputs:
-                if isinstance(item, Artifact):
-                    tracker.log_artifact(item, direction="input")
-                else:
-                    key = Path(item).stem
-                    tracker.log_artifact(item, key=key, direction="input")
+            with tracker.persistence.batch_artifact_writes():
+                for item in inputs:
+                    if isinstance(item, Artifact):
+                        tracker.log_artifact(item, direction="input")
+                    else:
+                        key = Path(item).stem
+                        tracker.log_artifact(item, key=key, direction="input")
 
         if not run.parent_run_id:
             parent_candidates = [
@@ -491,6 +500,7 @@ class RunLifecycleCoordinator:
                         config_hash=config_h,
                         input_hash=input_h,
                         git_hash=git_h,
+                        signature=run.signature,
                     )
                 _log_timing("find_matching_run", t0)
             cache_valid = False
@@ -524,6 +534,19 @@ class RunLifecycleCoordinator:
                         tracker._active_run_cache_options.cache_hydration,
                     )
             else:
+                explanation = CacheMissExplainer(
+                    cast(CacheMissExplainerContext, tracker)
+                ).explain(
+                    run,
+                    cached_run=cached_run,
+                    cache_valid=cache_valid if cached_run else None,
+                )
+                run.meta["cache_miss_explanation"] = explanation.as_dict()
+                logging.info(
+                    "[Consist][cache] miss explanation: reason=%s candidate=%s",
+                    explanation.reason,
+                    explanation.candidate_run_id,
+                )
                 if cached_run and not cache_valid and debug_cache:
                     logging.info(
                         "[Consist][cache] miss: cached run %s failed validation.",

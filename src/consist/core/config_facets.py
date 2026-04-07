@@ -154,16 +154,14 @@ class ConfigFacetManager:
             )
             return
 
-        self._db.upsert_config_facet(
-            ConfigFacet(
-                id=facet_id,
-                namespace=model,
-                schema_name=schema_name,
-                schema_version=(
-                    str(schema_version) if schema_version is not None else None
-                ),
-                facet_json=facet_dict,
-            )
+        facet_row = ConfigFacet(
+            id=facet_id,
+            namespace=model,
+            schema_name=schema_name,
+            schema_version=(
+                str(schema_version) if schema_version is not None else None
+            ),
+            facet_json=facet_dict,
         )
 
         run.meta["config_facet_id"] = facet_id
@@ -172,23 +170,26 @@ class ConfigFacetManager:
         if schema_version is not None:
             run.meta["config_facet_schema_version"] = schema_version
 
-        if not index_kv:
-            return
-
-        rows = self.flatten_facet_to_kv_rows(
-            run_id=run.id,
-            facet_id=facet_id,
-            namespace=model,
-            facet_dict=facet_dict,
-        )
-        if len(rows) > max_kv_rows:
-            logging.info(
-                "[Consist] Skipping facet KV indexing for run %s (too many keys: %d).",
-                run.id,
-                len(rows),
+        kv_rows: Optional[List[RunConfigKV]] = None
+        if index_kv:
+            kv_rows = self.flatten_facet_to_kv_rows(
+                run_id=run.id,
+                facet_id=facet_id,
+                namespace=model,
+                facet_dict=facet_dict,
             )
-            return
-        self._db.insert_run_config_kv_bulk(rows)
+            if len(kv_rows) > max_kv_rows:
+                logging.info(
+                    "[Consist] Skipping facet KV indexing for run %s (too many keys: %d).",
+                    run.id,
+                    len(kv_rows),
+                )
+                kv_rows = None
+
+        self._db.persist_config_facet_bundle(
+            facet=facet_row,
+            kv_rows=kv_rows,
+        )
 
     def flatten_facet_to_kv_rows(
         self,

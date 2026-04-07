@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import pytest
@@ -91,6 +92,188 @@ def test_scenario_run_promotes_coupler_inputs_for_path_binding(tracker):
         )
 
 
+def test_scenario_run_accepts_binding_result(tracker, tmp_path):
+    explicit_input = tmp_path / "raw.csv"
+    pd.DataFrame({"value": [10, 20]}).to_csv(explicit_input, index=False)
+
+    def produce(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        out_path = ctx.run_dir / "data.csv"
+        pd.DataFrame({"value": [1, 2]}).to_csv(out_path, index=False)
+
+    def consume(raw: pd.DataFrame, data: pd.DataFrame) -> None:
+        assert list(raw["value"]) == [10, 20]
+        assert list(data["value"]) == [1, 2]
+
+    with tracker.scenario("scen_binding_result") as sc:
+        sc.run(
+            fn=produce,
+            output_paths={"data": "data.csv"},
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        result = sc.run(
+            fn=consume,
+            binding=consist.BindingResult(
+                inputs={"raw": explicit_input},
+                input_keys=["data"],
+                optional_input_keys=["missing"],
+                metadata={"source": "binding-plan"},
+            ),
+            execution_options=ExecutionOptions(load_inputs=True),
+        )
+
+    assert result.cache_hit is False
+
+
+def test_scenario_run_binding_result_supports_path_binding(tracker, tmp_path):
+    raw_path = tmp_path / "raw.csv"
+    pd.DataFrame({"value": [10, 20]}).to_csv(raw_path, index=False)
+
+    def produce(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        out_path = ctx.run_dir / "data.csv"
+        pd.DataFrame({"value": [1, 2]}).to_csv(out_path, index=False)
+
+    def consume(raw: Path, data: Path) -> None:
+        assert isinstance(raw, Path)
+        assert isinstance(data, Path)
+        assert list(pd.read_csv(raw)["value"]) == [10, 20]
+        assert list(pd.read_csv(data)["value"]) == [1, 2]
+
+    with tracker.scenario("scen_binding_paths") as sc:
+        sc.run(
+            fn=produce,
+            output_paths={"data": "data.csv"},
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        result = sc.run(
+            fn=consume,
+            binding=consist.BindingResult(
+                inputs={"raw": raw_path},
+                input_keys=["data"],
+            ),
+            execution_options=ExecutionOptions(input_binding="paths"),
+        )
+
+    assert result.cache_hit is False
+
+
+def test_scenario_run_binding_result_metadata_is_inert(tracker, tmp_path):
+    raw_path = tmp_path / "raw.csv"
+    pd.DataFrame({"value": [7, 8]}).to_csv(raw_path, index=False)
+    calls: list[str] = []
+
+    def consume(raw: pd.DataFrame) -> None:
+        calls.append("called")
+        assert list(raw["value"]) == [7, 8]
+
+    with tracker.scenario("scen_binding_metadata") as sc:
+        first = sc.run(
+            fn=consume,
+            name="consume",
+            binding=consist.BindingResult(
+                inputs={"raw": raw_path},
+                metadata={"source": "first-plan"},
+            ),
+            execution_options=ExecutionOptions(load_inputs=True),
+        )
+        second = sc.run(
+            fn=consume,
+            name="consume",
+            binding=consist.BindingResult(
+                inputs={"raw": raw_path},
+                metadata={"source": "second-plan"},
+            ),
+            execution_options=ExecutionOptions(load_inputs=True),
+        )
+
+    assert calls == ["called"]
+    assert first.cache_hit is False
+    assert second.cache_hit is True
+    assert (first.run.meta or {}).get("source") is None
+    assert (second.run.meta or {}).get("source") is None
+    assert (
+        first.run.identity_summary["signature"]
+        == second.run.identity_summary["signature"]
+    )
+    assert (
+        first.run.identity_summary["input_hash"]
+        == second.run.identity_summary["input_hash"]
+    )
+    assert first.run.identity_summary["inputs"] == second.run.identity_summary["inputs"]
+    assert tracker.get_run_config_kv(first.run.id, prefix="source") == []
+    assert set(tracker.get_artifacts_for_run(first.run.id).inputs) == {"raw"}
+
+
+def test_scenario_run_binding_result_matches_primitive_cache_behavior(
+    tracker, tmp_path
+):
+    raw_path = tmp_path / "raw.csv"
+    pd.DataFrame({"value": [1, 2, 3]}).to_csv(raw_path, index=False)
+    calls: list[str] = []
+
+    def consume(raw: pd.DataFrame) -> None:
+        calls.append("called")
+        assert list(raw["value"]) == [1, 2, 3]
+
+    with tracker.scenario("scen_binding_cache_parity_primitive") as primitive_sc:
+        primitive = primitive_sc.run(
+            fn=consume,
+            name="consume",
+            inputs={"raw": raw_path},
+            execution_options=ExecutionOptions(load_inputs=True),
+        )
+
+    with tracker.scenario("scen_binding_cache_parity_binding") as binding_sc:
+        binding = binding_sc.run(
+            fn=consume,
+            name="consume",
+            binding=consist.BindingResult(inputs={"raw": raw_path}),
+            execution_options=ExecutionOptions(load_inputs=True),
+        )
+
+    assert calls == ["called"]
+    assert primitive.cache_hit is False
+    assert binding.cache_hit is True
+    assert (
+        primitive.run.identity_summary["signature"]
+        == binding.run.identity_summary["signature"]
+    )
+    assert (
+        primitive.run.identity_summary["input_hash"]
+        == binding.run.identity_summary["input_hash"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("primitive_kwargs", "expected_fragment"),
+    [
+        ({"inputs": {"raw": "raw.csv"}}, "inputs"),
+        ({"input_keys": ["data"]}, "input_keys"),
+        ({"optional_input_keys": ["data"]}, "optional_input_keys"),
+    ],
+)
+def test_scenario_run_rejects_mixed_binding_and_primitive_input_kwargs(
+    tracker, tmp_path, primitive_kwargs: dict[str, Any], expected_fragment: str
+):
+    binding = consist.BindingResult(inputs={"raw": tmp_path / "raw.csv"})
+
+    with tracker.scenario("scen_binding_conflict") as sc:
+        with pytest.raises(ValueError) as exc_info:
+            sc.run(
+                fn=lambda: None,
+                name="noop",
+                binding=binding,
+                execution_options=ExecutionOptions(load_inputs=True),
+                **primitive_kwargs,
+            )
+
+    message = str(exc_info.value)
+    _assert_problem_cause_fix(message)
+    assert "binding" in message
+    assert expected_fragment in message
+
+
 def test_scenario_trace_updates_coupler(tracker):
     with tracker.scenario("scen_trace") as sc:
         with sc.trace(name="plot") as t:
@@ -115,6 +298,51 @@ def test_scenario_trace_updates_coupler_after_exit(tracker):
 
         with sc.trace(name="second", inputs=[alpha]) as t:
             assert sc.coupler.require("alpha").id == alpha.id
+
+
+def test_scenario_trace_batches_parent_link_inserts(tracker, monkeypatch):
+    persistence_bulk_calls: list[tuple[list[object], str]] = []
+    bulk_calls: list[tuple[list[object], str]] = []
+    single_calls = 0
+
+    original_persistence_bulk = tracker.persistence.sync_run_with_links
+    original_bulk = tracker.db.link_artifacts_to_run_bulk
+    original_single = tracker.db.link_artifact_to_run
+
+    def counting_persistence_bulk(run, *, artifact_ids, direction) -> None:
+        persistence_bulk_calls.append((list(artifact_ids), direction))
+        original_persistence_bulk(run, artifact_ids=artifact_ids, direction=direction)
+
+    def counting_bulk(*, artifact_ids, run_id, direction) -> None:
+        bulk_calls.append((list(artifact_ids), direction))
+        original_bulk(artifact_ids=artifact_ids, run_id=run_id, direction=direction)
+
+    def counting_single(artifact_id, run_id, direction) -> None:
+        nonlocal single_calls
+        single_calls += 1
+        original_single(artifact_id, run_id, direction)
+
+    with tracker.scenario("scen_bulk_links") as sc:
+        with sc.trace(name="stage") as t:
+            out_path = t.run_dir / "out.txt"
+            out_path.write_text("out")
+            t.log_artifact(out_path, key="out", direction="output")
+
+            in_path = t.run_dir / "in.txt"
+            in_path.write_text("in")
+            t.log_artifact(in_path, key="in", direction="input")
+
+            monkeypatch.setattr(
+                tracker.persistence, "sync_run_with_links", counting_persistence_bulk
+            )
+            monkeypatch.setattr(tracker.db, "link_artifacts_to_run_bulk", counting_bulk)
+            monkeypatch.setattr(tracker.db, "link_artifact_to_run", counting_single)
+
+    assert persistence_bulk_calls
+    assert {direction for _, direction in persistence_bulk_calls} == {"output"}
+    assert bulk_calls
+    assert {direction for _, direction in bulk_calls} == {"input"}
+    assert single_calls == 0
 
 
 def test_scenario_run_supports_options_objects(tracker):

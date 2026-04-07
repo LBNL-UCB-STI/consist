@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 _VALID_MATERIALIZE_ON_MISSING = {"warn", "raise"}
 _VALID_MATERIALIZE_DB_FALLBACK = {"never", "if_ingested"}
+CanonicalRunMetaField = Literal["stage", "phase"]
 
 
 def _normalize_materialize_output_keys(
@@ -59,6 +60,25 @@ def _validate_materialize_option(
     if value not in allowed:
         allowed_display = ", ".join(repr(item) for item in sorted(allowed))
         raise ValueError(f"{name} must be one of: {allowed_display}")
+
+
+def resolve_canonical_run_meta_field(
+    run: "Run", field: CanonicalRunMetaField
+) -> Optional[str]:
+    """
+    Resolve a canonical run field with fallback to legacy mirrored metadata.
+
+    Canonical ``Run`` columns take precedence. ``run.meta`` is only consulted for
+    compatibility with older rows or snapshot payloads that predate the schema
+    change.
+    """
+    canonical_value = getattr(run, field, None)
+    if isinstance(canonical_value, str):
+        return canonical_value
+
+    meta = run.meta if isinstance(run.meta, dict) else {}
+    meta_value = meta.get(field)
+    return meta_value if isinstance(meta_value, str) else None
 
 
 class RunArtifactLink(SQLModel, table=True):
@@ -105,6 +125,8 @@ class Run(SQLModel, table=True):
         description (Optional[str]): Human-readable description of the run's purpose or outcome.
         year (Optional[int]): The simulation or data year, if applicable.
         iteration (Optional[int]): The iteration number, if applicable.
+        stage (Optional[str]): The workflow stage, if applicable.
+        phase (Optional[str]): The lifecycle phase, if applicable.
         tags (List[str]): A list of string labels for categorization and filtering (e.g., ["production", "urbansim"]).
         config_hash (Optional[str]): A hash of the run's configuration, used for caching.
         git_hash (Optional[str]): The Git commit hash of the code version used for the run.
@@ -138,6 +160,8 @@ class Run(SQLModel, table=True):
     )
     year: Optional[int] = Field(default=None, index=True)
     iteration: Optional[int] = Field(default=None, index=True)
+    stage: Optional[str] = Field(default=None, index=True)
+    phase: Optional[str] = Field(default=None, index=True)
 
     # Tags (for filtering and categorization)
     # Note: DuckDB supports arrays natively. For SQLite compatibility, this would need JSON storage.
@@ -214,8 +238,8 @@ class Run(SQLModel, table=True):
             "model": self.model_name,
             "year": self.year,
             "iteration": self.iteration,
-            "phase": meta.get("phase"),
-            "stage": meta.get("stage"),
+            "phase": resolve_canonical_run_meta_field(self, "phase"),
+            "stage": resolve_canonical_run_meta_field(self, "stage"),
             "cache_epoch": meta.get("cache_epoch"),
             "cache_version": meta.get("cache_version"),
         }

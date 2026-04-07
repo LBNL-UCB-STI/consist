@@ -39,6 +39,9 @@ consist db purge RUN_ID --delete-ingested-data --prune-cache --yes --db-path ./p
 
 ### `minimal`
 - Restores baseline provenance tables (`run`, `artifact`, `run_artifact_link`).
+- Restores canonical run dimensions such as `stage` and `phase` when they are
+  present in the JSON snapshot metadata, while keeping the legacy `run.meta`
+  mirror for compatibility.
 - Best for core recovery when optional index tables are not required.
 
 ### `full`
@@ -51,6 +54,9 @@ consist db purge RUN_ID --delete-ingested-data --prune-cache --yes --db-path ./p
 - Restoration is compatibility-gated against table schema and intentionally
   best-effort. Missing optional structures are skipped rather than treated as
   fatal rebuild errors.
+- This is the supported restore path for historical snapshots; it rebuilds the
+  DB from JSON run records rather than depending on a separate
+  `Run.from_snapshot()` API.
 
 Example:
 
