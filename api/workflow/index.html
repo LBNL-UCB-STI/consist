@@ -3346,6 +3346,11 @@ step surfaces (<code>ScenarioContext.run(...)</code> / <code>ScenarioContext.tra
 </span></code></pre></div>
 <p><code>config_plan</code> and <code>hash_inputs</code> are not accepted on scenario step run/trace
 surfaces. Use <code>adapter</code> and <code>identity_inputs</code>.</p>
+<p><code>Tracker.scenario(...)</code> and <code>consist.scenario(...)</code> also accept
+<code>step_tags=[...]</code> and <code>step_facet={...}</code> to apply default tags/facets to every
+child step in the scenario. These defaults apply to <code>run(...)</code> and <code>trace(...)</code>
+children only, not to the scenario header itself, and per-step values take
+precedence on conflicts.</p>
 <h2 id="bindingresult-execution-envelopes">BindingResult execution envelopes<a class="headerlink" href="#bindingresult-execution-envelopes" title="Permanent link">&para;</a></h2>
 <p><code>ScenarioContext.run(...)</code> also accepts <code>binding=BindingResult(...)</code> for
 orchestrator-facing code that has already resolved a step's explicit inputs,
