@@ -1880,7 +1880,13 @@ def test_db_purge_dry_run_json_output_is_parseable(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
-    assert set(payload.keys()) == {"plan", "executed", "ingested_data_skipped"}
+    assert set(payload.keys()) == {
+        "plan",
+        "executed",
+        "ingested_data_skipped",
+        "skipped_unsafe_json_files",
+        "skipped_unsafe_disk_files",
+    }
     assert payload["executed"] is False
     assert payload["plan"]["run_ids"] == ["cli_run"]
 
@@ -1894,6 +1900,8 @@ def test_db_purge_passes_prune_cache_flag_to_maintenance(tmp_path, monkeypatch):
             orphaned_artifact_ids=[],
             json_files=[],
             disk_files=[],
+            unsafe_json_files=[],
+            unsafe_disk_files=[],
             ingested_data={},
             ingested_table_modes={},
         ),
@@ -1922,6 +1930,7 @@ def test_db_purge_passes_prune_cache_flag_to_maintenance(tmp_path, monkeypatch):
     kwargs = maintenance.purge.call_args.kwargs
     assert kwargs["delete_ingested_data"] is False
     assert kwargs["prune_cache"] is True
+    assert kwargs["unsafe_delete_targets"] == "fail"
 
 
 def test_db_purge_non_dry_run_with_yes_executes(tmp_path, monkeypatch):
@@ -1989,6 +1998,8 @@ def test_db_purge_confirmation_shows_prune_cache_noop_when_ingested_delete_disab
         orphaned_artifact_ids=[],
         json_files=[],
         disk_files=[],
+        unsafe_json_files=[],
+        unsafe_disk_files=[],
         ingested_data={},
         ingested_table_modes={},
     )
@@ -2025,6 +2036,8 @@ def test_db_purge_confirmation_shows_enabled_ingested_rows_and_prune_cache(
         orphaned_artifact_ids=[],
         json_files=[],
         disk_files=[],
+        unsafe_json_files=[],
+        unsafe_disk_files=[],
         ingested_data={
             "global_tables.run_scoped_table": 4,
             "global_tables.run_link_table": 10,
@@ -2059,6 +2072,66 @@ def test_db_purge_confirmation_shows_enabled_ingested_rows_and_prune_cache(
     assert "ingested_global=enabled(rows~14)" in result.stdout
     assert "prune_cache=enabled" in result.stdout
     maintenance.purge.assert_not_called()
+
+
+def test_db_purge_invalid_unsafe_delete_targets_option_returns_usage_error(tmp_path):
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "purge",
+            "cli_run",
+            "--unsafe-delete-targets",
+            "nope",
+            "--db-path",
+            str(tmp_path / "target.duckdb"),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "--unsafe-delete-targets must be either 'fail' or 'skip'" in result.stdout
+
+
+def test_db_purge_passes_skip_override_to_maintenance(tmp_path, monkeypatch):
+    maintenance = MagicMock()
+    maintenance.purge.return_value = PurgeResult(
+        plan=PurgePlan(
+            run_ids=["cli_run"],
+            child_run_ids=[],
+            orphaned_artifact_ids=[],
+            json_files=[],
+            disk_files=[],
+            unsafe_json_files=[],
+            unsafe_disk_files=[Path("/tmp/blocked")],
+            ingested_data={},
+            ingested_table_modes={},
+        ),
+        executed=True,
+        ingested_data_skipped=False,
+        skipped_unsafe_disk_files=[Path("/tmp/blocked")],
+    )
+    monkeypatch.setattr(
+        "consist.cli._maintenance_service", lambda _db_path: maintenance
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "db",
+            "purge",
+            "cli_run",
+            "--yes",
+            "--unsafe-delete-targets",
+            "skip",
+            "--db-path",
+            str(tmp_path / "target.duckdb"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    kwargs = maintenance.purge.call_args.kwargs
+    assert kwargs["unsafe_delete_targets"] == "skip"
+    assert "Skipped unsafe filesystem deletion target" in result.stdout
 
 
 def test_root_help_includes_command_group_descriptions():
