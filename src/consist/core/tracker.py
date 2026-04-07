@@ -1685,6 +1685,8 @@ class Tracker:
         config: Optional[Dict[str, Any]] = None,
         tags: Optional[List[str]] = None,
         model: str = "scenario",
+        step_tags: Optional[List[str]] = None,
+        step_facet: Optional[Dict[str, Any]] = None,
         step_cache_hydration: Optional[str] = None,
         name_template: Optional[str] = None,
         cache_epoch: Optional[int] = None,
@@ -1713,6 +1715,16 @@ class Tracker:
             Tags for the scenario. "scenario_header" is automatically appended.
         model : str, default "scenario"
             The model name for the header run.
+        step_tags : Optional[List[str]], optional
+            Default tags applied to every child ``scenario.run(...)`` and
+            ``scenario.trace(...)`` call. These do not apply to the scenario
+            header run itself. Per-step ``tags=...`` values are preserved and
+            take precedence when duplicates exist.
+        step_facet : Optional[Dict[str, Any]], optional
+            Default facet mapping merged into every child ``scenario.run(...)``
+            and ``scenario.trace(...)`` call. These defaults do not apply to
+            the scenario header run itself. Per-step ``facet=...`` values win
+            on key collisions.
         step_cache_hydration : Optional[str], optional
             Default cache hydration policy for all scenario steps unless overridden
             in a specific `scenario.trace(...)` or `scenario.run(...)`.
@@ -1748,6 +1760,8 @@ class Tracker:
             config,
             tags,
             model,
+            step_tags=step_tags,
+            step_facet=step_facet,
             step_cache_hydration=step_cache_hydration,
             name_template=name_template,
             cache_epoch=cache_epoch,
@@ -1812,6 +1826,7 @@ class Tracker:
         model: Optional[str] = None,
         status: Optional[str] = None,
         parent_id: Optional[str] = None,
+        facet: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         limit: int = 100,
         index_by: Optional[Union[str, IndexBySpec]] = None,
@@ -1838,6 +1853,9 @@ class Tracker:
             Filter by run status (e.g., "completed", "failed").
         parent_id : Optional[str], optional
             Filter by scenario/header parent id.
+        facet : Optional[Dict[str, Any]], optional
+            Filter by exact matches against persisted run facet values. Nested
+            mappings are matched by their flattened key paths.
         metadata : Optional[Dict[str, Any]], optional
             Filter by exact matches in `Run.meta` (client-side filter).
         limit : int, default 100
@@ -1872,6 +1890,7 @@ class Tracker:
             model=model,
             status=status,
             parent_id=parent_id,
+            facet=facet,
             metadata=metadata,
             limit=limit,
             index_by=index_by,
@@ -1959,11 +1978,14 @@ class Tracker:
         model: Optional[str] = None,
         status: Optional[str] = None,
         year: Optional[int] = None,
+        iteration: Optional[int] = None,
         stage: Optional[str] = None,
         phase: Optional[str] = None,
         tags: Optional[List[str]] = None,
+        facet: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         limit: int = 10_000,
+        name: Optional[str] = None,
     ) -> Run:
         """
         Return the most recent run matching the filters.
@@ -1982,27 +2004,36 @@ class Tracker:
             Filter by run status.
         year : Optional[int], optional
             Filter by run year.
+        iteration : Optional[int], optional
+            Filter by run iteration.
         stage : Optional[str], optional
             Filter by run stage.
         phase : Optional[str], optional
             Filter by run phase.
         tags : Optional[List[str]], optional
             Filter runs that contain all provided tags.
+        facet : Optional[Dict[str, Any]], optional
+            Filter by exact matches against persisted run facet values.
         metadata : Optional[Dict[str, Any]], optional
             Filter by exact matches in ``Run.meta`` (client-side filter).
         limit : int, default 10_000
             Maximum number of runs to consider.
+        name : Optional[str], optional
+            Filter by run description/name alias.
         """
         return self.queries.find_latest_run(
             parent_id=parent_id,
             model=model,
             status=status,
             year=year,
+            iteration=iteration,
             stage=stage,
             phase=phase,
             tags=tags,
+            facet=facet,
             metadata=metadata,
             limit=limit,
+            name=name,
         )
 
     def get_latest_run_id(self, **kwargs) -> str:

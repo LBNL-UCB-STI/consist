@@ -10,6 +10,7 @@ from typing import (
     Dict,
     Any,
     Callable,
+    Literal,
     Mapping,
     Iterator,
     Union,
@@ -381,6 +382,8 @@ class ScenarioContext:
         self.model = model
         self.config_arg = config or {}
         self.tags = tags or []
+        self._step_tags = self._coerce_step_tags(kwargs.pop("step_tags", None))
+        self._step_facet = kwargs.pop("step_facet", None)
         self.kwargs = kwargs
         self.step_cache_hydration = step_cache_hydration
         self.name_template = name_template
@@ -597,6 +600,39 @@ class ScenarioContext:
         if isinstance(value, str):
             return [value]
         return list(value)
+
+    def _coerce_step_tags(self, value: Optional[Iterable[str]]) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raise TypeError("step_tags must be an iterable of strings, not a str.")
+        return list(value)
+
+    def _merge_step_tags(self, tags: Optional[List[str]]) -> Optional[List[str]]:
+        merged: list[str] = []
+        seen: set[str] = set()
+
+        for source in (tags, self._step_tags):
+            if not source:
+                continue
+            for tag in source:
+                if tag in seen:
+                    continue
+                seen.add(tag)
+                merged.append(tag)
+
+        return merged or None
+
+    def _merge_step_facet(self, facet: Optional[FacetLike]) -> Optional[FacetLike]:
+        if self._step_facet is None and facet is None:
+            return None
+
+        merged: Dict[str, Any] = {}
+        if self._step_facet is not None:
+            merged.update(self._coerce_mapping(self._step_facet, "step_facet"))
+        if facet is not None:
+            merged.update(self._coerce_mapping(facet, "facet"))
+        return self.tracker.identity.normalize_json(merged)
 
     def _resolve_input_value(self, value: RunInputRef) -> ArtifactRef:
         def _resolve_coupler_ref(ref: str) -> Optional[ArtifactRef]:
@@ -921,6 +957,8 @@ class ScenarioContext:
         runtime_kwargs_dict = resolved_invocation.runtime_kwargs
         resolved_inject_context = resolved_invocation.inject_context
         cache_epoch = resolved_invocation.cache_epoch
+        resolved_tags = self._merge_step_tags(resolved_tags)
+        resolved_facet = self._merge_step_facet(resolved_facet)
 
         if run_id is None:
             run_id = f"{self.run_id}_{resolved_name}_{uuid.uuid4().hex[:8]}"
@@ -1068,57 +1106,132 @@ class ScenarioContext:
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
 
-        resolved_model = model or name
+        output_mismatch_policy = cast(
+            Literal["warn", "error", "ignore"], output_mismatch
+        )
+        output_missing_policy = cast(Literal["warn", "error", "ignore"], output_missing)
+
+        resolved_invocation = resolve_run_invocation(
+            fn=None,
+            name=name,
+            model=model,
+            description=description,
+            config=config,
+            adapter=adapter,
+            identity_inputs=identity_inputs,
+            inputs=inputs,
+            input_keys=input_keys,
+            optional_input_keys=optional_input_keys,
+            tags=tags,
+            facet=facet,
+            facet_from=facet_from,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
+            year=year,
+            iteration=iteration,
+            phase=None,
+            stage=None,
+            outputs=outputs,
+            output_paths=output_paths,
+            cache_options=CacheOptions(
+                cache_mode=cache_mode,
+                cache_hydration=cache_hydration,
+                cache_version=cache_version,
+                cache_epoch=cache_epoch,
+                validate_cached_outputs=validate_cached_outputs,
+                code_identity=code_identity,
+                code_identity_extra_deps=code_identity_extra_deps,
+            ),
+            output_policy=OutputPolicyOptions(
+                output_mismatch=output_mismatch_policy,
+                output_missing=output_missing_policy,
+            ),
+            execution_options=None,
+            default_name_template=self.name_template,
+            allow_template=True,
+            apply_step_defaults=True,
+            consist_settings=self.tracker.settings,
+            consist_workspace=self.tracker.run_dir,
+            consist_state=self._header_record,
+            missing_name_error="ScenarioContext.trace requires a step name.",
+            python_missing_fn_error="Tracker.trace requires a callable fn.",
+            allow_python_without_fn=True,
+        )
+
+        resolved_name = resolved_invocation.name
+        resolved_model = resolved_invocation.model
+        resolved_description = resolved_invocation.description
+        resolved_config = resolved_invocation.config
+        resolved_adapter = resolved_invocation.adapter
+        resolved_identity_inputs = resolved_invocation.identity_inputs
+        resolved_tags = self._merge_step_tags(resolved_invocation.tags)
+        resolved_facet = self._merge_step_facet(resolved_invocation.facet)
+        resolved_outputs = resolved_invocation.outputs
+        resolved_output_paths = self._resolve_output_paths(
+            resolved_invocation.output_paths
+        )
+        resolved_inputs = self._resolve_inputs(
+            resolved_invocation.inputs,
+            resolved_invocation.input_keys,
+            resolved_invocation.optional_input_keys,
+        )
+        resolved_facet_from = resolved_invocation.facet_from
+        resolved_facet_schema_version = resolved_invocation.facet_schema_version
+        resolved_cache_mode = resolved_invocation.cache_mode
+        resolved_cache_hydration = resolved_invocation.cache_hydration
+        resolved_cache_version = resolved_invocation.cache_version
+        resolved_validate_cached_outputs = resolved_invocation.validate_cached_outputs
+        resolved_cache_epoch = resolved_invocation.cache_epoch
+
         if run_id is None:
-            run_id = f"{self.run_id}_{name}"
+            run_id = f"{self.run_id}_{resolved_name}"
         if parent_run_id is None:
             parent_run_id = self.run_id
 
         self._first_step_started = True
-        self._last_step_name = name
+        self._last_step_name = resolved_name
 
-        effective_cache_hydration = cache_hydration or self.step_cache_hydration
-
-        resolved_inputs = self._resolve_inputs(inputs, input_keys, optional_input_keys)
-        resolved_output_paths = self._resolve_output_paths(output_paths)
+        effective_cache_hydration = (
+            resolved_cache_hydration or self.step_cache_hydration
+        )
 
         try:
             self.tracker._active_coupler = self.coupler
             with self.tracker.trace(
-                name=name,
+                name=resolved_name,
                 run_id=run_id,
                 model=resolved_model,
-                description=description,
-                config=config,
-                adapter=adapter,
+                description=resolved_description,
+                config=resolved_config,
+                adapter=resolved_adapter,
                 config_plan_ingest=config_plan_ingest,
                 config_plan_profile_schema=config_plan_profile_schema,
                 inputs=resolved_inputs,
                 input_keys=None,
                 optional_input_keys=None,
                 depends_on=depends_on,
-                tags=tags,
-                facet=facet,
-                facet_from=facet_from,
-                facet_schema_version=facet_schema_version,
-                facet_index=facet_index,
-                identity_inputs=identity_inputs,
+                tags=resolved_tags,
+                facet=resolved_facet,
+                facet_from=resolved_facet_from,
+                facet_schema_version=resolved_facet_schema_version,
+                facet_index=resolved_invocation.facet_index,
+                identity_inputs=resolved_identity_inputs,
                 year=year,
                 iteration=iteration,
                 parent_run_id=parent_run_id,
-                outputs=outputs,
+                outputs=resolved_outputs,
                 output_paths=resolved_output_paths,
                 capture_dir=capture_dir,
                 capture_pattern=capture_pattern,
-                cache_mode=cache_mode,
+                cache_mode=resolved_cache_mode,
                 cache_hydration=effective_cache_hydration,
-                cache_version=cache_version,
-                cache_epoch=cache_epoch,
-                validate_cached_outputs=validate_cached_outputs,
-                code_identity=code_identity,
-                code_identity_extra_deps=code_identity_extra_deps,
-                output_mismatch=output_mismatch,
-                output_missing=output_missing,
+                cache_version=resolved_cache_version,
+                cache_epoch=resolved_cache_epoch,
+                validate_cached_outputs=resolved_validate_cached_outputs,
+                code_identity=resolved_invocation.code_identity,
+                code_identity_extra_deps=resolved_invocation.code_identity_extra_deps,
+                output_mismatch=resolved_invocation.output_mismatch,
+                output_missing=resolved_invocation.output_missing,
             ) as t:
                 if t.is_cached:
                     current_consist = t.current_consist

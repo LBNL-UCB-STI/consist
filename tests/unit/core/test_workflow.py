@@ -199,6 +199,83 @@ def test_scenario_trace_facet_from_config(tracker: Tracker):
     assert "extra" not in facet.facet_json
 
 
+def test_scenario_step_defaults_apply_to_child_steps_only(tracker: Tracker):
+    def step() -> None:
+        return None
+
+    with tracker.scenario(
+        "scen_step_defaults",
+        step_tags=["scenario:baseline", "seed:7"],
+        step_facet={"scenario_id": "baseline", "seed": 7},
+    ) as sc:
+        sc.run(
+            fn=step,
+            name="run_step",
+            run_id="scen_step_defaults_run_step",
+            tags=["custom", "scenario:baseline"],
+            facet={"seed": 8, "local": "run"},
+            cache_options=CacheOptions(cache_mode="overwrite"),
+        )
+
+        with sc.trace(
+            "trace_step",
+            run_id="scen_step_defaults_trace_step",
+            tags=["trace", "scenario:baseline"],
+            facet={"seed": 9, "local": "trace"},
+            cache_mode="overwrite",
+        ):
+            pass
+
+    header = tracker.get_run("scen_step_defaults")
+    assert header is not None
+    assert header.tags == ["scenario_header"]
+    assert "config_facet_id" not in (header.meta or {})
+
+    run_step = tracker.get_run("scen_step_defaults_run_step")
+    assert run_step is not None
+    assert run_step.tags == ["custom", "scenario:baseline", "seed:7"]
+    run_step_facet_id = run_step.meta["config_facet_id"]
+    run_step_facet = tracker.get_config_facet(run_step_facet_id)
+    assert run_step_facet is not None
+    assert run_step_facet.facet_json["scenario_id"] == "baseline"
+    assert run_step_facet.facet_json["seed"] == 8
+    assert run_step_facet.facet_json["local"] == "run"
+
+    trace_step = tracker.get_run("scen_step_defaults_trace_step")
+    assert trace_step is not None
+    assert trace_step.tags == ["trace", "scenario:baseline", "seed:7"]
+    trace_step_facet_id = trace_step.meta["config_facet_id"]
+    trace_step_facet = tracker.get_config_facet(trace_step_facet_id)
+    assert trace_step_facet is not None
+    assert trace_step_facet.facet_json["scenario_id"] == "baseline"
+    assert trace_step_facet.facet_json["seed"] == 9
+    assert trace_step_facet.facet_json["local"] == "trace"
+
+
+def test_scenario_step_facet_wins_over_facet_from_on_conflict(tracker: Tracker):
+    with tracker.scenario(
+        "scen_step_facet_conflict",
+        step_facet={"scenario_id": "baseline", "seed": 7},
+    ) as sc:
+        with sc.trace(
+            "trace_step",
+            run_id="scen_step_facet_conflict_trace_step",
+            config={"seed": 99, "sample": 0.2},
+            facet_from=["seed", "sample"],
+            cache_mode="overwrite",
+        ):
+            pass
+
+    trace_step = tracker.get_run("scen_step_facet_conflict_trace_step")
+    assert trace_step is not None
+    trace_step_facet_id = trace_step.meta["config_facet_id"]
+    trace_step_facet = tracker.get_config_facet(trace_step_facet_id)
+    assert trace_step_facet is not None
+    assert trace_step_facet.facet_json["scenario_id"] == "baseline"
+    assert trace_step_facet.facet_json["seed"] == 7
+    assert trace_step_facet.facet_json["sample"] == 0.2
+
+
 def test_step_log_dataframe_defaults_to_run_dir(tracker: Tracker):
     df = pd.DataFrame({"value": [1, 2, 3]})
     artifact = None

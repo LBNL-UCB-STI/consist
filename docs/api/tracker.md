@@ -39,8 +39,10 @@ print(latest.id if latest else None)
 
 `find_runs(...)` and `find_latest_run(...)` accept `stage=` and `phase=` as
 first-class workflow filters, alongside the existing run dimensions such as
-`year`, `iteration`, `model`, and `status`. Consist mirrors those values into
-`run.meta` for backward compatibility, but the canonical fields live on `Run`.
+`year`, `iteration`, `model`, and `status`. They also accept `facet=` for exact
+matches against persisted facet values. Consist mirrors the workflow values
+into `run.meta` for backward compatibility, but the canonical fields live on
+`Run`.
 
 For top-level wrappers around these methods, see [API Helpers](api_helpers.md).
 For grouped workflows, see [Workflow Contexts](workflow.md).

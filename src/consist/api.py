@@ -411,6 +411,8 @@ def scenario(
     tracker: Optional["Tracker"] = None,
     *,
     enabled: bool = True,
+    step_tags: Optional[list[str]] = None,
+    step_facet: Optional[dict[str, Any]] = None,
     **kwargs: Any,
 ):
     """
@@ -431,6 +433,15 @@ def scenario(
     enabled : bool, default True
         If False, returns a no-op context that executes functions without
         recording provenance, preserving the Scenario API ergonomics for debugging.
+    step_tags : Optional[list[str]], optional
+        Default tags applied to child ``scenario.run(...)`` and
+        ``scenario.trace(...)`` calls. These defaults do not apply to the
+        scenario header run itself.
+    step_facet : Optional[dict[str, Any]], optional
+        Default facet mapping applied to child ``scenario.run(...)`` and
+        ``scenario.trace(...)`` calls. These defaults do not apply to the
+        scenario header run itself, and per-step ``facet=...`` values take
+        precedence on key collisions.
     **kwargs : Any
         Additional metadata (e.g., tags, config) forwarded to the header run.
 
@@ -440,10 +451,20 @@ def scenario(
         An active scenario context with an internal Coupler for artifact chaining.
     """
     if not enabled:
-        yield NoopScenarioContext(name, **kwargs)
+        yield NoopScenarioContext(
+            name,
+            step_tags=step_tags,
+            step_facet=step_facet,
+            **kwargs,
+        )
         return
     tr = _resolve_tracker(tracker)
-    with tr.scenario(name, **kwargs) as sc:
+    with tr.scenario(
+        name,
+        step_tags=step_tags,
+        step_facet=step_facet,
+        **kwargs,
+    ) as sc:
         yield sc
 
 
@@ -1730,7 +1751,8 @@ def find_runs(
         Tracker instance to query; defaults to the active tracker.
     **filters : Any
         Filter values forwarded to ``Tracker.find_runs``. This includes
-        workflow filters such as ``stage`` and ``phase``.
+        workflow filters such as ``stage`` and ``phase`` and facet predicates
+        via ``facet={...}``.
 
     Returns
     -------
@@ -1751,7 +1773,8 @@ def find_latest_run(tracker: Optional["Tracker"] = None, **filters: Any) -> Run:
         Tracker instance to query; defaults to the active tracker.
     **filters : Any
         Filter values forwarded to ``Tracker.find_latest_run``. This includes
-        workflow filters such as ``stage`` and ``phase``.
+        workflow filters such as ``stage`` and ``phase`` and facet predicates
+        via ``facet={...}``.
 
     Returns
     -------

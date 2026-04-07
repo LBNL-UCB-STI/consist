@@ -39,6 +39,7 @@ from consist.core.schema_compat import (
     apply_run_stage_phase_compatibility,
     backfill_artifact_content_ids as compat_backfill_artifact_content_ids,
 )
+from consist.core.facet_common import flatten_facet_values
 from consist.models.artifact import Artifact, ArtifactContent
 from consist.models.artifact_facet import ArtifactFacet
 from consist.models.artifact_kv import ArtifactKV
@@ -1966,10 +1967,51 @@ class DatabaseManager:
         model: Optional[str] = None,
         status: Optional[str] = None,
         parent_id: Optional[str] = None,
+        facet: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         limit: int = 100,
         name: Optional[str] = None,
     ) -> List[Run]:
+        def _apply_facet_predicates(statement: Any) -> Any:
+            if not facet:
+                return statement
+
+            for index, predicate in enumerate(
+                flatten_facet_values(facet_dict=facet, include_json_leaves=True)
+            ):
+                kv = aliased(RunConfigKV, name=f"run_config_kv_{index}")
+                statement = statement.join(
+                    kv,
+                    Run.id == kv.run_id,
+                )
+                statement = statement.where(kv.key == predicate.key_path)
+                if model is not None:
+                    statement = statement.where(kv.namespace == model)
+
+                if predicate.value_type == "null":
+                    statement = statement.where(kv.value_type == "null")
+                elif predicate.value_type == "bool":
+                    statement = statement.where(kv.value_type == "bool")
+                    statement = statement.where(kv.value_bool == predicate.value_bool)
+                elif predicate.value_type == "int":
+                    value_num = predicate.value_num
+                    assert value_num is not None
+                    statement = statement.where(kv.value_type == "int")
+                    statement = statement.where(kv.value_num == float(value_num))
+                elif predicate.value_type == "float":
+                    value_num = predicate.value_num
+                    assert value_num is not None
+                    statement = statement.where(kv.value_type == "float")
+                    statement = statement.where(kv.value_num == float(value_num))
+                elif predicate.value_type == "str":
+                    statement = statement.where(kv.value_type == "str")
+                    statement = statement.where(kv.value_str == predicate.value_str)
+                else:
+                    statement = statement.where(kv.value_type == "json")
+                    statement = statement.where(kv.value_json == predicate.value_json)
+
+            return statement
+
         def _query():
             with self.session_scope() as session:
                 statement = select(Run).order_by(col(Run.created_at).desc())
@@ -1994,6 +2036,8 @@ class DatabaseManager:
                 if tags:
                     for tag in tags:
                         statement = statement.where(col(Run.tags).contains(tag))
+
+                statement = _apply_facet_predicates(statement)
 
                 results = session.exec(statement.limit(limit)).all()
 

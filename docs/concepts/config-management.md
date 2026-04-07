@@ -96,6 +96,22 @@ Facet persistence creates indexed tables:
 
 Flattened keys use dot-notation; dots in raw key names are escaped as `\.`.
 
+Primary run lookup APIs also understand facet predicates:
+
+```python
+tracker.find_runs(
+    model="beam",
+    year=2030,
+    facet={"scenario_id": "baseline", "seed": 42},
+)
+
+tracker.find_latest_run(
+    model="beam",
+    year=2030,
+    facet={"scenario_id": "baseline", "seed": 42},
+)
+```
+
 ```python
 tracker.find_runs_by_facet_kv(
     namespace="beam",
