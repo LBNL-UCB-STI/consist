@@ -2712,6 +2712,19 @@ via options objects.</p>
 <p>Use <code>run.identity_summary</code> to debug cache identity composition
 (<code>config_hash</code>, <code>input_hash</code>, <code>code_hash</code>, adapter metadata, and
 <code>identity_inputs</code> digests).</p>
+<p>If you are diagnosing a cache miss, also inspect
+<code>run.meta["cache_miss_explanation"]</code> on the completed run. It records the
+likely reason the run missed cache, such as config drift, input drift, code
+drift, validation failure, or the absence of a similar prior run.</p>
+<p>The payload is intentionally compact:</p>
+<ul>
+<li><code>reason</code> gives the broad miss category.</li>
+<li><code>candidate_run_id</code> points to the prior completed run that was compared, when
+  one exists.</li>
+<li><code>details</code> carries the concrete evidence, such as changed config keys, changed
+  input keys, code-identity drift, or <code>fallbacks_used</code> when the explainer had
+  to lean on fallback data.</li>
+</ul>
 
 
 <div class="doc doc-object doc-class">
