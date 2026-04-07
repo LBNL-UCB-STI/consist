@@ -83,6 +83,88 @@ def test_log_artifacts_facets_are_deduplicated_by_json_hash(
     assert len({row.artifact_id for row in kv_rows}) == 2
 
 
+def test_log_output_uses_single_transaction_for_faceted_artifacts(
+    tracker, run_dir: Path, monkeypatch
+) -> None:
+    out = run_dir / "combined_facet.parquet"
+    out.write_text("data")
+
+    combined_calls = 0
+    sync_calls = 0
+    facet_calls = 0
+
+    original_combined = tracker.db.sync_artifact_with_facet_bundle
+    original_sync = tracker.db.sync_artifact
+    original_facet = tracker.db.persist_artifact_facet_bundle
+
+    def counting_combined(*args, **kwargs):
+        nonlocal combined_calls
+        combined_calls += 1
+        return original_combined(*args, **kwargs)
+
+    def counting_sync(*args, **kwargs):
+        nonlocal sync_calls
+        sync_calls += 1
+        return original_sync(*args, **kwargs)
+
+    def counting_facet(*args, **kwargs):
+        nonlocal facet_calls
+        facet_calls += 1
+        return original_facet(*args, **kwargs)
+
+    monkeypatch.setattr(
+        tracker.db, "sync_artifact_with_facet_bundle", counting_combined
+    )
+    monkeypatch.setattr(tracker.db, "sync_artifact", counting_sync)
+    monkeypatch.setattr(tracker.db, "persist_artifact_facet_bundle", counting_facet)
+
+    with tracker.start_run("run_combined_artifact_facet", "beam"):
+        tracker.log_output(
+            out,
+            key="combined_facet",
+            facet={"artifact_family": "beam_output", "iteration": 1},
+            facet_index=True,
+        )
+
+    assert combined_calls == 1
+    assert sync_calls == 0
+    assert facet_calls == 0
+
+
+def test_log_output_without_facet_keeps_legacy_sync_path(
+    tracker, run_dir: Path, monkeypatch
+) -> None:
+    out = run_dir / "plain_output.parquet"
+    out.write_text("data")
+
+    combined_calls = 0
+    sync_calls = 0
+
+    original_combined = tracker.db.sync_artifact_with_facet_bundle
+    original_sync = tracker.db.sync_artifact
+
+    def counting_combined(*args, **kwargs):
+        nonlocal combined_calls
+        combined_calls += 1
+        return original_combined(*args, **kwargs)
+
+    def counting_sync(*args, **kwargs):
+        nonlocal sync_calls
+        sync_calls += 1
+        return original_sync(*args, **kwargs)
+
+    monkeypatch.setattr(
+        tracker.db, "sync_artifact_with_facet_bundle", counting_combined
+    )
+    monkeypatch.setattr(tracker.db, "sync_artifact", counting_sync)
+
+    with tracker.start_run("run_plain_output", "beam"):
+        tracker.log_output(out, key="plain_output")
+
+    assert combined_calls == 0
+    assert sync_calls == 1
+
+
 def test_register_artifact_facet_parser_supports_legacy_keys(
     tracker, run_dir: Path
 ) -> None:

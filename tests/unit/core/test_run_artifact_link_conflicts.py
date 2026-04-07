@@ -2,6 +2,7 @@ import logging
 
 from sqlmodel import Session, select
 
+from consist.models.artifact import Artifact
 from consist.models.run import RunArtifactLink
 
 
@@ -78,3 +79,31 @@ def test_run_artifact_link_distinct_input_and_output_no_warning(
 
     assert len(links) == 2
     assert sorted([link.direction for link in links]) == ["input", "output"]
+
+
+def test_log_artifact_syncs_artifact_and_link_in_one_db_step(
+    tracker, tmp_path, monkeypatch
+):
+    path = tmp_path / "single.csv"
+    path.write_text("x,y\n1,2\n", encoding="utf-8")
+
+    def _forbid_separate_link(*args, **kwargs):
+        raise AssertionError("sync_artifact should not call link_artifact_to_run")
+
+    monkeypatch.setattr(tracker.db, "link_artifact_to_run", _forbid_separate_link)
+
+    with tracker.start_run(run_id="single_sync_run", model="unit_test"):
+        artifact = tracker.log_artifact(path, key="single", direction="output")
+
+    with Session(tracker.engine) as session:
+        persisted_artifact = session.get(Artifact, artifact.id)
+        links = session.exec(
+            select(RunArtifactLink).where(
+                RunArtifactLink.run_id == "single_sync_run",
+                RunArtifactLink.artifact_id == artifact.id,
+            )
+        ).all()
+
+    assert persisted_artifact is not None
+    assert len(links) == 1
+    assert links[0].direction == "output"

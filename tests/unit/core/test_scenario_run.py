@@ -300,6 +300,51 @@ def test_scenario_trace_updates_coupler_after_exit(tracker):
             assert sc.coupler.require("alpha").id == alpha.id
 
 
+def test_scenario_trace_batches_parent_link_inserts(tracker, monkeypatch):
+    persistence_bulk_calls: list[tuple[list[object], str]] = []
+    bulk_calls: list[tuple[list[object], str]] = []
+    single_calls = 0
+
+    original_persistence_bulk = tracker.persistence.sync_run_with_links
+    original_bulk = tracker.db.link_artifacts_to_run_bulk
+    original_single = tracker.db.link_artifact_to_run
+
+    def counting_persistence_bulk(run, *, artifact_ids, direction) -> None:
+        persistence_bulk_calls.append((list(artifact_ids), direction))
+        original_persistence_bulk(run, artifact_ids=artifact_ids, direction=direction)
+
+    def counting_bulk(*, artifact_ids, run_id, direction) -> None:
+        bulk_calls.append((list(artifact_ids), direction))
+        original_bulk(artifact_ids=artifact_ids, run_id=run_id, direction=direction)
+
+    def counting_single(artifact_id, run_id, direction) -> None:
+        nonlocal single_calls
+        single_calls += 1
+        original_single(artifact_id, run_id, direction)
+
+    with tracker.scenario("scen_bulk_links") as sc:
+        with sc.trace(name="stage") as t:
+            out_path = t.run_dir / "out.txt"
+            out_path.write_text("out")
+            t.log_artifact(out_path, key="out", direction="output")
+
+            in_path = t.run_dir / "in.txt"
+            in_path.write_text("in")
+            t.log_artifact(in_path, key="in", direction="input")
+
+            monkeypatch.setattr(
+                tracker.persistence, "sync_run_with_links", counting_persistence_bulk
+            )
+            monkeypatch.setattr(tracker.db, "link_artifacts_to_run_bulk", counting_bulk)
+            monkeypatch.setattr(tracker.db, "link_artifact_to_run", counting_single)
+
+    assert persistence_bulk_calls
+    assert {direction for _, direction in persistence_bulk_calls} == {"output"}
+    assert bulk_calls
+    assert {direction for _, direction in bulk_calls} == {"input"}
+    assert single_calls == 0
+
+
 def test_scenario_run_supports_options_objects(tracker):
     calls: list[str] = []
 
