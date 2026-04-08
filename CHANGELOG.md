@@ -5,7 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
-## [Unreleased]
+## [0.1.1] - 2026-04-08
+
+### Added
+
+- Add shared artifact content identity, reducing duplicate persistence work and
+  deprecating output-row reuse semantics
+  by @zneedell ([#86](https://github.com/LBNL-UCB-STI/consist/pull/86)).
+- Add `MaterializationResult` and `materialize_run_outputs(...)` for cache-hit
+  hydration and output materialization workflows
+  by @zneedell ([#87](https://github.com/LBNL-UCB-STI/consist/pull/87)).
+- Add split metadata/data store support, including hot-data store loaders and
+  guardrails for single-store compatibility
+  by @zneedell ([#88](https://github.com/LBNL-UCB-STI/consist/pull/88)).
+- Add the `BindingResult` API for clearer access to resolved bound inputs and
+  outputs, with accompanying docs and test coverage
+  by @zneedell ([#89](https://github.com/LBNL-UCB-STI/consist/pull/89)).
+- Add cache-miss explainer details for config, input, and code mismatches,
+  with expanded docstrings and examples
+  by @zneedell ([#92](https://github.com/LBNL-UCB-STI/consist/pull/92)).
+- Add `facet={...}` filtering to `find_runs(...)` and `find_latest_run(...)`,
+  plus scenario-level `step_tags` / `step_facet` defaults for child
+  `run(...)` and `trace(...)` calls
+  by @zneedell ([#93](https://github.com/LBNL-UCB-STI/consist/pull/93)).
 
 ### Changed
 
@@ -14,6 +36,21 @@ The format is based on [Keep a Changelog], and this project adheres to
   `consist.find_latest_run(...)` helper. Legacy JSON metadata mirrors remain
   for compatibility, and DB rebuild paths restore canonical fields from
   snapshot metadata when available.
+  by @zneedell ([#91](https://github.com/LBNL-UCB-STI/consist/pull/91)).
+- Reduce DB overhead in hot runtime paths by batching repeated artifact
+  persistence, parent-link creation, facet/schema writes, and preferring
+  signature-first cache lookup with legacy fallback
+  by @zneedell ([#94](https://github.com/LBNL-UCB-STI/consist/pull/94)).
+- Clean up the docs surface, publish versioned docs with `mike`, and include
+  `pyarrow` in the base install for a smoother default environment
+  by @zneedell ([#90](https://github.com/LBNL-UCB-STI/consist/pull/90)).
+
+### Fixed
+
+- Prevent `consist db purge` from deleting files outside the active workspace
+  by @zneedell ([#95](https://github.com/LBNL-UCB-STI/consist/pull/95)).
+- Fix run-query ordering in CI and tighten docs/examples lint coverage
+  by @zneedell ([#90](https://github.com/LBNL-UCB-STI/consist/pull/90)).
 
 ## [0.1.0] - 2026-03-11
 
@@ -166,7 +203,9 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
 
-[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.1...HEAD
+
+[0.1.1]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.0...v0.1.1
 
 [0.1.0]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.0-beta.3...v0.1.0
 
