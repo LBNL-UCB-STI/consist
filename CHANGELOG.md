@@ -44,6 +44,10 @@ The format is based on [Keep a Changelog], and this project adheres to
 - Clean up the docs surface, publish versioned docs with `mike`, and include
   `pyarrow` in the base install for a smoother default environment
   by @zneedell ([#90](https://github.com/LBNL-UCB-STI/consist/pull/90)).
+- Expand the development and release-validation environment to include the
+  optional dependencies exercised by the non-heavy BEAM, NetCDF, OpenMatrix,
+  and Zarr test suites, and refresh the release runbook to sync that
+  environment before validation.
 
 ### Fixed
 
@@ -51,6 +55,8 @@ The format is based on [Keep a Changelog], and this project adheres to
   by @zneedell ([#95](https://github.com/LBNL-UCB-STI/consist/pull/95)).
 - Fix run-query ordering in CI and tighten docs/examples lint coverage
   by @zneedell ([#90](https://github.com/LBNL-UCB-STI/consist/pull/90)).
+- Fix optional dependency import handling in NetCDF/OpenMatrix ingestion so a
+  missing `zarr` install no longer disables `xarray`-backed ingestion paths.
 
 ## [0.1.0] - 2026-03-11
 
