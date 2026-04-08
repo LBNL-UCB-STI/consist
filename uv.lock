@@ -492,6 +492,7 @@ dependencies = [
     { name = "duckdb" },
     { name = "duckdb-engine" },
     { name = "pandas" },
+    { name = "pyarrow" },
     { name = "pydantic" },
     { name = "rich" },
     { name = "ruff" },
@@ -516,7 +517,6 @@ all = [
     { name = "h5py" },
     { name = "netcdf4" },
     { name = "openmatrix" },
-    { name = "pyarrow" },
     { name = "pyhocon" },
     { name = "pyyaml" },
     { name = "tables" },
@@ -533,7 +533,6 @@ bench = [
 dev = [
     { name = "dlt" },
     { name = "h5py" },
-    { name = "pyarrow" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-mock" },
@@ -560,7 +559,6 @@ hdf5 = [
 ]
 ingest = [
     { name = "dlt" },
-    { name = "pyarrow" },
 ]
 netcdf = [
     { name = "cftime" },
@@ -573,9 +571,6 @@ netcdf4 = [
 ]
 omx = [
     { name = "openmatrix" },
-]
-parquet = [
-    { name = "pyarrow" },
 ]
 spatial = [
     { name = "geopandas" },
@@ -603,7 +598,6 @@ bench = [
 dev = [
     { name = "dlt" },
     { name = "h5py" },
-    { name = "pyarrow" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-mock" },
@@ -656,10 +650,7 @@ requires-dist = [
     { name = "pandas-stubs", marker = "extra == 'typecheck'", specifier = "~=2.3.3" },
     { name = "polars", marker = "extra == 'bench'", specifier = ">=1.35.2" },
     { name = "psutil", marker = "extra == 'bench'", specifier = ">6.0.0" },
-    { name = "pyarrow", marker = "extra == 'all'", specifier = ">=22.0.0" },
-    { name = "pyarrow", marker = "extra == 'dev'", specifier = ">=22.0.0" },
-    { name = "pyarrow", marker = "extra == 'ingest'", specifier = ">=22.0.0" },
-    { name = "pyarrow", marker = "extra == 'parquet'", specifier = ">=22.0.0" },
+    { name = "pyarrow", specifier = ">=22.0.0" },
     { name = "pydantic", specifier = ">=2.12.4" },
     { name = "pyhocon", marker = "extra == 'all'", specifier = ">=0.3.60" },
     { name = "pyhocon", marker = "extra == 'beam'", specifier = ">=0.3.60" },
@@ -694,14 +685,13 @@ requires-dist = [
     { name = "zarr", marker = "extra == 'zarr'", specifier = ">=2.18,<3" },
     { name = "zensical", specifier = ">=0.0.32" },
 ]
-provides-extras = ["docker", "hdf5", "ingest", "activitysim", "beam", "netcdf", "netcdf4", "parquet", "spatial", "zarr", "omx", "examples", "typecheck", "all", "bench", "docs", "test", "dev"]
+provides-extras = ["docker", "hdf5", "ingest", "activitysim", "beam", "netcdf", "netcdf4", "spatial", "zarr", "omx", "examples", "typecheck", "all", "bench", "docs", "test", "dev"]
 
 [package.metadata.requires-dev]
 bench = [{ name = "psutil", specifier = ">=7.1.3" }]
 dev = [
     { name = "dlt", specifier = ">=1.21.0" },
     { name = "h5py", specifier = ">=3.15.1" },
-    { name = "pyarrow", specifier = ">=22.0.0" },
     { name = "pytest", specifier = ">=9.0.1" },
     { name = "pytest-cov", specifier = ">=7.0.0" },
     { name = "pytest-mock", specifier = ">=3.15.1" },

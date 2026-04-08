@@ -6,6 +6,10 @@ Consist has one recommended onboarding path:
 2. `trace(...)` for always-execute blocks with provenance
 3. `scenario(...)` to compose multi-step workflows from those two patterns
 
+This tutorial uses a `Tracker` instance for explicitness. Elsewhere in the docs
+you will also see the `consist.*` module-level helpers; they expose the same
+operations through a more concise entry point.
+
 ## Pattern 1: Cacheable Step (`run`)
 
 The same step can be expressed three ways. The recommended onboarding path is

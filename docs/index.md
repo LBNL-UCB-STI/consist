@@ -35,10 +35,8 @@ pipeline, then into deeper usage patterns.
     - Python 3.11+
     - Base install:
     `pip install consist`
-    - For the first workflow tutorial (Parquet writes):
-    run `pip install "consist[parquet]"`
     - See [Installation](getting-started/installation.md) for complete options,
-    including source installs and optional extras.
+      including source installs and optional extras.
 
 ## What is Consist?
 
