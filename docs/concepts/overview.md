@@ -136,6 +136,7 @@ If you prefer to receive a DataFrame directly instead of a path, use `input_bind
 
 ## Next Steps
 
+- **[Usage Guide](../usage-guide.md)** — Practical patterns for moving from the mental model to working code
 - **[Config Management](config-management.md)** — Understand the config vs. facet distinction and when to use each
 - **[Caching & Hydration](caching-and-hydration.md)** — Caching patterns and data recovery strategies
 - **[Data Materialization](data-materialization.md)** — When to ingest data and use hybrid views

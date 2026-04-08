@@ -12,7 +12,7 @@
 #
 # Read more: https://zensical.org/docs/setup/basics/#site_name
 site_name = "Consist"
-#repo_url = "https://github.com/LBNL-UCB-STI/consist"
+repo_url = "https://github.com/LBNL-UCB-STI/consist"
 
 # The site_description is included in the HTML head and should contain a
 # meaningful description of the site content for use by search engines.
@@ -168,7 +168,7 @@ features = [
     # With this feature enabled, Zensical will automatically hide parts
     # of the header when the user scrolls past a certain point.
     # https://zensical.org/docs/setup/header/#automatic-hiding
-    #    "header.autohide",
+    "header.autohide",
 
     # Turn on this feature to expand all collapsible sections in the
     # navigation sidebar by default.
@@ -312,6 +312,10 @@ filters = ["!^_"]
 ## ----------------------------------------------------------------------------
 ## The "extra" section contains miscellaneous settings.
 ## ----------------------------------------------------------------------------
+[project.extra.version]
+provider = "mike"
+default = "latest"
+
 [[project.extra.social]]
 icon = "fontawesome/brands/github"
 link = "https://github.com/LBNL-UCB-STI/consist"

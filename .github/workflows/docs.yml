@@ -1,27 +1,27 @@
 name: docs
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "docs/**"
-      - "src/**"
-      - "zensical.toml"
-      - "README.md"
-      - ".github/workflows/docs.yml"
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to publish docs for, e.g. v0.1.1"
+        required: true
+        type: string
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  build:
+  deploy:
+    if: github.event_name != 'release' || github.event.release.prerelease == false
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
 
       - name: Set up Python
         uses: actions/setup-python@82c7e631bb3cdc910f68e0081d67478d79c6982d # v5
@@ -34,34 +34,43 @@ jobs:
       - name: Install dependencies (frozen)
         run: uv sync --frozen --extra docs
 
-      - name: Build documentation
-        run: uv run zensical build
+      - name: Install mike fork
+        run: uv pip install --python .venv/bin/python git+https://github.com/squidfunk/mike.git
 
-      - name: Upload docs artifact
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
-        with:
-          name: docs-site
-          path: ./site
-          if-no-files-found: error
+      - name: Configure Git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-  deploy:
-    runs-on: ubuntu-latest
-    needs: build
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4
-        with:
-          fetch-depth: 0
+      - name: Fetch gh-pages
+        run: git fetch origin gh-pages --depth=1 || true
 
-      - name: Download docs artifact
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
-        with:
-          name: docs-site
-          path: ./site
+      - name: Determine docs version
+        run: |
+          python - <<'PY' >> "$GITHUB_ENV"
+          import tomllib
+          from pathlib import Path
+          import os
 
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./site
+          with Path("pyproject.toml").open("rb") as handle:
+              package_version = tomllib.load(handle)["project"]["version"]
+
+          raw_tag = os.environ["RELEASE_TAG"]
+          docs_version = raw_tag.removeprefix("v")
+
+          if docs_version != package_version:
+              raise SystemExit(
+                  "Release tag / package version mismatch: "
+                  f"tag={raw_tag!r}, pyproject={package_version!r}"
+              )
+
+          print(f"DOCS_VERSION={docs_version}")
+          PY
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
+
+      - name: Deploy versioned docs
+        run: .venv/bin/mike deploy --push --update-aliases "${DOCS_VERSION}" latest
+
+      - name: Set default docs version
+        run: .venv/bin/mike set-default --push latest

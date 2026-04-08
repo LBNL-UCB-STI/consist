@@ -41,6 +41,7 @@ from consist.core.schema_compat import (
     apply_run_stage_phase_compatibility,
     backfill_artifact_content_ids as compat_backfill_artifact_content_ids,
 )
+from consist.core.run_ordering import recent_run_order_by
 from consist.core.facet_common import flatten_facet_values
 from consist.models.artifact import Artifact, ArtifactContent
 from consist.models.artifact_facet import ArtifactFacet
@@ -2149,7 +2150,7 @@ class DatabaseManager:
                     .where(Run.config_hash == config_hash)
                     .where(Run.input_hash == input_hash)
                     .where(Run.git_hash == git_hash)
-                    .order_by(col(Run.created_at).desc())
+                    .order_by(*recent_run_order_by())
                     .limit(1)
                 )
                 return session.exec(statement).first()
@@ -2169,7 +2170,7 @@ class DatabaseManager:
                     select(Run)
                     .where(Run.status == "completed")
                     .where(Run.model_name == model_name)
-                    .order_by(col(Run.created_at).desc())
+                    .order_by(*recent_run_order_by())
                     .limit(limit)
                 )
                 results = session.exec(statement).all()
@@ -2200,7 +2201,7 @@ class DatabaseManager:
                     select(Run)
                     .where(Run.status == "completed")
                     .where(Run.signature == signature)
-                    .order_by(col(Run.created_at).desc())
+                    .order_by(*recent_run_order_by())
                     .limit(1)
                 )
                 return session.exec(statement).first()
@@ -2604,7 +2605,7 @@ class DatabaseManager:
 
         def _query():
             with self.session_scope() as session:
-                statement = select(Run).order_by(col(Run.created_at).desc())
+                statement = select(Run).order_by(*recent_run_order_by())
 
                 if status:
                     statement = statement.where(Run.status == status)
@@ -2628,7 +2629,6 @@ class DatabaseManager:
                         statement = statement.where(col(Run.tags).contains(tag))
 
                 statement = _apply_facet_predicates(statement)
-
                 results = session.exec(statement.limit(limit)).all()
 
                 # Client-side filtering for JSON metadata
@@ -3439,7 +3439,7 @@ class DatabaseManager:
     def get_history(
         self, limit: int = 10, tags: Optional[List[str]] = None
     ) -> pd.DataFrame:
-        query = select(Run).order_by(col(Run.created_at).desc()).limit(limit)
+        query = select(Run).order_by(*recent_run_order_by()).limit(limit)
         try:
             df = pd.read_sql(query, self.engine)
             if not df.empty and tags:

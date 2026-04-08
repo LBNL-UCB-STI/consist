@@ -38,7 +38,6 @@ pip install consist
 Optional extras:
 
 ```bash
-pip install "consist[parquet]"
 pip install "consist[ingest]"
 ```
 
@@ -142,8 +141,8 @@ Use `output_paths` when a function returns `None` but writes files, or when you 
   output back to its sources.
 - **SQL-Native Analysis**: All metadata is indexed in DuckDB. Query across runs, join tables, and compare variants using
   standard SQL.
-- **HPC and Container Support**: Track Docker and Singularity containers as pure functions—image digests and mounted
-  volumes become part of the cache signature. Ideal for long-running jobs on shared compute.
+- **HPC and Container Support**: Run tasks in Docker and Singularity containers, with image digests and mounted
+  volumes included in the cache signature. Ideal for long-running jobs on shared compute.
 - **Queryable CLI**: Inspect history, trace lineage, and compare results from the command line after a job completes. No
   code required.
 

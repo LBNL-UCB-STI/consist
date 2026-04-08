@@ -25,12 +25,6 @@ Install with example notebook dependencies:
 pip install "consist[examples]"
 ```
 
-Install with Parquet support for the getting-started tutorials:
-
-```bash
-pip install "consist[parquet]"
-```
-
 ## Install from Source
 
 Clone the repository and install in editable mode:
@@ -68,15 +62,8 @@ This prints the path to the installed package.
 ## Tutorial Prerequisites
 
 Core installs include `pandas`, which is used throughout the getting-started
-tutorials.
+tutorials, and `pyarrow`, used to read and write Parquet files.
 
-The [First Workflow](first-workflow.md) tutorial writes Parquet output via
-`pandas.DataFrame.to_parquet(...)`, which requires a Parquet engine such as
-`pyarrow`. Install the optional Parquet extra before running that tutorial:
-
-```bash
-pip install "consist[parquet]"
-```
 
 ## Next Steps
 

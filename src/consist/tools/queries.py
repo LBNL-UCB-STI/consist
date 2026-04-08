@@ -7,6 +7,7 @@ from sqlmodel import Session, select, func, col
 import duckdb
 import pandas as pd
 
+from consist.core.run_ordering import recent_run_order_by
 from consist.models.run import Run
 from consist.models.artifact import Artifact
 from consist.core.tracker import Tracker
@@ -21,7 +22,7 @@ def get_runs(
     status: Optional[str] = None,
 ) -> List[Run]:
     """Fetches a list of runs with optional filters."""
-    statement = select(Run).order_by(col(Run.created_at).desc())
+    statement = select(Run).order_by(*recent_run_order_by())
 
     if model_name:
         statement = statement.where(Run.model_name == model_name)
@@ -34,8 +35,7 @@ def get_runs(
             # so we use a LIKE query as a good-enough solution for DuckDB.
             statement = statement.where(col(Run.tags).like(f'%"{tag}"%'))
 
-    statement = statement.limit(limit)
-    return list(session.exec(statement).all())
+    return list(session.exec(statement.limit(limit)).all())
 
 
 def get_summary(session: Session) -> Dict[str, Any]:
@@ -52,11 +52,8 @@ def get_summary(session: Session) -> Dict[str, Any]:
     models_stmt = select(Run.model_name, func.count(Run.id)).group_by(Run.model_name)
     models_dist = session.exec(models_stmt).all()
 
-    first_run_stmt = select(Run.created_at).order_by(col(Run.created_at).asc()).limit(1)
-    first_run_date = session.exec(first_run_stmt).first()
-
-    last_run_stmt = select(Run.created_at).order_by(col(Run.created_at).desc()).limit(1)
-    last_run_date = session.exec(last_run_stmt).first()
+    first_run_date = session.exec(select(func.min(Run.created_at))).one()
+    last_run_date = session.exec(select(func.max(Run.created_at))).one()
 
     return {
         "total_runs": total_runs,
