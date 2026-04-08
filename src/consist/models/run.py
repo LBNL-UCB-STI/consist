@@ -357,8 +357,6 @@ class Run(SQLModel, table=True):
             on_missing=on_missing,
             db_fallback=db_fallback,
         )
-
-
 class RunArtifacts(BaseModel):
     """
     Structured container for artifacts associated with a run.

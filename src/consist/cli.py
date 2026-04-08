@@ -59,6 +59,7 @@ from sqlmodel import Session, col, select
 from consist import Tracker
 from consist.core.maintenance import DatabaseMaintenance
 from consist.core.persistence import DatabaseManager
+from consist.core.run_ordering import recent_run_order_by
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.tools import queries
 
@@ -1656,7 +1657,7 @@ def search(
                     else False,
                 )
             )
-            .order_by(col(Run.created_at).desc())
+            .order_by(*recent_run_order_by())
             .limit(limit)
         )
 
@@ -2678,8 +2679,8 @@ class ConsistShell(cmd.Cmd):
             from consist.models.run import Run
 
             with _tracker_session(self.tracker) as session:
-                statement = (
-                    select(Run.id).order_by(col(Run.created_at).desc()).limit(limit)
+                statement = select(Run.id).order_by(*recent_run_order_by()).limit(
+                    limit
                 )
                 return [
                     str(run_id) for run_id in session.exec(statement).all() if run_id
