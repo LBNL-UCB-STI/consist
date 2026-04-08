@@ -2679,9 +2679,7 @@ class ConsistShell(cmd.Cmd):
             from consist.models.run import Run
 
             with _tracker_session(self.tracker) as session:
-                statement = select(Run.id).order_by(*recent_run_order_by()).limit(
-                    limit
-                )
+                statement = select(Run.id).order_by(*recent_run_order_by()).limit(limit)
                 return [
                     str(run_id) for run_id in session.exec(statement).all() if run_id
                 ]
