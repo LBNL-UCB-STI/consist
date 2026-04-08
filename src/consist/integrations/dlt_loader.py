@@ -63,9 +63,12 @@ except ImportError:
 
 try:
     zarr = importlib.import_module("zarr")
-    xr = importlib.import_module("xarray")
 except ImportError:
     zarr = None
+
+try:
+    xr = importlib.import_module("xarray")
+except ImportError:
     xr = None
 
 try:

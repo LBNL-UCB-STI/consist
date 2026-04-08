@@ -486,7 +486,7 @@ wheels = [
 
 [[package]]
 name = "consist"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
@@ -532,12 +532,17 @@ bench = [
 ]
 dev = [
     { name = "dlt" },
+    { name = "h5netcdf" },
     { name = "h5py" },
+    { name = "openmatrix" },
+    { name = "pyhocon" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-mock" },
     { name = "ruff" },
     { name = "tables" },
+    { name = "xarray" },
+    { name = "zarr" },
 ]
 docker = [
     { name = "docker" },
@@ -576,11 +581,15 @@ spatial = [
     { name = "geopandas" },
 ]
 test = [
+    { name = "h5netcdf" },
+    { name = "openmatrix" },
     { name = "pyhocon" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-mock" },
     { name = "ruff" },
+    { name = "xarray" },
+    { name = "zarr" },
 ]
 typecheck = [
     { name = "pandas-stubs" },
@@ -597,12 +606,17 @@ bench = [
 ]
 dev = [
     { name = "dlt" },
+    { name = "h5netcdf" },
     { name = "h5py" },
+    { name = "openmatrix" },
+    { name = "pyhocon" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-mock" },
     { name = "ruff" },
     { name = "tables" },
+    { name = "xarray" },
+    { name = "zarr" },
 ]
 docs = [
     { name = "mkdocs-material" },
@@ -632,7 +646,9 @@ requires-dist = [
     { name = "geopandas", marker = "extra == 'all'", specifier = ">=0.14.0" },
     { name = "geopandas", marker = "extra == 'spatial'", specifier = ">=0.14.0" },
     { name = "h5netcdf", marker = "extra == 'all'", specifier = ">=1.3.0" },
+    { name = "h5netcdf", marker = "extra == 'dev'", specifier = ">=1.3.0" },
     { name = "h5netcdf", marker = "extra == 'netcdf'", specifier = ">=1.3.0" },
+    { name = "h5netcdf", marker = "extra == 'test'", specifier = ">=1.3.0" },
     { name = "h5py", marker = "extra == 'all'", specifier = ">=3.15.1" },
     { name = "h5py", marker = "extra == 'dev'", specifier = ">=3.15.1" },
     { name = "h5py", marker = "extra == 'hdf5'", specifier = ">=3.15.1" },
@@ -645,7 +661,9 @@ requires-dist = [
     { name = "netcdf4", marker = "extra == 'all'", specifier = ">=1.6.0" },
     { name = "netcdf4", marker = "extra == 'netcdf4'", specifier = ">=1.6.0" },
     { name = "openmatrix", marker = "extra == 'all'", specifier = ">=0.3.5.0" },
+    { name = "openmatrix", marker = "extra == 'dev'", specifier = ">=0.3.5.0" },
     { name = "openmatrix", marker = "extra == 'omx'", specifier = ">=0.3.5.0" },
+    { name = "openmatrix", marker = "extra == 'test'", specifier = ">=0.3.5.0" },
     { name = "pandas", specifier = ">=2.1.0" },
     { name = "pandas-stubs", marker = "extra == 'typecheck'", specifier = "~=2.3.3" },
     { name = "polars", marker = "extra == 'bench'", specifier = ">=1.35.2" },
@@ -654,6 +672,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.12.4" },
     { name = "pyhocon", marker = "extra == 'all'", specifier = ">=0.3.60" },
     { name = "pyhocon", marker = "extra == 'beam'", specifier = ">=0.3.60" },
+    { name = "pyhocon", marker = "extra == 'dev'", specifier = ">=0.3.60" },
     { name = "pyhocon", marker = "extra == 'test'", specifier = ">=0.3.60" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.1" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=9.0.1" },
@@ -678,10 +697,14 @@ requires-dist = [
     { name = "ty", marker = "extra == 'typecheck'", specifier = ">=0.0.7" },
     { name = "typer", specifier = ">=0.12.3" },
     { name = "xarray", marker = "extra == 'all'", specifier = ">=2024.9.0" },
+    { name = "xarray", marker = "extra == 'dev'", specifier = ">=2024.9.0" },
     { name = "xarray", marker = "extra == 'netcdf'", specifier = ">=2024.9.0" },
     { name = "xarray", marker = "extra == 'netcdf4'", specifier = ">=2024.9.0" },
+    { name = "xarray", marker = "extra == 'test'", specifier = ">=2024.9.0" },
     { name = "xarray", marker = "extra == 'zarr'", specifier = ">=2024.9.0" },
     { name = "zarr", marker = "extra == 'all'", specifier = ">=2.18,<3" },
+    { name = "zarr", marker = "extra == 'dev'", specifier = ">=2.18,<3" },
+    { name = "zarr", marker = "extra == 'test'", specifier = ">=2.18,<3" },
     { name = "zarr", marker = "extra == 'zarr'", specifier = ">=2.18,<3" },
     { name = "zensical", specifier = ">=0.0.32" },
 ]
@@ -691,12 +714,17 @@ provides-extras = ["docker", "hdf5", "ingest", "activitysim", "beam", "netcdf", 
 bench = [{ name = "psutil", specifier = ">=7.1.3" }]
 dev = [
     { name = "dlt", specifier = ">=1.21.0" },
+    { name = "h5netcdf", specifier = ">=1.3.0" },
     { name = "h5py", specifier = ">=3.15.1" },
+    { name = "openmatrix", specifier = ">=0.3.5.0" },
+    { name = "pyhocon", specifier = ">=0.3.60" },
     { name = "pytest", specifier = ">=9.0.1" },
     { name = "pytest-cov", specifier = ">=7.0.0" },
     { name = "pytest-mock", specifier = ">=3.15.1" },
     { name = "ruff", specifier = ">=0.14.6" },
     { name = "tables", specifier = ">=3.10.2" },
+    { name = "xarray", specifier = ">=2024.9.0" },
+    { name = "zarr", specifier = ">=2.18,<3" },
 ]
 docs = [
     { name = "mkdocs-material", specifier = ">=9.7.0" },

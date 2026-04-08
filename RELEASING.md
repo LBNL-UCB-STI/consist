@@ -50,10 +50,16 @@ minor releases may include breaking changes.
 Use the project virtualenv for release checks:
 
 ```bash
+uv sync --group dev
 .venv/bin/python -m ruff check src tests
 .venv/bin/python -m ruff format --check src tests
 .venv/bin/python -m pytest -m "not heavy" tests/unit tests/integration tests/e2e
 ```
+
+The release-check environment should include the non-heavy optional test
+dependencies used by the BEAM and OpenMatrix suites. `uv sync --group dev`
+refreshes `.venv` from the repo's development dependency group so those tests
+run instead of being skipped or failing on missing imports.
 
 If release changes touch packaging, docs, or CLI behavior, also do the
 relevant smoke checks before publishing.
