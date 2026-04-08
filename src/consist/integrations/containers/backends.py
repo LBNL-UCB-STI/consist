@@ -340,7 +340,15 @@ class DockerBackend(ContainerBackend):
 
         try:
             if self.pull_latest and hasattr(self.client, "images"):
-                self.client.images.pull(image)
+                try:
+                    self.client.images.pull(image)
+                except Exception as e:
+                    logger.warning(
+                        "Could not pull latest docker image %s; "
+                        "falling back to local image if available: %s",
+                        image,
+                        e,
+                    )
 
             logger.info(
                 "🐳 Running Docker image=%s command=%s env={%s} mounts=%d workdir=%s",

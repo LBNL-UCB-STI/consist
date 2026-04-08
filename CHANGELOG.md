@@ -57,6 +57,8 @@ The format is based on [Keep a Changelog], and this project adheres to
   by @zneedell ([#90](https://github.com/LBNL-UCB-STI/consist/pull/90)).
 - Fix optional dependency import handling in NetCDF/OpenMatrix ingestion so a
   missing `zarr` install no longer disables `xarray`-backed ingestion paths.
+- Make Docker `pull_latest=True` execution resilient to transient registry pull
+  failures by falling back to the local image when available.
 
 ## [0.1.0] - 2026-03-11
 

@@ -294,6 +294,29 @@ def test_docker_run_exception_handling():
     assert success is False
 
 
+def test_docker_run_pull_latest_falls_back_to_local_image_on_pull_failure():
+    """
+    Verifies that `DockerBackend.run` treats `pull_latest=True` as best-effort.
+
+    If the registry pull fails transiently but the image is already available
+    locally, Consist should still attempt container execution instead of failing
+    before `containers.run(...)`.
+    """
+    mock_client = MagicMock()
+    mock_container = MagicMock()
+    mock_container.wait.return_value = {"StatusCode": 0}
+    mock_client.images.pull.side_effect = Exception("registry 502")
+    mock_client.containers.run.return_value = mock_container
+
+    backend = DockerBackend(client=mock_client, pull_latest=True)
+    success = backend.run("img", ["sh", "-c", "echo hi"], {}, {})
+
+    assert success is True
+    mock_client.images.pull.assert_called_with("img")
+    mock_client.containers.run.assert_called_once()
+    mock_container.remove.assert_called_once()
+
+
 # --- Additional Singularity Tests ---
 
 
