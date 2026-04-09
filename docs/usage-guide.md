@@ -1053,7 +1053,8 @@ You do **not** need to create a second "archived artifact" when you move or
 copy tracked output bytes into long-term storage.
 
 Keep the original artifact and `container_uri`, then archive the bytes with
-`tracker.archive_artifact(...)` or `tracker.archive_run_outputs(...)`.
+`tracker.archive_current_run_outputs(...)`, `tracker.archive_artifact(...)`, or
+`tracker.archive_run_outputs(...)`.
 Consist records the archive root in `artifact.meta["recovery_roots"]`, so later
 hydration, restart/resume recovery, cache-hit output recovery, and lineage all
 still refer to the original artifact.
@@ -1083,19 +1084,15 @@ with use_tracker(tracker):
         fn=write_results,
         outputs=["results"],
     )
-
-run_id = result.run.id
-
-tracker.archive_run_outputs(
-    run_id,
-    Path("./archive/iteration_004"),
-    mode="move",
-)
+    tracker.archive_current_run_outputs(
+        Path("./archive/iteration_004"),
+        mode="move",
+    )
 
 hydrated = tracker.hydrate_run_outputs(
-    run_id,
+    result.run.id,
     keys=["results"],
-    target_root=Path("./runs/restored_outputs"),
+    target_root=tracker.run_dir / "restored_outputs",
 )
 
 restored = hydrated["results"].artifact.as_path()
@@ -1105,7 +1102,8 @@ print(restored.read_text().strip())
 
 What this example shows:
 
-- `archive_run_outputs(...)` moves the bytes into `./archive/iteration_004`
+- `archive_current_run_outputs(...)` moves the bytes into
+  `./archive/iteration_004`
   without creating a new artifact record.
 - The original artifact identity and lineage stay intact.
 - `hydrate_run_outputs(...)` restores from the archive root even though the
