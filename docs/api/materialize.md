@@ -70,10 +70,14 @@ from pathlib import Path
 hydrated = tracker.hydrate_run_outputs(
     "prior_run_id",
     keys=["persons", "households"],
-    target_root=Path("restored_workspace"),
+    target_root=tracker.run_dir / "restored_workspace",
     source_root=Path("/archive/outputs_mirror"),  # optional
 )
 ```
+
+Relative `target_root` values are resolved from the process working directory.
+Use `tracker.run_dir / ...` or an absolute mount-backed path when you want the
+restore destination to stay inside the tracker's allowed roots.
 
 Inspect the keyed results and reuse the detached artifacts directly:
 

@@ -974,8 +974,8 @@ class Tracker:
             raise ValueError(
                 f"Artifact {artifact.key!r} does not have a rematerializable URI "
                 "layout. Use managed output paths or preserve a stable relative "
-                "layout before archiving, or archive bytes manually and record "
-                "the archive root with set_artifact_recovery_roots(...)."
+                "layout before archiving. Absolute-path and file:// artifacts "
+                "cannot be recovered from root-only recovery metadata."
             )
 
         archive_root_path = Path(archive_root).resolve()

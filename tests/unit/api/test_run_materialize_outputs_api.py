@@ -316,7 +316,7 @@ def test_archive_artifact_unmappable_layout_has_actionable_error(
 
     with pytest.raises(
         ValueError,
-        match="Use managed output paths|set_artifact_recovery_roots",
+        match="Use managed output paths|cannot be recovered from root-only recovery metadata",
     ):
         tracker.archive_artifact(artifact, tmp_path / "archive")
 

@@ -1206,12 +1206,12 @@ def hydrate_run_outputs(
 
 
 def set_artifact_recovery_roots(
-    artifact: ArtifactLike,
+    artifact: Artifact,
     roots: str | Path | Sequence[str | Path],
     *,
     append: bool = False,
     tracker: Optional["Tracker"] = None,
-) -> ArtifactLike:
+) -> Artifact:
     """
     Persist ordered advisory recovery roots for an artifact.
 
@@ -1222,7 +1222,7 @@ def set_artifact_recovery_roots(
 
     Parameters
     ----------
-    artifact : ArtifactLike
+    artifact : Artifact
         Artifact whose recovery metadata should be updated.
     roots : str | Path | Sequence[str | Path]
         One or more filesystem roots. The artifact's URI-relative layout is
@@ -1239,7 +1239,7 @@ def set_artifact_recovery_roots(
 
 
 def archive_artifact(
-    artifact: ArtifactLike,
+    artifact: Artifact,
     archive_root: str | Path,
     *,
     mode: Literal["copy", "move"] = "copy",
