@@ -1,3 +1,4 @@
+import os
 import logging
 import tempfile
 import weakref
@@ -33,6 +34,22 @@ class CacheFs(Protocol):
     def resolve_historical_path(
         self, uri: str, original_run_dir: Optional[str]
     ) -> str: ...
+
+    def normalize_recovery_roots(
+        self,
+        roots: str | os.PathLike[str] | Sequence[str | os.PathLike[str]] | None,
+    ) -> list[str]: ...
+
+    def get_remappable_relative_path(self, uri: str) -> Path | None: ...
+
+    def get_historical_root(
+        self,
+        uri: str,
+        *,
+        original_run_dir: Optional[str],
+        mounts_snapshot: Optional[Dict[str, str]] = None,
+        artifact_mount_root: Optional[str] = None,
+    ) -> Path | None: ...
 
 
 @runtime_checkable
@@ -99,8 +116,12 @@ class ActiveRunCacheOptions:
     """
     Active-run cache/materialization controls for Tracker.
 
-    Stored on the Tracker (not in run.meta) because they affect runtime behavior and
-    should reset automatically at the end of the run.
+    Stored on the Tracker (not in run.meta) because they affect runtime
+    behavior and should reset automatically at the end of the run.
+
+    ``materialize_cached_outputs_source_root`` remains the per-run override for
+    archive/mirror recovery. Artifact-level ``recovery_roots`` are consulted
+    separately during cache-hit output hydration and eager cache validation.
     """
 
     cache_mode: str = "reuse"
@@ -468,16 +489,14 @@ def hydrate_cache_hit_outputs(
             if should_use_legacy:
                 from consist.core.materialize import (
                     build_materialize_items_for_keys,
+                    find_existing_recovery_source_path,
                     materialize_artifacts_from_sources,
                 )
 
                 items: list[tuple[Artifact, Path, Path]] = []
                 on_missing = "warn"
                 db = getattr(tracker, "db", None)
-                run_dir_cache: dict[str, Optional[str]] = {}
-                fallback_run_dir = None
-                if cached_run.meta:
-                    fallback_run_dir = cached_run.meta.get("_physical_run_dir")
+                run_cache: dict[str, Optional[Run]] = {}
 
                 if active_options.cache_hydration == "outputs-requested":
                     destinations = active_options.materialize_cached_output_paths or {}
@@ -485,24 +504,31 @@ def hydrate_cache_hit_outputs(
                         record.outputs,
                         destinations_by_key=destinations,
                     )
+                    unresolved_requested: list[tuple[str, str]] = []
                     for art, dest in requested_items:
-                        original_run_dir = fallback_run_dir
+                        historical_run = cached_run
                         if db and art.run_id:
                             run_id = str(art.run_id)
-                            if run_id not in run_dir_cache:
-                                run = db.get_run(run_id)
-                                run_dir_cache[run_id] = (
-                                    run.meta.get("_physical_run_dir")
-                                    if run and run.meta
-                                    else None
-                                )
-                            original_run_dir = run_dir_cache.get(run_id)
-                        source = Path(
-                            tracker.fs.resolve_historical_path(
-                                art.container_uri, original_run_dir
-                            )
+                            if run_id not in run_cache:
+                                run_cache[run_id] = db.get_run(run_id)
+                            run = run_cache.get(run_id)
+                            if run is not None:
+                                historical_run = run
+                        _, source, _ = find_existing_recovery_source_path(
+                            cast("Tracker", tracker),
+                            artifact=art,
+                            run=historical_run,
+                            source_root=active_options.materialize_cached_outputs_source_root,
                         )
-                        items.append((art, source, Path(dest)))
+                        if source is not None:
+                            items.append((art, source, Path(dest)))
+                        else:
+                            unresolved_requested.append(
+                                (
+                                    art.key,
+                                    f"[Consist] Cannot materialize cached input {art.key!r}: source path missing.",
+                                )
+                            )
                     requested_keys = set(destinations.keys())
                     hydrated_keys = {a.key for a in record.outputs}
                     missing_keys = requested_keys - hydrated_keys
@@ -511,6 +537,8 @@ def hydrate_cache_hit_outputs(
                             "[Consist] Requested cached output materialization for missing keys: %s",
                             sorted(missing_keys),
                         )
+                    for _, message in unresolved_requested:
+                        logging.warning(message)
                 else:  # outputs-all
                     on_missing = "raise"
                     if not active_options.materialize_cached_outputs_dir:
@@ -521,23 +549,26 @@ def hydrate_cache_hit_outputs(
                         active_options.materialize_cached_outputs_dir
                     ).resolve()
                     for art in record.outputs:
-                        original_run_dir = fallback_run_dir
+                        historical_run = cached_run
                         if db and art.run_id:
                             run_id = str(art.run_id)
-                            if run_id not in run_dir_cache:
-                                run = db.get_run(run_id)
-                                run_dir_cache[run_id] = (
-                                    run.meta.get("_physical_run_dir")
-                                    if run and run.meta
-                                    else None
-                                )
-                            original_run_dir = run_dir_cache.get(run_id)
-                        source = Path(
-                            tracker.fs.resolve_historical_path(
-                                art.container_uri, original_run_dir
-                            )
+                            if run_id not in run_cache:
+                                run_cache[run_id] = db.get_run(run_id)
+                            run = run_cache.get(run_id)
+                            if run is not None:
+                                historical_run = run
+                        relative_path, source, _ = find_existing_recovery_source_path(
+                            cast("Tracker", tracker),
+                            artifact=art,
+                            run=historical_run,
+                            source_root=active_options.materialize_cached_outputs_source_root,
                         )
-                        items.append((art, source, out_dir / source.name))
+                        if source is None or relative_path is None:
+                            raise FileNotFoundError(
+                                "[Consist] Cannot materialize cached input "
+                                f"{art.key!r}: source path missing."
+                            )
+                        items.append((art, source, out_dir / relative_path))
 
                 allowed_base = _allowed_materialization_roots(
                     tracker, target_run=target_run
@@ -600,14 +631,31 @@ def validate_cached_run_outputs(
         return True
 
     run_artifacts = tracker.get_artifacts_for_run(run.id)
+    db = tracker.db
 
     for art in run_artifacts.outputs.values():
         resolved_path = tracker.resolve_uri(art.container_uri)
         if not Path(resolved_path).exists() and not art.meta.get("is_ingested", False):
+            from consist.core.materialize import find_existing_recovery_source_path
             from consist.tools.mount_diagnostics import (
                 build_mount_resolution_hint,
                 format_missing_artifact_mount_help,
             )
+
+            owning_run = run
+            if db is not None and art.run_id and str(art.run_id) != run.id:
+                producing_run = db.get_run(str(art.run_id))
+                if producing_run is not None:
+                    owning_run = producing_run
+
+            _, recovery_source, _ = find_existing_recovery_source_path(
+                cast("Tracker", tracker),
+                artifact=art,
+                run=owning_run,
+                source_root=None,
+            )
+            if recovery_source is not None:
+                continue
 
             hint = build_mount_resolution_hint(
                 art.container_uri, artifact_meta=art.meta, mounts=tracker.mounts

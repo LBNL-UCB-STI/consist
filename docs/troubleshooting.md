@@ -280,6 +280,21 @@ on `run(...)` / scenario steps, or use the same
 `materialize_cached_outputs_source_root=Path(...)` override on low-level
 `tracker.start_run(...)` flows.
 
+If the archive root is part of the workflow rather than a one-off override,
+record it on the artifact once instead:
+
+```python
+tracker.archive_run_outputs(
+    "prior_run_id",
+    Path("/archive/iteration_004"),
+    mode="copy",
+)
+```
+
+That updates `artifact.meta["recovery_roots"]`, so future historical recovery,
+cache-hit output hydration, and eager cache validation can locate the archived
+bytes without repeating a manual source-root override.
+
 `tracker.hydrate_run_outputs(...)` can restore into a configured mount root
 without enabling `allow_external_paths=True`.
 

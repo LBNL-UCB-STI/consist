@@ -568,14 +568,16 @@ def validate_allowed_materialization_destination(
         allowed_root = allowed_roots[0]
         raise ValueError(
             f"Destination path {resolved_destination} is outside allowed base "
-            f"{allowed_root}. Set allow_external_paths=True or "
+            f"{allowed_root}. Choose a target under the tracker run_dir or a "
+            "configured mount root, or set allow_external_paths=True or "
             "CONSIST_ALLOW_EXTERNAL_PATHS=1 to override."
         )
 
     allowed_display = ", ".join(str(root) for root in allowed_roots)
     raise ValueError(
         f"Destination path {resolved_destination} is outside allowed roots: "
-        f"{allowed_display}. Set allow_external_paths=True or "
+        f"{allowed_display}. Choose a target under the tracker run_dir or a "
+        "configured mount root, or set allow_external_paths=True or "
         "CONSIST_ALLOW_EXTERNAL_PATHS=1 to override."
     )
 
@@ -634,6 +636,112 @@ def _derive_historical_remap(
         )
 
     return None
+
+
+def _derive_remappable_relative_path(
+    tracker: "Tracker",
+    *,
+    artifact: Artifact,
+) -> Path | None:
+    helper = getattr(tracker.fs, "get_remappable_relative_path", None)
+    if callable(helper):
+        return helper(artifact.container_uri)
+    return None
+
+
+def _derive_historical_root(
+    tracker: "Tracker",
+    *,
+    artifact: Artifact,
+    run,
+) -> Path | None:
+    meta = run.meta if isinstance(run.meta, dict) else {}
+    artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+
+    helper = getattr(tracker.fs, "get_historical_root", None)
+    if callable(helper):
+        return helper(
+            artifact.container_uri,
+            original_run_dir=meta.get("_physical_run_dir"),
+            mounts_snapshot=meta.get("mounts"),
+            artifact_mount_root=artifact_meta.get("mount_root"),
+        )
+
+    remap = _derive_historical_remap(tracker, artifact=artifact, run=run)
+    if remap is None:
+        return None
+    return remap[0]
+
+
+def _artifact_recovery_roots(
+    tracker: "Tracker",
+    *,
+    artifact: Artifact,
+) -> tuple[Path, ...]:
+    artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    helper = getattr(tracker.fs, "normalize_recovery_roots", None)
+    if not callable(helper):
+        return ()
+    return tuple(Path(root) for root in helper(artifact_meta.get("recovery_roots")))
+
+
+def _ordered_candidate_roots(
+    *,
+    source_root: Path | None,
+    historical_root: Path | None,
+    recovery_roots: Sequence[Path],
+) -> tuple[Path, ...]:
+    ordered: list[Path] = []
+    seen: set[str] = set()
+    for root in (
+        ([source_root] if source_root is not None else [])
+        + ([historical_root] if historical_root is not None else [])
+        + list(recovery_roots)
+    ):
+        resolved = str(root.resolve())
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        ordered.append(Path(resolved))
+    return tuple(ordered)
+
+
+def find_existing_recovery_source_path(
+    tracker: "Tracker",
+    *,
+    artifact: Artifact,
+    run,
+    source_root: Path | None,
+) -> tuple[Path | None, Path | None, bool]:
+    """
+    Return the rematerializable relative path and first existing filesystem source.
+
+    Filesystem candidates are probed in recovery order:
+
+    1. per-call ``source_root``
+    2. the historical root derived from run metadata / mount snapshots
+    3. ordered artifact ``recovery_roots``
+
+    The boolean return value reports whether any filesystem roots were available
+    to probe for that artifact.
+    """
+    relative_path = _derive_remappable_relative_path(tracker, artifact=artifact)
+    if relative_path is None:
+        return None, None, False
+
+    historical_root = _derive_historical_root(tracker, artifact=artifact, run=run)
+    recovery_roots = _artifact_recovery_roots(tracker, artifact=artifact)
+    candidate_roots = _ordered_candidate_roots(
+        source_root=source_root,
+        historical_root=historical_root,
+        recovery_roots=recovery_roots,
+    )
+    for root in candidate_roots:
+        candidate = (root / relative_path).resolve()
+        if candidate.exists():
+            return relative_path, candidate, True
+
+    return relative_path, None, bool(candidate_roots)
 
 
 def _source_identity(item: PlannedMaterialization) -> tuple[str, str]:
@@ -721,8 +829,15 @@ def plan_run_output_hydration(
         owning_run = _get_artifact_owning_run(
             tracker, selected_run=run, artifact=artifact
         )
-        remap = _derive_historical_remap(tracker, artifact=artifact, run=owning_run)
-        if remap is None:
+        relative_path, source_path, has_candidate_roots = (
+            find_existing_recovery_source_path(
+                tracker,
+                artifact=artifact,
+                run=owning_run,
+                source_root=source_root,
+            )
+        )
+        if relative_path is None:
             outputs[artifact.key] = _make_hydrated_output(
                 artifact,
                 status="skipped_unmapped",
@@ -731,23 +846,22 @@ def plan_run_output_hydration(
             )
             continue
 
-        historical_root, relative_path = remap
         destination = target_root / relative_path
 
-        historical_source = (historical_root / relative_path).resolve()
-        override_source = (
-            (source_root / relative_path).resolve() if source_root is not None else None
-        )
-
         source_kind: Literal["filesystem", "db_export"]
-        source_path: Path | None
-        if override_source is not None and override_source.exists():
+        planned_source_path: Path | None
+        if source_path is not None:
             source_kind = "filesystem"
-            source_path = override_source
-        elif historical_source.exists():
-            source_kind = "filesystem"
-            source_path = historical_source
+            planned_source_path = source_path
         else:
+            if not has_candidate_roots:
+                outputs[artifact.key] = _make_hydrated_output(
+                    artifact,
+                    status="skipped_unmapped",
+                    path=None,
+                    resolvable=False,
+                )
+                continue
             artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
             if db_fallback == "if_ingested" and artifact_meta.get("is_ingested", False):
                 driver = str(artifact.driver or "").lower()
@@ -764,7 +878,7 @@ def plan_run_output_hydration(
                     )
                     continue
                 source_kind = "db_export"
-                source_path = None
+                planned_source_path = None
             else:
                 outputs[artifact.key] = _make_hydrated_output(
                     artifact,
@@ -778,7 +892,7 @@ def plan_run_output_hydration(
             artifact=artifact,
             keys=(artifact.key,),
             source_kind=source_kind,
-            source_path=source_path,
+            source_path=planned_source_path,
             destination=destination,
             relative_path=relative_path,
             artifacts_by_key={artifact.key: artifact},

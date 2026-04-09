@@ -203,6 +203,10 @@ class ArtifactManager:
             meta.pop("table_path")
         if "array_path" in meta:
             meta.pop("array_path")
+        if "recovery_roots" in meta:
+            meta["recovery_roots"] = self.tracker.fs.normalize_recovery_roots(
+                meta["recovery_roots"]
+            )
         artifact_obj = None
         resolved_abs_path = None
         mount_scheme: Optional[str] = None

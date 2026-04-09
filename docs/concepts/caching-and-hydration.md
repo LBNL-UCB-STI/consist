@@ -520,6 +520,24 @@ Cache hydration exposes an archive-mirror override via
 also available on low-level `tracker.start_run(...)` /
 `tracker.begin_run(...)` flows.
 
+For recurring archive workflows, prefer artifact-level recovery metadata over
+repeating per-call source-root overrides. Consist can record ordered
+`recovery_roots` on the artifact itself:
+
+```python
+tracker.archive_run_outputs(
+    "prior_run_id",
+    Path("/archive/iteration_004"),
+    mode="copy",
+)
+```
+
+After that, both explicit historical recovery and cache-hit output hydration
+can recover from the archived bytes without a manual
+`materialize_cached_outputs_source_root=...` or `source_root=...` on every
+restart. Use `tracker.set_artifact_recovery_roots(...)` if your workflow copies
+or moves the files outside Consist and only needs to record the archive root.
+
 For explicit historical output recovery,
 `tracker.hydrate_run_outputs(...)` accepts `target_root` under either the
 tracker `run_dir` or any configured tracker mount root without requiring

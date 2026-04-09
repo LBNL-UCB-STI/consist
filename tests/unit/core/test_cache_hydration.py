@@ -795,6 +795,149 @@ def test_outputs_requested_uses_archive_source_root_for_mirror_recovery(
         tracker_b.engine.dispose()
 
 
+def test_outputs_all_uses_artifact_recovery_roots_without_source_root(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    run_dir_a = tmp_path / "runs_a"
+    run_dir_b = tmp_path / "runs_b"
+    archive_root = tmp_path / "archive"
+
+    tracker_a = Tracker(run_dir=run_dir_a, db_path=db_path)
+    _init_core_tables(tracker_a)
+
+    with tracker_a.start_run("producer_recovery_all", model="producer"):
+        out_dir = tracker_a.run_dir / "outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        source_a = out_dir / "a.csv"
+        source_b = out_dir / "b.csv"
+        source_a.write_text("value\n1\n", encoding="utf-8")
+        source_b.write_text("value\n2\n", encoding="utf-8")
+        tracker_a.log_artifact(source_a, key="a", direction="output")
+        tracker_a.log_artifact(source_b, key="b", direction="output")
+
+    archive_outputs = archive_root / "outputs"
+    archive_outputs.mkdir(parents=True, exist_ok=True)
+    (archive_outputs / "a.csv").write_text("value\n1\n", encoding="utf-8")
+    (archive_outputs / "b.csv").write_text("value\n2\n", encoding="utf-8")
+
+    historical_outputs = tracker_a.get_run_outputs("producer_recovery_all")
+    tracker_a.set_artifact_recovery_roots(historical_outputs["a"], [archive_root])
+    tracker_a.set_artifact_recovery_roots(historical_outputs["b"], [archive_root])
+
+    (run_dir_a / "outputs" / "a.csv").unlink()
+    (run_dir_a / "outputs" / "b.csv").unlink()
+
+    tracker_b = Tracker(run_dir=run_dir_b, db_path=db_path, allow_external_paths=True)
+    _init_core_tables(tracker_b)
+
+    restored_root = tmp_path / "restored_from_recovery_roots"
+    with tracker_b.start_run(
+        "artifact_root_hit_all",
+        model="producer",
+        cache_mode="reuse",
+        cache_hydration="outputs-all",
+        materialize_cached_outputs_dir=restored_root,
+    ) as t:
+        assert t.is_cached
+
+    assert (restored_root / "outputs" / "a.csv").read_text(
+        encoding="utf-8"
+    ) == "value\n1\n"
+    assert (restored_root / "outputs" / "b.csv").read_text(
+        encoding="utf-8"
+    ) == "value\n2\n"
+
+    if tracker_a.engine:
+        tracker_a.engine.dispose()
+    if tracker_b.engine:
+        tracker_b.engine.dispose()
+
+
+def test_outputs_requested_uses_artifact_recovery_roots_without_source_root(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    run_dir_a = tmp_path / "runs_a"
+    run_dir_b = tmp_path / "runs_b"
+    archive_root = tmp_path / "archive"
+
+    tracker_a = Tracker(run_dir=run_dir_a, db_path=db_path)
+    _init_core_tables(tracker_a)
+
+    with tracker_a.start_run("producer_recovery_requested", model="producer"):
+        out_dir = tracker_a.run_dir / "outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        source_a = out_dir / "a.csv"
+        source_a.write_text("value\n1\n", encoding="utf-8")
+        tracker_a.log_artifact(source_a, key="a", direction="output")
+
+    archive_outputs = archive_root / "outputs"
+    archive_outputs.mkdir(parents=True, exist_ok=True)
+    (archive_outputs / "a.csv").write_text("value\n1\n", encoding="utf-8")
+
+    historical_output = tracker_a.get_run_outputs("producer_recovery_requested")["a"]
+    tracker_a.set_artifact_recovery_roots(historical_output, [archive_root])
+
+    (run_dir_a / "outputs" / "a.csv").unlink()
+
+    tracker_b = Tracker(run_dir=run_dir_b, db_path=db_path, allow_external_paths=True)
+    _init_core_tables(tracker_b)
+
+    requested_dest = tmp_path / "requested_from_recovery_roots.csv"
+    with tracker_b.start_run(
+        "artifact_root_hit_requested",
+        model="producer",
+        cache_mode="reuse",
+        cache_hydration="outputs-requested",
+        materialize_cached_output_paths={"a": requested_dest},
+    ) as t:
+        assert t.is_cached
+
+    assert requested_dest.read_text(encoding="utf-8") == "value\n1\n"
+
+    if tracker_a.engine:
+        tracker_a.engine.dispose()
+    if tracker_b.engine:
+        tracker_b.engine.dispose()
+
+
+def test_cache_validation_accepts_archived_outputs_via_recovery_roots(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    run_dir_a = tmp_path / "runs_a"
+    run_dir_b = tmp_path / "runs_b"
+    archive_root = tmp_path / "archive_validation"
+
+    tracker_a = Tracker(run_dir=run_dir_a, db_path=db_path)
+    _init_core_tables(tracker_a)
+    with tracker_a.start_run(
+        "producer_validation", model="producer", cache_mode="overwrite"
+    ):
+        out_dir = tracker_a.run_dir / "outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "out.csv"
+        out_path.write_text("value\n1\n", encoding="utf-8")
+        artifact = tracker_a.log_artifact(out_path, key="out", direction="output")
+
+    tracker_a.archive_artifact(artifact, archive_root, mode="copy")
+    out_path.unlink()
+
+    tracker_b = Tracker(run_dir=run_dir_b, db_path=db_path, allow_external_paths=True)
+    _init_core_tables(tracker_b)
+
+    with tracker_b.start_run(
+        "validation_hit", model="producer", cache_mode="reuse"
+    ) as t:
+        assert t.is_cached
+
+    if tracker_a.engine:
+        tracker_a.engine.dispose()
+    if tracker_b.engine:
+        tracker_b.engine.dispose()
+
+
 def test_outputs_all_delegates_to_run_materialization_with_preserved_layout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -914,6 +1057,117 @@ def test_outputs_all_delegates_to_run_materialization_with_preserved_layout(
             "db_fallback": "if_ingested",
         }
     ]
+
+
+def test_outputs_all_legacy_fallback_uses_artifact_recovery_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker = Tracker(run_dir=tmp_path / "active_runs", allow_external_paths=True)
+    archive_root = tmp_path / "archive_outputs"
+    archived = archive_root / "outputs" / "a.csv"
+    archived.parent.mkdir(parents=True, exist_ok=True)
+    archived.write_text("value\n1\n", encoding="utf-8")
+
+    artifact = Artifact(
+        key="a",
+        container_uri="./outputs/a.csv",
+        driver="csv",
+        run_id=None,
+        meta={"recovery_roots": [str(archive_root)]},
+    )
+    run = Run(
+        id="active",
+        model_name="model",
+        config_hash=None,
+        git_hash=None,
+        meta={},
+    )
+    cached_run = Run(
+        id="cached",
+        model_name="model",
+        config_hash=None,
+        git_hash=None,
+        meta={},
+    )
+
+    tracker.current_consist = ConsistRecord(run=run, config={})
+    tracker.get_artifacts_for_run = lambda _run_id: RunArtifacts(
+        inputs={}, outputs={"a": artifact}
+    )
+
+    monkeypatch.setattr(
+        "consist.core.cache._can_delegate_run_output_materialization",
+        lambda _tracker: False,
+    )
+
+    restored_root = tmp_path / "restored_outputs"
+    options = ActiveRunCacheOptions(
+        cache_hydration="outputs-all",
+        materialize_cached_outputs_dir=restored_root,
+    )
+
+    hydrate_cache_hit_outputs(
+        tracker=tracker,
+        run=run,
+        cached_run=cached_run,
+        options=options,
+        link_outputs=False,
+    )
+
+    restored = restored_root / "outputs" / "a.csv"
+    assert restored.read_text(encoding="utf-8") == "value\n1\n"
+    assert run.meta["materialized_outputs"] == {"a": str(restored.resolve())}
+
+
+def test_outputs_all_legacy_fallback_raises_on_missing_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker = Tracker(run_dir=tmp_path / "active_runs", allow_external_paths=True)
+    artifact = Artifact(
+        key="a",
+        container_uri="./outputs/a.csv",
+        driver="csv",
+        run_id=None,
+        meta={},
+    )
+    run = Run(
+        id="active",
+        model_name="model",
+        config_hash=None,
+        git_hash=None,
+        meta={},
+    )
+    cached_run = Run(
+        id="cached",
+        model_name="model",
+        config_hash=None,
+        git_hash=None,
+        meta={},
+    )
+
+    tracker.current_consist = ConsistRecord(run=run, config={})
+    tracker.get_artifacts_for_run = lambda _run_id: RunArtifacts(
+        inputs={}, outputs={"a": artifact}
+    )
+
+    monkeypatch.setattr(
+        "consist.core.cache._can_delegate_run_output_materialization",
+        lambda _tracker: False,
+    )
+
+    with pytest.raises(FileNotFoundError, match="source path missing"):
+        hydrate_cache_hit_outputs(
+            tracker=tracker,
+            run=run,
+            cached_run=cached_run,
+            options=ActiveRunCacheOptions(
+                cache_hydration="outputs-all",
+                materialize_cached_outputs_dir=tmp_path / "restored_outputs",
+            ),
+            link_outputs=False,
+        )
 
 
 def test_outputs_requested_delegates_via_staging_and_warns_on_missing_keys(
@@ -1081,3 +1335,57 @@ def test_outputs_requested_source_root_does_not_warn_and_continue_on_failure(
             options=options,
             link_outputs=False,
         )
+
+
+def test_outputs_requested_legacy_fallback_warns_on_missing_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    tracker = Tracker(run_dir=tmp_path / "active_runs", allow_external_paths=True)
+    artifact = Artifact(
+        key="a",
+        container_uri="./outputs/a.csv",
+        driver="csv",
+        run_id=None,
+        meta={},
+    )
+    run = Run(
+        id="active",
+        model_name="model",
+        config_hash=None,
+        git_hash=None,
+        meta={},
+    )
+    cached_run = Run(
+        id="cached",
+        model_name="model",
+        config_hash=None,
+        git_hash=None,
+        meta={},
+    )
+
+    tracker.current_consist = ConsistRecord(run=run, config={})
+    tracker.get_artifacts_for_run = lambda _run_id: RunArtifacts(
+        inputs={}, outputs={"a": artifact}
+    )
+
+    monkeypatch.setattr(
+        "consist.core.cache._can_delegate_run_output_materialization",
+        lambda _tracker: False,
+    )
+
+    hydrate_cache_hit_outputs(
+        tracker=tracker,
+        run=run,
+        cached_run=cached_run,
+        options=ActiveRunCacheOptions(
+            cache_hydration="outputs-requested",
+            materialize_cached_output_paths={"a": tmp_path / "requested.csv"},
+        ),
+        link_outputs=False,
+    )
+
+    assert any("source path missing" in record.message for record in caplog.records)
+    assert "materialized_outputs" not in (run.meta or {})
