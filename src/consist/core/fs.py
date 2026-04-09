@@ -1,7 +1,7 @@
 import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
-from typing import Optional, Union, Dict
+from typing import Optional, Union, Dict, cast
 
 
 class FileSystemManager:
@@ -212,8 +212,9 @@ class FileSystemManager:
         if roots is None:
             return []
 
+        raw_roots: list[str | os.PathLike[str]] | Sequence[str | os.PathLike[str]]
         if isinstance(roots, (str, os.PathLike)):
-            raw_roots: Sequence[str | os.PathLike[str]] = [roots]
+            raw_roots = (cast(str | os.PathLike[str], roots),)
         elif isinstance(roots, Sequence):
             raw_roots = roots
         else:
