@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uuid
 import weakref
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Literal, Optional
@@ -205,6 +206,25 @@ class Artifact(SQLModel, table=True):
         except Exception:
             return None
 
+    @property
+    def recovery_roots(self) -> list[str]:
+        """
+        Ordered advisory recovery roots recorded on this artifact.
+
+        This is a typed convenience view over ``meta["recovery_roots"]``. Use
+        ``Tracker.set_artifact_recovery_roots(...)`` to persist changes.
+        """
+        roots = (self.meta or {}).get("recovery_roots")
+        if roots is None:
+            return []
+        if isinstance(roots, (str, Path)):
+            return [str(roots)]
+        if isinstance(roots, Sequence):
+            return [
+                str(item) for item in roots if isinstance(item, (str, Path))
+            ]
+        return []
+
     @abs_path.setter
     def abs_path(self, value: str) -> None:
         """
@@ -222,15 +242,19 @@ class Artifact(SQLModel, table=True):
         """
         Resolve this artifact to a filesystem Path.
 
-        Uses the tracker when available to handle mount-aware URIs; otherwise falls
-        back to the cached absolute path or the raw URI.
+        Uses the tracker when available to handle mount-aware URIs. If that
+        canonical resolution does not exist but a runtime ``abs_path`` is set
+        (for example after historical hydration or archive ``move``), this
+        falls back to ``abs_path`` before returning the raw URI.
         """
         tracker_ref = get_tracker_ref(self)
         if tracker_ref is not None:
             tracker_obj = tracker_ref()
             if tracker_obj is not None:
                 try:
-                    return Path(tracker_obj.resolve_uri(self.container_uri))
+                    resolved = Path(tracker_obj.resolve_uri(self.container_uri))
+                    if resolved.exists() or not self.abs_path:
+                        return resolved
                 except Exception:
                     pass
 
@@ -242,10 +266,16 @@ class Artifact(SQLModel, table=True):
         """
         Resolve this artifact to a filesystem path.
 
-        When ``tracker`` is provided, URI resolution uses that tracker directly.
-        Otherwise this falls back to the attached tracker context (if any), then
-        runtime absolute path, then raw URI path.
+        When a runtime ``abs_path`` is present and still exists on disk (for
+        example after historical hydration or archive ``move``), it takes
+        precedence even if ``tracker`` is provided. Otherwise this uses the
+        explicit tracker, then the attached tracker context, then the raw URI
+        path.
         """
+        if self.abs_path:
+            abs_path = Path(self.abs_path)
+            if abs_path.exists():
+                return abs_path
         if tracker is not None:
             return Path(tracker.resolve_uri(self.container_uri))
         return self.path

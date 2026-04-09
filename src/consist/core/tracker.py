@@ -1,6 +1,7 @@
 import inspect
 import itertools
 import re
+import shutil
 from dataclasses import replace
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
@@ -886,6 +887,250 @@ class Tracker:
         ]
         self._artifact_facet_parsers.append((prefix, parser_fn))
         self._artifact_facet_parsers.sort(key=lambda row: len(row[0]), reverse=True)
+
+    def set_artifact_recovery_roots(
+        self,
+        artifact: Artifact,
+        roots: str | os.PathLike[str] | Sequence[str | os.PathLike[str]],
+        *,
+        append: bool = False,
+    ) -> Artifact:
+        """
+        Persist advisory filesystem recovery roots for an artifact.
+
+        Recovery roots are ordered fallback locations used during historical
+        rematerialization and cache-hit output hydration when the canonical
+        cold bytes are no longer available at their original location.
+
+        The artifact's ``container_uri`` remains the canonical logical
+        location. Recovery roots are only alternate byte sources.
+        """
+        if not isinstance(artifact, Artifact):
+            raise TypeError("artifact must be an Artifact instance.")
+        if self.db is None:
+            raise RuntimeError(
+                "Cannot update artifact recovery roots: tracker has no database configured."
+            )
+
+        incoming = self.fs.normalize_recovery_roots(roots)
+        existing = self.fs.normalize_recovery_roots(
+            (artifact.meta or {}).get("recovery_roots")
+        )
+        normalized = incoming
+        if append:
+            normalized = self.fs.normalize_recovery_roots([*existing, *incoming])
+
+        updates: dict[str, Any]
+        if normalized:
+            updates = {"recovery_roots": normalized}
+        else:
+            current_meta = dict(artifact.meta or {})
+            current_meta.pop("recovery_roots", None)
+            self.db.update_artifact_meta(
+                artifact,
+                {"recovery_roots": None},
+                raise_on_error=True,
+            )
+            artifact.meta = current_meta
+            self._run_artifacts_cache.clear()
+            return artifact
+
+        self.db.update_artifact_meta(artifact, updates, raise_on_error=True)
+        artifact.meta = dict(artifact.meta or {})
+        artifact.meta["recovery_roots"] = normalized
+        self._run_artifacts_cache.clear()
+        return artifact
+
+    def archive_artifact(
+        self,
+        artifact: Artifact,
+        archive_root: str | os.PathLike[str],
+        *,
+        mode: Literal["copy", "move"] = "copy",
+        append: bool = True,
+    ) -> Path:
+        """
+        Archive a rematerializable artifact into a stable recovery root.
+
+        The archived copy preserves the artifact's URI-relative layout under
+        ``archive_root`` and records that root in
+        ``artifact.meta["recovery_roots"]``.
+
+        This helper is intended for workflows that promote bytes into archival
+        storage while keeping the original artifact identity and
+        ``container_uri`` unchanged.
+        """
+        if not isinstance(artifact, Artifact):
+            raise TypeError("artifact must be an Artifact instance.")
+        if mode not in {"copy", "move"}:
+            raise ValueError("mode must be 'copy' or 'move'.")
+        if self.db is None:
+            raise RuntimeError(
+                "Cannot archive artifact: tracker has no database configured."
+            )
+
+        relative_path = self.fs.get_remappable_relative_path(artifact.container_uri)
+        if relative_path is None:
+            raise ValueError(
+                f"Artifact {artifact.key!r} does not have a rematerializable URI "
+                "layout. Use managed output paths or preserve a stable relative "
+                "layout before archiving, or archive bytes manually and record "
+                "the archive root with set_artifact_recovery_roots(...)."
+            )
+
+        archive_root_path = Path(archive_root).resolve()
+        destination = (archive_root_path / relative_path).resolve()
+        source_path: Path | None = None
+
+        if artifact.run_id:
+            from consist.core.materialize import find_existing_recovery_source_path
+
+            producing_run = self.get_run(str(artifact.run_id))
+            if producing_run is not None:
+                _, recovered, _ = find_existing_recovery_source_path(
+                    self,
+                    artifact=artifact,
+                    run=producing_run,
+                    source_root=None,
+                )
+                source_path = recovered
+
+        if source_path is None and artifact.run_id is None and artifact.abs_path:
+            candidate = Path(artifact.abs_path).resolve()
+            if candidate.exists():
+                source_path = candidate
+
+        if source_path is None and artifact.run_id is None:
+            candidate = Path(self.resolve_uri(artifact.container_uri)).resolve()
+            if candidate.exists():
+                source_path = candidate
+
+        if source_path is None or not source_path.exists():
+            raise FileNotFoundError(
+                f"Cannot archive artifact {artifact.key!r}: source bytes are unavailable."
+            )
+
+        destination_preexisted = destination.exists()
+        moved_from: Path | None = None
+        if destination.exists():
+            if destination.is_symlink():
+                raise ValueError(
+                    f"Symlink detected in archive destination: {destination}"
+                )
+            if destination.resolve() != source_path.resolve():
+                if source_path.is_file() and destination.is_file():
+                    same_size = source_path.stat().st_size == destination.stat().st_size
+                    same_hash = False
+                    if same_size:
+                        same_hash = self.identity.compute_file_checksum(
+                            str(source_path)
+                        ) == self.identity.compute_file_checksum(str(destination))
+                    if not same_hash:
+                        raise FileExistsError(
+                            f"Archive destination already exists: {destination}"
+                        )
+                else:
+                    raise FileExistsError(
+                        f"Archive destination already exists: {destination}"
+                    )
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if source_path.resolve() != destination.resolve():
+                if mode == "copy":
+                    if source_path.is_dir():
+                        shutil.copytree(source_path, destination)
+                    else:
+                        shutil.copy2(source_path, destination)
+                else:
+                    moved_from = source_path
+                    shutil.move(str(source_path), str(destination))
+
+        try:
+            self.set_artifact_recovery_roots(
+                artifact, [archive_root_path], append=append
+            )
+        except Exception:
+            if moved_from is not None and destination.exists():
+                moved_from.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(destination), str(moved_from))
+            elif not destination_preexisted and destination.exists():
+                if destination.is_dir():
+                    shutil.rmtree(destination)
+                else:
+                    destination.unlink()
+            raise
+
+        if mode == "move":
+            artifact.abs_path = str(destination.resolve())
+        return destination
+
+    def archive_run_outputs(
+        self,
+        run_id: str,
+        archive_root: str | os.PathLike[str],
+        *,
+        keys: Sequence[str] | None = None,
+        mode: Literal["copy", "move"] = "copy",
+        append: bool = True,
+    ) -> dict[str, Path]:
+        """
+        Archive one or more historical run outputs into a stable recovery root.
+
+        Each archived output retains its canonical artifact identity and gains
+        ``archive_root`` as an advisory recovery root.
+        """
+        normalized_keys = normalize_materialize_output_keys(
+            keys,
+            caller="archive_run_outputs",
+        )
+        outputs = self.get_run_outputs(run_id)
+        if normalized_keys is not None:
+            missing = [key for key in normalized_keys if key not in outputs]
+            if missing:
+                raise KeyError(
+                    "Requested output keys were not found for run "
+                    f"{run_id!r}: {', '.join(repr(key) for key in missing)}"
+                )
+            selected = {key: outputs[key] for key in normalized_keys}
+        else:
+            selected = outputs
+
+        archived: dict[str, Path] = {}
+        for key, artifact in selected.items():
+            archived[key] = self.archive_artifact(
+                artifact,
+                archive_root,
+                mode=mode,
+                append=append,
+            )
+        return archived
+
+    def archive_current_run_outputs(
+        self,
+        archive_root: str | os.PathLike[str],
+        *,
+        keys: Sequence[str] | None = None,
+        mode: Literal["copy", "move"] = "copy",
+        append: bool = True,
+    ) -> dict[str, Path]:
+        """
+        Archive outputs for the currently active run into a stable recovery root.
+
+        This is a convenience wrapper around ``archive_run_outputs(...)`` for
+        the common workflow of archiving outputs immediately after they are
+        logged, without manually extracting the active run ID first.
+        """
+        if not self.current_consist or self.current_consist.run is None:
+            raise RuntimeError(
+                "archive_current_run_outputs(...) requires an active run context."
+            )
+        return self.archive_run_outputs(
+            self.current_consist.run.id,
+            archive_root,
+            keys=keys,
+            mode=mode,
+            append=append,
+        )
 
     def _parse_artifact_facet_from_registered_parsers(
         self, key: str
@@ -2123,6 +2368,8 @@ class Tracker:
             If True, flatten scalar facet fields into ``artifact_kv`` for fast queries.
         **meta : Any
             Additional key-value pairs to store in the artifact's flexible `meta` field.
+            ``recovery_roots`` is normalized to an ordered list of absolute
+            filesystem roots when provided.
 
         Returns
         -------

@@ -1042,6 +1042,78 @@ For archive-mirror recovery, cache hydration supports
 `consist.run(...)`, `Tracker.run(...)`, and scenario steps, or via the low-level
 `tracker.start_run(...)` / `tracker.begin_run(...)` APIs directly.
 
+For recurring archive workflows, prefer recording archive roots on the artifact
+once instead of passing `source_root` overrides repeatedly. This is useful when
+iterations overwrite the same logical output path but you preserve each
+iteration under its own archive root:
+
+#### Archiving Outputs Without Creating New Artifacts
+
+You do **not** need to create a second "archived artifact" when you move or
+copy tracked output bytes into long-term storage.
+
+Keep the original artifact and `container_uri`, then archive the bytes with
+`tracker.archive_artifact(...)` or `tracker.archive_run_outputs(...)`.
+Consist records the archive root in `artifact.meta["recovery_roots"]`, so later
+hydration, restart/resume recovery, cache-hit output recovery, and lineage all
+still refer to the original artifact.
+
+This example uses a managed Consist output path so it runs as written. The same
+pattern also applies when your workflow writes to a mutable location on each
+iteration and you keep an iteration-specific archive copy.
+
+```python
+from pathlib import Path
+
+import consist
+from consist import Tracker, use_tracker
+
+tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+
+
+def write_results() -> dict[str, Path]:
+    out = consist.output_path("results", ext="txt")
+    out.write_text("iteration 4\n")
+    return {"results": out}
+
+
+with use_tracker(tracker):
+    result = consist.run(
+        name="iteration_004",
+        fn=write_results,
+        outputs=["results"],
+    )
+
+run_id = result.run.id
+
+tracker.archive_run_outputs(
+    run_id,
+    Path("./archive/iteration_004"),
+    mode="move",
+)
+
+hydrated = tracker.hydrate_run_outputs(
+    run_id,
+    keys=["results"],
+    target_root=Path("./runs/restored_outputs"),
+)
+
+restored = hydrated["results"].artifact.as_path()
+print(restored)
+print(restored.read_text().strip())
+```
+
+What this example shows:
+
+- `archive_run_outputs(...)` moves the bytes into `./archive/iteration_004`
+  without creating a new artifact record.
+- The original artifact identity and lineage stay intact.
+- `hydrate_run_outputs(...)` restores from the archive root even though the
+  original mutable workspace path is no longer the source of truth.
+
+Use `mode="copy"` if the original workspace file should remain in place. Use
+`mode="move"` when the archive copy should become the durable byte source.
+
 When you use `tracker.hydrate_run_outputs(...)`, `target_root` may be either
 the tracker `run_dir` or any configured tracker mount root without needing
 `allow_external_paths=True`.
