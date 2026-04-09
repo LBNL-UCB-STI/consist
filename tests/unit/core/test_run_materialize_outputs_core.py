@@ -900,7 +900,7 @@ def test_hydrate_run_outputs_returns_detached_artifact_views(
     assert result.artifact.container_uri == historical_artifact.container_uri
     assert result.artifact.path == restored_path
     assert result.artifact.as_path() == restored_path
-    assert result.artifact.as_path(tracker=tracker) == restored_path
+    assert result.artifact.as_path(tracker=tracker) == output_path
     assert hydrated.paths == {"table": restored_path}
     assert list(hydrated.resolvable) == ["table"]
     assert hydrated.complete is True

@@ -1116,7 +1116,9 @@ Use `mode="copy"` if the original workspace file should remain in place. Use
 
 When you use `tracker.hydrate_run_outputs(...)`, `target_root` may be either
 the tracker `run_dir` or any configured tracker mount root without needing
-`allow_external_paths=True`.
+`allow_external_paths=True`. Relative `target_root` values are resolved from the
+process working directory, so prefer `tracker.run_dir / ...` or an absolute
+mount-backed path in examples and production code.
 
 Example:
 
@@ -1124,7 +1126,7 @@ Example:
 hydrated = tracker.hydrate_run_outputs(
     "prior_run_id",
     keys=["results"],
-    target_root=Path("restored_outputs"),
+    target_root=tracker.run_dir / "restored_outputs",
 )
 
 result = hydrated["results"]

@@ -266,16 +266,11 @@ class Artifact(SQLModel, table=True):
         """
         Resolve this artifact to a filesystem path.
 
-        When a runtime ``abs_path`` is present and still exists on disk (for
-        example after historical hydration or archive ``move``), it takes
-        precedence even if ``tracker`` is provided. Otherwise this uses the
-        explicit tracker, then the attached tracker context, then the raw URI
-        path.
+        When ``tracker`` is provided, URI resolution uses that tracker
+        explicitly. Otherwise this falls back to the attached tracker context
+        (if any), then any runtime ``abs_path`` captured during hydration or
+        archive ``move``, then the raw URI path.
         """
-        if self.abs_path:
-            abs_path = Path(self.abs_path)
-            if abs_path.exists():
-                return abs_path
         if tracker is not None:
             return Path(tracker.resolve_uri(self.container_uri))
         return self.path
