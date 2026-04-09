@@ -220,9 +220,7 @@ class Artifact(SQLModel, table=True):
         if isinstance(roots, (str, Path)):
             return [str(roots)]
         if isinstance(roots, Sequence):
-            return [
-                str(item) for item in roots if isinstance(item, (str, Path))
-            ]
+            return [str(item) for item in roots if isinstance(item, (str, Path))]
         return []
 
     @abs_path.setter
