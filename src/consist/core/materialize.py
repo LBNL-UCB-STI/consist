@@ -74,6 +74,7 @@ class MaterializationResult:
     failed : list[tuple[str, str]]
         Keys that failed during recovery, paired with the failure message.
     """
+
     materialized_from_filesystem: dict[str, str] = field(default_factory=dict)
     materialized_from_db: dict[str, str] = field(default_factory=dict)
     skipped_existing: list[str] = field(default_factory=list)
@@ -146,6 +147,7 @@ class HydratedRunOutput:
         hydrated workspace. When ``True``, ``path`` exists or is treated as the
         preserved reusable destination.
     """
+
     key: str
     artifact: Artifact
     path: Path | None
@@ -179,6 +181,7 @@ class HydratedRunOutputsResult(MappingABC[str, HydratedRunOutput]):
     >>> hydrated.paths["persons"].name
     'persons.parquet'
     """
+
     outputs: dict[str, HydratedRunOutput] = field(default_factory=dict)
 
     def __getitem__(self, key: str) -> HydratedRunOutput:
