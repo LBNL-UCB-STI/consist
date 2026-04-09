@@ -495,14 +495,21 @@ reconstruction. It raises only when the requested bytes still cannot be
 recovered.
 
 For archive-mirror recovery or export workflows, use the explicit run-scoped
-API instead of cache hydration:
+API instead of cache hydration. In almost all new code, that means
+`hydrate_run_outputs(...)`:
 
 ```python
-result = tracker.materialize_run_outputs(
+hydrated = tracker.hydrate_run_outputs(
     "prior_run_id",
+    keys=["features"],
     target_root=Path("restored_outputs"),
     source_root=Path("/archive/outputs_mirror"),
 )
+
+features = hydrated["features"]
+assert features.resolvable
+print(features.status)
+print(features.artifact.as_path())
 ```
 
 Cache hydration exposes an archive-mirror override via
@@ -513,9 +520,13 @@ Cache hydration exposes an archive-mirror override via
 also available on low-level `tracker.start_run(...)` /
 `tracker.begin_run(...)` flows.
 
-For explicit historical output recovery, `tracker.materialize_run_outputs(...)`
-accepts `target_root` under either the tracker `run_dir` or any configured
-tracker mount root without requiring `allow_external_paths=True`.
+For explicit historical output recovery,
+`tracker.hydrate_run_outputs(...)` accepts `target_root` under either the
+tracker `run_dir` or any configured tracker mount root without requiring
+`allow_external_paths=True`.
+
+Keep `tracker.materialize_run_outputs(...)` for compatibility if you only need
+aggregate summary buckets rather than keyed per-output results.
 
 ### Containers Integration
 

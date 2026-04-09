@@ -76,7 +76,17 @@ from consist.core.persistence import (
 from consist.core.views import ViewFactory, ViewRegistry
 from consist.core.ingestion import ingest_artifact
 from consist.core.lineage import LineageService
-from consist.core.materialize import materialize_artifacts
+from consist.core.materialize import (
+    fold_hydrated_run_outputs_result,
+    hydrate_run_outputs as hydrate_run_outputs_core,
+    materialize_artifacts,
+)
+from consist.core.materialize_options import (
+    VALID_MATERIALIZE_DB_FALLBACK as _VALID_MATERIALIZE_DB_FALLBACK,
+    VALID_MATERIALIZE_ON_MISSING as _VALID_MATERIALIZE_ON_MISSING,
+    normalize_materialize_output_keys,
+    validate_materialize_option,
+)
 from consist.core.matrix import MatrixViewFactory
 from consist.core.netcdf_views import NetCdfMetadataView
 from consist.core.openmatrix_views import OpenMatrixMetadataView
@@ -108,14 +118,12 @@ from consist.types import (
 
 if TYPE_CHECKING:
     from consist.core.coupler import Coupler
-    from consist.core.materialize import MaterializationResult
+    from consist.core.materialize import HydratedRunOutputsResult, MaterializationResult
     from consist.core.step_context import StepContext
     from consist.runset import RunSet
 
 AccessMode = Literal["standard", "analysis", "read_only"]
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_VALID_MATERIALIZE_ON_MISSING = {"warn", "raise"}
-_VALID_MATERIALIZE_DB_FALLBACK = {"never", "if_ingested"}
 
 
 def _is_safe_identifier(identifier: str) -> bool:
@@ -131,38 +139,6 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _normalize_materialize_output_keys(
-    keys: Sequence[str] | None,
-) -> tuple[str, ...] | None:
-    if keys is None:
-        return None
-    if isinstance(keys, (str, bytes)):
-        raise TypeError(
-            "keys must be a sequence of output-key strings, not a single str/bytes value."
-        )
-
-    normalized: list[str] = []
-    for key in keys:
-        if not isinstance(key, str):
-            raise TypeError(
-                "keys must contain only strings "
-                f"(got {type(key).__name__!s} in materialize_run_outputs)."
-            )
-        normalized.append(key)
-    return tuple(normalized)
-
-
-def _validate_materialize_option(
-    *,
-    name: str,
-    value: str,
-    allowed: set[str],
-) -> None:
-    if value not in allowed:
-        allowed_display = ", ".join(repr(item) for item in sorted(allowed))
-        raise ValueError(f"{name} must be one of: {allowed_display}")
 
 
 class Tracker:
@@ -4564,43 +4540,158 @@ class Tracker:
         db_fallback: Literal["never", "if_ingested"] = "if_ingested",
     ) -> "MaterializationResult":
         """
-        Materialize the output artifacts linked to a historical run.
+        Restore historical run outputs and return the legacy summary result.
 
-        This is a recovery/export helper for rematerializing run-linked outputs
-        into a new filesystem root while preserving historical relative layout
-        where the underlying planner can derive it.
+        This method performs the same copy/export work as
+        ``hydrate_run_outputs(...)`` but folds the keyed outcomes into the older
+        ``MaterializationResult`` buckets. Use it when you only need to know
+        which keys were restored, skipped, or failed.
+
+        For new restart or cross-workspace recovery flows, prefer
+        ``hydrate_run_outputs(...)`` because it returns detached artifacts and
+        directly usable per-key paths.
+
+        Parameters
+        ----------
+        run_id : str
+            Identifier of the historical run whose outputs should be restored.
+        target_root : str | Path
+            Destination root under which historical relative layout is recreated.
+        source_root : str | Path | None, optional
+            Optional alternate root to probe before the original historical
+            filesystem location. This is useful for archive mirrors.
+        keys : Sequence[str] | None, optional
+            Optional subset of output keys to restore. ``None`` means all
+            outputs linked to the run.
+        preserve_existing : bool, default True
+            If ``True``, existing destinations are treated as reusable and
+            reported in ``skipped_existing``.
+        on_missing : {"warn", "raise"}, default "warn"
+            Error handling policy for missing source bytes and copy/export
+            failures.
+        db_fallback : {"never", "if_ingested"}, default "if_ingested"
+            Whether ingested CSV/Parquet artifacts may be exported from DuckDB
+            when cold filesystem bytes are unavailable.
+
+        Returns
+        -------
+        MaterializationResult
+            Aggregate summary of the selected outputs.
+        """
+        return fold_hydrated_run_outputs_result(
+            self.hydrate_run_outputs(
+                run_id,
+                target_root=target_root,
+                source_root=source_root,
+                keys=keys,
+                preserve_existing=preserve_existing,
+                on_missing=on_missing,
+                db_fallback=db_fallback,
+            )
+        )
+
+    def hydrate_run_outputs(
+        self,
+        run_id: str,
+        *,
+        target_root: str | Path,
+        source_root: str | Path | None = None,
+        keys: Sequence[str] | None = None,
+        preserve_existing: bool = True,
+        on_missing: Literal["warn", "raise"] = "warn",
+        db_fallback: Literal["never", "if_ingested"] = "if_ingested",
+    ) -> "HydratedRunOutputsResult":
+        """
+        Hydrate the output artifacts linked to a historical run.
+
+        This is the first-class historical recovery API. It rematerializes
+        selected run outputs into ``target_root`` and returns one keyed result
+        per output, including:
+
+        - a detached artifact view for that key
+        - the resolved destination path under the new workspace root
+        - a status describing how recovery happened
+        - whether the detached artifact is immediately resolvable
+
+        Compared with ``materialize_run_outputs(...)``, this method removes the
+        need for separate output lookup and post-hoc "is this usable now?"
+        checks. The returned detached artifacts preserve provenance metadata but
+        are no longer attached to the original tracker state.
 
         Parameters
         ----------
         run_id : str
             Identifier of the run whose linked outputs should be restored.
         target_root : str | Path
-            Destination root for rematerialized outputs.
+            Destination root under which historical relative layout is recreated.
         source_root : str | Path | None, optional
-            Optional alternate root for filesystem-backed source recovery.
+            Optional alternate root to probe before the original historical
+            filesystem location. This is useful for archive mirrors or copied
+            cold-storage trees.
         keys : Sequence[str] | None, optional
-            Optional subset of output keys to restore.
+            Optional subset of output keys to restore. ``None`` means all
+            outputs linked to the run. Unknown keys raise ``KeyError`` before
+            any copy/export work starts.
         preserve_existing : bool, default True
-            If True, existing destinations are skipped rather than replaced.
+            If ``True``, existing destinations are treated as reusable and
+            returned with ``status="preserved_existing"``.
         on_missing : {"warn", "raise"}, default "warn"
-            Error handling policy for missing filesystem bytes or copy failures.
+            Error handling policy for missing filesystem bytes or copy/export
+            failures. ``"warn"`` returns per-key ``missing_source`` / ``failed``
+            statuses. ``"raise"`` aborts on execution-time failures.
         db_fallback : {"never", "if_ingested"}, default "if_ingested"
             Whether ingested csv/parquet artifacts may be exported from DuckDB
             when cold filesystem bytes are unavailable.
 
         Returns
         -------
-        MaterializationResult
-            Structured materialization outcome returned by the core planner and
-            executor.
+        HydratedRunOutputsResult
+            Keyed hydration outcomes for the selected historical outputs.
+
+        Notes
+        -----
+        Status values have the following meanings:
+
+        - ``materialized_from_filesystem``: copied from historical cold bytes
+        - ``materialized_from_db``: exported from DuckDB for an ingested output
+        - ``preserved_existing``: destination already existed and was reused
+        - ``skipped_unmapped``: no safe historical relative-path mapping exists
+        - ``missing_source``: historical bytes were unavailable and not
+          recoverable
+        - ``failed``: recovery was attempted but failed
+
+        Examples
+        --------
+        Restore two outputs into a new workspace root and inspect statuses:
+
+        >>> hydrated = tracker.hydrate_run_outputs(
+        ...     "prior_run_id",
+        ...     keys=["persons", "households"],
+        ...     target_root="restored",
+        ... )
+        >>> hydrated["persons"].status
+        'materialized_from_filesystem'
+        >>> hydrated.paths["persons"]
+        PosixPath('.../restored/.../persons.parquet')
+
+        Use the detached hydrated artifact directly:
+
+        >>> persons = hydrated["persons"]
+        >>> persons.resolvable
+        True
+        >>> persons.artifact.as_path()
+        PosixPath('.../restored/.../persons.parquet')
         """
-        normalized_keys = _normalize_materialize_output_keys(keys)
-        _validate_materialize_option(
+        normalized_keys = normalize_materialize_output_keys(
+            keys,
+            caller="hydrate_run_outputs",
+        )
+        validate_materialize_option(
             name="on_missing",
             value=on_missing,
             allowed=_VALID_MATERIALIZE_ON_MISSING,
         )
-        _validate_materialize_option(
+        validate_materialize_option(
             name="db_fallback",
             value=db_fallback,
             allowed=_VALID_MATERIALIZE_DB_FALLBACK,
@@ -4631,33 +4722,17 @@ class Tracker:
             Path(source_root).resolve() if source_root is not None else None
         )
 
-        plan, result = materialize_core.build_run_output_materialize_plan(
-            self,
-            run,
+        return hydrate_run_outputs_core(
+            tracker=self,
+            run=run,
             target_root=destination_root,
             source_root=source_root_override,
             keys=normalized_keys,
+            allowed_base=allowed_roots,
             preserve_existing=preserve_existing,
+            on_missing=on_missing,
             db_fallback=db_fallback,
         )
-
-        execution_result = materialize_core.materialize_planned_outputs(
-            plan,
-            tracker=self,
-            allowed_base=allowed_roots,
-            on_missing=on_missing,
-            preserve_existing=preserve_existing,
-        )
-
-        result.materialized_from_filesystem.update(
-            execution_result.materialized_from_filesystem
-        )
-        result.materialized_from_db.update(execution_result.materialized_from_db)
-        result.skipped_existing.extend(execution_result.skipped_existing)
-        result.skipped_unmapped.extend(execution_result.skipped_unmapped)
-        result.skipped_missing_source.extend(execution_result.skipped_missing_source)
-        result.failed.extend(execution_result.failed)
-        return result
 
     def get_config_bundle(
         self,

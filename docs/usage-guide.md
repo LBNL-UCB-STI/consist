@@ -1027,8 +1027,13 @@ the prior run's files or reconstruct ingested tables.
 When cache-hit output files are gone, `outputs-all` and the new run-scoped
 output recovery API can reconstruct ingested CSV/Parquet outputs from DuckDB.
 For archive-mirror recovery or debug/export workflows, prefer the explicit
-`tracker.materialize_run_outputs(...)` API instead of overloading cache
-hydration.
+historical output recovery API instead of overloading cache hydration:
+
+- `tracker.hydrate_run_outputs(...)` is the recommended path. It gives you a
+  keyed result with detached artifacts, statuses, and directly usable hydrated
+  paths.
+- `tracker.materialize_run_outputs(...)` remains available when you
+  specifically want the older aggregate summary buckets.
 
 For archive-mirror recovery, cache hydration supports
 `materialize_cached_outputs_source_root=Path(...)` for `outputs-requested` and
@@ -1037,9 +1042,24 @@ For archive-mirror recovery, cache hydration supports
 `consist.run(...)`, `Tracker.run(...)`, and scenario steps, or via the low-level
 `tracker.start_run(...)` / `tracker.begin_run(...)` APIs directly.
 
-When you use the explicit `tracker.materialize_run_outputs(...)` API, `target_root`
-may be either the tracker `run_dir` or any configured tracker mount root without
-needing `allow_external_paths=True`.
+When you use `tracker.hydrate_run_outputs(...)`, `target_root` may be either
+the tracker `run_dir` or any configured tracker mount root without needing
+`allow_external_paths=True`.
+
+Example:
+
+```python
+hydrated = tracker.hydrate_run_outputs(
+    "prior_run_id",
+    keys=["results"],
+    target_root=Path("restored_outputs"),
+)
+
+result = hydrated["results"]
+print(result.status)
+if result.resolvable:
+    print(result.artifact.as_path())
+```
 
 Set per-run via `cache_options=CacheOptions(cache_hydration=...)` (for `run(...)`)
 or for scenario defaults via `step_cache_hydration=...`:

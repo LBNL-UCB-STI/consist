@@ -97,6 +97,33 @@ def test_run_output_helpers(tracker: Tracker, run_dir):
     assert df.shape[0] == 1
 
 
+def test_hydrate_run_outputs_across_shared_db_workspaces(tmp_path):
+    db_path = str(tmp_path / "shared.duckdb")
+
+    tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
+    output_path = tracker_a.run_dir / "outputs" / "results.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("a,b\n1,2\n", encoding="utf-8")
+
+    with tracker_a.start_run("historical_run", "model_outputs"):
+        tracker_a.log_artifact(output_path, key="results", direction="output")
+
+    tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
+    target_root = tracker_b.run_dir / "workspace_root"
+    hydrated = tracker_b.hydrate_run_outputs(
+        "historical_run",
+        target_root=target_root,
+        keys=["results"],
+    )
+
+    restored_path = (target_root / "outputs" / "results.csv").resolve()
+    result = hydrated["results"]
+    assert result.status == "materialized_from_filesystem"
+    assert result.path == restored_path
+    assert result.artifact.as_path() == restored_path
+    assert restored_path.exists()
+
+
 def test_artifact_accessor_helpers_support_attached_and_explicit_tracker(
     tracker: Tracker, run_dir
 ):

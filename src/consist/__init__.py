@@ -54,6 +54,7 @@ from consist.api import (
     cached_output,
     cached_artifacts,
     get_run_result,
+    hydrate_run_outputs,
     materialize_run_outputs,
     get_artifact,
     register_artifact_facet_parser,
@@ -94,7 +95,11 @@ from consist.core.noop import (
     NoopScenarioContext,
     NoopTracker,
 )
-from consist.core.materialize import MaterializationResult
+from consist.core.materialize import (
+    HydratedRunOutput,
+    HydratedRunOutputsResult,
+    MaterializationResult,
+)
 from consist.runtime import create_tracker
 from consist.protocols import (
     ArtifactLike,
@@ -124,6 +129,8 @@ __all__ = [
     "NoopRunResult",
     "NoopScenarioContext",
     "NoopTracker",
+    "HydratedRunOutput",
+    "HydratedRunOutputsResult",
     "MaterializationResult",
     "create_tracker",
     "ArtifactLike",
@@ -169,6 +176,7 @@ __all__ = [
     "cached_output",
     "cached_artifacts",
     "get_run_result",
+    "hydrate_run_outputs",
     "materialize_run_outputs",
     "get_artifact",
     "register_artifact_facet_parser",

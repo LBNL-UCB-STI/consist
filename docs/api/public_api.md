@@ -81,6 +81,8 @@ with tracker.scenario("baseline") as sc:
 - [`consist.Tracker`](tracker.md)
 - [`consist.Run`](run.md)
 - [`consist.Artifact`](artifact.md)
+- [`consist.HydratedRunOutput`](materialize.md#consist.core.materialize.HydratedRunOutput)
+- [`consist.HydratedRunOutputsResult`](materialize.md#consist.core.materialize.HydratedRunOutputsResult)
 - [`consist.MaterializationResult`](materialize.md#consist.core.materialize.MaterializationResult)
 - [`consist.RunSet`](runset.md#consist.runset.RunSet)
 - [`consist.AlignedPair`](runset.md#consist.runset.AlignedPair)
@@ -119,7 +121,8 @@ Scenario defaults like `name_template` and `cache_epoch` are configured via `con
 - [`consist.load`](api_helpers.md#consist.api.load)
 - [`consist.capture_outputs`](api_helpers.md#consist.api.capture_outputs)
 - [`consist.get_artifact`](api_helpers.md#consist.api.get_artifact)
-- [`consist.materialize_run_outputs`](api_helpers.md#consist.api.materialize_run_outputs)
+- [`consist.hydrate_run_outputs`](api_helpers.md#consist.api.hydrate_run_outputs) (recommended historical output recovery API)
+- [`consist.materialize_run_outputs`](api_helpers.md#consist.api.materialize_run_outputs) (aggregate compatibility wrapper)
 - [`consist.register_artifact_facet_parser`](api_helpers.md#consist.api.register_artifact_facet_parser)
 - [`consist.cached_output`](api_helpers.md#consist.api.cached_output)
 - [`consist.cached_artifacts`](api_helpers.md#consist.api.cached_artifacts)
@@ -180,6 +183,7 @@ as needed.
 - `find_artifacts`, `get_artifact`, `get_artifacts_for_run`
 - `find_artifacts_by_params`, `get_artifact_kv`, `register_artifact_facet_parser`
 - `get_run`, `get_run_config`, `get_run_inputs`, `get_run_outputs`
+- `hydrate_run_outputs`, `materialize_run_outputs`
 - `get_artifact_lineage`, `print_lineage`, `history`
 - `diff_runs`, `get_config_facet`, `get_config_facets`, `get_run_config_kv`
 - `get_config_values`, `get_config_value`, `find_runs_by_facet_kv`
