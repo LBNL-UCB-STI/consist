@@ -37,17 +37,17 @@ on every restart:
 
 ```python
 archive_root = Path("/archive/pilates/iteration_004")
+run_id = tracker.current_consist.run.id
 
-archived = tracker.archive_run_outputs(
-    "prior_run_id",
+tracker.archive_current_run_outputs(
     archive_root,
     mode="copy",
 )
 
 hydrated = tracker.hydrate_run_outputs(
-    "prior_run_id",
+    run_id,
     keys=["persons"],
-    target_root=Path("restored_workspace"),
+    target_root=tracker.run_dir / "restored_workspace",
 )
 ```
 
@@ -55,6 +55,8 @@ Use the lower-level helpers when you want to manage archival yourself:
 
 - `tracker.set_artifact_recovery_roots(...)` records one or more archive roots
   without copying bytes.
+- `tracker.archive_current_run_outputs(...)` archives the outputs of the active
+  run without manually extracting the run ID first.
 - `tracker.archive_artifact(...)` copies or moves a single artifact into an
   archive root and records that root.
 - `tracker.archive_run_outputs(...)` applies the same pattern to all or a
