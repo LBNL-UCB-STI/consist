@@ -1147,12 +1147,9 @@ class RunTraceCoordinator:
                     if get_tracker_ref(artifact) is None:
                         set_tracker_ref(artifact, tracker)
                     if input_binding == "paths":
-                        artifact_path = None
                         if requested_input_paths and param_name in requested_input_paths:
                             artifact_path = Path(requested_input_paths[param_name])
-                        elif artifact.abs_path is not None:
-                            artifact_path = Path(artifact.abs_path)
-                        if artifact_path is None:
+                        else:
                             artifact_path = artifact.path
                         if not artifact_path.exists():
                             raise ValueError(
