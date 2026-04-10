@@ -226,6 +226,38 @@ class ArtifactManager:
                     "content_id equality governs deduplication instead."
                 )
 
+        def _clone_artifact(
+            artifact: Artifact,
+            *,
+            driver_override: Optional[str],
+            table_path_override: Optional[str],
+            array_path_override: Optional[str],
+        ) -> Artifact:
+            cloned = Artifact(
+                id=artifact.id,
+                key=artifact.key,
+                container_uri=artifact.container_uri,
+                table_path=(
+                    table_path_override
+                    if table_path_override is not None
+                    else artifact.table_path
+                ),
+                array_path=(
+                    array_path_override
+                    if array_path_override is not None
+                    else artifact.array_path
+                ),
+                driver=driver_override or artifact.driver,
+                hash=artifact.hash,
+                content_id=artifact.content_id,
+                run_id=artifact.run_id,
+                meta=dict(artifact.meta or {}),
+                created_at=artifact.created_at,
+            )
+            if artifact.abs_path:
+                cloned.abs_path = artifact.abs_path
+            return cloned
+
         def _attach_content_id(artifact: Artifact) -> None:
             hash_value = hash_state.effective_hash or artifact.hash
             effective_driver = driver or artifact.driver
@@ -315,20 +347,20 @@ class ArtifactManager:
         _warn_output_reuse_deprecated()
 
         if isinstance(path, Artifact):
-            artifact_obj = path
-            resolved_abs_path = artifact_obj.abs_path or self.tracker.resolve_uri(
-                artifact_obj.container_uri
+            source_artifact = path
+            resolved_abs_path = source_artifact.abs_path or self.tracker.resolve_uri(
+                source_artifact.container_uri
             )
             if key is None:
-                key = artifact_obj.key
+                key = source_artifact.key
             if key is not None:
                 validate_artifact_key(key)
-            if driver:
-                artifact_obj.driver = driver
-            if table_path is not None:
-                artifact_obj.table_path = table_path
-            if array_path is not None:
-                artifact_obj.array_path = array_path
+            artifact_obj = _clone_artifact(
+                source_artifact,
+                driver_override=driver,
+                table_path_override=table_path,
+                array_path_override=array_path,
+            )
             _apply_content_hash_override(artifact_obj)
             if meta:
                 artifact_obj.meta.update(meta)
@@ -372,9 +404,12 @@ class ArtifactManager:
                         )
 
                     if should_reuse:
-                        artifact_obj = parent
-                        if driver:
-                            artifact_obj.driver = driver
+                        artifact_obj = _clone_artifact(
+                            parent,
+                            driver_override=driver,
+                            table_path_override=table_path,
+                            array_path_override=array_path,
+                        )
                         _apply_content_hash_override(artifact_obj)
                         if meta:
                             artifact_obj.meta.update(meta)
