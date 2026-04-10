@@ -106,6 +106,9 @@ class ExecutionOptions:
 
     load_inputs: Optional[bool] = None
     input_binding: Optional[InputBindingMode] = None
+    input_paths: Optional[Mapping[str, PathLike]] = None
+    input_materialization: Optional[Literal["requested"]] = None
+    input_materialization_mode: Optional[Literal["copy"]] = None
     executor: Optional[Literal["python", "container"]] = None
     container: Optional[Mapping[str, Any]] = None
     runtime_kwargs: Optional[Mapping[str, Any]] = None

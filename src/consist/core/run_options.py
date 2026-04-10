@@ -27,6 +27,14 @@ LEGACY_POLICY_KWARG_REPLACEMENTS: Final[dict[str, str]] = {
     "load_inputs": "execution_options=ExecutionOptions(load_inputs=...)",
     "executor": "execution_options=ExecutionOptions(executor=...)",
     "container": "execution_options=ExecutionOptions(container=...)",
+    "input_binding": "execution_options=ExecutionOptions(input_binding=...)",
+    "input_paths": "execution_options=ExecutionOptions(input_paths=...)",
+    "input_materialization": (
+        "execution_options=ExecutionOptions(input_materialization=...)"
+    ),
+    "input_materialization_mode": (
+        "execution_options=ExecutionOptions(input_materialization_mode=...)"
+    ),
     "runtime_kwargs": "execution_options=ExecutionOptions(runtime_kwargs=...)",
     "inject_context": "execution_options=ExecutionOptions(inject_context=...)",
 }
@@ -54,6 +62,9 @@ class ResolvedRunOptions:
     output_missing: Optional[str]
     input_binding: Optional[InputBindingMode]
     load_inputs: Optional[bool]
+    input_paths: Optional[Mapping[str, Any]]
+    input_materialization: Optional[str]
+    input_materialization_mode: Optional[str]
     executor: Optional[str]
     container: Optional[Mapping[str, Any]]
     runtime_kwargs: Optional[Mapping[str, Any]]
@@ -118,6 +129,9 @@ def resolve_runtime_kwargs_alias(
     return ExecutionOptions(
         input_binding=execution_options.input_binding,
         load_inputs=execution_options.load_inputs,
+        input_paths=execution_options.input_paths,
+        input_materialization=execution_options.input_materialization,
+        input_materialization_mode=execution_options.input_materialization_mode,
         executor=execution_options.executor,
         container=execution_options.container,
         runtime_kwargs=runtime_kwargs,
@@ -154,6 +168,9 @@ def merge_run_options(
         output_missing=output_obj.output_missing,
         input_binding=exec_obj.input_binding,
         load_inputs=exec_obj.load_inputs,
+        input_paths=exec_obj.input_paths,
+        input_materialization=exec_obj.input_materialization,
+        input_materialization_mode=exec_obj.input_materialization_mode,
         executor=exec_obj.executor,
         container=exec_obj.container,
         runtime_kwargs=exec_obj.runtime_kwargs,

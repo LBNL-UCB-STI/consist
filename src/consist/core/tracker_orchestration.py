@@ -138,6 +138,9 @@ class RunInvocationContext:
     input_binding: InputBindingMode
     resolved_inputs: List[ArtifactRef]
     input_artifacts_by_key: Dict[str, Artifact]
+    requested_input_paths: Optional[Dict[str, Path]]
+    requested_input_materialization: Optional[str]
+    requested_input_materialization_mode: Optional[str]
     run_id: str
     start_kwargs: Dict[str, Any]
 
@@ -270,6 +273,9 @@ class RunTraceCoordinator:
         materialize_cached_output_paths: Optional[Dict[str, Path]] = None,
         materialize_cached_outputs_dir: Optional[Path] = None,
         materialize_cached_outputs_source_root: Optional[Path] = None,
+        requested_input_paths: Optional[Mapping[str, Any]] = None,
+        requested_input_materialization: Optional[str] = None,
+        requested_input_materialization_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build the kwargs payload passed into ``tracker.start_run``."""
         start_kwargs: Dict[str, Any] = {
@@ -297,6 +303,21 @@ class RunTraceCoordinator:
             )
         if code_identity_callable is not None:
             start_kwargs["_consist_code_identity_callable"] = code_identity_callable
+        if requested_input_materialization is not None:
+            start_kwargs["requested_input_materialization"] = (
+                requested_input_materialization
+            )
+        if requested_input_paths is not None:
+            start_kwargs["requested_input_paths"] = {
+                str(key): str(Path(value)) for key, value in requested_input_paths.items()
+            }
+        requested_mode = requested_input_materialization_mode or (
+            "copy" if requested_input_materialization == "requested" else None
+        )
+        if requested_mode is not None:
+            start_kwargs["requested_input_materialization_mode"] = (
+                requested_mode
+            )
         optional_values: Dict[str, Any] = {
             "cache_version": invocation.cache_version,
             "phase": phase,
@@ -460,6 +481,9 @@ class RunTraceCoordinator:
             adapter=invocation.adapter,
         )
         input_binding = invocation.input_binding
+        requested_input_paths = invocation.input_paths
+        requested_input_materialization = invocation.input_materialization
+        requested_input_materialization_mode = invocation.input_materialization_mode
         if (
             input_binding != "none"
             and invocation.inputs is not None
@@ -506,8 +530,35 @@ class RunTraceCoordinator:
             tracker,
             invocation.inputs,
             depends_on,
-            include_keyed_artifacts=invocation.executor == "python",
+            include_keyed_artifacts=(
+                invocation.executor == "python"
+                or requested_input_materialization == "requested"
+            ),
         )
+        if (
+            requested_input_materialization == "requested"
+            and requested_input_paths is not None
+        ):
+            missing_requested_keys = sorted(
+                set(requested_input_paths) - set(input_artifacts_by_key)
+            )
+            if missing_requested_keys:
+                raise ValueError(
+                    format_problem_cause_fix(
+                        problem=(
+                            "execution_options.input_paths contains keys that are "
+                            "not present in the resolved input artifact set."
+                        ),
+                        cause=(
+                            "Requested input staging only works for explicitly keyed "
+                            "input artifacts."
+                        ),
+                        fix=(
+                            "Use input_paths keys drawn from the resolved inputs "
+                            f"mapping. Unknown keys: {missing_requested_keys}."
+                        ),
+                    )
+                )
 
         if run_id is None:
             run_id = f"{resolved_name}_{uuid.uuid4().hex[:8]}"
@@ -568,6 +619,11 @@ class RunTraceCoordinator:
                 if invocation.materialize_cached_outputs_source_root is not None
                 else None
             ),
+            requested_input_paths=requested_input_paths,
+            requested_input_materialization=requested_input_materialization,
+            requested_input_materialization_mode=(
+                requested_input_materialization_mode
+            ),
         )
 
         return RunInvocationContext(
@@ -586,6 +642,15 @@ class RunTraceCoordinator:
             input_binding=input_binding,
             resolved_inputs=resolved_inputs,
             input_artifacts_by_key=input_artifacts_by_key,
+            requested_input_paths=(
+                {str(key): Path(value) for key, value in requested_input_paths.items()}
+                if requested_input_paths is not None
+                else None
+            ),
+            requested_input_materialization=requested_input_materialization,
+            requested_input_materialization_mode=(
+                requested_input_materialization_mode
+            ),
             run_id=run_id,
             start_kwargs=start_kwargs,
         )
@@ -995,6 +1060,7 @@ class RunTraceCoordinator:
         inject_context: Optional[Union[bool, str]],
         input_binding: InputBindingMode,
         input_artifacts_by_key: Dict[str, Artifact],
+        requested_input_paths: Optional[Mapping[str, Path]],
         capture_dir: Optional[Path],
         capture_pattern: str,
     ) -> tuple[Any, Dict[str, Artifact]]:
@@ -1081,7 +1147,13 @@ class RunTraceCoordinator:
                     if get_tracker_ref(artifact) is None:
                         set_tracker_ref(artifact, tracker)
                     if input_binding == "paths":
-                        artifact_path = artifact.as_path(tracker=tracker)
+                        artifact_path = None
+                        if requested_input_paths and param_name in requested_input_paths:
+                            artifact_path = Path(requested_input_paths[param_name])
+                        elif artifact.abs_path is not None:
+                            artifact_path = Path(artifact.abs_path)
+                        if artifact_path is None:
+                            artifact_path = artifact.path
                         if not artifact_path.exists():
                             raise ValueError(
                                 format_problem_cause_fix(
@@ -1333,6 +1405,7 @@ class RunTraceCoordinator:
         input_binding = context.input_binding
         resolved_inputs = context.resolved_inputs
         input_artifacts_by_key = context.input_artifacts_by_key
+        requested_input_paths = context.requested_input_paths
         run_id = context.run_id
         start_kwargs = context.start_kwargs
 
@@ -1407,6 +1480,7 @@ class RunTraceCoordinator:
                 inject_context=inject_context,
                 input_binding=input_binding,
                 input_artifacts_by_key=input_artifacts_by_key,
+                requested_input_paths=requested_input_paths,
                 capture_dir=capture_dir,
                 capture_pattern=capture_pattern,
             )

@@ -81,6 +81,8 @@ from consist.core.materialize import (
     fold_hydrated_run_outputs_result,
     hydrate_run_outputs as hydrate_run_outputs_core,
     materialize_artifacts,
+    stage_artifact as stage_artifact_core,
+    stage_inputs as stage_inputs_core,
 )
 from consist.core.materialize_options import (
     VALID_MATERIALIZE_DB_FALLBACK as _VALID_MATERIALIZE_DB_FALLBACK,
@@ -119,7 +121,12 @@ from consist.types import (
 
 if TYPE_CHECKING:
     from consist.core.coupler import Coupler
-    from consist.core.materialize import HydratedRunOutputsResult, MaterializationResult
+    from consist.core.materialize import (
+        HydratedRunOutputsResult,
+        MaterializationResult,
+        StagedInput,
+        StagedInputsResult,
+    )
     from consist.core.step_context import StepContext
     from consist.runset import RunSet
 
@@ -4058,6 +4065,61 @@ class Tracker:
             on_missing=on_missing,
         )
         return result.get(artifact.key)
+
+    def stage_artifact(
+        self,
+        artifact: Artifact,
+        *,
+        destination: str | Path,
+        mode: Literal["copy", "hardlink", "symlink"] = "copy",
+        overwrite: bool = False,
+        validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
+        allow_external_paths: Optional[bool] = None,
+    ) -> "StagedInput":
+        """
+        Stage one canonical input artifact to an explicit local destination.
+
+        This is the low-level input-side equivalent of output hydration. It
+        does not create a new tracked artifact identity; it returns a detached
+        staged artifact view whose runtime path points at the staged location
+        when successful.
+        """
+        return stage_artifact_core(
+            self,
+            artifact,
+            Path(destination),
+            mode=mode,
+            overwrite=overwrite,
+            validate_content_hash=validate_content_hash,
+            allow_external_paths=allow_external_paths,
+        )
+
+    def stage_inputs(
+        self,
+        inputs_by_key: Mapping[str, Artifact],
+        *,
+        destinations_by_key: Mapping[str, str | Path],
+        mode: Literal["copy", "hardlink", "symlink"] = "copy",
+        overwrite: bool = False,
+        validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
+        allow_external_paths: Optional[bool] = None,
+    ) -> "StagedInputsResult":
+        """
+        Stage multiple canonical input artifacts to explicit local destinations.
+        """
+        normalized_destinations = {
+            str(key): Path(destination)
+            for key, destination in destinations_by_key.items()
+        }
+        return stage_inputs_core(
+            self,
+            inputs_by_key,
+            normalized_destinations,
+            mode=mode,
+            overwrite=overwrite,
+            validate_content_hash=validate_content_hash,
+            allow_external_paths=allow_external_paths,
+        )
 
     # --- Retrieval Helpers ---
 
