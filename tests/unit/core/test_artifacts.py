@@ -1,9 +1,12 @@
+import logging
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from consist.core.artifacts import ArtifactManager
+from consist.core.persistence import DatabaseManager
 from consist.models.artifact import Artifact
 from consist.models.artifact import ArtifactContent
 
@@ -168,3 +171,139 @@ def test_attach_content_id_uses_artifact_driver_when_arg_missing():
     tracker.db.get_or_create_artifact_content.assert_called_with(
         content_hash="hash_from_obj", driver="parquet"
     )
+
+
+def test_attach_content_id_handles_deepcopied_detached_artifact(tmp_path, caplog):
+    db = DatabaseManager(str(tmp_path / "artifact_replay.db"))
+
+    with db.session_scope() as session:
+        original = Artifact(
+            key="geoid_to_zone",
+            container_uri="outputs://zones.parquet",
+            driver="parquet",
+            hash="shared_hash",
+            run_id="run_a",
+        )
+        session.add(original)
+        session.commit()
+        artifact_id = original.id
+
+    detached = db.get_artifact(artifact_id)
+    assert detached is not None
+    replayed = deepcopy(detached)
+
+    tracker = MagicMock()
+    tracker.resolve_uri = lambda uri: f"/abs/{uri}"
+    tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
+    tracker.identity.compute_file_checksum.return_value = "shared_hash"
+    tracker.db = db
+
+    manager = ArtifactManager(tracker)
+    with caplog.at_level(logging.WARNING):
+        out = manager.create_artifact(path=replayed, run_id="run_b")
+
+    content = db.find_artifact_content(content_hash="shared_hash", driver="parquet")
+
+    assert out is not replayed
+    assert out.id == replayed.id
+    assert content is not None
+    assert out.content_id == content.id
+    assert "Failed to record artifact content identity" not in caplog.text
+
+
+def test_create_artifact_handles_driver_override_on_deepcopied_detached_artifact(
+    tmp_path, caplog
+):
+    db = DatabaseManager(str(tmp_path / "artifact_driver_override.db"))
+
+    with db.session_scope() as session:
+        original = Artifact(
+            key="geoid_to_zone",
+            container_uri="outputs://zones.parquet",
+            driver="parquet",
+            hash="shared_hash",
+            run_id="run_a",
+        )
+        session.add(original)
+        session.commit()
+        artifact_id = original.id
+
+    detached = db.get_artifact(artifact_id)
+    assert detached is not None
+    replayed = deepcopy(detached)
+
+    tracker = MagicMock()
+    tracker.resolve_uri = lambda uri: f"/abs/{uri}"
+    tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
+    tracker.identity.compute_file_checksum.return_value = "shared_hash"
+    tracker.db = db
+
+    manager = ArtifactManager(tracker)
+    with caplog.at_level(logging.WARNING):
+        out = manager.create_artifact(
+            path=replayed,
+            run_id="run_b",
+            driver="csv",
+        )
+
+    db.sync_artifact(out, run_id="run_b", direction="output")
+    persisted = db.get_artifact(out.id)
+    content = db.find_artifact_content(content_hash="shared_hash", driver="csv")
+
+    assert out is not replayed
+    assert out.id == replayed.id
+    assert replayed.driver == "parquet"
+    assert persisted is not None
+    assert persisted.driver == "csv"
+    assert content is not None
+    assert persisted.content_id == content.id
+    assert replayed.content_id != content.id
+    assert "Failed to record artifact content identity" not in caplog.text
+
+
+def test_create_artifact_clones_reused_input_artifact_before_mutation(tmp_path, caplog):
+    db = DatabaseManager(str(tmp_path / "artifact_input_reuse.db"))
+
+    with db.session_scope() as session:
+        original = Artifact(
+            key="geoid_to_zone",
+            container_uri="inputs://zones.parquet",
+            driver="parquet",
+            hash="shared_hash",
+            run_id="run_a",
+        )
+        session.add(original)
+        session.commit()
+        artifact_id = original.id
+
+    detached = db.get_artifact(artifact_id)
+    assert detached is not None
+    reused_parent = deepcopy(detached)
+
+    tracker = MagicMock()
+    tracker.resolve_uri = lambda uri: str(tmp_path / uri.split("://", 1)[1])
+    tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
+    tracker.identity.compute_file_checksum.return_value = "shared_hash"
+    tracker.mounts = {}
+    tracker.db = MagicMock(wraps=db)
+    tracker.db.find_latest_artifact_at_uri.return_value = reused_parent
+
+    manager = ArtifactManager(tracker)
+    input_path = tmp_path / "zones.parquet"
+    input_path.write_text("zone,data\n1,a\n", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        out = manager.create_artifact(
+            path=input_path,
+            key="geoid_to_zone",
+            direction="input",
+        )
+
+    content = db.find_artifact_content(content_hash="shared_hash", driver="parquet")
+
+    assert out is not reused_parent
+    assert out.id == reused_parent.id
+    assert reused_parent.content_id is None
+    assert content is not None
+    assert out.content_id == content.id
+    assert "Failed to record artifact content identity" not in caplog.text
