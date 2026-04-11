@@ -142,8 +142,8 @@ class ResolvedRunInvocation:
     input_binding: InputBindingMode
     load_inputs: Optional[bool]
     input_paths: Optional[Mapping[str, PathLike]]
-    input_materialization: Optional[str]
-    input_materialization_mode: Optional[str]
+    input_materialization: Optional[Literal["requested"]]
+    input_materialization_mode: Optional[Literal["copy"]]
     executor: Literal["python", "container"]
     container: Optional[Mapping[str, Any]]
     runtime_kwargs: Optional[Dict[str, Any]]

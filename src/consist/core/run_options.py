@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Final, Mapping, Optional, Union
+from typing import Any, Final, Literal, Mapping, Optional, Union
 
 from consist.core.error_messages import format_problem_cause_fix
 from consist.types import (
@@ -63,8 +63,8 @@ class ResolvedRunOptions:
     input_binding: Optional[InputBindingMode]
     load_inputs: Optional[bool]
     input_paths: Optional[Mapping[str, Any]]
-    input_materialization: Optional[str]
-    input_materialization_mode: Optional[str]
+    input_materialization: Optional[Literal["requested"]]
+    input_materialization_mode: Optional[Literal["copy"]]
     executor: Optional[str]
     container: Optional[Mapping[str, Any]]
     runtime_kwargs: Optional[Mapping[str, Any]]
