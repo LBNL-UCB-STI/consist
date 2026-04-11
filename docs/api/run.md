@@ -11,6 +11,31 @@ Use options objects instead:
 - `output_policy=OutputPolicyOptions(...)`
 - `execution_options=ExecutionOptions(...)`
 
+For path-bound steps, `ExecutionOptions` is also the public surface for
+requested input staging:
+
+```python
+from pathlib import Path
+import consist
+from consist import ExecutionOptions
+
+result = consist.run(
+    fn=run_tool,
+    inputs={"config_path": Path("./configs/baseline.yaml")},
+    outputs=["report"],
+    execution_options=ExecutionOptions(
+        input_binding="paths",
+        input_materialization="requested",
+        input_paths={"config_path": Path("./workspace/config.yaml")},
+    ),
+)
+```
+
+That pattern applies equally to `Tracker.run(...)` and
+`ScenarioContext.run(...)`. It keeps canonical artifact identity in
+`inputs={...}` while ensuring the callable sees a real local file at the
+requested destination, including on cache hits.
+
 For migration details, see
 [Options Objects Migration Guide](../migrations/options-objects-migration-guide.md).
 
@@ -29,6 +54,17 @@ Passing them raises `TypeError` (`unexpected keyword argument ...`).
 Run/trace parity is implemented through a shared invocation-resolution path
 (`resolve_run_invocation`), so identity and cache-option validation rules are
 consistent across both execution styles.
+
+## Execution controls to reach for first
+
+Use `ExecutionOptions(...)` for three common runtime choices:
+
+- `input_binding="paths"` when the callable should own file I/O
+- `input_binding="loaded"` when Consist should hydrate data objects first
+- `input_materialization="requested"` plus `input_paths={...}` when a
+  path-bound step needs exact local input destinations
+
+For the lower-level staging helpers, see [Materialization](materialize.md).
 
 ::: consist.api.run
     options:

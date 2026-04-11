@@ -261,7 +261,36 @@ class HydratedRunOutputsResult(MappingABC[str, HydratedRunOutput]):
 
 @dataclass(frozen=True, slots=True)
 class StagedInput:
-    """Per-key outcome for canonical input staging."""
+    """Per-key outcome for canonical input staging.
+
+    Attributes
+    ----------
+    key : str
+        Input key requested by the caller.
+    artifact : Artifact
+        Detached copy of the input artifact. When ``resolvable`` is ``True``,
+        the detached artifact's runtime ``abs_path`` points at the staged
+        destination so helpers like ``artifact.as_path()`` can be used
+        directly.
+    path : Path | None
+        Explicit staging destination, when one was known.
+    status : StagingStatus
+        One of:
+
+        - ``"staged"``: bytes were copied to the requested destination.
+        - ``"preserved_existing"``: destination already existed with matching
+          content and was reused.
+        - ``"missing_source"``: no readable source bytes were found for the
+          canonical artifact.
+        - ``"failed"``: staging was attempted but failed due to a collision,
+          policy check, or copy error.
+    message : str | None
+        Optional warning or error detail for ``"missing_source"`` and
+        ``"failed"`` outcomes.
+    resolvable : bool
+        Whether the returned detached artifact is immediately usable from the
+        staged destination.
+    """
 
     key: str
     artifact: Artifact
@@ -273,7 +302,13 @@ class StagedInput:
 
 @dataclass(slots=True)
 class StagedInputsResult(MappingABC[str, StagedInput]):
-    """Key-indexed result for canonical input staging."""
+    """Key-indexed result for canonical input staging.
+
+    This mapping preserves the caller's requested key order and answers the
+    practical questions for each requested input: what destination was used,
+    whether the staged artifact is immediately usable, and whether staging
+    copied bytes or reused an existing local path.
+    """
 
     outputs: dict[str, StagedInput] = field(default_factory=dict)
 
@@ -1134,7 +1169,11 @@ def stage_artifacts_to_destinations(
     validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
     allow_external_paths: bool | None = None,
 ) -> StagedInputsResult:
-    """Stage explicit artifact/destination pairs into a keyed result."""
+    """Stage explicit artifact/destination pairs into a keyed result.
+
+    This is the shared implementation used by both the public low-level
+    staging helpers and run-time requested input materialization.
+    """
     if mode != "copy":
         raise ValueError(f"Unsupported staging mode {mode!r}; only 'copy' is supported.")
 
@@ -1833,7 +1872,32 @@ def stage_artifact(
     validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
     allow_external_paths: bool | None = None,
 ) -> StagedInput:
-    """Stage one artifact to a requested filesystem destination."""
+    """Stage one artifact to a requested filesystem destination.
+
+    Parameters
+    ----------
+    tracker : Tracker
+        Tracker used to resolve canonical paths, allowed roots, and recovery
+        fallbacks.
+    artifact : Artifact
+        Canonical input artifact to stage.
+    destination : Path
+        Explicit local destination where the staged copy should exist.
+    mode : {"copy", "hardlink", "symlink"}, default "copy"
+        Staging mode. In v1, only ``"copy"`` is supported.
+    overwrite : bool, default False
+        Whether to replace an existing non-identical destination.
+    validate_content_hash : {"never", "if-present", "always"}, default "if-present"
+        Whether to validate staged file bytes against ``artifact.hash`` when a
+        file hash is available.
+    allow_external_paths : bool | None, default None
+        Override for the tracker's external-path policy.
+
+    Returns
+    -------
+    StagedInput
+        Detached artifact view plus the per-key staging outcome.
+    """
     return stage_artifacts_to_destinations(
         tracker,
         [(artifact.key, artifact, Path(destination))],
@@ -1854,7 +1918,33 @@ def stage_inputs(
     validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
     allow_external_paths: bool | None = None,
 ) -> StagedInputsResult:
-    """Stage multiple keyed artifacts to their requested destinations."""
+    """Stage multiple keyed artifacts to their requested destinations.
+
+    Parameters
+    ----------
+    tracker : Tracker
+        Tracker used to resolve canonical paths, allowed roots, and recovery
+        fallbacks.
+    inputs_by_key : Mapping[str, Artifact]
+        Resolved input artifact mapping, typically the same key space later
+        used for ``inputs={...}`` on ``run(...)`` or ``ScenarioContext.run(...)``.
+    destinations_by_key : Mapping[str, Path]
+        Explicit staging destinations keyed by input name.
+    mode : {"copy", "hardlink", "symlink"}, default "copy"
+        Staging mode. In v1, only ``"copy"`` is supported.
+    overwrite : bool, default False
+        Whether to replace an existing non-identical destination.
+    validate_content_hash : {"never", "if-present", "always"}, default "if-present"
+        Whether to validate staged file bytes against ``artifact.hash`` when a
+        file hash is available.
+    allow_external_paths : bool | None, default None
+        Override for the tracker's external-path policy.
+
+    Returns
+    -------
+    StagedInputsResult
+        Key-indexed staging outcomes in the caller's requested key order.
+    """
     if mode != "copy":
         raise ValueError(
             f"Unsupported staging mode {mode!r}; only 'copy' is supported."

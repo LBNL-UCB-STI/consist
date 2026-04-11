@@ -102,6 +102,34 @@ class ExecutionOptions:
 
     These are runtime controls and do not affect cache identity unless the
     corresponding primitive kwargs already do.
+
+    Attributes
+    ----------
+    load_inputs : Optional[bool]
+        Legacy compatibility switch for automatic input loading. Prefer
+        ``input_binding=...`` for new code.
+    input_binding : Optional[InputBindingMode]
+        Controls what the callable receives for declared named inputs:
+        ``"paths"``, ``"loaded"``, or ``"none"``.
+    input_paths : Optional[Mapping[str, PathLike]]
+        Explicit per-input local destinations used when requested input
+        materialization is enabled. Keys must refer to resolved named inputs.
+    input_materialization : Optional[Literal["requested"]]
+        Enables run-time input staging for the keys listed in ``input_paths``.
+        Use this with path-bound runs when a tool expects inputs at specific
+        local paths, including on cache hits.
+    input_materialization_mode : Optional[Literal["copy"]]
+        Strategy for requested input materialization. In v1, only ``"copy"``
+        is supported.
+    executor : Optional[Literal["python", "container"]]
+        Selects the execution backend.
+    container : Optional[Mapping[str, Any]]
+        Backend-specific container configuration when ``executor="container"``.
+    runtime_kwargs : Optional[Mapping[str, Any]]
+        Runtime-only keyword arguments forwarded to the callable without
+        affecting cache identity.
+    inject_context : Optional[Union[bool, str]]
+        Whether to inject a ``RunContext`` into the callable.
     """
 
     load_inputs: Optional[bool] = None

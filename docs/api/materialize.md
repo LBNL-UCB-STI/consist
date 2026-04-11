@@ -1,5 +1,12 @@
 # Materialization
 
+Consist has two related filesystem-recovery stories:
+
+- historical output recovery, which starts with `hydrate_run_outputs(...)`
+- canonical input staging, which starts with
+  `ExecutionOptions(input_materialization="requested", input_paths={...})` on
+  `run(...)` and `ScenarioContext.run(...)`
+
 For historical output recovery, start with `hydrate_run_outputs(...)`.
 
 It is the clearest API for restart, archive-mirror recovery, and
@@ -14,6 +21,12 @@ but returns the older aggregate
 [`MaterializationResult`](#consist.core.materialize.MaterializationResult).
 Keep it for compatibility or summary-style reporting; use
 `hydrate_run_outputs(...)` for new workflows.
+
+For input-side workflows, prefer requested input materialization on the run
+surface. It uses the same canonical artifact recovery rules, but keeps the
+operation attached to normal execution and cache-hit behavior. Reach for
+`stage_artifact(...)` and `stage_inputs(...)` only when you need the same
+staging behavior outside a run lifecycle.
 
 ## Recovery Ordering
 
@@ -103,6 +116,51 @@ In this flow:
   `resolvable` is `True`, `artifact.as_path()` points at the hydrated
   destination in the new workspace.
 
+## Requested Input Staging
+
+For new workflow code, input-side staging usually belongs on the run surface:
+
+```python
+from pathlib import Path
+from consist import ExecutionOptions
+
+result = tracker.run(
+    fn=run_tool,
+    inputs={"config_path": Path("./configs/baseline.yaml")},
+    outputs=["report"],
+    execution_options=ExecutionOptions(
+        input_binding="paths",
+        input_materialization="requested",
+        input_paths={"config_path": Path("./workspace/config.yaml")},
+    ),
+)
+```
+
+This keeps the canonical input artifact unchanged for identity and lineage
+while ensuring the callable sees a real local file at the requested path.
+
+Use the low-level helpers when you already have resolved artifacts and need to
+stage them manually:
+
+```python
+from pathlib import Path
+import consist
+
+staged = consist.stage_inputs(
+    {"config_path": artifact},
+    destinations_by_key={"config_path": Path("./workspace/config.yaml")},
+)
+```
+
+## Staging Status Meanings
+
+| Status | Meaning |
+|---|---|
+| `staged` | Copied bytes to the requested destination |
+| `preserved_existing` | Destination already existed with matching content and was reused |
+| `missing_source` | No readable source bytes were found for the canonical artifact |
+| `failed` | Staging was attempted but failed due to a collision, policy check, or copy error |
+
 ## Status Meanings
 
 | Status | Meaning |
@@ -140,6 +198,10 @@ signatures and attribute details, use the generated reference below.
       show_root_heading: false
       show_root_toc_entry: false
       members:
+        - stage_artifact
+        - stage_inputs
+        - StagedInput
+        - StagedInputsResult
         - HydratedRunOutput
         - HydratedRunOutputsResult
         - MaterializationResult

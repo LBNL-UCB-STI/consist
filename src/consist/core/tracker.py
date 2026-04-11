@@ -1501,7 +1501,12 @@ class Tracker:
             Grouped output policies (`output_mismatch`, `output_missing`).
         execution_options : Optional[ExecutionOptions], optional
             Grouped execution controls (`input_binding`, legacy `load_inputs`,
-            `executor`, `container`, `runtime_kwargs`, `inject_context`).
+            `input_materialization`, `input_paths`,
+            `input_materialization_mode`, `executor`, `container`,
+            `runtime_kwargs`, `inject_context`). Use requested input
+            materialization with path-bound runs when a callable or external
+            tool expects inputs at specific local paths on both cache misses
+            and cache hits.
         runtime_kwargs : Optional[Mapping[str, Any]], optional
             Top-level alias for `execution_options.runtime_kwargs`. This is
             mutually exclusive with
@@ -4083,6 +4088,11 @@ class Tracker:
         does not create a new tracked artifact identity; it returns a detached
         staged artifact view whose runtime path points at the staged location
         when successful.
+
+        Prefer ``execution_options=ExecutionOptions(
+        input_materialization="requested", input_paths={...})`` on
+        ``Tracker.run(...)`` when you want the staging side effect to happen as
+        part of a normal run lifecycle.
         """
         return stage_artifact_core(
             self,
@@ -4106,6 +4116,11 @@ class Tracker:
     ) -> "StagedInputsResult":
         """
         Stage multiple canonical input artifacts to explicit local destinations.
+
+        This low-level helper is most useful for custom orchestration or
+        preflight setup. Standard workflow code should usually request the same
+        behavior through ``ExecutionOptions`` on ``run(...)`` or
+        ``ScenarioContext.run(...)``.
         """
         normalized_destinations = {
             str(key): Path(destination)

@@ -73,6 +73,9 @@ deeper work.
 === "By Topic"
 
     - **Caching and reuse**: [Caching & Hydration](concepts/caching-and-hydration.md)
+    - **Path-bound external tools**:
+      [Usage Guide](usage-guide.md),
+      [Materialization](api/materialize.md)
     - **Configuration and identity**: [Config Management](concepts/config-management.md)
     - **SQL analytics and ingestion**:
       [Data Materialization](concepts/data-materialization.md),
@@ -86,6 +89,7 @@ deeper work.
 | I want to...                           | Go to                                                                                   |
 |----------------------------------------|-----------------------------------------------------------------------------------------|
 | Speed up my pipeline                   | [Caching & Hydration](concepts/caching-and-hydration.md)                                |
+| Run a tool that needs fixed local input files | [Usage Guide](usage-guide.md) or [Materialization](api/materialize.md)           |
 | Debug a cache miss                     | [Troubleshooting](troubleshooting.md)                                                   |
 | Operate or repair the provenance DB    | [DB Maintenance Guide](db-maintenance.md)                                               |
 | Find which config produced a result    | [`consist lineage`](cli-reference.md#consist-lineage)                                   |

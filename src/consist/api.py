@@ -580,7 +580,10 @@ def run(
     output_policy : Optional[OutputPolicyOptions]
         Grouped output mismatch/missing policy controls.
     execution_options : Optional[ExecutionOptions]
-        Grouped runtime execution controls.
+        Grouped runtime execution controls. For path-bound workflows, this is
+        also where you request local input staging via
+        ``ExecutionOptions(input_binding="paths", input_materialization="requested",
+        input_paths={...})``.
     **kwargs : Any
         Arguments forwarded to `Tracker.run`, including `inputs`, `config`,
         `tags`, and other core run metadata.
@@ -1228,6 +1231,11 @@ def stage_artifact(
     copies the artifact bytes into the requested destination, preserving
     existing identical content when possible and returning a detached staged
     artifact view for immediate reuse.
+
+    Prefer ``ExecutionOptions(input_materialization="requested",
+    input_paths={...})`` on ``run(...)`` or ``ScenarioContext.run(...)`` when
+    the goal is to prepare declared inputs for one execution. Use this helper
+    when you need the same staging behavior outside a run lifecycle.
     """
     tr = _resolve_tracker(tracker)
     return stage_artifact_core(
@@ -1256,6 +1264,10 @@ def stage_inputs(
 
     Keys must match the input artifact mapping keys. The returned result is
     keyed in the same order as ``destinations_by_key``.
+
+    Prefer run-level requested input materialization for standard workflow
+    code. Use this helper when you already have resolved artifacts and need to
+    stage them before or outside normal run execution.
     """
     tr = _resolve_tracker(tracker)
     normalized_destinations = {
