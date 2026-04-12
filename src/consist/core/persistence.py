@@ -36,6 +36,11 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.pool import NullPool
 from sqlmodel import create_engine, Session, select, SQLModel, col, delete
 
+from consist.core.db_runtime import DatabaseRuntimeOps
+from consist.core.db_snapshot import DatabaseSnapshotOps
+from consist.core.provenance_writer import (
+    ProvenanceWriter as _ExtractedProvenanceWriter,
+)
 from consist.core.schema_compat import (
     apply_content_identity_compatibility,
     apply_run_stage_phase_compatibility,
@@ -342,6 +347,14 @@ class DatabaseManager:
         )
         self._artifact_content_cache: dict[tuple[str, str], ArtifactContent] = {}
         self._artifact_content_cache_lock = threading.Lock()
+        self._runtime_ops = DatabaseRuntimeOps(self)
+        self._snapshot_ops = DatabaseSnapshotOps(self)
+        self.execute_with_retry = self._runtime_ops.execute_with_retry
+        self.session_scope = self._runtime_ops.session_scope
+        self._atomic_copy_file = self._snapshot_ops._atomic_copy_file
+        self._atomic_write_json_file = self._snapshot_ops._atomic_write_json_file
+        self._snapshot_sidecar_path = self._snapshot_ops._snapshot_sidecar_path
+        self.snapshot_to = self._snapshot_ops.snapshot_to
         self._init_schema()
 
     def _init_schema(self):
@@ -3763,3 +3776,6 @@ class ProvenanceWriter:
                 )
             except Exception as e:
                 logging.warning("Database sync failed: %s", e)
+
+
+ProvenanceWriter = _ExtractedProvenanceWriter  # noqa: F811

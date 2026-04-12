@@ -49,9 +49,13 @@ from consist.core.run_resolution import (
     write_xarray_dataset as _write_xarray_dataset,
 )
 from consist.core.tracker_artifact_logging import ArtifactLoggingCoordinator
+from consist.core.tracker_artifact_queries import TrackerArtifactQueryService
 from consist.core.tracker_lifecycle import RunLifecycleCoordinator
+from consist.core.tracker_history import TrackerHistoryService
 from consist.core.tracker_orchestration import RunTraceCoordinator, RunTraceHelpers
+from consist.core.tracker_recovery import TrackerRecoveryService
 from consist.core.tracker_config import TrackerConfig
+from consist.core.tracker_config_plans import TrackerConfigPlanService
 from consist.core.config_canonicalization import (
     ConfigAdapter,
     ConfigAdapterOptions,
@@ -78,18 +82,9 @@ from consist.core.views import ViewFactory, ViewRegistry
 from consist.core.ingestion import ingest_artifact
 from consist.core.lineage import LineageService
 from consist.core.materialize import (
-    fold_hydrated_run_outputs_result,
-    hydrate_run_outputs as hydrate_run_outputs_core,
-    materialize_artifacts,
-    stage_artifact as stage_artifact_core,
-    stage_inputs as stage_inputs_core,
+    hydrate_run_outputs as hydrate_run_outputs_core,  # noqa: F401
 )
-from consist.core.materialize_options import (
-    VALID_MATERIALIZE_DB_FALLBACK as _VALID_MATERIALIZE_DB_FALLBACK,
-    VALID_MATERIALIZE_ON_MISSING as _VALID_MATERIALIZE_ON_MISSING,
-    normalize_materialize_output_keys,
-    validate_materialize_option,
-)
+from consist.core.materialize_options import normalize_materialize_output_keys
 from consist.core.matrix import MatrixViewFactory
 from consist.core.netcdf_views import NetCdfMetadataView
 from consist.core.openmatrix_views import OpenMatrixMetadataView
@@ -318,6 +313,10 @@ class Tracker:
                 write_xarray_dataset=_write_xarray_dataset,
             ),
         )
+        self._artifact_queries = TrackerArtifactQueryService(self)
+        self._history_service = TrackerHistoryService(self)
+        self._recovery_service = TrackerRecoveryService(self)
+        self._config_plan_service = TrackerConfigPlanService(self)
 
         self.views = ViewRegistry(self)
         # Store registered schemas by class name for cross-session lookup.
@@ -400,6 +399,65 @@ class Tracker:
             self.on_run_failed(self._lifecycle.emit_failed)
         else:
             self._lifecycle = None
+
+        # Bind extracted service methods on the instance while keeping the
+        # public Tracker API and import path unchanged.
+        self.get_artifact = self._artifact_queries.get_artifact
+        self.find_artifacts_with_same_content = (
+            self._artifact_queries.find_artifacts_with_same_content
+        )
+        self.find_runs_producing_same_content = (
+            self._artifact_queries.find_runs_producing_same_content
+        )
+        self.select_artifact_schema_for_artifact = (
+            self._artifact_queries.select_artifact_schema_for_artifact
+        )
+        self.get_artifact_by_uri = self._artifact_queries.get_artifact_by_uri
+        self.find_artifacts = self._artifact_queries.find_artifacts
+        self._parse_artifact_param_value = (
+            self._artifact_queries._parse_artifact_param_value
+        )
+        self._parse_artifact_param_expression = (
+            self._artifact_queries._parse_artifact_param_expression
+        )
+        self.find_artifacts_by_params = self._artifact_queries.find_artifacts_by_params
+        self.get_artifact_kv = self._artifact_queries.get_artifact_kv
+
+        self.resolve_historical_path = self._history_service.resolve_historical_path
+        self.get_run = self._history_service.get_run
+        self.snapshot_db = self._history_service.snapshot_db
+        self.get_run_record = self._history_service.get_run_record
+        self.get_run_config = self._history_service.get_run_config
+        self.get_config_bundle = self._history_service.get_config_bundle
+        self.get_artifacts_for_run = self._history_service.get_artifacts_for_run
+        self.get_run_outputs = self._history_service.get_run_outputs
+        self.get_run_result = self._history_service.get_run_result
+        self.get_run_inputs = self._history_service.get_run_inputs
+        self.get_run_artifact = self._history_service.get_run_artifact
+        self.load_run_output = self._history_service.load_run_output
+        self.find_matching_run = self._history_service.find_matching_run
+        self.find_recent_completed_runs_for_model = (
+            self._history_service.find_recent_completed_runs_for_model
+        )
+        self.history = self._history_service.history
+        self.load_input_bundle = self._history_service.load_input_bundle
+
+        self._adapter_accepts_options = (
+            self._config_plan_service._adapter_accepts_options
+        )
+        self._discover_config = self._config_plan_service._discover_config
+        self._canonicalize_config = self._config_plan_service._canonicalize_config
+        self.canonicalize_config = self._config_plan_service.canonicalize_config
+        self.prepare_config = self._config_plan_service.prepare_config
+        self.prepare_config_resolver = self._config_plan_service.prepare_config_resolver
+        self.apply_config_plan = self._config_plan_service.apply_config_plan
+        self.identity_from_config_plan = (
+            self._config_plan_service.identity_from_config_plan
+        )
+        self._apply_config_contribution = (
+            self._config_plan_service._apply_config_contribution
+        )
+        self._ingest_cache_hit = self._config_plan_service._ingest_cache_hit
 
     @property
     def db(self) -> DatabaseManager | None:
@@ -4064,12 +4122,11 @@ class Tracker:
             The destination path for the materialized artifact, or ``None`` if
             missing and ``on_missing="warn"``.
         """
-        result = materialize_artifacts(
-            tracker=self,
-            items=[(artifact, Path(destination_path))],
+        return self._recovery_service.materialize(
+            artifact,
+            destination_path,
             on_missing=on_missing,
         )
-        return result.get(artifact.key)
 
     def stage_artifact(
         self,
@@ -4094,10 +4151,9 @@ class Tracker:
         ``Tracker.run(...)`` when you want the staging side effect to happen as
         part of a normal run lifecycle.
         """
-        return stage_artifact_core(
-            self,
+        return self._recovery_service.stage_artifact(
             artifact,
-            Path(destination),
+            destination=destination,
             mode=mode,
             overwrite=overwrite,
             validate_content_hash=validate_content_hash,
@@ -4122,14 +4178,9 @@ class Tracker:
         behavior through ``ExecutionOptions`` on ``run(...)`` or
         ``ScenarioContext.run(...)``.
         """
-        normalized_destinations = {
-            str(key): Path(destination)
-            for key, destination in destinations_by_key.items()
-        }
-        return stage_inputs_core(
-            self,
+        return self._recovery_service.stage_inputs(
             inputs_by_key,
-            normalized_destinations,
+            destinations_by_key=destinations_by_key,
             mode=mode,
             overwrite=overwrite,
             validate_content_hash=validate_content_hash,
@@ -4902,16 +4953,14 @@ class Tracker:
         MaterializationResult
             Aggregate summary of the selected outputs.
         """
-        return fold_hydrated_run_outputs_result(
-            self.hydrate_run_outputs(
-                run_id,
-                target_root=target_root,
-                source_root=source_root,
-                keys=keys,
-                preserve_existing=preserve_existing,
-                on_missing=on_missing,
-                db_fallback=db_fallback,
-            )
+        return self._recovery_service.materialize_run_outputs(
+            run_id,
+            target_root=target_root,
+            source_root=source_root,
+            keys=keys,
+            preserve_existing=preserve_existing,
+            on_missing=on_missing,
+            db_fallback=db_fallback,
         )
 
     def hydrate_run_outputs(
@@ -5006,53 +5055,11 @@ class Tracker:
         >>> persons.artifact.as_path()
         PosixPath('.../restored/.../persons.parquet')
         """
-        normalized_keys = normalize_materialize_output_keys(
-            keys,
-            caller="hydrate_run_outputs",
-        )
-        validate_materialize_option(
-            name="on_missing",
-            value=on_missing,
-            allowed=_VALID_MATERIALIZE_ON_MISSING,
-        )
-        validate_materialize_option(
-            name="db_fallback",
-            value=db_fallback,
-            allowed=_VALID_MATERIALIZE_DB_FALLBACK,
-        )
-
-        if self.db is None:
-            raise RuntimeError(
-                "Cannot materialize run outputs: tracker has no database configured."
-            )
-
-        run = self.get_run(run_id)
-        if run is None:
-            raise KeyError(f"Run {run_id!r} was not found.")
-
-        from consist.core import materialize as materialize_core
-
-        destination_root = Path(target_root).resolve()
-        allowed_roots = materialize_core.build_allowed_materialization_roots(
-            run_dir=self.run_dir,
-            mounts=self.mounts,
-            allow_external_paths=self.allow_external_paths,
-        )
-        materialize_core.validate_allowed_materialization_destination(
-            destination_root, allowed_roots
-        )
-
-        source_root_override = (
-            Path(source_root).resolve() if source_root is not None else None
-        )
-
-        return hydrate_run_outputs_core(
-            tracker=self,
-            run=run,
-            target_root=destination_root,
-            source_root=source_root_override,
-            keys=normalized_keys,
-            allowed_base=allowed_roots,
+        return self._recovery_service.hydrate_run_outputs(
+            run_id,
+            target_root=target_root,
+            source_root=source_root,
+            keys=keys,
             preserve_existing=preserve_existing,
             on_missing=on_missing,
             db_fallback=db_fallback,
