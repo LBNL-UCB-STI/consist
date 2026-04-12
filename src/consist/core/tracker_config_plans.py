@@ -144,7 +144,7 @@ class TrackerConfigPlanService(_TrackerServiceBase):
             adapter,
             canonical,
             run=target_run,
-            tracker=self,
+            tracker=self._tracker,
             strict=strict,
             plan_only=False,
             options=options,

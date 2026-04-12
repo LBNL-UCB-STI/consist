@@ -14,6 +14,21 @@ from consist.models.run import ConsistRecord, Run, RunArtifacts, RunResult
 
 class TrackerHistoryService(_TrackerServiceBase):
     def resolve_historical_path(self, artifact: Artifact, run: Run) -> Path:
+        """
+        Resolve the original filesystem path for an artifact from a prior run.
+
+        Parameters
+        ----------
+        artifact : Artifact
+            Artifact whose historical location should be resolved.
+        run : Run
+            Run that originally produced or consumed the artifact.
+
+        Returns
+        -------
+        Path
+            Resolved historical filesystem path.
+        """
         if not run:
             return Path(self.resolve_uri(artifact.container_uri))
 
@@ -22,6 +37,19 @@ class TrackerHistoryService(_TrackerServiceBase):
         return Path(path_str)
 
     def get_run(self, run_id: str) -> Optional[Run]:
+        """
+        Retrieve a run by id.
+
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+
+        Returns
+        -------
+        Optional[Run]
+            Matching run, or ``None`` if it does not exist.
+        """
         if self.db:
             return self.db.get_run(run_id)
         return None
@@ -29,6 +57,21 @@ class TrackerHistoryService(_TrackerServiceBase):
     def snapshot_db(
         self, dest_path: str | os.PathLike[str], checkpoint: bool = True
     ) -> Path:
+        """
+        Snapshot the provenance database to a destination path.
+
+        Parameters
+        ----------
+        dest_path : str | os.PathLike[str]
+            Destination path for the snapshot database file.
+        checkpoint : bool, default True
+            Whether to checkpoint the source database before copying.
+
+        Returns
+        -------
+        Path
+            Snapshot database path.
+        """
         if self.db is None:
             raise RuntimeError("Database snapshot requires a configured database.")
 
@@ -57,6 +100,21 @@ class TrackerHistoryService(_TrackerServiceBase):
     def get_run_record(
         self, run_id: str, *, allow_missing: bool = False
     ) -> Optional[ConsistRecord]:
+        """
+        Load the JSON snapshot record for a historical run.
+
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+        allow_missing : bool, default False
+            Return ``None`` instead of raising when the snapshot is absent.
+
+        Returns
+        -------
+        Optional[ConsistRecord]
+            Parsed run snapshot record.
+        """
         run = self.get_run(run_id) if self.db else None
         snapshot_path = self._resolve_run_snapshot_path(run_id, run)
         if not snapshot_path.exists():
@@ -79,6 +137,21 @@ class TrackerHistoryService(_TrackerServiceBase):
     def get_run_config(
         self, run_id: str, *, allow_missing: bool = False
     ) -> Optional[Dict[str, Any]]:
+        """
+        Load the full config snapshot for a historical run.
+
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+        allow_missing : bool, default False
+            Return ``None`` instead of raising when the snapshot is absent.
+
+        Returns
+        -------
+        Optional[Dict[str, Any]]
+            Stored config payload for the run.
+        """
         record = self.get_run_record(run_id, allow_missing=allow_missing)
         if record is None:
             return None
@@ -92,6 +165,25 @@ class TrackerHistoryService(_TrackerServiceBase):
         role: str = "bundle",
         allow_missing: bool = False,
     ) -> Path | None:
+        """
+        Resolve a config artifact path for a run by role and optional adapter.
+
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+        adapter : Optional[str], optional
+            Optional adapter name filter.
+        role : str, default "bundle"
+            Config artifact role to select.
+        allow_missing : bool, default False
+            Return ``None`` when the matching file is absent.
+
+        Returns
+        -------
+        Path | None
+            Resolved config artifact path.
+        """
         artifacts = self.get_artifacts_for_run(run_id)
         input_artifacts = list(artifacts.inputs.values())
 
@@ -160,6 +252,19 @@ class TrackerHistoryService(_TrackerServiceBase):
         )
 
     def get_artifacts_for_run(self, run_id: str) -> RunArtifacts:
+        """
+        Retrieve input and output artifacts for a run.
+
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+
+        Returns
+        -------
+        RunArtifacts
+            Inputs and outputs grouped by artifact key.
+        """
         if not self.db:
             return RunArtifacts()
 
@@ -190,6 +295,9 @@ class TrackerHistoryService(_TrackerServiceBase):
         return artifacts
 
     def get_run_outputs(self, run_id: str) -> Dict[str, Artifact]:
+        """
+        Return output artifacts for a run, keyed by artifact key.
+        """
         return self.get_artifacts_for_run(run_id).outputs
 
     def get_run_result(
@@ -199,6 +307,23 @@ class TrackerHistoryService(_TrackerServiceBase):
         keys: Optional[Iterable[str]] = None,
         validate: Literal["lazy", "strict", "none"] = "lazy",
     ) -> RunResult:
+        """
+        Build a ``RunResult`` view for a historical run.
+
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+        keys : Optional[Iterable[str]], optional
+            Optional subset of output keys to include.
+        validate : {"lazy", "strict", "none"}, default "lazy"
+            Output validation policy.
+
+        Returns
+        -------
+        RunResult
+            Historical run metadata plus selected outputs.
+        """
         run = self.get_run(run_id)
         if run is None:
             raise KeyError(f"Run {run_id!r} was not found.")
@@ -246,6 +371,9 @@ class TrackerHistoryService(_TrackerServiceBase):
         return RunResult(run=run, outputs=selected_outputs, cache_hit=cache_hit)
 
     def get_run_inputs(self, run_id: str) -> Dict[str, Artifact]:
+        """
+        Return input artifacts for a run, keyed by artifact key.
+        """
         return self.get_artifacts_for_run(run_id).inputs
 
     def get_run_artifact(
@@ -255,6 +383,9 @@ class TrackerHistoryService(_TrackerServiceBase):
         key_contains: Optional[str] = None,
         direction: str = "output",
     ) -> Optional[Artifact]:
+        """
+        Retrieve a single artifact from a run by exact key or substring match.
+        """
         record = self.get_artifacts_for_run(run_id)
         collection = record.outputs if direction == "output" else record.inputs
         if key and key in collection:
@@ -266,6 +397,9 @@ class TrackerHistoryService(_TrackerServiceBase):
         return next(iter(collection.values()), None)
 
     def load_run_output(self, run_id: str, key: str, **kwargs: Any) -> Any:
+        """
+        Load one output artifact from a historical run.
+        """
         artifact = self.get_run_artifact(run_id, key=key, direction="output")
         if artifact is None:
             raise ValueError(
@@ -281,6 +415,9 @@ class TrackerHistoryService(_TrackerServiceBase):
         *,
         signature: Optional[str] = None,
     ) -> Optional[Run]:
+        """
+        Find a previously completed run matching the supplied identity hashes.
+        """
         if self.db:
             if signature:
                 matched = self.db.find_run_by_signature(signature)
@@ -292,6 +429,9 @@ class TrackerHistoryService(_TrackerServiceBase):
     def find_recent_completed_runs_for_model(
         self, model_name: str, *, limit: int = 20
     ) -> list[Run]:
+        """
+        Return recent completed runs for a model, newest first.
+        """
         if self.db:
             return self.db.find_recent_completed_runs_for_model(model_name, limit=limit)
         return []
@@ -299,11 +439,17 @@ class TrackerHistoryService(_TrackerServiceBase):
     def history(
         self, limit: int = 10, tags: Optional[List[str]] = None
     ) -> pd.DataFrame:
+        """
+        Return recent runs as a Pandas DataFrame.
+        """
         if self.db:
             return self.db.get_history(limit, tags)
         return pd.DataFrame()
 
     def load_input_bundle(self, run_id: str) -> dict[str, Artifact]:
+        """
+        Load output artifacts from a prior bundle run as reusable inputs.
+        """
         run = self.get_run(run_id)
         if not run:
             raise ValueError(f"Input bundle run_id={run_id!r} not found.")

@@ -36,7 +36,7 @@ class TrackerRecoveryService(_TrackerServiceBase):
         on_missing: Literal["warn", "raise"] = "warn",
     ) -> Optional[str]:
         result = materialize_artifacts(
-            tracker=self,
+            tracker=self._tracker,
             items=[(artifact, Path(destination_path))],
             on_missing=on_missing,
         )
@@ -53,7 +53,7 @@ class TrackerRecoveryService(_TrackerServiceBase):
         allow_external_paths: Optional[bool] = None,
     ) -> "StagedInput":
         return stage_artifact_core(
-            self,
+            self._tracker,
             artifact,
             Path(destination),
             mode=mode,
@@ -77,7 +77,7 @@ class TrackerRecoveryService(_TrackerServiceBase):
             for key, destination in destinations_by_key.items()
         }
         return stage_inputs_core(
-            self,
+            self._tracker,
             inputs_by_key,
             normalized_destinations,
             mode=mode,

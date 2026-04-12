@@ -721,7 +721,9 @@ def materialize_missing_inputs(
 
         run_id = str(artifact.run_id)
         run = db.get_run(run_id)
-        original_run_dir = run.meta.get("_physical_run_dir") if run and run.meta else None
+        original_run_dir = (
+            run.meta.get("_physical_run_dir") if run and run.meta else None
+        )
         if not original_run_dir:
             continue
 

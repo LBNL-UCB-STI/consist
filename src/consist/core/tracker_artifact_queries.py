@@ -18,6 +18,21 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         *,
         run_id: Optional[str] = None,
     ) -> Optional[Artifact]:
+        """
+        Retrieve an artifact by semantic key or artifact id.
+
+        Parameters
+        ----------
+        key_or_id : str | uuid.UUID
+            Artifact key or artifact UUID.
+        run_id : Optional[str], optional
+            Optional run id that limits lookup to artifacts linked to that run.
+
+        Returns
+        -------
+        Optional[Artifact]
+            Matching artifact, or ``None`` when no match exists.
+        """
         if self.db:
             artifact = self.db.get_artifact(key_or_id, run_id=run_id)
             if artifact is not None:
@@ -28,6 +43,19 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
     def find_artifacts_with_same_content(
         self, artifact: Union[Artifact, str, uuid.UUID]
     ) -> List[Artifact]:
+        """
+        Find artifacts that share the same content identity.
+
+        Parameters
+        ----------
+        artifact : Artifact | str | uuid.UUID
+            Artifact instance or identifier to resolve first.
+
+        Returns
+        -------
+        List[Artifact]
+            Artifacts with the same ``content_id`` as the target artifact.
+        """
         if not self.db:
             return []
         target = (
@@ -43,6 +71,19 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
     def find_runs_producing_same_content(
         self, artifact: Union[Artifact, str, uuid.UUID]
     ) -> List[str]:
+        """
+        Find run ids that produced artifacts with the same content identity.
+
+        Parameters
+        ----------
+        artifact : Artifact | str | uuid.UUID
+            Artifact instance or identifier to resolve first.
+
+        Returns
+        -------
+        List[str]
+            Run ids linked to output artifacts sharing the same ``content_id``.
+        """
         if not self.db:
             return []
         target = (
@@ -59,6 +100,23 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         source: Optional["SchemaProfileSource"] = None,
         strict_source: bool = False,
     ) -> Optional["ArtifactSchemaSelection"]:
+        """
+        Resolve schema-selection metadata for an artifact.
+
+        Parameters
+        ----------
+        artifact_id : str | uuid.UUID
+            Artifact identifier to inspect.
+        source : Optional[SchemaProfileSource], optional
+            Preferred schema profile source.
+        strict_source : bool, default False
+            Require the selected schema to come from ``source`` when provided.
+
+        Returns
+        -------
+        Optional[ArtifactSchemaSelection]
+            Selection metadata used to explain which schema was chosen.
+        """
         if not self.db:
             raise ValueError(
                 "Schema selection requires a configured database (db_path)."
@@ -79,6 +137,23 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         table_path: Optional[str] = None,
         array_path: Optional[str] = None,
     ) -> Optional[Artifact]:
+        """
+        Find an artifact by URI and optional sub-path selectors.
+
+        Parameters
+        ----------
+        uri : str
+            Artifact container URI to match.
+        table_path : Optional[str], optional
+            Optional table path to match for container-backed artifacts.
+        array_path : Optional[str], optional
+            Optional array path to match for array-backed artifacts.
+
+        Returns
+        -------
+        Optional[Artifact]
+            Matching artifact, or ``None`` when nothing matches.
+        """
         if self.current_consist:
             for art in self.current_consist.inputs + self.current_consist.outputs:
                 if art.container_uri != uri:
@@ -107,6 +182,25 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         key: Optional[str] = None,
         limit: int = 100,
     ) -> List[Artifact]:
+        """
+        Find artifacts by producing run, consuming run, and optional key.
+
+        Parameters
+        ----------
+        creator : Optional[str | Run], optional
+            Producing run or run id.
+        consumer : Optional[str | Run], optional
+            Consuming run or run id.
+        key : Optional[str], optional
+            Exact artifact key to match.
+        limit : int, default 100
+            Maximum number of artifacts to return.
+
+        Returns
+        -------
+        List[Artifact]
+            Matching artifact records.
+        """
         if not self.db:
             return []
 
@@ -194,6 +288,27 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         artifact_family_prefix: Optional[str] = None,
         limit: int = 100,
     ) -> List[Artifact]:
+        """
+        Find artifacts by indexed facet predicates and prefix filters.
+
+        Parameters
+        ----------
+        params : Optional[Iterable[str]], optional
+            Facet predicate expressions such as ``year=2018``.
+        namespace : Optional[str], optional
+            Default namespace for predicates without an explicit namespace.
+        key_prefix : Optional[str], optional
+            Optional artifact-key prefix filter.
+        artifact_family_prefix : Optional[str], optional
+            Optional artifact-family prefix filter.
+        limit : int, default 100
+            Maximum number of artifacts to return.
+
+        Returns
+        -------
+        List[Artifact]
+            Matching artifact records.
+        """
         if not self.db:
             return []
 
@@ -222,6 +337,25 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         prefix: Optional[str] = None,
         limit: int = 10_000,
     ):
+        """
+        Retrieve flattened artifact facet key/value rows.
+
+        Parameters
+        ----------
+        artifact : Artifact | uuid.UUID
+            Artifact instance or artifact id.
+        namespace : Optional[str], optional
+            Optional namespace filter.
+        prefix : Optional[str], optional
+            Optional key prefix filter.
+        limit : int, default 10_000
+            Maximum number of rows to return.
+
+        Returns
+        -------
+        list
+            Flattened key/value rows for the selected artifact.
+        """
         if not self.db:
             return []
         artifact_id = artifact.id if isinstance(artifact, Artifact) else artifact

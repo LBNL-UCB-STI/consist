@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.exc import DatabaseError, OperationalError
 
+from consist.core.db_runtime import DatabaseRuntimeOps
 from consist.core.persistence import (
     DatabaseManager,
     ProvenanceWriter,
@@ -54,10 +55,16 @@ def test_table_has_column_returns_false_for_unsafe_table_name() -> None:
     )
 
 
+def _build_retry_only_db() -> DatabaseManager:
+    db = DatabaseManager.__new__(DatabaseManager)
+    db._runtime_ops = DatabaseRuntimeOps(db)
+    return db
+
+
 def test_execute_with_retry_retries_retryable_operational_error_then_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    db = DatabaseManager.__new__(DatabaseManager)
+    db = _build_retry_only_db()
     db._lock_retries = 5
     db._lock_base_sleep_seconds = 0.01
     db._lock_max_sleep_seconds = 0.05
@@ -75,9 +82,9 @@ def test_execute_with_retry_retries_retryable_operational_error_then_succeeds(
             )
         return "ok"
 
-    monkeypatch.setattr("consist.core.persistence.random.uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr("consist.core.db_runtime.random.uniform", lambda _a, _b: 0.0)
     monkeypatch.setattr(
-        "consist.core.persistence.time.sleep", lambda s: sleeps.append(s)
+        "consist.core.db_runtime.time.sleep", lambda s: sleeps.append(s)
     )
 
     result = db.execute_with_retry(flaky, operation_name="test_retry")
@@ -87,7 +94,7 @@ def test_execute_with_retry_retries_retryable_operational_error_then_succeeds(
 
 
 def test_execute_with_retry_does_not_retry_non_retryable_db_error() -> None:
-    db = DatabaseManager.__new__(DatabaseManager)
+    db = _build_retry_only_db()
     calls: list[int] = []
 
     def fail_fast() -> None:

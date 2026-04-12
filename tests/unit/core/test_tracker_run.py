@@ -154,9 +154,7 @@ def test_tracker_run_path_binding_requires_materialized_local_path(tracker, samp
         )
 
 
-def test_tracker_run_path_binding_falls_back_from_stale_abs_path(
-    tracker, sample_csv
-):
+def test_tracker_run_path_binding_falls_back_from_stale_abs_path(tracker, sample_csv):
     input_path = sample_csv("stale_abs_path.csv", rows=3)
     stale_path = tracker.run_dir / "missing" / "stale.csv"
     seen: dict[str, Path] = {}
