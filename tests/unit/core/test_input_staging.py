@@ -84,7 +84,9 @@ def test_stage_artifact_copies_file_and_detaches_artifact(tmp_path: Path) -> Non
     assert destination.read_text(encoding="utf-8") == "value\n1\n"
 
 
-def test_stage_artifact_preserves_existing_identical_destination(tmp_path: Path) -> None:
+def test_stage_artifact_preserves_existing_identical_destination(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "inputs" / "source.csv"
     destination = tmp_path / "runs" / "staged" / "source.csv"
     source.parent.mkdir(parents=True, exist_ok=True)
@@ -117,7 +119,9 @@ def test_stage_artifact_stages_directories(tmp_path: Path) -> None:
     result = stage_artifact(tracker, artifact, destination)
 
     assert result.status == "staged"
-    assert (destination / "nested" / "data.txt").read_text(encoding="utf-8") == "payload"
+    assert (destination / "nested" / "data.txt").read_text(
+        encoding="utf-8"
+    ) == "payload"
 
 
 def test_stage_artifact_uses_runtime_abs_path_when_canonical_resolution_missing(

@@ -447,11 +447,7 @@ class RunLifecycleCoordinator:
             requested_input_materialization=requested_input_materialization,
             requested_input_materialization_mode=(
                 requested_input_materialization_mode
-                or (
-                    "copy"
-                    if requested_input_materialization == "requested"
-                    else None
-                )
+                or ("copy" if requested_input_materialization == "requested" else None)
             ),
         )
 

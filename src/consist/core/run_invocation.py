@@ -590,9 +590,7 @@ def resolve_run_invocation(
                         "execution_options.input_materialization='requested' "
                         "requires input_paths."
                     ),
-                    cause=(
-                        "Requested input staging needs explicit destination paths."
-                    ),
+                    cause=("Requested input staging needs explicit destination paths."),
                     fix=(
                         "Provide execution_options=ExecutionOptions("
                         "input_materialization='requested', input_paths={...})."

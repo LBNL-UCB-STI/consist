@@ -309,15 +309,14 @@ class RunTraceCoordinator:
             )
         if requested_input_paths is not None:
             start_kwargs["requested_input_paths"] = {
-                str(key): str(Path(value)) for key, value in requested_input_paths.items()
+                str(key): str(Path(value))
+                for key, value in requested_input_paths.items()
             }
         requested_mode = requested_input_materialization_mode or (
             "copy" if requested_input_materialization == "requested" else None
         )
         if requested_mode is not None:
-            start_kwargs["requested_input_materialization_mode"] = (
-                requested_mode
-            )
+            start_kwargs["requested_input_materialization_mode"] = requested_mode
         optional_values: Dict[str, Any] = {
             "cache_version": invocation.cache_version,
             "phase": phase,
@@ -621,9 +620,7 @@ class RunTraceCoordinator:
             ),
             requested_input_paths=requested_input_paths,
             requested_input_materialization=requested_input_materialization,
-            requested_input_materialization_mode=(
-                requested_input_materialization_mode
-            ),
+            requested_input_materialization_mode=(requested_input_materialization_mode),
         )
 
         return RunInvocationContext(
@@ -648,9 +645,7 @@ class RunTraceCoordinator:
                 else None
             ),
             requested_input_materialization=requested_input_materialization,
-            requested_input_materialization_mode=(
-                requested_input_materialization_mode
-            ),
+            requested_input_materialization_mode=(requested_input_materialization_mode),
             run_id=run_id,
             start_kwargs=start_kwargs,
         )
@@ -1147,7 +1142,10 @@ class RunTraceCoordinator:
                     if get_tracker_ref(artifact) is None:
                         set_tracker_ref(artifact, tracker)
                     if input_binding == "paths":
-                        if requested_input_paths and param_name in requested_input_paths:
+                        if (
+                            requested_input_paths
+                            and param_name in requested_input_paths
+                        ):
                             artifact_path = Path(requested_input_paths[param_name])
                         else:
                             artifact_path = artifact.path

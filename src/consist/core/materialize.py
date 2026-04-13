@@ -346,7 +346,9 @@ class StagedInputsResult(MappingABC[str, StagedInput]):
 
     @property
     def failed_keys(self) -> list[str]:
-        return [key for key, output in self.outputs.items() if output.status == "failed"]
+        return [
+            key for key, output in self.outputs.items() if output.status == "failed"
+        ]
 
     @property
     def complete(self) -> bool:
@@ -1015,9 +1017,7 @@ def _stage_artifact_path(
 
         source_path = _resolve_staging_source_path(tracker, artifact=artifact)
         if source_path is None or not source_path.exists():
-            msg = (
-                f"[Consist] Cannot stage artifact {artifact.key!r}: source path missing."
-            )
+            msg = f"[Consist] Cannot stage artifact {artifact.key!r}: source path missing."
             logging.warning(msg)
             return _make_staged_output(
                 artifact,
@@ -1033,9 +1033,7 @@ def _stage_artifact_path(
             )
 
         if validate_content_hash == "always" and not artifact.hash:
-            msg = (
-                f"[Consist] Cannot validate artifact {artifact.key!r}: artifact.hash is missing."
-            )
+            msg = f"[Consist] Cannot validate artifact {artifact.key!r}: artifact.hash is missing."
             logging.warning(msg)
             return _make_staged_output(
                 artifact,
@@ -1082,9 +1080,7 @@ def _stage_artifact_path(
                     resolvable=False,
                 )
             if source_path.is_dir() != destination_path.is_dir():
-                msg = (
-                    f"Destination type mismatch for {destination_path}; refusing to overwrite."
-                )
+                msg = f"Destination type mismatch for {destination_path}; refusing to overwrite."
                 logging.warning("[Consist] %s", msg)
                 return _make_staged_output(
                     artifact,
@@ -1147,9 +1143,7 @@ def _stage_artifact_path(
             resolvable=False,
         )
     except (OSError, shutil.Error, RuntimeError, ValueError) as exc:
-        msg = (
-            f"[Consist] Failed to stage artifact {artifact.key!r} to {destination_path}: {exc}"
-        )
+        msg = f"[Consist] Failed to stage artifact {artifact.key!r} to {destination_path}: {exc}"
         logging.warning(msg)
         return _make_staged_output(
             artifact,
@@ -1175,7 +1169,9 @@ def stage_artifacts_to_destinations(
     staging helpers and run-time requested input materialization.
     """
     if mode != "copy":
-        raise ValueError(f"Unsupported staging mode {mode!r}; only 'copy' is supported.")
+        raise ValueError(
+            f"Unsupported staging mode {mode!r}; only 'copy' is supported."
+        )
 
     outputs: dict[str, StagedInput] = {}
     key_order: list[str] = []
@@ -1953,7 +1949,9 @@ def stage_inputs(
     for key, destination in destinations_by_key.items():
         artifact = inputs_by_key.get(key)
         if artifact is None:
-            raise KeyError(f"Input key {key!r} was not found in the resolved artifact set.")
+            raise KeyError(
+                f"Input key {key!r} was not found in the resolved artifact set."
+            )
         items.append((key, artifact, Path(destination)))
     return stage_artifacts_to_destinations(
         tracker,
