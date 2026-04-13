@@ -95,6 +95,25 @@ cleaned_df = consist.load_df(artifact)
 the local `Path` values named in `inputs`, while those same inputs still define
 cache identity and lineage.
 
+When a path-bound step needs inputs at specific local destinations, request
+staging through `ExecutionOptions` instead of manually copying files:
+
+```python
+result = tracker.run(
+    fn=clean_data,
+    inputs={"raw": Path("raw.parquet")},
+    outputs=["cleaned"],
+    execution_options=ExecutionOptions(
+        input_binding="paths",
+        input_materialization="requested",
+        input_paths={"raw": Path("./workspace/raw.parquet")},
+    ),
+)
+```
+
+That keeps artifact identity canonical while ensuring the callable sees a real
+local file at the requested path, including on cache hits.
+
 **Summary**: Consist computes a deterministic fingerprint from your code version, config, and input files. If you change
 anything upstream, only affected downstream steps will re-execute.
 
@@ -137,6 +156,8 @@ Use `output_paths` when a function returns `None` but writes files, or when you 
   affected downstream steps re-execute when any upstream piece changes.
 - **Plain Python**: Tasks are ordinary Python functions—callable and testable without the tracker. The tracker is
   additive and does not restructure your code.
+- **Explicit File Workflows**: Path-bound steps can request staged local inputs without giving up canonical artifact
+  identity, which is useful for subprocesses, external tools, and workspace-local contracts.
 - **Complete Lineage**: Every result is tagged with the exact code and config that created it. Trace lineage from any
   output back to its sources.
 - **SQL-Native Analysis**: All metadata is indexed in DuckDB. Query across runs, join tables, and compare variants using

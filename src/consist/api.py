@@ -55,6 +55,10 @@ from consist.core.materialize_options import (
     validate_materialize_option,
 )
 from consist.core.run_options import raise_legacy_policy_kwargs_error
+from consist.core.materialize import (
+    stage_artifact as stage_artifact_core,
+    stage_inputs as stage_inputs_core,
+)
 from consist.core.stores import get_hot_data_db_path
 from consist.core.views import _quote_ident, create_view_model
 from consist.core.workflow import OutputCapture, RunContext
@@ -77,6 +81,8 @@ if TYPE_CHECKING:
     from consist.core.materialize import (
         HydratedRunOutputsResult,
         MaterializationResult,
+        StagedInput,
+        StagedInputsResult,
     )
     from consist.core.step_context import StepContext
     from consist.runset import RunSet
@@ -574,7 +580,10 @@ def run(
     output_policy : Optional[OutputPolicyOptions]
         Grouped output mismatch/missing policy controls.
     execution_options : Optional[ExecutionOptions]
-        Grouped runtime execution controls.
+        Grouped runtime execution controls. For path-bound workflows, this is
+        also where you request local input staging via
+        ``ExecutionOptions(input_binding="paths", input_materialization="requested",
+        input_paths={...})``.
     **kwargs : Any
         Arguments forwarded to `Tracker.run`, including `inputs`, `config`,
         `tags`, and other core run metadata.
@@ -1202,6 +1211,76 @@ def hydrate_run_outputs(
         preserve_existing=preserve_existing,
         on_missing=on_missing,
         db_fallback=db_fallback,
+    )
+
+
+def stage_artifact(
+    artifact: Artifact,
+    *,
+    destination: str | Path,
+    overwrite: bool = False,
+    mode: Literal["copy", "hardlink", "symlink"] = "copy",
+    validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
+    allow_external_paths: Optional[bool] = None,
+    tracker: Optional["Tracker"] = None,
+) -> "StagedInput":
+    """
+    Stage a single artifact to a requested filesystem destination.
+
+    This is the low-level convenience wrapper for canonical input staging. It
+    copies the artifact bytes into the requested destination, preserving
+    existing identical content when possible and returning a detached staged
+    artifact view for immediate reuse.
+
+    Prefer ``ExecutionOptions(input_materialization="requested",
+    input_paths={...})`` on ``run(...)`` or ``ScenarioContext.run(...)`` when
+    the goal is to prepare declared inputs for one execution. Use this helper
+    when you need the same staging behavior outside a run lifecycle.
+    """
+    tr = _resolve_tracker(tracker)
+    return stage_artifact_core(
+        tr,
+        artifact,
+        Path(destination),
+        mode=mode,
+        overwrite=overwrite,
+        validate_content_hash=validate_content_hash,
+        allow_external_paths=allow_external_paths,
+    )
+
+
+def stage_inputs(
+    inputs_by_key: Mapping[str, Artifact],
+    *,
+    destinations_by_key: Mapping[str, str | Path],
+    overwrite: bool = False,
+    mode: Literal["copy", "hardlink", "symlink"] = "copy",
+    validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
+    allow_external_paths: Optional[bool] = None,
+    tracker: Optional["Tracker"] = None,
+) -> "StagedInputsResult":
+    """
+    Stage multiple keyed artifacts to explicitly requested filesystem paths.
+
+    Keys must match the input artifact mapping keys. The returned result is
+    keyed in the same order as ``destinations_by_key``.
+
+    Prefer run-level requested input materialization for standard workflow
+    code. Use this helper when you already have resolved artifacts and need to
+    stage them before or outside normal run execution.
+    """
+    tr = _resolve_tracker(tracker)
+    normalized_destinations = {
+        key: Path(destination) for key, destination in destinations_by_key.items()
+    }
+    return stage_inputs_core(
+        tr,
+        inputs_by_key,
+        normalized_destinations,
+        mode=mode,
+        overwrite=overwrite,
+        validate_content_hash=validate_content_hash,
+        allow_external_paths=allow_external_paths,
     )
 
 

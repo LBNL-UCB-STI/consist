@@ -97,6 +97,12 @@ class ResolvedRunInvocation:
         Effective input binding mode for callable execution.
     load_inputs : Optional[bool]
         Effective legacy input auto-loading preference retained for compatibility.
+    input_paths : Optional[Mapping[str, PathLike]]
+        Requested destination paths for explicit input staging.
+    input_materialization : Optional[Literal["requested"]]
+        Requested input-staging policy.
+    input_materialization_mode : Optional[Literal["copy"]]
+        Requested staging transport mode.
     executor : Literal["python", "container"]
         Effective execution backend.
     container : Optional[Mapping[str, Any]]
@@ -135,6 +141,9 @@ class ResolvedRunInvocation:
     output_missing: Literal["warn", "error", "ignore"]
     input_binding: InputBindingMode
     load_inputs: Optional[bool]
+    input_paths: Optional[Mapping[str, PathLike]]
+    input_materialization: Optional[Literal["requested"]]
+    input_materialization_mode: Optional[Literal["copy"]]
     executor: Literal["python", "container"]
     container: Optional[Mapping[str, Any]]
     runtime_kwargs: Optional[Dict[str, Any]]
@@ -355,6 +364,9 @@ def resolve_run_invocation(
     output_missing = merged_options.output_missing
     input_binding = merged_options.input_binding
     load_inputs = merged_options.load_inputs
+    requested_input_paths = merged_options.input_paths
+    requested_input_materialization = merged_options.input_materialization
+    requested_input_materialization_mode = merged_options.input_materialization_mode
     executor = merged_options.executor
     container = merged_options.container
     runtime_kwargs = merged_options.runtime_kwargs
@@ -556,6 +568,56 @@ def resolve_run_invocation(
     if resolved_validate_cached_outputs is None:
         resolved_validate_cached_outputs = "lazy"
 
+    if requested_input_materialization is not None:
+        if requested_input_materialization != "requested":
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem=(
+                        "execution_options.input_materialization must be 'requested'. "
+                        f"Received {requested_input_materialization!r}."
+                    ),
+                    cause="An unsupported input materialization policy was configured.",
+                    fix=(
+                        "Use execution_options=ExecutionOptions("
+                        "input_materialization='requested', input_paths={...})."
+                    ),
+                )
+            )
+        if requested_input_paths is None:
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem=(
+                        "execution_options.input_materialization='requested' "
+                        "requires input_paths."
+                    ),
+                    cause=("Requested input staging needs explicit destination paths."),
+                    fix=(
+                        "Provide execution_options=ExecutionOptions("
+                        "input_materialization='requested', input_paths={...})."
+                    ),
+                )
+            )
+    else:
+        requested_input_paths = None
+
+    if (
+        requested_input_materialization_mode is not None
+        and requested_input_materialization_mode != "copy"
+    ):
+        raise ValueError(
+            format_problem_cause_fix(
+                problem=(
+                    "execution_options.input_materialization_mode must be 'copy'. "
+                    f"Received {requested_input_materialization_mode!r}."
+                ),
+                cause="Only copy-based requested input staging is supported.",
+                fix=(
+                    "Use execution_options=ExecutionOptions("
+                    "input_materialization_mode='copy')."
+                ),
+            )
+        )
+
     if output_mismatch not in {"warn", "error", "ignore"}:
         raise ValueError(
             format_problem_cause_fix(
@@ -591,6 +653,33 @@ def resolve_run_invocation(
         inputs=resolved.inputs,
     )
 
+    if (
+        requested_input_materialization == "requested"
+        and requested_input_paths is not None
+        and isinstance(resolved.inputs, Mapping)
+    ):
+        requested_keys = set(requested_input_paths.keys())
+        resolved_keys = {str(key) for key in resolved.inputs.keys()}
+        missing_keys = sorted(requested_keys - resolved_keys)
+        if missing_keys:
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem=(
+                        "execution_options.input_paths contains keys that are not "
+                        "present in the resolved inputs: "
+                        f"{missing_keys}."
+                    ),
+                    cause=(
+                        "Requested input staging can only target resolved input "
+                        "artifact keys."
+                    ),
+                    fix=(
+                        "Use keys from the run inputs mapping, or remove the "
+                        "missing entries from execution_options.input_paths."
+                    ),
+                )
+            )
+
     return ResolvedRunInvocation(
         name=resolved.name,
         model=resolved.model,
@@ -624,6 +713,11 @@ def resolve_run_invocation(
         output_missing=cast(Literal["warn", "error", "ignore"], output_missing),
         input_binding=resolved_input_binding,
         load_inputs=resolved.load_inputs,
+        input_paths=(
+            dict(requested_input_paths) if requested_input_paths is not None else None
+        ),
+        input_materialization=requested_input_materialization,
+        input_materialization_mode=requested_input_materialization_mode,
         executor=cast(Literal["python", "container"], executor),
         container=container,
         runtime_kwargs=runtime_kwargs_dict,

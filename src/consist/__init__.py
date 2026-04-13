@@ -56,6 +56,8 @@ from consist.api import (
     get_run_result,
     hydrate_run_outputs,
     materialize_run_outputs,
+    stage_artifact,
+    stage_inputs,
     set_artifact_recovery_roots,
     archive_artifact,
     archive_run_outputs,
@@ -103,6 +105,8 @@ from consist.core.materialize import (
     HydratedRunOutput,
     HydratedRunOutputsResult,
     MaterializationResult,
+    StagedInput,
+    StagedInputsResult,
 )
 from consist.runtime import create_tracker
 from consist.protocols import (
@@ -136,6 +140,8 @@ __all__ = [
     "HydratedRunOutput",
     "HydratedRunOutputsResult",
     "MaterializationResult",
+    "StagedInput",
+    "StagedInputsResult",
     "create_tracker",
     "ArtifactLike",
     "RunIdentifiedResultLike",
@@ -182,6 +188,8 @@ __all__ = [
     "get_run_result",
     "hydrate_run_outputs",
     "materialize_run_outputs",
+    "stage_artifact",
+    "stage_inputs",
     "set_artifact_recovery_roots",
     "archive_artifact",
     "archive_run_outputs",

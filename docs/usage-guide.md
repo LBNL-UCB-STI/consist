@@ -24,6 +24,7 @@ for the recommended wrapper architecture.
 
 - [Choosing Your Pattern](#choosing-your-pattern)
 - [Pattern 1: Single-Step Runs (`run()`)](#pattern-1-single-step-runs-run)
+- [Requested Input Staging for Path-Bound Steps](#requested-input-staging-for-path-bound-steps)
 - [Pattern 2: Multi-Step Workflows (`scenario()`)](#pattern-2-multi-step-workflows-scenario)
 - [Pattern 3: Container Integration](#pattern-3-container-integration)
 - [Advanced Patterns](#advanced-patterns)
@@ -45,7 +46,7 @@ workflow state, or per-step caching across a larger pipeline.
 |-------------------------------------------------------------|---------------------------------|-----------------------------------------------------------------------------------------------------------------------------|
 | Single data processing step (clean, transform, aggregate)   | **`run`**                       | Simple: caches the entire function call with low overhead. Use for self-contained operations.                               |
 | Multi-step workflow (preprocessing → simulation → analysis) | **`scenario`**                  | Groups related steps, shares state via coupler, per-step caching. Use when steps have dependencies or shared configuration. |
-| Existing tool/model (subprocess, legacy code, container)    | **[`container` or `depends_on`](containers-guide.md)** | Wraps external executables, tracks container digest as cache key. Use for black-box tools.                                  |
+| Existing tool/model (subprocess, legacy code, container)    | **[`container` or `depends_on`](containers-guide.md)** | Wraps external executables, tracks container digest as cache key. Pair path-bound steps with requested input staging when a tool expects fixed local input paths. |
 | Parameter sweep / sensitivity analysis                      | **`scenario`&nbsp;+&nbsp;loop** | Run the same step with different configs, compare results.                                                                  |
 | Multi-year simulation                                       | **`scenario`&nbsp;+&nbsp;loop** | Runs in years, each year caches independently, all years share scenario context.                                            |
 
@@ -73,6 +74,24 @@ identity-only and you do not want automatic binding.
 `runtime_kwargs` still exists, but it should usually mean "runtime-only values
 that are not the declared named inputs." It is no longer the recommended way to
 pass paths into a path-based step.
+
+If a path-bound step needs those inputs at exact local destinations, request
+staging as part of the run instead of copying files yourself:
+
+``` python
+execution_options = ExecutionOptions(
+    input_binding="paths",
+    input_materialization="requested",
+    input_paths={
+        "raw_path": Path("./workspace/raw.parquet"),
+    },
+)
+```
+
+That pattern is especially useful for subprocess wrappers, legacy tools, and
+steps that need stable workspace-local filenames. The requested paths are
+created before execution on cache misses and before the cached result is
+returned on cache hits.
 
 **When to use:**
 
@@ -216,6 +235,53 @@ This reduces cache misses when unrelated files elsewhere in the repository chang
 
 Legacy run-policy kwargs are no longer supported on `run(...)` APIs. Use
 `cache_options=...`, `output_policy=...`, and `execution_options=...`.
+
+### Requested Input Staging for Path-Bound Steps
+
+Use requested input staging when the callable or wrapped tool expects one or
+more declared inputs at specific local destinations. This keeps the canonical
+artifact identity unchanged while creating a run-local working copy where the
+tool expects it.
+
+``` python
+from pathlib import Path
+import subprocess
+from consist import ExecutionOptions, Tracker
+
+tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+
+
+def run_legacy_tool(config_path: Path) -> dict[str, Path]:
+    output = Path("./report.txt")
+    subprocess.run(
+        ["legacy-tool", "--config", str(config_path), "--out", str(output)],
+        check=True,
+    )
+    return {"report": output}
+
+
+result = tracker.run(
+    fn=run_legacy_tool,
+    inputs={"config_path": Path("./configs/baseline.yaml")},
+    outputs=["report"],
+    execution_options=ExecutionOptions(
+        input_binding="paths",
+        input_materialization="requested",
+        input_paths={
+            "config_path": Path("./workspace/config.yaml"),
+        },
+    ),
+)
+```
+
+Use this pattern when:
+
+- the step expects a fixed on-disk input location
+- the same expectation must hold on cache hits
+- you want `inputs={...}` to remain the source of identity and lineage
+
+Use low-level `consist.stage_artifact(...)` or `consist.stage_inputs(...)` only
+for custom orchestration or setup work outside a normal run lifecycle.
 
 For file outputs, prefer returning `dict[str, Path]` and declaring
 `outputs=[...]` when you control the function body. Use managed helpers like

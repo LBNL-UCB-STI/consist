@@ -20,7 +20,13 @@ def test_merge_run_options_merges_options_objects() -> None:
             code_identity_extra_deps=["helpers.py"],
         ),
         output_policy=OutputPolicyOptions(output_missing="error"),
-        execution_options=ExecutionOptions(inject_context="ctx"),
+        execution_options=ExecutionOptions(
+            inject_context="ctx",
+            input_binding="paths",
+            input_paths={"raw": "/tmp/raw.csv"},
+            input_materialization="requested",
+            input_materialization_mode="copy",
+        ),
     )
 
     assert merged.cache_mode == "reuse"
@@ -29,7 +35,10 @@ def test_merge_run_options_merges_options_objects() -> None:
     assert merged.code_identity == "callable_module"
     assert merged.code_identity_extra_deps == ["helpers.py"]
     assert merged.output_missing == "error"
-    assert merged.input_binding is None
+    assert merged.input_binding == "paths"
+    assert merged.input_paths == {"raw": "/tmp/raw.csv"}
+    assert merged.input_materialization == "requested"
+    assert merged.input_materialization_mode == "copy"
     assert merged.inject_context == "ctx"
 
 
@@ -48,6 +57,9 @@ def test_merge_run_options_defaults_to_empty_options() -> None:
     assert merged.output_missing is None
     assert merged.input_binding is None
     assert merged.load_inputs is None
+    assert merged.input_paths is None
+    assert merged.input_materialization is None
+    assert merged.input_materialization_mode is None
     assert merged.executor is None
     assert merged.container is None
     assert merged.runtime_kwargs is None
@@ -71,7 +83,12 @@ def test_resolve_runtime_kwargs_alias_merges_into_execution_options() -> None:
     resolved = resolve_runtime_kwargs_alias(
         api_name="Tracker.run",
         execution_options=ExecutionOptions(
-            input_binding="paths", load_inputs=True, inject_context="ctx"
+            input_binding="paths",
+            load_inputs=True,
+            inject_context="ctx",
+            input_paths={"raw": "/tmp/raw.csv"},
+            input_materialization="requested",
+            input_materialization_mode="copy",
         ),
         runtime_kwargs={"threshold": 2},
     )
@@ -80,6 +97,9 @@ def test_resolve_runtime_kwargs_alias_merges_into_execution_options() -> None:
     assert resolved.input_binding == "paths"
     assert resolved.load_inputs is True
     assert resolved.inject_context == "ctx"
+    assert resolved.input_paths == {"raw": "/tmp/raw.csv"}
+    assert resolved.input_materialization == "requested"
+    assert resolved.input_materialization_mode == "copy"
     assert resolved.runtime_kwargs == {"threshold": 2}
 
 

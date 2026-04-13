@@ -26,6 +26,7 @@ from consist.core.cache import (
     CacheValidationContext,
     hydrate_cache_hit_outputs,
     materialize_missing_inputs,
+    materialize_requested_inputs,
     parse_materialize_cached_outputs_kwargs,
     validate_cached_run_outputs,
 )
@@ -247,6 +248,37 @@ class RunLifecycleCoordinator:
             materialize_cached_outputs_source_root,
             validate_cached_outputs,
         ) = parse_materialize_cached_outputs_kwargs(kwargs)
+        requested_input_paths_raw = kwargs.pop("requested_input_paths", None)
+        requested_input_materialization = kwargs.pop(
+            "requested_input_materialization", None
+        )
+        requested_input_materialization_mode = kwargs.pop(
+            "requested_input_materialization_mode", None
+        )
+
+        requested_input_paths: Optional[Dict[str, Path]] = None
+        if requested_input_paths_raw is not None:
+            requested_input_paths = {
+                str(key): Path(value)
+                for key, value in dict(requested_input_paths_raw).items()
+            }
+        if (
+            requested_input_materialization_mode is not None
+            and requested_input_materialization_mode != "copy"
+        ):
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem=(
+                        "requested_input_materialization_mode must be 'copy'. "
+                        f"Received {requested_input_materialization_mode!r}."
+                    ),
+                    cause="Only copy-based requested input staging is supported.",
+                    fix=(
+                        "Use execution_options=ExecutionOptions("
+                        "input_materialization_mode='copy')."
+                    ),
+                )
+            )
 
         raw_config_model: Optional[BaseModel] = (
             config if isinstance(config, BaseModel) else None
@@ -390,6 +422,15 @@ class RunLifecycleCoordinator:
         if run.meta is None:
             run.meta = {}
         run.meta.setdefault("mounts", dict(tracker.mounts))
+        if requested_input_materialization == "requested" and requested_input_paths:
+            run.meta["requested_input_staging"] = {
+                "materialization": requested_input_materialization,
+                "mode": requested_input_materialization_mode or "copy",
+                "input_paths": {
+                    key: str(Path(value).resolve())
+                    for key, value in requested_input_paths.items()
+                },
+            }
 
         push_tracker(tracker)
         tracker.current_consist = ConsistRecord(run=run, config=config_dict)
@@ -402,6 +443,12 @@ class RunLifecycleCoordinator:
                 materialize_cached_outputs_source_root
             ),
             validate_cached_outputs=validate_cached_outputs,
+            requested_input_paths=requested_input_paths,
+            requested_input_materialization=requested_input_materialization,
+            requested_input_materialization_mode=(
+                requested_input_materialization_mode
+                or ("copy" if requested_input_materialization == "requested" else None)
+            ),
         )
 
         facet_dict = tracker.config_facets.resolve_facet_dict(
@@ -563,6 +610,14 @@ class RunLifecycleCoordinator:
                 tracker=cast(CacheMaterializationContext, tracker),
                 options=tracker._active_run_cache_options,
             )
+
+        if requested_input_materialization == "requested" and requested_input_paths:
+            staged_inputs = materialize_requested_inputs(
+                tracker=cast(CacheMaterializationContext, tracker),
+                options=tracker._active_run_cache_options,
+            )
+            if staged_inputs:
+                run.meta["staged_inputs"] = staged_inputs
 
         tracker._flush_json()
         if cached_output_ids and tracker.db:

@@ -84,6 +84,8 @@ with tracker.scenario("baseline") as sc:
 - [`consist.HydratedRunOutput`](materialize.md#consist.core.materialize.HydratedRunOutput)
 - [`consist.HydratedRunOutputsResult`](materialize.md#consist.core.materialize.HydratedRunOutputsResult)
 - [`consist.MaterializationResult`](materialize.md#consist.core.materialize.MaterializationResult)
+- [`consist.StagedInput`](materialize.md#consist.core.materialize.StagedInput)
+- [`consist.StagedInputsResult`](materialize.md#consist.core.materialize.StagedInputsResult)
 - [`consist.RunSet`](runset.md#consist.runset.RunSet)
 - [`consist.AlignedPair`](runset.md#consist.runset.AlignedPair)
 - `consist.CacheOptions`, `consist.OutputPolicyOptions`, `consist.ExecutionOptions`
@@ -123,6 +125,8 @@ Scenario defaults like `name_template` and `cache_epoch` are configured via `con
 - [`consist.get_artifact`](api_helpers.md#consist.api.get_artifact)
 - [`consist.hydrate_run_outputs`](api_helpers.md#consist.api.hydrate_run_outputs) (recommended historical output recovery API)
 - [`consist.materialize_run_outputs`](api_helpers.md#consist.api.materialize_run_outputs) (aggregate compatibility wrapper)
+- [`consist.stage_artifact`](api_helpers.md#consist.api.stage_artifact) (low-level canonical input staging)
+- [`consist.stage_inputs`](api_helpers.md#consist.api.stage_inputs) (low-level canonical input staging)
 - [`consist.set_artifact_recovery_roots`](api_helpers.md#consist.api.set_artifact_recovery_roots)
 - [`consist.archive_artifact`](api_helpers.md#consist.api.archive_artifact)
 - [`consist.archive_run_outputs`](api_helpers.md#consist.api.archive_run_outputs)
@@ -187,6 +191,7 @@ as needed.
 - `find_artifacts_by_params`, `get_artifact_kv`, `register_artifact_facet_parser`
 - `get_run`, `get_run_config`, `get_run_inputs`, `get_run_outputs`
 - `hydrate_run_outputs`, `materialize_run_outputs`
+- `stage_artifact`, `stage_inputs`
 - `set_artifact_recovery_roots`, `archive_artifact`, `archive_run_outputs`
 - `get_artifact_lineage`, `print_lineage`, `history`
 - `diff_runs`, `get_config_facet`, `get_config_facets`, `get_run_config_kv`

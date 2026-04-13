@@ -1036,6 +1036,11 @@ class ScenarioContext:
             ),
             execution_options=ExecutionOptions(
                 input_binding=resolved_input_binding,
+                input_paths=resolved_invocation.input_paths,
+                input_materialization=resolved_invocation.input_materialization,
+                input_materialization_mode=(
+                    resolved_invocation.input_materialization_mode
+                ),
                 executor=resolved_executor,
                 container=resolved_container,
                 runtime_kwargs=runtime_kwargs_dict,

@@ -154,6 +154,32 @@ def test_tracker_run_path_binding_requires_materialized_local_path(tracker, samp
         )
 
 
+def test_tracker_run_path_binding_falls_back_from_stale_abs_path(tracker, sample_csv):
+    input_path = sample_csv("stale_abs_path.csv", rows=3)
+    stale_path = tracker.run_dir / "missing" / "stale.csv"
+    seen: dict[str, Path] = {}
+
+    artifact = tracker.artifacts.create_artifact(
+        input_path,
+        run_id=None,
+        key="data",
+        direction="input",
+    )
+    artifact.abs_path = str(stale_path)
+
+    def step(data: Path) -> None:
+        seen["data"] = data
+        assert list(pd.read_csv(data)["value"]) == [0, 1, 2]
+
+    tracker.run(
+        fn=step,
+        inputs={"data": artifact},
+        execution_options=ExecutionOptions(input_binding="paths"),
+    )
+
+    assert seen["data"] == input_path
+
+
 def test_tracker_run_cache_hit_skips_callable(tracker):
     calls: list[str] = []
 

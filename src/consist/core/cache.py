@@ -1,5 +1,7 @@
+import hashlib
 import os
 import logging
+import shutil
 import tempfile
 import weakref
 from copy import deepcopy
@@ -19,6 +21,7 @@ from typing import (
 
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifacts, ConsistRecord
+from consist.core.error_messages import format_problem_cause_fix
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
@@ -130,6 +133,10 @@ class ActiveRunCacheOptions:
     materialize_cached_outputs_dir: Optional[Path] = None
     materialize_cached_outputs_source_root: Optional[Path] = None
     validate_cached_outputs: str = "lazy"  # "eager" | "lazy"
+    requested_input_paths: Optional[Dict[str, Path]] = None
+    requested_input_materialization: Optional[str] = None
+    requested_input_materialization_mode: Optional[str] = None
+    requested_input_validate_content_hash: str = "if-present"
 
 
 def _can_delegate_run_output_materialization(tracker: CacheHydrationContext) -> bool:
@@ -703,7 +710,6 @@ def materialize_missing_inputs(
 
     items: list[tuple[Artifact, Path, Path]] = []
     db_items: list[tuple[Artifact, Path]] = []
-    run_dir_cache: dict[str, Optional[str]] = {}
 
     for artifact in tracker.current_consist.inputs:
         if not artifact.run_id:
@@ -714,20 +720,17 @@ def materialize_missing_inputs(
             continue
 
         run_id = str(artifact.run_id)
-        if run_id not in run_dir_cache:
-            run = db.get_run(run_id)
-            run_dir_cache[run_id] = (
-                run.meta.get("_physical_run_dir") if run and run.meta else None
-            )
-
-        original_run_dir = run_dir_cache.get(run_id)
+        run = db.get_run(run_id)
+        original_run_dir = (
+            run.meta.get("_physical_run_dir") if run and run.meta else None
+        )
         if not original_run_dir:
             continue
 
         source = Path(
             tracker.fs.resolve_historical_path(artifact.container_uri, original_run_dir)
         )
-        if source.exists():
+        if source is not None and source.exists():
             items.append((artifact, source, destination))
             continue
 
@@ -765,3 +768,264 @@ def materialize_missing_inputs(
 
     if materialized:
         tracker.current_consist.run.meta["materialized_inputs"] = materialized
+
+
+def materialize_requested_inputs(
+    *,
+    tracker: CacheMaterializationContext,
+    options: Optional[ActiveRunCacheOptions],
+) -> dict[str, str]:
+    """
+    Stage explicitly requested input paths for the active run.
+
+    This helper is used after cache-hit hydration and after cache-miss input
+    materialization so Python execution sees concrete local paths when
+    ``ExecutionOptions.input_materialization='requested'`` is enabled.
+    """
+    active_options = options or ActiveRunCacheOptions()
+    if active_options.requested_input_materialization != "requested":
+        return {}
+    if not tracker.current_consist:
+        return {}
+
+    requested_mode = active_options.requested_input_materialization_mode or "copy"
+    requested_paths = active_options.requested_input_paths or {}
+    if not requested_paths:
+        return {}
+
+    run = tracker.current_consist.run
+    inputs_by_key: dict[str, list[Artifact]] = {}
+    for artifact in tracker.current_consist.inputs:
+        inputs_by_key.setdefault(artifact.key, []).append(artifact)
+
+    allowed_base = _allowed_materialization_roots(tracker, target_run=run)
+    staged: dict[str, str] = {}
+    run_dir_cache: dict[str, Optional[str]] = {}
+
+    def _file_hash(path: Path) -> str:
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _dir_hash(path: Path) -> str:
+        digest = hashlib.sha256()
+        base = Path(path).resolve()
+        for root, dirnames, filenames in os.walk(base):
+            dirnames.sort()
+            filenames.sort()
+            rel_root = Path(root).resolve().relative_to(base).as_posix()
+            digest.update(f"dir:{rel_root}".encode())
+            for dirname in dirnames:
+                digest.update(
+                    f"subdir:{Path(root, dirname).resolve().relative_to(base).as_posix()}".encode()
+                )
+            for filename in filenames:
+                file_path = Path(root, filename)
+                rel_file = file_path.resolve().relative_to(base).as_posix()
+                digest.update(f"file:{rel_file}:{file_path.stat().st_size}".encode())
+                digest.update(_file_hash(file_path).encode())
+        return digest.hexdigest()
+
+    def _content_signature(path: Path) -> tuple[str, str] | None:
+        if path.is_dir():
+            return ("dir", _dir_hash(path))
+        if path.is_file():
+            return ("file", _file_hash(path))
+        return None
+
+    def _paths_match(source: Path, destination: Path) -> bool:
+        if source.resolve() == destination.resolve():
+            return True
+        source_sig = _content_signature(source)
+        destination_sig = _content_signature(destination)
+        return source_sig is not None and source_sig == destination_sig
+
+    def _remove_existing(path: Path) -> None:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+    def _resolve_source(artifact: Artifact) -> Optional[Path]:
+        resolved_path = Path(tracker.resolve_uri(artifact.container_uri))
+        if resolved_path.exists():
+            return resolved_path
+
+        if artifact.abs_path:
+            abs_path = Path(artifact.abs_path)
+            if abs_path.exists():
+                return abs_path
+
+        if tracker.db is not None and artifact.run_id:
+            run_id = str(artifact.run_id)
+            if run_id not in run_dir_cache:
+                prior_run = tracker.db.get_run(run_id)
+                run_dir_cache[run_id] = (
+                    prior_run.meta.get("_physical_run_dir")
+                    if prior_run and prior_run.meta
+                    else None
+                )
+            original_run_dir = run_dir_cache.get(run_id)
+            if original_run_dir:
+                historical = Path(
+                    tracker.fs.resolve_historical_path(
+                        artifact.container_uri,
+                        original_run_dir,
+                    )
+                )
+                if historical.exists():
+                    return historical
+
+        return None
+
+    for key, destination in requested_paths.items():
+        matches = inputs_by_key.get(key, [])
+        if not matches:
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem=(
+                        f"Requested input materialization key {key!r} was not "
+                        "present in the resolved run inputs."
+                    ),
+                    cause=(
+                        "Requested staging destinations must correspond to a "
+                        "resolved input artifact key."
+                    ),
+                    fix=(
+                        "Choose keys from the resolved inputs mapping, or remove "
+                        "the entry from execution_options.input_paths."
+                    ),
+                )
+            )
+        if len(matches) > 1:
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem=(
+                        f"Requested input materialization key {key!r} is ambiguous."
+                    ),
+                    cause="Multiple resolved input artifacts share the same key.",
+                    fix=(
+                        "Use unique input keys for the run, or stage a different key."
+                    ),
+                )
+            )
+
+        artifact = matches[0]
+        destination_path = Path(destination).resolve()
+
+        from consist.core.materialize import (
+            _ensure_destination_not_symlink,
+            materialize_artifacts_from_sources,
+            materialize_ingested_artifact_from_db,
+            validate_allowed_materialization_destination,
+        )
+
+        validate_allowed_materialization_destination(destination_path, allowed_base)
+        _ensure_destination_not_symlink(destination_path)
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+
+        source_path = _resolve_source(artifact)
+        if destination_path.exists():
+            if destination_path.is_symlink():
+                raise ValueError(
+                    f"Symlink detected in destination path: {destination_path}"
+                )
+            if (
+                source_path is None
+                and artifact.hash
+                and destination_path.is_file()
+                and _file_hash(destination_path) == artifact.hash
+            ):
+                artifact.abs_path = str(destination_path)
+                staged[key] = str(destination_path)
+                continue
+            if source_path is not None and _paths_match(source_path, destination_path):
+                artifact.abs_path = str(destination_path)
+                staged[key] = str(destination_path)
+                continue
+            if requested_mode != "copy":
+                raise ValueError(
+                    format_problem_cause_fix(
+                        problem=(
+                            "requested_input_materialization_mode must be 'copy'."
+                        ),
+                        cause="Only copy-based requested input staging is supported.",
+                        fix=(
+                            "Use execution_options=ExecutionOptions("
+                            "input_materialization_mode='copy')."
+                        ),
+                    )
+                )
+            _remove_existing(destination_path)
+
+        if source_path is None:
+            if artifact.meta.get("is_ingested", False):
+                staged_path = Path(
+                    materialize_ingested_artifact_from_db(
+                        artifact=artifact,
+                        tracker=cast("Tracker", tracker),
+                        destination=destination_path,
+                        overwrite=False,
+                    )
+                ).resolve()
+                if (
+                    active_options.requested_input_validate_content_hash == "if-present"
+                    and artifact.hash
+                    and staged_path.is_file()
+                    and _file_hash(staged_path) != artifact.hash
+                ):
+                    raise ValueError(
+                        format_problem_cause_fix(
+                            problem=(
+                                f"Hash mismatch after staging ingested input {key!r}."
+                            ),
+                            cause=(
+                                "The reconstructed bytes do not match the artifact hash."
+                            ),
+                            fix=(
+                                "Verify the source data in DuckDB or disable hash "
+                                "validation for this staging request."
+                            ),
+                        )
+                    )
+                artifact.abs_path = str(staged_path)
+                staged[key] = str(staged_path)
+                continue
+            raise FileNotFoundError(
+                f"[Consist] Cannot stage input {artifact.key!r}: source path missing."
+            )
+
+        if source_path.resolve() == destination_path:
+            artifact.abs_path = str(destination_path)
+            staged[key] = str(destination_path)
+            continue
+
+        materialize_artifacts_from_sources(
+            items=[(artifact, source_path, destination_path)],
+            allowed_base=allowed_base,
+            on_missing="raise",
+        )
+
+        if (
+            active_options.requested_input_validate_content_hash == "if-present"
+            and artifact.hash
+            and destination_path.is_file()
+            and _file_hash(destination_path) != artifact.hash
+        ):
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem=f"Hash mismatch after staging input {key!r}.",
+                    cause="The staged file bytes do not match the artifact hash.",
+                    fix=(
+                        "Verify the source artifact or disable hash validation for "
+                        "this staging request."
+                    ),
+                )
+            )
+
+        artifact.abs_path = str(destination_path)
+        staged[key] = str(destination_path)
+
+    return staged

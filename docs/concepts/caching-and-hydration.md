@@ -43,9 +43,11 @@ Materialize cached outputs (copy bytes to your current run) in three cases:
 
 1. **Extending a scenario in a new workspace**: Cached results in `/workspace/2024`, continuing in `/workspace/2025`. Use `cache_hydration="inputs-missing"` to copy input files.
 
-2. **Preparing outputs for external tools**: Tools expect local files. Use `cache_hydration="outputs-requested"` with `materialize_cached_output_paths`. With `consist.run(...)` or `sc.run(...)`, use `output_paths={...}`.
+2. **Preparing declared inputs for path-bound steps**: A callable or wrapped tool expects one or more inputs at fixed local destinations. Use `ExecutionOptions(input_binding="paths", input_materialization="requested", input_paths={...})`.
 
-3. **Ensuring local reproducibility**: All results accessible without remote mounts. Use `cache_hydration="outputs-all"` to copy all cached outputs.
+3. **Preparing outputs for external tools**: Tools expect local files. Use `cache_hydration="outputs-requested"` with `materialize_cached_output_paths`. With `consist.run(...)` or `sc.run(...)`, use `output_paths={...}`.
+
+4. **Ensuring local reproducibility**: All results accessible without remote mounts. Use `cache_hydration="outputs-all"` to copy all cached outputs.
 
 ### Example: Electric Grid Modeling Workflow
 
@@ -144,6 +146,42 @@ That is why path-oriented workflows often pair naturally with
 `cache_hydration="inputs-missing"` when work moves across run directories.
 Loaded workflows can often keep using `cache_hydration="metadata"` and let
 Consist load the bytes on demand.
+
+### Requested Input Materialization for Path Binding
+
+`cache_hydration` is about reusing prior outputs. Requested input
+materialization is the complementary input-side mechanism for path-bound runs.
+
+Use it when a declared input artifact is canonical in provenance terms, but the
+callable needs a staged local copy at a specific destination:
+
+```python
+from pathlib import Path
+import consist
+from consist import ExecutionOptions
+
+result = tracker.run(
+    fn=run_tool,
+    inputs={"config_path": consist.ref(prepare, key="config")},
+    outputs=["report"],
+    execution_options=ExecutionOptions(
+        input_binding="paths",
+        input_materialization="requested",
+        input_paths={"config_path": Path("./workspace/tool-config.yaml")},
+    ),
+)
+```
+
+This gives you a clear split of responsibilities:
+
+- `inputs={...}` declares identity and lineage.
+- `input_binding="paths"` says the callable wants filesystem paths.
+- `input_paths={...}` names the exact local destinations that must exist.
+- `input_materialization="requested"` tells Consist to create those paths on
+  cache misses and cache hits.
+
+Use this when a tool expects exact workspace-local filenames or when you need a
+fresh local copy instead of reading from the artifact's canonical path.
 
 ### Signatures and Cache Behavior
 
