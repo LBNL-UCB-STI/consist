@@ -3418,7 +3418,13 @@ class Tracker:
         )
 
     def _ingest_cache_hit(self, table_name: str, content_hash: str) -> bool:
-        return self._config_plan_service._ingest_cache_hit(table_name, content_hash)
+        config_plan_service = getattr(self, "_config_plan_service", None)
+        if config_plan_service is None:
+            # Compatibility fallback for legacy/partial Tracker stubs that are
+            # constructed via ``Tracker.__new__`` in focused unit tests.
+            config_plan_service = TrackerConfigPlanService(self)
+            self._config_plan_service = config_plan_service
+        return config_plan_service._ingest_cache_hit(table_name, content_hash)
 
     # --- View Factory ---
 
