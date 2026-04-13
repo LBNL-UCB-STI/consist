@@ -1,35 +1,39 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
+import uuid
 
 import pytest
 
 import consist
-import consist.core as consist_core
 import consist.core.materialize as consist_materialize
+from consist.api import hydrate_run_outputs as hydrate_run_outputs_api
 from consist.api import materialize_run_outputs as materialize_run_outputs_api
 from consist.core.tracker import Tracker
+from consist.models.artifact import Artifact
 from consist.models.run import Run
 
 
-def _result(
-    *,
-    fs: dict[str, str] | None = None,
-    db: dict[str, str] | None = None,
-    skipped_existing: list[str] | None = None,
-    skipped_unmapped: list[str] | None = None,
-    skipped_missing_source: list[str] | None = None,
-    failed: list[tuple[str, str]] | None = None,
-) -> SimpleNamespace:
-    return SimpleNamespace(
-        materialized_from_filesystem=fs or {},
-        materialized_from_db=db or {},
-        skipped_existing=skipped_existing or [],
-        skipped_unmapped=skipped_unmapped or [],
-        skipped_missing_source=skipped_missing_source or [],
-        failed=failed or [],
-    )
+def _hydrated_result(
+    outputs: dict[str, tuple[str | None, str, bool, str | None]],
+) -> consist_materialize.HydratedRunOutputsResult:
+    hydrated_outputs: dict[str, consist_materialize.HydratedRunOutput] = {}
+    for key, (path, status, resolvable, message) in outputs.items():
+        hydrated_outputs[key] = consist_materialize.HydratedRunOutput(
+            key=key,
+            artifact=Artifact(
+                id=uuid.uuid4(),
+                key=key,
+                container_uri=f"./{key}.csv",
+                driver="csv",
+                meta={},
+            ),
+            path=Path(path) if path is not None else None,
+            status=status,
+            message=message,
+            resolvable=resolvable,
+        )
+    return consist_materialize.HydratedRunOutputsResult(outputs=hydrated_outputs)
 
 
 def test_tracker_materialize_run_outputs_requires_db(tmp_path: Path) -> None:
@@ -63,115 +67,76 @@ def test_tracker_materialize_run_outputs_rejects_external_target_root_when_disal
         tracker.materialize_run_outputs("run_1", target_root=outside)
 
 
-def test_tracker_materialize_run_outputs_delegates_to_core_helpers(
+def test_tracker_materialize_run_outputs_folds_hydrated_results(
     tracker: Tracker,
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    run = Run(
-        id="run_1",
-        model_name="model",
-        config_hash=None,
-        git_hash=None,
-        meta={},
+    hydrated_result = _hydrated_result(
+        {
+            "from_fs": (
+                str((tracker.run_dir / "copied.csv").resolve()),
+                "materialized_from_filesystem",
+                True,
+                None,
+            ),
+            "from_db": (
+                str((tracker.run_dir / "exported.csv").resolve()),
+                "materialized_from_db",
+                True,
+                None,
+            ),
+            "keep-me": (
+                str((tracker.run_dir / "existing.csv").resolve()),
+                "preserved_existing",
+                True,
+                None,
+            ),
+            "already-unmapped": (None, "skipped_unmapped", False, None),
+            "missing-source": (
+                str((tracker.run_dir / "missing.csv").resolve()),
+                "missing_source",
+                False,
+                "source path missing",
+            ),
+            "bad": (
+                str((tracker.run_dir / "bad.csv").resolve()),
+                "failed",
+                False,
+                "copy failed",
+            ),
+        }
     )
-    plan = [object()]
-    planner_result = _result(
-        fs={"planned": "planner-only"},
-        skipped_unmapped=["already-unmapped"],
-    )
-    execution_result = _result(
-        fs={"from_fs": str((tracker.run_dir / "copied.csv").resolve())},
-        db={"from_db": str((tracker.run_dir / "exported.csv").resolve())},
-        skipped_existing=["keep-me"],
-        skipped_missing_source=["missing-source"],
-        failed=[("bad", "copy failed")],
-    )
-    planner_calls: dict[str, object] = {}
-    execution_calls: dict[str, object] = {}
+    calls: dict[str, object] = {}
 
-    monkeypatch.setattr(
-        tracker, "get_run", lambda run_id: run if run_id == "run_1" else None
-    )
+    def _fake_hydrate(self, run_id: str, **kwargs):
+        calls["run_id"] = run_id
+        calls["kwargs"] = kwargs
+        return hydrated_result
 
-    def _fake_plan(
-        tracker_arg,
-        run_arg,
-        *,
-        target_root,
-        source_root,
-        keys,
-        preserve_existing,
-        db_fallback,
-    ):
-        planner_calls.update(
-            tracker=tracker_arg,
-            run=run_arg,
-            target_root=target_root,
-            source_root=source_root,
-            keys=keys,
-            preserve_existing=preserve_existing,
-            db_fallback=db_fallback,
-        )
-        return plan, planner_result
-
-    def _fake_execute(
-        plan_arg,
-        *,
-        tracker,
-        allowed_base,
-        on_missing,
-        preserve_existing,
-    ):
-        execution_calls.update(
-            plan=plan_arg,
-            tracker=tracker,
-            allowed_base=allowed_base,
-            on_missing=on_missing,
-            preserve_existing=preserve_existing,
-        )
-        return execution_result
-
-    fake_materialize_module = SimpleNamespace(
-        build_run_output_materialize_plan=_fake_plan,
-        materialize_planned_outputs=_fake_execute,
-        build_allowed_materialization_roots=(
-            consist_materialize.build_allowed_materialization_roots
-        ),
-        validate_allowed_materialization_destination=(
-            consist_materialize.validate_allowed_materialization_destination
-        ),
-    )
-    monkeypatch.setattr(consist_core, "materialize", fake_materialize_module)
+    monkeypatch.setattr(Tracker, "hydrate_run_outputs", _fake_hydrate)
 
     result = tracker.materialize_run_outputs(
         "run_1",
         target_root=tracker.run_dir / "restored",
-        source_root=tmp_path / "archive",
+        source_root=tracker.run_dir / "archive",
         keys=("a", "b"),
         preserve_existing=False,
         on_missing="raise",
         db_fallback="never",
     )
 
-    assert planner_calls == {
-        "tracker": tracker,
-        "run": run,
-        "target_root": (tracker.run_dir / "restored").resolve(),
-        "source_root": (tmp_path / "archive").resolve(),
-        "keys": ("a", "b"),
-        "preserve_existing": False,
-        "db_fallback": "never",
-    }
-    assert execution_calls == {
-        "plan": plan,
-        "tracker": tracker,
-        "allowed_base": (tracker.run_dir.resolve(),),
-        "on_missing": "raise",
-        "preserve_existing": False,
+    assert calls == {
+        "run_id": "run_1",
+        "kwargs": {
+            "target_root": tracker.run_dir / "restored",
+            "source_root": tracker.run_dir / "archive",
+            "keys": ("a", "b"),
+            "preserve_existing": False,
+            "on_missing": "raise",
+            "db_fallback": "never",
+        },
     }
     assert result.materialized_from_filesystem == {
-        "planned": "planner-only",
         "from_fs": str((tracker.run_dir / "copied.csv").resolve()),
     }
     assert result.materialized_from_db == {
@@ -183,7 +148,78 @@ def test_tracker_materialize_run_outputs_delegates_to_core_helpers(
     assert result.failed == [("bad", "copy failed")]
 
 
-def test_tracker_materialize_run_outputs_allows_external_target_root_when_configured(
+def test_tracker_hydrate_run_outputs_delegates_to_core_helper(
+    tracker: Tracker,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = Run(
+        id="run_1",
+        model_name="model",
+        config_hash=None,
+        git_hash=None,
+        meta={},
+    )
+    calls: dict[str, object] = {}
+    hydrated_result = _hydrated_result({})
+
+    monkeypatch.setattr(tracker, "get_run", lambda _run_id: run)
+
+    def _fake_hydrate_core(
+        *,
+        tracker,
+        run,
+        target_root,
+        source_root,
+        keys,
+        allowed_base,
+        preserve_existing,
+        on_missing,
+        db_fallback,
+    ):
+        calls.update(
+            tracker=tracker,
+            run=run,
+            target_root=target_root,
+            source_root=source_root,
+            keys=keys,
+            allowed_base=allowed_base,
+            preserve_existing=preserve_existing,
+            on_missing=on_missing,
+            db_fallback=db_fallback,
+        )
+        return hydrated_result
+
+    monkeypatch.setattr(
+        "consist.core.tracker.hydrate_run_outputs_core",
+        _fake_hydrate_core,
+    )
+
+    result = tracker.hydrate_run_outputs(
+        "run_1",
+        target_root=tracker.run_dir / "restored",
+        source_root=tmp_path / "archive",
+        keys=("a", "b"),
+        preserve_existing=False,
+        on_missing="raise",
+        db_fallback="never",
+    )
+
+    assert result is hydrated_result
+    assert calls == {
+        "tracker": tracker,
+        "run": run,
+        "target_root": (tracker.run_dir / "restored").resolve(),
+        "source_root": (tmp_path / "archive").resolve(),
+        "keys": ("a", "b"),
+        "allowed_base": (tracker.run_dir.resolve(),),
+        "preserve_existing": False,
+        "on_missing": "raise",
+        "db_fallback": "never",
+    }
+
+
+def test_tracker_hydrate_run_outputs_allows_external_target_root_when_configured(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -199,42 +235,23 @@ def test_tracker_materialize_run_outputs_allows_external_target_root_when_config
         git_hash=None,
         meta={},
     )
-    planner_result = _result()
-    execution_result = _result()
-    execution_calls: dict[str, object] = {}
+    calls: dict[str, object] = {}
 
     monkeypatch.setattr(tracker, "get_run", lambda _run_id: run)
-    fake_materialize_module = SimpleNamespace(
-        build_run_output_materialize_plan=lambda *_args, **_kwargs: (
-            [],
-            planner_result,
-        ),
-        build_allowed_materialization_roots=(
-            consist_materialize.build_allowed_materialization_roots
-        ),
-        validate_allowed_materialization_destination=(
-            consist_materialize.validate_allowed_materialization_destination
-        ),
+
+    def _fake_hydrate_core(**kwargs):
+        calls["allowed_base"] = kwargs["allowed_base"]
+        return _hydrated_result({})
+
+    monkeypatch.setattr(
+        "consist.core.tracker.hydrate_run_outputs_core",
+        _fake_hydrate_core,
     )
 
-    def _fake_execute(
-        plan_arg,
-        *,
-        tracker,
-        allowed_base,
-        on_missing,
-        preserve_existing,
-    ):
-        execution_calls["allowed_base"] = allowed_base
-        return execution_result
-
-    fake_materialize_module.materialize_planned_outputs = _fake_execute
-    monkeypatch.setattr(consist_core, "materialize", fake_materialize_module)
-
     outside = tmp_path / "external"
-    tracker.materialize_run_outputs("run_1", target_root=outside)
+    tracker.hydrate_run_outputs("run_1", target_root=outside)
 
-    assert execution_calls["allowed_base"] is None
+    assert calls["allowed_base"] is None
 
     if tracker.engine:
         tracker.engine.dispose()
@@ -267,6 +284,46 @@ def test_run_materialize_outputs_delegates_to_tracker() -> None:
     )
 
     assert result == "result"
+    assert calls == {
+        "run_id": "run_1",
+        "kwargs": {
+            "target_root": "/tmp/restored",
+            "source_root": "/tmp/archive",
+            "keys": ("a",),
+            "preserve_existing": False,
+            "on_missing": "raise",
+            "db_fallback": "never",
+        },
+    }
+
+
+def test_run_hydrate_outputs_delegates_to_tracker() -> None:
+    run = Run(
+        id="run_1",
+        model_name="model",
+        config_hash=None,
+        git_hash=None,
+        meta={},
+    )
+    calls: dict[str, object] = {}
+
+    class _FakeTracker:
+        def hydrate_run_outputs(self, run_id: str, **kwargs):
+            calls["run_id"] = run_id
+            calls["kwargs"] = kwargs
+            return "hydrated"
+
+    result = run.hydrate_outputs(
+        _FakeTracker(),
+        target_root="/tmp/restored",
+        source_root="/tmp/archive",
+        keys=("a",),
+        preserve_existing=False,
+        on_missing="raise",
+        db_fallback="never",
+    )
+
+    assert result == "hydrated"
     assert calls == {
         "run_id": "run_1",
         "kwargs": {
@@ -322,7 +379,48 @@ def test_api_materialize_run_outputs_delegates_with_default_tracker(
     assert consist.MaterializationResult is consist_materialize.MaterializationResult
 
 
-def test_tracker_materialize_run_outputs_allows_configured_mount_roots(
+def test_api_hydrate_run_outputs_delegates_with_default_tracker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    class _FakeTracker:
+        def hydrate_run_outputs(self, run_id: str, **kwargs):
+            calls["run_id"] = run_id
+            calls["kwargs"] = kwargs
+            return "hydrated-api-result"
+
+    fake_tracker = _FakeTracker()
+    monkeypatch.setattr(
+        "consist.api._resolve_tracker", lambda tracker=None: fake_tracker
+    )
+
+    result = hydrate_run_outputs_api(
+        "run_9",
+        target_root="/tmp/restored",
+        source_root="/tmp/archive",
+        keys=("x", "y"),
+        preserve_existing=False,
+        on_missing="raise",
+        db_fallback="never",
+    )
+
+    assert result == "hydrated-api-result"
+    assert calls == {
+        "run_id": "run_9",
+        "kwargs": {
+            "target_root": "/tmp/restored",
+            "source_root": "/tmp/archive",
+            "keys": ("x", "y"),
+            "preserve_existing": False,
+            "on_missing": "raise",
+            "db_fallback": "never",
+        },
+    }
+    assert consist.hydrate_run_outputs is hydrate_run_outputs_api
+
+
+def test_tracker_hydrate_run_outputs_allows_configured_mount_roots(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -339,44 +437,25 @@ def test_tracker_materialize_run_outputs_allows_configured_mount_roots(
         git_hash=None,
         meta={},
     )
-    planner_result = _result()
-    execution_result = _result()
-    execution_calls: dict[str, object] = {}
+    calls: dict[str, object] = {}
 
     monkeypatch.setattr(tracker, "get_run", lambda _run_id: run)
-    fake_materialize_module = SimpleNamespace(
-        build_run_output_materialize_plan=lambda *_args, **_kwargs: (
-            [],
-            planner_result,
-        ),
+
+    def _fake_hydrate_core(**kwargs):
+        calls["allowed_base"] = kwargs["allowed_base"]
+        return _hydrated_result({})
+
+    monkeypatch.setattr(
+        "consist.core.tracker.hydrate_run_outputs_core",
+        _fake_hydrate_core,
     )
 
-    def _fake_execute(
-        plan_arg,
-        *,
-        tracker,
-        allowed_base,
-        on_missing,
-        preserve_existing,
-    ):
-        execution_calls["allowed_base"] = allowed_base
-        return execution_result
-
-    fake_materialize_module.materialize_planned_outputs = _fake_execute
-    fake_materialize_module.build_allowed_materialization_roots = (
-        consist_materialize.build_allowed_materialization_roots
-    )
-    fake_materialize_module.validate_allowed_materialization_destination = (
-        consist_materialize.validate_allowed_materialization_destination
-    )
-    monkeypatch.setattr(consist_core, "materialize", fake_materialize_module)
-
-    tracker.materialize_run_outputs(
+    tracker.hydrate_run_outputs(
         "run_1",
         target_root=workspace_root / "restored",
     )
 
-    assert execution_calls["allowed_base"] == (
+    assert calls["allowed_base"] == (
         tracker.run_dir.resolve(),
         workspace_root.resolve(),
     )
@@ -454,6 +533,30 @@ def test_run_materialize_outputs_rejects_scalar_string_keys_before_delegation(
         )
 
 
+@pytest.mark.parametrize("bad_keys", ["out", b"out"])
+def test_run_hydrate_outputs_rejects_scalar_string_keys_before_delegation(
+    bad_keys: str | bytes,
+) -> None:
+    run = Run(
+        id="run_1",
+        model_name="model",
+        config_hash=None,
+        git_hash=None,
+        meta={},
+    )
+
+    class _FakeTracker:
+        def hydrate_run_outputs(self, run_id: str, **kwargs):
+            raise AssertionError("delegation should not happen for invalid keys")
+
+    with pytest.raises(TypeError, match="keys must be a sequence"):
+        run.hydrate_outputs(
+            _FakeTracker(),
+            target_root="/tmp/restored",
+            keys=bad_keys,
+        )
+
+
 @pytest.mark.parametrize(
     ("field_name", "field_value"),
     [
@@ -483,6 +586,35 @@ def test_run_materialize_outputs_rejects_invalid_runtime_options_before_delegati
         run.materialize_outputs(_FakeTracker(), **kwargs)
 
 
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("on_missing", "ignore"),
+        ("db_fallback", "always"),
+    ],
+)
+def test_run_hydrate_outputs_rejects_invalid_runtime_options_before_delegation(
+    field_name: str,
+    field_value: str,
+) -> None:
+    run = Run(
+        id="run_1",
+        model_name="model",
+        config_hash=None,
+        git_hash=None,
+        meta={},
+    )
+
+    class _FakeTracker:
+        def hydrate_run_outputs(self, run_id: str, **kwargs):
+            raise AssertionError("delegation should not happen for invalid options")
+
+    kwargs = {"target_root": "/tmp/restored", field_name: field_value}
+
+    with pytest.raises(ValueError, match=field_name):
+        run.hydrate_outputs(_FakeTracker(), **kwargs)
+
+
 @pytest.mark.parametrize("bad_keys", ["out", b"out"])
 def test_api_materialize_run_outputs_rejects_scalar_string_keys_before_delegation(
     monkeypatch: pytest.MonkeyPatch,
@@ -498,6 +630,23 @@ def test_api_materialize_run_outputs_rejects_scalar_string_keys_before_delegatio
 
     with pytest.raises(TypeError, match="keys must be a sequence"):
         materialize_run_outputs_api("run_1", target_root="/tmp/restored", keys=bad_keys)
+
+
+@pytest.mark.parametrize("bad_keys", ["out", b"out"])
+def test_api_hydrate_run_outputs_rejects_scalar_string_keys_before_delegation(
+    monkeypatch: pytest.MonkeyPatch,
+    bad_keys: str | bytes,
+) -> None:
+    class _FakeTracker:
+        def hydrate_run_outputs(self, run_id: str, **kwargs):
+            raise AssertionError("delegation should not happen for invalid keys")
+
+    monkeypatch.setattr(
+        "consist.api._resolve_tracker", lambda tracker=None: _FakeTracker()
+    )
+
+    with pytest.raises(TypeError, match="keys must be a sequence"):
+        hydrate_run_outputs_api("run_1", target_root="/tmp/restored", keys=bad_keys)
 
 
 @pytest.mark.parametrize(
@@ -523,3 +672,28 @@ def test_api_materialize_run_outputs_rejects_invalid_runtime_options_before_dele
 
     with pytest.raises(ValueError, match=field_name):
         materialize_run_outputs_api("run_1", **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("on_missing", "ignore"),
+        ("db_fallback", "always"),
+    ],
+)
+def test_api_hydrate_run_outputs_rejects_invalid_runtime_options_before_delegation(
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+    field_value: str,
+) -> None:
+    class _FakeTracker:
+        def hydrate_run_outputs(self, run_id: str, **kwargs):
+            raise AssertionError("delegation should not happen for invalid options")
+
+    monkeypatch.setattr(
+        "consist.api._resolve_tracker", lambda tracker=None: _FakeTracker()
+    )
+    kwargs = {"target_root": "/tmp/restored", field_name: field_value}
+
+    with pytest.raises(ValueError, match=field_name):
+        hydrate_run_outputs_api("run_1", **kwargs)

@@ -259,11 +259,15 @@ run's outputs into a new directory or recover from an archive mirror:
 ```python
 from pathlib import Path
 
-restored = tracker.materialize_run_outputs(
+hydrated = tracker.hydrate_run_outputs(
     "prior_run_id",
+    keys=["persons", "households"],
     target_root=Path("rehydrated"),
     source_root=Path("/archive/outputs_mirror"),  # optional
 )
+
+for key, output in hydrated.items():
+    print(key, output.status, output.path)
 ```
 
 This preserves historical relative layout under `target_root`. If the original
@@ -276,8 +280,12 @@ on `run(...)` / scenario steps, or use the same
 `materialize_cached_outputs_source_root=Path(...)` override on low-level
 `tracker.start_run(...)` flows.
 
-`tracker.materialize_run_outputs(...)` can also restore into a configured mount
-root without enabling `allow_external_paths=True`.
+`tracker.hydrate_run_outputs(...)` can restore into a configured mount root
+without enabling `allow_external_paths=True`.
+
+Keep `tracker.materialize_run_outputs(...)` for compatibility when you only
+need aggregate summary buckets rather than the keyed per-output result shown
+above.
 
 ---
 

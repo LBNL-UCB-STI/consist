@@ -11,6 +11,7 @@ from consist.core.fs import FileSystemManager
 from consist.core.materialize import (
     PlannedMaterialization,
     build_run_output_materialize_plan,
+    hydrate_run_outputs,
     materialize_planned_outputs,
 )
 from consist.models.artifact import Artifact
@@ -669,3 +670,83 @@ def test_build_plan_reports_unsupported_ingested_driver_clearly(
             "unsupported DB export for ingested driver 'json'",
         )
     ]
+
+
+def test_hydrate_run_outputs_returns_detached_artifact_views(
+    tracker, run_dir: Path
+) -> None:
+    output_path = run_dir / "outputs" / "table.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n1\n", encoding="utf-8")
+
+    with tracker.start_run(
+        "producer_hydrate", model="producer", cache_mode="overwrite"
+    ):
+        tracker.log_artifact(output_path, key="table", direction="output")
+
+    historical_artifact = tracker.get_run_outputs("producer_hydrate")["table"]
+
+    hydrated = tracker.hydrate_run_outputs(
+        "producer_hydrate",
+        target_root=run_dir / "restored_hydrate",
+        keys=["table"],
+    )
+
+    restored_path = (run_dir / "restored_hydrate" / "outputs" / "table.csv").resolve()
+    result = hydrated["table"]
+    assert result.status == "materialized_from_filesystem"
+    assert result.resolvable is True
+    assert result.path == restored_path
+    assert result.artifact is not historical_artifact
+    assert result.artifact.container_uri == historical_artifact.container_uri
+    assert result.artifact.as_path() == restored_path
+    assert hydrated.paths == {"table": restored_path}
+    assert list(hydrated.resolvable) == ["table"]
+    assert hydrated.complete is True
+    assert historical_artifact.as_path() == output_path
+
+
+def test_hydrate_run_outputs_warn_mode_returns_mixed_keyed_statuses(
+    tmp_path: Path,
+) -> None:
+    producer_dir = tmp_path / "producer"
+    existing_source = producer_dir / "outputs" / "good.csv"
+    existing_source.parent.mkdir(parents=True, exist_ok=True)
+    existing_source.write_text("value\n1\n", encoding="utf-8")
+
+    selected_run = _run("consumer", run_dir=tmp_path / "consumer")
+    producing_run = _run("producer", run_dir=producer_dir)
+    outputs = [
+        _artifact("good", "./outputs/good.csv", run_id="producer"),
+        _artifact("missing", "./outputs/missing.csv", run_id="producer"),
+        _artifact("absolute", "/tmp/data.csv", run_id="producer"),
+    ]
+    tracker = _stub_tracker(
+        run_dir=tmp_path / "workspace",
+        outputs_by_run={"consumer": outputs},
+        runs={"consumer": selected_run, "producer": producing_run},
+    )
+
+    result = hydrate_run_outputs(
+        tracker,
+        selected_run,
+        target_root=tmp_path / "restored",
+        source_root=None,
+        keys=None,
+        allowed_base=tmp_path,
+        preserve_existing=True,
+        on_missing="warn",
+        db_fallback="never",
+    )
+
+    assert result["good"].status == "materialized_from_filesystem"
+    assert result["good"].resolvable is True
+    assert result["missing"].status == "missing_source"
+    assert result["missing"].resolvable is False
+    assert result["absolute"].status == "skipped_unmapped"
+    assert result["absolute"].path is None
+    assert result.paths == {
+        "good": (tmp_path / "restored" / "outputs" / "good.csv").resolve()
+    }
+    assert list(result.failed_keys) == []
+    assert result.complete is False

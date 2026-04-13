@@ -48,6 +48,12 @@ from consist.core.decorators import (
 )
 from consist.core.drivers import ARRAY_DRIVERS, TABLE_DRIVERS, ArrayInfo, TableInfo
 from consist.core.noop import NoopRunContext, NoopScenarioContext
+from consist.core.materialize_options import (
+    VALID_MATERIALIZE_DB_FALLBACK as _VALID_MATERIALIZE_DB_FALLBACK,
+    VALID_MATERIALIZE_ON_MISSING as _VALID_MATERIALIZE_ON_MISSING,
+    normalize_materialize_output_keys,
+    validate_materialize_option,
+)
 from consist.core.run_options import raise_legacy_policy_kwargs_error
 from consist.core.stores import get_hot_data_db_path
 from consist.core.views import _quote_ident, create_view_model
@@ -68,7 +74,10 @@ from consist.types import (
 
 if TYPE_CHECKING:
     from consist.core.config_canonicalization import ConfigAdapter
-    from consist.core.materialize import MaterializationResult
+    from consist.core.materialize import (
+        HydratedRunOutputsResult,
+        MaterializationResult,
+    )
     from consist.core.step_context import StepContext
     from consist.runset import RunSet
 
@@ -95,8 +104,6 @@ except ImportError:
     gpd = None
 
 T = TypeVar("T", bound=SQLModel)
-_VALID_MATERIALIZE_ON_MISSING = {"warn", "raise"}
-_VALID_MATERIALIZE_DB_FALLBACK = {"never", "if_ingested"}
 
 
 class OpenMatrixFileLike(Protocol):
@@ -107,38 +114,6 @@ class OpenMatrixFileLike(Protocol):
     def __getitem__(self, key: str) -> Any: ...
 
     def close(self) -> None: ...
-
-
-def _normalize_materialize_output_keys(
-    keys: Sequence[str] | None,
-) -> tuple[str, ...] | None:
-    if keys is None:
-        return None
-    if isinstance(keys, (str, bytes)):
-        raise TypeError(
-            "keys must be a sequence of output-key strings, not a single str/bytes value."
-        )
-
-    normalized: list[str] = []
-    for key in keys:
-        if not isinstance(key, str):
-            raise TypeError(
-                "keys must contain only strings "
-                f"(got {type(key).__name__!s} in materialize_run_outputs)."
-            )
-        normalized.append(key)
-    return tuple(normalized)
-
-
-def _validate_materialize_option(
-    *,
-    name: str,
-    value: str,
-    allowed: set[str],
-) -> None:
-    if value not in allowed:
-        allowed_display = ", ".join(repr(item) for item in sorted(allowed))
-        raise ValueError(f"{name} must be one of: {allowed_display}")
 
 
 LoadResult = Union[
@@ -1080,6 +1055,13 @@ def materialize_run_outputs(
     """
     Materialize the linked outputs of a historical run into a new root.
 
+    This is the top-level convenience wrapper around
+    ``Tracker.materialize_run_outputs(...)``. It restores historical bytes and
+    returns the legacy aggregate ``MaterializationResult`` summary.
+
+    Prefer ``hydrate_run_outputs(...)`` when you want a result keyed by output
+    name, detached hydrated artifacts, or directly usable destination paths.
+
     Parameters
     ----------
     run_id : str
@@ -1103,14 +1085,27 @@ def materialize_run_outputs(
     -------
     MaterializationResult
         Structured materialization outcome for the selected run outputs.
+
+    Examples
+    --------
+    >>> restored = consist.materialize_run_outputs(
+    ...     "prior_run_id",
+    ...     keys=["persons"],
+    ...     target_root="restored",
+    ... )
+    >>> restored.materialized
+    {'persons': '.../restored/.../persons.parquet'}
     """
-    normalized_keys = _normalize_materialize_output_keys(keys)
-    _validate_materialize_option(
+    normalized_keys = normalize_materialize_output_keys(
+        keys,
+        caller="materialize_run_outputs",
+    )
+    validate_materialize_option(
         name="on_missing",
         value=on_missing,
         allowed=_VALID_MATERIALIZE_ON_MISSING,
     )
-    _validate_materialize_option(
+    validate_materialize_option(
         name="db_fallback",
         value=db_fallback,
         allowed=_VALID_MATERIALIZE_DB_FALLBACK,
@@ -1118,6 +1113,88 @@ def materialize_run_outputs(
 
     tr = _resolve_tracker(tracker)
     return tr.materialize_run_outputs(
+        run_id,
+        target_root=target_root,
+        source_root=source_root,
+        keys=normalized_keys,
+        preserve_existing=preserve_existing,
+        on_missing=on_missing,
+        db_fallback=db_fallback,
+    )
+
+
+def hydrate_run_outputs(
+    run_id: str,
+    *,
+    target_root: str | Path,
+    source_root: str | Path | None = None,
+    keys: Sequence[str] | None = None,
+    preserve_existing: bool = True,
+    on_missing: Literal["warn", "raise"] = "warn",
+    db_fallback: Literal["never", "if_ingested"] = "if_ingested",
+    tracker: Optional["Tracker"] = None,
+) -> "HydratedRunOutputsResult":
+    """
+    Hydrate the linked outputs of a historical run into a new root.
+
+    This is the higher-level historical recovery helper. It performs the same
+    physical copy/export work as ``materialize_run_outputs(...)`` but returns a
+    keyed result with detached artifacts, destination paths, statuses, and
+    resolvability information for each requested output.
+
+    Parameters
+    ----------
+    run_id : str
+        Identifier of the run whose outputs should be restored.
+    target_root : str | Path
+        Destination root for hydrated outputs.
+    source_root : str | Path | None, optional
+        Optional alternate source root for filesystem-backed recovery.
+    keys : Sequence[str] | None, optional
+        Optional subset of output keys to restore.
+    preserve_existing : bool, default True
+        If True, existing destinations are preserved and reported as reusable.
+    on_missing : {"warn", "raise"}, default "warn"
+        Missing-source handling policy forwarded to the tracker.
+    db_fallback : {"never", "if_ingested"}, default "if_ingested"
+        DB export fallback policy forwarded to the tracker.
+    tracker : Optional[Tracker], optional
+        Tracker instance to use. If omitted, resolves the active/default tracker.
+
+    Returns
+    -------
+    HydratedRunOutputsResult
+        Keyed hydration outcome for the selected run outputs.
+
+    Examples
+    --------
+    >>> hydrated = consist.hydrate_run_outputs(
+    ...     "prior_run_id",
+    ...     keys=["persons"],
+    ...     target_root="restored",
+    ... )
+    >>> hydrated["persons"].status
+    'materialized_from_filesystem'
+    >>> hydrated["persons"].artifact.as_path()
+    PosixPath('.../restored/.../persons.parquet')
+    """
+    normalized_keys = normalize_materialize_output_keys(
+        keys,
+        caller="hydrate_run_outputs",
+    )
+    validate_materialize_option(
+        name="on_missing",
+        value=on_missing,
+        allowed=_VALID_MATERIALIZE_ON_MISSING,
+    )
+    validate_materialize_option(
+        name="db_fallback",
+        value=db_fallback,
+        allowed=_VALID_MATERIALIZE_DB_FALLBACK,
+    )
+
+    tr = _resolve_tracker(tracker)
+    return tr.hydrate_run_outputs(
         run_id,
         target_root=target_root,
         source_root=source_root,

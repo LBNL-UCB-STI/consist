@@ -195,8 +195,9 @@ When Consist needs bytes from a historical run (e.g., cache hydration or
 If a mount is missing or points somewhere else, materialization will warn and skip
 missing files rather than crashing (unless explicitly set to raise).
 
-For the newer `tracker.materialize_run_outputs(...)` recovery path, output layout
-resolution is more conservative and history-aware:
+For the newer historical output recovery flow
+(`tracker.hydrate_run_outputs(...)`), output layout resolution is more
+conservative and history-aware:
 
 1) `workspace://...` and `./...` are re-rooted under the producing run's
    `_physical_run_dir`.
@@ -265,11 +266,14 @@ for non-container run policies.
   `run(...)` / scenario steps, or pass
   `materialize_cached_outputs_source_root=...` on low-level
   `tracker.start_run(...)` / `tracker.begin_run(...)` workflows.
-- Use `tracker.materialize_run_outputs(..., source_root=...)` when you need to
-  restore historical outputs from an archive mirror into a new root.
-- `tracker.materialize_run_outputs(...)` accepts `target_root` under either the
-  tracker `run_dir` or a configured mount root. Other destinations still require
-  `allow_external_paths=True`.
+- Use `tracker.hydrate_run_outputs(..., source_root=...)` when you want
+  key-indexed recovery results and detached artifacts that are immediately
+  usable in the new workspace.
+- Keep `tracker.materialize_run_outputs(..., source_root=...)` only for
+  compatibility when you intentionally want the aggregate summary buckets.
+- `tracker.hydrate_run_outputs(...)` accepts `target_root` under either the
+  tracker `run_dir` or a configured mount root. Other destinations still
+  require `allow_external_paths=True`.
 
 ---
 

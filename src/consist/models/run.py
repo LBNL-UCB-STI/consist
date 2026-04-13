@@ -16,50 +16,24 @@ from pydantic import BaseModel, ConfigDict, Field as PydanticField
 
 from sqlalchemy import Column, JSON, String
 from sqlmodel import Field, SQLModel
+from consist.core.materialize_options import (
+    VALID_MATERIALIZE_DB_FALLBACK as _VALID_MATERIALIZE_DB_FALLBACK,
+    VALID_MATERIALIZE_ON_MISSING as _VALID_MATERIALIZE_ON_MISSING,
+    normalize_materialize_output_keys,
+    validate_materialize_option,
+)
 from consist.models.artifact import Artifact, UUIDType
 
 UTC = timezone.utc
 
 if TYPE_CHECKING:
-    from consist.core.materialize import MaterializationResult
+    from consist.core.materialize import (
+        HydratedRunOutputsResult,
+        MaterializationResult,
+    )
     from consist.core.tracker import Tracker
 
-
-_VALID_MATERIALIZE_ON_MISSING = {"warn", "raise"}
-_VALID_MATERIALIZE_DB_FALLBACK = {"never", "if_ingested"}
 CanonicalRunMetaField = Literal["stage", "phase"]
-
-
-def _normalize_materialize_output_keys(
-    keys: Sequence[str] | None,
-) -> tuple[str, ...] | None:
-    if keys is None:
-        return None
-    if isinstance(keys, (str, bytes)):
-        raise TypeError(
-            "keys must be a sequence of output-key strings, not a single str/bytes value."
-        )
-
-    normalized: list[str] = []
-    for key in keys:
-        if not isinstance(key, str):
-            raise TypeError(
-                "keys must contain only strings "
-                f"(got {type(key).__name__!s} in materialize_outputs)."
-            )
-        normalized.append(key)
-    return tuple(normalized)
-
-
-def _validate_materialize_option(
-    *,
-    name: str,
-    value: str,
-    allowed: set[str],
-) -> None:
-    if value not in allowed:
-        allowed_display = ", ".join(repr(item) for item in sorted(allowed))
-        raise ValueError(f"{name} must be one of: {allowed_display}")
 
 
 def resolve_canonical_run_meta_field(
@@ -319,6 +293,14 @@ class Run(SQLModel, table=True):
         """
         Materialize this run's linked outputs through the supplied tracker.
 
+        This is the convenience ``Run`` wrapper for
+        ``Tracker.materialize_run_outputs(...)``. It restores historical bytes
+        into ``target_root`` and returns the legacy aggregate
+        ``MaterializationResult`` summary.
+
+        Prefer ``hydrate_outputs(...)`` when you want per-key statuses,
+        detached artifacts, or directly usable hydrated paths.
+
         Parameters
         ----------
         tracker : Tracker
@@ -335,20 +317,94 @@ class Run(SQLModel, table=True):
             Missing-source handling policy forwarded to the tracker.
         db_fallback : {"never", "if_ingested"}, default "if_ingested"
             DB fallback policy forwarded to the tracker.
+
+        Returns
+        -------
+        MaterializationResult
+            Aggregate summary of which outputs were restored, skipped, or failed.
         """
-        normalized_keys = _normalize_materialize_output_keys(keys)
-        _validate_materialize_option(
+        normalized_keys = normalize_materialize_output_keys(
+            keys,
+            caller="materialize_outputs",
+        )
+        validate_materialize_option(
             name="on_missing",
             value=on_missing,
             allowed=_VALID_MATERIALIZE_ON_MISSING,
         )
-        _validate_materialize_option(
+        validate_materialize_option(
             name="db_fallback",
             value=db_fallback,
             allowed=_VALID_MATERIALIZE_DB_FALLBACK,
         )
 
         return tracker.materialize_run_outputs(
+            self.id,
+            target_root=target_root,
+            source_root=source_root,
+            keys=normalized_keys,
+            preserve_existing=preserve_existing,
+            on_missing=on_missing,
+            db_fallback=db_fallback,
+        )
+
+    def hydrate_outputs(
+        self,
+        tracker: "Tracker",
+        *,
+        target_root: str | Path,
+        source_root: str | Path | None = None,
+        keys: Sequence[str] | None = None,
+        preserve_existing: bool = True,
+        on_missing: Literal["warn", "raise"] = "warn",
+        db_fallback: Literal["never", "if_ingested"] = "if_ingested",
+    ) -> "HydratedRunOutputsResult":
+        """
+        Hydrate this run's linked outputs through the supplied tracker.
+
+        This is the convenience ``Run`` wrapper for
+        ``Tracker.hydrate_run_outputs(...)``. It restores historical bytes into
+        ``target_root`` and returns a key-indexed result whose detached
+        artifacts and paths can be used immediately in the new workspace.
+
+        Parameters
+        ----------
+        tracker : Tracker
+            Tracker instance that owns the provenance database and path policy.
+        target_root : str | Path
+            Destination root for hydrated outputs.
+        source_root : str | Path | None, optional
+            Optional alternate source root for filesystem-backed recovery.
+        keys : Sequence[str] | None, optional
+            Optional subset of output keys to restore.
+        preserve_existing : bool, default True
+            If True, keep existing destination paths in place.
+        on_missing : {"warn", "raise"}, default "warn"
+            Missing-source handling policy forwarded to the tracker.
+        db_fallback : {"never", "if_ingested"}, default "if_ingested"
+            DB fallback policy forwarded to the tracker.
+
+        Returns
+        -------
+        HydratedRunOutputsResult
+            Per-key hydration outcomes keyed by output name.
+        """
+        normalized_keys = normalize_materialize_output_keys(
+            keys,
+            caller="hydrate_outputs",
+        )
+        validate_materialize_option(
+            name="on_missing",
+            value=on_missing,
+            allowed=_VALID_MATERIALIZE_ON_MISSING,
+        )
+        validate_materialize_option(
+            name="db_fallback",
+            value=db_fallback,
+            allowed=_VALID_MATERIALIZE_DB_FALLBACK,
+        )
+
+        return tracker.hydrate_run_outputs(
             self.id,
             target_root=target_root,
             source_root=source_root,
