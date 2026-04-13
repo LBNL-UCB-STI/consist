@@ -319,6 +319,205 @@ def test_build_plan_uses_mount_snapshot_and_source_root_override(
     assert plan[0].relative_path == Path("beam") / "skims.csv"
 
 
+def test_build_plan_uses_recovery_roots_for_workspace_outputs(
+    tmp_path: Path,
+) -> None:
+    recovery_root = tmp_path / "archive"
+    recovery_file = recovery_root / "outputs" / "a.csv"
+    recovery_file.parent.mkdir(parents=True, exist_ok=True)
+    recovery_file.write_text("value\n7\n", encoding="utf-8")
+
+    selected_run = _run("consumer", run_dir=tmp_path / "consumer")
+    producing_run = _run("producer", run_dir=tmp_path / "missing_producer")
+    output = _artifact(
+        "table",
+        "./outputs/a.csv",
+        run_id="producer",
+        meta={"recovery_roots": [str(recovery_root)]},
+    )
+    tracker = _stub_tracker(
+        run_dir=tmp_path / "workspace",
+        outputs_by_run={"consumer": [output]},
+        runs={"consumer": selected_run, "producer": producing_run},
+    )
+
+    plan, result = build_run_output_materialize_plan(
+        tracker,
+        selected_run,
+        target_root=tmp_path / "restore",
+        source_root=None,
+        keys=None,
+        preserve_existing=True,
+        db_fallback="if_ingested",
+    )
+
+    assert result.failed == []
+    assert len(plan) == 1
+    assert plan[0].source_path == recovery_file.resolve()
+    assert plan[0].relative_path == Path("outputs") / "a.csv"
+
+
+def test_build_plan_uses_recovery_roots_for_mount_outputs_without_snapshot(
+    tmp_path: Path,
+) -> None:
+    recovery_root = tmp_path / "archive_mount"
+    recovery_file = recovery_root / "reports" / "summary.csv"
+    recovery_file.parent.mkdir(parents=True, exist_ok=True)
+    recovery_file.write_text("value\n8\n", encoding="utf-8")
+
+    selected_run = _run("consumer", run_dir=tmp_path / "consumer")
+    producing_run = _run("producer", run_dir=tmp_path / "producer")
+    output = _artifact(
+        "summary",
+        "outputs://reports/summary.csv",
+        run_id="producer",
+        meta={"recovery_roots": [str(recovery_root)]},
+    )
+    tracker = _stub_tracker(
+        run_dir=tmp_path / "workspace",
+        outputs_by_run={"consumer": [output]},
+        runs={"consumer": selected_run, "producer": producing_run},
+    )
+
+    plan, result = build_run_output_materialize_plan(
+        tracker,
+        selected_run,
+        target_root=tmp_path / "restore",
+        source_root=None,
+        keys=None,
+        preserve_existing=True,
+        db_fallback="if_ingested",
+    )
+
+    assert result.failed == []
+    assert len(plan) == 1
+    assert plan[0].source_path == recovery_file.resolve()
+    assert plan[0].relative_path == Path("reports") / "summary.csv"
+
+
+def test_build_plan_prefers_historical_source_over_recovery_roots(
+    tmp_path: Path,
+) -> None:
+    producer_dir = tmp_path / "producer"
+    historical_file = producer_dir / "outputs" / "table.csv"
+    historical_file.parent.mkdir(parents=True, exist_ok=True)
+    historical_file.write_text("historical\n", encoding="utf-8")
+
+    recovery_root = tmp_path / "archive"
+    recovery_file = recovery_root / "outputs" / "table.csv"
+    recovery_file.parent.mkdir(parents=True, exist_ok=True)
+    recovery_file.write_text("archive\n", encoding="utf-8")
+
+    selected_run = _run("consumer", run_dir=tmp_path / "consumer")
+    producing_run = _run("producer", run_dir=producer_dir)
+    output = _artifact(
+        "table",
+        "./outputs/table.csv",
+        run_id="producer",
+        meta={"recovery_roots": [str(recovery_root)]},
+    )
+    tracker = _stub_tracker(
+        run_dir=tmp_path / "workspace",
+        outputs_by_run={"consumer": [output]},
+        runs={"consumer": selected_run, "producer": producing_run},
+    )
+
+    plan, result = build_run_output_materialize_plan(
+        tracker,
+        selected_run,
+        target_root=tmp_path / "restore",
+        source_root=None,
+        keys=None,
+        preserve_existing=True,
+        db_fallback="if_ingested",
+    )
+
+    assert result.failed == []
+    assert len(plan) == 1
+    assert plan[0].source_path == historical_file.resolve()
+
+
+def test_build_plan_prefers_source_root_over_recovery_roots(
+    tmp_path: Path,
+) -> None:
+    recovery_root = tmp_path / "archive"
+    recovery_file = recovery_root / "outputs" / "table.csv"
+    recovery_file.parent.mkdir(parents=True, exist_ok=True)
+    recovery_file.write_text("archive\n", encoding="utf-8")
+
+    override_root = tmp_path / "override"
+    override_file = override_root / "outputs" / "table.csv"
+    override_file.parent.mkdir(parents=True, exist_ok=True)
+    override_file.write_text("override\n", encoding="utf-8")
+
+    selected_run = _run("consumer", run_dir=tmp_path / "consumer")
+    producing_run = _run("producer", run_dir=tmp_path / "missing_producer")
+    output = _artifact(
+        "table",
+        "./outputs/table.csv",
+        run_id="producer",
+        meta={"recovery_roots": [str(recovery_root)]},
+    )
+    tracker = _stub_tracker(
+        run_dir=tmp_path / "workspace",
+        outputs_by_run={"consumer": [output]},
+        runs={"consumer": selected_run, "producer": producing_run},
+    )
+
+    plan, result = build_run_output_materialize_plan(
+        tracker,
+        selected_run,
+        target_root=tmp_path / "restore",
+        source_root=override_root,
+        keys=None,
+        preserve_existing=True,
+        db_fallback="if_ingested",
+    )
+
+    assert result.failed == []
+    assert len(plan) == 1
+    assert plan[0].source_path == override_file.resolve()
+
+
+def test_build_plan_prefers_recovery_roots_over_db_export(
+    tmp_path: Path,
+) -> None:
+    recovery_root = tmp_path / "archive"
+    recovery_file = recovery_root / "outputs" / "table.csv"
+    recovery_file.parent.mkdir(parents=True, exist_ok=True)
+    recovery_file.write_text("value\n11\n", encoding="utf-8")
+
+    selected_run = _run("consumer", run_dir=tmp_path / "consumer")
+    producing_run = _run("producer", run_dir=tmp_path / "missing_producer")
+    output = _artifact(
+        "table",
+        "./outputs/table.csv",
+        run_id="producer",
+        driver="csv",
+        meta={"is_ingested": True, "recovery_roots": [str(recovery_root)]},
+    )
+    tracker = _stub_tracker(
+        run_dir=tmp_path / "workspace",
+        outputs_by_run={"consumer": [output]},
+        runs={"consumer": selected_run, "producer": producing_run},
+    )
+
+    plan, result = build_run_output_materialize_plan(
+        tracker,
+        selected_run,
+        target_root=tmp_path / "restore",
+        source_root=None,
+        keys=None,
+        preserve_existing=True,
+        db_fallback="if_ingested",
+    )
+
+    assert result.failed == []
+    assert len(plan) == 1
+    assert plan[0].source_kind == "filesystem"
+    assert plan[0].source_path == recovery_file.resolve()
+
+
 def test_build_plan_rejects_existing_symlink_even_with_preserve_existing(
     tmp_path: Path,
 ) -> None:
@@ -699,7 +898,9 @@ def test_hydrate_run_outputs_returns_detached_artifact_views(
     assert result.path == restored_path
     assert result.artifact is not historical_artifact
     assert result.artifact.container_uri == historical_artifact.container_uri
+    assert result.artifact.path == restored_path
     assert result.artifact.as_path() == restored_path
+    assert result.artifact.as_path(tracker=tracker) == output_path
     assert hydrated.paths == {"table": restored_path}
     assert list(hydrated.resolvable) == ["table"]
     assert hydrated.complete is True

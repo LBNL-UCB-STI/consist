@@ -74,7 +74,10 @@ def test_materialize_artifacts_from_sources_raises_for_allowed_base_violation(
     outside_destination = tmp_path / "outside.csv"
     artifact = _artifact(key="outside")
 
-    with pytest.raises(ValueError, match="outside allowed base"):
+    with pytest.raises(
+        ValueError,
+        match="outside allowed base|configured mount root|allow_external_paths",
+    ):
         materialize_artifacts_from_sources(
             items=[(artifact, source, outside_destination)],
             allowed_base=allowed_base,

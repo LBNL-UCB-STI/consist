@@ -15,6 +15,53 @@ but returns the older aggregate
 Keep it for compatibility or summary-style reporting; use
 `hydrate_run_outputs(...)` for new workflows.
 
+## Recovery Ordering
+
+When Consist rematerializes a historical output, it probes recovery sources in
+this order:
+
+1. A per-call `source_root=...` override
+2. The historical source derived from the producing run directory, historical
+   mount snapshot, or recorded artifact mount root
+3. Ordered `artifact.meta["recovery_roots"]`
+4. DuckDB export fallback for ingested CSV/Parquet artifacts
+
+`container_uri` remains the canonical logical location throughout. Recovery
+roots are advisory byte sources, not a second canonical path.
+
+## Archive Workflow
+
+For long-lived workflows that move outputs into an archive or iteration-specific
+root, prefer recording recovery roots once instead of passing `source_root=...`
+on every restart:
+
+```python
+archive_root = Path("/archive/pilates/iteration_004")
+run_id = tracker.current_consist.run.id
+
+tracker.archive_current_run_outputs(
+    archive_root,
+    mode="copy",
+)
+
+hydrated = tracker.hydrate_run_outputs(
+    run_id,
+    keys=["persons"],
+    target_root=tracker.run_dir / "restored_workspace",
+)
+```
+
+Use the lower-level helpers when you want to manage archival yourself:
+
+- `tracker.set_artifact_recovery_roots(...)` records one or more archive roots
+  without copying bytes.
+- `tracker.archive_current_run_outputs(...)` archives the outputs of the active
+  run without manually extracting the run ID first.
+- `tracker.archive_artifact(...)` copies or moves a single artifact into an
+  archive root and records that root.
+- `tracker.archive_run_outputs(...)` applies the same pattern to all or a
+  selected subset of outputs for a run.
+
 ## Recommended Workflow
 
 Hydrate only the outputs you need into a fresh workspace root:
@@ -25,10 +72,14 @@ from pathlib import Path
 hydrated = tracker.hydrate_run_outputs(
     "prior_run_id",
     keys=["persons", "households"],
-    target_root=Path("restored_workspace"),
+    target_root=tracker.run_dir / "restored_workspace",
     source_root=Path("/archive/outputs_mirror"),  # optional
 )
 ```
+
+Relative `target_root` values are resolved from the process working directory.
+Use `tracker.run_dir / ...` or an absolute mount-backed path when you want the
+restore destination to stay inside the tracker's allowed roots.
 
 Inspect the keyed results and reuse the detached artifacts directly:
 

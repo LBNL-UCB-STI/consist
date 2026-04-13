@@ -1205,6 +1205,114 @@ def hydrate_run_outputs(
     )
 
 
+def set_artifact_recovery_roots(
+    artifact: Artifact,
+    roots: str | Path | Sequence[str | Path],
+    *,
+    append: bool = False,
+    tracker: Optional["Tracker"] = None,
+) -> Artifact:
+    """
+    Persist ordered advisory recovery roots for an artifact.
+
+    These roots are probed after per-call overrides and historical run/mount
+    locations when rematerializing historical outputs or hydrating cache-hit
+    outputs. Use this when a workflow promotes bytes into a stable archive root
+    but you want to keep ``container_uri`` as the canonical logical location.
+
+    Parameters
+    ----------
+    artifact : Artifact
+        Artifact whose recovery metadata should be updated.
+    roots : str | Path | Sequence[str | Path]
+        One or more filesystem roots. The artifact's URI-relative layout is
+        preserved beneath each root.
+    append : bool, default False
+        If True, append unique roots after existing ones. If False, replace the
+        existing list. Passing an empty sequence clears ``recovery_roots``.
+    tracker : Tracker | None, optional
+        Tracker used for persistence. If omitted, resolves the active/default
+        tracker.
+    """
+    tr = _resolve_tracker(tracker)
+    return tr.set_artifact_recovery_roots(artifact, roots, append=append)
+
+
+def archive_artifact(
+    artifact: Artifact,
+    archive_root: str | Path,
+    *,
+    mode: Literal["copy", "move"] = "copy",
+    append: bool = True,
+    tracker: Optional["Tracker"] = None,
+) -> Path:
+    """
+    Archive an artifact into a stable recovery root and record that root.
+
+    This helper copies or moves the artifact's bytes to
+    ``archive_root / <uri-relative-path>`` and then records ``archive_root`` in
+    ``artifact.meta["recovery_roots"]``. It is designed for restart/resume
+    workflows where outputs are promoted into long-lived storage but retain
+    their canonical ``container_uri``.
+    """
+    tr = _resolve_tracker(tracker)
+    return tr.archive_artifact(
+        artifact,
+        archive_root,
+        mode=mode,
+        append=append,
+    )
+
+
+def archive_run_outputs(
+    run_id: str,
+    archive_root: str | Path,
+    *,
+    keys: Sequence[str] | None = None,
+    mode: Literal["copy", "move"] = "copy",
+    append: bool = True,
+    tracker: Optional["Tracker"] = None,
+) -> dict[str, Path]:
+    """
+    Archive one or more historical run outputs into a stable recovery root.
+
+    This is the bulk form of ``archive_artifact(...)`` for iteration/archive
+    workflows that promote all or a subset of outputs after a run completes.
+    """
+    tr = _resolve_tracker(tracker)
+    return tr.archive_run_outputs(
+        run_id,
+        archive_root,
+        keys=keys,
+        mode=mode,
+        append=append,
+    )
+
+
+def archive_current_run_outputs(
+    archive_root: str | Path,
+    *,
+    keys: Sequence[str] | None = None,
+    mode: Literal["copy", "move"] = "copy",
+    append: bool = True,
+    tracker: Optional["Tracker"] = None,
+) -> dict[str, Path]:
+    """
+    Archive outputs for the currently active run into a stable recovery root.
+
+    This is the convenience form of ``archive_run_outputs(...)`` for workflows
+    that archive outputs immediately after logging them, without separately
+    pulling ``result.run.id`` or ``tracker.current_consist.run.id``.
+    """
+    tr = _resolve_tracker(tracker)
+    return tr.archive_current_run_outputs(
+        archive_root,
+        keys=keys,
+        mode=mode,
+        append=append,
+    )
+
+
 def get_artifact(
     run_id: str,
     key: Optional[str] = None,
@@ -1320,6 +1428,8 @@ def log_artifact(
         If False, returns a noop artifact object without requiring an active run.
     **meta : Any
         Additional key-value pairs to store in the artifact's flexible `meta` field.
+        ``recovery_roots`` may be supplied here and will be normalized to an
+        ordered list of absolute filesystem roots.
 
     Returns
     -------

@@ -735,7 +735,13 @@ class DatabaseManager:
 
     # --- Write Operations ---
 
-    def update_artifact_meta(self, artifact: Artifact, updates: Dict[str, Any]) -> None:
+    def update_artifact_meta(
+        self,
+        artifact: Artifact,
+        updates: Dict[str, Any],
+        *,
+        raise_on_error: bool = False,
+    ) -> bool:
         """Updates artifact metadata safely with retries."""
 
         def _update():
@@ -744,7 +750,11 @@ class DatabaseManager:
                 db_art = session.merge(artifact)
                 # Ensure meta is a dict (handle potential None)
                 current_meta = db_art.meta or {}
-                current_meta.update(updates)
+                for key, value in updates.items():
+                    if value is None:
+                        current_meta.pop(key, None)
+                    else:
+                        current_meta[key] = value
                 db_art.meta = current_meta
 
                 session.add(db_art)
@@ -754,8 +764,12 @@ class DatabaseManager:
 
         try:
             self.execute_with_retry(_update, operation_name="update_meta")
+            return True
         except Exception as e:
+            if raise_on_error:
+                raise
             logging.warning(f"Failed to update artifact metadata: {e}")
+            return False
 
     def sync_run(self, run: Run) -> None:
         """Upserts a Run object."""
