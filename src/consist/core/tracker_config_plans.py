@@ -347,7 +347,7 @@ class TrackerConfigPlanService(_TrackerServiceBase):
             bundle_artifact = getattr(adapter_ref, "bundle_artifact", None)
             if callable(bundle_artifact):
                 bundle_spec = bundle_artifact(
-                    plan.canonical, run=target_run, tracker=self
+                    plan.canonical, run=target_run, tracker=self._tracker
                 )
                 if bundle_spec is not None:
                     artifacts.append(bundle_spec)
