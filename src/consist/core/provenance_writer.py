@@ -19,6 +19,13 @@ if TYPE_CHECKING:
 
 
 class ProvenanceWriter:
+    """
+    Persistence-side helper for run JSON snapshots and artifact DB sync.
+
+    This keeps write-heavy provenance plumbing out of ``Tracker`` while leaving
+    the tracker as the composition root and lifecycle orchestrator.
+    """
+
     def __init__(self, tracker: "Tracker"):
         self._tracker = tracker
         self._artifact_batch_depth = 0

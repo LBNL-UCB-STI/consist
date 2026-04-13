@@ -28,6 +28,13 @@ if TYPE_CHECKING:
 
 
 class TrackerRecoveryService(_TrackerServiceBase):
+    """
+    Artifact staging and historical output recovery helpers for ``Tracker``.
+
+    This service centralizes low-level materialization and staging flows while
+    the public ``Tracker`` methods remain the stable entry points.
+    """
+
     def materialize(
         self,
         artifact: Artifact,

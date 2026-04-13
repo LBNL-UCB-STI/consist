@@ -13,6 +13,15 @@ from consist.core._db_ops_base import _DatabaseOpsBase
 
 
 class DatabaseSnapshotOps(_DatabaseOpsBase):
+    """
+    Snapshot and atomic file-write helpers extracted from ``DatabaseManager``.
+
+    The implementation still delegates through the concrete owning
+    ``DatabaseManager`` for engine access and retry behavior. The split is meant
+    to isolate snapshot concerns, not to define a finalized independent
+    persistence layer yet.
+    """
+
     def _atomic_copy_file(self, src: Path, dest: Path) -> None:
         temp_path = dest.parent / f".{dest.name}.{uuid.uuid4().hex}.tmp"
         try:

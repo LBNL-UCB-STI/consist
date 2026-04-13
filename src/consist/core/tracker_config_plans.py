@@ -48,6 +48,15 @@ def _quote_ident(identifier: str) -> str:
 
 
 class TrackerConfigPlanService(_TrackerServiceBase):
+    """
+    Config planning and apply-time helpers extracted from ``Tracker``.
+
+    This service owns adapter-driven config discovery, planning, and application
+    logic. It remains intentionally tracker-backed for now, so callers should
+    treat ``Tracker`` as the public API surface and this class as an internal
+    organization boundary.
+    """
+
     def _adapter_accepts_options(
         self, adapter: ConfigAdapter, method_name: str
     ) -> bool:

@@ -13,6 +13,14 @@ from consist.models.run import ConsistRecord, Run, RunArtifacts, RunResult
 
 
 class TrackerHistoryService(_TrackerServiceBase):
+    """
+    Historical run lookup and recovery metadata helpers for ``Tracker``.
+
+    The service groups read-oriented APIs that were extracted from
+    ``Tracker``. It still depends on the concrete tracker owner through
+    ``_TrackerServiceBase`` while the larger refactor remains transitional.
+    """
+
     def resolve_historical_path(self, artifact: Artifact, run: Run) -> Path:
         """
         Resolve the original filesystem path for an artifact from a prior run.

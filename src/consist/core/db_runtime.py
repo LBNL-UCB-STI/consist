@@ -170,6 +170,15 @@ def is_retryable_db_error(message: str) -> bool:
 
 
 class DatabaseRuntimeOps(_DatabaseOpsBase):
+    """
+    Runtime-only database operations extracted from ``DatabaseManager``.
+
+    This service currently owns retry behavior, shared session scoping, and
+    optional DB profiling. It still operates over the concrete
+    ``DatabaseManager`` via ``_DatabaseOpsBase`` while the refactor remains in a
+    transitional state.
+    """
+
     def execute_with_retry(
         self,
         func: Callable,
