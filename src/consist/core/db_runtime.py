@@ -179,6 +179,12 @@ class DatabaseRuntimeOps(_DatabaseOpsBase):
     transitional state.
     """
 
+    def _rollback_session(self, session: Session) -> None:
+        try:
+            session.rollback()
+        except Exception:
+            return
+
     def execute_with_retry(
         self,
         func: Callable,
@@ -214,10 +220,7 @@ class DatabaseRuntimeOps(_DatabaseOpsBase):
             try:
                 yield session
             except Exception:
-                try:
-                    session.rollback()
-                except Exception:
-                    pass
+                self._rollback_session(session)
                 raise
             return
         session = Session(self.engine)

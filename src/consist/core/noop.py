@@ -428,14 +428,15 @@ def _build_noop_artifact(
     if hasattr(value, "path"):
         try:
             path = Path(value.path)
+        except Exception:
+            path = None
+        if path is not None:
             return NoopArtifact(
                 key=key,
                 path=path,
                 container_uri=str(path),
                 meta=dict(meta or {}),
             )
-        except Exception:
-            pass
     path = Path(value) if value is not None else Path(key)
     return NoopArtifact(
         key=key,

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping as MappingABC
 from dataclasses import dataclass, field
+from contextlib import suppress
 import hashlib
 import logging
 import os
@@ -409,28 +410,22 @@ def _detach_artifact_for_hydration(
     clone = artifact.model_copy(deep=True)
     private_state = getattr(clone, "__pydantic_private__", None)
     if private_state is None:
-        try:
+        with suppress(Exception):
             object.__setattr__(clone, "__pydantic_private__", {})
-        except Exception:
-            pass
         private_state = getattr(clone, "__pydantic_private__", None)
     if isinstance(private_state, dict):
         private_state["_tracker"] = None
         private_state["_abs_path"] = (
             str(hydrated_path.resolve()) if hydrated_path is not None else None
         )
-    try:
+    with suppress(Exception):
         object.__setattr__(clone, "_tracker", None)
-    except Exception:
-        pass
-    try:
+    with suppress(Exception):
         object.__setattr__(
             clone,
             "_abs_path",
             str(hydrated_path.resolve()) if hydrated_path is not None else None,
         )
-    except Exception:
-        pass
     return clone
 
 
@@ -582,16 +577,18 @@ def _copy_file_atomic(source: Path, destination: Path) -> bool:
     tmp_path_obj = Path(tmp_path)
     try:
         shutil.copy2(source, tmp_path_obj)
-        try:
-            os.link(tmp_path_obj, destination)
-        except FileExistsError:
-            return False
-        return True
+        return _link_file_atomic(tmp_path_obj, destination)
     finally:
-        try:
+        with suppress(FileNotFoundError):
             tmp_path_obj.unlink()
-        except FileNotFoundError:
-            pass
+
+
+def _link_file_atomic(source: Path, destination: Path) -> bool:
+    try:
+        os.link(source, destination)
+    except FileExistsError:
+        return False
+    return True
 
 
 def _copy_dir_safe(source: Path, destination: Path) -> bool:
@@ -621,10 +618,8 @@ def _cleanup_path(path: Path) -> None:
     if path.is_dir() and not path.is_symlink():
         shutil.rmtree(path, ignore_errors=True)
         return
-    try:
+    with suppress(FileNotFoundError):
         path.unlink()
-    except FileNotFoundError:
-        pass
 
 
 def _replace_path(source: Path, destination: Path) -> None:
@@ -699,10 +694,8 @@ def _materialize_path(
         shutil.copy2(source, tmp_path_obj)
         _replace_path(tmp_path_obj, destination)
     finally:
-        try:
+        with suppress(FileNotFoundError):
             tmp_path_obj.unlink()
-        except FileNotFoundError:
-            pass
     return True, False
 
 
@@ -947,12 +940,16 @@ def _resolve_staging_source_path(
     *,
     artifact: Artifact,
 ) -> Path | None:
+    canonical_path: Path | None = None
     try:
-        canonical_path = Path(tracker.resolve_uri(artifact.container_uri)).resolve()
-        if canonical_path.exists():
-            return canonical_path
+        candidate = Path(tracker.resolve_uri(artifact.container_uri)).resolve()
+        if candidate.exists():
+            canonical_path = candidate
     except (OSError, ValueError, AttributeError):
-        pass
+        canonical_path = None
+
+    if canonical_path is not None:
+        return canonical_path
 
     runtime_abs_path = artifact.abs_path
     if runtime_abs_path:
@@ -2075,14 +2072,10 @@ def materialize_ingested_artifact_from_db(
         if overwrite:
             _replace_path(tmp_path_obj, destination_path)
         else:
-            try:
-                os.link(tmp_path_obj, destination_path)
-            except FileExistsError:
+            if not _link_file_atomic(tmp_path_obj, destination_path):
                 return str(destination_path)
     finally:
-        try:
+        with suppress(FileNotFoundError):
             tmp_path_obj.unlink()
-        except FileNotFoundError:
-            pass
 
     return str(destination_path)

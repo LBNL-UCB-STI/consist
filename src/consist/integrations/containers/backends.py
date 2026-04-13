@@ -144,6 +144,18 @@ def _summarize_environment(env: Dict[str, str], max_items: int = 5) -> str:
     )
 
 
+def _pull_latest_docker_image(client: Any, image: str) -> None:
+    try:
+        client.images.pull(image)
+    except Exception as e:
+        logger.warning(
+            "Could not pull latest docker image %s; "
+            "falling back to local image if available: %s",
+            image,
+            e,
+        )
+
+
 class ContainerBackend(abc.ABC):
     @abc.abstractmethod
     def run(
@@ -340,15 +352,7 @@ class DockerBackend(ContainerBackend):
 
         try:
             if self.pull_latest and hasattr(self.client, "images"):
-                try:
-                    self.client.images.pull(image)
-                except Exception as e:
-                    logger.warning(
-                        "Could not pull latest docker image %s; "
-                        "falling back to local image if available: %s",
-                        image,
-                        e,
-                    )
+                _pull_latest_docker_image(self.client, image)
 
             logger.info(
                 "🐳 Running Docker image=%s command=%s env={%s} mounts=%d workdir=%s",

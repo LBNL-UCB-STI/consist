@@ -82,6 +82,12 @@ class IdentityManager:
         }
     )
 
+    def _safe_repo_git_diff(self, repo: Any, *args: str) -> Optional[str]:
+        try:
+            return str(repo.git.diff(*args))
+        except Exception:
+            return None
+
     def canonical_json_str(self, obj: Any) -> str:
         """
         Return a stable JSON string for hashing/IDs.
@@ -168,14 +174,12 @@ class IdentityManager:
                 # Hashing the diff keeps cache keys stable until the working tree changes.
                 # Only include Python file diffs in the dirty hash to keep cache keys
                 # stable when non-code files (e.g., notebooks) change.
-                try:
-                    diff_head = repo.git.diff("HEAD", "--", "*.py")
-                except Exception:
-                    diff_head = repo.git.diff("--", "*.py")
-                try:
-                    diff_cached = repo.git.diff("--cached", "--", "*.py")
-                except Exception:
-                    diff_cached = ""
+                diff_head = self._safe_repo_git_diff(repo, "HEAD", "--", "*.py")
+                if diff_head is None:
+                    diff_head = self._safe_repo_git_diff(repo, "--", "*.py")
+                diff_cached = (
+                    self._safe_repo_git_diff(repo, "--cached", "--", "*.py") or ""
+                )
                 # NOTE:
                 # `repo.git.diff(...)` should return strings, but when `git`/`repo` is
                 # mocked, these can be `MagicMock` instances. Coerce to `str` so the

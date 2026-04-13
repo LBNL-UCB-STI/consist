@@ -130,7 +130,7 @@ class FileSystemManager:
             rel = resolved_path.relative_to(self.run_dir.resolve())
             return f"./{rel.as_posix()}"
         except ValueError:
-            pass
+            return str(resolved_path)
 
         # 5. Fallback to absolute
         return str(resolved_path)

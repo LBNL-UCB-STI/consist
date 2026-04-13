@@ -77,6 +77,16 @@ _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 SchemaProfileSource = Literal["file", "duckdb", "user_provided"]
 
+
+def _coerce_run_tags(run_tags: Any) -> Any:
+    if isinstance(run_tags, str):
+        try:
+            return load_json_safe(run_tags, max_depth=10)
+        except ValueError:
+            return run_tags
+    return run_tags
+
+
 __all__ = [
     "ArtifactSchemaSelection",
     "DatabaseManager",
@@ -3394,11 +3404,7 @@ class DatabaseManager:
                     # (Implementation of tag parsing logic from original code)
                     if not run_tags:
                         return False
-                    if isinstance(run_tags, str):
-                        try:
-                            run_tags = load_json_safe(run_tags, max_depth=10)
-                        except ValueError:
-                            pass
+                    run_tags = _coerce_run_tags(run_tags)
                     return all(t in (run_tags or []) for t in tags)
 
                 df = df[df["tags"].apply(has_all_tags)]

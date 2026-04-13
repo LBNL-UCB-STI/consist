@@ -73,7 +73,7 @@ _READLINE: ModuleType | None = None
 try:
     _READLINE = importlib.import_module("readline")
 except ImportError:  # pragma: no cover - platform dependent
-    pass
+    _READLINE = None
 
 app = typer.Typer(rich_markup_mode="markdown")
 schema_app = typer.Typer(rich_markup_mode="markdown")
@@ -901,14 +901,24 @@ def _resolve_schema_capture_path(
         return override_path.expanduser().resolve()
 
     candidates: List[Path] = []
-    try:
-        candidates.append(tracker.resolve_historical_path(artifact, run))
-    except Exception:
-        pass
-    try:
-        candidates.append(Path(tracker.resolve_uri(artifact.container_uri)).resolve())
-    except Exception:
-        pass
+
+    def _append_candidate(candidate_factory) -> None:
+        try:
+            candidates.append(candidate_factory())
+        except (
+            AttributeError,
+            NotImplementedError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            return
+
+    _append_candidate(lambda: tracker.resolve_historical_path(artifact, run))
+    _append_candidate(
+        lambda: Path(tracker.resolve_uri(artifact.container_uri)).resolve()
+    )
 
     for candidate in candidates:
         if candidate.exists():
@@ -1747,7 +1757,14 @@ def validate(
                 if not Path(abs_path).exists():
                     missing.append((key, uri, run_id))
                     missing_ids.append(artifact_id)
-            except Exception:
+            except (
+                AttributeError,
+                NotImplementedError,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ):
                 missing.append((key, uri, run_id))
                 missing_ids.append(artifact_id)
 
@@ -2155,19 +2172,27 @@ def _load_artifact_with_diagnostics(
             artifact, tracker=tracker, db_fallback="always", **load_kwargs
         )
 
+    def _load_from_base(
+        base_dir: Path, label: str, original_run_dir: Path
+    ) -> Any | None:
+        try:
+            _set_tracker_run_dir(tracker, base_dir)
+            return _load_once()
+        except FileNotFoundError:
+            attempted_paths.append(
+                (label, (base_dir / artifact.container_uri[2:]).resolve())
+            )
+            return None
+        finally:
+            _set_tracker_run_dir(tracker, original_run_dir)
+
     try:
         if artifact.container_uri.startswith("./") and resolution_bases:
             original_run_dir = _resolve_cli_path(tracker.run_dir)
             for label, base_dir in resolution_bases:
-                try:
-                    _set_tracker_run_dir(tracker, base_dir)
-                    return _load_once()
-                except FileNotFoundError:
-                    attempted_paths.append(
-                        (label, (base_dir / artifact.container_uri[2:]).resolve())
-                    )
-                finally:
-                    _set_tracker_run_dir(tracker, original_run_dir)
+                loaded = _load_from_base(base_dir, label, original_run_dir)
+                if loaded is not None:
+                    return loaded
 
             _print_missing_artifact_file_help(
                 tracker,

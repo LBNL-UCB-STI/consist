@@ -2,7 +2,7 @@
 Reusable database queries for inspecting Consist provenance data.
 """
 
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 from sqlmodel import Session, select, func, col
 import duckdb
 import pandas as pd
@@ -38,7 +38,7 @@ def get_runs(
     return list(session.exec(statement.limit(limit)).all())
 
 
-def get_summary(session: Session) -> Dict[str, Any]:
+def get_summary(session: Session) -> Dict[str, object]:
     """Returns a high-level summary of the database."""
     total_runs = session.exec(select(func.count(Run.id))).one()
     completed_runs = session.exec(
@@ -104,7 +104,7 @@ def find_artifacts_by_params(
     key_prefix: Optional[str] = None,
     artifact_family_prefix: Optional[str] = None,
     limit: int = 100,
-) -> List[Dict[str, Any]]:
+) -> List[Dict[str, object]]:
     """
     Query artifacts by indexed facet predicates and optional prefix filters.
 
@@ -127,7 +127,7 @@ def find_artifacts_by_params(
 
     Returns
     -------
-    List[Dict[str, Any]]
+    List[Dict[str, object]]
         Result rows containing artifact metadata and persisted facet metadata.
     """
     artifacts = tracker.find_artifacts_by_params(
@@ -138,7 +138,7 @@ def find_artifacts_by_params(
         limit=limit,
     )
 
-    rows: List[Dict[str, Any]] = []
+    rows: List[Dict[str, object]] = []
     for artifact in artifacts:
         meta = artifact.meta or {}
         rows.append(

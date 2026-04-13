@@ -40,6 +40,12 @@ class ProvenanceWriter:
             ]
         ] = []
 
+    def _cleanup_temp_path(self, temp_path: Path) -> None:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            return
+
     @contextmanager
     def batch_artifact_writes(self) -> Iterator[None]:
         is_outermost = self._artifact_batch_depth == 0
@@ -121,10 +127,7 @@ class ProvenanceWriter:
             os.replace(tmp_path, target)
         except Exception:
             if tmp_path is not None:
-                try:
-                    tmp_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                self._cleanup_temp_path(tmp_path)
             raise
 
     def sync_run(self, run: "RunModel") -> None:

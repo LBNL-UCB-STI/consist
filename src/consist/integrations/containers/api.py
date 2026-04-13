@@ -593,7 +593,7 @@ def run_container(
                 try:
                     object.__setattr__(logged, "_abs_path", str(path_obj))
                 except Exception:
-                    pass
+                    continue
             else:
                 logger.warning(f"⚠️ [Consist] Expected output not found: {host_out}")
 

@@ -12,7 +12,7 @@ import weakref
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Literal, Optional
+from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, Protocol, cast
 
 from pydantic import PrivateAttr
 from sqlalchemy import JSON, Column, UniqueConstraint
@@ -33,30 +33,78 @@ if TYPE_CHECKING:
     from consist.core.tracker import Tracker
 
 
-def get_tracker_ref(artifact: Any) -> Optional[weakref.ReferenceType[Any]]:
-    """Safely fetch a tracker weakref without triggering Pydantic __getattr__."""
-    private_state = getattr(artifact, "__pydantic_private__", None)
-    if isinstance(private_state, dict):
+class _ArtifactTrackerRef(Protocol):
+    def resolve_uri(self, uri: str) -> str: ...
+
+
+def _private_state(artifact: object) -> Optional[dict[str, object]]:
+    """Return Pydantic's private-attribute storage when it exists.
+
+    ``Artifact`` uses ``PrivateAttr`` for runtime-only state such as the tracker
+    weakref and resolved absolute path. In practice, ORM-loaded instances and
+    copied models do not always present that storage consistently through normal
+    attribute access, so this helper reads ``__pydantic_private__`` directly via
+    ``object.__getattribute__``.
+
+    Returning ``None`` means "treat this instance as if it has no initialized
+    private state yet" rather than failing the caller.
+    """
+    try:
+        private_state = object.__getattribute__(artifact, "__pydantic_private__")
+    except AttributeError:
+        return None
+    return private_state if isinstance(private_state, dict) else None
+
+
+def get_tracker_ref(
+    artifact: object,
+) -> Optional[weakref.ReferenceType[_ArtifactTrackerRef]]:
+    """Read the runtime tracker weakref without depending on normal model access.
+
+    The tracker reference is a convenience link used only at runtime for path
+    resolution. It is intentionally not part of the persisted model schema.
+
+    We first check Pydantic's private-state dictionary, which is the preferred
+    storage for ``PrivateAttr`` values. If that storage is unavailable, we fall
+    back to a direct ``object.__getattribute__`` lookup so partially initialized
+    or copied objects still work. Missing state is treated as a normal case and
+    returns ``None``.
+    """
+    private_state = _private_state(artifact)
+    if private_state is not None:
         tracker_ref = private_state.get("_tracker")
         if tracker_ref is not None:
-            return tracker_ref
+            return cast(weakref.ReferenceType[_ArtifactTrackerRef], tracker_ref)
     try:
-        return object.__getattribute__(artifact, "_tracker")
-    except Exception:
+        return cast(
+            weakref.ReferenceType[_ArtifactTrackerRef],
+            object.__getattribute__(artifact, "_tracker"),
+        )
+    except AttributeError:
         return None
 
 
-def set_tracker_ref(artifact: Any, tracker: Any) -> None:
-    """Attach a tracker weakref, tolerating missing Pydantic private state."""
+def set_tracker_ref(artifact: object, tracker: _ArtifactTrackerRef) -> None:
+    """Store a runtime tracker weakref on an artifact when possible.
+
+    This helper mirrors :func:`get_tracker_ref`: prefer Pydantic's private-state
+    dictionary, but fall back to ``object.__setattr__`` when that storage has not
+    been initialized. The weakref avoids keeping the tracker alive solely because
+    an artifact still points at it.
+
+    Failing to attach the ref is non-fatal. The artifact can still function as a
+    plain data object; it just loses the convenience of tracker-backed path
+    resolution until another code path reattaches the tracker.
+    """
     tracker_ref = weakref.ref(tracker)
-    private_state = getattr(artifact, "__pydantic_private__", None)
-    if isinstance(private_state, dict):
+    private_state = _private_state(artifact)
+    if private_state is not None:
         private_state["_tracker"] = tracker_ref
         return
     try:
         object.__setattr__(artifact, "_tracker", tracker_ref)
-    except Exception:
-        pass
+    except (AttributeError, TypeError):
+        return
 
 
 class UUIDType(TypeDecorator):
@@ -115,7 +163,7 @@ class Artifact(SQLModel, table=True):
         hash (Optional[str]): SHA256 content hash of the artifact's data, enabling content-addressable
                               lookups and deduplication.
         run_id (Optional[str]): The ID of the run that generated this artifact. Null for inputs.
-        meta (Dict[str, Any]): A flexible JSON field for storing arbitrary metadata, such as
+        meta (dict[str, object]): A flexible JSON field for storing arbitrary metadata, such as
                                schema signatures, or data dimensions.
         created_at (datetime): The timestamp when the artifact was first logged.
     """
@@ -180,7 +228,9 @@ class Artifact(SQLModel, table=True):
     # but is needed at runtime, aligning with "Path Resolution & Mounts" and "Artifact Chaining"
     # as described in the architecture documentation.
     _abs_path: Optional[str] = PrivateAttr(default=None)
-    _tracker: Optional[weakref.ReferenceType[Any]] = PrivateAttr(default=None)
+    _tracker: Optional[weakref.ReferenceType[_ArtifactTrackerRef]] = PrivateAttr(
+        default=None
+    )
 
     @property
     def abs_path(self) -> Optional[str]:
@@ -197,14 +247,11 @@ class Artifact(SQLModel, table=True):
             The absolute file system path of the artifact, or `None` if it has not
             yet been resolved or set.
         """
-        # Some ORM-loaded artifacts may not initialize private state; guard for None.
-        private_state = getattr(self, "__pydantic_private__", None)
+        private_state = _private_state(self)
         if private_state is None:
             return None
-        try:
-            return self._abs_path
-        except Exception:
-            return None
+        abs_path = private_state.get("_abs_path")
+        return abs_path if isinstance(abs_path, str) else None
 
     @property
     def recovery_roots(self) -> list[str]:
@@ -254,7 +301,7 @@ class Artifact(SQLModel, table=True):
                     if resolved.exists() or not self.abs_path:
                         return resolved
                 except Exception:
-                    pass
+                    resolved = None
 
         if self.abs_path:
             return Path(self.abs_path)
@@ -287,6 +334,7 @@ class Artifact(SQLModel, table=True):
         This is equivalent to ``consist.load_df(self, ...)`` and supports the same
         loader options.
         """
+        # reason: keep the import local to avoid a circular dependency at module import time.
         from consist.api import load_df
 
         return load_df(
