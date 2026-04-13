@@ -927,37 +927,77 @@ def test_run_hydrate_outputs_rejects_invalid_runtime_options_before_delegation(
 
 
 @pytest.mark.parametrize("bad_keys", ["out", b"out"])
-def test_api_materialize_run_outputs_rejects_scalar_string_keys_before_delegation(
+def test_api_materialize_run_outputs_passes_scalar_string_keys_to_tracker(
     monkeypatch: pytest.MonkeyPatch,
     bad_keys: str | bytes,
 ) -> None:
+    calls: dict[str, object] = {}
+
     class _FakeTracker:
         def materialize_run_outputs(self, run_id: str, **kwargs):
-            raise AssertionError("delegation should not happen for invalid keys")
+            calls["run_id"] = run_id
+            calls["kwargs"] = kwargs
+            return "api-result"
 
     monkeypatch.setattr(
         "consist.api._resolve_tracker", lambda tracker=None: _FakeTracker()
     )
 
-    with pytest.raises(TypeError, match="keys must be a sequence"):
-        materialize_run_outputs_api("run_1", target_root="/tmp/restored", keys=bad_keys)
+    result = materialize_run_outputs_api(
+        "run_1",
+        target_root="/tmp/restored",
+        keys=bad_keys,
+    )
+
+    assert result == "api-result"
+    assert calls == {
+        "run_id": "run_1",
+        "kwargs": {
+            "target_root": "/tmp/restored",
+            "source_root": None,
+            "keys": bad_keys,
+            "preserve_existing": True,
+            "on_missing": "warn",
+            "db_fallback": "if_ingested",
+        },
+    }
 
 
 @pytest.mark.parametrize("bad_keys", ["out", b"out"])
-def test_api_hydrate_run_outputs_rejects_scalar_string_keys_before_delegation(
+def test_api_hydrate_run_outputs_passes_scalar_string_keys_to_tracker(
     monkeypatch: pytest.MonkeyPatch,
     bad_keys: str | bytes,
 ) -> None:
+    calls: dict[str, object] = {}
+
     class _FakeTracker:
         def hydrate_run_outputs(self, run_id: str, **kwargs):
-            raise AssertionError("delegation should not happen for invalid keys")
+            calls["run_id"] = run_id
+            calls["kwargs"] = kwargs
+            return "hydrated-api-result"
 
     monkeypatch.setattr(
         "consist.api._resolve_tracker", lambda tracker=None: _FakeTracker()
     )
 
-    with pytest.raises(TypeError, match="keys must be a sequence"):
-        hydrate_run_outputs_api("run_1", target_root="/tmp/restored", keys=bad_keys)
+    result = hydrate_run_outputs_api(
+        "run_1",
+        target_root="/tmp/restored",
+        keys=bad_keys,
+    )
+
+    assert result == "hydrated-api-result"
+    assert calls == {
+        "run_id": "run_1",
+        "kwargs": {
+            "target_root": "/tmp/restored",
+            "source_root": None,
+            "keys": bad_keys,
+            "preserve_existing": True,
+            "on_missing": "warn",
+            "db_fallback": "if_ingested",
+        },
+    }
 
 
 @pytest.mark.parametrize(
@@ -967,22 +1007,40 @@ def test_api_hydrate_run_outputs_rejects_scalar_string_keys_before_delegation(
         ("db_fallback", "always"),
     ],
 )
-def test_api_materialize_run_outputs_rejects_invalid_runtime_options_before_delegation(
+def test_api_materialize_run_outputs_passes_invalid_runtime_options_to_tracker(
     monkeypatch: pytest.MonkeyPatch,
     field_name: str,
     field_value: str,
 ) -> None:
+    calls: dict[str, object] = {}
+
     class _FakeTracker:
         def materialize_run_outputs(self, run_id: str, **kwargs):
-            raise AssertionError("delegation should not happen for invalid options")
+            calls["run_id"] = run_id
+            calls["kwargs"] = kwargs
+            return "api-result"
 
     monkeypatch.setattr(
         "consist.api._resolve_tracker", lambda tracker=None: _FakeTracker()
     )
     kwargs = {"target_root": "/tmp/restored", field_name: field_value}
 
-    with pytest.raises(ValueError, match=field_name):
-        materialize_run_outputs_api("run_1", **kwargs)
+    result = materialize_run_outputs_api("run_1", **kwargs)
+
+    assert result == "api-result"
+    assert calls == {
+        "run_id": "run_1",
+        "kwargs": {
+            "target_root": "/tmp/restored",
+            "source_root": None,
+            "keys": None,
+            "preserve_existing": True,
+            "on_missing": "warn" if field_name != "on_missing" else field_value,
+            "db_fallback": (
+                "if_ingested" if field_name != "db_fallback" else field_value
+            ),
+        },
+    }
 
 
 @pytest.mark.parametrize(
@@ -992,19 +1050,37 @@ def test_api_materialize_run_outputs_rejects_invalid_runtime_options_before_dele
         ("db_fallback", "always"),
     ],
 )
-def test_api_hydrate_run_outputs_rejects_invalid_runtime_options_before_delegation(
+def test_api_hydrate_run_outputs_passes_invalid_runtime_options_to_tracker(
     monkeypatch: pytest.MonkeyPatch,
     field_name: str,
     field_value: str,
 ) -> None:
+    calls: dict[str, object] = {}
+
     class _FakeTracker:
         def hydrate_run_outputs(self, run_id: str, **kwargs):
-            raise AssertionError("delegation should not happen for invalid options")
+            calls["run_id"] = run_id
+            calls["kwargs"] = kwargs
+            return "hydrated-api-result"
 
     monkeypatch.setattr(
         "consist.api._resolve_tracker", lambda tracker=None: _FakeTracker()
     )
     kwargs = {"target_root": "/tmp/restored", field_name: field_value}
 
-    with pytest.raises(ValueError, match=field_name):
-        hydrate_run_outputs_api("run_1", **kwargs)
+    result = hydrate_run_outputs_api("run_1", **kwargs)
+
+    assert result == "hydrated-api-result"
+    assert calls == {
+        "run_id": "run_1",
+        "kwargs": {
+            "target_root": "/tmp/restored",
+            "source_root": None,
+            "keys": None,
+            "preserve_existing": True,
+            "on_missing": "warn" if field_name != "on_missing" else field_value,
+            "db_fallback": (
+                "if_ingested" if field_name != "db_fallback" else field_value
+            ),
+        },
+    }

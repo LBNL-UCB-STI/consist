@@ -4,8 +4,8 @@ This page explains how `@define_step` metadata, templates, and resolver defaults
 so you can reduce boilerplate without losing clarity or cache correctness.
 
 !!! note "Recommended path"
-    This page is centered on metadata used with the recommended path:
-    `consist.run(...)`, `consist.trace(...)`, and `consist.scenario(...)`.
+    This page is centered on metadata used with the preferred execution path:
+    `tracker.run(...)`, `tracker.trace(...)`, and `consist.scenario(...)`.
     Adapter/identity metadata examples here are advanced integration patterns,
     not the default onboarding run surface.
 
@@ -133,8 +133,8 @@ Declarative adapter handoff metadata:
 
 !!! note "Advanced integration pattern"
     Adapter metadata on `@define_step` is a low-level/advanced option for
-    integration workflows. Keep typical runs on the recommended path
-    (`run`/`trace`/`scenario`).
+    integration workflows. Keep typical runs on the explicit tracker/scenario
+    execution path.
 
 ```python
 @define_step(

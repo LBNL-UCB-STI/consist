@@ -5,10 +5,10 @@ between machines without breaking lineage. This page explains how mounts, worksp
 URIs, and historical path resolution work.
 
 !!! note "Recommended path"
-    For most workflow code, the recommended path is `consist.run(...)`,
-    `consist.trace(...)`, or `consist.scenario(...)`. This page includes
-    `tracker.start_run(...)`/`consist.log_artifact(...)` snippets as low-level
-    examples for path and URI mechanics.
+    For most workflow code, prefer `tracker.run(...)`, `tracker.trace(...)`, or
+    `consist.scenario(...)` with `scenario.run(...)` / `scenario.trace(...)`.
+    This page includes `tracker.start_run(...)` / `consist.log_artifact(...)`
+    snippets as low-level examples for path and URI mechanics.
 
 ---
 

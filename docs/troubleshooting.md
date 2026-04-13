@@ -7,10 +7,11 @@ This guide organizes issues by symptom. For concept definitions, see [Core Conce
 - [Mounts & Portability](mounts-and-portability.md#troubleshooting)
 
 !!! note "Recommended path"
-    For normal workflow code, the recommended path is `consist.run(...)`,
-    `consist.trace(...)`, or `consist.scenario(...)`. Some troubleshooting sections
-    intentionally use low-level lifecycle APIs (for example `tracker.start_run(...)`
-    and manual materialization helpers) to isolate specific failure modes.
+    For normal workflow code, prefer `tracker.run(...)`, `tracker.trace(...)`,
+    or `consist.scenario(...)` with `scenario.run(...)` / `scenario.trace(...)`.
+    Some troubleshooting sections intentionally use low-level lifecycle APIs
+    (for example `tracker.start_run(...)` and manual materialization helpers) to
+    isolate specific failure modes.
 
 ---
 
@@ -142,7 +143,7 @@ Common messages and fixes:
 ### "Scenario input string did not resolve ..."
 
 - `Cause`: the scenario input string matched neither a Coupler key nor an existing filesystem path.
-- `Fix`: pass a real path, or on the recommended path use `consist.refs(...)` between steps.
+- `Fix`: pass a real path, or on the preferred execution path use `consist.refs(...)` between steps.
 
 ---
 

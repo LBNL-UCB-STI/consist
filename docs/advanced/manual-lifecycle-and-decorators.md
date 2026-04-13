@@ -1,7 +1,7 @@
 # Manual Lifecycle and Decorators
 
 These APIs are supported for integrations and framework glue, but are not part
-of the quickstart recommended path.
+of the quickstart preferred execution path.
 
 ## Manual lifecycle APIs
 

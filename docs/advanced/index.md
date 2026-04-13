@@ -3,7 +3,8 @@
 This section collects supported but non-onboarding patterns.
 
 Use these pages when you need framework integration, low-level lifecycle
-control, or explicit metadata/decorator defaults beyond the recommended path.
+control, or explicit metadata/decorator defaults beyond the preferred
+execution path.
 
 ## Start here
 

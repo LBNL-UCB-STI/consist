@@ -8,10 +8,11 @@ Consist's core loop: declare inputs → compute signature → check cache → lo
 This page covers patterns for making caching reliable, keeping pipelines portable, and choosing when artifacts should be hydrated or materialized.
 
 !!! note "Recommended path"
-    For routine workflow code, the recommended path is `consist.run(...)`,
-    `consist.trace(...)`, or `consist.scenario(...)`. Low-level lifecycle snippets
-    in this page (for example `tracker.start_run(...)`) are advanced examples to
-    make hydration/materialization mechanics explicit.
+    For routine workflow code, prefer `tracker.run(...)`, `tracker.trace(...)`,
+    or `consist.scenario(...)` with `scenario.run(...)` / `scenario.trace(...)`.
+    Low-level lifecycle snippets in this page (for example
+    `tracker.start_run(...)`) are advanced examples to make
+    hydration/materialization mechanics explicit.
 
 ---
 
@@ -53,7 +54,7 @@ Materialize cached outputs (copy bytes to your current run) in three cases:
 
 !!! note "Advanced lifecycle example"
     This walkthrough uses low-level lifecycle APIs to show cache and hydration
-    behavior step-by-step. Prefer the recommended path (`run`/`trace`/`scenario`)
+    behavior step-by-step. Prefer the explicit tracker/scenario execution path
     for new workflow code.
 
 ``` python
@@ -392,7 +393,7 @@ Use `ScenarioContext.run(...)` to skip execution on cache hits. The `output_path
 
 ## Pattern 2: Cached Runs with `consist.run`
 
-Use `consist.run(...)` with declared outputs for cache-aware function execution.
+Use `tracker.run(...)` with declared outputs for cache-aware function execution.
 
 ```python
 def clean(raw_file: Path):
@@ -505,12 +506,12 @@ with tracker.start_run(
     ...
 ```
 
-Equivalent with `consist.run(...)`:
+Equivalent with `tracker.run(...)`:
 
 ```python
 from consist import CacheOptions
 
-result = consist.run(
+result = tracker.run(
     fn=step,
     cache_options=CacheOptions(cache_hydration="outputs-requested"),
     output_paths={"features": Path("outputs/features.csv")},
@@ -518,7 +519,7 @@ result = consist.run(
 ```
 
 Default is `cache_hydration="metadata"` (artifact hydration only). For
-`consist.run(...)` or `sc.run(...)`, use `output_paths={...}` with
+`tracker.run(...)` or `sc.run(...)`, use `output_paths={...}` with
 `cache_options=CacheOptions(cache_hydration="outputs-requested")`.
 
 | Policy | Requires | Rejects |
@@ -552,10 +553,10 @@ print(features.artifact.as_path())
 
 Cache hydration exposes an archive-mirror override via
 `materialize_cached_outputs_source_root=...` for `outputs-requested` and
-`outputs-all`. On the recommended path, pass it through
+`outputs-all`. On the preferred execution path, pass it through
 `cache_options=CacheOptions(materialize_cached_outputs_source_root=...)` on
-`consist.run(...)`, `Tracker.run(...)`, or scenario steps. The same override is
-also available on low-level `tracker.start_run(...)` /
+`tracker.run(...)` or scenario steps. The deprecated `consist.run(...)`
+wrapper also forwards it. The same override is available on low-level `tracker.start_run(...)` /
 `tracker.begin_run(...)` flows.
 
 For recurring archive workflows, prefer artifact-level recovery metadata over
