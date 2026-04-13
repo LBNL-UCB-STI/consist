@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 import uuid
 
 import pytest
@@ -40,8 +39,12 @@ def test_artifact_query_service_normalizes_run_filters_and_attaches_tracker(
     tracker,
 ) -> None:
     service = tracker._artifact_queries
-    producer = Run(id="producer-run", model_name="demo", config_hash=None, git_hash=None)
-    consumer = Run(id="consumer-run", model_name="demo", config_hash=None, git_hash=None)
+    producer = Run(
+        id="producer-run", model_name="demo", config_hash=None, git_hash=None
+    )
+    consumer = Run(
+        id="consumer-run", model_name="demo", config_hash=None, git_hash=None
+    )
     artifact = Artifact(
         id=uuid.uuid4(),
         key="result",
