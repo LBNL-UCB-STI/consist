@@ -24,6 +24,7 @@ for the recommended wrapper architecture.
 
 - [Choosing Your Pattern](#choosing-your-pattern)
 - [Pattern 1: Single-Step Runs (`run()`)](#pattern-1-single-step-runs-run)
+- [Requested Input Staging for Path-Bound Steps](#requested-input-staging-for-path-bound-steps)
 - [Pattern 2: Multi-Step Workflows (`scenario()`)](#pattern-2-multi-step-workflows-scenario)
 - [Pattern 3: Container Integration](#pattern-3-container-integration)
 - [Advanced Patterns](#advanced-patterns)
@@ -45,7 +46,7 @@ workflow state, or per-step caching across a larger pipeline.
 |-------------------------------------------------------------|---------------------------------|-----------------------------------------------------------------------------------------------------------------------------|
 | Single data processing step (clean, transform, aggregate)   | **`run`**                       | Simple: caches the entire function call with low overhead. Use for self-contained operations.                               |
 | Multi-step workflow (preprocessing → simulation → analysis) | **`scenario`**                  | Groups related steps, shares state via coupler, per-step caching. Use when steps have dependencies or shared configuration. |
-| Existing tool/model (subprocess, legacy code, container)    | **[`container` or `depends_on`](containers-guide.md)** | Wraps external executables, tracks container digest as cache key. Use for black-box tools.                                  |
+| Existing tool/model (subprocess, legacy code, container)    | **[`container` or `depends_on`](containers-guide.md)** | Wraps external executables, tracks container digest as cache key. Pair path-bound steps with requested input staging when a tool expects fixed local input paths. |
 | Parameter sweep / sensitivity analysis                      | **`scenario`&nbsp;+&nbsp;loop** | Run the same step with different configs, compare results.                                                                  |
 | Multi-year simulation                                       | **`scenario`&nbsp;+&nbsp;loop** | Runs in years, each year caches independently, all years share scenario context.                                            |
 
@@ -73,6 +74,24 @@ identity-only and you do not want automatic binding.
 `runtime_kwargs` still exists, but it should usually mean "runtime-only values
 that are not the declared named inputs." It is no longer the recommended way to
 pass paths into a path-based step.
+
+If a path-bound step needs those inputs at exact local destinations, request
+staging as part of the run instead of copying files yourself:
+
+``` python
+execution_options = ExecutionOptions(
+    input_binding="paths",
+    input_materialization="requested",
+    input_paths={
+        "raw_path": Path("./workspace/raw.parquet"),
+    },
+)
+```
+
+That pattern is especially useful for subprocess wrappers, legacy tools, and
+steps that need stable workspace-local filenames. The requested paths are
+created before execution on cache misses and before the cached result is
+returned on cache hits.
 
 **When to use:**
 
@@ -216,6 +235,53 @@ This reduces cache misses when unrelated files elsewhere in the repository chang
 
 Legacy run-policy kwargs are no longer supported on `run(...)` APIs. Use
 `cache_options=...`, `output_policy=...`, and `execution_options=...`.
+
+### Requested Input Staging for Path-Bound Steps
+
+Use requested input staging when the callable or wrapped tool expects one or
+more declared inputs at specific local destinations. This keeps the canonical
+artifact identity unchanged while creating a run-local working copy where the
+tool expects it.
+
+``` python
+from pathlib import Path
+import subprocess
+from consist import ExecutionOptions, Tracker
+
+tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+
+
+def run_legacy_tool(config_path: Path) -> dict[str, Path]:
+    output = Path("./report.txt")
+    subprocess.run(
+        ["legacy-tool", "--config", str(config_path), "--out", str(output)],
+        check=True,
+    )
+    return {"report": output}
+
+
+result = tracker.run(
+    fn=run_legacy_tool,
+    inputs={"config_path": Path("./configs/baseline.yaml")},
+    outputs=["report"],
+    execution_options=ExecutionOptions(
+        input_binding="paths",
+        input_materialization="requested",
+        input_paths={
+            "config_path": Path("./workspace/config.yaml"),
+        },
+    ),
+)
+```
+
+Use this pattern when:
+
+- the step expects a fixed on-disk input location
+- the same expectation must hold on cache hits
+- you want `inputs={...}` to remain the source of identity and lineage
+
+Use low-level `consist.stage_artifact(...)` or `consist.stage_inputs(...)` only
+for custom orchestration or setup work outside a normal run lifecycle.
 
 For file outputs, prefer returning `dict[str, Path]` and declaring
 `outputs=[...]` when you control the function body. Use managed helpers like
@@ -1039,12 +1105,85 @@ For archive-mirror recovery, cache hydration supports
 `materialize_cached_outputs_source_root=Path(...)` for `outputs-requested` and
 `outputs-all`. You can pass it through
 `cache_options=CacheOptions(materialize_cached_outputs_source_root=...)` on
-`consist.run(...)`, `Tracker.run(...)`, and scenario steps, or via the low-level
-`tracker.start_run(...)` / `tracker.begin_run(...)` APIs directly.
+`tracker.run(...)` and scenario steps. The deprecated `consist.run(...)`
+wrapper also forwards it, or you can use the low-level `tracker.start_run(...)`
+/ `tracker.begin_run(...)` APIs directly.
+
+For recurring archive workflows, prefer recording archive roots on the artifact
+once instead of passing `source_root` overrides repeatedly. This is useful when
+iterations overwrite the same logical output path but you preserve each
+iteration under its own archive root:
+
+#### Archiving Outputs Without Creating New Artifacts
+
+You do **not** need to create a second "archived artifact" when you move or
+copy tracked output bytes into long-term storage.
+
+Keep the original artifact and `container_uri`, then archive the bytes with
+`tracker.archive_current_run_outputs(...)`, `tracker.archive_artifact(...)`, or
+`tracker.archive_run_outputs(...)`.
+Consist records the archive root in `artifact.meta["recovery_roots"]`, so later
+hydration, restart/resume recovery, cache-hit output recovery, and lineage all
+still refer to the original artifact.
+
+This example uses a managed Consist output path so it runs as written. The same
+pattern also applies when your workflow writes to a mutable location on each
+iteration and you keep an iteration-specific archive copy.
+
+```python
+from pathlib import Path
+
+import consist
+from consist import Tracker, use_tracker
+
+tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+
+
+def write_results() -> dict[str, Path]:
+    out = consist.output_path("results", ext="txt")
+    out.write_text("iteration 4\n")
+    return {"results": out}
+
+
+with use_tracker(tracker):
+    result = consist.run(
+        name="iteration_004",
+        fn=write_results,
+        outputs=["results"],
+    )
+    tracker.archive_current_run_outputs(
+        Path("./archive/iteration_004"),
+        mode="move",
+    )
+
+hydrated = tracker.hydrate_run_outputs(
+    result.run.id,
+    keys=["results"],
+    target_root=tracker.run_dir / "restored_outputs",
+)
+
+restored = hydrated["results"].artifact.as_path()
+print(restored)
+print(restored.read_text().strip())
+```
+
+What this example shows:
+
+- `archive_current_run_outputs(...)` moves the bytes into
+  `./archive/iteration_004`
+  without creating a new artifact record.
+- The original artifact identity and lineage stay intact.
+- `hydrate_run_outputs(...)` restores from the archive root even though the
+  original mutable workspace path is no longer the source of truth.
+
+Use `mode="copy"` if the original workspace file should remain in place. Use
+`mode="move"` when the archive copy should become the durable byte source.
 
 When you use `tracker.hydrate_run_outputs(...)`, `target_root` may be either
 the tracker `run_dir` or any configured tracker mount root without needing
-`allow_external_paths=True`.
+`allow_external_paths=True`. Relative `target_root` values are resolved from the
+process working directory, so prefer `tracker.run_dir / ...` or an absolute
+mount-backed path in examples and production code.
 
 Example:
 
@@ -1052,14 +1191,23 @@ Example:
 hydrated = tracker.hydrate_run_outputs(
     "prior_run_id",
     keys=["results"],
-    target_root=Path("restored_outputs"),
+    target_root=tracker.run_dir / "restored_outputs",
 )
 
 result = hydrated["results"]
 print(result.status)
 if result.resolvable:
     print(result.artifact.as_path())
+    print(result.artifact.hash)
 ```
+
+The detached artifact returned by `hydrate_run_outputs(...)` preserves
+`artifact.hash` as Consist's canonical artifact fingerprint. This is the field
+downstream provenance code should read after logging, querying, replay, staging,
+or hydration. Fingerprint semantics follow the active hashing strategy, so under
+`fast` hashing the value may be metadata-based rather than a byte-for-byte
+content digest. By contrast, `artifact.content_id` is a DB-local dedupe key and
+is not the public fingerprint surface.
 
 Set per-run via `cache_options=CacheOptions(cache_hydration=...)` (for `run(...)`)
 or for scenario defaults via `step_cache_hydration=...`:
@@ -1085,14 +1233,15 @@ with use_tracker(tracker):
 
 ### Mixing Runs and Scenarios
 
-Call `consist.run(...)` inside a scenario when a step should cache independently:
+Call `tracker.run(...)` inside a scenario when a step should cache
+independently:
 
 ``` python
 from consist import ExecutionOptions
 
 with use_tracker(tracker):
     with consist.scenario("baseline") as sc:
-        preprocess = consist.run(
+        preprocess = tracker.run(
             fn=expensive_preprocessing,
             inputs={"network_file": Path("network.geojson")},
             outputs=["processed"],
@@ -1377,7 +1526,15 @@ For more on ingestion and hybrid views, see [Data Materialization Strategy](conc
 If you ingest tabular data into DuckDB, Consist can capture the observed schema and export an **editable SQLModel stub** so you can curate PK/FK constraints and then register the model for views. This is useful when you want a stable, documented schema for downstream analysis or audits.
 
 You can also opt into lightweight file schema capture when logging CSV/Parquet artifacts by passing `profile_file_schema=True` (and optionally `file_schema_sample_rows=`) to `log_artifact`. These captured schemas are stored in the provenance DB and remain available even if the original files move or are deleted.
-If you already have a content hash (e.g., after copying or moving a file), pass `content_hash=` to `log_artifact` to reuse it without re-hashing the file. For safety, Consist will not overwrite an existing, different hash unless you pass `force_hash_override=True`. To verify the hash against disk, use `validate_content_hash=True`.
+If you already have an artifact fingerprint (for example after copying or moving
+a file), pass `content_hash=` to `log_artifact` to reuse it without re-hashing
+the path. Consist stores that value on `artifact.hash`, the canonical public
+fingerprint surface for downstream provenance/bookkeeping code. For safety,
+Consist will not overwrite an existing, different fingerprint unless you pass
+`force_hash_override=True`. To verify the supplied fingerprint against disk, use
+`validate_content_hash=True`. Fingerprint semantics follow the active hashing
+strategy, so under `fast` hashing the value may be metadata-based for files or
+directories.
 
 See [Schema Export](schema-export.md) for the full workflow (CLI + Python) and column-name/`__tablename__` guidelines.
 See [Data Materialization Strategy](concepts/data-materialization.md) for ingestion tradeoffs and DB fallback behavior.

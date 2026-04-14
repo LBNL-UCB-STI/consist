@@ -7,10 +7,11 @@ materialization live in [Core Concepts Overview](overview.md). This page focuses
 on decision criteria and implementation patterns.
 
 !!! note "Recommended path"
-    For standard execution flow, the recommended path is `consist.run(...)`,
-    `consist.trace(...)`, or `consist.scenario(...)`. The ingestion snippets below
-    use low-level lifecycle APIs (`tracker.start_run(...)`, `tracker.log_artifact(...)`)
-    because ingestion is attached to explicit artifact logging.
+    For standard execution flow, prefer `tracker.run(...)`, `tracker.trace(...)`,
+    or `consist.scenario(...)` with `scenario.run(...)` / `scenario.trace(...)`.
+    The ingestion snippets below use low-level lifecycle APIs
+    (`tracker.start_run(...)`, `tracker.log_artifact(...)`) because ingestion is
+    attached to explicit artifact logging.
 
 ---
 
@@ -67,8 +68,8 @@ Cold data lives only on disk; provenance metadata is tracked but data is not que
 
 !!! note "Advanced lifecycle examples"
     The following snippets intentionally show explicit run lifecycle calls for
-    ingestion control. Keep regular compute steps on the recommended path
-    (`run`/`trace`/`scenario`).
+    ingestion control. Keep regular compute steps on the explicit
+    tracker/scenario execution path.
 
 Install the optional DLT dependency:
 

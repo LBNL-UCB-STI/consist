@@ -7,10 +7,11 @@ This guide organizes issues by symptom. For concept definitions, see [Core Conce
 - [Mounts & Portability](mounts-and-portability.md#troubleshooting)
 
 !!! note "Recommended path"
-    For normal workflow code, the recommended path is `consist.run(...)`,
-    `consist.trace(...)`, or `consist.scenario(...)`. Some troubleshooting sections
-    intentionally use low-level lifecycle APIs (for example `tracker.start_run(...)`
-    and manual materialization helpers) to isolate specific failure modes.
+    For normal workflow code, prefer `tracker.run(...)`, `tracker.trace(...)`,
+    or `consist.scenario(...)` with `scenario.run(...)` / `scenario.trace(...)`.
+    Some troubleshooting sections intentionally use low-level lifecycle APIs
+    (for example `tracker.start_run(...)` and manual materialization helpers) to
+    isolate specific failure modes.
 
 ---
 
@@ -142,7 +143,7 @@ Common messages and fixes:
 ### "Scenario input string did not resolve ..."
 
 - `Cause`: the scenario input string matched neither a Coupler key nor an existing filesystem path.
-- `Fix`: pass a real path, or on the recommended path use `consist.refs(...)` between steps.
+- `Fix`: pass a real path, or on the preferred execution path use `consist.refs(...)` between steps.
 
 ---
 
@@ -170,6 +171,8 @@ DuckDB connection open until you close them.
 - `Artifact.uri` → `Artifact.container_uri`
 - `Artifact.table_path` added (nullable) for container formats (HDF5 tables)
 - `Artifact.array_path` added (nullable) for array formats
+- `Artifact.parent_artifact_id` added (nullable) as the canonical container
+  child-artifact relation
 - `meta["table_path"]` is no longer used
 
 **Solution:**
@@ -181,16 +184,27 @@ rm ./provenance.duckdb
 rm ./test_db.duckdb
 ```
 
-Then update any code that referenced `artifact.uri` or `artifact.meta["table_path"]`:
+Then update any code that referenced `artifact.uri`,
+`artifact.meta["table_path"]`, or relied on metadata-only parent-child links:
 
 ```python
 # Before
 artifact.uri
 artifact.meta.get("table_path")
+artifact.meta.get("parent_id")  # legacy compatibility mirror only
 
 # After
 artifact.container_uri
 artifact.table_path
+artifact.parent_artifact_id
+```
+
+If you need to traverse container child artifacts, prefer the first-class query
+helpers:
+
+```python
+children = tracker.get_child_artifacts(container_artifact)
+parent = tracker.get_parent_artifact(child_artifact)
 ```
 
 ---
@@ -280,6 +294,21 @@ on `run(...)` / scenario steps, or use the same
 `materialize_cached_outputs_source_root=Path(...)` override on low-level
 `tracker.start_run(...)` flows.
 
+If the archive root is part of the workflow rather than a one-off override,
+record it on the artifact once instead:
+
+```python
+tracker.archive_run_outputs(
+    "prior_run_id",
+    Path("/archive/iteration_004"),
+    mode="copy",
+)
+```
+
+That updates `artifact.meta["recovery_roots"]`, so future historical recovery,
+cache-hit output hydration, and eager cache validation can locate the archived
+bytes without repeating a manual source-root override.
+
 `tracker.hydrate_run_outputs(...)` can restore into a configured mount root
 without enabling `allow_external_paths=True`.
 
@@ -353,7 +382,7 @@ cache miss explanation tells you which part of that key likely drifted.
 **Common causes:**
 - **Code changed:** Check git status, function definitions
 - **Config changed:** Check parameter types (0 vs 0.0, "0" vs 0)
-- **Input file changed:** Check file modification time, content hash
+- **Input file changed:** Check file modification time and artifact fingerprint
 - **Run fields changed:** `model`, `year`, or `iteration` are folded into the config hash
 - **Dependencies changed:** Installed package versions can affect behavior
 
@@ -919,7 +948,7 @@ from pathlib import Path
 with tracker.start_run("hash_input", model="example"):
     artifact = tracker.log_artifact(Path("input.csv"), key="input", direction="input")
     print(f"Path: {artifact.path}")
-    print(f"Hash: {artifact.hash}")
+    print(f"Artifact Fingerprint: {artifact.hash}")
     print(f"Size: {artifact.path.stat().st_size}")
 ```
 

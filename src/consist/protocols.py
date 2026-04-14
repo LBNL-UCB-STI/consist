@@ -1,7 +1,19 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional, Protocol, runtime_checkable
+from typing import (
+    Callable,
+    Mapping,
+    Optional,
+    Protocol,
+    TYPE_CHECKING,
+    runtime_checkable,
+)
+
+from consist.types import ArtifactRef
+
+if TYPE_CHECKING:
+    from consist.models.run import Run
 
 
 @runtime_checkable
@@ -15,44 +27,44 @@ class ArtifactLike(Protocol):
 
 @runtime_checkable
 class RunResultLike(Protocol):
-    outputs: Dict[str, ArtifactLike]
+    outputs: Mapping[str, ArtifactLike]
     cache_hit: bool
 
 
 @runtime_checkable
 class RunIdentifiedResultLike(RunResultLike, Protocol):
-    run: Any
+    run: "Run"
 
 
 @runtime_checkable
 class ScenarioLike(Protocol):
     def run(
         self,
-        fn: Optional[Callable[..., Any]] = None,
+        fn: Optional[Callable[..., object]] = None,
         name: Optional[str] = None,
         *,
         outputs: Optional[list[str]] = None,
-        output_paths: Optional[Mapping[str, Any]] = None,
-        runtime_kwargs: Optional[Dict[str, Any]] = None,
+        output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        runtime_kwargs: Optional[Mapping[str, object]] = None,
         inject_context: bool | str = False,
-        **kwargs: Any,
+        **kwargs: object,
     ) -> RunResultLike: ...
 
-    def trace(self, name: str, **kwargs: Any) -> Any: ...
+    def trace(self, name: str, **kwargs: object) -> object: ...
 
 
 @runtime_checkable
 class TrackerLike(Protocol):
     def log_output(
-        self, path: Any, key: Optional[str] = None, **metadata: Any
-    ) -> Optional[ArtifactLike]: ...
+        self, path: ArtifactRef, key: Optional[str] = None, **metadata: object
+    ) -> ArtifactLike: ...
 
     def log_input(
-        self, path: Any, key: Optional[str] = None, **metadata: Any
-    ) -> Optional[ArtifactLike]: ...
+        self, path: ArtifactRef, key: Optional[str] = None, **metadata: object
+    ) -> ArtifactLike: ...
 
     def log_artifacts(
-        self, outputs: Mapping[str, Any], **metadata: Any
+        self, outputs: Mapping[str, ArtifactRef], **metadata: object
     ) -> Mapping[str, ArtifactLike]: ...
 
-    def scenario(self, name: str, **kwargs: Any) -> ScenarioLike: ...
+    def scenario(self, name: str, **kwargs: object) -> ScenarioLike: ...

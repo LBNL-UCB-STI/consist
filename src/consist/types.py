@@ -49,6 +49,7 @@ CodeIdentityMode: TypeAlias = Literal[
     "callable_source",
 ]
 InputBindingMode: TypeAlias = Literal["loaded", "paths", "none"]
+H5ChildSelectionMode: TypeAlias = Literal["all", "include_only"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,14 +103,63 @@ class ExecutionOptions:
 
     These are runtime controls and do not affect cache identity unless the
     corresponding primitive kwargs already do.
+
+    Attributes
+    ----------
+    load_inputs : Optional[bool]
+        Legacy compatibility switch for automatic input loading. Prefer
+        ``input_binding=...`` for new code.
+    input_binding : Optional[InputBindingMode]
+        Controls what the callable receives for declared named inputs:
+        ``"paths"``, ``"loaded"``, or ``"none"``.
+    input_paths : Optional[Mapping[str, PathLike]]
+        Explicit per-input local destinations used when requested input
+        materialization is enabled. Keys must refer to resolved named inputs.
+    input_materialization : Optional[Literal["requested"]]
+        Enables run-time input staging for the keys listed in ``input_paths``.
+        Use this with path-bound runs when a tool expects inputs at specific
+        local paths, including on cache hits.
+    input_materialization_mode : Optional[Literal["copy"]]
+        Strategy for requested input materialization. In v1, only ``"copy"``
+        is supported.
+    executor : Optional[Literal["python", "container"]]
+        Selects the execution backend.
+    container : Optional[Mapping[str, Any]]
+        Backend-specific container configuration when ``executor="container"``.
+    runtime_kwargs : Optional[Mapping[str, Any]]
+        Runtime-only keyword arguments forwarded to the callable without
+        affecting cache identity.
+    inject_context : Optional[Union[bool, str]]
+        Whether to inject a ``RunContext`` into the callable.
     """
 
     load_inputs: Optional[bool] = None
     input_binding: Optional[InputBindingMode] = None
+    input_paths: Optional[Mapping[str, PathLike]] = None
+    input_materialization: Optional[Literal["requested"]] = None
+    input_materialization_mode: Optional[Literal["copy"]] = None
     executor: Optional[Literal["python", "container"]] = None
     container: Optional[Mapping[str, Any]] = None
     runtime_kwargs: Optional[Mapping[str, Any]] = None
     inject_context: Optional[Union[bool, str]] = None
+
+
+@dataclass(frozen=True, slots=True)
+class H5ChildSpec:
+    """
+    Semantic customization for one discovered child artifact inside an HDF5 container.
+
+    The spec is keyed by HDF5 dataset path and only affects how an already-selected
+    child artifact is logged; it does not change dataset discovery behavior unless
+    paired with ``child_selection="include_only"``.
+    """
+
+    key: Optional[str] = None
+    description: Optional[str] = None
+    facet: Optional[FacetLike] = None
+    facet_schema_version: Optional[Union[str, int]] = None
+    facet_index: bool = False
+    metadata: Optional[Mapping[str, Any]] = None
 
 
 # Known artifact drivers used by Consist loaders.

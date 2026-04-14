@@ -1,8 +1,8 @@
 # API Advanced
 
 Advanced APIs are fully supported, but they are not part of the onboarding
-recommended path. Reach for these when integrating Consist into larger frameworks,
-adapters, or custom orchestration layers.
+preferred execution path. Reach for these when integrating Consist into larger
+frameworks, adapters, or custom orchestration layers.
 
 ## Manual lifecycle and decorator patterns
 

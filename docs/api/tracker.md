@@ -16,6 +16,13 @@ Run lookup helpers expose workflow-aware filters such as `stage=` and
 `phase=`. Use those when you need to query by lifecycle step or pipeline stage
 instead of treating those values as opaque metadata.
 
+Tracker also exposes first-class container child-artifact queries.
+`get_child_artifacts(...)` returns children ordered by creation time ascending,
+and `get_parent_artifact(...)` resolves the canonical parent relation for a
+child artifact. These helpers prefer `Artifact.parent_artifact_id` and fall
+back to legacy `artifact.meta["parent_id"]` rows when older databases are
+opened.
+
 ## Minimal runnable example
 
 ```python
@@ -46,6 +53,25 @@ into `run.meta` for backward compatibility, but the canonical fields live on
 
 For top-level wrappers around these methods, see [API Helpers](api_helpers.md).
 For grouped workflows, see [Workflow Contexts](workflow.md).
+
+## Container child artifacts and HDF5 helpers
+
+Use `log_h5_container(...)` when you want to log an HDF5 file as one container
+artifact plus optional child `h5_table` artifacts. The HDF5 logging surface now
+supports:
+
+- `child_specs={...}` keyed by HDF5 dataset path for per-child semantic
+  customization
+- `child_selection="all" | "include_only"` to either customize discovered
+  children or restrict logging to the paths named in `child_specs`
+- child-spec fields that mirror normal artifact ergonomics: `key`,
+  `description`, `facet`, `facet_schema_version`, `facet_index`, and extra
+  metadata
+
+Use `log_h5_table(...)` when you want to register a single child artifact
+without scanning the whole container. It accepts the same semantic metadata
+surface (`description`, `facet`, `facet_schema_version`, `facet_index`) and can
+link the child to a parent container artifact.
 
 ## Constructing with `TrackerConfig`
 
@@ -150,6 +176,8 @@ and `digest`.
         - get_latest_run_id
         - find_artifacts
         - get_artifact
+        - get_child_artifacts
+        - get_parent_artifact
         - get_artifacts_for_run
         - get_run
         - get_run_config

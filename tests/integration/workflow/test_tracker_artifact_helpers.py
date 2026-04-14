@@ -336,3 +336,35 @@ class TestLogH5Container:
 
         assert container.key == "discovered_data"
         assert isinstance(tables, list)
+
+
+def test_tracker_parent_child_artifact_queries(tracker, run_dir: Path):
+    h5py = pytest.importorskip("h5py")
+
+    h5_file = run_dir / "query_helpers.h5"
+    with h5py.File(h5_file, "w") as handle:
+        handle.create_dataset("a", data=[1, 2, 3])
+        handle.create_dataset("b", data=[4, 5, 6])
+
+    with tracker.start_run("run_h5_queries", "test_model"):
+        container, tables = tracker.log_h5_container(
+            h5_file,
+            key="query_helpers",
+            discover_tables=True,
+        )
+
+    assert len(tables) == 2
+
+    children_by_artifact = tracker.get_child_artifacts(container)
+    children_by_id = tracker.get_child_artifacts(container.id)
+
+    assert [artifact.id for artifact in children_by_artifact] == [
+        artifact.id for artifact in children_by_id
+    ]
+    assert [artifact.id for artifact in children_by_artifact] == [
+        artifact.id for artifact in tables
+    ]
+
+    parent = tracker.get_parent_artifact(tables[0].id)
+    assert parent is not None
+    assert parent.id == container.id

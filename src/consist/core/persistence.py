@@ -1,13 +1,10 @@
 import atexit
 import time
-import random
 import logging
 import re
 import os
 import uuid
 import json
-import shutil
-import tempfile
 import contextvars
 import threading
 from dataclasses import dataclass
@@ -30,13 +27,15 @@ from typing import (
 )
 
 import pandas as pd
-from sqlalchemy.exc import OperationalError, DatabaseError
-from sqlalchemy.orm.exc import ConcurrentModificationError
 from sqlalchemy.orm import aliased
 from sqlalchemy.pool import NullPool
 from sqlmodel import create_engine, Session, select, SQLModel, col, delete
 
+from consist.core.db_runtime import DatabaseRuntimeOps
+from consist.core.db_snapshot import DatabaseSnapshotOps
+from consist.core.provenance_writer import ProvenanceWriter
 from consist.core.schema_compat import (
+    apply_artifact_parent_compatibility,
     apply_content_identity_compatibility,
     apply_run_stage_phase_compatibility,
     backfill_artifact_content_ids as compat_backfill_artifact_content_ids,
@@ -61,10 +60,7 @@ from consist.models.run import (
 from consist.models.run_config_kv import RunConfigKV
 
 if TYPE_CHECKING:
-    from consist.core.tracker import Tracker
     from consist.models.artifact import Artifact
-    from consist.models.run import ConsistRecord
-    from consist.models.run import Run as RunModel
 
 
 MAX_JSON_DEPTH = 50
@@ -81,6 +77,23 @@ _RETRYABLE_DB_ERROR_MARKERS = (
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 SchemaProfileSource = Literal["file", "duckdb", "user_provided"]
+
+
+def _coerce_run_tags(run_tags: Any) -> Any:
+    if isinstance(run_tags, str):
+        try:
+            return load_json_safe(run_tags, max_depth=10)
+        except ValueError:
+            return run_tags
+    return run_tags
+
+
+__all__ = [
+    "ArtifactSchemaSelection",
+    "DatabaseManager",
+    "ProvenanceWriter",
+    "SchemaProfileSource",
+]
 
 
 @dataclass(frozen=True)
@@ -342,6 +355,8 @@ class DatabaseManager:
         )
         self._artifact_content_cache: dict[tuple[str, str], ArtifactContent] = {}
         self._artifact_content_cache_lock = threading.Lock()
+        self._runtime_ops = DatabaseRuntimeOps(self)
+        self._snapshot_ops = DatabaseSnapshotOps(self)
         self._init_schema()
 
     def _init_schema(self):
@@ -370,6 +385,7 @@ class DatabaseManager:
             # Lightweight compatibility hooks for older DBs. Keep these isolated so
             # they can be removed without changing steady-state persistence behavior.
             apply_content_identity_compatibility(self)
+            apply_artifact_parent_compatibility(self)
             apply_run_stage_phase_compatibility(self)
             self._ensure_artifact_schema_field_ordinal_position()
             self._ensure_schema_links_view()
@@ -568,32 +584,19 @@ class DatabaseManager:
 
     def _atomic_copy_file(self, src: Path, dest: Path) -> None:
         """Copy a file via temp path and atomic rename in destination directory."""
-        temp_path = dest.parent / f".{dest.name}.{uuid.uuid4().hex}.tmp"
-        try:
-            shutil.copy2(src, temp_path)
-            temp_path.replace(dest)
-        finally:
-            try:
-                if temp_path.exists():
-                    temp_path.unlink()
-            except OSError:
-                pass
+        snapshot_ops = getattr(self, "_snapshot_ops", None)
+        if snapshot_ops is None:
+            snapshot_ops = DatabaseSnapshotOps(self)
+            self._snapshot_ops = snapshot_ops
+        snapshot_ops._atomic_copy_file(src, dest)
 
     def _atomic_write_json_file(self, payload: Dict[str, Any], dest: Path) -> None:
         """Write JSON to a temp file then atomically replace target."""
-        temp_path = dest.parent / f".{dest.name}.{uuid.uuid4().hex}.tmp"
-        try:
-            temp_path.write_text(
-                json.dumps(payload, indent=2, sort_keys=True),
-                encoding="utf-8",
-            )
-            temp_path.replace(dest)
-        finally:
-            try:
-                if temp_path.exists():
-                    temp_path.unlink()
-            except OSError:
-                pass
+        snapshot_ops = getattr(self, "_snapshot_ops", None)
+        if snapshot_ops is None:
+            snapshot_ops = DatabaseSnapshotOps(self)
+            self._snapshot_ops = snapshot_ops
+        snapshot_ops._atomic_write_json_file(payload, dest)
 
     def _snapshot_sidecar_path(self, destination: Path) -> Path:
         """
@@ -601,8 +604,11 @@ class DatabaseManager:
 
         Example: provenance.duckdb -> provenance.snapshot_meta.json
         """
-        base_name = destination.stem if destination.suffix else destination.name
-        return destination.with_name(f"{base_name}.snapshot_meta.json")
+        snapshot_ops = getattr(self, "_snapshot_ops", None)
+        if snapshot_ops is None:
+            snapshot_ops = DatabaseSnapshotOps(self)
+            self._snapshot_ops = snapshot_ops
+        return snapshot_ops._snapshot_sidecar_path(destination)
 
     def snapshot_to(
         self,
@@ -627,50 +633,15 @@ class DatabaseManager:
         Path
             The destination snapshot database path.
         """
-        if self.db_path == ":memory:":
-            raise ValueError("Cannot snapshot an in-memory DuckDB database.")
-
-        source_db_path = Path(self.db_path)
-        destination = Path(dest_path)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-
-        if checkpoint:
-
-            def _checkpoint() -> None:
-                with self.engine.begin() as conn:
-                    conn.exec_driver_sql("CHECKPOINT")
-
-            self.execute_with_retry(_checkpoint, operation_name="snapshot_checkpoint")
-
-        self._atomic_copy_file(source_db_path, destination)
-
-        source_wal_path = Path(f"{source_db_path}.wal")
-        destination_wal_path = Path(f"{destination}.wal")
-        if checkpoint:
-            try:
-                if destination_wal_path.exists():
-                    destination_wal_path.unlink()
-            except OSError as exc:
-                logging.warning(
-                    "Failed to remove stale snapshot WAL at %s: %s",
-                    destination_wal_path,
-                    exc,
-                )
-        elif source_wal_path.exists():
-            self._atomic_copy_file(source_wal_path, destination_wal_path)
-
-        if metadata is not None:
-            snapshot_metadata = dict(metadata)
-            snapshot_metadata["snapshot_ts_utc"] = datetime.now(
-                timezone.utc
-            ).isoformat()
-            snapshot_metadata["source_db_path"] = str(source_db_path)
-            self._atomic_write_json_file(
-                snapshot_metadata,
-                self._snapshot_sidecar_path(destination),
-            )
-
-        return destination
+        snapshot_ops = getattr(self, "_snapshot_ops", None)
+        if snapshot_ops is None:
+            snapshot_ops = DatabaseSnapshotOps(self)
+            self._snapshot_ops = snapshot_ops
+        return snapshot_ops.snapshot_to(
+            dest_path,
+            checkpoint=checkpoint,
+            metadata=metadata,
+        )
 
     def execute_with_retry(
         self,
@@ -680,25 +651,16 @@ class DatabaseManager:
         **kwargs,  # <--- Add this to absorb extra arguments
     ) -> Any:
         """Executes a function with exponential backoff for DB locks."""
-        default_retries = getattr(self, "_lock_retries", 20)
-        base_sleep_seconds = getattr(self, "_lock_base_sleep_seconds", 0.1)
-        max_sleep_seconds = getattr(self, "_lock_max_sleep_seconds", 2.0)
-        retry_count = default_retries if retries is None else max(1, int(retries))
-        for i in range(retry_count):
-            try:
-                return func()
-            except (OperationalError, DatabaseError) as e:
-                if _is_retryable_db_error(str(e)):
-                    if i == retry_count - 1:
-                        raise e
-                    sleep_time = min(
-                        (base_sleep_seconds * (1.5**i)) + random.uniform(0.05, 0.2),
-                        max_sleep_seconds,
-                    )
-                    time.sleep(sleep_time)
-                else:
-                    raise e
-        raise ConcurrentModificationError(f"Concurrency problem in {operation_name}")
+        runtime_ops = getattr(self, "_runtime_ops", None)
+        if runtime_ops is None:
+            runtime_ops = DatabaseRuntimeOps(self)
+            self._runtime_ops = runtime_ops
+        return runtime_ops.execute_with_retry(
+            func,
+            operation_name=operation_name,
+            retries=retries,
+            **kwargs,
+        )
 
     @contextmanager
     def session_scope(self) -> Iterator[Session]:
@@ -708,34 +670,22 @@ class DatabaseManager:
         This keeps CLI commands to a single DuckDB connection while preserving
         existing behavior for library usage.
         """
-        session = self._session_ctx.get()
-        if session is not None:
-            _DB_CALL_PROFILER.note_session_reuse()
-            try:
-                yield session
-            except Exception:
-                try:
-                    session.rollback()
-                except Exception:
-                    pass
-                raise
-            return
-        session = Session(self.engine)
-        token = self._session_ctx.set(session)
-        _DB_CALL_PROFILER.note_session_open()
-        started = time.perf_counter()
-        try:
+        runtime_ops = getattr(self, "_runtime_ops", None)
+        if runtime_ops is None:
+            runtime_ops = DatabaseRuntimeOps(self)
+            self._runtime_ops = runtime_ops
+        with runtime_ops.session_scope() as session:
             yield session
-        finally:
-            session.close()
-            _DB_CALL_PROFILER.note_session_close(
-                live_seconds=time.perf_counter() - started
-            )
-            self._session_ctx.reset(token)
 
     # --- Write Operations ---
 
-    def update_artifact_meta(self, artifact: Artifact, updates: Dict[str, Any]) -> None:
+    def update_artifact_meta(
+        self,
+        artifact: Artifact,
+        updates: Dict[str, Any],
+        *,
+        raise_on_error: bool = False,
+    ) -> bool:
         """Updates artifact metadata safely with retries."""
 
         def _update():
@@ -744,7 +694,11 @@ class DatabaseManager:
                 db_art = session.merge(artifact)
                 # Ensure meta is a dict (handle potential None)
                 current_meta = db_art.meta or {}
-                current_meta.update(updates)
+                for key, value in updates.items():
+                    if value is None:
+                        current_meta.pop(key, None)
+                    else:
+                        current_meta[key] = value
                 db_art.meta = current_meta
 
                 session.add(db_art)
@@ -754,8 +708,12 @@ class DatabaseManager:
 
         try:
             self.execute_with_retry(_update, operation_name="update_meta")
+            return True
         except Exception as e:
+            if raise_on_error:
+                raise
             logging.warning(f"Failed to update artifact metadata: {e}")
+            return False
 
     def sync_run(self, run: Run) -> None:
         """Upserts a Run object."""
@@ -2257,6 +2215,92 @@ class DatabaseManager:
         except Exception:
             return None
 
+    def get_child_artifacts(self, parent_id: uuid.UUID) -> List[Artifact]:
+        """
+        Return child artifacts for a parent, ordered by creation time ascending.
+
+        Prefers the canonical ``artifact.parent_artifact_id`` column and falls
+        back to legacy ``artifact.meta["parent_id"]`` values for older rows.
+        """
+
+        def _query() -> List[Artifact]:
+            with self.session_scope() as session:
+                statement = (
+                    select(Artifact)
+                    .where(Artifact.parent_artifact_id == parent_id)
+                    .order_by(
+                        col(Artifact.created_at), col(Artifact.key), col(Artifact.id)
+                    )
+                )
+                results = list(session.exec(statement).all())
+
+                legacy_results = []
+                for artifact in session.exec(select(Artifact)).all():
+                    if artifact.parent_artifact_id is not None:
+                        continue
+                    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+                    if meta.get("parent_id") == str(parent_id):
+                        legacy_results.append(artifact)
+
+                combined = {artifact.id: artifact for artifact in results}
+                for artifact in legacy_results:
+                    combined.setdefault(artifact.id, artifact)
+
+                ordered = sorted(
+                    combined.values(),
+                    key=lambda artifact: (
+                        artifact.created_at,
+                        artifact.key,
+                        artifact.id,
+                    ),
+                )
+                for artifact in ordered:
+                    _ = artifact.meta
+                    session.expunge(artifact)
+                return ordered
+
+        try:
+            return self.execute_with_retry(_query, operation_name="get_child_artifacts")
+        except Exception:
+            return []
+
+    def get_parent_artifact(self, child_id: uuid.UUID) -> Optional[Artifact]:
+        """
+        Return the parent artifact for a child artifact when one is recorded.
+
+        Prefers the canonical ``artifact.parent_artifact_id`` column and falls
+        back to legacy ``artifact.meta["parent_id"]`` values for older rows.
+        """
+
+        def _query() -> Optional[Artifact]:
+            with self.session_scope() as session:
+                child = session.get(Artifact, child_id)
+                if child is None:
+                    return None
+
+                parent_id = child.parent_artifact_id
+                if parent_id is None:
+                    meta = child.meta if isinstance(child.meta, dict) else {}
+                    raw_parent_id = meta.get("parent_id")
+                    if isinstance(raw_parent_id, str):
+                        try:
+                            parent_id = uuid.UUID(raw_parent_id)
+                        except ValueError:
+                            parent_id = None
+                if parent_id is None:
+                    return None
+
+                parent = session.get(Artifact, parent_id)
+                if parent is not None:
+                    _ = parent.meta
+                    session.expunge(parent)
+                return parent
+
+        try:
+            return self.execute_with_retry(_query, operation_name="get_parent_artifact")
+        except Exception:
+            return None
+
     def select_artifact_schema_for_artifact(
         self,
         *,
@@ -3448,11 +3492,7 @@ class DatabaseManager:
                     # (Implementation of tag parsing logic from original code)
                     if not run_tags:
                         return False
-                    if isinstance(run_tags, str):
-                        try:
-                            run_tags = load_json_safe(run_tags, max_depth=10)
-                        except ValueError:
-                            pass
+                    run_tags = _coerce_run_tags(run_tags)
                     return all(t in (run_tags or []) for t in tags)
 
                 df = df[df["tags"].apply(has_all_tags)]
@@ -3465,287 +3505,3 @@ class DatabaseManager:
         except Exception as e:
             logging.warning(f"Failed to fetch history: {e}")
             return pd.DataFrame()
-
-
-class ProvenanceWriter:
-    """
-    Lightweight persistence helper for JSON snapshots and DB synchronization.
-
-    This keeps non-public persistence mechanics out of managers while allowing
-    the tracker to remain the primary orchestrator.
-    """
-
-    def __init__(self, tracker: "Tracker"):
-        self._tracker = tracker
-        self._artifact_batch_depth = 0
-        self._batch_pending_json_flush = False
-        self._batch_pending_artifacts: list[tuple["Artifact", str]] = []
-        self._batch_pending_artifact_facet_bundles: list[
-            tuple[
-                "Artifact",
-                ArtifactFacet,
-                Dict[str, Any],
-                Optional[List[ArtifactKV]],
-            ]
-        ] = []
-
-    @contextmanager
-    def batch_artifact_writes(self) -> Iterator[None]:
-        """
-        Defer artifact JSON flushes and DB syncs until the end of a batch.
-
-        This keeps `log_artifact(...)` semantics unchanged while allowing callers
-        such as `log_artifacts(...)` to avoid redundant per-item persistence I/O.
-        """
-        is_outermost = self._artifact_batch_depth == 0
-        if is_outermost:
-            self._batch_pending_json_flush = False
-            self._batch_pending_artifacts = []
-            self._batch_pending_artifact_facet_bundles = []
-        self._artifact_batch_depth += 1
-        try:
-            yield
-        finally:
-            self._artifact_batch_depth -= 1
-            if self._artifact_batch_depth != 0:
-                return
-
-            pending_json_flush = self._batch_pending_json_flush
-            pending_artifacts = list(self._batch_pending_artifacts)
-            pending_artifact_facet_bundles = list(
-                self._batch_pending_artifact_facet_bundles
-            )
-            self._batch_pending_json_flush = False
-            self._batch_pending_artifacts = []
-            self._batch_pending_artifact_facet_bundles = []
-
-            if pending_json_flush:
-                self._flush_json_now()
-            if pending_artifacts:
-                self._sync_artifacts_now(pending_artifacts)
-            if pending_artifact_facet_bundles:
-                self._persist_artifact_facet_bundles_now(pending_artifact_facet_bundles)
-
-    def flush_json(self) -> None:
-        """
-        Flush the current in-memory run state to JSON snapshots on disk.
-
-        Uses an atomic write strategy for both the per-run snapshot and the
-        rolling latest snapshot.
-        """
-        if self._artifact_batch_depth > 0:
-            self._batch_pending_json_flush = True
-            return
-        self._flush_json_now()
-
-    def _flush_json_now(self) -> None:
-        """Immediate implementation behind `flush_json`."""
-        tracker = self._tracker
-        if not tracker.current_consist:
-            return
-        self._write_record_json(tracker.current_consist)
-
-    def flush_record_json(self, record: "ConsistRecord") -> None:
-        """
-        Flush a specific run snapshot record to JSON files on disk.
-
-        This is used when metadata is updated after run execution has ended and
-        there is no active ``current_consist`` context.
-        """
-        self._write_record_json(record)
-
-    def _write_record_json(self, record: "ConsistRecord") -> None:
-        """Write per-run and latest JSON snapshots for a record atomically."""
-        tracker = self._tracker
-        json_str = record.model_dump_json(indent=2)
-
-        run_id = record.run.id
-        safe_run_id = "".join(
-            c if (c.isalnum() or c in ("-", "_", ".")) else "_" for c in run_id
-        )
-
-        per_run_dir = tracker.fs.run_dir / "consist_runs"
-        per_run_dir.mkdir(parents=True, exist_ok=True)
-        per_run_target = per_run_dir / f"{safe_run_id}.json"
-        self._write_text_atomic(per_run_target, json_str)
-
-        latest_target = tracker.fs.run_dir / "consist.json"
-        self._write_text_atomic(latest_target, json_str)
-
-    def _write_text_atomic(self, target: Path, payload: str) -> None:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path: Optional[Path] = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=target.parent,
-                prefix=f".{target.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as handle:
-                handle.write(payload)
-                handle.flush()
-                tmp_path = Path(handle.name)
-            os.replace(tmp_path, target)
-        except Exception:
-            if tmp_path is not None:
-                try:
-                    tmp_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-            raise
-
-    def sync_run(self, run: "RunModel") -> None:
-        """
-        Sync a Run object to the database, if configured.
-
-        Parameters
-        ----------
-        run : Run
-            Run instance to upsert into the database.
-        """
-        tracker = self._tracker
-        if tracker.db:
-            try:
-                tracker.db.sync_run(run)
-            except Exception as e:
-                logging.warning("Database sync failed: %s", e)
-
-    def sync_run_with_links(
-        self,
-        run: "RunModel",
-        *,
-        artifact_ids: list[uuid.UUID],
-        direction: str = "output",
-    ) -> None:
-        """
-        Sync a Run and link artifacts in one database transaction.
-
-        Parameters
-        ----------
-        run : Run
-            Run instance to upsert into the database.
-        artifact_ids : list[uuid.UUID]
-            Artifact ids to link to the run.
-        direction : str, default "output"
-            Direction for all linked artifacts.
-        """
-        tracker = self._tracker
-        if tracker.db:
-            try:
-                tracker.db.sync_run_with_links(
-                    run=run, artifact_ids=artifact_ids, direction=direction
-                )
-            except Exception as e:
-                logging.warning("Database sync failed: %s", e)
-
-    def sync_artifact(
-        self,
-        artifact: "Artifact",
-        direction: str,
-        *,
-        profile_label: Optional[str] = None,
-    ) -> None:
-        """
-        Sync an Artifact and its run link to the database, if configured.
-
-        Parameters
-        ----------
-        artifact : Artifact
-            Artifact instance to upsert into the database.
-        direction : str
-            Direction of the artifact relative to the current run
-            ("input" or "output").
-        """
-        if self._artifact_batch_depth > 0:
-            self._batch_pending_artifacts.append((artifact, direction))
-            return
-
-        tracker = self._tracker
-        if tracker.db and tracker.current_consist:
-            try:
-                tracker.db.sync_artifact(
-                    artifact,
-                    tracker.current_consist.run.id,
-                    direction,
-                    profile_label=profile_label,
-                )
-            except Exception as e:
-                logging.warning("Database sync failed: %s", e)
-
-    def sync_artifact_with_facet_bundle(
-        self,
-        artifact: "Artifact",
-        direction: str,
-        *,
-        facet: ArtifactFacet,
-        meta_updates: Dict[str, Any],
-        kv_rows: Optional[List[ArtifactKV]] = None,
-    ) -> None:
-        """
-        Sync an Artifact, run link, and facet bundle in one database transaction.
-        """
-        if self._artifact_batch_depth > 0:
-            self._batch_pending_artifacts.append((artifact, direction))
-            self._batch_pending_artifact_facet_bundles.append(
-                (artifact, facet, meta_updates, kv_rows)
-            )
-            return
-
-        tracker = self._tracker
-        if tracker.db and tracker.current_consist:
-            try:
-                tracker.db.sync_artifact_with_facet_bundle(
-                    artifact,
-                    tracker.current_consist.run.id,
-                    direction,
-                    facet=facet,
-                    meta_updates=meta_updates,
-                    kv_rows=kv_rows,
-                )
-            except Exception as e:
-                logging.warning("Database sync failed: %s", e)
-
-    def _sync_artifacts_now(
-        self, artifacts_with_direction: Sequence[tuple["Artifact", str]]
-    ) -> None:
-        tracker = self._tracker
-        if not tracker.db or not tracker.current_consist:
-            return
-
-        run_id = tracker.current_consist.run.id
-        artifacts_by_direction: Dict[str, List["Artifact"]] = {}
-        for artifact, direction in artifacts_with_direction:
-            artifacts_by_direction.setdefault(direction, []).append(artifact)
-
-        for direction, artifacts in artifacts_by_direction.items():
-            try:
-                tracker.db.sync_artifacts(
-                    artifacts=artifacts,
-                    run_id=run_id,
-                    direction=direction,
-                )
-            except Exception as e:
-                logging.warning("Database sync failed: %s", e)
-
-    def _persist_artifact_facet_bundles_now(
-        self,
-        artifact_facet_bundles: Sequence[
-            tuple["Artifact", ArtifactFacet, Dict[str, Any], Optional[List[ArtifactKV]]]
-        ],
-    ) -> None:
-        tracker = self._tracker
-        if not tracker.db:
-            return
-
-        for artifact, facet, meta_updates, kv_rows in artifact_facet_bundles:
-            try:
-                tracker.db.persist_artifact_facet_bundle(
-                    artifact=artifact,
-                    facet=facet,
-                    meta_updates=meta_updates,
-                    kv_rows=kv_rows,
-                )
-            except Exception as e:
-                logging.warning("Database sync failed: %s", e)

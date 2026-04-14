@@ -110,6 +110,49 @@ def _retry_sleep(
     time.sleep(delay)
 
 
+def _open_netcdf_dataset(path: str, engine: Optional[str]):
+    if xr is None:
+        raise ImportError("xarray is required to open NetCDF datasets")
+    if engine:
+        try:
+            return xr.open_dataset(path, engine=engine)
+        except Exception:
+            return xr.open_dataset(path)
+    return xr.open_dataset(path)
+
+
+def _retry_pipeline_load(
+    pipeline: Any,
+    *,
+    retries: int,
+    lock_base_sleep_seconds: float,
+    lock_max_sleep_seconds: float,
+    exc: Exception,
+):
+    retries = max(1, int(retries))
+    for attempt in range(retries):
+        if attempt == retries - 1:
+            raise exc
+        logging.warning(
+            "[Consist][dlt] Load failed due to DuckDB lock (attempt %d/%d): %s",
+            attempt + 1,
+            retries,
+            exc,
+        )
+        _retry_sleep(
+            attempt,
+            base_sleep_seconds=max(0.0, float(lock_base_sleep_seconds)),
+            max_sleep_seconds=max(0.0, float(lock_max_sleep_seconds)),
+        )
+        try:
+            return pipeline.load()
+        except Exception as retry_exc:
+            if not _is_retryable_duckdb_lock_error(retry_exc):
+                raise
+            exc = retry_exc
+    raise exc
+
+
 def _json_dumps(value: Dict[str, Any]) -> str:
     import json
 
@@ -210,13 +253,7 @@ def _handle_netcdf_metadata(path: str) -> Iterable[Dict[str, Any]]:
 
     try:
         engine = resolve_netcdf_engine()
-        if engine:
-            try:
-                ds = xr.open_dataset(path, engine=engine)
-            except Exception:
-                ds = xr.open_dataset(path)
-        else:
-            ds = xr.open_dataset(path)
+        ds = _open_netcdf_dataset(path, engine)
 
         # 1. Yield Data Variables
         for var_name, da in ds.data_vars.items():
@@ -730,29 +767,13 @@ def ingest_artifact(
     except Exception as exc:
         if not _is_retryable_duckdb_lock_error(exc):
             raise
-
-        retries = max(1, int(lock_retries))
-        for attempt in range(retries):
-            if attempt == retries - 1:
-                raise exc
-            logging.warning(
-                "[Consist][dlt] Load failed due to DuckDB lock (attempt %d/%d): %s",
-                attempt + 1,
-                retries,
-                exc,
-            )
-            _retry_sleep(
-                attempt,
-                base_sleep_seconds=max(0.0, float(lock_base_sleep_seconds)),
-                max_sleep_seconds=max(0.0, float(lock_max_sleep_seconds)),
-            )
-            try:
-                info = pipeline.load()
-                break
-            except Exception as retry_exc:
-                if not _is_retryable_duckdb_lock_error(retry_exc):
-                    raise
-                exc = retry_exc
+        info = _retry_pipeline_load(
+            pipeline,
+            retries=lock_retries,
+            lock_base_sleep_seconds=lock_base_sleep_seconds,
+            lock_max_sleep_seconds=lock_max_sleep_seconds,
+            exc=exc,
+        )
 
     real_table_name = pipeline.default_schema.naming.normalize_table_identifier(
         str(desired_table_name)

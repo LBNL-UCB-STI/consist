@@ -119,6 +119,38 @@ def test_run_rejects_path_binding_with_non_mapping_inputs(tracker) -> None:
     assert "input_binding='paths' requires inputs to be a dict" in message
 
 
+def test_run_rejects_requested_input_materialization_without_paths(tracker) -> None:
+    with pytest.raises(ValueError) as excinfo:
+        tracker.run(
+            fn=lambda data: None,
+            name="missing_requested_input_paths",
+            inputs={"data": Path("any.csv")},
+            execution_options=ExecutionOptions(input_materialization="requested"),
+        )
+
+    message = str(excinfo.value)
+    _assert_problem_cause_fix(message)
+    assert "input_materialization='requested' requires input_paths" in message
+
+
+def test_run_rejects_invalid_requested_input_materialization_mode(tracker) -> None:
+    with pytest.raises(ValueError) as excinfo:
+        tracker.run(
+            fn=lambda data: None,
+            name="bad_requested_input_materialization_mode",
+            inputs={"data": Path("any.csv")},
+            execution_options=ExecutionOptions(
+                input_materialization="requested",
+                input_paths={"data": Path("stage.csv")},
+                input_materialization_mode=cast(Any, "symlink"),
+            ),
+        )
+
+    message = str(excinfo.value)
+    _assert_problem_cause_fix(message)
+    assert "input_materialization_mode must be 'copy'" in message
+
+
 def test_run_rejects_invalid_executor_message_shape(tracker) -> None:
     with pytest.raises(ValueError) as excinfo:
         tracker.run(

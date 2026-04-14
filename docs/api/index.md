@@ -6,7 +6,7 @@ icon: lucide/book-open
 
 The API reference is organized into two tiers:
 
-- **Essentials**: the recommended path API for most users (`run`, `trace`, `scenario`)
+- **Essentials**: the preferred execution path for most users (`Tracker.run`, `Tracker.trace`, `scenario`)
 - **Advanced**: lifecycle, decorators, and lower-level utilities for integrations
 
 ## Start Here
@@ -19,9 +19,9 @@ The API reference is organized into two tiers:
 
 | If you need | Start here | Why |
 |---|---|---|
-| One cache-aware function call | [`consist.run`](api_helpers.md#consist.api.run) | Smallest API surface; uses active/default tracker |
+| One cache-aware function call | [`Tracker.run`](tracker.md#consist.core.tracker.Tracker.run) | Explicit tracker ownership without compatibility warnings |
 | Multi-step workflow with shared context | [`consist.scenario`](api_helpers.md#consist.api.scenario) | Groups steps and lineage under one scenario header |
-| Always-execute run-scoped block | [`consist.trace`](api_helpers.md#consist.api.trace) | Records provenance but executes block every time |
+| Always-execute run-scoped block | [`Tracker.trace`](tracker.md#consist.core.tracker.Tracker.trace) | Records provenance but executes block every time |
 | Multi-run grouping and pairwise comparison | [`RunSet`](runset.md#runset-and-alignment) / [`consist.run_set`](api_helpers.md#consist.api.run_set) | Fluent partitioning, recency selection, and alignment |
 
 ## Minimal first run

@@ -43,6 +43,7 @@ def _normalize_index_name(name: Any, level: int) -> str:
 
 def _parquet_pandas_metadata(path: str) -> Optional[Dict[str, Any]]:
     try:
+        # reason: pyarrow is optional and only needed when reading parquet metadata.
         import pyarrow.parquet as pq
     except ImportError:
         return None
@@ -81,6 +82,7 @@ def _parquet_index_columns(path: str) -> List[str]:
 
 def _index_info_from_df(df: Any) -> tuple[List[str], Dict[str, str]]:
     try:
+        # reason: pandas is only needed for DataFrame inspection, so keep the dependency local.
         import pandas as pd
     except ImportError:
         return [], {}
@@ -321,6 +323,7 @@ def profile_file_schema(
     if driver == "h5_table":
         if not table_path:
             raise ValueError("table_path is required for h5_table profiling.")
+        # reason: pandas is only needed for HDF5 hydration, so keep the dependency local.
         import pandas as pd
 
         if sample_rows is not None:

@@ -8,10 +8,11 @@ Consist's core loop: declare inputs → compute signature → check cache → lo
 This page covers patterns for making caching reliable, keeping pipelines portable, and choosing when artifacts should be hydrated or materialized.
 
 !!! note "Recommended path"
-    For routine workflow code, the recommended path is `consist.run(...)`,
-    `consist.trace(...)`, or `consist.scenario(...)`. Low-level lifecycle snippets
-    in this page (for example `tracker.start_run(...)`) are advanced examples to
-    make hydration/materialization mechanics explicit.
+    For routine workflow code, prefer `tracker.run(...)`, `tracker.trace(...)`,
+    or `consist.scenario(...)` with `scenario.run(...)` / `scenario.trace(...)`.
+    Low-level lifecycle snippets in this page (for example
+    `tracker.start_run(...)`) are advanced examples to make
+    hydration/materialization mechanics explicit.
 
 ---
 
@@ -43,15 +44,17 @@ Materialize cached outputs (copy bytes to your current run) in three cases:
 
 1. **Extending a scenario in a new workspace**: Cached results in `/workspace/2024`, continuing in `/workspace/2025`. Use `cache_hydration="inputs-missing"` to copy input files.
 
-2. **Preparing outputs for external tools**: Tools expect local files. Use `cache_hydration="outputs-requested"` with `materialize_cached_output_paths`. With `consist.run(...)` or `sc.run(...)`, use `output_paths={...}`.
+2. **Preparing declared inputs for path-bound steps**: A callable or wrapped tool expects one or more inputs at fixed local destinations. Use `ExecutionOptions(input_binding="paths", input_materialization="requested", input_paths={...})`.
 
-3. **Ensuring local reproducibility**: All results accessible without remote mounts. Use `cache_hydration="outputs-all"` to copy all cached outputs.
+3. **Preparing outputs for external tools**: Tools expect local files. Use `cache_hydration="outputs-requested"` with `materialize_cached_output_paths`. With `consist.run(...)` or `sc.run(...)`, use `output_paths={...}`.
+
+4. **Ensuring local reproducibility**: All results accessible without remote mounts. Use `cache_hydration="outputs-all"` to copy all cached outputs.
 
 ### Example: Electric Grid Modeling Workflow
 
 !!! note "Advanced lifecycle example"
     This walkthrough uses low-level lifecycle APIs to show cache and hydration
-    behavior step-by-step. Prefer the recommended path (`run`/`trace`/`scenario`)
+    behavior step-by-step. Prefer the explicit tracker/scenario execution path
     for new workflow code.
 
 ``` python
@@ -144,6 +147,42 @@ That is why path-oriented workflows often pair naturally with
 `cache_hydration="inputs-missing"` when work moves across run directories.
 Loaded workflows can often keep using `cache_hydration="metadata"` and let
 Consist load the bytes on demand.
+
+### Requested Input Materialization for Path Binding
+
+`cache_hydration` is about reusing prior outputs. Requested input
+materialization is the complementary input-side mechanism for path-bound runs.
+
+Use it when a declared input artifact is canonical in provenance terms, but the
+callable needs a staged local copy at a specific destination:
+
+```python
+from pathlib import Path
+import consist
+from consist import ExecutionOptions
+
+result = tracker.run(
+    fn=run_tool,
+    inputs={"config_path": consist.ref(prepare, key="config")},
+    outputs=["report"],
+    execution_options=ExecutionOptions(
+        input_binding="paths",
+        input_materialization="requested",
+        input_paths={"config_path": Path("./workspace/tool-config.yaml")},
+    ),
+)
+```
+
+This gives you a clear split of responsibilities:
+
+- `inputs={...}` declares identity and lineage.
+- `input_binding="paths"` says the callable wants filesystem paths.
+- `input_paths={...}` names the exact local destinations that must exist.
+- `input_materialization="requested"` tells Consist to create those paths on
+  cache misses and cache hits.
+
+Use this when a tool expects exact workspace-local filenames or when you need a
+fresh local copy instead of reading from the artifact's canonical path.
 
 ### Signatures and Cache Behavior
 
@@ -294,7 +333,13 @@ Consist distinguishes **provenance identity** (where an artifact came from, via 
 
 For Consist-produced artifacts, inputs are hashed by linking to the producing run's signature (Merkle-style). For raw files (no `run_id`), Consist hashes file contents or metadata depending on configuration.
 
-To skip hashing when you know the content hash (e.g., after copying a file), pass `content_hash=` to `log_artifact`. Consist ignores mismatched overrides unless `force_hash_override=True`. Use `validate_content_hash=True` to verify the override against on-disk data.
+To skip hashing when you already know the artifact fingerprint (for example
+after copying a file), pass `content_hash=` to `log_artifact`. Consist stores
+that value on `artifact.hash`, the canonical public fingerprint field. Consist
+ignores mismatched overrides unless `force_hash_override=True`. Use
+`validate_content_hash=True` to verify the override against on-disk data. Under
+`fast` hashing, the fingerprint may be metadata-based rather than a strict
+byte-content digest.
 
 ### Portability and Path Resolution
 
@@ -354,7 +399,7 @@ Use `ScenarioContext.run(...)` to skip execution on cache hits. The `output_path
 
 ## Pattern 2: Cached Runs with `consist.run`
 
-Use `consist.run(...)` with declared outputs for cache-aware function execution.
+Use `tracker.run(...)` with declared outputs for cache-aware function execution.
 
 ```python
 def clean(raw_file: Path):
@@ -467,12 +512,12 @@ with tracker.start_run(
     ...
 ```
 
-Equivalent with `consist.run(...)`:
+Equivalent with `tracker.run(...)`:
 
 ```python
 from consist import CacheOptions
 
-result = consist.run(
+result = tracker.run(
     fn=step,
     cache_options=CacheOptions(cache_hydration="outputs-requested"),
     output_paths={"features": Path("outputs/features.csv")},
@@ -480,7 +525,7 @@ result = consist.run(
 ```
 
 Default is `cache_hydration="metadata"` (artifact hydration only). For
-`consist.run(...)` or `sc.run(...)`, use `output_paths={...}` with
+`tracker.run(...)` or `sc.run(...)`, use `output_paths={...}` with
 `cache_options=CacheOptions(cache_hydration="outputs-requested")`.
 
 | Policy | Requires | Rejects |
@@ -510,15 +555,39 @@ features = hydrated["features"]
 assert features.resolvable
 print(features.status)
 print(features.artifact.as_path())
+print(features.artifact.hash)
 ```
+
+`features.artifact.hash` remains the canonical artifact fingerprint after
+hydration. Downstream provenance code should read that field rather than
+guessing among wrapper-specific names. Fingerprint semantics follow the active
+hashing strategy, so under `fast` hashing the value may be metadata-based.
 
 Cache hydration exposes an archive-mirror override via
 `materialize_cached_outputs_source_root=...` for `outputs-requested` and
-`outputs-all`. On the recommended path, pass it through
+`outputs-all`. On the preferred execution path, pass it through
 `cache_options=CacheOptions(materialize_cached_outputs_source_root=...)` on
-`consist.run(...)`, `Tracker.run(...)`, or scenario steps. The same override is
-also available on low-level `tracker.start_run(...)` /
+`tracker.run(...)` or scenario steps. The deprecated `consist.run(...)`
+wrapper also forwards it. The same override is available on low-level `tracker.start_run(...)` /
 `tracker.begin_run(...)` flows.
+
+For recurring archive workflows, prefer artifact-level recovery metadata over
+repeating per-call source-root overrides. Consist can record ordered
+`recovery_roots` on the artifact itself:
+
+```python
+tracker.archive_run_outputs(
+    "prior_run_id",
+    Path("/archive/iteration_004"),
+    mode="copy",
+)
+```
+
+After that, both explicit historical recovery and cache-hit output hydration
+can recover from the archived bytes without a manual
+`materialize_cached_outputs_source_root=...` or `source_root=...` on every
+restart. Use `tracker.set_artifact_recovery_roots(...)` if your workflow copies
+or moves the files outside Consist and only needs to record the archive root.
 
 For explicit historical output recovery,
 `tracker.hydrate_run_outputs(...)` accepts `target_root` under either the

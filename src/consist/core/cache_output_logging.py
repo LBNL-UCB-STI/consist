@@ -146,10 +146,8 @@ def _demote_cache_hit(record: ConsistRecord, *, reason: str) -> None:
     record.cached_run = None
     record.outputs = []
 
-    try:
+    if isinstance(record.run.meta, dict):
         record.run.meta.pop("cache_hit", None)
         record.run.meta.pop("cache_source", None)
         record.run.meta.pop("declared_outputs", None)
         record.run.meta.pop("materialized_outputs", None)
-    except Exception:
-        pass

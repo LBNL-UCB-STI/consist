@@ -118,11 +118,13 @@ def test_default_tracker_and_introspection_helpers(tracker):
     with pytest.raises(
         RuntimeError, match="No default tracker configured for consist.run"
     ):
-        consist.run(fn=noop)
+        with pytest.warns(DeprecationWarning, match="consist.run"):
+            consist.run(fn=noop)
 
     # Default tracker resolves consist.run
     with consist.use_tracker(tracker):
-        result = consist.run(fn=noop, name="noop")
+        with pytest.warns(DeprecationWarning, match="consist.run"):
+            result = consist.run(fn=noop, name="noop")
         assert result.run.model_name == "noop"
 
     # Default tracker fallback for current_tracker
@@ -148,25 +150,33 @@ def test_use_tracker_nested_and_override_precedence(tracker, tmp_path):
     )
 
     with consist.use_tracker(tracker):
-        outer = consist.run(fn=noop, name="outer_default")
+        with pytest.warns(DeprecationWarning, match="consist.run"):
+            outer = consist.run(fn=noop, name="outer_default")
         assert tracker.last_run.run.id == outer.run.id
 
         with consist.use_tracker(other_tracker):
-            inner = consist.run(fn=noop, name="inner_default")
+            with pytest.warns(DeprecationWarning, match="consist.run"):
+                inner = consist.run(fn=noop, name="inner_default")
             assert other_tracker.last_run.run.id == inner.run.id
 
-            overridden = consist.run(
-                fn=noop, name="override", tracker=tracker, run_id="explicit_override"
-            )
+            with pytest.warns(DeprecationWarning, match="consist.run"):
+                overridden = consist.run(
+                    fn=noop,
+                    name="override",
+                    tracker=tracker,
+                    run_id="explicit_override",
+                )
             assert tracker.last_run.run.id == overridden.run.id
 
-        after_inner = consist.run(fn=noop, name="after_inner")
+        with pytest.warns(DeprecationWarning, match="consist.run"):
+            after_inner = consist.run(fn=noop, name="after_inner")
         assert tracker.last_run.run.id == after_inner.run.id
 
     with pytest.raises(
         RuntimeError, match="No default tracker configured for consist.run"
     ):
-        consist.run(fn=noop)
+        with pytest.warns(DeprecationWarning, match="consist.run"):
+            consist.run(fn=noop)
 
 
 def test_active_run_context_beats_default_tracker_for_logging(tracker, tmp_path):

@@ -1,6 +1,7 @@
 import os
+from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
-from typing import Optional, Union, Dict
+from typing import Optional, Union, Dict, cast
 
 
 class FileSystemManager:
@@ -129,7 +130,7 @@ class FileSystemManager:
             rel = resolved_path.relative_to(self.run_dir.resolve())
             return f"./{rel.as_posix()}"
         except ValueError:
-            pass
+            return str(resolved_path)
 
         # 5. Fallback to absolute
         return str(resolved_path)
@@ -200,6 +201,41 @@ class FileSystemManager:
         return self.resolve_uri(uri)
 
     @staticmethod
+    def normalize_recovery_roots(
+        roots: str | os.PathLike[str] | Sequence[str | os.PathLike[str]] | None,
+    ) -> list[str]:
+        """
+        Normalize advisory recovery roots into a deduped ordered list.
+
+        Roots are stored as absolute filesystem paths and retain caller order.
+        """
+        if roots is None:
+            return []
+
+        raw_roots: list[str | os.PathLike[str]] | Sequence[str | os.PathLike[str]]
+        if isinstance(roots, (str, os.PathLike)):
+            raw_roots = (cast(str | os.PathLike[str], roots),)
+        elif isinstance(roots, Sequence):
+            raw_roots = roots
+        else:
+            raise ValueError(
+                "recovery_roots must be a path-like value or a sequence of path-like values."
+            )
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for root in raw_roots:
+            if not isinstance(root, (str, os.PathLike)):
+                raise ValueError(
+                    "recovery_roots entries must be strings or pathlib.Path values."
+                )
+            resolved = str(Path(root).resolve())
+            if resolved not in seen:
+                seen.add(resolved)
+                normalized.append(resolved)
+        return normalized
+
+    @staticmethod
     def normalize_remappable_relative_path(rel_path: str) -> Optional[Path]:
         """
         Validate and normalize a remappable URI-relative path.
@@ -222,6 +258,58 @@ class FileSystemManager:
             return None
         return Path(*normalized_parts)
 
+    def get_remappable_relative_path(self, uri: str) -> Optional[Path]:
+        """
+        Derive a portable relative layout for a rematerializable artifact URI.
+        """
+        if uri.startswith("workspace://"):
+            return self.normalize_remappable_relative_path(
+                uri.replace("workspace://", "", 1).lstrip("/")
+            )
+
+        if uri.startswith("./"):
+            return self.normalize_remappable_relative_path(uri[2:])
+
+        if "://" not in uri:
+            return None
+
+        scheme, rel_path = uri.split("://", 1)
+        if scheme == "file":
+            return None
+
+        return self.normalize_remappable_relative_path(rel_path)
+
+    def get_historical_root(
+        self,
+        uri: str,
+        *,
+        original_run_dir: Optional[str],
+        mounts_snapshot: Optional[Mapping[str, str]] = None,
+        artifact_mount_root: Optional[str] = None,
+    ) -> Optional[Path]:
+        """
+        Resolve the most specific historical root recorded for a URI.
+        """
+        if uri.startswith("workspace://") or uri.startswith("./"):
+            if not original_run_dir:
+                return None
+            return Path(original_run_dir).resolve()
+
+        if "://" not in uri:
+            return None
+
+        scheme, _ = uri.split("://", 1)
+        if scheme == "file":
+            return None
+
+        if mounts_snapshot and isinstance(mounts_snapshot.get(scheme), str):
+            return Path(mounts_snapshot[scheme]).resolve()
+
+        if artifact_mount_root:
+            return Path(artifact_mount_root).resolve()
+
+        return None
+
     def get_historical_remap(
         self,
         uri: str,
@@ -236,35 +324,17 @@ class FileSystemManager:
         This is stricter than ``resolve_historical_path(...)`` because it only
         returns remappable layouts used by recovery-oriented materialization.
         """
-        if uri.startswith("workspace://"):
-            relative_path = self.normalize_remappable_relative_path(
-                uri.replace("workspace://", "", 1).lstrip("/")
-            )
-            if relative_path is None or not original_run_dir:
-                return None
-            return Path(original_run_dir).resolve(), relative_path
-
-        if uri.startswith("./"):
-            relative_path = self.normalize_remappable_relative_path(uri[2:])
-            if relative_path is None or not original_run_dir:
-                return None
-            return Path(original_run_dir).resolve(), relative_path
-
-        if "://" not in uri:
-            return None
-
-        scheme, rel_path = uri.split("://", 1)
-        if scheme == "file":
-            return None
-
-        relative_path = self.normalize_remappable_relative_path(rel_path)
+        relative_path = self.get_remappable_relative_path(uri)
         if relative_path is None:
             return None
 
-        if mounts_snapshot and isinstance(mounts_snapshot.get(scheme), str):
-            return Path(mounts_snapshot[scheme]).resolve(), relative_path
+        historical_root = self.get_historical_root(
+            uri,
+            original_run_dir=original_run_dir,
+            mounts_snapshot=mounts_snapshot,
+            artifact_mount_root=artifact_mount_root,
+        )
+        if historical_root is None:
+            return None
 
-        if artifact_mount_root:
-            return Path(artifact_mount_root).resolve(), relative_path
-
-        return None
+        return historical_root, relative_path

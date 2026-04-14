@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import gzip
+import hashlib
 import json
 import logging
 import re
 import shutil
-import tempfile
 import tarfile
+import tempfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import (
     IO,
+    TYPE_CHECKING,
     Any,
     Dict,
     Iterable,
@@ -21,7 +22,6 @@ from typing import (
     Optional,
     Sequence,
     Set,
-    TYPE_CHECKING,
     Union,
 )
 
@@ -39,24 +39,42 @@ from consist.core.config_canonicalization import (
 from consist.core.identity import IdentityManager
 from consist.integrations._config_adapter_shared import (
     OverrideRunHooks as _shared_OverrideRunHooks,
+)
+from consist.integrations._config_adapter_shared import (
     artifact_key_for_path as _shared_artifact_key_for_path,
+)
+from consist.integrations._config_adapter_shared import (
     build_override_runtime_kwargs as _shared_build_override_runtime_kwargs,
+)
+from consist.integrations._config_adapter_shared import (
     callable_accepts_kwarg as _shared_callable_accepts_kwarg,
+)
+from consist.integrations._config_adapter_shared import (
     digest_path as _shared_digest_path,
+)
+from consist.integrations._config_adapter_shared import (
     file_sha256 as _shared_file_sha256,
+)
+from consist.integrations._config_adapter_shared import (
     get_nested_value as _shared_get_nested_value,
+)
+from consist.integrations._config_adapter_shared import (
     resolve_base_config_dirs as _shared_resolve_base_config_dirs,
+)
+from consist.integrations._config_adapter_shared import (
     resolve_override_base_selector as _shared_resolve_override_base_selector,
+)
+from consist.integrations._config_adapter_shared import (
     run_with_config_overrides_orchestrated as _shared_run_with_config_overrides_orchestrated,
 )
 from consist.models.activitysim import (
     ActivitySimCoefficientsCache,
     ActivitySimCoefficientTemplateRefsCache,
+    ActivitySimConfigIngestRunLink,
     ActivitySimConstantsCache,
     ActivitySimProbabilitiesCache,
     ActivitySimProbabilitiesEntriesCache,
     ActivitySimProbabilitiesMetaEntriesCache,
-    ActivitySimConfigIngestRunLink,
 )
 from consist.models.run import Run
 
@@ -858,7 +876,7 @@ class ActivitySimConfigAdapter:
         model: str | None = None,
         config: dict[str, Any] | None = None,
         outputs: list[str] | None = None,
-        execution_options: "ExecutionOptions" | None = None,
+        execution_options: "ExecutionOptions | None" = None,
         strict: bool = True,
         identity_inputs: "IdentityInputs" = None,
         resolved_config_identity: Literal["auto", "off"] = "auto",
@@ -1142,7 +1160,7 @@ class ActivitySimConfigAdapter:
         self,
         config_dirs: list[Path] | None = None,
         run_id: str | None = None,
-        tracker: "Tracker" | None = None,
+        tracker: "Tracker | None" = None,
         file_name: str = "",
         coefficient_name: str = "",
         segment: str = "",

@@ -1,7 +1,5 @@
-import inspect
-import itertools
 import re
-from dataclasses import replace
+import shutil
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
 import logging
@@ -48,9 +46,13 @@ from consist.core.run_resolution import (
     write_xarray_dataset as _write_xarray_dataset,
 )
 from consist.core.tracker_artifact_logging import ArtifactLoggingCoordinator
+from consist.core.tracker_artifact_queries import TrackerArtifactQueryService
 from consist.core.tracker_lifecycle import RunLifecycleCoordinator
+from consist.core.tracker_history import TrackerHistoryService
 from consist.core.tracker_orchestration import RunTraceCoordinator, RunTraceHelpers
+from consist.core.tracker_recovery import TrackerRecoveryService
 from consist.core.tracker_config import TrackerConfig
+from consist.core.tracker_config_plans import TrackerConfigPlanService
 from consist.core.config_canonicalization import (
     ConfigAdapter,
     ConfigAdapterOptions,
@@ -59,7 +61,6 @@ from consist.core.config_canonicalization import (
     ConfigContribution,
     ConfigPlan,
     SupportsRunWithConfigOverrides,
-    validate_config_plan,
 )
 from consist.core.config_facets import ConfigFacetManager
 from consist.core.decorators import define_step as define_step_decorator
@@ -77,16 +78,9 @@ from consist.core.views import ViewFactory, ViewRegistry
 from consist.core.ingestion import ingest_artifact
 from consist.core.lineage import LineageService
 from consist.core.materialize import (
-    fold_hydrated_run_outputs_result,
-    hydrate_run_outputs as hydrate_run_outputs_core,
-    materialize_artifacts,
+    hydrate_run_outputs as hydrate_run_outputs_core,  # noqa: F401
 )
-from consist.core.materialize_options import (
-    VALID_MATERIALIZE_DB_FALLBACK as _VALID_MATERIALIZE_DB_FALLBACK,
-    VALID_MATERIALIZE_ON_MISSING as _VALID_MATERIALIZE_ON_MISSING,
-    normalize_materialize_output_keys,
-    validate_materialize_option,
-)
+from consist.core.materialize_options import normalize_materialize_output_keys
 from consist.core.matrix import MatrixViewFactory
 from consist.core.netcdf_views import NetCdfMetadataView
 from consist.core.openmatrix_views import OpenMatrixMetadataView
@@ -110,6 +104,8 @@ from consist.types import (
     CodeIdentityMode,
     ExecutionOptions,
     FacetLike,
+    H5ChildSelectionMode,
+    H5ChildSpec,
     HashInputs,
     IdentityInputs,
     OutputPolicyOptions,
@@ -118,7 +114,12 @@ from consist.types import (
 
 if TYPE_CHECKING:
     from consist.core.coupler import Coupler
-    from consist.core.materialize import HydratedRunOutputsResult, MaterializationResult
+    from consist.core.materialize import (
+        HydratedRunOutputsResult,
+        MaterializationResult,
+        StagedInput,
+        StagedInputsResult,
+    )
     from consist.core.step_context import StepContext
     from consist.runset import RunSet
 
@@ -310,6 +311,10 @@ class Tracker:
                 write_xarray_dataset=_write_xarray_dataset,
             ),
         )
+        self._artifact_queries = TrackerArtifactQueryService(self)
+        self._history_service = TrackerHistoryService(self)
+        self._recovery_service = TrackerRecoveryService(self)
+        self._config_plan_service = TrackerConfigPlanService(self)
 
         self.views = ViewRegistry(self)
         # Store registered schemas by class name for cross-session lookup.
@@ -887,6 +892,250 @@ class Tracker:
         self._artifact_facet_parsers.append((prefix, parser_fn))
         self._artifact_facet_parsers.sort(key=lambda row: len(row[0]), reverse=True)
 
+    def set_artifact_recovery_roots(
+        self,
+        artifact: Artifact,
+        roots: str | os.PathLike[str] | Sequence[str | os.PathLike[str]],
+        *,
+        append: bool = False,
+    ) -> Artifact:
+        """
+        Persist advisory filesystem recovery roots for an artifact.
+
+        Recovery roots are ordered fallback locations used during historical
+        rematerialization and cache-hit output hydration when the canonical
+        cold bytes are no longer available at their original location.
+
+        The artifact's ``container_uri`` remains the canonical logical
+        location. Recovery roots are only alternate byte sources.
+        """
+        if not isinstance(artifact, Artifact):
+            raise TypeError("artifact must be an Artifact instance.")
+        if self.db is None:
+            raise RuntimeError(
+                "Cannot update artifact recovery roots: tracker has no database configured."
+            )
+
+        incoming = self.fs.normalize_recovery_roots(roots)
+        existing = self.fs.normalize_recovery_roots(
+            (artifact.meta or {}).get("recovery_roots")
+        )
+        normalized = incoming
+        if append:
+            normalized = self.fs.normalize_recovery_roots([*existing, *incoming])
+
+        updates: dict[str, Any]
+        if normalized:
+            updates = {"recovery_roots": normalized}
+        else:
+            current_meta = dict(artifact.meta or {})
+            current_meta.pop("recovery_roots", None)
+            self.db.update_artifact_meta(
+                artifact,
+                {"recovery_roots": None},
+                raise_on_error=True,
+            )
+            artifact.meta = current_meta
+            self._run_artifacts_cache.clear()
+            return artifact
+
+        self.db.update_artifact_meta(artifact, updates, raise_on_error=True)
+        artifact.meta = dict(artifact.meta or {})
+        artifact.meta["recovery_roots"] = normalized
+        self._run_artifacts_cache.clear()
+        return artifact
+
+    def archive_artifact(
+        self,
+        artifact: Artifact,
+        archive_root: str | os.PathLike[str],
+        *,
+        mode: Literal["copy", "move"] = "copy",
+        append: bool = True,
+    ) -> Path:
+        """
+        Archive a rematerializable artifact into a stable recovery root.
+
+        The archived copy preserves the artifact's URI-relative layout under
+        ``archive_root`` and records that root in
+        ``artifact.meta["recovery_roots"]``.
+
+        This helper is intended for workflows that promote bytes into archival
+        storage while keeping the original artifact identity and
+        ``container_uri`` unchanged.
+        """
+        if not isinstance(artifact, Artifact):
+            raise TypeError("artifact must be an Artifact instance.")
+        if mode not in {"copy", "move"}:
+            raise ValueError("mode must be 'copy' or 'move'.")
+        if self.db is None:
+            raise RuntimeError(
+                "Cannot archive artifact: tracker has no database configured."
+            )
+
+        relative_path = self.fs.get_remappable_relative_path(artifact.container_uri)
+        if relative_path is None:
+            raise ValueError(
+                f"Artifact {artifact.key!r} does not have a rematerializable URI "
+                "layout. Use managed output paths or preserve a stable relative "
+                "layout before archiving. Absolute-path and file:// artifacts "
+                "cannot be recovered from root-only recovery metadata."
+            )
+
+        archive_root_path = Path(archive_root).resolve()
+        destination = (archive_root_path / relative_path).resolve()
+        source_path: Path | None = None
+
+        if artifact.run_id:
+            from consist.core.materialize import find_existing_recovery_source_path
+
+            producing_run = self.get_run(str(artifact.run_id))
+            if producing_run is not None:
+                _, recovered, _ = find_existing_recovery_source_path(
+                    self,
+                    artifact=artifact,
+                    run=producing_run,
+                    source_root=None,
+                )
+                source_path = recovered
+
+        if source_path is None and artifact.run_id is None and artifact.abs_path:
+            candidate = Path(artifact.abs_path).resolve()
+            if candidate.exists():
+                source_path = candidate
+
+        if source_path is None and artifact.run_id is None:
+            candidate = Path(self.resolve_uri(artifact.container_uri)).resolve()
+            if candidate.exists():
+                source_path = candidate
+
+        if source_path is None or not source_path.exists():
+            raise FileNotFoundError(
+                f"Cannot archive artifact {artifact.key!r}: source bytes are unavailable."
+            )
+
+        destination_preexisted = destination.exists()
+        moved_from: Path | None = None
+        if destination.exists():
+            if destination.is_symlink():
+                raise ValueError(
+                    f"Symlink detected in archive destination: {destination}"
+                )
+            if destination.resolve() != source_path.resolve():
+                if source_path.is_file() and destination.is_file():
+                    same_size = source_path.stat().st_size == destination.stat().st_size
+                    same_hash = False
+                    if same_size:
+                        same_hash = self.identity.compute_file_checksum(
+                            str(source_path)
+                        ) == self.identity.compute_file_checksum(str(destination))
+                    if not same_hash:
+                        raise FileExistsError(
+                            f"Archive destination already exists: {destination}"
+                        )
+                else:
+                    raise FileExistsError(
+                        f"Archive destination already exists: {destination}"
+                    )
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if source_path.resolve() != destination.resolve():
+                if mode == "copy":
+                    if source_path.is_dir():
+                        shutil.copytree(source_path, destination)
+                    else:
+                        shutil.copy2(source_path, destination)
+                else:
+                    moved_from = source_path
+                    shutil.move(str(source_path), str(destination))
+
+        try:
+            self.set_artifact_recovery_roots(
+                artifact, [archive_root_path], append=append
+            )
+        except Exception:
+            if moved_from is not None and destination.exists():
+                moved_from.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(destination), str(moved_from))
+            elif not destination_preexisted and destination.exists():
+                if destination.is_dir():
+                    shutil.rmtree(destination)
+                else:
+                    destination.unlink()
+            raise
+
+        if mode == "move":
+            artifact.abs_path = str(destination.resolve())
+        return destination
+
+    def archive_run_outputs(
+        self,
+        run_id: str,
+        archive_root: str | os.PathLike[str],
+        *,
+        keys: Sequence[str] | None = None,
+        mode: Literal["copy", "move"] = "copy",
+        append: bool = True,
+    ) -> dict[str, Path]:
+        """
+        Archive one or more historical run outputs into a stable recovery root.
+
+        Each archived output retains its canonical artifact identity and gains
+        ``archive_root`` as an advisory recovery root.
+        """
+        normalized_keys = normalize_materialize_output_keys(
+            keys,
+            caller="archive_run_outputs",
+        )
+        outputs = self.get_run_outputs(run_id)
+        if normalized_keys is not None:
+            missing = [key for key in normalized_keys if key not in outputs]
+            if missing:
+                raise KeyError(
+                    "Requested output keys were not found for run "
+                    f"{run_id!r}: {', '.join(repr(key) for key in missing)}"
+                )
+            selected = {key: outputs[key] for key in normalized_keys}
+        else:
+            selected = outputs
+
+        archived: dict[str, Path] = {}
+        for key, artifact in selected.items():
+            archived[key] = self.archive_artifact(
+                artifact,
+                archive_root,
+                mode=mode,
+                append=append,
+            )
+        return archived
+
+    def archive_current_run_outputs(
+        self,
+        archive_root: str | os.PathLike[str],
+        *,
+        keys: Sequence[str] | None = None,
+        mode: Literal["copy", "move"] = "copy",
+        append: bool = True,
+    ) -> dict[str, Path]:
+        """
+        Archive outputs for the currently active run into a stable recovery root.
+
+        This is a convenience wrapper around ``archive_run_outputs(...)`` for
+        the common workflow of archiving outputs immediately after they are
+        logged, without manually extracting the active run ID first.
+        """
+        if not self.current_consist or self.current_consist.run is None:
+            raise RuntimeError(
+                "archive_current_run_outputs(...) requires an active run context."
+            )
+        return self.archive_run_outputs(
+            self.current_consist.run.id,
+            archive_root,
+            keys=keys,
+            mode=mode,
+            append=append,
+        )
+
     def _parse_artifact_facet_from_registered_parsers(
         self, key: str
     ) -> Optional[FacetLike]:
@@ -1249,7 +1498,12 @@ class Tracker:
             Grouped output policies (`output_mismatch`, `output_missing`).
         execution_options : Optional[ExecutionOptions], optional
             Grouped execution controls (`input_binding`, legacy `load_inputs`,
-            `executor`, `container`, `runtime_kwargs`, `inject_context`).
+            `input_materialization`, `input_paths`,
+            `input_materialization_mode`, `executor`, `container`,
+            `runtime_kwargs`, `inject_context`). Use requested input
+            materialization with path-bound runs when a callable or external
+            tool expects inputs at specific local paths on both cache misses
+            and cache hits.
         runtime_kwargs : Optional[Mapping[str, Any]], optional
             Top-level alias for `execution_options.runtime_kwargs`. This is
             mutually exclusive with
@@ -2095,8 +2349,9 @@ class Tracker:
         array_path : Optional[str], optional
             Optional array path inside a container (e.g., Zarr group).
         content_hash : Optional[str], optional
-            Precomputed content hash to use for the artifact instead of hashing
-            the path on disk.
+            Precomputed artifact fingerprint to use instead of hashing the path
+            on disk. When provided, Consist stores it on the canonical public
+            fingerprint field, ``artifact.hash``.
         force_hash_override : bool, default False
             If True, overwrite an existing artifact hash when it differs from
             `content_hash`. By default, mismatched overrides are ignored with a warning.
@@ -2123,6 +2378,8 @@ class Tracker:
             If True, flatten scalar facet fields into ``artifact_kv`` for fast queries.
         **meta : Any
             Additional key-value pairs to store in the artifact's flexible `meta` field.
+            ``recovery_roots`` is normalized to an ordered list of absolute
+            filesystem roots when provided.
 
         Returns
         -------
@@ -2402,8 +2659,9 @@ class Tracker:
         key : Optional[str], optional
             A semantic, human-readable name for the artifact.
         content_hash : Optional[str], optional
-            Precomputed content hash to use for the artifact instead of hashing
-            the path on disk.
+            Precomputed artifact fingerprint to use instead of hashing the path
+            on disk. When provided, Consist stores it on the canonical public
+            fingerprint field, ``artifact.hash``.
         force_hash_override : bool, default False
             If True, overwrite an existing artifact hash when it differs from
             `content_hash`. By default, mismatched overrides are ignored with a warning.
@@ -2460,8 +2718,9 @@ class Tracker:
         key : Optional[str], optional
             A semantic, human-readable name for the artifact.
         content_hash : Optional[str], optional
-            Precomputed content hash to use for the artifact instead of hashing
-            the path on disk.
+            Precomputed artifact fingerprint to use instead of hashing the path
+            on disk. When provided, Consist stores it on the canonical public
+            fingerprint field, ``artifact.hash``.
         force_hash_override : bool, default False
             If True, overwrite an existing artifact hash when it differs from
             `content_hash`. By default, mismatched overrides are ignored with a warning.
@@ -2533,6 +2792,8 @@ class Tracker:
         table_filter: Optional[Union[Callable[[str], bool], List[str]]] = None,
         hash_tables: Literal["always", "if_unchanged", "never"] = "if_unchanged",
         table_hash_chunk_rows: Optional[int] = None,
+        child_specs: Optional[Mapping[str, H5ChildSpec]] = None,
+        child_selection: H5ChildSelectionMode = "all",
         **meta: Any,
     ) -> Tuple[Artifact, List[Artifact]]:
         """
@@ -2563,6 +2824,12 @@ class Tracker:
             skips hashing when a table appears unchanged based on lightweight checks.
         table_hash_chunk_rows : Optional[int], optional
             Row chunk size to use when hashing large tables.
+        child_specs : Optional[Mapping[str, H5ChildSpec]], optional
+            Optional per-dataset semantic customization keyed by HDF5 dataset path.
+            Keys may be written with or without a leading ``/``.
+        child_selection : {"all", "include_only"}, default "all"
+            Whether all discovered datasets are eligible for logging or only the
+            dataset paths named in ``child_specs``.
         **meta : Any
             Additional metadata for the container artifact.
 
@@ -2608,6 +2875,8 @@ class Tracker:
             table_filter=table_filter,
             hash_tables=hash_tables,
             table_hash_chunk_rows=table_hash_chunk_rows,
+            child_specs=child_specs,
+            child_selection=child_selection,
             **meta,
         )
 
@@ -2623,6 +2892,10 @@ class Tracker:
         table_hash_chunk_rows: Optional[int] = None,
         profile_file_schema: bool | Literal["if_changed"] = False,
         file_schema_sample_rows: Optional[int] = None,
+        description: Optional[str] = None,
+        facet: Optional[FacetLike] = None,
+        facet_schema_version: Optional[Union[str, int]] = None,
+        facet_index: bool = False,
         **meta: Any,
     ) -> Artifact:
         """
@@ -2651,6 +2924,14 @@ class Tracker:
             for legacy rows).
         file_schema_sample_rows : Optional[int], optional
             Number of rows to sample when profiling schema.
+        description : Optional[str], optional
+            Optional description stored in the child artifact metadata.
+        facet : Optional[FacetLike], optional
+            Optional artifact-level facet payload for this child artifact.
+        facet_schema_version : Optional[Union[str, int]], optional
+            Optional facet schema version.
+        facet_index : bool, default False
+            Whether to index scalar facet fields for querying.
         **meta : Any
             Additional metadata to store on the artifact.
 
@@ -2669,6 +2950,10 @@ class Tracker:
             table_hash_chunk_rows=table_hash_chunk_rows,
             profile_file_schema=profile_file_schema,
             file_schema_sample_rows=file_schema_sample_rows,
+            description=description,
+            facet=facet,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
             **meta,
         )
 
@@ -2920,18 +3205,7 @@ class Tracker:
     def _adapter_accepts_options(
         self, adapter: ConfigAdapter, method_name: str
     ) -> bool:
-        method = getattr(adapter, method_name, None)
-        if method is None:
-            return False
-        try:
-            signature = inspect.signature(method)
-        except (TypeError, ValueError):
-            return False
-        if "options" in signature.parameters:
-            return True
-        return any(
-            param.kind == param.VAR_KEYWORD for param in signature.parameters.values()
-        )
+        return self._config_plan_service._adapter_accepts_options(adapter, method_name)
 
     def _discover_config(
         self,
@@ -2940,11 +3214,11 @@ class Tracker:
         strict: bool,
         options: Optional[ConfigAdapterOptions],
     ) -> CanonicalConfig:
-        kwargs: dict[str, Any] = {}
-        if options is not None and self._adapter_accepts_options(adapter, "discover"):
-            kwargs["options"] = options
-        return adapter.discover(
-            config_dir_paths, identity=self.identity, strict=strict, **kwargs
+        return self._config_plan_service._discover_config(
+            adapter,
+            config_dir_paths,
+            strict,
+            options,
         )
 
     def _canonicalize_config(
@@ -2958,18 +3232,14 @@ class Tracker:
         plan_only: bool,
         options: Optional[ConfigAdapterOptions],
     ) -> CanonicalizationResult:
-        kwargs: dict[str, Any] = {}
-        if options is not None and self._adapter_accepts_options(
-            adapter, "canonicalize"
-        ):
-            kwargs["options"] = options
-        return adapter.canonicalize(
+        return self._config_plan_service._canonicalize_config(
+            adapter,
             canonical,
             run=run,
             tracker=tracker,
             strict=strict,
             plan_only=plan_only,
-            **kwargs,
+            options=options,
         )
 
     def canonicalize_config(
@@ -3011,67 +3281,16 @@ class Tracker:
         ConfigContribution
             Structured summary of logged artifacts and ingestables.
         """
-        if run is not None and run_id is not None:
-            raise ValueError("Provide either run= or run_id=, not both.")
-        if options is not None and (strict is not False or ingest is not True):
-            raise ValueError(
-                "When options= is provided, do not pass strict= or ingest=."
-            )
-        if options is not None:
-            strict = options.strict
-            ingest = options.ingest
-
-        target_run = run
-        if target_run is None and run_id is not None:
-            if self.current_consist and self.current_consist.run.id == run_id:
-                target_run = self.current_consist.run
-            else:
-                raise RuntimeError(
-                    "canonicalize_config requires an active run matching run_id=."
-                )
-        if target_run is None and self.current_consist:
-            target_run = self.current_consist.run
-        if target_run is None:
-            raise RuntimeError("canonicalize_config requires an active run or run=.")
-
-        config_dir_paths = [Path(p).resolve() for p in config_dirs]
-        canonical = self._discover_config(adapter, config_dir_paths, strict, options)
-        result = self._canonicalize_config(
+        return self._config_plan_service.canonicalize_config(
             adapter,
-            canonical,
-            run=target_run,
-            tracker=self,
+            config_dirs,
+            run=run,
+            run_id=run_id,
             strict=strict,
-            plan_only=False,
-            options=options,
-        )
-
-        contribution = ConfigContribution(
-            identity_hash=canonical.content_hash,
-            adapter_version=getattr(adapter, "adapter_version", None),
-            artifacts=result.artifacts,
-            ingestables=result.ingestables,
-            meta={
-                "adapter": adapter.model_name,
-                "config_dirs": [str(p) for p in config_dir_paths],
-            },
-        )
-
-        self._apply_config_contribution(
-            contribution,
-            run=target_run,
             ingest=ingest,
             profile_schema=profile_schema,
+            options=options,
         )
-
-        if target_run.meta is None:
-            target_run.meta = {}
-        target_run.meta["config_bundle_hash"] = canonical.content_hash
-        target_run.meta["config_adapter"] = adapter.model_name
-        if contribution.adapter_version is not None:
-            target_run.meta["config_adapter_version"] = contribution.adapter_version
-
-        return contribution
 
     def prepare_config(
         self,
@@ -3115,52 +3334,17 @@ class Tracker:
         ConfigPlan
             Pre-run config plan containing artifacts and ingestables.
         """
-        if options is not None and strict is not False:
-            raise ValueError("When options= is provided, do not pass strict=.")
-        if options is not None:
-            strict = options.strict
-        config_dir_paths = [Path(p).resolve() for p in config_dirs]
-        canonical = self._discover_config(adapter, config_dir_paths, strict, options)
-        result = self._canonicalize_config(
+        return self._config_plan_service.prepare_config(
             adapter,
-            canonical,
-            run=None,
-            tracker=None,
+            config_dirs,
             strict=strict,
-            plan_only=True,
             options=options,
-        )
-        facet_data = None
-        if facet_spec is not None:
-            if hasattr(adapter, "build_facet"):
-                facet_data = adapter.build_facet(canonical, facet_spec=facet_spec)
-                if facet_data is not None:
-                    facet_data = self.identity.normalize_json(facet_data)
-            else:
-                raise ValueError(
-                    "facet_spec provided but adapter does not support build_facet()."
-                )
-
-        plan = ConfigPlan(
-            adapter_name=adapter.model_name,
-            adapter_version=getattr(adapter, "adapter_version", None),
-            canonical=canonical,
-            artifacts=result.artifacts,
-            ingestables=result.ingestables,
-            facet=facet_data,
+            validate_only=validate_only,
+            facet_spec=facet_spec,
             facet_schema_name=facet_schema_name,
             facet_schema_version=facet_schema_version,
             facet_index=facet_index,
-            meta={
-                "adapter": adapter.model_name,
-                "config_dirs": [str(p) for p in config_dir_paths],
-            },
-            adapter=adapter,
         )
-        if validate_only:
-            diagnostics = validate_config_plan(plan)
-            return replace(plan, diagnostics=diagnostics)
-        return plan
 
     def prepare_config_resolver(
         self,
@@ -3191,72 +3375,18 @@ class Tracker:
         The returned callable is metadata-safe (pre-run) and delegates to
         `prepare_config(...)`.
         """
-        if (config_dirs is None) == (config_dirs_from is None):
-            raise ValueError(
-                "prepare_config_resolver requires exactly one of "
-                "config_dirs= or config_dirs_from=."
-            )
-
-        static_dirs = tuple(config_dirs) if config_dirs is not None else None
-
-        def _resolve_runtime_path(ctx: "StepContext", path: str) -> object:
-            parts = [part for part in path.split(".") if part]
-            if not parts:
-                raise ValueError(
-                    "config_dirs_from path must be non-empty (e.g., "
-                    "'settings.config_dirs')."
-                )
-            value: object = ctx.require_runtime(parts[0])
-            for part in parts[1:]:
-                if isinstance(value, MappingABC):
-                    mapping_value = cast(Mapping[str, object], value)
-                    if part not in mapping_value:
-                        raise ValueError(
-                            f"Missing runtime mapping key {part!r} while resolving "
-                            f"config_dirs_from={path!r}."
-                        )
-                    value = mapping_value[part]
-                    continue
-                if not hasattr(value, part):
-                    raise ValueError(
-                        f"Missing runtime attribute {part!r} while resolving "
-                        f"config_dirs_from={path!r}."
-                    )
-                value = getattr(value, part)
-            return value
-
-        def _resolve_dirs(ctx: "StepContext") -> Iterable[Union[str, Path]]:
-            if static_dirs is not None:
-                return static_dirs
-            source = config_dirs_from
-            if isinstance(source, str):
-                candidate = _resolve_runtime_path(ctx, source)
-            else:
-                source_from_ctx = cast(
-                    Callable[["StepContext"], Iterable[Union[str, Path]]], source
-                )
-                candidate = source_from_ctx(ctx)
-            if isinstance(candidate, (str, Path)):
-                raise ValueError(
-                    "Resolved config_dirs must be an iterable of paths, not a single "
-                    f"value: {candidate!r}."
-                )
-            return cast(Iterable[Union[str, Path]], candidate)
-
-        def _resolver(ctx: "StepContext") -> ConfigPlan:
-            return self.prepare_config(
-                adapter=adapter,
-                config_dirs=_resolve_dirs(ctx),
-                strict=strict,
-                options=options,
-                validate_only=validate_only,
-                facet_spec=facet_spec,
-                facet_schema_name=facet_schema_name,
-                facet_schema_version=facet_schema_version,
-                facet_index=facet_index,
-            )
-
-        return _resolver
+        return self._config_plan_service.prepare_config_resolver(
+            adapter,
+            config_dirs=config_dirs,
+            config_dirs_from=config_dirs_from,
+            strict=strict,
+            options=options,
+            validate_only=validate_only,
+            facet_spec=facet_spec,
+            facet_schema_name=facet_schema_name,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
+        )
 
     def apply_config_plan(
         self,
@@ -3291,87 +3421,17 @@ class Tracker:
         ConfigContribution
             Structured summary of logged artifacts and ingestables.
         """
-        if options is not None and ingest is not True:
-            raise ValueError("When options= is provided, do not pass ingest=.")
-        if options is not None:
-            ingest = options.ingest
-
-        target_run = run
-        if target_run is None and self.current_consist:
-            target_run = self.current_consist.run
-        if target_run is None:
-            raise RuntimeError("apply_config_plan requires an active run or run=.")
-
-        artifacts = list(plan.artifacts)
-        adapter_ref = adapter or plan.adapter
-        if adapter_ref is not None and (options is None or options.bundle):
-            bundle_artifact = getattr(adapter_ref, "bundle_artifact", None)
-            if callable(bundle_artifact):
-                bundle_spec = bundle_artifact(
-                    plan.canonical, run=target_run, tracker=self
-                )
-                if bundle_spec is not None:
-                    artifacts.append(bundle_spec)
-
-        contribution = ConfigContribution(
-            identity_hash=plan.identity_hash,
-            adapter_version=plan.adapter_version,
-            artifacts=artifacts,
-            ingestables=plan.ingestables,
-            facet=plan.facet,
-            facet_schema_name=plan.facet_schema_name,
-            facet_schema_version=plan.facet_schema_version,
-            meta=dict(plan.meta or {}),
-        )
-
-        self._apply_config_contribution(
-            contribution,
-            run=target_run,
+        return self._config_plan_service.apply_config_plan(
+            plan,
+            run=run,
             ingest=ingest,
             profile_schema=profile_schema,
+            adapter=adapter,
+            options=options,
         )
 
-        if target_run.meta is None:
-            target_run.meta = {}
-        target_run.meta["config_bundle_hash"] = plan.identity_hash
-        target_run.meta["config_adapter"] = plan.adapter_name
-        if plan.adapter_version is not None:
-            target_run.meta["config_adapter_version"] = plan.adapter_version
-
-        if plan.facet is not None:
-            facet_dict = plan.facet
-            if self.current_consist is not None:
-                self.current_consist.facet = facet_dict
-            schema_name = (
-                plan.facet_schema_name
-                or self.config_facets.infer_schema_name(None, facet_dict)
-            )
-            self.config_facets.persist_facet(
-                run=target_run,
-                model=target_run.model_name,
-                facet_dict=facet_dict,
-                schema_name=schema_name,
-                schema_version=plan.facet_schema_version,
-                index_kv=plan.facet_index if plan.facet_index is not None else True,
-            )
-
-        return contribution
-
     def identity_from_config_plan(self, plan: ConfigPlan) -> str:
-        """
-        Return the identity hash derived from a config plan.
-
-        Parameters
-        ----------
-        plan : ConfigPlan
-            Config plan produced by `prepare_config`.
-
-        Returns
-        -------
-        str
-            Stable hash representing the canonical config content.
-        """
-        return plan.identity_hash
+        return self._config_plan_service.identity_from_config_plan(plan)
 
     def _apply_config_contribution(
         self,
@@ -3381,82 +3441,21 @@ class Tracker:
         ingest: bool,
         profile_schema: bool,
     ) -> Dict[str, Artifact]:
-        artifacts_by_key: Dict[str, Artifact] = {}
-        with self.persistence.batch_artifact_writes():
-            for spec in contribution.artifacts:
-                art = self.log_artifact(
-                    spec.path,
-                    key=spec.key,
-                    direction=spec.direction,
-                    **spec.meta,
-                )
-                artifacts_by_key[spec.key] = art
-
-        if ingest:
-            for spec in contribution.ingestables:
-                source_key = spec.source
-                artifact = (
-                    artifacts_by_key.get(source_key)
-                    if source_key
-                    else next(iter(artifacts_by_key.values()), None)
-                )
-                if artifact is None:
-                    logging.warning(
-                        "[Consist] Skipping ingest for %s; no source artifact found.",
-                        spec.table_name,
-                    )
-                    continue
-                if spec.rows is None:
-                    logging.warning(
-                        "[Consist] Skipping ingest for %s; no rows provided.",
-                        spec.table_name,
-                    )
-                    continue
-                if spec.dedupe_on_hash and spec.content_hash:
-                    if self._ingest_cache_hit(spec.table_name, spec.content_hash):
-                        logging.info(
-                            "[Consist] Skipping ingest for %s; cache hit for %s.",
-                            spec.table_name,
-                            spec.content_hash,
-                        )
-                        continue
-                if source_key is None:
-                    logging.warning(
-                        "[Consist] Ingest spec for %s missing source; using %s.",
-                        spec.table_name,
-                        artifact.key,
-                    )
-                rows = spec.materialize_rows(run.id)
-                self.ingest(
-                    artifact,
-                    data=rows,
-                    schema=spec.schema,
-                    run=run,
-                    profile_schema=profile_schema,
-                )
-
-        return artifacts_by_key
+        return self._config_plan_service._apply_config_contribution(
+            contribution,
+            run=run,
+            ingest=ingest,
+            profile_schema=profile_schema,
+        )
 
     def _ingest_cache_hit(self, table_name: str, content_hash: str) -> bool:
-        store = getattr(self, "hot_data_store", None)
-        if store is not None:
-            return store.ingest_cache_hit(table_name, content_hash)
-
-        # Compatibility fallback for legacy/partial tracker stubs.
-        if self.engine is None:
-            return False
-        if not _is_safe_identifier(table_name):
-            return False
-        table_ref = f"{_quote_ident('global_tables')}.{_quote_ident(table_name)}"
-        try:
-            with self.engine.begin() as connection:
-                result = connection.exec_driver_sql(
-                    f"SELECT 1 FROM {table_ref} WHERE content_hash = ? LIMIT 1",
-                    (content_hash,),
-                ).fetchone()
-            return result is not None
-        except Exception:
-            return False
+        config_plan_service = getattr(self, "_config_plan_service", None)
+        if config_plan_service is None:
+            # Compatibility fallback for legacy/partial Tracker stubs that are
+            # constructed via ``Tracker.__new__`` in focused unit tests.
+            config_plan_service = TrackerConfigPlanService(self)
+            self._config_plan_service = config_plan_service
+        return config_plan_service._ingest_cache_hit(table_name, content_hash)
 
     # --- View Factory ---
 
@@ -3805,12 +3804,70 @@ class Tracker:
             The destination path for the materialized artifact, or ``None`` if
             missing and ``on_missing="warn"``.
         """
-        result = materialize_artifacts(
-            tracker=self,
-            items=[(artifact, Path(destination_path))],
+        return self._recovery_service.materialize(
+            artifact,
+            destination_path,
             on_missing=on_missing,
         )
-        return result.get(artifact.key)
+
+    def stage_artifact(
+        self,
+        artifact: Artifact,
+        *,
+        destination: str | Path,
+        mode: Literal["copy", "hardlink", "symlink"] = "copy",
+        overwrite: bool = False,
+        validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
+        allow_external_paths: Optional[bool] = None,
+    ) -> "StagedInput":
+        """
+        Stage one canonical input artifact to an explicit local destination.
+
+        This is the low-level input-side equivalent of output hydration. It
+        does not create a new tracked artifact identity; it returns a detached
+        staged artifact view whose runtime path points at the staged location
+        when successful.
+
+        Prefer ``execution_options=ExecutionOptions(
+        input_materialization="requested", input_paths={...})`` on
+        ``Tracker.run(...)`` when you want the staging side effect to happen as
+        part of a normal run lifecycle.
+        """
+        return self._recovery_service.stage_artifact(
+            artifact,
+            destination=destination,
+            mode=mode,
+            overwrite=overwrite,
+            validate_content_hash=validate_content_hash,
+            allow_external_paths=allow_external_paths,
+        )
+
+    def stage_inputs(
+        self,
+        inputs_by_key: Mapping[str, Artifact],
+        *,
+        destinations_by_key: Mapping[str, str | Path],
+        mode: Literal["copy", "hardlink", "symlink"] = "copy",
+        overwrite: bool = False,
+        validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
+        allow_external_paths: Optional[bool] = None,
+    ) -> "StagedInputsResult":
+        """
+        Stage multiple canonical input artifacts to explicit local destinations.
+
+        This low-level helper is most useful for custom orchestration or
+        preflight setup. Standard workflow code should usually request the same
+        behavior through ``ExecutionOptions`` on ``run(...)`` or
+        ``ScenarioContext.run(...)``.
+        """
+        return self._recovery_service.stage_inputs(
+            inputs_by_key,
+            destinations_by_key=destinations_by_key,
+            mode=mode,
+            overwrite=overwrite,
+            validate_content_hash=validate_content_hash,
+            allow_external_paths=allow_external_paths,
+        )
 
     # --- Retrieval Helpers ---
 
@@ -3820,83 +3877,27 @@ class Tracker:
         *,
         run_id: Optional[str] = None,
     ) -> Optional[Artifact]:
-        """
-        Retrieves an Artifact by semantic key or UUID, optionally scoped to run_id.
-
-        Parameters
-        ----------
-        key_or_id : Union[str, uuid.UUID]
-            The artifact key (e.g., "households") or artifact UUID.
-        run_id : Optional[str], optional
-            If provided, limits results to artifacts linked to this run (as either
-            input or output) via ``run_artifact_link``.
-
-        Returns
-        -------
-        Optional[Artifact]
-            The found artifact, or ``None`` if not found.
-        """
-        if self.db:
-            artifact = self.db.get_artifact(key_or_id, run_id=run_id)
-            if artifact is not None:
-                set_tracker_ref(artifact, self)
-            return artifact
-        return None
+        return self._artifact_queries.get_artifact(key_or_id, run_id=run_id)
 
     def find_artifacts_with_same_content(
         self, artifact: Union[Artifact, str, uuid.UUID]
     ) -> List[Artifact]:
-        """
-        Return artifact occurrences that share the same content identity.
-
-        Parameters
-        ----------
-        artifact : Artifact | str | uuid.UUID
-            Artifact instance or artifact id to resolve.
-
-        Returns
-        -------
-        List[Artifact]
-            Artifacts sharing the same ``content_id``. Returns an empty list when
-            the artifact is unknown, has no content identity, or the database is not
-            configured.
-        """
-        if not self.db:
-            return []
-        target = (
-            artifact if isinstance(artifact, Artifact) else self.get_artifact(artifact)
-        )
-        if target is None or target.content_id is None:
-            return []
-        artifacts = self.db.find_artifacts_by_content_id(target.content_id)
-        for item in artifacts:
-            set_tracker_ref(item, self)
-        return artifacts
+        return self._artifact_queries.find_artifacts_with_same_content(artifact)
 
     def find_runs_producing_same_content(
         self, artifact: Union[Artifact, str, uuid.UUID]
     ) -> List[str]:
-        """
-        Return run ids that produced artifacts with the same content identity.
+        return self._artifact_queries.find_runs_producing_same_content(artifact)
 
-        Parameters
-        ----------
-        artifact : Artifact | str | uuid.UUID
-            Artifact instance or artifact id to resolve.
+    def get_child_artifacts(
+        self, parent: Union[Artifact, str, uuid.UUID]
+    ) -> List[Artifact]:
+        return self._artifact_queries.get_child_artifacts(parent)
 
-        Returns
-        -------
-        List[str]
-            Run ids linked to output artifacts sharing the resolved ``content_id``.
-        """
-        if not self.db:
-            return []
-        target = (
-            artifact if isinstance(artifact, Artifact) else self.get_artifact(artifact)
-        )
-        if target is None or target.content_id is None:
-            return []
-        return self.db.find_runs_producing_content(target.content_id)
+    def get_parent_artifact(
+        self, child: Union[Artifact, str, uuid.UUID]
+    ) -> Optional[Artifact]:
+        return self._artifact_queries.get_parent_artifact(child)
 
     def select_artifact_schema_for_artifact(
         self,
@@ -3905,22 +3906,9 @@ class Tracker:
         source: Optional[SchemaProfileSource] = None,
         strict_source: bool = False,
     ) -> Optional[ArtifactSchemaSelection]:
-        """
-        Resolve schema selection metadata for an artifact.
-
-        Returns selection details (schema_id/source/candidate_count/rule) used for
-        explainability and deterministic source selection in shell UX.
-        """
-        if not self.db:
-            raise ValueError(
-                "Schema selection requires a configured database (db_path)."
-            )
-        artifact_uuid = (
-            uuid.UUID(artifact_id) if isinstance(artifact_id, str) else artifact_id
-        )
-        return self.db.select_artifact_schema_for_artifact(
-            artifact_id=artifact_uuid,
-            prefer_source=source,
+        return self._artifact_queries.select_artifact_schema_for_artifact(
+            artifact_id=artifact_id,
+            source=source,
             strict_source=strict_source,
         )
 
@@ -3931,47 +3919,11 @@ class Tracker:
         table_path: Optional[str] = None,
         array_path: Optional[str] = None,
     ) -> Optional[Artifact]:
-        """
-        Find an artifact by its URI.
-
-        Useful for checking if a specific file has been logged,
-        or for retrieving artifact metadata by path.
-
-        Parameters
-        ----------
-        uri : str
-            The portable URI to search for (e.g., "inputs://households.csv").
-        table_path : Optional[str]
-            Optional table path to match.
-        array_path : Optional[str]
-            Optional array path to match.
-
-        Returns
-        -------
-        Optional[Artifact]
-            The found `Artifact` object, or `None` if no matching artifact is found.
-        """
-        # 1. Check In-Memory Context (Current Run)
-        if self.current_consist:
-            for art in self.current_consist.inputs + self.current_consist.outputs:
-                if art.container_uri != uri:
-                    continue
-                if table_path is not None and art.table_path != table_path:
-                    continue
-                if array_path is not None and art.array_path != array_path:
-                    continue
-                return art
-
-        # 2. Check Database
-        if self.db:
-            artifact = self.db.get_artifact_by_uri(
-                uri, table_path=table_path, array_path=array_path
-            )
-            if artifact is not None:
-                set_tracker_ref(artifact, self)
-            return artifact
-
-        return None
+        return self._artifact_queries.get_artifact_by_uri(
+            uri,
+            table_path=table_path,
+            array_path=array_path,
+        )
 
     def find_artifacts(
         self,
@@ -3981,102 +3933,19 @@ class Tracker:
         key: Optional[str] = None,
         limit: int = 100,
     ) -> List[Artifact]:
-        """
-        Find artifacts by producing/consuming runs and key.
-
-        Parameters
-        ----------
-        creator : Optional[Union[str, Run]]
-            Run ID (or Run) that logged the artifact as an output.
-        consumer : Optional[Union[str, Run]]
-            Run ID (or Run) that logged the artifact as an input.
-        key : Optional[str]
-            Exact artifact key to match.
-        limit : int, default 100
-            Maximum number of artifacts to return.
-
-        Returns
-        -------
-        list
-            Matching artifact records (empty if DB is not configured).
-        """
-        if not self.db:
-            return []
-
-        creator_id = creator.id if isinstance(creator, Run) else creator
-        consumer_id = consumer.id if isinstance(consumer, Run) else consumer
-
-        artifacts = self.db.find_artifacts(
-            creator=creator_id, consumer=consumer_id, key=key, limit=limit
+        return self._artifact_queries.find_artifacts(
+            creator=creator,
+            consumer=consumer,
+            key=key,
+            limit=limit,
         )
-        for artifact in artifacts:
-            set_tracker_ref(artifact, self)
-        return artifacts
 
     @staticmethod
     def _parse_artifact_param_value(raw: str) -> tuple[str, Any]:
-        value = raw.strip()
-        lowered = value.lower()
-        if lowered == "true":
-            return "bool", True
-        if lowered == "false":
-            return "bool", False
-        if lowered == "null":
-            return "null", None
-        try:
-            if "." not in value and "e" not in lowered:
-                return "num", int(value)
-            return "num", float(value)
-        except ValueError:
-            return "str", value
+        return TrackerArtifactQueryService._parse_artifact_param_value(raw)
 
     def _parse_artifact_param_expression(self, expression: str) -> Dict[str, Any]:
-        raw = expression.strip()
-        operator = None
-        for candidate in (">=", "<=", "="):
-            idx = raw.find(candidate)
-            if idx > 0:
-                operator = candidate
-                lhs = raw[:idx].strip()
-                rhs = raw[idx + len(candidate) :].strip()
-                break
-
-        if operator is None:
-            raise ValueError(
-                f"Invalid artifact facet predicate {expression!r}. "
-                "Expected <key>=<value>, <key>>=<value>, or <key><=<value>."
-            )
-        if not lhs:
-            raise ValueError(
-                f"Artifact facet predicate is missing a key: {expression!r}"
-            )
-        if rhs == "":
-            raise ValueError(
-                f"Artifact facet predicate is missing a value: {expression!r}"
-            )
-
-        namespace = None
-        key_path = lhs
-        if "." in lhs:
-            maybe_namespace, remainder = lhs.split(".", 1)
-            if maybe_namespace and remainder:
-                namespace = maybe_namespace
-                key_path = remainder
-
-        value_kind, value = self._parse_artifact_param_value(rhs)
-        if operator in {">=", "<="} and value_kind != "num":
-            raise ValueError(
-                f"Artifact facet predicate {expression!r} uses {operator} with a "
-                "non-numeric value."
-            )
-
-        return {
-            "namespace": namespace,
-            "key_path": key_path,
-            "op": operator,
-            "kind": value_kind,
-            "value": value,
-        }
+        return self._artifact_queries._parse_artifact_param_expression(expression)
 
     def find_artifacts_by_params(
         self,
@@ -4087,28 +3956,13 @@ class Tracker:
         artifact_family_prefix: Optional[str] = None,
         limit: int = 100,
     ) -> List[Artifact]:
-        """
-        Find artifacts by indexed facet predicates and optional prefix filters.
-        """
-        if not self.db:
-            return []
-
-        predicates = (
-            [self._parse_artifact_param_expression(param) for param in params]
-            if params
-            else []
-        )
-
-        artifacts = self.db.find_artifacts_by_facet_params(
-            predicates=predicates,
+        return self._artifact_queries.find_artifacts_by_params(
+            params=params,
             namespace=namespace,
             key_prefix=key_prefix,
             artifact_family_prefix=artifact_family_prefix,
             limit=limit,
         )
-        for artifact in artifacts:
-            set_tracker_ref(artifact, self)
-        return artifacts
 
     def get_artifact_kv(
         self,
@@ -4118,14 +3972,8 @@ class Tracker:
         prefix: Optional[str] = None,
         limit: int = 10_000,
     ):
-        """
-        Retrieve flattened artifact facet KV rows for an artifact.
-        """
-        if not self.db:
-            return []
-        artifact_id = artifact.id if isinstance(artifact, Artifact) else artifact
-        return self.db.get_artifact_kv(
-            artifact_id=artifact_id,
+        return self._artifact_queries.get_artifact_kv(
+            artifact,
             namespace=namespace,
             prefix=prefix,
             limit=limit,
@@ -4377,156 +4225,25 @@ class Tracker:
         )
 
     def resolve_historical_path(self, artifact: Artifact, run: Run) -> Path:
-        """
-        Resolve the on-disk path for an artifact from a prior run.
-
-        Parameters
-        ----------
-        artifact : Artifact
-            The artifact whose historical location should be resolved.
-        run : Run
-            The run that originally produced/consumed the artifact.
-
-        Returns
-        -------
-        Path
-            The resolved filesystem path for the artifact in its original run
-            workspace.
-        """
-        if not run:
-            return Path(self.resolve_uri(artifact.container_uri))
-
-        old_dir = run.meta.get("_physical_run_dir")
-
-        # Delegate the path math to the FS service
-        path_str = self.fs.resolve_historical_path(artifact.container_uri, old_dir)
-        return Path(path_str)
+        return self._history_service.resolve_historical_path(artifact, run)
 
     def get_run(self, run_id: str) -> Optional[Run]:
-        """
-        Retrieve a single Run by its ID from the database.
-
-        Parameters
-        ----------
-        run_id : str
-            The unique identifier of the run to retrieve.
-
-        Returns
-        -------
-        Optional[Run]
-            The Run object if found, or ``None`` if missing or no database is
-            configured.
-        """
-        if self.db:
-            return self.db.get_run(run_id)
-        return None
+        return self._history_service.get_run(run_id)
 
     def snapshot_db(
         self, dest_path: str | os.PathLike[str], checkpoint: bool = True
     ) -> Path:
-        """
-        Snapshot the configured provenance database to a destination path.
-
-        Parameters
-        ----------
-        dest_path : str | os.PathLike[str]
-            Destination path for the snapshot database file.
-        checkpoint : bool, default True
-            If True, checkpoint the source DB before copying.
-
-        Returns
-        -------
-        Path
-            Snapshot database path.
-        """
-        if self.db is None:
-            raise RuntimeError("Database snapshot requires a configured database.")
-
-        active_run_id = self.current_consist.run.id if self.current_consist else None
-        last_completed_run_id: Optional[str] = None
-        if (
-            self._last_consist is not None
-            and self._last_consist.run.status == "completed"
-        ):
-            last_completed_run_id = self._last_consist.run.id
-        else:
-            completed_runs = self.db.find_runs(status="completed", limit=1)
-            if completed_runs:
-                last_completed_run_id = completed_runs[0].id
-
-        return self.db.snapshot_to(
-            dest_path=dest_path,
-            checkpoint=checkpoint,
-            metadata={
-                "run_id": active_run_id,
-                "last_completed_run_id": last_completed_run_id,
-                "cache_epoch": self._cache_epoch,
-            },
-        )
+        return self._history_service.snapshot_db(dest_path, checkpoint=checkpoint)
 
     def get_run_record(
         self, run_id: str, *, allow_missing: bool = False
     ) -> Optional[ConsistRecord]:
-        """
-        Load the full run record snapshot from disk.
-
-        This reads the JSON snapshot produced at run time (``consist_runs/<id>.json``)
-        and returns the parsed ``ConsistRecord``.
-
-        Parameters
-        ----------
-        run_id : str
-            Run identifier.
-        allow_missing : bool, default False
-            Return ``None`` if the snapshot file is missing or unreadable instead
-            of raising.
-
-        Returns
-        -------
-        Optional[ConsistRecord]
-            The parsed run record, or ``None`` if missing and ``allow_missing``.
-        """
-        run = self.get_run(run_id) if self.db else None
-        snapshot_path = self._resolve_run_snapshot_path(run_id, run)
-        if not snapshot_path.exists():
-            if allow_missing:
-                return None
-            raise FileNotFoundError(
-                f"Run snapshot not found at {snapshot_path!s} for run_id={run_id}."
-            )
-        try:
-            return ConsistRecord.model_validate_json(
-                snapshot_path.read_text(encoding="utf-8")
-            )
-        except Exception as exc:
-            if allow_missing:
-                return None
-            raise ValueError(
-                f"Failed to parse run snapshot at {snapshot_path!s} for run_id={run_id}."
-            ) from exc
+        return self._history_service.get_run_record(run_id, allow_missing=allow_missing)
 
     def get_run_config(
         self, run_id: str, *, allow_missing: bool = False
     ) -> Optional[Dict[str, Any]]:
-        """
-        Load the full config snapshot for a historical run.
-
-        Parameters
-        ----------
-        run_id : str
-            Run identifier.
-        allow_missing : bool, default False
-            Return ``None`` if the snapshot is missing instead of raising.
-
-        Returns
-        -------
-        Optional[Dict[str, Any]]
-            The stored config payload, or ``None`` if missing and ``allow_missing``.
-        """
-        record = self.get_run_record(run_id, allow_missing=allow_missing)
-        if record is None:
-            return None
-        return record.config
+        return self._history_service.get_run_config(run_id, allow_missing=allow_missing)
 
     def materialize_run_outputs(
         self,
@@ -4578,16 +4295,14 @@ class Tracker:
         MaterializationResult
             Aggregate summary of the selected outputs.
         """
-        return fold_hydrated_run_outputs_result(
-            self.hydrate_run_outputs(
-                run_id,
-                target_root=target_root,
-                source_root=source_root,
-                keys=keys,
-                preserve_existing=preserve_existing,
-                on_missing=on_missing,
-                db_fallback=db_fallback,
-            )
+        return self._recovery_service.materialize_run_outputs(
+            run_id,
+            target_root=target_root,
+            source_root=source_root,
+            keys=keys,
+            preserve_existing=preserve_existing,
+            on_missing=on_missing,
+            db_fallback=db_fallback,
         )
 
     def hydrate_run_outputs(
@@ -4682,53 +4397,11 @@ class Tracker:
         >>> persons.artifact.as_path()
         PosixPath('.../restored/.../persons.parquet')
         """
-        normalized_keys = normalize_materialize_output_keys(
-            keys,
-            caller="hydrate_run_outputs",
-        )
-        validate_materialize_option(
-            name="on_missing",
-            value=on_missing,
-            allowed=_VALID_MATERIALIZE_ON_MISSING,
-        )
-        validate_materialize_option(
-            name="db_fallback",
-            value=db_fallback,
-            allowed=_VALID_MATERIALIZE_DB_FALLBACK,
-        )
-
-        if self.db is None:
-            raise RuntimeError(
-                "Cannot materialize run outputs: tracker has no database configured."
-            )
-
-        run = self.get_run(run_id)
-        if run is None:
-            raise KeyError(f"Run {run_id!r} was not found.")
-
-        from consist.core import materialize as materialize_core
-
-        destination_root = Path(target_root).resolve()
-        allowed_roots = materialize_core.build_allowed_materialization_roots(
-            run_dir=self.run_dir,
-            mounts=self.mounts,
-            allow_external_paths=self.allow_external_paths,
-        )
-        materialize_core.validate_allowed_materialization_destination(
-            destination_root, allowed_roots
-        )
-
-        source_root_override = (
-            Path(source_root).resolve() if source_root is not None else None
-        )
-
-        return hydrate_run_outputs_core(
-            tracker=self,
-            run=run,
-            target_root=destination_root,
-            source_root=source_root_override,
-            keys=normalized_keys,
-            allowed_base=allowed_roots,
+        return self._recovery_service.hydrate_run_outputs(
+            run_id,
+            target_root=target_root,
+            source_root=source_root,
+            keys=keys,
             preserve_existing=preserve_existing,
             on_missing=on_missing,
             db_fallback=db_fallback,
@@ -4742,146 +4415,18 @@ class Tracker:
         role: str = "bundle",
         allow_missing: bool = False,
     ) -> Path | None:
-        """
-        Resolve a config artifact path for a run by role.
-
-        This helper scans run-linked artifacts and selects those with
-        ``artifact.meta["config_role"] == role``. When ``adapter`` is provided,
-        matching uses existing adapter identity conventions:
-        ``run.meta["config_adapter"]`` and/or artifact metadata
-        (``artifact.meta["config_adapter"]`` or ``artifact.meta["adapter"]``).
-
-        If multiple artifacts match, selection is deterministic: sort by
-        ``(artifact.key, artifact.created_at, artifact.id)`` and return the first.
-        """
-        artifacts = self.get_artifacts_for_run(run_id)
-        input_artifacts = list(artifacts.inputs.values())
-
-        matching: list[Artifact] = []
-        for artifact in input_artifacts:
-            meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-            if meta.get("config_role") == role:
-                matching.append(artifact)
-
-        run = self.get_run(run_id)
-        run_adapter: str | None = None
-        if run is not None and isinstance(run.meta, dict):
-            candidate = run.meta.get("config_adapter")
-            if isinstance(candidate, str) and candidate:
-                run_adapter = candidate
-
-        if adapter is not None:
-            if run_adapter is not None and run_adapter != adapter:
-                matching = []
-            else:
-                filtered: list[Artifact] = []
-                for artifact in matching:
-                    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-                    artifact_adapters: list[str] = []
-                    for key in ("config_adapter", "adapter"):
-                        value = meta.get(key)
-                        if isinstance(value, str) and value:
-                            artifact_adapters.append(value)
-                    if artifact_adapters:
-                        if adapter in artifact_adapters:
-                            filtered.append(artifact)
-                    elif run_adapter == adapter:
-                        filtered.append(artifact)
-                matching = filtered
-
-        if matching:
-            selected = sorted(
-                matching,
-                key=lambda artifact: (
-                    artifact.key,
-                    artifact.created_at.isoformat() if artifact.created_at else "",
-                    str(artifact.id),
-                ),
-            )[0]
-            resolved = Path(self.resolve_uri(selected.container_uri))
-            if resolved.exists():
-                return resolved
-
-            if allow_missing:
-                return None
-            raise FileNotFoundError(
-                "Config artifact was found but the resolved file is missing for "
-                f"run_id={run_id!r}, role={role!r}, key={selected.key!r}: {resolved!s}. "
-                "Check path mounts or regenerate config artifacts for this run."
-            )
-
-        if allow_missing:
-            return None
-        adapter_hint = f", adapter={adapter!r}" if adapter is not None else ""
-        raise FileNotFoundError(
-            "No config artifact found for "
-            f"run_id={run_id!r}, role={role!r}{adapter_hint}. "
-            "Ensure config artifacts were logged with meta['config_role'] and, when "
-            "adapter filtering is requested, run.meta['config_adapter'] and/or "
-            "artifact.meta['config_adapter'|'adapter'] match."
+        return self._history_service.get_config_bundle(
+            run_id,
+            adapter=adapter,
+            role=role,
+            allow_missing=allow_missing,
         )
 
     def get_artifacts_for_run(self, run_id: str) -> RunArtifacts:
-        """
-        Retrieve inputs and outputs for a specific run, organized by key.
-
-        Parameters
-        ----------
-        run_id : str
-            Run identifier.
-
-        Returns
-        -------
-        RunArtifacts
-            Container with ``inputs`` and ``outputs`` dicts. Returns empty
-            collections if the database is not configured.
-        """
-        if not self.db:
-            return RunArtifacts()
-
-        current_run_id = self.current_consist.run.id if self.current_consist else None
-        if run_id != current_run_id:
-            cached = self._run_artifacts_cache.get(run_id)
-            if cached is not None:
-                return cached
-
-        # Get raw list [(Artifact, "input"), (Artifact, "output")]
-        raw_list = self.db.get_artifacts_for_run(run_id)
-
-        inputs = {}
-        outputs = {}
-
-        for artifact, direction in raw_list:
-            if direction == "input":
-                inputs[artifact.key] = artifact
-            elif direction == "output":
-                outputs[artifact.key] = artifact
-
-        artifacts = RunArtifacts(inputs=inputs, outputs=outputs)
-        for artifact in itertools.chain(inputs.values(), outputs.values()):
-            set_tracker_ref(artifact, self)
-        if run_id != current_run_id:
-            self._run_artifacts_cache[run_id] = artifacts
-            if len(self._run_artifacts_cache) > self._run_artifacts_cache_max_entries:
-                self._run_artifacts_cache.pop(next(iter(self._run_artifacts_cache)))
-        return artifacts
+        return self._history_service.get_artifacts_for_run(run_id)
 
     def get_run_outputs(self, run_id: str) -> Dict[str, Artifact]:
-        """
-        Return output artifacts for a run, keyed by artifact key.
-
-        Parameters
-        ----------
-        run_id : str
-            Run identifier.
-
-        Returns
-        -------
-        Dict[str, Artifact]
-            Output artifacts keyed by artifact key. Returns an empty dict if the
-            database is not configured or the run is unknown.
-        """
-        return self.get_artifacts_for_run(run_id).outputs
+        return self._history_service.get_run_outputs(run_id)
 
     def get_run_result(
         self,
@@ -4890,97 +4435,14 @@ class Tracker:
         keys: Optional[Iterable[str]] = None,
         validate: Literal["lazy", "strict", "none"] = "lazy",
     ) -> RunResult:
-        """
-        Build a ``RunResult`` view for a historical run.
-
-        Parameters
-        ----------
-        run_id : str
-            Run identifier.
-        keys : Optional[Iterable[str]], optional
-            Optional subset of output keys to include. When provided, every key
-            must exist in the historical run outputs.
-        validate : {"lazy", "strict", "none"}, default "lazy"
-            Output validation policy.
-            - ``lazy`` / ``none``: no filesystem existence checks
-            - ``strict``: require non-ingested output files to exist on disk
-
-        Returns
-        -------
-        RunResult
-            Historical run metadata plus selected outputs.
-
-        Raises
-        ------
-        KeyError
-            If ``run_id`` is unknown or requested ``keys`` are missing.
-        ValueError
-            If ``validate`` is invalid or ``keys`` contain non-string values.
-        FileNotFoundError
-            If ``validate='strict'`` and a selected non-ingested output is missing.
-        """
-        run = self.get_run(run_id)
-        if run is None:
-            raise KeyError(f"Run {run_id!r} was not found.")
-
-        outputs = self.get_run_outputs(run_id)
-
-        selected_outputs: Dict[str, Artifact]
-        if keys is None:
-            selected_outputs = dict(outputs)
-        else:
-            key_list = list(keys)
-            if any(not isinstance(key, str) for key in key_list):
-                raise ValueError("keys must contain only strings.")
-            missing = sorted(key for key in key_list if key not in outputs)
-            if missing:
-                missing_str = ", ".join(repr(key) for key in missing)
-                available = ", ".join(repr(key) for key in sorted(outputs)) or "<none>"
-                raise KeyError(
-                    f"Run {run_id!r} missing requested output keys: {missing_str}. "
-                    f"Available keys: {available}."
-                )
-            selected_outputs = {key: outputs[key] for key in key_list}
-
-        validation_policy = str(validate).lower()
-        if validation_policy not in {"lazy", "strict", "none"}:
-            raise ValueError("validate must be one of: 'lazy', 'strict', 'none'.")
-
-        if validation_policy == "strict":
-            missing_paths: list[str] = []
-            for key, artifact in selected_outputs.items():
-                if artifact.meta.get("is_ingested", False):
-                    continue
-                resolved = Path(self.resolve_uri(artifact.container_uri))
-                if not resolved.exists():
-                    missing_paths.append(f"{key!r} -> {resolved!s}")
-            if missing_paths:
-                details = "; ".join(missing_paths)
-                raise FileNotFoundError(
-                    f"Run {run_id!r} has missing output files: {details}"
-                )
-
-        cache_hit = (
-            bool(run.meta.get("cache_hit")) if isinstance(run.meta, dict) else False
+        return self._history_service.get_run_result(
+            run_id,
+            keys=keys,
+            validate=validate,
         )
-        return RunResult(run=run, outputs=selected_outputs, cache_hit=cache_hit)
 
     def get_run_inputs(self, run_id: str) -> Dict[str, Artifact]:
-        """
-        Return input artifacts for a run, keyed by artifact key.
-
-        Parameters
-        ----------
-        run_id : str
-            Run identifier.
-
-        Returns
-        -------
-        Dict[str, Artifact]
-            Input artifacts keyed by artifact key. Returns an empty dict if the
-            database is not configured or the run is unknown.
-        """
-        return self.get_artifacts_for_run(run_id).inputs
+        return self._history_service.get_run_inputs(run_id)
 
     def get_run_artifact(
         self,
@@ -4989,49 +4451,15 @@ class Tracker:
         key_contains: Optional[str] = None,
         direction: str = "output",
     ) -> Optional[Artifact]:
-        """
-        Convenience helper to fetch a single artifact for a specific run.
-
-        Args:
-            run_id: Run identifier.
-            key: Exact key to match (if present in logged artifacts).
-            key_contains: Optional substring to match when the exact key is unknown.
-            direction: \"output\" (default) or \"input\".
-        """
-        record = self.get_artifacts_for_run(run_id)
-        collection = record.outputs if direction == "output" else record.inputs
-        if key and key in collection:
-            return collection[key]
-        if key_contains:
-            for k, art in collection.items():
-                if key_contains in k:
-                    return art
-        return next(iter(collection.values()), None)
+        return self._history_service.get_run_artifact(
+            run_id,
+            key=key,
+            key_contains=key_contains,
+            direction=direction,
+        )
 
     def load_run_output(self, run_id: str, key: str, **kwargs: Any) -> Any:
-        """
-        Load a specific output artifact from a run by key.
-
-        Parameters
-        ----------
-        run_id : str
-            Run identifier.
-        key : str
-            Output artifact key to load.
-        **kwargs : Any
-            Forwarded to `Tracker.load(...)`.
-
-        Returns
-        -------
-        Any
-            Loaded artifact data.
-        """
-        artifact = self.get_run_artifact(run_id, key=key, direction="output")
-        if artifact is None:
-            raise ValueError(
-                f"No output artifact found for run_id={run_id!r} key={key!r}."
-            )
-        return self.load(artifact, **kwargs)
+        return self._history_service.load_run_output(run_id, key, **kwargs)
 
     def find_matching_run(
         self,
@@ -5041,44 +4469,20 @@ class Tracker:
         *,
         signature: Optional[str] = None,
     ) -> Optional[Run]:
-        """
-        Find a previously completed run that matches the identity hashes.
-
-        Parameters
-        ----------
-        config_hash : str
-            Hash of the canonicalized config for the run.
-        input_hash : str
-            Hash of the run inputs.
-        git_hash : str
-            Git commit hash captured with the run.
-        signature : str | None, optional
-            Composite run signature. When provided, Consist attempts a direct
-            signature lookup first and falls back to the legacy component-hash
-            lookup for compatibility with older rows.
-
-        Returns
-        -------
-        Optional[Run]
-            The matching run, or ``None`` if not found or if no database is configured.
-        """
-        if self.db:
-            if signature:
-                matched = self.db.find_run_by_signature(signature)
-                if matched is not None:
-                    return matched
-            return self.db.find_matching_run(config_hash, input_hash, git_hash)
-        return None
+        return self._history_service.find_matching_run(
+            config_hash,
+            input_hash,
+            git_hash,
+            signature=signature,
+        )
 
     def find_recent_completed_runs_for_model(
         self, model_name: str, *, limit: int = 20
     ) -> list[Run]:
-        """
-        Return recent completed runs for a model, newest first.
-        """
-        if self.db:
-            return self.db.find_recent_completed_runs_for_model(model_name, limit=limit)
-        return []
+        return self._history_service.find_recent_completed_runs_for_model(
+            model_name,
+            limit=limit,
+        )
 
     def get_artifact_lineage(
         self,
@@ -5358,56 +4762,31 @@ class Tracker:
     def history(
         self, limit: int = 10, tags: Optional[List[str]] = None
     ) -> pd.DataFrame:
-        """
-        Return recent runs as a Pandas DataFrame.
-
-        Parameters
-        ----------
-        limit : int, default 10
-            Maximum number of runs to include.
-        tags : Optional[List[str]], optional
-            If provided, filter runs to those containing any of the given tags.
-
-        Returns
-        -------
-        pd.DataFrame
-            A DataFrame of recent runs (empty if DB is not configured).
-        """
-        if self.db:
-            return self.db.get_history(limit, tags)
-        return pd.DataFrame()
+        return self._history_service.history(limit=limit, tags=tags)
 
     def load_input_bundle(self, run_id: str) -> dict[str, Artifact]:
-        """
-        Load a set of input artifacts from a prior "bundle" run by run_id.
+        return self._history_service.load_input_bundle(run_id)
 
-        This is a convenience helper for shared DuckDB bundles where a dedicated
-        run logs all required inputs as outputs. The returned dict can be passed
-        directly to `inputs=[...]` on a new run.
+    def _resolve_cached_artifact_abs_path(self, artifact: Artifact) -> None:
+        if artifact.abs_path:
+            return
+        try:
+            artifact.abs_path = self.resolve_uri(artifact.container_uri)
+        except Exception:
+            return
 
-        Parameters
-        ----------
-        run_id : str
-            The run id that logged the bundle outputs.
-
-        Returns
-        -------
-        dict[str, Artifact]
-            Mapping of artifact key -> Artifact from the bundle run.
-
-        Raises
-        ------
-        ValueError
-            If the run does not exist or has no output artifacts.
-        """
-        run = self.get_run(run_id)
-        if not run:
-            raise ValueError(f"Input bundle run_id={run_id!r} not found.")
-
-        outputs = self.get_artifacts_for_run(run_id).outputs
-        if not outputs:
-            raise ValueError(f"Input bundle run_id={run_id!r} has no output artifacts.")
-        return outputs
+    def _auto_capture_output_artifact(self, f_path: Path) -> Artifact | None:
+        key = f_path.stem
+        try:
+            return self.log_artifact(
+                str(f_path),
+                key=key,
+                direction="output",
+                captured_automatically=True,
+            )
+        except Exception as exc:
+            logging.error("[Consist] Failed to auto-capture %s: %s", f_path, exc)
+            return None
 
     @contextmanager
     def capture_outputs(
@@ -5459,18 +4838,9 @@ class Tracker:
             for f_path, mtime in after_state.items():
                 # Check if file is new or modified
                 if f_path not in before_state or mtime > before_state[f_path]:
-                    try:
-                        key = f_path.stem
-                        # Log it
-                        art = self.log_artifact(
-                            str(f_path),
-                            key=key,
-                            direction="output",
-                            captured_automatically=True,
-                        )
+                    art = self._auto_capture_output_artifact(f_path)
+                    if art is not None:
                         capture_result.artifacts.append(art)
-                    except Exception as e:
-                        logging.error(f"[Consist] Failed to auto-capture {f_path}: {e}")
 
     def log_meta(self, **kwargs: Any) -> None:
         """
@@ -5632,10 +5002,49 @@ class Tracker:
             return None
         artifact = outputs.get(key) if key else next(iter(outputs.values()))
         if artifact:
-            if not artifact.abs_path:
-                try:
-                    artifact.abs_path = self.resolve_uri(artifact.container_uri)
-                except Exception:
-                    pass
+            self._resolve_cached_artifact_abs_path(artifact)
             set_tracker_ref(artifact, self)
         return artifact
+
+
+_TRACKER_WRAPPER_DOCS = {
+    "get_artifact": TrackerArtifactQueryService.get_artifact,
+    "find_artifacts_with_same_content": (
+        TrackerArtifactQueryService.find_artifacts_with_same_content
+    ),
+    "find_runs_producing_same_content": (
+        TrackerArtifactQueryService.find_runs_producing_same_content
+    ),
+    "get_child_artifacts": TrackerArtifactQueryService.get_child_artifacts,
+    "get_parent_artifact": TrackerArtifactQueryService.get_parent_artifact,
+    "select_artifact_schema_for_artifact": (
+        TrackerArtifactQueryService.select_artifact_schema_for_artifact
+    ),
+    "get_artifact_by_uri": TrackerArtifactQueryService.get_artifact_by_uri,
+    "find_artifacts": TrackerArtifactQueryService.find_artifacts,
+    "find_artifacts_by_params": TrackerArtifactQueryService.find_artifacts_by_params,
+    "get_artifact_kv": TrackerArtifactQueryService.get_artifact_kv,
+    "resolve_historical_path": TrackerHistoryService.resolve_historical_path,
+    "get_run": TrackerHistoryService.get_run,
+    "snapshot_db": TrackerHistoryService.snapshot_db,
+    "get_run_record": TrackerHistoryService.get_run_record,
+    "get_run_config": TrackerHistoryService.get_run_config,
+    "get_config_bundle": TrackerHistoryService.get_config_bundle,
+    "get_artifacts_for_run": TrackerHistoryService.get_artifacts_for_run,
+    "get_run_outputs": TrackerHistoryService.get_run_outputs,
+    "get_run_result": TrackerHistoryService.get_run_result,
+    "get_run_inputs": TrackerHistoryService.get_run_inputs,
+    "get_run_artifact": TrackerHistoryService.get_run_artifact,
+    "load_run_output": TrackerHistoryService.load_run_output,
+    "find_matching_run": TrackerHistoryService.find_matching_run,
+    "find_recent_completed_runs_for_model": (
+        TrackerHistoryService.find_recent_completed_runs_for_model
+    ),
+    "history": TrackerHistoryService.history,
+    "load_input_bundle": TrackerHistoryService.load_input_bundle,
+}
+
+for _name, _source in _TRACKER_WRAPPER_DOCS.items():
+    getattr(Tracker, _name).__doc__ = _source.__doc__
+
+del _name, _source

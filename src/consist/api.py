@@ -48,12 +48,6 @@ from consist.core.decorators import (
 )
 from consist.core.drivers import ARRAY_DRIVERS, TABLE_DRIVERS, ArrayInfo, TableInfo
 from consist.core.noop import NoopRunContext, NoopScenarioContext
-from consist.core.materialize_options import (
-    VALID_MATERIALIZE_DB_FALLBACK as _VALID_MATERIALIZE_DB_FALLBACK,
-    VALID_MATERIALIZE_ON_MISSING as _VALID_MATERIALIZE_ON_MISSING,
-    normalize_materialize_output_keys,
-    validate_materialize_option,
-)
 from consist.core.run_options import raise_legacy_policy_kwargs_error
 from consist.core.stores import get_hot_data_db_path
 from consist.core.views import _quote_ident, create_view_model
@@ -77,6 +71,8 @@ if TYPE_CHECKING:
     from consist.core.materialize import (
         HydratedRunOutputsResult,
         MaterializationResult,
+        StagedInput,
+        StagedInputsResult,
     )
     from consist.core.step_context import StepContext
     from consist.runset import RunSet
@@ -268,6 +264,14 @@ def _resolve_tracker(tracker: Optional["Tracker"]) -> "Tracker":
             "  3. Use Tracker directly: my_tracker.run(fn=...)"
         )
     return default
+
+
+def _warn_deprecated_global_wrapper(wrapper: str, replacement: str) -> None:
+    warnings.warn(
+        f"{wrapper} is deprecated; prefer {replacement}.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
 
 @contextmanager
@@ -530,6 +534,10 @@ def start_run(
         consist.log_artifact("data.csv", "input_data")
     ```
     """
+    _warn_deprecated_global_wrapper(
+        "consist.start_run(...)",
+        "tracker.start_run(...)",
+    )
     tr = _resolve_tracker(tracker)
     with tr.start_run(run_id=run_id, model=model, **kwargs) as active:
         yield active
@@ -574,7 +582,10 @@ def run(
     output_policy : Optional[OutputPolicyOptions]
         Grouped output mismatch/missing policy controls.
     execution_options : Optional[ExecutionOptions]
-        Grouped runtime execution controls.
+        Grouped runtime execution controls. For path-bound workflows, this is
+        also where you request local input staging via
+        ``ExecutionOptions(input_binding="paths", input_materialization="requested",
+        input_paths={...})``.
     **kwargs : Any
         Arguments forwarded to `Tracker.run`, including `inputs`, `config`,
         `tags`, and other core run metadata.
@@ -601,6 +612,7 @@ def run(
         api_name="consist.run",
         kwargs=kwargs,
     )
+    _warn_deprecated_global_wrapper("consist.run(...)", "tracker.run(...)")
     tr = _resolve_tracker(tracker)
     return tr.run(
         fn=fn,
@@ -831,6 +843,10 @@ def trace(
     Tracker
         The active tracker instance.
     """
+    _warn_deprecated_global_wrapper(
+        "consist.trace(...)",
+        "tracker.trace(...) or scenario.trace(...)",
+    )
     tr = _resolve_tracker(tracker)
     with tr.trace(
         name=name,
@@ -1037,8 +1053,9 @@ def get_run_result(
     RunResult
         Historical run metadata plus selected outputs.
     """
-    tr = _resolve_tracker(tracker)
-    return tr.get_run_result(run_id, keys=keys, validate=validate)
+    return _resolve_tracker(tracker).get_run_result(
+        run_id, keys=keys, validate=validate
+    )
 
 
 def materialize_run_outputs(
@@ -1096,27 +1113,11 @@ def materialize_run_outputs(
     >>> restored.materialized
     {'persons': '.../restored/.../persons.parquet'}
     """
-    normalized_keys = normalize_materialize_output_keys(
-        keys,
-        caller="materialize_run_outputs",
-    )
-    validate_materialize_option(
-        name="on_missing",
-        value=on_missing,
-        allowed=_VALID_MATERIALIZE_ON_MISSING,
-    )
-    validate_materialize_option(
-        name="db_fallback",
-        value=db_fallback,
-        allowed=_VALID_MATERIALIZE_DB_FALLBACK,
-    )
-
-    tr = _resolve_tracker(tracker)
-    return tr.materialize_run_outputs(
+    return _resolve_tracker(tracker).materialize_run_outputs(
         run_id,
         target_root=target_root,
         source_root=source_root,
-        keys=normalized_keys,
+        keys=keys,
         preserve_existing=preserve_existing,
         on_missing=on_missing,
         db_fallback=db_fallback,
@@ -1164,7 +1165,9 @@ def hydrate_run_outputs(
     Returns
     -------
     HydratedRunOutputsResult
-        Keyed hydration outcome for the selected run outputs.
+        Keyed hydration outcome for the selected run outputs. Each detached
+        returned artifact preserves the canonical fingerprint surface on
+        ``artifact.hash``.
 
     Examples
     --------
@@ -1178,30 +1181,183 @@ def hydrate_run_outputs(
     >>> hydrated["persons"].artifact.as_path()
     PosixPath('.../restored/.../persons.parquet')
     """
-    normalized_keys = normalize_materialize_output_keys(
-        keys,
-        caller="hydrate_run_outputs",
-    )
-    validate_materialize_option(
-        name="on_missing",
-        value=on_missing,
-        allowed=_VALID_MATERIALIZE_ON_MISSING,
-    )
-    validate_materialize_option(
-        name="db_fallback",
-        value=db_fallback,
-        allowed=_VALID_MATERIALIZE_DB_FALLBACK,
-    )
-
-    tr = _resolve_tracker(tracker)
-    return tr.hydrate_run_outputs(
+    return _resolve_tracker(tracker).hydrate_run_outputs(
         run_id,
         target_root=target_root,
         source_root=source_root,
-        keys=normalized_keys,
+        keys=keys,
         preserve_existing=preserve_existing,
         on_missing=on_missing,
         db_fallback=db_fallback,
+    )
+
+
+def stage_artifact(
+    artifact: Artifact,
+    *,
+    destination: str | Path,
+    overwrite: bool = False,
+    mode: Literal["copy", "hardlink", "symlink"] = "copy",
+    validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
+    allow_external_paths: Optional[bool] = None,
+    tracker: Optional["Tracker"] = None,
+) -> "StagedInput":
+    """
+    Stage a single artifact to a requested filesystem destination.
+
+    This is the low-level convenience wrapper for canonical input staging. It
+    copies the artifact bytes into the requested destination, preserving
+    existing identical content when possible and returning a detached staged
+    artifact view for immediate reuse.
+
+    Prefer ``ExecutionOptions(input_materialization="requested",
+    input_paths={...})`` on ``run(...)`` or ``ScenarioContext.run(...)`` when
+    the goal is to prepare declared inputs for one execution. Use this helper
+    when you need the same staging behavior outside a run lifecycle.
+    """
+    return _resolve_tracker(tracker).stage_artifact(
+        artifact,
+        destination=destination,
+        mode=mode,
+        overwrite=overwrite,
+        validate_content_hash=validate_content_hash,
+        allow_external_paths=allow_external_paths,
+    )
+
+
+def stage_inputs(
+    inputs_by_key: Mapping[str, Artifact],
+    *,
+    destinations_by_key: Mapping[str, str | Path],
+    overwrite: bool = False,
+    mode: Literal["copy", "hardlink", "symlink"] = "copy",
+    validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
+    allow_external_paths: Optional[bool] = None,
+    tracker: Optional["Tracker"] = None,
+) -> "StagedInputsResult":
+    """
+    Stage multiple keyed artifacts to explicitly requested filesystem paths.
+
+    Keys must match the input artifact mapping keys. The returned result is
+    keyed in the same order as ``destinations_by_key``.
+
+    Prefer run-level requested input materialization for standard workflow
+    code. Use this helper when you already have resolved artifacts and need to
+    stage them before or outside normal run execution.
+    """
+    return _resolve_tracker(tracker).stage_inputs(
+        inputs_by_key,
+        destinations_by_key=destinations_by_key,
+        mode=mode,
+        overwrite=overwrite,
+        validate_content_hash=validate_content_hash,
+        allow_external_paths=allow_external_paths,
+    )
+
+
+def set_artifact_recovery_roots(
+    artifact: Artifact,
+    roots: str | Path | Sequence[str | Path],
+    *,
+    append: bool = False,
+    tracker: Optional["Tracker"] = None,
+) -> Artifact:
+    """
+    Persist ordered advisory recovery roots for an artifact.
+
+    These roots are probed after per-call overrides and historical run/mount
+    locations when rematerializing historical outputs or hydrating cache-hit
+    outputs. Use this when a workflow promotes bytes into a stable archive root
+    but you want to keep ``container_uri`` as the canonical logical location.
+
+    Parameters
+    ----------
+    artifact : Artifact
+        Artifact whose recovery metadata should be updated.
+    roots : str | Path | Sequence[str | Path]
+        One or more filesystem roots. The artifact's URI-relative layout is
+        preserved beneath each root.
+    append : bool, default False
+        If True, append unique roots after existing ones. If False, replace the
+        existing list. Passing an empty sequence clears ``recovery_roots``.
+    tracker : Tracker | None, optional
+        Tracker used for persistence. If omitted, resolves the active/default
+        tracker.
+    """
+    return _resolve_tracker(tracker).set_artifact_recovery_roots(
+        artifact, roots, append=append
+    )
+
+
+def archive_artifact(
+    artifact: Artifact,
+    archive_root: str | Path,
+    *,
+    mode: Literal["copy", "move"] = "copy",
+    append: bool = True,
+    tracker: Optional["Tracker"] = None,
+) -> Path:
+    """
+    Archive an artifact into a stable recovery root and record that root.
+
+    This helper copies or moves the artifact's bytes to
+    ``archive_root / <uri-relative-path>`` and then records ``archive_root`` in
+    ``artifact.meta["recovery_roots"]``. It is designed for restart/resume
+    workflows where outputs are promoted into long-lived storage but retain
+    their canonical ``container_uri``.
+    """
+    return _resolve_tracker(tracker).archive_artifact(
+        artifact,
+        archive_root,
+        mode=mode,
+        append=append,
+    )
+
+
+def archive_run_outputs(
+    run_id: str,
+    archive_root: str | Path,
+    *,
+    keys: Sequence[str] | None = None,
+    mode: Literal["copy", "move"] = "copy",
+    append: bool = True,
+    tracker: Optional["Tracker"] = None,
+) -> dict[str, Path]:
+    """
+    Archive one or more historical run outputs into a stable recovery root.
+
+    This is the bulk form of ``archive_artifact(...)`` for iteration/archive
+    workflows that promote all or a subset of outputs after a run completes.
+    """
+    return _resolve_tracker(tracker).archive_run_outputs(
+        run_id,
+        archive_root,
+        keys=keys,
+        mode=mode,
+        append=append,
+    )
+
+
+def archive_current_run_outputs(
+    archive_root: str | Path,
+    *,
+    keys: Sequence[str] | None = None,
+    mode: Literal["copy", "move"] = "copy",
+    append: bool = True,
+    tracker: Optional["Tracker"] = None,
+) -> dict[str, Path]:
+    """
+    Archive outputs for the currently active run into a stable recovery root.
+
+    This is the convenience form of ``archive_run_outputs(...)`` for workflows
+    that archive outputs immediately after logging them, without separately
+    pulling ``result.run.id`` or ``tracker.current_consist.run.id``.
+    """
+    return _resolve_tracker(tracker).archive_current_run_outputs(
+        archive_root,
+        keys=keys,
+        mode=mode,
+        append=append,
     )
 
 
@@ -1246,8 +1402,7 @@ def register_artifact_facet_parser(
 
     The parser is invoked when logging an artifact without an explicit ``facet=``.
     """
-    tr = _resolve_tracker(tracker)
-    tr.register_artifact_facet_parser(prefix, parser_fn)
+    _resolve_tracker(tracker).register_artifact_facet_parser(prefix, parser_fn)
 
 
 # --- Proxy Functions ---
@@ -1295,8 +1450,9 @@ def log_artifact(
         Explicitly specify the driver (e.g., 'h5_table').
         If None, the driver is inferred from the file extension.
     content_hash : Optional[str], optional
-        Precomputed content hash to use for the artifact instead of hashing
-        the path on disk.
+        Precomputed artifact fingerprint to use instead of hashing the path on
+        disk. When provided, Consist stores it on the canonical public
+        fingerprint field, ``artifact.hash``.
     force_hash_override : bool, default False
         If True, overwrite an existing artifact hash when it differs from
         `content_hash`. By default, mismatched overrides are ignored with a warning.
@@ -1320,6 +1476,8 @@ def log_artifact(
         If False, returns a noop artifact object without requiring an active run.
     **meta : Any
         Additional key-value pairs to store in the artifact's flexible `meta` field.
+        ``recovery_roots`` may be supplied here and will be normalized to an
+        ordered list of absolute filesystem roots.
 
     Returns
     -------
@@ -1540,7 +1698,9 @@ def log_input(
     driver : Optional[str]
         Explicit format driver (e.g. "parquet"). Inferred from extension if None.
     content_hash : Optional[str]
-        Precomputed hash to avoid re-hashing large files.
+        Precomputed artifact fingerprint to avoid re-hashing large files. When
+        provided, Consist stores it on the canonical public fingerprint field,
+        ``artifact.hash``.
     force_hash_override : bool, default False
         Overwrite existing hash in the database if different from `content_hash`.
     validate_content_hash : bool, default False
@@ -1610,7 +1770,9 @@ def log_output(
     driver : Optional[str]
         Explicit format driver (e.g. "parquet"). Inferred from extension if None.
     content_hash : Optional[str]
-        Precomputed hash to avoid re-hashing large files.
+        Precomputed artifact fingerprint to avoid re-hashing large files. When
+        provided, Consist stores it on the canonical public fingerprint field,
+        ``artifact.hash``.
     force_hash_override : bool, default False
         Overwrite existing hash in the database if different from `content_hash`.
     validate_content_hash : bool, default False
@@ -2545,7 +2707,7 @@ def load(
         tracker_ref = get_tracker_ref(artifact)
         if tracker_ref:
             attached_tracker = tracker_ref()
-            if attached_tracker:
+            if isinstance(attached_tracker, Tracker):
                 tracker = attached_tracker
 
     if tracker is None:

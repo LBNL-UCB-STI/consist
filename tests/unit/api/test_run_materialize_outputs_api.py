@@ -9,6 +9,10 @@ import consist
 import consist.core.materialize as consist_materialize
 from consist.api import hydrate_run_outputs as hydrate_run_outputs_api
 from consist.api import materialize_run_outputs as materialize_run_outputs_api
+from consist.api import archive_artifact as archive_artifact_api
+from consist.api import archive_current_run_outputs as archive_current_run_outputs_api
+from consist.api import archive_run_outputs as archive_run_outputs_api
+from consist.api import set_artifact_recovery_roots as set_artifact_recovery_roots_api
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
 from consist.models.run import Run
@@ -63,7 +67,10 @@ def test_tracker_materialize_run_outputs_rejects_external_target_root_when_disal
     monkeypatch.setattr(tracker, "get_run", lambda _run_id: run)
     outside = tracker.run_dir.parent / "outside"
 
-    with pytest.raises(ValueError, match="outside allowed base"):
+    with pytest.raises(
+        ValueError,
+        match="outside allowed base|configured mount root|allow_external_paths",
+    ):
         tracker.materialize_run_outputs("run_1", target_root=outside)
 
 
@@ -217,6 +224,310 @@ def test_tracker_hydrate_run_outputs_delegates_to_core_helper(
         "on_missing": "raise",
         "db_fallback": "never",
     }
+
+
+def test_set_artifact_recovery_roots_persists_and_invalidates_cache(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "table.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n1\n", encoding="utf-8")
+
+    with tracker.start_run("producer_recovery_roots", model="producer"):
+        tracker.log_artifact(output_path, key="table", direction="output")
+
+    cached = tracker.get_run_outputs("producer_recovery_roots")["table"]
+    archive_a = tmp_path / "archive_a"
+    archive_b = tmp_path / "archive_b"
+
+    updated = set_artifact_recovery_roots_api(
+        cached,
+        [archive_a, archive_a],
+        tracker=tracker,
+    )
+    assert updated.meta["recovery_roots"] == [str(archive_a.resolve())]
+
+    refreshed = tracker.get_run_outputs("producer_recovery_roots")["table"]
+    assert refreshed.meta["recovery_roots"] == [str(archive_a.resolve())]
+
+    tracker.set_artifact_recovery_roots(refreshed, [archive_b], append=True)
+    appended = tracker.get_run_outputs("producer_recovery_roots")["table"]
+    assert appended.meta["recovery_roots"] == [
+        str(archive_a.resolve()),
+        str(archive_b.resolve()),
+    ]
+
+    tracker.set_artifact_recovery_roots(appended, [], append=False)
+    cleared = tracker.get_run_outputs("producer_recovery_roots")["table"]
+    assert "recovery_roots" not in cleared.meta
+
+
+def test_log_artifact_normalizes_recovery_roots_metadata(tracker: Tracker) -> None:
+    output_path = tracker.run_dir / "outputs" / "normalized.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n1\n", encoding="utf-8")
+    archive = tracker.run_dir.parent / "archive_root"
+
+    with tracker.start_run("producer_log_recovery_roots", model="producer"):
+        artifact = tracker.log_artifact(
+            output_path,
+            key="normalized",
+            direction="output",
+            recovery_roots=[archive, archive],
+        )
+
+    assert artifact.meta["recovery_roots"] == [str(archive.resolve())]
+    assert artifact.recovery_roots == [str(archive.resolve())]
+
+
+def test_archive_artifact_copies_bytes_and_records_recovery_root(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "archived.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n1\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_copy"
+
+    with tracker.start_run("producer_archive_copy", model="producer"):
+        artifact = tracker.log_artifact(output_path, key="archived", direction="output")
+
+    archived_path = archive_artifact_api(artifact, archive_root, tracker=tracker)
+
+    assert archived_path == (archive_root / "outputs" / "archived.csv").resolve()
+    assert archived_path.read_text(encoding="utf-8") == "value\n1\n"
+    assert output_path.exists()
+    refreshed = tracker.get_run_outputs("producer_archive_copy")["archived"]
+    assert refreshed.meta["recovery_roots"] == [str(archive_root.resolve())]
+
+
+def test_archive_artifact_unmappable_layout_has_actionable_error(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    artifact = Artifact(
+        id=uuid.uuid4(),
+        key="absolute",
+        container_uri=str((tmp_path / "absolute.csv").resolve()),
+        driver="csv",
+        meta={},
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Use managed output paths|cannot be recovered from root-only recovery metadata",
+    ):
+        tracker.archive_artifact(artifact, tmp_path / "archive")
+
+
+def test_archive_artifact_move_updates_runtime_path(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "moved.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n2\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_move"
+
+    with tracker.start_run("producer_archive_move", model="producer"):
+        artifact = tracker.log_artifact(output_path, key="moved", direction="output")
+
+    archived_path = tracker.archive_artifact(artifact, archive_root, mode="move")
+
+    assert archived_path.read_text(encoding="utf-8") == "value\n2\n"
+    assert not output_path.exists()
+    assert artifact.abs_path == str(archived_path.resolve())
+    assert artifact.path == archived_path
+
+
+def test_archive_current_run_outputs_uses_active_run(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "current.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n4\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_current"
+
+    with tracker.start_run("producer_archive_current", model="producer"):
+        tracker.log_artifact(output_path, key="current", direction="output")
+        archived = tracker.archive_current_run_outputs(archive_root, mode="copy")
+
+    archived_path = (archive_root / "outputs" / "current.csv").resolve()
+    assert archived == {"current": archived_path}
+    assert archived_path.read_text(encoding="utf-8") == "value\n4\n"
+    refreshed = tracker.get_run_outputs("producer_archive_current")["current"]
+    assert refreshed.recovery_roots == [str(archive_root.resolve())]
+
+
+def test_archive_current_run_outputs_requires_active_run(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(RuntimeError, match="requires an active run context"):
+        tracker.archive_current_run_outputs(tmp_path / "archive_current")
+
+
+def test_archive_artifact_prefers_historical_source_over_current_workspace(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
+    tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
+
+    source_path = tracker_a.run_dir / "outputs" / "shared.csv"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("historical\n", encoding="utf-8")
+
+    with tracker_a.start_run("producer_archive_history", model="producer"):
+        tracker_a.log_artifact(source_path, key="shared", direction="output")
+
+    current_path = tracker_b.run_dir / "outputs" / "shared.csv"
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+    current_path.write_text("current\n", encoding="utf-8")
+
+    historical_artifact = tracker_b.get_run_outputs("producer_archive_history")[
+        "shared"
+    ]
+    archive_root = tmp_path / "archive_history"
+    archived_path = tracker_b.archive_artifact(historical_artifact, archive_root)
+
+    assert archived_path.read_text(encoding="utf-8") == "historical\n"
+
+    if tracker_a.engine:
+        tracker_a.engine.dispose()
+    if tracker_b.engine:
+        tracker_b.engine.dispose()
+
+
+def test_archive_artifact_move_rolls_back_on_metadata_failure(
+    tracker: Tracker,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "rollback.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n3\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_rollback"
+
+    with tracker.start_run("producer_archive_rollback", model="producer"):
+        artifact = tracker.log_artifact(output_path, key="rollback", direction="output")
+
+    def _raise_update(*_args, **_kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(tracker.db, "update_artifact_meta", _raise_update)
+
+    with pytest.raises(RuntimeError, match="db down"):
+        tracker.archive_artifact(artifact, archive_root, mode="move")
+
+    assert output_path.read_text(encoding="utf-8") == "value\n3\n"
+    assert not (archive_root / "outputs" / "rollback.csv").exists()
+
+
+def test_archive_artifact_copy_is_idempotent_for_matching_file(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "retry.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n4\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_retry_copy"
+
+    with tracker.start_run("producer_archive_retry_copy", model="producer"):
+        artifact = tracker.log_artifact(output_path, key="retry", direction="output")
+
+    first = tracker.archive_artifact(artifact, archive_root, mode="copy")
+    second = tracker.archive_artifact(artifact, archive_root, mode="copy")
+
+    assert first == second
+    assert second.read_text(encoding="utf-8") == "value\n4\n"
+
+
+def test_archive_artifact_move_is_idempotent_for_matching_file(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "retry_move.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n5\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_retry_move"
+
+    with tracker.start_run("producer_archive_retry_move", model="producer"):
+        artifact = tracker.log_artifact(
+            output_path, key="retry_move", direction="output"
+        )
+
+    first = tracker.archive_artifact(artifact, archive_root, mode="move")
+    second = tracker.archive_artifact(artifact, archive_root, mode="move")
+
+    assert first == second
+    assert second.read_text(encoding="utf-8") == "value\n5\n"
+    assert not output_path.exists()
+
+
+def test_archive_run_outputs_archives_selected_keys(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    a_path = tracker.run_dir / "outputs" / "a.csv"
+    b_path = tracker.run_dir / "outputs" / "b.csv"
+    a_path.parent.mkdir(parents=True, exist_ok=True)
+    a_path.write_text("value\n1\n", encoding="utf-8")
+    b_path.write_text("value\n2\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_bulk"
+
+    with tracker.start_run("producer_archive_bulk", model="producer"):
+        tracker.log_artifact(a_path, key="a", direction="output")
+        tracker.log_artifact(b_path, key="b", direction="output")
+
+    archived = archive_run_outputs_api(
+        "producer_archive_bulk",
+        archive_root,
+        keys=["a"],
+        tracker=tracker,
+    )
+
+    assert archived == {"a": (archive_root / "outputs" / "a.csv").resolve()}
+    outputs = tracker.get_run_outputs("producer_archive_bulk")
+    assert outputs["a"].meta["recovery_roots"] == [str(archive_root.resolve())]
+    assert "recovery_roots" not in outputs["b"].meta
+
+
+def test_api_archive_current_run_outputs_delegates_with_default_tracker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    class _FakeTracker:
+        def archive_current_run_outputs(self, archive_root, **kwargs):
+            calls["archive_root"] = archive_root
+            calls["kwargs"] = kwargs
+            return {"x": Path("/tmp/archive/x.csv")}
+
+    fake_tracker = _FakeTracker()
+    monkeypatch.setattr(
+        "consist.api._resolve_tracker", lambda tracker=None: fake_tracker
+    )
+
+    result = archive_current_run_outputs_api(
+        "/tmp/archive",
+        keys=("x", "y"),
+        mode="move",
+        append=False,
+    )
+
+    assert result == {"x": Path("/tmp/archive/x.csv")}
+    assert calls == {
+        "archive_root": "/tmp/archive",
+        "kwargs": {
+            "keys": ("x", "y"),
+            "mode": "move",
+            "append": False,
+        },
+    }
+    assert consist.archive_current_run_outputs is archive_current_run_outputs_api
 
 
 def test_tracker_hydrate_run_outputs_allows_external_target_root_when_configured(
@@ -616,37 +927,77 @@ def test_run_hydrate_outputs_rejects_invalid_runtime_options_before_delegation(
 
 
 @pytest.mark.parametrize("bad_keys", ["out", b"out"])
-def test_api_materialize_run_outputs_rejects_scalar_string_keys_before_delegation(
+def test_api_materialize_run_outputs_passes_scalar_string_keys_to_tracker(
     monkeypatch: pytest.MonkeyPatch,
     bad_keys: str | bytes,
 ) -> None:
+    calls: dict[str, object] = {}
+
     class _FakeTracker:
         def materialize_run_outputs(self, run_id: str, **kwargs):
-            raise AssertionError("delegation should not happen for invalid keys")
+            calls["run_id"] = run_id
+            calls["kwargs"] = kwargs
+            return "api-result"
 
     monkeypatch.setattr(
         "consist.api._resolve_tracker", lambda tracker=None: _FakeTracker()
     )
 
-    with pytest.raises(TypeError, match="keys must be a sequence"):
-        materialize_run_outputs_api("run_1", target_root="/tmp/restored", keys=bad_keys)
+    result = materialize_run_outputs_api(
+        "run_1",
+        target_root="/tmp/restored",
+        keys=bad_keys,
+    )
+
+    assert result == "api-result"
+    assert calls == {
+        "run_id": "run_1",
+        "kwargs": {
+            "target_root": "/tmp/restored",
+            "source_root": None,
+            "keys": bad_keys,
+            "preserve_existing": True,
+            "on_missing": "warn",
+            "db_fallback": "if_ingested",
+        },
+    }
 
 
 @pytest.mark.parametrize("bad_keys", ["out", b"out"])
-def test_api_hydrate_run_outputs_rejects_scalar_string_keys_before_delegation(
+def test_api_hydrate_run_outputs_passes_scalar_string_keys_to_tracker(
     monkeypatch: pytest.MonkeyPatch,
     bad_keys: str | bytes,
 ) -> None:
+    calls: dict[str, object] = {}
+
     class _FakeTracker:
         def hydrate_run_outputs(self, run_id: str, **kwargs):
-            raise AssertionError("delegation should not happen for invalid keys")
+            calls["run_id"] = run_id
+            calls["kwargs"] = kwargs
+            return "hydrated-api-result"
 
     monkeypatch.setattr(
         "consist.api._resolve_tracker", lambda tracker=None: _FakeTracker()
     )
 
-    with pytest.raises(TypeError, match="keys must be a sequence"):
-        hydrate_run_outputs_api("run_1", target_root="/tmp/restored", keys=bad_keys)
+    result = hydrate_run_outputs_api(
+        "run_1",
+        target_root="/tmp/restored",
+        keys=bad_keys,
+    )
+
+    assert result == "hydrated-api-result"
+    assert calls == {
+        "run_id": "run_1",
+        "kwargs": {
+            "target_root": "/tmp/restored",
+            "source_root": None,
+            "keys": bad_keys,
+            "preserve_existing": True,
+            "on_missing": "warn",
+            "db_fallback": "if_ingested",
+        },
+    }
 
 
 @pytest.mark.parametrize(
@@ -656,22 +1007,40 @@ def test_api_hydrate_run_outputs_rejects_scalar_string_keys_before_delegation(
         ("db_fallback", "always"),
     ],
 )
-def test_api_materialize_run_outputs_rejects_invalid_runtime_options_before_delegation(
+def test_api_materialize_run_outputs_passes_invalid_runtime_options_to_tracker(
     monkeypatch: pytest.MonkeyPatch,
     field_name: str,
     field_value: str,
 ) -> None:
+    calls: dict[str, object] = {}
+
     class _FakeTracker:
         def materialize_run_outputs(self, run_id: str, **kwargs):
-            raise AssertionError("delegation should not happen for invalid options")
+            calls["run_id"] = run_id
+            calls["kwargs"] = kwargs
+            return "api-result"
 
     monkeypatch.setattr(
         "consist.api._resolve_tracker", lambda tracker=None: _FakeTracker()
     )
     kwargs = {"target_root": "/tmp/restored", field_name: field_value}
 
-    with pytest.raises(ValueError, match=field_name):
-        materialize_run_outputs_api("run_1", **kwargs)
+    result = materialize_run_outputs_api("run_1", **kwargs)
+
+    assert result == "api-result"
+    assert calls == {
+        "run_id": "run_1",
+        "kwargs": {
+            "target_root": "/tmp/restored",
+            "source_root": None,
+            "keys": None,
+            "preserve_existing": True,
+            "on_missing": "warn" if field_name != "on_missing" else field_value,
+            "db_fallback": (
+                "if_ingested" if field_name != "db_fallback" else field_value
+            ),
+        },
+    }
 
 
 @pytest.mark.parametrize(
@@ -681,19 +1050,37 @@ def test_api_materialize_run_outputs_rejects_invalid_runtime_options_before_dele
         ("db_fallback", "always"),
     ],
 )
-def test_api_hydrate_run_outputs_rejects_invalid_runtime_options_before_delegation(
+def test_api_hydrate_run_outputs_passes_invalid_runtime_options_to_tracker(
     monkeypatch: pytest.MonkeyPatch,
     field_name: str,
     field_value: str,
 ) -> None:
+    calls: dict[str, object] = {}
+
     class _FakeTracker:
         def hydrate_run_outputs(self, run_id: str, **kwargs):
-            raise AssertionError("delegation should not happen for invalid options")
+            calls["run_id"] = run_id
+            calls["kwargs"] = kwargs
+            return "hydrated-api-result"
 
     monkeypatch.setattr(
         "consist.api._resolve_tracker", lambda tracker=None: _FakeTracker()
     )
     kwargs = {"target_root": "/tmp/restored", field_name: field_value}
 
-    with pytest.raises(ValueError, match=field_name):
-        hydrate_run_outputs_api("run_1", **kwargs)
+    result = hydrate_run_outputs_api("run_1", **kwargs)
+
+    assert result == "hydrated-api-result"
+    assert calls == {
+        "run_id": "run_1",
+        "kwargs": {
+            "target_root": "/tmp/restored",
+            "source_root": None,
+            "keys": None,
+            "preserve_existing": True,
+            "on_missing": "warn" if field_name != "on_missing" else field_value,
+            "db_fallback": (
+                "if_ingested" if field_name != "db_fallback" else field_value
+            ),
+        },
+    }

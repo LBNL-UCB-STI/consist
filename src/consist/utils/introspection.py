@@ -3,10 +3,11 @@ from __future__ import annotations
 import warnings
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from consist.core.decorators import StepDefinition
 from consist.core.step_context import StepContext, resolve_metadata
 
 
-def _step_name(step: Callable[..., Any]) -> str:
+def _step_name(step: Any) -> str:
     return getattr(step, "__name__", step.__class__.__name__)
 
 
@@ -47,16 +48,12 @@ def collect_step_schema(
 
     for step in steps:
         defn = getattr(step, "__consist_step__", None)
-        if not defn:
+        if not isinstance(defn, StepDefinition):
             continue
 
         step_name = _step_name(step)
-        schema_outputs = getattr(defn, "schema_outputs", None)
-        outputs_value = (
-            schema_outputs
-            if schema_outputs is not None
-            else getattr(defn, "outputs", None)
-        )
+        schema_outputs = defn.schema_outputs
+        outputs_value = schema_outputs if schema_outputs is not None else defn.outputs
 
         if callable(outputs_value):
             if settings is not None:
@@ -67,7 +64,7 @@ def collect_step_schema(
                         runtime_kwargs={"settings": settings},
                     )
                     outputs = _normalize_outputs(resolve_metadata(outputs_value, ctx))
-                except Exception as exc:
+                except TypeError as exc:
                     if warn_unresolvable:
                         warnings.warn(
                             "Cannot resolve callable outputs for "
@@ -90,7 +87,7 @@ def collect_step_schema(
         else:
             outputs = _normalize_outputs(outputs_value)
 
-        description_value = getattr(defn, "description", None)
+        description_value = defn.description
         if callable(description_value) and settings is not None:
             try:
                 ctx = StepContext(
@@ -99,7 +96,7 @@ def collect_step_schema(
                     runtime_kwargs={"settings": settings},
                 )
                 description_value = resolve_metadata(description_value, ctx)
-            except Exception:
+            except TypeError:
                 description_value = None
         description = description_value or f"Output from {step_name}"
         for key in outputs:

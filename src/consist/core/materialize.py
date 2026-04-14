@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping as MappingABC
 from dataclasses import dataclass, field
+from contextlib import suppress
+import hashlib
 import logging
 import os
 import shutil
@@ -40,6 +42,13 @@ HydrationStatus = Literal[
     "materialized_from_db",
     "preserved_existing",
     "skipped_unmapped",
+    "missing_source",
+    "failed",
+]
+
+StagingStatus = Literal[
+    "staged",
+    "preserved_existing",
     "missing_source",
     "failed",
 ]
@@ -121,7 +130,8 @@ class HydratedRunOutput:
         Detached copy of the historical artifact record. When ``resolvable`` is
         ``True``, the detached artifact's runtime ``abs_path`` points at the
         hydrated destination so helpers like ``artifact.as_path()`` can be used
-        directly in the new workspace.
+        directly in the new workspace. The detached artifact preserves the
+        canonical fingerprint surface on ``artifact.hash``.
     path : Path | None
         Destination path under the requested target root, when one is known.
         This can be populated even for non-resolvable outcomes to show the
@@ -252,6 +262,123 @@ class HydratedRunOutputsResult(MappingABC[str, HydratedRunOutput]):
 
 
 @dataclass(frozen=True, slots=True)
+class StagedInput:
+    """Per-key outcome for canonical input staging.
+
+    Attributes
+    ----------
+    key : str
+        Input key requested by the caller.
+    artifact : Artifact
+        Detached copy of the input artifact. When ``resolvable`` is ``True``,
+        the detached artifact's runtime ``abs_path`` points at the staged
+        destination so helpers like ``artifact.as_path()`` can be used
+        directly. The detached artifact preserves the canonical fingerprint
+        surface on ``artifact.hash``.
+    path : Path | None
+        Explicit staging destination, when one was known.
+    status : StagingStatus
+        One of:
+
+        - ``"staged"``: bytes were copied to the requested destination.
+        - ``"preserved_existing"``: destination already existed with matching
+          content and was reused.
+        - ``"missing_source"``: no readable source bytes were found for the
+          canonical artifact.
+        - ``"failed"``: staging was attempted but failed due to a collision,
+          policy check, or copy error.
+    message : str | None
+        Optional warning or error detail for ``"missing_source"`` and
+        ``"failed"`` outcomes.
+    resolvable : bool
+        Whether the returned detached artifact is immediately usable from the
+        staged destination.
+    """
+
+    key: str
+    artifact: Artifact
+    path: Path | None
+    status: StagingStatus
+    message: str | None = None
+    resolvable: bool = False
+
+
+@dataclass(slots=True)
+class StagedInputsResult(MappingABC[str, StagedInput]):
+    """Key-indexed result for canonical input staging.
+
+    This mapping preserves the caller's requested key order and answers the
+    practical questions for each requested input: what destination was used,
+    whether the staged artifact is immediately usable, and whether staging
+    copied bytes or reused an existing local path.
+    """
+
+    outputs: dict[str, StagedInput] = field(default_factory=dict)
+
+    def __getitem__(self, key: str) -> StagedInput:
+        return self.outputs[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.outputs)
+
+    def __len__(self) -> int:
+        return len(self.outputs)
+
+    def items(self):
+        return self.outputs.items()
+
+    def keys(self):
+        return self.outputs.keys()
+
+    def values(self):
+        return self.outputs.values()
+
+    @property
+    def paths(self) -> dict[str, Path]:
+        return {
+            key: output.path
+            for key, output in self.outputs.items()
+            if output.path is not None and output.resolvable
+        }
+
+    @property
+    def resolvable(self) -> dict[str, StagedInput]:
+        return {
+            key: output for key, output in self.outputs.items() if output.resolvable
+        }
+
+    @property
+    def failed_keys(self) -> list[str]:
+        return [
+            key for key, output in self.outputs.items() if output.status == "failed"
+        ]
+
+    @property
+    def complete(self) -> bool:
+        incomplete_statuses = {"missing_source", "failed"}
+        return all(
+            output.status not in incomplete_statuses for output in self.outputs.values()
+        )
+
+    @property
+    def summary(self) -> str:
+        counts: dict[str, int] = {
+            "staged": 0,
+            "preserved_existing": 0,
+            "missing_source": 0,
+            "failed": 0,
+        }
+        for output in self.outputs.values():
+            counts[output.status] += 1
+        return (
+            f"staged={counts['staged']} "
+            f"preserved_existing={counts['preserved_existing']} "
+            f"missing_source={counts['missing_source']} "
+            f"failed={counts['failed']}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PlannedMaterialization:
     artifact: Artifact
     keys: tuple[str, ...]
@@ -285,28 +412,22 @@ def _detach_artifact_for_hydration(
     clone = artifact.model_copy(deep=True)
     private_state = getattr(clone, "__pydantic_private__", None)
     if private_state is None:
-        try:
+        with suppress(Exception):
             object.__setattr__(clone, "__pydantic_private__", {})
-        except Exception:
-            pass
         private_state = getattr(clone, "__pydantic_private__", None)
     if isinstance(private_state, dict):
         private_state["_tracker"] = None
         private_state["_abs_path"] = (
             str(hydrated_path.resolve()) if hydrated_path is not None else None
         )
-    try:
+    with suppress(Exception):
         object.__setattr__(clone, "_tracker", None)
-    except Exception:
-        pass
-    try:
+    with suppress(Exception):
         object.__setattr__(
             clone,
             "_abs_path",
             str(hydrated_path.resolve()) if hydrated_path is not None else None,
         )
-    except Exception:
-        pass
     return clone
 
 
@@ -333,6 +454,29 @@ def _make_hydrated_output(
     )
 
 
+def _make_staged_output(
+    artifact: Artifact,
+    *,
+    status: StagingStatus,
+    path: Path | None,
+    message: str | None = None,
+    resolvable: bool,
+) -> StagedInput:
+    normalized_path = path.resolve() if path is not None else None
+    detached = _detach_artifact_for_hydration(
+        artifact,
+        hydrated_path=normalized_path if resolvable else None,
+    )
+    return StagedInput(
+        key=artifact.key,
+        artifact=detached,
+        path=normalized_path,
+        status=status,
+        message=message,
+        resolvable=resolvable,
+    )
+
+
 def _ordered_hydrated_results(
     key_order: Sequence[str],
     outputs: Mapping[str, HydratedRunOutput],
@@ -346,6 +490,21 @@ def _ordered_hydrated_results(
         if key not in ordered:
             ordered[key] = output
     return HydratedRunOutputsResult(outputs=ordered)
+
+
+def _ordered_staged_results(
+    key_order: Sequence[str],
+    outputs: Mapping[str, StagedInput],
+) -> StagedInputsResult:
+    ordered: dict[str, StagedInput] = {}
+    for key in key_order:
+        output = outputs.get(key)
+        if output is not None:
+            ordered[key] = output
+    for key, output in outputs.items():
+        if key not in ordered:
+            ordered[key] = output
+    return StagedInputsResult(outputs=ordered)
 
 
 def fold_hydrated_run_outputs_result(
@@ -385,22 +544,53 @@ def _ensure_destination_not_symlink(path: Path) -> None:
         raise ValueError(f"Symlink detected in destination path: {path}")
 
 
+def _compute_file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _compute_path_checksum(path: Path) -> str:
+    if path.is_dir():
+        digest = hashlib.sha256()
+        base = path.resolve()
+        for root, dirnames, filenames in os.walk(base):
+            dirnames.sort()
+            filenames.sort()
+            rel_root = Path(root).resolve().relative_to(base).as_posix()
+            digest.update(f"dir:{rel_root}".encode("utf-8"))
+            for dirname in dirnames:
+                rel_dir = Path(root, dirname).resolve().relative_to(base).as_posix()
+                digest.update(f"subdir:{rel_dir}".encode("utf-8"))
+            for filename in filenames:
+                file_path = Path(root, filename).resolve()
+                rel_file = file_path.relative_to(base).as_posix()
+                digest.update(f"file:{rel_file}".encode("utf-8"))
+                digest.update(_compute_file_sha256(file_path).encode("utf-8"))
+        return digest.hexdigest()
+    return _compute_file_sha256(path)
+
+
 def _copy_file_atomic(source: Path, destination: Path) -> bool:
     fd, tmp_path = tempfile.mkstemp(dir=str(destination.parent))
     os.close(fd)
     tmp_path_obj = Path(tmp_path)
     try:
         shutil.copy2(source, tmp_path_obj)
-        try:
-            os.link(tmp_path_obj, destination)
-        except FileExistsError:
-            return False
-        return True
+        return _link_file_atomic(tmp_path_obj, destination)
     finally:
-        try:
+        with suppress(FileNotFoundError):
             tmp_path_obj.unlink()
-        except FileNotFoundError:
-            pass
+
+
+def _link_file_atomic(source: Path, destination: Path) -> bool:
+    try:
+        os.link(source, destination)
+    except FileExistsError:
+        return False
+    return True
 
 
 def _copy_dir_safe(source: Path, destination: Path) -> bool:
@@ -430,10 +620,8 @@ def _cleanup_path(path: Path) -> None:
     if path.is_dir() and not path.is_symlink():
         shutil.rmtree(path, ignore_errors=True)
         return
-    try:
+    with suppress(FileNotFoundError):
         path.unlink()
-    except FileNotFoundError:
-        pass
 
 
 def _replace_path(source: Path, destination: Path) -> None:
@@ -508,10 +696,8 @@ def _materialize_path(
         shutil.copy2(source, tmp_path_obj)
         _replace_path(tmp_path_obj, destination)
     finally:
-        try:
+        with suppress(FileNotFoundError):
             tmp_path_obj.unlink()
-        except FileNotFoundError:
-            pass
     return True, False
 
 
@@ -568,14 +754,16 @@ def validate_allowed_materialization_destination(
         allowed_root = allowed_roots[0]
         raise ValueError(
             f"Destination path {resolved_destination} is outside allowed base "
-            f"{allowed_root}. Set allow_external_paths=True or "
+            f"{allowed_root}. Choose a target under the tracker run_dir or a "
+            "configured mount root, or set allow_external_paths=True or "
             "CONSIST_ALLOW_EXTERNAL_PATHS=1 to override."
         )
 
     allowed_display = ", ".join(str(root) for root in allowed_roots)
     raise ValueError(
         f"Destination path {resolved_destination} is outside allowed roots: "
-        f"{allowed_display}. Set allow_external_paths=True or "
+        f"{allowed_display}. Choose a target under the tracker run_dir or a "
+        "configured mount root, or set allow_external_paths=True or "
         "CONSIST_ALLOW_EXTERNAL_PATHS=1 to override."
     )
 
@@ -636,11 +824,380 @@ def _derive_historical_remap(
     return None
 
 
+def _derive_remappable_relative_path(
+    tracker: "Tracker",
+    *,
+    artifact: Artifact,
+) -> Path | None:
+    helper = getattr(tracker.fs, "get_remappable_relative_path", None)
+    if callable(helper):
+        return helper(artifact.container_uri)
+    return None
+
+
+def _derive_historical_root(
+    tracker: "Tracker",
+    *,
+    artifact: Artifact,
+    run,
+) -> Path | None:
+    meta = run.meta if isinstance(run.meta, dict) else {}
+    artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+
+    helper = getattr(tracker.fs, "get_historical_root", None)
+    if callable(helper):
+        return helper(
+            artifact.container_uri,
+            original_run_dir=meta.get("_physical_run_dir"),
+            mounts_snapshot=meta.get("mounts"),
+            artifact_mount_root=artifact_meta.get("mount_root"),
+        )
+
+    remap = _derive_historical_remap(tracker, artifact=artifact, run=run)
+    if remap is None:
+        return None
+    return remap[0]
+
+
+def _artifact_recovery_roots(
+    tracker: "Tracker",
+    *,
+    artifact: Artifact,
+) -> tuple[Path, ...]:
+    artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    helper = getattr(tracker.fs, "normalize_recovery_roots", None)
+    if not callable(helper):
+        return ()
+    return tuple(Path(root) for root in helper(artifact_meta.get("recovery_roots")))
+
+
+def _ordered_candidate_roots(
+    *,
+    source_root: Path | None,
+    historical_root: Path | None,
+    recovery_roots: Sequence[Path],
+) -> tuple[Path, ...]:
+    ordered: list[Path] = []
+    seen: set[str] = set()
+    for root in (
+        ([source_root] if source_root is not None else [])
+        + ([historical_root] if historical_root is not None else [])
+        + list(recovery_roots)
+    ):
+        resolved = str(root.resolve())
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        ordered.append(Path(resolved))
+    return tuple(ordered)
+
+
+def find_existing_recovery_source_path(
+    tracker: "Tracker",
+    *,
+    artifact: Artifact,
+    run,
+    source_root: Path | None,
+) -> tuple[Path | None, Path | None, bool]:
+    """
+    Return the rematerializable relative path and first existing filesystem source.
+
+    Filesystem candidates are probed in recovery order:
+
+    1. per-call ``source_root``
+    2. the historical root derived from run metadata / mount snapshots
+    3. ordered artifact ``recovery_roots``
+
+    The boolean return value reports whether any filesystem roots were available
+    to probe for that artifact.
+    """
+    relative_path = _derive_remappable_relative_path(tracker, artifact=artifact)
+    if relative_path is None:
+        return None, None, False
+
+    historical_root = _derive_historical_root(tracker, artifact=artifact, run=run)
+    recovery_roots = _artifact_recovery_roots(tracker, artifact=artifact)
+    candidate_roots = _ordered_candidate_roots(
+        source_root=source_root,
+        historical_root=historical_root,
+        recovery_roots=recovery_roots,
+    )
+    for root in candidate_roots:
+        candidate = (root / relative_path).resolve()
+        if candidate.exists():
+            return relative_path, candidate, True
+
+    return relative_path, None, bool(candidate_roots)
+
+
 def _source_identity(item: PlannedMaterialization) -> tuple[str, str]:
     if item.source_kind == "filesystem":
         assert item.source_path is not None
         return ("filesystem", str(item.source_path.resolve()))
     return ("db_export", str(item.artifact.id))
+
+
+def _resolve_staging_source_path(
+    tracker: "Tracker",
+    *,
+    artifact: Artifact,
+) -> Path | None:
+    canonical_path: Path | None = None
+    try:
+        candidate = Path(tracker.resolve_uri(artifact.container_uri)).resolve()
+        if candidate.exists():
+            canonical_path = candidate
+    except (OSError, ValueError, AttributeError):
+        canonical_path = None
+
+    if canonical_path is not None:
+        return canonical_path
+
+    runtime_abs_path = artifact.abs_path
+    if runtime_abs_path:
+        candidate = Path(runtime_abs_path).resolve()
+        if candidate.exists():
+            return candidate
+
+    fs = getattr(tracker, "fs", None)
+    helper = getattr(fs, "get_remappable_relative_path", None)
+    if not callable(helper):
+        return None
+
+    relative_path = helper(artifact.container_uri)
+    if relative_path is None:
+        return None
+
+    if artifact.run_id:
+        owning_run = tracker.get_run(str(artifact.run_id))
+        if owning_run is not None:
+            _, source, _ = find_existing_recovery_source_path(
+                tracker,
+                artifact=artifact,
+                run=owning_run,
+                source_root=None,
+            )
+            if source is not None:
+                return source
+
+    for root in _artifact_recovery_roots(tracker, artifact=artifact):
+        candidate = (root / relative_path).resolve()
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _stage_artifact_path(
+    tracker: "Tracker",
+    *,
+    artifact: Artifact,
+    destination: Path,
+    overwrite: bool,
+    validate_content_hash: Literal["never", "if-present", "always"],
+    allow_external_paths: bool | None,
+) -> StagedInput:
+    allow_external = (
+        getattr(tracker, "allow_external_paths", False)
+        if allow_external_paths is None
+        else allow_external_paths
+    )
+    allowed_base = build_allowed_materialization_roots(
+        run_dir=Path(getattr(tracker, "run_dir")),
+        mounts=getattr(getattr(tracker, "fs", None), "mounts", None),
+        allow_external_paths=allow_external,
+    )
+
+    destination_path = Path(destination)
+
+    try:
+        _ensure_destination_not_symlink(destination_path)
+        destination_path = destination_path.resolve()
+        validate_allowed_materialization_destination(destination_path, allowed_base)
+
+        source_path = _resolve_staging_source_path(tracker, artifact=artifact)
+        if source_path is None or not source_path.exists():
+            msg = f"[Consist] Cannot stage artifact {artifact.key!r}: source path missing."
+            logging.warning(msg)
+            return _make_staged_output(
+                artifact,
+                status="missing_source",
+                path=destination_path,
+                message=msg,
+                resolvable=False,
+            )
+
+        if validate_content_hash not in {"never", "if-present", "always"}:
+            raise ValueError(
+                "validate_content_hash must be one of 'never', 'if-present', or 'always'."
+            )
+
+        if validate_content_hash == "always" and not artifact.hash:
+            msg = f"[Consist] Cannot validate artifact {artifact.key!r}: artifact.hash is missing."
+            logging.warning(msg)
+            return _make_staged_output(
+                artifact,
+                status="failed",
+                path=destination_path,
+                message=msg,
+                resolvable=False,
+            )
+
+        source_hash: str | None = None
+        if artifact.hash and validate_content_hash != "never":
+            source_hash = _compute_path_checksum(source_path)
+            if source_hash != artifact.hash:
+                msg = (
+                    f"[Consist] Content hash mismatch while staging {artifact.key!r}: "
+                    f"expected {artifact.hash}, found {source_hash}."
+                )
+                logging.warning(msg)
+                return _make_staged_output(
+                    artifact,
+                    status="failed",
+                    path=destination_path,
+                    message=msg,
+                    resolvable=False,
+                )
+
+        if source_path == destination_path:
+            return _make_staged_output(
+                artifact,
+                status="preserved_existing",
+                path=destination_path,
+                resolvable=True,
+            )
+
+        if destination_path.exists():
+            if destination_path.is_symlink():
+                msg = f"Symlink detected in destination path: {destination_path}"
+                logging.warning("[Consist] %s", msg)
+                return _make_staged_output(
+                    artifact,
+                    status="failed",
+                    path=destination_path,
+                    message=msg,
+                    resolvable=False,
+                )
+            if source_path.is_dir() != destination_path.is_dir():
+                msg = f"Destination type mismatch for {destination_path}; refusing to overwrite."
+                logging.warning("[Consist] %s", msg)
+                return _make_staged_output(
+                    artifact,
+                    status="failed",
+                    path=destination_path,
+                    message=msg,
+                    resolvable=False,
+                )
+
+            if not overwrite:
+                if source_hash is None:
+                    source_hash = _compute_path_checksum(source_path)
+                destination_hash = _compute_path_checksum(destination_path)
+                if source_hash == destination_hash:
+                    return _make_staged_output(
+                        artifact,
+                        status="preserved_existing",
+                        path=destination_path,
+                        resolvable=True,
+                    )
+
+                msg = f"Destination already exists and differs for {destination_path}; "
+                msg += "refusing to overwrite."
+                logging.warning("[Consist] %s", msg)
+                return _make_staged_output(
+                    artifact,
+                    status="failed",
+                    path=destination_path,
+                    message=msg,
+                    resolvable=False,
+                )
+
+        materialized, skipped_existing = _materialize_path(
+            source=source_path,
+            destination=destination_path,
+            preserve_existing=False,
+        )
+        if skipped_existing:
+            return _make_staged_output(
+                artifact,
+                status="preserved_existing",
+                path=destination_path,
+                resolvable=True,
+            )
+        if materialized:
+            return _make_staged_output(
+                artifact,
+                status="staged",
+                path=destination_path,
+                resolvable=True,
+            )
+
+        msg = f"Failed to stage artifact {artifact.key!r} to {destination_path}."
+        logging.warning("[Consist] %s", msg)
+        return _make_staged_output(
+            artifact,
+            status="failed",
+            path=destination_path,
+            message=msg,
+            resolvable=False,
+        )
+    except (OSError, shutil.Error, RuntimeError, ValueError) as exc:
+        msg = f"[Consist] Failed to stage artifact {artifact.key!r} to {destination_path}: {exc}"
+        logging.warning(msg)
+        return _make_staged_output(
+            artifact,
+            status="failed",
+            path=destination_path,
+            message=str(exc),
+            resolvable=False,
+        )
+
+
+def stage_artifacts_to_destinations(
+    tracker: "Tracker",
+    items: Sequence[tuple[str, Artifact, Path]],
+    *,
+    mode: Literal["copy", "hardlink", "symlink"] = "copy",
+    overwrite: bool = False,
+    validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
+    allow_external_paths: bool | None = None,
+) -> StagedInputsResult:
+    """Stage explicit artifact/destination pairs into a keyed result.
+
+    This is the shared implementation used by both the public low-level
+    staging helpers and run-time requested input materialization.
+    """
+    if mode != "copy":
+        raise ValueError(
+            f"Unsupported staging mode {mode!r}; only 'copy' is supported."
+        )
+
+    outputs: dict[str, StagedInput] = {}
+    key_order: list[str] = []
+    for key, artifact, destination in items:
+        key_order.append(key)
+        if artifact.key != key:
+            msg = (
+                f"Resolved artifact key {artifact.key!r} does not match requested "
+                f"staging key {key!r}."
+            )
+            outputs[key] = _make_staged_output(
+                artifact,
+                status="failed",
+                path=Path(destination),
+                message=msg,
+                resolvable=False,
+            )
+            continue
+        outputs[key] = _stage_artifact_path(
+            tracker,
+            artifact=artifact,
+            destination=Path(destination),
+            overwrite=overwrite,
+            validate_content_hash=validate_content_hash,
+            allow_external_paths=allow_external_paths,
+        )
+    return _ordered_staged_results(tuple(key_order), outputs)
 
 
 def plan_run_output_hydration(
@@ -721,8 +1278,15 @@ def plan_run_output_hydration(
         owning_run = _get_artifact_owning_run(
             tracker, selected_run=run, artifact=artifact
         )
-        remap = _derive_historical_remap(tracker, artifact=artifact, run=owning_run)
-        if remap is None:
+        relative_path, source_path, has_candidate_roots = (
+            find_existing_recovery_source_path(
+                tracker,
+                artifact=artifact,
+                run=owning_run,
+                source_root=source_root,
+            )
+        )
+        if relative_path is None:
             outputs[artifact.key] = _make_hydrated_output(
                 artifact,
                 status="skipped_unmapped",
@@ -731,23 +1295,22 @@ def plan_run_output_hydration(
             )
             continue
 
-        historical_root, relative_path = remap
         destination = target_root / relative_path
 
-        historical_source = (historical_root / relative_path).resolve()
-        override_source = (
-            (source_root / relative_path).resolve() if source_root is not None else None
-        )
-
         source_kind: Literal["filesystem", "db_export"]
-        source_path: Path | None
-        if override_source is not None and override_source.exists():
+        planned_source_path: Path | None
+        if source_path is not None:
             source_kind = "filesystem"
-            source_path = override_source
-        elif historical_source.exists():
-            source_kind = "filesystem"
-            source_path = historical_source
+            planned_source_path = source_path
         else:
+            if not has_candidate_roots:
+                outputs[artifact.key] = _make_hydrated_output(
+                    artifact,
+                    status="skipped_unmapped",
+                    path=None,
+                    resolvable=False,
+                )
+                continue
             artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
             if db_fallback == "if_ingested" and artifact_meta.get("is_ingested", False):
                 driver = str(artifact.driver or "").lower()
@@ -764,7 +1327,7 @@ def plan_run_output_hydration(
                     )
                     continue
                 source_kind = "db_export"
-                source_path = None
+                planned_source_path = None
             else:
                 outputs[artifact.key] = _make_hydrated_output(
                     artifact,
@@ -778,7 +1341,7 @@ def plan_run_output_hydration(
             artifact=artifact,
             keys=(artifact.key,),
             source_kind=source_kind,
-            source_path=source_path,
+            source_path=planned_source_path,
             destination=destination,
             relative_path=relative_path,
             artifacts_by_key={artifact.key: artifact},
@@ -1294,6 +1857,111 @@ def build_materialize_items_for_keys(
     return items
 
 
+def stage_artifact(
+    tracker: "Tracker",
+    artifact: Artifact,
+    destination: Path,
+    *,
+    mode: Literal["copy", "hardlink", "symlink"] = "copy",
+    overwrite: bool = False,
+    validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
+    allow_external_paths: bool | None = None,
+) -> StagedInput:
+    """Stage one artifact to a requested filesystem destination.
+
+    Parameters
+    ----------
+    tracker : Tracker
+        Tracker used to resolve canonical paths, allowed roots, and recovery
+        fallbacks.
+    artifact : Artifact
+        Canonical input artifact to stage.
+    destination : Path
+        Explicit local destination where the staged copy should exist.
+    mode : {"copy", "hardlink", "symlink"}, default "copy"
+        Staging mode. In v1, only ``"copy"`` is supported.
+    overwrite : bool, default False
+        Whether to replace an existing non-identical destination.
+    validate_content_hash : {"never", "if-present", "always"}, default "if-present"
+        Whether to validate staged file bytes against ``artifact.hash`` when a
+        file hash is available.
+    allow_external_paths : bool | None, default None
+        Override for the tracker's external-path policy.
+
+    Returns
+    -------
+    StagedInput
+        Detached artifact view plus the per-key staging outcome.
+    """
+    return stage_artifacts_to_destinations(
+        tracker,
+        [(artifact.key, artifact, Path(destination))],
+        mode=mode,
+        overwrite=overwrite,
+        validate_content_hash=validate_content_hash,
+        allow_external_paths=allow_external_paths,
+    )[artifact.key]
+
+
+def stage_inputs(
+    tracker: "Tracker",
+    inputs_by_key: Mapping[str, Artifact],
+    destinations_by_key: Mapping[str, Path],
+    *,
+    mode: Literal["copy", "hardlink", "symlink"] = "copy",
+    overwrite: bool = False,
+    validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
+    allow_external_paths: bool | None = None,
+) -> StagedInputsResult:
+    """Stage multiple keyed artifacts to their requested destinations.
+
+    Parameters
+    ----------
+    tracker : Tracker
+        Tracker used to resolve canonical paths, allowed roots, and recovery
+        fallbacks.
+    inputs_by_key : Mapping[str, Artifact]
+        Resolved input artifact mapping, typically the same key space later
+        used for ``inputs={...}`` on ``run(...)`` or ``ScenarioContext.run(...)``.
+    destinations_by_key : Mapping[str, Path]
+        Explicit staging destinations keyed by input name.
+    mode : {"copy", "hardlink", "symlink"}, default "copy"
+        Staging mode. In v1, only ``"copy"`` is supported.
+    overwrite : bool, default False
+        Whether to replace an existing non-identical destination.
+    validate_content_hash : {"never", "if-present", "always"}, default "if-present"
+        Whether to validate staged file bytes against ``artifact.hash`` when a
+        file hash is available.
+    allow_external_paths : bool | None, default None
+        Override for the tracker's external-path policy.
+
+    Returns
+    -------
+    StagedInputsResult
+        Key-indexed staging outcomes in the caller's requested key order.
+    """
+    if mode != "copy":
+        raise ValueError(
+            f"Unsupported staging mode {mode!r}; only 'copy' is supported."
+        )
+    items: list[tuple[str, Artifact, Path]] = []
+    for key, destination in destinations_by_key.items():
+        artifact = inputs_by_key.get(key)
+        if artifact is None:
+            raise KeyError(
+                f"Input key {key!r} was not found in the resolved artifact set."
+            )
+        items.append((key, artifact, Path(destination)))
+    return stage_artifacts_to_destinations(
+        tracker,
+        items,
+        mode=mode,
+        overwrite=overwrite,
+        validate_content_hash=validate_content_hash,
+        allow_external_paths=allow_external_paths,
+    )
+
+
 def materialize_ingested_artifact_from_db(
     *,
     artifact: Artifact,
@@ -1406,14 +2074,10 @@ def materialize_ingested_artifact_from_db(
         if overwrite:
             _replace_path(tmp_path_obj, destination_path)
         else:
-            try:
-                os.link(tmp_path_obj, destination_path)
-            except FileExistsError:
+            if not _link_file_atomic(tmp_path_obj, destination_path):
                 return str(destination_path)
     finally:
-        try:
+        with suppress(FileNotFoundError):
             tmp_path_obj.unlink()
-        except FileNotFoundError:
-            pass
 
     return str(destination_path)

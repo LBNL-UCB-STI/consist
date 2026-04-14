@@ -123,6 +123,25 @@ returns a cache hit and skips execution.
 the function. Use `"loaded"` when you want hydrated tables or objects; use
 `"paths"` when you want the callable to own its own I/O boundary.
 
+If a path-bound step needs an input at a specific local filename, request that
+staging directly in `ExecutionOptions`:
+
+``` python
+first = tracker.run(
+    fn=summarize_values,
+    inputs={"data_path": Path("input.csv")},
+    outputs=["summary"],
+    execution_options=ExecutionOptions(
+        input_binding="paths",
+        input_materialization="requested",
+        input_paths={"data_path": Path("./workspace/input.csv")},
+    ),
+)
+```
+
+That is the recommended pattern for subprocesses or legacy tools that expect
+fixed workspace-local input paths, and it still works on cache hits.
+
 The main Consist-specific onboarding cost in these examples is small but real:
 return `dict[str, Path]` instead of a bare `Path`, and declare
 `outputs=[...]` so the tracker knows which artifact key to log.

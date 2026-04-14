@@ -5,10 +5,10 @@ between machines without breaking lineage. This page explains how mounts, worksp
 URIs, and historical path resolution work.
 
 !!! note "Recommended path"
-    For most workflow code, the recommended path is `consist.run(...)`,
-    `consist.trace(...)`, or `consist.scenario(...)`. This page includes
-    `tracker.start_run(...)`/`consist.log_artifact(...)` snippets as low-level
-    examples for path and URI mechanics.
+    For most workflow code, prefer `tracker.run(...)`, `tracker.trace(...)`, or
+    `consist.scenario(...)` with `scenario.run(...)` / `scenario.trace(...)`.
+    This page includes `tracker.start_run(...)` / `consist.log_artifact(...)`
+    snippets as low-level examples for path and URI mechanics.
 
 ---
 
@@ -266,6 +266,11 @@ for non-container run policies.
   `run(...)` / scenario steps, or pass
   `materialize_cached_outputs_source_root=...` on low-level
   `tracker.start_run(...)` / `tracker.begin_run(...)` workflows.
+- For stable archive roots that should keep working across resumes, prefer
+  recording `artifact.meta["recovery_roots"]` once via
+  `tracker.set_artifact_recovery_roots(...)`,
+  `tracker.archive_artifact(...)`, or `tracker.archive_run_outputs(...)`
+  instead of repeating per-call source-root overrides.
 - Use `tracker.hydrate_run_outputs(..., source_root=...)` when you want
   key-indexed recovery results and detached artifacts that are immediately
   usable in the new workspace.
@@ -280,7 +285,9 @@ for non-container run policies.
 ## Troubleshooting
 
 - **Missing file on cache hit**: Check that mounts map to the correct root and the
-  original run directory still exists for workspace URIs.
+  original run directory still exists for workspace URIs. If outputs are
+  intentionally archived elsewhere, record that archive root in
+  `recovery_roots` so cache validation and hydration can find the bytes.
 - **Moved run directory**: Cache metadata is still valid, but byte materialization
   will warn because `_physical_run_dir` no longer points to the original location.
 - **Permission denied**: Consist warns and continues; adjust mount permissions or

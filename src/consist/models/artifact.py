@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import uuid
 import weakref
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Literal, Optional
+from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, Protocol, cast
 
 from pydantic import PrivateAttr
 from sqlalchemy import JSON, Column, UniqueConstraint
@@ -32,30 +33,78 @@ if TYPE_CHECKING:
     from consist.core.tracker import Tracker
 
 
-def get_tracker_ref(artifact: Any) -> Optional[weakref.ReferenceType[Any]]:
-    """Safely fetch a tracker weakref without triggering Pydantic __getattr__."""
-    private_state = getattr(artifact, "__pydantic_private__", None)
-    if isinstance(private_state, dict):
+class _ArtifactTrackerRef(Protocol):
+    def resolve_uri(self, uri: str) -> str: ...
+
+
+def _private_state(artifact: object) -> Optional[dict[str, object]]:
+    """Return Pydantic's private-attribute storage when it exists.
+
+    ``Artifact`` uses ``PrivateAttr`` for runtime-only state such as the tracker
+    weakref and resolved absolute path. In practice, ORM-loaded instances and
+    copied models do not always present that storage consistently through normal
+    attribute access, so this helper reads ``__pydantic_private__`` directly via
+    ``object.__getattribute__``.
+
+    Returning ``None`` means "treat this instance as if it has no initialized
+    private state yet" rather than failing the caller.
+    """
+    try:
+        private_state = object.__getattribute__(artifact, "__pydantic_private__")
+    except AttributeError:
+        return None
+    return private_state if isinstance(private_state, dict) else None
+
+
+def get_tracker_ref(
+    artifact: object,
+) -> Optional[weakref.ReferenceType[_ArtifactTrackerRef]]:
+    """Read the runtime tracker weakref without depending on normal model access.
+
+    The tracker reference is a convenience link used only at runtime for path
+    resolution. It is intentionally not part of the persisted model schema.
+
+    We first check Pydantic's private-state dictionary, which is the preferred
+    storage for ``PrivateAttr`` values. If that storage is unavailable, we fall
+    back to a direct ``object.__getattribute__`` lookup so partially initialized
+    or copied objects still work. Missing state is treated as a normal case and
+    returns ``None``.
+    """
+    private_state = _private_state(artifact)
+    if private_state is not None:
         tracker_ref = private_state.get("_tracker")
         if tracker_ref is not None:
-            return tracker_ref
+            return cast(weakref.ReferenceType[_ArtifactTrackerRef], tracker_ref)
     try:
-        return object.__getattribute__(artifact, "_tracker")
-    except Exception:
+        return cast(
+            weakref.ReferenceType[_ArtifactTrackerRef],
+            object.__getattribute__(artifact, "_tracker"),
+        )
+    except AttributeError:
         return None
 
 
-def set_tracker_ref(artifact: Any, tracker: Any) -> None:
-    """Attach a tracker weakref, tolerating missing Pydantic private state."""
+def set_tracker_ref(artifact: object, tracker: _ArtifactTrackerRef) -> None:
+    """Store a runtime tracker weakref on an artifact when possible.
+
+    This helper mirrors :func:`get_tracker_ref`: prefer Pydantic's private-state
+    dictionary, but fall back to ``object.__setattr__`` when that storage has not
+    been initialized. The weakref avoids keeping the tracker alive solely because
+    an artifact still points at it.
+
+    Failing to attach the ref is non-fatal. The artifact can still function as a
+    plain data object; it just loses the convenience of tracker-backed path
+    resolution until another code path reattaches the tracker.
+    """
     tracker_ref = weakref.ref(tracker)
-    private_state = getattr(artifact, "__pydantic_private__", None)
-    if isinstance(private_state, dict):
+    private_state = _private_state(artifact)
+    if private_state is not None:
         private_state["_tracker"] = tracker_ref
         return
     try:
         object.__setattr__(artifact, "_tracker", tracker_ref)
-    except Exception:
-        pass
+    except (AttributeError, TypeError):
+        return
 
 
 class UUIDType(TypeDecorator):
@@ -102,6 +151,15 @@ class Artifact(SQLModel, table=True):
     has a unique identity, a virtualized location, and rich metadata, supporting
     both "hot" (ingested) and "cold" (file-based) data strategies.
 
+    The public fingerprint surface for downstream consumers is ``Artifact.hash``.
+    Consist preserves that field across logging, querying, replay, staging, and
+    hydration so external provenance/bookkeeping code can read one stable
+    fingerprint without probing wrapper-specific fields. Fingerprint semantics
+    follow the configured hashing strategy: ``full`` is generally content-based,
+    while ``fast`` may use metadata-based hashing for files or directories.
+    ``Artifact.content_id`` is a database-local deduplication key and is not the
+    public fingerprint contract.
+
     Attributes:
         id (uuid.UUID): A unique identifier for the artifact.
         key (str): A semantic, human-readable name for the artifact (e.g., "households", "parcels").
@@ -111,10 +169,13 @@ class Artifact(SQLModel, table=True):
         array_path (Optional[str]): Optional path inside a container for array artifacts.
         driver (str): The name of the format handler used to read or write the artifact
                       (e.g., "parquet", "csv", "zarr").
-        hash (Optional[str]): SHA256 content hash of the artifact's data, enabling content-addressable
-                              lookups and deduplication.
+        hash (Optional[str]): Canonical portable artifact fingerprint. This is usually a SHA256
+                              digest and remains the stable public identity field across logging,
+                              replay, staging, and hydration.
+        parent_artifact_id (Optional[uuid.UUID]): Canonical parent artifact relation for
+                              container child artifacts. Null for standalone artifacts.
         run_id (Optional[str]): The ID of the run that generated this artifact. Null for inputs.
-        meta (Dict[str, Any]): A flexible JSON field for storing arbitrary metadata, such as
+        meta (dict[str, object]): A flexible JSON field for storing arbitrary metadata, such as
                                schema signatures, or data dimensions.
         created_at (datetime): The timestamp when the artifact was first logged.
     """
@@ -150,17 +211,31 @@ class Artifact(SQLModel, table=True):
         description="Format handler: parquet, csv, zarr, json, h5_table, h5, hdf5, geojson, shapefile, geopackage, or other"
     )
 
-    # Content Hash (for deduplication and content-addressable lookups)
+    # Canonical artifact fingerprint (portable) plus DB-local content identity.
     hash: Optional[str] = Field(
         default=None,
         index=True,
-        description="SHA256 content hash of the artifact's data",
+        description=(
+            "Canonical portable artifact fingerprint. Semantics follow the active "
+            "hashing strategy and may be content- or metadata-based."
+        ),
     )
     content_id: Optional[uuid.UUID] = Field(
         default=None,
         index=True,
         sa_type=UUIDType,
-        description="Pointer to shared ArtifactContent metadata when available",
+        description=(
+            "Database-local pointer to shared ArtifactContent metadata used for "
+            "deduplication; not the public artifact fingerprint surface."
+        ),
+    )
+    parent_artifact_id: Optional[uuid.UUID] = Field(
+        default=None,
+        index=True,
+        sa_type=UUIDType,
+        description=(
+            "Canonical parent artifact relation for container child artifacts."
+        ),
     )
 
     # Lineage
@@ -179,7 +254,9 @@ class Artifact(SQLModel, table=True):
     # but is needed at runtime, aligning with "Path Resolution & Mounts" and "Artifact Chaining"
     # as described in the architecture documentation.
     _abs_path: Optional[str] = PrivateAttr(default=None)
-    _tracker: Optional[weakref.ReferenceType[Any]] = PrivateAttr(default=None)
+    _tracker: Optional[weakref.ReferenceType[_ArtifactTrackerRef]] = PrivateAttr(
+        default=None
+    )
 
     @property
     def abs_path(self) -> Optional[str]:
@@ -196,14 +273,28 @@ class Artifact(SQLModel, table=True):
             The absolute file system path of the artifact, or `None` if it has not
             yet been resolved or set.
         """
-        # Some ORM-loaded artifacts may not initialize private state; guard for None.
-        private_state = getattr(self, "__pydantic_private__", None)
+        private_state = _private_state(self)
         if private_state is None:
             return None
-        try:
-            return self._abs_path
-        except Exception:
-            return None
+        abs_path = private_state.get("_abs_path")
+        return abs_path if isinstance(abs_path, str) else None
+
+    @property
+    def recovery_roots(self) -> list[str]:
+        """
+        Ordered advisory recovery roots recorded on this artifact.
+
+        This is a typed convenience view over ``meta["recovery_roots"]``. Use
+        ``Tracker.set_artifact_recovery_roots(...)`` to persist changes.
+        """
+        roots = (self.meta or {}).get("recovery_roots")
+        if roots is None:
+            return []
+        if isinstance(roots, (str, Path)):
+            return [str(roots)]
+        if isinstance(roots, Sequence):
+            return [str(item) for item in roots if isinstance(item, (str, Path))]
+        return []
 
     @abs_path.setter
     def abs_path(self, value: str) -> None:
@@ -222,17 +313,21 @@ class Artifact(SQLModel, table=True):
         """
         Resolve this artifact to a filesystem Path.
 
-        Uses the tracker when available to handle mount-aware URIs; otherwise falls
-        back to the cached absolute path or the raw URI.
+        Uses the tracker when available to handle mount-aware URIs. If that
+        canonical resolution does not exist but a runtime ``abs_path`` is set
+        (for example after historical hydration or archive ``move``), this
+        falls back to ``abs_path`` before returning the raw URI.
         """
         tracker_ref = get_tracker_ref(self)
         if tracker_ref is not None:
             tracker_obj = tracker_ref()
             if tracker_obj is not None:
                 try:
-                    return Path(tracker_obj.resolve_uri(self.container_uri))
+                    resolved = Path(tracker_obj.resolve_uri(self.container_uri))
+                    if resolved.exists() or not self.abs_path:
+                        return resolved
                 except Exception:
-                    pass
+                    resolved = None
 
         if self.abs_path:
             return Path(self.abs_path)
@@ -242,9 +337,10 @@ class Artifact(SQLModel, table=True):
         """
         Resolve this artifact to a filesystem path.
 
-        When ``tracker`` is provided, URI resolution uses that tracker directly.
-        Otherwise this falls back to the attached tracker context (if any), then
-        runtime absolute path, then raw URI path.
+        When ``tracker`` is provided, URI resolution uses that tracker
+        explicitly. Otherwise this falls back to the attached tracker context
+        (if any), then any runtime ``abs_path`` captured during hydration or
+        archive ``move``, then the raw URI path.
         """
         if tracker is not None:
             return Path(tracker.resolve_uri(self.container_uri))
@@ -264,6 +360,7 @@ class Artifact(SQLModel, table=True):
         This is equivalent to ``consist.load_df(self, ...)`` and supports the same
         loader options.
         """
+        # reason: keep the import local to avoid a circular dependency at module import time.
         from consist.api import load_df
 
         return load_df(

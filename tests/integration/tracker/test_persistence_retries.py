@@ -6,15 +6,22 @@ from typing import List
 import pytest
 from sqlalchemy.exc import DatabaseError, OperationalError
 
+from consist.core.db_runtime import DatabaseRuntimeOps
 from consist.core.persistence import DatabaseManager
 from consist.models.run_config_kv import RunConfigKV
+
+
+def _build_retry_only_db() -> DatabaseManager:
+    db = DatabaseManager.__new__(DatabaseManager)
+    db._runtime_ops = DatabaseRuntimeOps(db)
+    return db
 
 
 def test_execute_with_retry_retries_on_lock(monkeypatch) -> None:
     """
     execute_with_retry should retry lock/IO errors and eventually return.
     """
-    db = DatabaseManager.__new__(DatabaseManager)
+    db = _build_retry_only_db()
     calls: List[int] = []
 
     def flaky():
@@ -23,7 +30,7 @@ def test_execute_with_retry_retries_on_lock(monkeypatch) -> None:
             raise OperationalError("stmt", {}, Exception("database is locked"))
         return "ok"
 
-    monkeypatch.setattr("time.sleep", lambda _s: None)
+    monkeypatch.setattr("consist.core.db_runtime.time.sleep", lambda _s: None)
     assert db.execute_with_retry(flaky, retries=3) == "ok"
     assert len(calls) == 3
 
@@ -32,7 +39,7 @@ def test_execute_with_retry_raises_on_non_lock_errors() -> None:
     """
     execute_with_retry should not retry non-lock errors (e.g., constraint violations).
     """
-    db = DatabaseManager.__new__(DatabaseManager)
+    db = _build_retry_only_db()
     calls: List[int] = []
 
     def fail_fast():
@@ -48,7 +55,7 @@ def test_execute_with_retry_raises_on_constraint_operational_error() -> None:
     """
     Constraint-like OperationalError should not be retried.
     """
-    db = DatabaseManager.__new__(DatabaseManager)
+    db = _build_retry_only_db()
     calls: List[int] = []
 
     def fail_fast():
@@ -64,7 +71,7 @@ def test_execute_with_retry_retries_on_active_connection_lock(monkeypatch) -> No
     """
     execute_with_retry should retry connection-lock errors from DuckDB.
     """
-    db = DatabaseManager.__new__(DatabaseManager)
+    db = _build_retry_only_db()
     calls: List[int] = []
 
     def flaky():
@@ -77,7 +84,7 @@ def test_execute_with_retry_retries_on_active_connection_lock(monkeypatch) -> No
             )
         return "ok"
 
-    monkeypatch.setattr("time.sleep", lambda _s: None)
+    monkeypatch.setattr("consist.core.db_runtime.time.sleep", lambda _s: None)
     assert db.execute_with_retry(flaky, retries=3) == "ok"
     assert len(calls) == 3
 

@@ -1,15 +1,18 @@
 # API Essentials
 
-Use this page for day-to-day Consist usage. These APIs are the recommended path 
-for new projects and onboarding docs/examples.
+Use this page for day-to-day Consist usage. These are the preferred execution
+patterns for new projects and onboarding docs/examples.
 
 ## Core execution patterns
 
-- **Cacheable function step**: [`consist.run`](api_helpers.md#consist.api.run)
-- **Always-execute traced step**: [`consist.trace`](api_helpers.md#consist.api.trace)
+- **Cacheable function step**: [`Tracker.run`](tracker.md#consist.core.tracker.Tracker.run)
+- **Always-execute traced step**: [`Tracker.trace`](tracker.md#consist.core.tracker.Tracker.trace)
 - **Workflow composition**: [`consist.scenario`](api_helpers.md#consist.api.scenario),
   [`ScenarioContext.run`](workflow.md#consist.core.workflow.ScenarioContext.run),
   [`ScenarioContext.trace`](workflow.md#consist.core.workflow.ScenarioContext.trace)
+- **Compatibility wrappers**: [`consist.run`](api_helpers.md#consist.api.run) and
+  [`consist.trace`](api_helpers.md#consist.api.trace) remain available, but they
+  now warn and simply resolve a tracker before forwarding to the explicit APIs.
 
 If you already have a resolved binding plan from a planner or orchestrator,
 pass `binding=BindingResult(...)` to `ScenarioContext.run(...)`. That envelope
@@ -48,11 +51,9 @@ These run/trace entry points share the same public identity kwargs:
 - `adapter=...`
 - `identity_inputs=[...]`
 
-This parity applies across:
-
-- `consist.run(...)` and `consist.trace(...)`
-- `Tracker.run(...)` and `Tracker.trace(...)`
-- `ScenarioContext.run(...)` and `ScenarioContext.trace(...)`
+This parity applies across `Tracker.run(...)`, `Tracker.trace(...)`,
+`ScenarioContext.run(...)`, `ScenarioContext.trace(...)`, and the deprecated
+`consist.run(...)` / `consist.trace(...)` compatibility wrappers.
 
 ## Minimal essentials example
 
@@ -68,17 +69,16 @@ def produce(*, value: int) -> Path:
     out.write_text(f"{value}\n", encoding="utf-8")
     return out
 
-with consist.use_tracker(tracker):
-    result = consist.run(
-        fn=produce,
-        name="produce",
-        config={"value": 42},
-        outputs=["value"],
-        execution_options=ExecutionOptions(runtime_kwargs={"value": 42}),
-    )
+result = tracker.run(
+    fn=produce,
+    name="produce",
+    config={"value": 42},
+    outputs=["value"],
+    execution_options=ExecutionOptions(runtime_kwargs={"value": 42}),
+)
 
-    with consist.trace("inspect", inputs={"value": consist.ref(result, key="value")}):
-        pass
+with tracker.trace("inspect", inputs={"value": consist.ref(result, key="value")}):
+    pass
 ```
 
 For lower-level patterns (`start_run`, `begin_run/end_run`, `define_step`, and
