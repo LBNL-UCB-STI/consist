@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, Type, 
 from sqlmodel import SQLModel
 
 from consist.core.drivers import ARRAY_DRIVERS, TABLE_DRIVERS
+from consist.core.cache_output_logging import _demote_cache_hit
 from consist.core.validation import validate_artifact_key
 from consist.models.artifact import Artifact
 from consist.types import (
@@ -142,6 +143,33 @@ def _resolve_h5_child_spec(
         or child_specs.get(normalized_path.lstrip("/"))
         or child_specs.get(table_path)
     )
+
+
+def _list_h5_dataset_names(
+    path_obj: Path,
+    *,
+    filter_fn: Callable[[str], bool],
+) -> list[str]:
+    try:
+        import h5py
+    except ImportError:
+        logging.warning("[Consist] h5py not installed. Cannot inspect HDF5 tables.")
+        return []
+
+    dataset_names: list[str] = []
+    try:
+        with h5py.File(str(path_obj), "r") as handle:
+
+            def visit_datasets(name: str, obj: Any) -> None:
+                if isinstance(obj, h5py.Dataset) and filter_fn(name):
+                    dataset_names.append(_normalize_h5_child_path(name))
+
+            handle.visititems(visit_datasets)
+    except Exception as exc:
+        logging.warning("[Consist] Failed to inspect HDF5 tables: %s", exc)
+        return []
+
+    return dataset_names
 
 
 class ArtifactManager:
@@ -687,7 +715,7 @@ class ArtifactManager:
                 _normalize_h5_child_path(path_key): spec
                 for path_key, spec in child_specs.items()
             }
-            if child_specs
+            if child_specs is not None
             else None
         )
         prior_container = None
@@ -714,6 +742,7 @@ class ArtifactManager:
             )
 
             table_artifacts: List[Artifact] = []
+            reusing_cached_children = False
             should_hash_tables = False
             skip_reason: Optional[str] = None
             if hash_tables not in {"always", "if_unchanged", "never"}:
@@ -754,8 +783,12 @@ class ArtifactManager:
 
             if discover_tables:
                 include_only_paths = (
-                    set(normalized_child_specs.keys())
-                    if child_selection == "include_only" and normalized_child_specs
+                    (
+                        set(normalized_child_specs.keys())
+                        if normalized_child_specs is not None
+                        else set()
+                    )
+                    if child_selection == "include_only"
                     else None
                 )
                 if table_filter is None:
@@ -780,40 +813,87 @@ class ArtifactManager:
                         return True
                     return _normalize_h5_child_path(name) in include_only_paths
 
-                scanned_children = self.scan_h5_container(
-                    container,
-                    path_obj,
-                    key,
-                    direction,
-                    filter_fn,
-                    hash_tables=should_hash_tables,
-                    table_hash_chunk_rows=table_hash_chunk_rows,
-                    child_specs=normalized_child_specs,
-                )
-
-                for table_artifact, prepared_bundle in scanned_children:
-                    self.tracker._artifact_logging.apply_inherited_run_metadata(
-                        table_artifact
-                    )
-                    self.tracker._artifact_logging.attach_logged_artifact(
-                        artifact=table_artifact,
-                        direction=direction,
-                        register_with_coupler=False,
-                    )
-                    if prepared_bundle is not None:
-                        self.tracker.persistence.sync_artifact_with_facet_bundle(
-                            table_artifact,
-                            direction,
-                            facet=prepared_bundle.facet,
-                            meta_updates=prepared_bundle.meta_updates,
-                            kv_rows=prepared_bundle.kv_rows,
+                if direction == "output" and self.tracker.is_cached:
+                    cached_children = [
+                        artifact
+                        for artifact in self.tracker.current_consist.outputs
+                        if artifact.id != container.id
+                        and (
+                            artifact.parent_artifact_id == container.id
+                            or (
+                                isinstance(artifact.meta, dict)
+                                and artifact.meta.get("parent_id") == str(container.id)
+                            )
                         )
+                        and artifact.table_path is not None
+                        and filter_fn(artifact.table_path)
+                    ]
+                    cached_child_paths = {
+                        _normalize_h5_child_path(artifact.table_path)
+                        for artifact in cached_children
+                        if artifact.table_path is not None
+                    }
+                    requested_child_paths = set(
+                        _list_h5_dataset_names(path_obj, filter_fn=filter_fn)
+                    )
+                    if cached_child_paths == requested_child_paths:
+                        table_artifacts = list(cached_children)
+                        reusing_cached_children = True
                     else:
-                        self.tracker.persistence.sync_artifact(
-                            table_artifact,
-                            direction,
+                        _demote_cache_hit(
+                            self.tracker.current_consist,
+                            reason=(
+                                "caller requested HDF5 child artifacts that do not "
+                                "match the cached output set"
+                            ),
                         )
-                    table_artifacts.append(table_artifact)
+                        container = self.tracker.log_artifact(
+                            str(path_obj),
+                            key=key,
+                            direction=direction,
+                            driver="h5",
+                            is_container=True,
+                            **meta,
+                        )
+
+                if not table_artifacts:
+                    scanned_children = self.scan_h5_container(
+                        container,
+                        path_obj,
+                        key,
+                        direction,
+                        filter_fn,
+                        hash_tables=should_hash_tables,
+                        table_hash_chunk_rows=table_hash_chunk_rows,
+                        child_specs=normalized_child_specs,
+                    )
+
+                    for table_artifact, prepared_bundle in scanned_children:
+                        self.tracker._artifact_logging.apply_inherited_run_metadata(
+                            table_artifact
+                        )
+                        self.tracker._artifact_logging.attach_logged_artifact(
+                            artifact=table_artifact,
+                            direction=direction,
+                            register_with_coupler=False,
+                        )
+                        if prepared_bundle is not None:
+                            self.tracker.persistence.sync_artifact_with_facet_bundle(
+                                table_artifact,
+                                direction,
+                                facet=prepared_bundle.facet,
+                                meta_updates=prepared_bundle.meta_updates,
+                                kv_rows=prepared_bundle.kv_rows,
+                            )
+                        else:
+                            self.tracker.persistence.sync_artifact(
+                                table_artifact,
+                                direction,
+                            )
+                        table_artifacts.append(table_artifact)
+
+                if reusing_cached_children:
+                    return container, table_artifacts
 
             container.meta["table_count"] = len(table_artifacts)
             container.meta["table_ids"] = [str(t.id) for t in table_artifacts]
@@ -949,7 +1029,7 @@ class ArtifactManager:
         self.tracker._artifact_logging.attach_logged_artifact(
             artifact=artifact,
             direction=direction,
-            register_with_coupler=False,
+            register_with_coupler=direction == "output",
         )
 
         self.tracker._flush_json()
