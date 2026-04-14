@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## [0.1.2] - 2026-04-14
+
+### Added
+
+- Add `hydrate_run_outputs(...)` and `Run.hydrate_outputs(...)` for keyed
+  historical output recovery, including per-output status/result reporting
+  for restart, archive-mirror recovery, and cross-workspace reuse
+  by @zneedell ([#101](https://github.com/LBNL-UCB-STI/consist/pull/101)).
+- Add artifact recovery roots and archive helpers so historical outputs can be
+  recovered after archival without minting new artifact identities, including
+  `archive_artifact(...)`, `archive_run_outputs(...)`, and
+  `archive_current_run_outputs(...)`
+  by @zneedell ([#102](https://github.com/LBNL-UCB-STI/consist/pull/102)).
+- Add first-class input staging for path-bound workflows via
+  `ExecutionOptions(input_materialization="requested", input_paths={...})`,
+  plus `stage_artifact(...)` and `stage_inputs(...)` helpers
+  by @zneedell ([#106](https://github.com/LBNL-UCB-STI/consist/pull/106)).
+- Add canonical parent/child artifact relationships, first-class parent/child
+  query helpers, and typed HDF5 child selection/customization via
+  `H5ChildSpec`
+  by @zneedell ([#111](https://github.com/LBNL-UCB-STI/consist/pull/111)).
+
+### Changed
+
+- Clarify `Artifact.hash` as the canonical public artifact fingerprint while
+  keeping `content_id` as an internal DB-local dedupe identity, with docs and
+  lifecycle tests updated around that contract
+  by @zneedell ([#110](https://github.com/LBNL-UCB-STI/consist/pull/110)).
+- Tighten the top-level `consist.*` API around the `Tracker` boundary:
+  `consist.run(...)`, `consist.trace(...)`, and `consist.start_run(...)` are
+  now deprecated compatibility wrappers, while ambient logging/ingestion
+  helpers remain supported
+  by @zneedell ([#109](https://github.com/LBNL-UCB-STI/consist/pull/109)).
+- Refactor tracker and persistence internals into focused service modules and
+  tighten typing/error handling across the codebase to make future evolution
+  safer without changing the public composition roots
+  by @zneedell ([#107](https://github.com/LBNL-UCB-STI/consist/pull/107),
+  [#108](https://github.com/LBNL-UCB-STI/consist/pull/108)).
+
+### Fixed
+
+- Fix detached-artifact replay/cache-reuse paths by cloning DB-loaded
+  artifacts before applying overrides or attaching `content_id`, avoiding
+  SQLAlchemy mutation failures during hydration and reuse
+  by @zneedell ([#105](https://github.com/LBNL-UCB-STI/consist/pull/105)).
+
 ## [0.1.1] - 2026-04-08
 
 ### Added
@@ -211,7 +257,9 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
 
-[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.2...HEAD
+
+[0.1.2]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.1...v0.1.2
 
 [0.1.1]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.0...v0.1.1
 
