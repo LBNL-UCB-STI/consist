@@ -158,6 +158,12 @@ class DatabaseMaintenance:
         except OSError:
             return (self.run_dir,)
 
+    def _resolve_default_run_directory(self) -> Path:
+        try:
+            return self.run_dir.resolve()
+        except OSError:
+            return self.run_dir
+
     def _classify_delete_targets(
         self, paths: Iterable[Path]
     ) -> tuple[list[Path], list[Path]]:
@@ -3363,11 +3369,8 @@ class DatabaseMaintenance:
                 try:
                     return Path(physical_run_dir).resolve()
                 except OSError:
-                    pass
-        try:
-            return self.run_dir.resolve()
-        except OSError:
-            return self.run_dir
+                    return self._resolve_default_run_directory()
+        return self._resolve_default_run_directory()
 
     def _mount_roots_for_uri(
         self,

@@ -4726,6 +4726,27 @@ class Tracker:
     def load_input_bundle(self, run_id: str) -> dict[str, Artifact]:
         return self._history_service.load_input_bundle(run_id)
 
+    def _resolve_cached_artifact_abs_path(self, artifact: Artifact) -> None:
+        if artifact.abs_path:
+            return
+        try:
+            artifact.abs_path = self.resolve_uri(artifact.container_uri)
+        except Exception:
+            return
+
+    def _auto_capture_output_artifact(self, f_path: Path) -> Artifact | None:
+        key = f_path.stem
+        try:
+            return self.log_artifact(
+                str(f_path),
+                key=key,
+                direction="output",
+                captured_automatically=True,
+            )
+        except Exception as exc:
+            logging.error("[Consist] Failed to auto-capture %s: %s", f_path, exc)
+            return None
+
     @contextmanager
     def capture_outputs(
         self, directory: Union[str, Path], pattern: str = "*", recursive: bool = False
@@ -4776,18 +4797,9 @@ class Tracker:
             for f_path, mtime in after_state.items():
                 # Check if file is new or modified
                 if f_path not in before_state or mtime > before_state[f_path]:
-                    try:
-                        key = f_path.stem
-                        # Log it
-                        art = self.log_artifact(
-                            str(f_path),
-                            key=key,
-                            direction="output",
-                            captured_automatically=True,
-                        )
+                    art = self._auto_capture_output_artifact(f_path)
+                    if art is not None:
                         capture_result.artifacts.append(art)
-                    except Exception as e:
-                        logging.error(f"[Consist] Failed to auto-capture {f_path}: {e}")
 
     def log_meta(self, **kwargs: Any) -> None:
         """
@@ -4949,11 +4961,7 @@ class Tracker:
             return None
         artifact = outputs.get(key) if key else next(iter(outputs.values()))
         if artifact:
-            if not artifact.abs_path:
-                try:
-                    artifact.abs_path = self.resolve_uri(artifact.container_uri)
-                except Exception:
-                    pass
+            self._resolve_cached_artifact_abs_path(artifact)
             set_tracker_ref(artifact, self)
         return artifact
 

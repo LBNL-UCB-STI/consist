@@ -22,17 +22,20 @@ class DatabaseSnapshotOps(_DatabaseOpsBase):
     persistence layer yet.
     """
 
+    def _unlink_temp_path(self, temp_path: Path) -> None:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            return
+
     def _atomic_copy_file(self, src: Path, dest: Path) -> None:
         temp_path = dest.parent / f".{dest.name}.{uuid.uuid4().hex}.tmp"
         try:
             shutil.copy2(src, temp_path)
             temp_path.replace(dest)
         finally:
-            try:
-                if temp_path.exists():
-                    temp_path.unlink()
-            except OSError:
-                pass
+            self._unlink_temp_path(temp_path)
 
     def _atomic_write_json_file(self, payload: Dict[str, Any], dest: Path) -> None:
         temp_path = dest.parent / f".{dest.name}.{uuid.uuid4().hex}.tmp"
@@ -43,11 +46,7 @@ class DatabaseSnapshotOps(_DatabaseOpsBase):
             )
             temp_path.replace(dest)
         finally:
-            try:
-                if temp_path.exists():
-                    temp_path.unlink()
-            except OSError:
-                pass
+            self._unlink_temp_path(temp_path)
 
     def _snapshot_sidecar_path(self, destination: Path) -> Path:
         base_name = destination.stem if destination.suffix else destination.name

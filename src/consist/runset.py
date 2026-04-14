@@ -41,7 +41,7 @@ _RUN_FIELD_ALIASES: Dict[str, str] = {
 }
 
 
-def _coerce_config_kv_value(row: RunConfigKV) -> Any:
+def _coerce_config_kv_value(row: RunConfigKV) -> object | None:
     if row.value_type == "json":
         return row.value_json
     if row.value_type == "str":
@@ -55,7 +55,7 @@ def _coerce_config_kv_value(row: RunConfigKV) -> Any:
     return None
 
 
-def _sort_value(value: Any) -> tuple[int, Any]:
+def _sort_value(value: object | None) -> tuple[int, object]:
     if value is None:
         return (0, 0)
     if isinstance(value, bool):
@@ -155,7 +155,7 @@ class RunSet:
         """
         return cls(runs=list(runs), label=label)
 
-    def split_by(self, field: str) -> Dict[Any, "RunSet"]:
+    def split_by(self, field: str) -> OrderedDict[object, "RunSet"]:
         """
         Partition runs into keyed sub-RunSets by field or facet value.
 
@@ -167,7 +167,7 @@ class RunSet:
 
         Returns
         -------
-        Dict[Any, RunSet]
+        OrderedDict[object, RunSet]
             Ordered dict keyed by the resolved field value, sorted ascending.
             Missing values are grouped under ``None``.
         """
@@ -175,7 +175,7 @@ class RunSet:
             return OrderedDict()
 
         values_by_run = self._values_for_fields([field])
-        grouped: Dict[Any, List[Run]] = {}
+        grouped: Dict[object, List[Run]] = {}
         for run in self.runs:
             key = values_by_run[run.id].get(field)
             grouped.setdefault(key, []).append(run)
@@ -185,13 +185,13 @@ class RunSet:
             ordered[key] = self._clone(grouped[key])
         return ordered
 
-    def filter(self, **field_values: Any) -> "RunSet":
+    def filter(self, **field_values: object) -> "RunSet":
         """
         Filter runs by exact field/facet matches.
 
         Parameters
         ----------
-        **field_values : Any
+        **field_values : object
             Key-value predicates. A run is retained only if all predicates match.
 
         Returns
@@ -238,7 +238,7 @@ class RunSet:
             return self._clone([latest_run])
 
         values_by_run = self._values_for_fields(group_by)
-        latest_by_group: Dict[tuple[Any, ...], Run] = {}
+        latest_by_group: Dict[tuple[object, ...], Run] = {}
         for run in self.runs:
             group_key = tuple(values_by_run[run.id].get(field) for field in group_by)
             current = latest_by_group.get(group_key)
@@ -272,8 +272,8 @@ class RunSet:
         left_values = self._values_for_fields([on])
         right_values = other._values_for_fields([on])
 
-        left_lookup: Dict[Any, Run] = {}
-        right_lookup: Dict[Any, Run] = {}
+        left_lookup: Dict[object, Run] = {}
+        right_lookup: Dict[object, Run] = {}
 
         for run in self.runs:
             key = left_values[run.id].get(on)
@@ -342,9 +342,9 @@ class RunSet:
             {key for values in facets_by_run.values() for key in values.keys()}
             - set(columns)
         )
-        rows: List[Dict[str, Any]] = []
+        rows: List[Dict[str, object]] = []
         for run in self.runs:
-            row: Dict[str, Any] = {
+            row: Dict[str, object] = {
                 "run_id": run.id,
                 "label": self.label,
                 "status": run.status,
@@ -369,13 +369,15 @@ class RunSet:
     def _run_field_name(field: str) -> str:
         return _RUN_FIELD_ALIASES.get(field, field)
 
-    def _resolve_run_field(self, run: Run, field: str) -> tuple[bool, Any]:
+    def _resolve_run_field(self, run: Run, field: str) -> tuple[bool, object | None]:
         run_field_name = self._run_field_name(field)
-        if hasattr(run, run_field_name):
-            return True, getattr(run, run_field_name)
+        if run_field_name in Run.model_fields:
+            return True, run.__dict__.get(run_field_name)
         return False, None
 
-    def _values_for_fields(self, fields: List[str]) -> Dict[str, Dict[str, Any]]:
+    def _values_for_fields(
+        self, fields: List[str]
+    ) -> Dict[str, Dict[str, object | None]]:
         values_by_run = {run.id: {} for run in self.runs}
         unresolved_fields: set[str] = set()
 
@@ -406,12 +408,10 @@ class RunSet:
 
     def _load_facet_values(
         self, fields: Optional[set[str]] = None
-    ) -> Dict[str, Dict[str, Any]]:
+    ) -> Dict[str, Dict[str, object | None]]:
         if not self.runs or self._tracker is None:
             return {}
-        queries = getattr(self._tracker, "queries", None)
-        if queries is None:
-            return {}
+        queries = self._tracker.queries
 
         run_ids = [run.id for run in self.runs]
         run_model_by_id = {run.id: run.model_name for run in self.runs}
@@ -422,7 +422,7 @@ class RunSet:
         if not rows:
             return {}
 
-        values_by_run: Dict[str, Dict[str, Any]] = {}
+        values_by_run: Dict[str, Dict[str, object | None]] = {}
         namespace_by_run_key: Dict[str, Dict[str, str]] = {}
         for row in rows:
             run_values = values_by_run.setdefault(row.run_id, {})
@@ -460,14 +460,14 @@ class AlignedPair:
         Left-hand RunSet with keys ordered to match ``keys``.
     right : RunSet
         Right-hand RunSet with keys ordered to match ``keys``.
-    keys : List[Any]
+    keys : List[object]
         Shared alignment key values present in both RunSets.
     """
 
     on: str
     left: RunSet
     right: RunSet
-    keys: List[Any]
+    keys: List[object]
 
     def _resolve_diff_tracker(self) -> "Tracker":
         left_tracker = self.left._tracker
@@ -478,16 +478,19 @@ class AlignedPair:
                 "Build RunSets with RunSet.from_query(...) first."
             )
         if left_tracker is None:
-            assert right_tracker is not None
+            if right_tracker is None:
+                raise RuntimeError(
+                    "AlignedPair.config_diffs requires Tracker-backed RunSets. "
+                    "Build RunSets with RunSet.from_query(...) first."
+                )
             return right_tracker
         if right_tracker is None:
-            assert left_tracker is not None
             return left_tracker
         if left_tracker is right_tracker:
             return left_tracker
 
-        left_db_path = getattr(left_tracker, "db_path", None)
-        right_db_path = getattr(right_tracker, "db_path", None)
+        left_db_path = left_tracker.db_path
+        right_db_path = right_tracker.db_path
         if left_db_path is not None and right_db_path is not None:
             if str(left_db_path) == str(right_db_path):
                 return left_tracker
@@ -509,13 +512,13 @@ class AlignedPair:
         for left_run, right_run in zip(self.left, self.right):
             yield left_run, right_run
 
-    def apply(self, fn: Callable[[Run, Run, Any], pd.DataFrame]) -> pd.DataFrame:
+    def apply(self, fn: Callable[[Run, Run, object], pd.DataFrame]) -> pd.DataFrame:
         """
         Apply a pairwise function over aligned runs and concatenate results.
 
         Parameters
         ----------
-        fn : Callable[[Run, Run, Any], pandas.DataFrame]
+        fn : Callable[[Run, Run, object], pandas.DataFrame]
             Function called as ``fn(left_run, right_run, key)`` for each pair.
 
         Returns
@@ -570,7 +573,7 @@ class AlignedPair:
         """
         tracker = self._resolve_diff_tracker()
 
-        rows: List[Dict[str, Any]] = []
+        rows: List[Dict[str, object]] = []
         for on_value, (left_run, right_run) in zip(self.keys, self.pairs()):
             diff = tracker.diff_runs(
                 left_run.id,
@@ -621,7 +624,7 @@ class AlignedPair:
             Columns:
             ``key, left_run_id, right_run_id, left_status, right_status``.
         """
-        rows: List[Dict[str, Any]] = []
+        rows: List[Dict[str, object]] = []
         for key, (left_run, right_run) in zip(self.keys, self.pairs()):
             rows.append(
                 {

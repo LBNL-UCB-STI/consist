@@ -46,7 +46,10 @@ def resolve_canonical_run_meta_field(
     compatibility with older rows or snapshot payloads that predate the schema
     change.
     """
-    canonical_value = getattr(run, field, None)
+    if field == "phase":
+        canonical_value = run.phase
+    else:
+        canonical_value = run.stage
     if isinstance(canonical_value, str):
         return canonical_value
 
@@ -104,7 +107,7 @@ class Run(SQLModel, table=True):
         tags (List[str]): A list of string labels for categorization and filtering (e.g., ["production", "urbansim"]).
         config_hash (Optional[str]): A hash of the run's configuration, used for caching.
         git_hash (Optional[str]): The Git commit hash of the code version used for the run.
-        meta (Dict[str, Any]): A flexible dictionary for storing arbitrary metadata (e.g., hostname).
+        meta (dict[str, object]): A flexible dictionary for storing arbitrary metadata (e.g., hostname).
         started_at (datetime): The timestamp when the run execution began.
         ended_at (Optional[datetime]): The timestamp when the run execution completed or failed.
         created_at (datetime): The timestamp when the run record was created.
@@ -452,7 +455,7 @@ class RunResult(BaseModel):
             return None
         return next(iter(self.outputs.values()))
 
-    def as_dict(self) -> Dict[str, Artifact]:
+    def as_dict(self) -> dict[str, Artifact]:
         return dict(self.outputs)
 
     def output_path(self, key: str, tracker: Optional["Tracker"] = None) -> Path:
@@ -542,7 +545,7 @@ class ConsistRecord(SQLModel):
         run (Run): The core `Run` object containing the execution's metadata and state.
         inputs (List[Artifact]): A list of all artifacts that served as inputs to the run.
         outputs (List[Artifact]): A list of all artifacts that were generated as outputs by the run.
-        config (Dict[str, Any]): A snapshot of the configuration dictionary used for this run.
+        config (dict[str, object]): A snapshot of the configuration dictionary used for this run.
     """
 
     run: Run

@@ -2734,7 +2734,7 @@ def load(
         tracker_ref = get_tracker_ref(artifact)
         if tracker_ref:
             attached_tracker = tracker_ref()
-            if attached_tracker:
+            if isinstance(attached_tracker, Tracker):
                 tracker = attached_tracker
 
     if tracker is None:
