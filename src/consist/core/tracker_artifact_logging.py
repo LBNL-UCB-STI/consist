@@ -78,7 +78,9 @@ class ArtifactLoggingCoordinator:
         array_path : str | None, optional
             Optional array path for array/container-backed artifacts.
         content_hash : str | None, optional
-            Optional precomputed content hash override.
+            Optional precomputed artifact fingerprint override. When provided,
+            it becomes the artifact's canonical public fingerprint on
+            ``artifact.hash``.
         force_hash_override : bool, default False
             Whether mismatched content hash overrides are forced.
         validate_content_hash : bool, default False

@@ -2347,8 +2347,9 @@ class Tracker:
         array_path : Optional[str], optional
             Optional array path inside a container (e.g., Zarr group).
         content_hash : Optional[str], optional
-            Precomputed content hash to use for the artifact instead of hashing
-            the path on disk.
+            Precomputed artifact fingerprint to use instead of hashing the path
+            on disk. When provided, Consist stores it on the canonical public
+            fingerprint field, ``artifact.hash``.
         force_hash_override : bool, default False
             If True, overwrite an existing artifact hash when it differs from
             `content_hash`. By default, mismatched overrides are ignored with a warning.
@@ -2656,8 +2657,9 @@ class Tracker:
         key : Optional[str], optional
             A semantic, human-readable name for the artifact.
         content_hash : Optional[str], optional
-            Precomputed content hash to use for the artifact instead of hashing
-            the path on disk.
+            Precomputed artifact fingerprint to use instead of hashing the path
+            on disk. When provided, Consist stores it on the canonical public
+            fingerprint field, ``artifact.hash``.
         force_hash_override : bool, default False
             If True, overwrite an existing artifact hash when it differs from
             `content_hash`. By default, mismatched overrides are ignored with a warning.
@@ -2714,8 +2716,9 @@ class Tracker:
         key : Optional[str], optional
             A semantic, human-readable name for the artifact.
         content_hash : Optional[str], optional
-            Precomputed content hash to use for the artifact instead of hashing
-            the path on disk.
+            Precomputed artifact fingerprint to use instead of hashing the path
+            on disk. When provided, Consist stores it on the canonical public
+            fingerprint field, ``artifact.hash``.
         force_hash_override : bool, default False
             If True, overwrite an existing artifact hash when it differs from
             `content_hash`. By default, mismatched overrides are ignored with a warning.
