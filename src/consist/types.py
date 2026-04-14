@@ -49,6 +49,7 @@ CodeIdentityMode: TypeAlias = Literal[
     "callable_source",
 ]
 InputBindingMode: TypeAlias = Literal["loaded", "paths", "none"]
+H5ChildSelectionMode: TypeAlias = Literal["all", "include_only"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +142,24 @@ class ExecutionOptions:
     container: Optional[Mapping[str, Any]] = None
     runtime_kwargs: Optional[Mapping[str, Any]] = None
     inject_context: Optional[Union[bool, str]] = None
+
+
+@dataclass(frozen=True, slots=True)
+class H5ChildSpec:
+    """
+    Semantic customization for one discovered child artifact inside an HDF5 container.
+
+    The spec is keyed by HDF5 dataset path and only affects how an already-selected
+    child artifact is logged; it does not change dataset discovery behavior unless
+    paired with ``child_selection="include_only"``.
+    """
+
+    key: Optional[str] = None
+    description: Optional[str] = None
+    facet: Optional[FacetLike] = None
+    facet_schema_version: Optional[Union[str, int]] = None
+    facet_index: bool = False
+    metadata: Optional[Mapping[str, Any]] = None
 
 
 # Known artifact drivers used by Consist loaders.

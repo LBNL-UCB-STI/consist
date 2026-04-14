@@ -910,6 +910,45 @@ def test_hydrate_run_outputs_returns_detached_artifact_views(
     assert historical_artifact.as_path() == output_path
 
 
+def test_hydrate_run_outputs_preserves_parent_artifact_id(
+    tracker, run_dir: Path
+) -> None:
+    h5py = pytest.importorskip("h5py")
+    output_path = run_dir / "outputs" / "tables.h5"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(output_path, "w") as handle:
+        handle.create_dataset("households", data=[1, 2, 3])
+
+    with tracker.start_run(
+        "producer_h5_hydrate", model="producer", cache_mode="overwrite"
+    ):
+        container, _ = tracker.log_h5_container(
+            output_path,
+            key="tables",
+            discover_tables=False,
+        )
+        tracker.log_h5_table(
+            output_path,
+            table_path="/households",
+            key="households",
+            parent=container,
+        )
+
+    historical_artifact = tracker.get_run_outputs("producer_h5_hydrate")["households"]
+
+    hydrated = tracker.hydrate_run_outputs(
+        "producer_h5_hydrate",
+        target_root=run_dir / "restored_h5_hydrate",
+        keys=["households"],
+    )
+
+    result = hydrated["households"]
+    assert result.artifact is not historical_artifact
+    assert result.artifact.parent_artifact_id == historical_artifact.parent_artifact_id
+    assert result.artifact.meta["parent_id"] == historical_artifact.meta["parent_id"]
+
+
 def test_hydrate_run_outputs_preserves_unhashed_artifacts(tmp_path: Path) -> None:
     producer_dir = tmp_path / "producer"
     source = producer_dir / "outputs" / "table.csv"

@@ -210,6 +210,7 @@ def test_attach_content_id_handles_deepcopied_detached_artifact(tmp_path, caplog
     assert content is not None
     assert out.content_id == content.id
     assert "Failed to record artifact content identity" not in caplog.text
+    assert out.parent_artifact_id is None
 
 
 def test_create_artifact_handles_driver_override_on_deepcopied_detached_artifact(
@@ -260,6 +261,47 @@ def test_create_artifact_handles_driver_override_on_deepcopied_detached_artifact
     assert persisted.content_id == content.id
     assert replayed.content_id != content.id
     assert "Failed to record artifact content identity" not in caplog.text
+
+
+def test_create_artifact_preserves_parent_artifact_id_on_detached_clone(tmp_path):
+    db = DatabaseManager(str(tmp_path / "artifact_parent_clone.db"))
+    parent_id = Artifact(
+        key="container",
+        container_uri="outputs://container.h5",
+        driver="h5",
+        run_id="run_parent",
+    ).id
+
+    with db.session_scope() as session:
+        original = Artifact(
+            key="geoid_to_zone",
+            container_uri="outputs://zones.h5",
+            table_path="/zones",
+            driver="h5_table",
+            hash="shared_hash",
+            parent_artifact_id=parent_id,
+            run_id="run_a",
+            meta={"parent_id": str(parent_id)},
+        )
+        session.add(original)
+        session.commit()
+        artifact_id = original.id
+
+    detached = db.get_artifact(artifact_id)
+    assert detached is not None
+    replayed = deepcopy(detached)
+
+    tracker = MagicMock()
+    tracker.resolve_uri = lambda uri: f"/abs/{uri}"
+    tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
+    tracker.identity.compute_file_checksum.return_value = "shared_hash"
+    tracker.db = db
+
+    manager = ArtifactManager(tracker)
+    out = manager.create_artifact(path=replayed, run_id="run_b")
+
+    assert out.parent_artifact_id == parent_id
+    assert out.meta["parent_id"] == str(parent_id)
 
 
 def test_create_artifact_clones_reused_input_artifact_before_mutation(tmp_path, caplog):

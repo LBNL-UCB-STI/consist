@@ -172,6 +172,8 @@ class Artifact(SQLModel, table=True):
         hash (Optional[str]): Canonical portable artifact fingerprint. This is usually a SHA256
                               digest and remains the stable public identity field across logging,
                               replay, staging, and hydration.
+        parent_artifact_id (Optional[uuid.UUID]): Canonical parent artifact relation for
+                              container child artifacts. Null for standalone artifacts.
         run_id (Optional[str]): The ID of the run that generated this artifact. Null for inputs.
         meta (dict[str, object]): A flexible JSON field for storing arbitrary metadata, such as
                                schema signatures, or data dimensions.
@@ -225,6 +227,14 @@ class Artifact(SQLModel, table=True):
         description=(
             "Database-local pointer to shared ArtifactContent metadata used for "
             "deduplication; not the public artifact fingerprint surface."
+        ),
+    )
+    parent_artifact_id: Optional[uuid.UUID] = Field(
+        default=None,
+        index=True,
+        sa_type=UUIDType,
+        description=(
+            "Canonical parent artifact relation for container child artifacts."
         ),
     )
 

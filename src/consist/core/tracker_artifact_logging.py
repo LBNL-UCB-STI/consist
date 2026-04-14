@@ -38,6 +38,87 @@ class ArtifactLoggingCoordinator:
             return f"log_artifact:h5_table:{direction}"
         return f"log_artifact:{direction}"
 
+    def prepare_artifact_facet_bundle(
+        self,
+        *,
+        artifact: Artifact,
+        facet: Optional[FacetLike],
+        facet_schema_version: Optional[Union[str, int]],
+        facet_index: bool,
+    ) -> Any:
+        """Prepare a persistable artifact facet bundle without mutating run state."""
+        tracker = self._tracker
+        resolved_artifact_facet: Optional[Dict[str, Any]] = None
+        artifact_facet_payload: Optional[FacetLike] = facet
+        if artifact_facet_payload is None and artifact.key:
+            artifact_facet_payload = (
+                tracker._parse_artifact_facet_from_registered_parsers(artifact.key)
+            )
+        if artifact_facet_payload is not None:
+            resolved_artifact_facet = tracker.artifact_facets.resolve_facet_dict(
+                artifact_facet_payload
+            )
+        if resolved_artifact_facet is None:
+            return None
+
+        schema_version = facet_schema_version
+        if schema_version is None and isinstance(
+            artifact_facet_payload, HasFacetSchemaVersion
+        ):
+            schema_version = artifact_facet_payload.facet_schema_version
+        return tracker.artifact_facets.prepare_facet_bundle(
+            artifact=artifact,
+            namespace=tracker.current_consist.run.model_name
+            if tracker.current_consist
+            else None,
+            facet_dict=resolved_artifact_facet,
+            schema_name=tracker.artifact_facets.infer_schema_name(
+                artifact_facet_payload
+            ),
+            schema_version=schema_version,
+            index_kv=facet_index,
+        )
+
+    def apply_inherited_run_metadata(self, artifact: Artifact) -> None:
+        """Mirror standard run metadata onto a newly logged artifact."""
+        tracker = self._tracker
+        if tracker.current_consist is None:
+            return
+        run_ctx = tracker.current_consist.run
+        inherited_fields = {
+            "year": run_ctx.year,
+            "iteration": run_ctx.iteration,
+            "tags": run_ctx.tags or [],
+        }
+        if artifact.meta is None:
+            artifact.meta = {}
+        for inherited_key, inherited_value in inherited_fields.items():
+            if inherited_value is not None and inherited_key not in artifact.meta:
+                artifact.meta[inherited_key] = inherited_value
+
+    def attach_logged_artifact(
+        self,
+        *,
+        artifact: Artifact,
+        direction: str,
+        register_with_coupler: bool,
+    ) -> None:
+        """Attach a logged artifact to the active run state and optional coupler."""
+        tracker = self._tracker
+        set_tracker_ref(artifact, tracker)
+        if tracker.current_consist is None:
+            return
+        if direction == "input":
+            tracker.current_consist.inputs.append(artifact)
+            return
+        tracker.current_consist.outputs.append(artifact)
+        if (
+            register_with_coupler
+            and tracker._active_coupler is not None
+            and artifact.key
+        ):
+            tracker._active_coupler.set(artifact.key, artifact)
+
     def log_artifact(
         self,
         path: ArtifactRef,
@@ -149,36 +230,12 @@ class ArtifactLoggingCoordinator:
             reuse_scope=reuse_scope,
             **meta,
         )
-
-        resolved_artifact_facet: Optional[Dict[str, Any]] = None
-        prepared_artifact_facet_bundle = None
-        artifact_facet_payload: Optional[FacetLike] = facet
-        if artifact_facet_payload is None and artifact_obj.key:
-            artifact_facet_payload = (
-                tracker._parse_artifact_facet_from_registered_parsers(artifact_obj.key)
-            )
-        if artifact_facet_payload is not None:
-            resolved_artifact_facet = tracker.artifact_facets.resolve_facet_dict(
-                artifact_facet_payload
-            )
-        if resolved_artifact_facet is not None:
-            schema_version = facet_schema_version
-            if schema_version is None and isinstance(
-                artifact_facet_payload, HasFacetSchemaVersion
-            ):
-                schema_version = artifact_facet_payload.facet_schema_version
-            prepared_artifact_facet_bundle = (
-                tracker.artifact_facets.prepare_facet_bundle(
-                    artifact=artifact_obj,
-                    namespace=tracker.current_consist.run.model_name,
-                    facet_dict=resolved_artifact_facet,
-                    schema_name=tracker.artifact_facets.infer_schema_name(
-                        artifact_facet_payload
-                    ),
-                    schema_version=schema_version,
-                    index_kv=facet_index,
-                )
-            )
+        prepared_artifact_facet_bundle = self.prepare_artifact_facet_bundle(
+            artifact=artifact_obj,
+            facet=facet,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
+        )
 
         if isinstance(path, Artifact) and direction == "output":
             producing_run_id = artifact_obj.run_id
@@ -192,26 +249,12 @@ class ArtifactLoggingCoordinator:
                     getattr(artifact_obj, "key", None),
                     getattr(artifact_obj, "id", None),
                 )
-
-        run_ctx = tracker.current_consist.run
-        inherited_fields = {
-            "year": run_ctx.year,
-            "iteration": run_ctx.iteration,
-            "tags": run_ctx.tags or [],
-        }
-        if artifact_obj.meta is None:
-            artifact_obj.meta = {}
-        for inherited_key, inherited_value in inherited_fields.items():
-            if inherited_value is not None and inherited_key not in artifact_obj.meta:
-                artifact_obj.meta[inherited_key] = inherited_value
-
-        set_tracker_ref(artifact_obj, tracker)
-        if direction == "input":
-            tracker.current_consist.inputs.append(artifact_obj)
-        else:
-            tracker.current_consist.outputs.append(artifact_obj)
-            if tracker._active_coupler is not None and artifact_obj.key:
-                tracker._active_coupler.set(artifact_obj.key, artifact_obj)
+        self.apply_inherited_run_metadata(artifact_obj)
+        self.attach_logged_artifact(
+            artifact=artifact_obj,
+            direction=direction,
+            register_with_coupler=True,
+        )
 
         # Preserve dual-write ordering so snapshot state reflects artifact links
         # before DB synchronization side effects occur.

@@ -171,6 +171,8 @@ DuckDB connection open until you close them.
 - `Artifact.uri` → `Artifact.container_uri`
 - `Artifact.table_path` added (nullable) for container formats (HDF5 tables)
 - `Artifact.array_path` added (nullable) for array formats
+- `Artifact.parent_artifact_id` added (nullable) as the canonical container
+  child-artifact relation
 - `meta["table_path"]` is no longer used
 
 **Solution:**
@@ -182,16 +184,27 @@ rm ./provenance.duckdb
 rm ./test_db.duckdb
 ```
 
-Then update any code that referenced `artifact.uri` or `artifact.meta["table_path"]`:
+Then update any code that referenced `artifact.uri`,
+`artifact.meta["table_path"]`, or relied on metadata-only parent-child links:
 
 ```python
 # Before
 artifact.uri
 artifact.meta.get("table_path")
+artifact.meta.get("parent_id")  # legacy compatibility mirror only
 
 # After
 artifact.container_uri
 artifact.table_path
+artifact.parent_artifact_id
+```
+
+If you need to traverse container child artifacts, prefer the first-class query
+helpers:
+
+```python
+children = tracker.get_child_artifacts(container_artifact)
+parent = tracker.get_parent_artifact(child_artifact)
 ```
 
 ---

@@ -115,6 +115,7 @@ with tracker.scenario("baseline") as sc:
 - [`consist.AlignedPair`](runset.md#consist.runset.AlignedPair)
 - `consist.CacheOptions`, `consist.OutputPolicyOptions`, `consist.ExecutionOptions`
 - `consist.BindingResult` (execution envelope for orchestrator-resolved scenario inputs)
+- `consist.H5ChildSpec` (typed child-artifact customization for HDF5 containers)
 
 ### Scenario / workflow helpers
 
@@ -182,6 +183,7 @@ Scenario defaults like `name_template` and `cache_epoch` are configured via `con
 - [`RunSet`](runset.md#consist.runset.RunSet) and [`AlignedPair`](runset.md#consist.runset.AlignedPair)
 - [`Tracker.find_latest_run(...)`](tracker.md#consist.core.tracker.Tracker.find_latest_run)
 - [`Tracker.diff_runs(...)`](tracker.md#consist.core.tracker.Tracker.diff_runs)
+- [`Tracker.get_child_artifacts(...)`](tracker.md#consist.core.tracker.Tracker.get_child_artifacts) / [`Tracker.get_parent_artifact(...)`](tracker.md#consist.core.tracker.Tracker.get_parent_artifact)
 - [`Tracker.get_run_inputs(...)`](tracker.md#consist.core.tracker.Tracker.get_run_inputs) / [`Tracker.get_run_outputs(...)`](tracker.md#consist.core.tracker.Tracker.get_run_outputs)
 - [`Tracker.get_run_config(...)`](tracker.md#consist.core.tracker.Tracker.get_run_config)
 - [`Tracker.print_lineage(...)`](tracker.md#consist.core.tracker.Tracker.print_lineage)
@@ -218,7 +220,7 @@ as needed.
 #### Querying and history
 
 - `find_runs`, `run_set`, `find_run`, `find_latest_run`, `get_latest_run_id`
-- `find_artifacts`, `get_artifact`, `get_artifacts_for_run`
+- `find_artifacts`, `get_artifact`, `get_child_artifacts`, `get_parent_artifact`, `get_artifacts_for_run`
 - `find_artifacts_by_params`, `get_artifact_kv`, `register_artifact_facet_parser`
 - `get_run`, `get_run_config`, `get_run_inputs`, `get_run_outputs`
 - `hydrate_run_outputs`, `materialize_run_outputs`
@@ -240,6 +242,13 @@ as needed.
 #### Format-specific logging
 
 - `log_h5_container`, `log_h5_table`, `log_netcdf_file`, `log_openmatrix_file`
+
+`log_h5_container(...)` now supports `child_specs={...}` and
+`child_selection="all" | "include_only"` so callers can either customize
+discovered child artifacts or log only a selected subset of HDF5 dataset paths.
+`log_h5_table(...)` accepts the same child-level semantic metadata surface as
+normal artifact logging: `description`, `facet`, `facet_schema_version`, and
+`facet_index`.
 
 ### Advanced (power-user / lower-level)
 

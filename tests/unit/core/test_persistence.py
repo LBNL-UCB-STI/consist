@@ -1,7 +1,11 @@
 from pathlib import Path
+import uuid
 
 from consist.core.persistence import DatabaseManager
-from consist.core.schema_compat import apply_content_identity_compatibility
+from consist.core.schema_compat import (
+    apply_artifact_parent_compatibility,
+    apply_content_identity_compatibility,
+)
 from consist.models.artifact import Artifact
 from consist.models.artifact_schema import ArtifactSchemaObservation, ArtifactSchema
 
@@ -115,6 +119,53 @@ def test_content_identity_compatibility_recreates_index_idempotently(
     assert rows == [("idx_artifact_content_id",)]
 
 
+def test_artifact_parent_compatibility_recreates_index_idempotently(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "artifact_parent_index.db"
+    db = DatabaseManager(str(db_path))
+
+    with db.engine.begin() as conn:
+        initial_rows = conn.exec_driver_sql(
+            """
+            SELECT index_name
+            FROM duckdb_indexes()
+            WHERE table_name = 'artifact'
+              AND expressions = '[parent_artifact_id]'
+            """
+        ).fetchall()
+
+    assert len(initial_rows) == 1
+
+    with db.engine.begin() as conn:
+        for (index_name,) in conn.exec_driver_sql(
+            """
+            SELECT index_name
+            FROM duckdb_indexes()
+            WHERE table_name = 'artifact'
+              AND expressions = '[parent_artifact_id]'
+            """
+        ).fetchall():
+            conn.exec_driver_sql(f"DROP INDEX IF EXISTS {index_name}")
+
+    assert db._table_has_column(table_name="artifact", column_name="parent_artifact_id")
+
+    apply_artifact_parent_compatibility(db)
+    apply_artifact_parent_compatibility(db)
+
+    with db.engine.begin() as conn:
+        rows = conn.exec_driver_sql(
+            """
+            SELECT index_name
+            FROM duckdb_indexes()
+            WHERE table_name = 'artifact'
+              AND expressions = '[parent_artifact_id]'
+            """
+        ).fetchall()
+
+    assert rows == [("idx_artifact_parent_artifact_id",)]
+
+
 def test_content_id_backfill_is_explicit_not_automatic(tmp_path: Path) -> None:
     db_path = tmp_path / "content_backfill.db"
     db = DatabaseManager(str(db_path))
@@ -188,3 +239,53 @@ def test_find_schema_observation_for_content_id(tmp_path: Path) -> None:
     obs = db.find_schema_observation_for_content_id(content.id)
     assert obs is not None
     assert obs.schema_id == "sid"
+
+
+def test_parent_artifact_queries_support_canonical_and_legacy_rows(
+    tmp_path: Path,
+) -> None:
+    db = DatabaseManager(str(tmp_path / "artifact_parent_lookup.db"))
+
+    parent_id = uuid.uuid4()
+    with db.session_scope() as session:
+        parent = Artifact(
+            id=parent_id,
+            key="container",
+            container_uri="outputs://container.h5",
+            driver="h5",
+            run_id="run_a",
+        )
+        child = Artifact(
+            key="child",
+            container_uri="outputs://container.h5",
+            driver="h5_table",
+            table_path="/a",
+            parent_artifact_id=parent_id,
+            run_id="run_a",
+            meta={"parent_id": str(parent_id)},
+        )
+        legacy_child = Artifact(
+            key="legacy_child",
+            container_uri="outputs://legacy.h5",
+            driver="h5_table",
+            table_path="/legacy",
+            run_id="run_a",
+            meta={"parent_id": str(parent_id)},
+        )
+        session.add(parent)
+        session.add(child)
+        session.add(legacy_child)
+        session.commit()
+        child_id = child.id
+        legacy_child_id = legacy_child.id
+
+    children = db.get_child_artifacts(parent_id)
+    assert [artifact.key for artifact in children] == ["child", "legacy_child"]
+
+    resolved_parent = db.get_parent_artifact(child_id)
+    assert resolved_parent is not None
+    assert resolved_parent.id == parent_id
+
+    resolved_legacy_parent = db.get_parent_artifact(legacy_child_id)
+    assert resolved_legacy_parent is not None
+    assert resolved_legacy_parent.id == parent_id

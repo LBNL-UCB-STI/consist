@@ -35,6 +35,7 @@ from consist.core.db_runtime import DatabaseRuntimeOps
 from consist.core.db_snapshot import DatabaseSnapshotOps
 from consist.core.provenance_writer import ProvenanceWriter
 from consist.core.schema_compat import (
+    apply_artifact_parent_compatibility,
     apply_content_identity_compatibility,
     apply_run_stage_phase_compatibility,
     backfill_artifact_content_ids as compat_backfill_artifact_content_ids,
@@ -384,6 +385,7 @@ class DatabaseManager:
             # Lightweight compatibility hooks for older DBs. Keep these isolated so
             # they can be removed without changing steady-state persistence behavior.
             apply_content_identity_compatibility(self)
+            apply_artifact_parent_compatibility(self)
             apply_run_stage_phase_compatibility(self)
             self._ensure_artifact_schema_field_ordinal_position()
             self._ensure_schema_links_view()
@@ -2210,6 +2212,92 @@ class DatabaseManager:
 
         try:
             return self.execute_with_retry(_query)
+        except Exception:
+            return None
+
+    def get_child_artifacts(self, parent_id: uuid.UUID) -> List[Artifact]:
+        """
+        Return child artifacts for a parent, ordered by creation time ascending.
+
+        Prefers the canonical ``artifact.parent_artifact_id`` column and falls
+        back to legacy ``artifact.meta["parent_id"]`` values for older rows.
+        """
+
+        def _query() -> List[Artifact]:
+            with self.session_scope() as session:
+                statement = (
+                    select(Artifact)
+                    .where(Artifact.parent_artifact_id == parent_id)
+                    .order_by(
+                        col(Artifact.created_at), col(Artifact.key), col(Artifact.id)
+                    )
+                )
+                results = list(session.exec(statement).all())
+
+                legacy_results = []
+                for artifact in session.exec(select(Artifact)).all():
+                    if artifact.parent_artifact_id is not None:
+                        continue
+                    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+                    if meta.get("parent_id") == str(parent_id):
+                        legacy_results.append(artifact)
+
+                combined = {artifact.id: artifact for artifact in results}
+                for artifact in legacy_results:
+                    combined.setdefault(artifact.id, artifact)
+
+                ordered = sorted(
+                    combined.values(),
+                    key=lambda artifact: (
+                        artifact.created_at,
+                        artifact.key,
+                        artifact.id,
+                    ),
+                )
+                for artifact in ordered:
+                    _ = artifact.meta
+                    session.expunge(artifact)
+                return ordered
+
+        try:
+            return self.execute_with_retry(_query, operation_name="get_child_artifacts")
+        except Exception:
+            return []
+
+    def get_parent_artifact(self, child_id: uuid.UUID) -> Optional[Artifact]:
+        """
+        Return the parent artifact for a child artifact when one is recorded.
+
+        Prefers the canonical ``artifact.parent_artifact_id`` column and falls
+        back to legacy ``artifact.meta["parent_id"]`` values for older rows.
+        """
+
+        def _query() -> Optional[Artifact]:
+            with self.session_scope() as session:
+                child = session.get(Artifact, child_id)
+                if child is None:
+                    return None
+
+                parent_id = child.parent_artifact_id
+                if parent_id is None:
+                    meta = child.meta if isinstance(child.meta, dict) else {}
+                    raw_parent_id = meta.get("parent_id")
+                    if isinstance(raw_parent_id, str):
+                        try:
+                            parent_id = uuid.UUID(raw_parent_id)
+                        except ValueError:
+                            parent_id = None
+                if parent_id is None:
+                    return None
+
+                parent = session.get(Artifact, parent_id)
+                if parent is not None:
+                    _ = parent.meta
+                    session.expunge(parent)
+                return parent
+
+        try:
+            return self.execute_with_retry(_query, operation_name="get_parent_artifact")
         except Exception:
             return None
 

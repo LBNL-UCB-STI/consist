@@ -1,5 +1,7 @@
 import pytest
+from consist.core.coupler import Coupler
 from consist.core.tracker import Tracker
+from consist.types import H5ChildSpec
 
 pytest.importorskip("tables")
 h5py = pytest.importorskip("h5py")
@@ -57,6 +59,7 @@ def test_h5_auto_discovery(tracker: Tracker):
             assert child.run_id == container.run_id, (
                 "Child artifact must inherit Run ID"
             )
+            assert child.parent_artifact_id == container.id
             assert child.meta["parent_id"] == str(container.id)
             assert child.driver == "h5_table"
 
@@ -64,3 +67,228 @@ def test_h5_auto_discovery(tracker: Tracker):
     saved_children = tracker.get_artifacts_for_run(container.run_id).outputs
     # +1 for the container itself
     assert len(saved_children) == 3
+
+
+def test_h5_child_specs_include_only_and_semantic_overrides(tracker: Tracker):
+    h5_path = tracker.run_dir / "customized.h5"
+    h5_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(h5_path, "w") as f:
+        year_2020 = f.create_group("year_2020")
+        year_2020.create_dataset("households", data=[1, 2, 3])
+        year_2020.create_dataset("persons", data=[4, 5, 6])
+
+    with tracker.start_run("run_child_specs", model="test_model"):
+        container, children = tracker.log_h5_container(
+            h5_path,
+            key="simulation_data",
+            child_selection="include_only",
+            child_specs={
+                "/year_2020/households": H5ChildSpec(
+                    key="households_2020",
+                    description="Selected households table",
+                    facet={"artifact_family": "urbansim", "dataset": "households"},
+                    facet_schema_version="1",
+                    facet_index=True,
+                    metadata={"semantic_group": "population"},
+                )
+            },
+        )
+
+    assert container.meta["table_count"] == 1
+    assert [child.key for child in children] == ["households_2020"]
+
+    child = children[0]
+    assert child.parent_artifact_id == container.id
+    assert child.meta["parent_id"] == str(container.id)
+    assert child.meta["description"] == "Selected households table"
+    assert child.meta["semantic_group"] == "population"
+    assert child.meta["artifact_facet_schema_version"] == "1"
+
+    reloaded_child = tracker.get_artifact(child.id)
+    assert reloaded_child is not None
+    assert reloaded_child.parent_artifact_id == container.id
+
+    resolved_parent = tracker.get_parent_artifact(reloaded_child)
+    assert resolved_parent is not None
+    assert resolved_parent.id == container.id
+
+    children_from_query = tracker.get_child_artifacts(container)
+    assert [artifact.id for artifact in children_from_query] == [child.id]
+
+
+def test_h5_child_specs_include_only_with_empty_specs_logs_no_children(
+    tracker: Tracker,
+):
+    h5_path = tracker.run_dir / "customized_empty.h5"
+    h5_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(h5_path, "w") as f:
+        year_2020 = f.create_group("year_2020")
+        year_2020.create_dataset("households", data=[1, 2, 3])
+
+    with tracker.start_run("run_child_specs_empty", model="test_model"):
+        container, children = tracker.log_h5_container(
+            h5_path,
+            key="simulation_data",
+            child_selection="include_only",
+            child_specs={},
+        )
+
+    assert container.meta["table_count"] == 0
+    assert children == []
+
+
+def test_h5_child_specs_customize_without_filtering_all_children(tracker: Tracker):
+    h5_path = tracker.run_dir / "customized_all.h5"
+    h5_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(h5_path, "w") as f:
+        year_2020 = f.create_group("year_2020")
+        year_2020.create_dataset("households", data=[1, 2, 3])
+        year_2020.create_dataset("persons", data=[4, 5, 6])
+
+    with tracker.start_run("run_child_specs_all", model="test_model"):
+        container, children = tracker.log_h5_container(
+            h5_path,
+            key="simulation_data",
+            child_specs={
+                "year_2020/households": H5ChildSpec(
+                    key="households_2020",
+                    description="Customized households table",
+                    metadata={"semantic_group": "population"},
+                )
+            },
+        )
+
+    assert container.meta["table_count"] == 2
+    assert sorted(child.key for child in children) == [
+        "households_2020",
+        "simulation_data_year_2020_persons",
+    ]
+
+    customized = next(child for child in children if child.key == "households_2020")
+    default_child = next(
+        child for child in children if child.key == "simulation_data_year_2020_persons"
+    )
+
+    assert customized.meta["description"] == "Customized households table"
+    assert customized.meta["semantic_group"] == "population"
+    assert default_child.meta.get("description") is None
+
+
+def test_log_h5_table_supports_semantic_metadata_and_parent_queries(tracker: Tracker):
+    h5_path = tracker.run_dir / "single_table.h5"
+    h5_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(h5_path, "w") as f:
+        f.create_group("year_2030").create_dataset("households", data=[1, 2, 3])
+
+    with tracker.start_run("run_single_table", model="test_model"):
+        container, _ = tracker.log_h5_container(
+            h5_path,
+            key="single_table_container",
+            discover_tables=False,
+        )
+        tracker._active_coupler = Coupler(tracker)
+        table = tracker.log_h5_table(
+            h5_path,
+            table_path="/year_2030/households",
+            key="households_2030",
+            parent=container,
+            description="Standalone child artifact",
+            facet={"artifact_family": "urbansim", "dataset": "households"},
+            facet_schema_version=2,
+            facet_index=True,
+            semantic_group="population",
+        )
+        assert tracker._active_coupler.get("households_2030") is table
+        tracker._active_coupler = None
+
+    assert table.parent_artifact_id == container.id
+    assert table.meta["parent_id"] == str(container.id)
+    assert table.meta["description"] == "Standalone child artifact"
+    assert table.meta["semantic_group"] == "population"
+    assert table.meta["artifact_facet_schema_version"] == 2
+
+    parent = tracker.get_parent_artifact(table)
+    assert parent is not None
+    assert parent.id == container.id
+
+
+def test_h5_container_cache_hit_reuses_cached_children(tracker: Tracker):
+    h5_path = tracker.run_dir / "cache_reuse.h5"
+    h5_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(h5_path, "w") as f:
+        f.create_dataset("households", data=[1, 2, 3])
+        f.create_dataset("persons", data=[4, 5, 6])
+
+    with tracker.start_run(
+        "run_h5_cache_seed",
+        model="test_model",
+        cache_mode="overwrite",
+        config={"cache_demo": True},
+    ) as t:
+        container_seed, children_seed = t.log_h5_container(
+            h5_path,
+            key="cached_h5",
+            discover_tables=True,
+        )
+        assert not t.is_cached
+
+    with tracker.start_run(
+        "run_h5_cache_hit",
+        model="test_model",
+        cache_mode="reuse",
+        config={"cache_demo": True},
+    ) as t:
+        container_hit, children_hit = t.log_h5_container(
+            h5_path,
+            key="cached_h5",
+            discover_tables=True,
+        )
+        assert t.is_cached
+
+    assert container_hit.id == container_seed.id
+    assert [child.id for child in children_hit] == [child.id for child in children_seed]
+
+
+def test_h5_container_cache_hit_demotes_when_children_were_not_cached(
+    tracker: Tracker,
+):
+    h5_path = tracker.run_dir / "cache_demote.h5"
+    h5_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(h5_path, "w") as f:
+        f.create_dataset("households", data=[1, 2, 3])
+
+    with tracker.start_run(
+        "run_h5_cache_demote_seed",
+        model="test_model",
+        cache_mode="overwrite",
+        config={"cache_demo": "demote"},
+    ) as t:
+        t.log_h5_container(
+            h5_path,
+            key="cached_h5",
+            discover_tables=False,
+        )
+        assert not t.is_cached
+
+    with tracker.start_run(
+        "run_h5_cache_demote_hit",
+        model="test_model",
+        cache_mode="reuse",
+        config={"cache_demo": "demote"},
+    ) as t:
+        assert t.is_cached
+        container, children = t.log_h5_container(
+            h5_path,
+            key="cached_h5",
+            discover_tables=True,
+        )
+        assert not t.is_cached
+
+    assert container.key == "cached_h5"
+    assert len(children) == 1
