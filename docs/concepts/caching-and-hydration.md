@@ -333,7 +333,13 @@ Consist distinguishes **provenance identity** (where an artifact came from, via 
 
 For Consist-produced artifacts, inputs are hashed by linking to the producing run's signature (Merkle-style). For raw files (no `run_id`), Consist hashes file contents or metadata depending on configuration.
 
-To skip hashing when you know the content hash (e.g., after copying a file), pass `content_hash=` to `log_artifact`. Consist ignores mismatched overrides unless `force_hash_override=True`. Use `validate_content_hash=True` to verify the override against on-disk data.
+To skip hashing when you already know the artifact fingerprint (for example
+after copying a file), pass `content_hash=` to `log_artifact`. Consist stores
+that value on `artifact.hash`, the canonical public fingerprint field. Consist
+ignores mismatched overrides unless `force_hash_override=True`. Use
+`validate_content_hash=True` to verify the override against on-disk data. Under
+`fast` hashing, the fingerprint may be metadata-based rather than a strict
+byte-content digest.
 
 ### Portability and Path Resolution
 
@@ -549,7 +555,13 @@ features = hydrated["features"]
 assert features.resolvable
 print(features.status)
 print(features.artifact.as_path())
+print(features.artifact.hash)
 ```
+
+`features.artifact.hash` remains the canonical artifact fingerprint after
+hydration. Downstream provenance code should read that field rather than
+guessing among wrapper-specific names. Fingerprint semantics follow the active
+hashing strategy, so under `fast` hashing the value may be metadata-based.
 
 Cache hydration exposes an archive-mirror override via
 `materialize_cached_outputs_source_root=...` for `outputs-requested` and

@@ -151,6 +151,15 @@ class Artifact(SQLModel, table=True):
     has a unique identity, a virtualized location, and rich metadata, supporting
     both "hot" (ingested) and "cold" (file-based) data strategies.
 
+    The public fingerprint surface for downstream consumers is ``Artifact.hash``.
+    Consist preserves that field across logging, querying, replay, staging, and
+    hydration so external provenance/bookkeeping code can read one stable
+    fingerprint without probing wrapper-specific fields. Fingerprint semantics
+    follow the configured hashing strategy: ``full`` is generally content-based,
+    while ``fast`` may use metadata-based hashing for files or directories.
+    ``Artifact.content_id`` is a database-local deduplication key and is not the
+    public fingerprint contract.
+
     Attributes:
         id (uuid.UUID): A unique identifier for the artifact.
         key (str): A semantic, human-readable name for the artifact (e.g., "households", "parcels").
@@ -160,8 +169,9 @@ class Artifact(SQLModel, table=True):
         array_path (Optional[str]): Optional path inside a container for array artifacts.
         driver (str): The name of the format handler used to read or write the artifact
                       (e.g., "parquet", "csv", "zarr").
-        hash (Optional[str]): SHA256 content hash of the artifact's data, enabling content-addressable
-                              lookups and deduplication.
+        hash (Optional[str]): Canonical portable artifact fingerprint. This is usually a SHA256
+                              digest and remains the stable public identity field across logging,
+                              replay, staging, and hydration.
         run_id (Optional[str]): The ID of the run that generated this artifact. Null for inputs.
         meta (dict[str, object]): A flexible JSON field for storing arbitrary metadata, such as
                                schema signatures, or data dimensions.
@@ -199,17 +209,23 @@ class Artifact(SQLModel, table=True):
         description="Format handler: parquet, csv, zarr, json, h5_table, h5, hdf5, geojson, shapefile, geopackage, or other"
     )
 
-    # Content Hash (for deduplication and content-addressable lookups)
+    # Canonical artifact fingerprint (portable) plus DB-local content identity.
     hash: Optional[str] = Field(
         default=None,
         index=True,
-        description="SHA256 content hash of the artifact's data",
+        description=(
+            "Canonical portable artifact fingerprint. Semantics follow the active "
+            "hashing strategy and may be content- or metadata-based."
+        ),
     )
     content_id: Optional[uuid.UUID] = Field(
         default=None,
         index=True,
         sa_type=UUIDType,
-        description="Pointer to shared ArtifactContent metadata when available",
+        description=(
+            "Database-local pointer to shared ArtifactContent metadata used for "
+            "deduplication; not the public artifact fingerprint surface."
+        ),
     )
 
     # Lineage

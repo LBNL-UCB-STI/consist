@@ -63,14 +63,15 @@ Consist uses two core entities with a many-to-many relationship:
 | Entity | Purpose |
 |--------|---------|
 | `Run` | Execution context: model name, config, timestamps, status, parent linkage |
-| `Artifact` | File metadata: path (as URI), content hash, driver, schema reference |
+| `Artifact` | File metadata: path (as URI), canonical fingerprint (`artifact.hash`), driver, schema reference |
 | `RunArtifactLink` | Connects runs to their input and output artifacts with direction metadata |
 
 Key fields for workflow tracking:
 - `Run.parent_run_id` — Links scenario steps to their parent scenario; used as the scenario identifier in views (see `consist_scenario_id`)
 - `Run.year` — Simulation year for time-series workflows
 - `Run.tags` — String labels for filtering (stored as JSON array)
-- `Artifact.hash` — SHA256 content hash for deduplication and verification
+- `Artifact.hash` — Canonical portable artifact fingerprint for downstream provenance, verification, and deduplication
+- `Artifact.content_id` — DB-local dedupe identity; not the public fingerprint surface
 
 Consist provides three strategies for tracking configuration: `config=` (hashed into the cache key, stored as a JSON snapshot), `facet=` (queryable in DuckDB, does not affect the cache), and `identity_inputs=` (large external files hashed into the cache key but not stored as content). For full usage, guardrails, and query examples, see [Config, Facets, and Identity Inputs](concepts/config-management.md).
 
