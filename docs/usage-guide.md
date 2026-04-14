@@ -1105,8 +1105,9 @@ For archive-mirror recovery, cache hydration supports
 `materialize_cached_outputs_source_root=Path(...)` for `outputs-requested` and
 `outputs-all`. You can pass it through
 `cache_options=CacheOptions(materialize_cached_outputs_source_root=...)` on
-`consist.run(...)`, `Tracker.run(...)`, and scenario steps, or via the low-level
-`tracker.start_run(...)` / `tracker.begin_run(...)` APIs directly.
+`tracker.run(...)` and scenario steps. The deprecated `consist.run(...)`
+wrapper also forwards it, or you can use the low-level `tracker.start_run(...)`
+/ `tracker.begin_run(...)` APIs directly.
 
 For recurring archive workflows, prefer recording archive roots on the artifact
 once instead of passing `source_root` overrides repeatedly. This is useful when
@@ -1223,14 +1224,15 @@ with use_tracker(tracker):
 
 ### Mixing Runs and Scenarios
 
-Call `consist.run(...)` inside a scenario when a step should cache independently:
+Call `tracker.run(...)` inside a scenario when a step should cache
+independently:
 
 ``` python
 from consist import ExecutionOptions
 
 with use_tracker(tracker):
     with consist.scenario("baseline") as sc:
-        preprocess = consist.run(
+        preprocess = tracker.run(
             fn=expensive_preprocessing,
             inputs={"network_file": Path("network.geojson")},
             outputs=["processed"],

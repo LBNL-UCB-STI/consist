@@ -21,13 +21,13 @@ Start
  |                 |
  |                 +-- Should user code skip execution on cache hit?
  |                 |      |
- |                 |      +-- Yes --> consist.run(...) / tracker.run(...)
- |                 |      +-- No  --> consist.trace(...) / tracker.trace(...)
+ |                 |      +-- Yes --> tracker.run(...)
+ |                 |      +-- No  --> tracker.trace(...)
  |                 |
  |                 +-- Need explicit object wiring (library/app code)?
  |                        |
  |                        +-- Yes --> tracker.run(...) / tracker.trace(...)
- |                        +-- No  --> consist.run(...) / consist.trace(...)
+ |                        +-- No  --> consist.run(...) / consist.trace(...) (deprecated compatibility wrappers)
  |
  +-- Need manual lifecycle split across call sites?
         |

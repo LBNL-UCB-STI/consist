@@ -2,8 +2,12 @@
 
 ## `consist.run` options contract
 
-`consist.run(...)` rejects legacy direct policy kwargs (for example
+`consist.run(...)` is a deprecated compatibility wrapper around
+`Tracker.run(...)`. It still rejects legacy direct policy kwargs (for example
 `cache_mode`, `output_missing`, `inject_context`) with a `TypeError`.
+
+For new code, prefer `tracker.run(...)` for single-step execution or
+`scenario.run(...)` inside an active scenario.
 
 Use options objects instead:
 
@@ -16,10 +20,11 @@ requested input staging:
 
 ```python
 from pathlib import Path
-import consist
-from consist import ExecutionOptions
+from consist import ExecutionOptions, Tracker
 
-result = consist.run(
+tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+
+result = tracker.run(
     fn=run_tool,
     inputs={"config_path": Path("./configs/baseline.yaml")},
     outputs=["report"],
@@ -41,9 +46,9 @@ For migration details, see
 
 ## Identity kwargs for run/trace surfaces
 
-Public identity kwargs for `consist.run(...)`, `consist.trace(...)`,
-`Tracker.run(...)`, `Tracker.trace(...)`, `ScenarioContext.run(...)`, and
-`ScenarioContext.trace(...)` are:
+Public identity kwargs for `Tracker.run(...)`, `Tracker.trace(...)`,
+`ScenarioContext.run(...)`, `ScenarioContext.trace(...)`, and the deprecated
+`consist.run(...)` / `consist.trace(...)` wrappers are:
 
 - `adapter=...`
 - `identity_inputs=[...]`

@@ -48,17 +48,7 @@ from consist.core.decorators import (
 )
 from consist.core.drivers import ARRAY_DRIVERS, TABLE_DRIVERS, ArrayInfo, TableInfo
 from consist.core.noop import NoopRunContext, NoopScenarioContext
-from consist.core.materialize_options import (
-    VALID_MATERIALIZE_DB_FALLBACK as _VALID_MATERIALIZE_DB_FALLBACK,
-    VALID_MATERIALIZE_ON_MISSING as _VALID_MATERIALIZE_ON_MISSING,
-    normalize_materialize_output_keys,
-    validate_materialize_option,
-)
 from consist.core.run_options import raise_legacy_policy_kwargs_error
-from consist.core.materialize import (
-    stage_artifact as stage_artifact_core,
-    stage_inputs as stage_inputs_core,
-)
 from consist.core.stores import get_hot_data_db_path
 from consist.core.views import _quote_ident, create_view_model
 from consist.core.workflow import OutputCapture, RunContext
@@ -274,6 +264,14 @@ def _resolve_tracker(tracker: Optional["Tracker"]) -> "Tracker":
             "  3. Use Tracker directly: my_tracker.run(fn=...)"
         )
     return default
+
+
+def _warn_deprecated_global_wrapper(wrapper: str, replacement: str) -> None:
+    warnings.warn(
+        f"{wrapper} is deprecated; prefer {replacement}.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
 
 @contextmanager
@@ -536,6 +534,10 @@ def start_run(
         consist.log_artifact("data.csv", "input_data")
     ```
     """
+    _warn_deprecated_global_wrapper(
+        "consist.start_run(...)",
+        "tracker.start_run(...)",
+    )
     tr = _resolve_tracker(tracker)
     with tr.start_run(run_id=run_id, model=model, **kwargs) as active:
         yield active
@@ -610,6 +612,7 @@ def run(
         api_name="consist.run",
         kwargs=kwargs,
     )
+    _warn_deprecated_global_wrapper("consist.run(...)", "tracker.run(...)")
     tr = _resolve_tracker(tracker)
     return tr.run(
         fn=fn,
@@ -840,6 +843,10 @@ def trace(
     Tracker
         The active tracker instance.
     """
+    _warn_deprecated_global_wrapper(
+        "consist.trace(...)",
+        "tracker.trace(...) or scenario.trace(...)",
+    )
     tr = _resolve_tracker(tracker)
     with tr.trace(
         name=name,
@@ -1046,8 +1053,9 @@ def get_run_result(
     RunResult
         Historical run metadata plus selected outputs.
     """
-    tr = _resolve_tracker(tracker)
-    return tr.get_run_result(run_id, keys=keys, validate=validate)
+    return _resolve_tracker(tracker).get_run_result(
+        run_id, keys=keys, validate=validate
+    )
 
 
 def materialize_run_outputs(
@@ -1105,27 +1113,11 @@ def materialize_run_outputs(
     >>> restored.materialized
     {'persons': '.../restored/.../persons.parquet'}
     """
-    normalized_keys = normalize_materialize_output_keys(
-        keys,
-        caller="materialize_run_outputs",
-    )
-    validate_materialize_option(
-        name="on_missing",
-        value=on_missing,
-        allowed=_VALID_MATERIALIZE_ON_MISSING,
-    )
-    validate_materialize_option(
-        name="db_fallback",
-        value=db_fallback,
-        allowed=_VALID_MATERIALIZE_DB_FALLBACK,
-    )
-
-    tr = _resolve_tracker(tracker)
-    return tr.materialize_run_outputs(
+    return _resolve_tracker(tracker).materialize_run_outputs(
         run_id,
         target_root=target_root,
         source_root=source_root,
-        keys=normalized_keys,
+        keys=keys,
         preserve_existing=preserve_existing,
         on_missing=on_missing,
         db_fallback=db_fallback,
@@ -1187,27 +1179,11 @@ def hydrate_run_outputs(
     >>> hydrated["persons"].artifact.as_path()
     PosixPath('.../restored/.../persons.parquet')
     """
-    normalized_keys = normalize_materialize_output_keys(
-        keys,
-        caller="hydrate_run_outputs",
-    )
-    validate_materialize_option(
-        name="on_missing",
-        value=on_missing,
-        allowed=_VALID_MATERIALIZE_ON_MISSING,
-    )
-    validate_materialize_option(
-        name="db_fallback",
-        value=db_fallback,
-        allowed=_VALID_MATERIALIZE_DB_FALLBACK,
-    )
-
-    tr = _resolve_tracker(tracker)
-    return tr.hydrate_run_outputs(
+    return _resolve_tracker(tracker).hydrate_run_outputs(
         run_id,
         target_root=target_root,
         source_root=source_root,
-        keys=normalized_keys,
+        keys=keys,
         preserve_existing=preserve_existing,
         on_missing=on_missing,
         db_fallback=db_fallback,
@@ -1237,11 +1213,9 @@ def stage_artifact(
     the goal is to prepare declared inputs for one execution. Use this helper
     when you need the same staging behavior outside a run lifecycle.
     """
-    tr = _resolve_tracker(tracker)
-    return stage_artifact_core(
-        tr,
+    return _resolve_tracker(tracker).stage_artifact(
         artifact,
-        Path(destination),
+        destination=destination,
         mode=mode,
         overwrite=overwrite,
         validate_content_hash=validate_content_hash,
@@ -1269,14 +1243,9 @@ def stage_inputs(
     code. Use this helper when you already have resolved artifacts and need to
     stage them before or outside normal run execution.
     """
-    tr = _resolve_tracker(tracker)
-    normalized_destinations = {
-        key: Path(destination) for key, destination in destinations_by_key.items()
-    }
-    return stage_inputs_core(
-        tr,
+    return _resolve_tracker(tracker).stage_inputs(
         inputs_by_key,
-        normalized_destinations,
+        destinations_by_key=destinations_by_key,
         mode=mode,
         overwrite=overwrite,
         validate_content_hash=validate_content_hash,
@@ -1313,8 +1282,9 @@ def set_artifact_recovery_roots(
         Tracker used for persistence. If omitted, resolves the active/default
         tracker.
     """
-    tr = _resolve_tracker(tracker)
-    return tr.set_artifact_recovery_roots(artifact, roots, append=append)
+    return _resolve_tracker(tracker).set_artifact_recovery_roots(
+        artifact, roots, append=append
+    )
 
 
 def archive_artifact(
@@ -1334,8 +1304,7 @@ def archive_artifact(
     workflows where outputs are promoted into long-lived storage but retain
     their canonical ``container_uri``.
     """
-    tr = _resolve_tracker(tracker)
-    return tr.archive_artifact(
+    return _resolve_tracker(tracker).archive_artifact(
         artifact,
         archive_root,
         mode=mode,
@@ -1358,8 +1327,7 @@ def archive_run_outputs(
     This is the bulk form of ``archive_artifact(...)`` for iteration/archive
     workflows that promote all or a subset of outputs after a run completes.
     """
-    tr = _resolve_tracker(tracker)
-    return tr.archive_run_outputs(
+    return _resolve_tracker(tracker).archive_run_outputs(
         run_id,
         archive_root,
         keys=keys,
@@ -1383,8 +1351,7 @@ def archive_current_run_outputs(
     that archive outputs immediately after logging them, without separately
     pulling ``result.run.id`` or ``tracker.current_consist.run.id``.
     """
-    tr = _resolve_tracker(tracker)
-    return tr.archive_current_run_outputs(
+    return _resolve_tracker(tracker).archive_current_run_outputs(
         archive_root,
         keys=keys,
         mode=mode,
@@ -1433,8 +1400,7 @@ def register_artifact_facet_parser(
 
     The parser is invoked when logging an artifact without an explicit ``facet=``.
     """
-    tr = _resolve_tracker(tracker)
-    tr.register_artifact_facet_parser(prefix, parser_fn)
+    _resolve_tracker(tracker).register_artifact_facet_parser(prefix, parser_fn)
 
 
 # --- Proxy Functions ---

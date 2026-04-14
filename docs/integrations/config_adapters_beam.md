@@ -9,17 +9,16 @@ Dependencies:
 - Requires `pandas` only if you use tabular ingestion via `BeamIngestSpec`.
 
 !!! note "Recommended path"
-    For workflow execution, the recommended path is `consist.run(...)`,
-    `consist.trace(...)`, or `consist.scenario(...)` with `adapter=` and
-    `identity_inputs=`. Examples using `tracker.begin_run(...)`,
-    `tracker.canonicalize_config(...)`, and `tracker.end_run()` are
-    integration-specific advanced lifecycle patterns.
+    For workflow execution, prefer `tracker.run(...)`, `tracker.trace(...)`, or
+    `consist.scenario(...)` with `adapter=` and `identity_inputs=`. Examples
+    using `tracker.begin_run(...)`, `tracker.canonicalize_config(...)`, and
+    `tracker.end_run()` are integration-specific advanced lifecycle patterns.
 
 ## Usage
 
 !!! note "Integration-specific advanced lifecycle snippet"
     This usage block shows explicit adapter lifecycle control. Prefer the
-    recommended path (`run`/`trace`/`scenario`) for regular BEAM runs.
+    explicit tracker/scenario execution path for regular BEAM runs.
 
 ```python
 from pathlib import Path
@@ -39,9 +38,9 @@ tracker.end_run()
 
 ## Run/Trace Adapter Handoff (Public Surface)
 
-For `consist.run(...)`, `consist.trace(...)`, `Tracker.run(...)`,
-`Tracker.trace(...)`, `ScenarioContext.run(...)`, and `ScenarioContext.trace(...)`,
-use `adapter=` and `identity_inputs=`:
+For `Tracker.run(...)`, `Tracker.trace(...)`, `ScenarioContext.run(...)`,
+`ScenarioContext.trace(...)`, and the deprecated `consist.run(...)` /
+`consist.trace(...)` wrappers, use `adapter=` and `identity_inputs=`:
 
 ```python
 import consist

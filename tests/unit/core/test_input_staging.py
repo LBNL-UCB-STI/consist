@@ -4,8 +4,6 @@ import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 import consist.api as consist_api
 from consist.core.fs import FileSystemManager
 from consist.core.materialize import (
@@ -271,17 +269,16 @@ def test_stage_inputs_returns_ordered_keyed_results(tmp_path: Path) -> None:
     assert result.paths["b"] == dest_b.resolve()
 
 
-def test_api_stage_artifact_delegates_to_core(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_api_stage_artifact_delegates_to_tracker_method() -> None:
     sentinel = object()
     calls: dict[str, object] = {}
-    tracker = SimpleNamespace()
     artifact = _artifact("source", "./inputs/source.csv")
 
-    def _fake_stage(tr, art, destination, **kwargs):
-        calls.update(tr=tr, art=art, destination=destination, kwargs=kwargs)
+    def _fake_stage(art, **kwargs):
+        calls.update(art=art, kwargs=kwargs)
         return sentinel
 
-    monkeypatch.setattr(consist_api, "stage_artifact_core", _fake_stage)
+    tracker = SimpleNamespace(stage_artifact=_fake_stage)
 
     result = consist_api.stage_artifact(
         artifact,
@@ -292,28 +289,25 @@ def test_api_stage_artifact_delegates_to_core(monkeypatch: pytest.MonkeyPatch) -
     )
 
     assert result is sentinel
-    assert calls["tr"] is tracker
     assert calls["art"] is artifact
-    assert calls["destination"] == Path("/tmp/staged.csv")
     assert calls["kwargs"]["overwrite"] is True
+    assert calls["kwargs"]["destination"] == "/tmp/staged.csv"
+    assert calls["kwargs"]["mode"] == "copy"
 
 
-def test_api_stage_inputs_delegates_to_core(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_api_stage_inputs_delegates_to_tracker_method() -> None:
     sentinel = object()
     calls: dict[str, object] = {}
-    tracker = SimpleNamespace()
     artifact = _artifact("source", "./inputs/source.csv")
 
-    def _fake_stage(tr, inputs_by_key, destinations_by_key, **kwargs):
+    def _fake_stage(inputs_by_key, **kwargs):
         calls.update(
-            tr=tr,
             inputs_by_key=inputs_by_key,
-            destinations_by_key=destinations_by_key,
             kwargs=kwargs,
         )
         return sentinel
 
-    monkeypatch.setattr(consist_api, "stage_inputs_core", _fake_stage)
+    tracker = SimpleNamespace(stage_inputs=_fake_stage)
 
     result = consist_api.stage_inputs(
         {"source": artifact},
@@ -324,7 +318,7 @@ def test_api_stage_inputs_delegates_to_core(monkeypatch: pytest.MonkeyPatch) -> 
     )
 
     assert result is sentinel
-    assert calls["tr"] is tracker
     assert calls["inputs_by_key"] == {"source": artifact}
-    assert calls["destinations_by_key"] == {"source": Path("/tmp/staged.csv")}
     assert calls["kwargs"]["overwrite"] is True
+    assert calls["kwargs"]["destinations_by_key"] == {"source": "/tmp/staged.csv"}
+    assert calls["kwargs"]["mode"] == "copy"

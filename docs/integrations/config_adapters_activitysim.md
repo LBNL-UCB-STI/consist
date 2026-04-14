@@ -4,11 +4,11 @@ The ActivitySim config adapter discovers and canonicalizes ActivitySim configura
 directories (with support for YAML inheritance, CSV references, and config bundling).
 
 !!! note "Recommended path"
-    For workflow execution, the recommended path is `consist.run(...)`,
-    `consist.trace(...)`, or `consist.scenario(...)` with `adapter=` and
-    `identity_inputs=`. Lifecycle snippets using `tracker.begin_run(...)`,
-    `tracker.canonicalize_config(...)`, and `tracker.end_run()` are
-    integration-specific advanced patterns for manual orchestration.
+    For workflow execution, prefer `tracker.run(...)`, `tracker.trace(...)`, or
+    `consist.scenario(...)` with `adapter=` and `identity_inputs=`. Lifecycle
+    snippets using `tracker.begin_run(...)`, `tracker.canonicalize_config(...)`,
+    and `tracker.end_run()` are integration-specific advanced patterns for
+    manual orchestration.
 
 ## Overview
 
@@ -29,7 +29,7 @@ Compare how constants and coefficients change between runs:
 
 !!! note "Integration-specific advanced lifecycle snippet"
     This example uses explicit lifecycle APIs for adapter-centric ingestion and
-    diagnostics. Use the recommended path (`run`/`trace`/`scenario`) for day-to-day
+    diagnostics. Use the explicit tracker/scenario execution path for day-to-day
     workflow execution.
 
 ```python
@@ -113,8 +113,8 @@ Use the `materialize()` method to apply overrides to a baseline config:
 
 !!! note "Integration-specific advanced lifecycle snippet"
     The final `begin_run`/`canonicalize_config`/`end_run` block below is advanced
-    adapter orchestration. Keep standard execution on the recommended path
-    (`run`/`trace`/`scenario`).
+    adapter orchestration. Keep standard execution on the explicit
+    tracker/scenario execution path.
 
 ```python
 from consist.integrations.activitysim import ConfigOverrides

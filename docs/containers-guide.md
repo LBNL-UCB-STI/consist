@@ -7,8 +7,8 @@ Consist executes containerized tools (Docker, Singularity) with automatic proven
 
 !!! note "Recommended path"
     `run_container(...)` is an integration-specific API for external tools. For
-    Python workflow steps, the recommended path is `consist.run(...)`,
-    `consist.trace(...)`, or `consist.scenario(...)`.
+    Python workflow steps, prefer `tracker.run(...)`, `tracker.trace(...)`, or
+    `consist.scenario(...)` with `scenario.run(...)` / `scenario.trace(...)`.
 
 ---
 
@@ -20,8 +20,8 @@ Consist executes containerized tools (Docker, Singularity) with automatic proven
 | Complex dependencies easier to package than install | Container |
 | Black-box or non-deterministic tools | Container |
 | Tool expects specific file paths | Container |
-| Simple Python functions | `consist.run()` |
-| Fine-grained step caching | `scenario()` + `consist.run()` |
+| Simple Python functions | `tracker.run()` |
+| Fine-grained step caching | `scenario()` + `sc.run()` |
 | Development/debugging with fast iteration | Native execution |
 
 ---
@@ -503,7 +503,7 @@ To force re-execution even with matching signature:
 
 !!! note "Advanced lifecycle pattern"
     The `tracker.begin_run(...)`/`tracker.end_run()` wrapper below is low-level.
-    Prefer the recommended path (`run`/`trace`/`scenario`) unless you need manual
+    Prefer the explicit tracker/scenario execution path unless you need manual
     lifecycle control around container orchestration.
 
 ```python

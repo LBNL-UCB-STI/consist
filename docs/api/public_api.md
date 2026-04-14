@@ -6,24 +6,24 @@ more verbose, lower-level, or easier to misuse.
 
 For tiered guidance:
 
-- [API Essentials](essentials.md) for onboarding and recommended path usage
+- [API Essentials](essentials.md) for onboarding and preferred execution patterns
 - [API Advanced](advanced.md) for manual lifecycle, decorators, and lower-level APIs
 
 ## When to use each run entry point
 
 | Entry point | Use when | Notes |
 |---|---|---|
-| [`consist.run`](api_helpers.md#consist.api.run) | You want the quickest cache-aware call for one function | Convenience wrapper around `Tracker.run` |
-| [`consist.trace`](api_helpers.md#consist.api.trace) | You need inline `with`-block execution with run recording | Convenience wrapper around `Tracker.trace` |
-| [`Tracker.run`](tracker.md#consist.core.tracker.Tracker.run) | You want explicit tracker ownership in app/library code | Same core behavior as `consist.run` |
+| [`Tracker.run`](tracker.md#consist.core.tracker.Tracker.run) | You want explicit tracker ownership for one cache-aware function | Preferred single-step entry point |
 | [`Tracker.trace`](tracker.md#consist.core.tracker.Tracker.trace) | You need inline execution with explicit tracker control | Block executes every time |
 | [`consist.scenario`](api_helpers.md#consist.api.scenario) | You need multi-step workflows with shared scenario context | Returns [`ScenarioContext`](workflow.md#consist.core.workflow.ScenarioContext) |
 | [`ScenarioContext.run`](workflow.md#consist.core.workflow.ScenarioContext.run) | You are inside a scenario and want cache-aware steps | Step-level equivalent of `Tracker.run`; also accepts `binding=BindingResult(...)` for orchestrator-resolved inputs |
 | [`ScenarioContext.trace`](workflow.md#consist.core.workflow.ScenarioContext.trace) | You are inside a scenario and need inline step execution | Step-level equivalent of `Tracker.trace` |
+| [`consist.run`](api_helpers.md#consist.api.run) | You need the legacy context-resolving convenience wrapper | Deprecated compatibility wrapper around `Tracker.run` |
+| [`consist.trace`](api_helpers.md#consist.api.trace) | You need the legacy context-resolving tracing wrapper | Deprecated compatibility wrapper around `Tracker.trace` |
+| [`consist.start_run`](api_helpers.md#consist.api.start_run) | You need the legacy context-resolving lifecycle wrapper | Deprecated compatibility wrapper around `Tracker.start_run` |
 
 ## Relationship: `consist.scenario`, `consist.run`, and `Tracker.run`
 
-- `consist.run(...)` resolves the active/default tracker and then calls `Tracker.run(...)`.
 - `Tracker.run(...)` is the explicit class method for a single cache-aware step.
 - `consist.scenario(...)` creates a scenario context; inside it, call `sc.run(...)`
   for cache-aware steps or `sc.trace(...)` for inline blocks that execute each time.
@@ -31,6 +31,35 @@ For tiered guidance:
   `binding=BindingResult(...)` to `sc.run(...)` instead of unpacking primitive
   input kwargs. That is the preferred scenario-level envelope for complex or
   externally orchestrated workflows.
+- `consist.run(...)` resolves the active/default tracker and then calls `Tracker.run(...)`,
+  but it is now a deprecated compatibility wrapper.
+
+## Top-level API policy
+
+Consist keeps top-level `consist.*` helpers when they add one of two things:
+
+- **Ambient run-scoped behavior**: helpers that attach metadata, artifacts, or
+  side effects to an already-active run without forcing tracker plumbing
+  through nested workflow code. Examples include
+  `consist.log_artifact(...)`, `consist.log_artifacts(...)`,
+  `consist.log_input(...)`, `consist.log_output(...)`,
+  `consist.ingest(...)`, `consist.log_meta(...)`, and
+  `consist.capture_outputs(...)`.
+- **Pure/context utilities**: helpers that do not create tracker-owned
+  execution state, such as `consist.ref(...)`, `consist.refs(...)`,
+  `consist.output_path(...)`, and `consist.output_dir(...)`.
+
+Consist deprecates top-level helpers when they are only duplicate
+tracker-owning execution entry points:
+
+- `consist.run(...)`
+- `consist.trace(...)`
+- `consist.start_run(...)`
+
+`consist.scenario(...)` remains a deliberate exception. It is still a top-level
+workflow entry point, but it carries meaningful API-level behavior beyond
+simple forwarding, including the `enabled=False` noop branch and the scenario
+ergonomics used throughout examples and multi-step workflows.
 
 ## Run/trace identity kwargs (public surface)
 
@@ -64,12 +93,8 @@ def write_result() -> Path:
     out.write_text("ok\n")
     return out
 
-# Convenience helper: resolves tracker from context.
-with consist.use_tracker(tracker):
-    one = consist.run(fn=write_result, outputs=["result"])
-
-# Explicit class API: same run behavior, explicit object wiring.
-two = tracker.run(fn=write_result, outputs=["result"])
+# Preferred class API: explicit tracker ownership.
+one = tracker.run(fn=write_result, outputs=["result"])
 
 # Scenario API: grouped multi-step workflows.
 with tracker.scenario("baseline") as sc:
@@ -95,13 +120,15 @@ with tracker.scenario("baseline") as sc:
 
 - [`consist.scenario`](api_helpers.md#consist.api.scenario)
 - [`consist.single_step_scenario`](api_helpers.md#consist.api.single_step_scenario)
-- [`consist.run`](api_helpers.md#consist.api.run)
-- [`consist.trace`](api_helpers.md#consist.api.trace)
-- [`consist.start_run`](api_helpers.md#consist.api.start_run)
 - [`consist.define_step`](api_helpers.md#consist.api.define_step)
 - [`consist.use_tracker`](api_helpers.md#consist.api.use_tracker)
 - [`consist.output_dir`](api_helpers.md#consist.api.output_dir)
 - [`consist.output_path`](api_helpers.md#consist.api.output_path)
+- [`Tracker.run`](tracker.md#consist.core.tracker.Tracker.run)
+- [`Tracker.trace`](tracker.md#consist.core.tracker.Tracker.trace)
+- [`consist.run`](api_helpers.md#consist.api.run) (deprecated compatibility wrapper)
+- [`consist.trace`](api_helpers.md#consist.api.trace) (deprecated compatibility wrapper)
+- [`consist.start_run`](api_helpers.md#consist.api.start_run) (deprecated compatibility wrapper)
 - [`ScenarioContext`](workflow.md#consist.core.workflow.ScenarioContext) (returned by `consist.scenario(...)`)
   - `run_id`, `config`, `inputs`, `add_input`, `declare_outputs`, `require_outputs`, `collect_by_keys`, `run`, `trace`
   - `run(..., binding=BindingResult(...))` for resolved orchestrator plans
@@ -119,6 +146,10 @@ Scenario defaults like `name_template` and `cache_epoch` are configured via `con
 ### Artifact logging and loading
 
 - [`consist.log_artifact`](api_helpers.md#consist.api.log_artifact)
+- [`consist.log_artifacts`](api_helpers.md#consist.api.log_artifacts)
+- [`consist.log_input`](api_helpers.md#consist.api.log_input)
+- [`consist.log_output`](api_helpers.md#consist.api.log_output)
+- [`consist.ingest`](api_helpers.md#consist.api.ingest)
 - [`consist.log_dataframe`](api_helpers.md#consist.api.log_dataframe)
 - [`consist.load`](api_helpers.md#consist.api.load)
 - [`consist.capture_outputs`](api_helpers.md#consist.api.capture_outputs)

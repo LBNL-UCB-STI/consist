@@ -1,10 +1,11 @@
 # Architecture
 
 !!! note "Recommended path"
-    For most user workflows, the recommended path is `consist.run(...)`,
-    `consist.trace(...)`, or `consist.scenario(...)`. Low-level lifecycle snippets
-    in this page (for example `tracker.start_run(...)` + `tracker.log_artifact(...)`)
-    are advanced and primarily explain internal behavior.
+    For most user workflows, prefer `tracker.run(...)`, `tracker.trace(...)`,
+    or `consist.scenario(...)` with `scenario.run(...)` / `scenario.trace(...)`.
+    Low-level lifecycle snippets in this page (for example
+    `tracker.start_run(...)` + `tracker.log_artifact(...)`) are advanced and
+    primarily explain internal behavior.
 
 ## How Caching Works
 
