@@ -130,7 +130,8 @@ class HydratedRunOutput:
         Detached copy of the historical artifact record. When ``resolvable`` is
         ``True``, the detached artifact's runtime ``abs_path`` points at the
         hydrated destination so helpers like ``artifact.as_path()`` can be used
-        directly in the new workspace.
+        directly in the new workspace. The detached artifact preserves the
+        canonical fingerprint surface on ``artifact.hash``.
     path : Path | None
         Destination path under the requested target root, when one is known.
         This can be populated even for non-resolvable outcomes to show the
@@ -272,7 +273,8 @@ class StagedInput:
         Detached copy of the input artifact. When ``resolvable`` is ``True``,
         the detached artifact's runtime ``abs_path`` points at the staged
         destination so helpers like ``artifact.as_path()`` can be used
-        directly.
+        directly. The detached artifact preserves the canonical fingerprint
+        surface on ``artifact.hash``.
     path : Path | None
         Explicit staging destination, when one was known.
     status : StagingStatus

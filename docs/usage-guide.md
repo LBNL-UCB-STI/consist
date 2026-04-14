@@ -1198,7 +1198,16 @@ result = hydrated["results"]
 print(result.status)
 if result.resolvable:
     print(result.artifact.as_path())
+    print(result.artifact.hash)
 ```
+
+The detached artifact returned by `hydrate_run_outputs(...)` preserves
+`artifact.hash` as Consist's canonical artifact fingerprint. This is the field
+downstream provenance code should read after logging, querying, replay, staging,
+or hydration. Fingerprint semantics follow the active hashing strategy, so under
+`fast` hashing the value may be metadata-based rather than a byte-for-byte
+content digest. By contrast, `artifact.content_id` is a DB-local dedupe key and
+is not the public fingerprint surface.
 
 Set per-run via `cache_options=CacheOptions(cache_hydration=...)` (for `run(...)`)
 or for scenario defaults via `step_cache_hydration=...`:
@@ -1517,7 +1526,15 @@ For more on ingestion and hybrid views, see [Data Materialization Strategy](conc
 If you ingest tabular data into DuckDB, Consist can capture the observed schema and export an **editable SQLModel stub** so you can curate PK/FK constraints and then register the model for views. This is useful when you want a stable, documented schema for downstream analysis or audits.
 
 You can also opt into lightweight file schema capture when logging CSV/Parquet artifacts by passing `profile_file_schema=True` (and optionally `file_schema_sample_rows=`) to `log_artifact`. These captured schemas are stored in the provenance DB and remain available even if the original files move or are deleted.
-If you already have a content hash (e.g., after copying or moving a file), pass `content_hash=` to `log_artifact` to reuse it without re-hashing the file. For safety, Consist will not overwrite an existing, different hash unless you pass `force_hash_override=True`. To verify the hash against disk, use `validate_content_hash=True`.
+If you already have an artifact fingerprint (for example after copying or moving
+a file), pass `content_hash=` to `log_artifact` to reuse it without re-hashing
+the path. Consist stores that value on `artifact.hash`, the canonical public
+fingerprint surface for downstream provenance/bookkeeping code. For safety,
+Consist will not overwrite an existing, different fingerprint unless you pass
+`force_hash_override=True`. To verify the supplied fingerprint against disk, use
+`validate_content_hash=True`. Fingerprint semantics follow the active hashing
+strategy, so under `fast` hashing the value may be metadata-based for files or
+directories.
 
 See [Schema Export](schema-export.md) for the full workflow (CLI + Python) and column-name/`__tablename__` guidelines.
 See [Data Materialization Strategy](concepts/data-materialization.md) for ingestion tradeoffs and DB fallback behavior.

@@ -114,7 +114,8 @@ In this flow:
   destination.
 - `hydrated["persons"].artifact` is a detached artifact view. When
   `resolvable` is `True`, `artifact.as_path()` points at the hydrated
-  destination in the new workspace.
+  destination in the new workspace. The detached artifact also preserves
+  `artifact.hash`, Consist's canonical artifact fingerprint surface.
 
 ## Requested Input Staging
 

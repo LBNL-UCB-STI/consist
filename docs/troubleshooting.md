@@ -382,7 +382,7 @@ cache miss explanation tells you which part of that key likely drifted.
 **Common causes:**
 - **Code changed:** Check git status, function definitions
 - **Config changed:** Check parameter types (0 vs 0.0, "0" vs 0)
-- **Input file changed:** Check file modification time, content hash
+- **Input file changed:** Check file modification time and artifact fingerprint
 - **Run fields changed:** `model`, `year`, or `iteration` are folded into the config hash
 - **Dependencies changed:** Installed package versions can affect behavior
 
@@ -948,7 +948,7 @@ from pathlib import Path
 with tracker.start_run("hash_input", model="example"):
     artifact = tracker.log_artifact(Path("input.csv"), key="input", direction="input")
     print(f"Path: {artifact.path}")
-    print(f"Hash: {artifact.hash}")
+    print(f"Artifact Fingerprint: {artifact.hash}")
     print(f"Size: {artifact.path.stat().st_size}")
 ```
 

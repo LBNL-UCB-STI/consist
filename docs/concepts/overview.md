@@ -6,7 +6,10 @@ This section establishes the mental model for Consist before covering API detail
 
 ## Core Abstractions
 
-**Artifact**: A file with provenance metadata—its path, format, content hash (SHA256), producing run, and ingestion status.
+**Artifact**: A file with provenance metadata: path, format, canonical
+fingerprint (`artifact.hash`), producing run, and ingestion status. Fingerprint
+semantics follow the active hashing strategy, so under `fast` hashing the value
+may be metadata-based rather than a strict byte-content digest.
 
 **Run**: A single execution with tracked inputs, configuration, outputs, status, and timing. Each run has a signature computed from code, config, and inputs that enables cache reuse.
 

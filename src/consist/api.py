@@ -1165,7 +1165,9 @@ def hydrate_run_outputs(
     Returns
     -------
     HydratedRunOutputsResult
-        Keyed hydration outcome for the selected run outputs.
+        Keyed hydration outcome for the selected run outputs. Each detached
+        returned artifact preserves the canonical fingerprint surface on
+        ``artifact.hash``.
 
     Examples
     --------
@@ -1448,8 +1450,9 @@ def log_artifact(
         Explicitly specify the driver (e.g., 'h5_table').
         If None, the driver is inferred from the file extension.
     content_hash : Optional[str], optional
-        Precomputed content hash to use for the artifact instead of hashing
-        the path on disk.
+        Precomputed artifact fingerprint to use instead of hashing the path on
+        disk. When provided, Consist stores it on the canonical public
+        fingerprint field, ``artifact.hash``.
     force_hash_override : bool, default False
         If True, overwrite an existing artifact hash when it differs from
         `content_hash`. By default, mismatched overrides are ignored with a warning.
@@ -1695,7 +1698,9 @@ def log_input(
     driver : Optional[str]
         Explicit format driver (e.g. "parquet"). Inferred from extension if None.
     content_hash : Optional[str]
-        Precomputed hash to avoid re-hashing large files.
+        Precomputed artifact fingerprint to avoid re-hashing large files. When
+        provided, Consist stores it on the canonical public fingerprint field,
+        ``artifact.hash``.
     force_hash_override : bool, default False
         Overwrite existing hash in the database if different from `content_hash`.
     validate_content_hash : bool, default False
@@ -1765,7 +1770,9 @@ def log_output(
     driver : Optional[str]
         Explicit format driver (e.g. "parquet"). Inferred from extension if None.
     content_hash : Optional[str]
-        Precomputed hash to avoid re-hashing large files.
+        Precomputed artifact fingerprint to avoid re-hashing large files. When
+        provided, Consist stores it on the canonical public fingerprint field,
+        ``artifact.hash``.
     force_hash_override : bool, default False
         Overwrite existing hash in the database if different from `content_hash`.
     validate_content_hash : bool, default False

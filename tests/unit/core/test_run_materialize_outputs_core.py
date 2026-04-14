@@ -51,6 +51,7 @@ def _artifact(
     *,
     run_id: str | None = None,
     driver: str = "csv",
+    hash_value: str | None = None,
     meta: dict | None = None,
 ) -> Artifact:
     return Artifact(
@@ -58,6 +59,7 @@ def _artifact(
         key=key,
         container_uri=uri,
         driver=driver,
+        hash=hash_value,
         run_id=run_id,
         meta=dict(meta or {}),
     )
@@ -881,7 +883,7 @@ def test_hydrate_run_outputs_returns_detached_artifact_views(
     with tracker.start_run(
         "producer_hydrate", model="producer", cache_mode="overwrite"
     ):
-        tracker.log_artifact(output_path, key="table", direction="output")
+        logged = tracker.log_artifact(output_path, key="table", direction="output")
 
     historical_artifact = tracker.get_run_outputs("producer_hydrate")["table"]
 
@@ -897,6 +899,7 @@ def test_hydrate_run_outputs_returns_detached_artifact_views(
     assert result.resolvable is True
     assert result.path == restored_path
     assert result.artifact is not historical_artifact
+    assert result.artifact.hash == historical_artifact.hash == logged.hash
     assert result.artifact.container_uri == historical_artifact.container_uri
     assert result.artifact.path == restored_path
     assert result.artifact.as_path() == restored_path
@@ -944,6 +947,39 @@ def test_hydrate_run_outputs_preserves_parent_artifact_id(
     assert result.artifact is not historical_artifact
     assert result.artifact.parent_artifact_id == historical_artifact.parent_artifact_id
     assert result.artifact.meta["parent_id"] == historical_artifact.meta["parent_id"]
+
+
+def test_hydrate_run_outputs_preserves_unhashed_artifacts(tmp_path: Path) -> None:
+    producer_dir = tmp_path / "producer"
+    source = producer_dir / "outputs" / "table.csv"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("value\n1\n", encoding="utf-8")
+
+    selected_run = _run("consumer", run_dir=tmp_path / "consumer")
+    producing_run = _run("producer", run_dir=producer_dir)
+    outputs = [_artifact("table", "./outputs/table.csv", run_id="producer")]
+    tracker = _stub_tracker(
+        run_dir=tmp_path / "workspace",
+        outputs_by_run={"consumer": outputs},
+        runs={"consumer": selected_run, "producer": producing_run},
+    )
+
+    hydrated = hydrate_run_outputs(
+        tracker,
+        selected_run,
+        target_root=tmp_path / "restored",
+        source_root=None,
+        keys=["table"],
+        allowed_base=tmp_path,
+        preserve_existing=True,
+        on_missing="raise",
+        db_fallback="never",
+    )
+
+    result = hydrated["table"]
+    assert result.status == "materialized_from_filesystem"
+    assert result.resolvable is True
+    assert result.artifact.hash is None
 
 
 def test_hydrate_run_outputs_warn_mode_returns_mixed_keyed_statuses(

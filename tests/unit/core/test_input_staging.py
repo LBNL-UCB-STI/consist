@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,11 +19,22 @@ from consist.models.artifact import Artifact
 def _checksum(path: Path) -> str:
     if path.is_dir():
         digest = hashlib.sha256()
-        for child in sorted(path.rglob("*")):
-            if child.is_file():
-                digest.update(child.relative_to(path).as_posix().encode("utf-8"))
-                digest.update(b"\0")
-                digest.update(child.read_bytes())
+        base = path.resolve()
+        for root, dirnames, filenames in os.walk(base):
+            dirnames.sort()
+            filenames.sort()
+            rel_root = Path(root).resolve().relative_to(base).as_posix()
+            digest.update(f"dir:{rel_root}".encode("utf-8"))
+            for dirname in dirnames:
+                rel_dir = Path(root, dirname).resolve().relative_to(base).as_posix()
+                digest.update(f"subdir:{rel_dir}".encode("utf-8"))
+            for filename in filenames:
+                file_path = Path(root, filename).resolve()
+                rel_file = file_path.relative_to(base).as_posix()
+                digest.update(f"file:{rel_file}".encode("utf-8"))
+                digest.update(
+                    hashlib.sha256(file_path.read_bytes()).hexdigest().encode("utf-8")
+                )
         return digest.hexdigest()
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -78,6 +90,7 @@ def test_stage_artifact_copies_file_and_detaches_artifact(tmp_path: Path) -> Non
     assert result.status == "staged"
     assert result.resolvable is True
     assert result.path == destination.resolve()
+    assert result.artifact.hash == artifact.hash
     assert result.artifact.as_path() == destination.resolve()
     assert destination.read_text(encoding="utf-8") == "value\n1\n"
 
@@ -112,14 +125,32 @@ def test_stage_artifact_stages_directories(tmp_path: Path) -> None:
         "bundle",
         "./inputs/bundle",
         driver="zarr",
+        hash_value=_checksum(source),
     )
 
     result = stage_artifact(tracker, artifact, destination)
 
     assert result.status == "staged"
+    assert result.artifact.hash == artifact.hash
     assert (destination / "nested" / "data.txt").read_text(
         encoding="utf-8"
     ) == "payload"
+
+
+def test_stage_artifact_preserves_missing_hash_on_detached_artifact(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "inputs" / "source.csv"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("value\n1\n", encoding="utf-8")
+    destination = tmp_path / "runs" / "staged" / "source.csv"
+    tracker = _tracker(tmp_path / "runs", resolve_uri=lambda _uri: str(source))
+    artifact = _artifact("source", "./inputs/source.csv")
+
+    result = stage_artifact(tracker, artifact, destination)
+
+    assert result.status == "staged"
+    assert result.artifact.hash is None
 
 
 def test_stage_artifact_uses_runtime_abs_path_when_canonical_resolution_missing(

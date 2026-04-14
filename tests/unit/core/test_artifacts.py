@@ -206,6 +206,7 @@ def test_attach_content_id_handles_deepcopied_detached_artifact(tmp_path, caplog
 
     assert out is not replayed
     assert out.id == replayed.id
+    assert out.hash == replayed.hash == "shared_hash"
     assert content is not None
     assert out.content_id == content.id
     assert "Failed to record artifact content identity" not in caplog.text
