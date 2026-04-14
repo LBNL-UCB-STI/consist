@@ -12,6 +12,13 @@ if TYPE_CHECKING:
 
 
 class TrackerArtifactQueryService(_TrackerServiceBase):
+    def _resolve_artifact_ref(
+        self, artifact: Union[Artifact, str, uuid.UUID]
+    ) -> Optional[Artifact]:
+        return (
+            artifact if isinstance(artifact, Artifact) else self.get_artifact(artifact)
+        )
+
     def get_artifact(
         self,
         key_or_id: Union[str, uuid.UUID],
@@ -58,9 +65,7 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         """
         if not self.db:
             return []
-        target = (
-            artifact if isinstance(artifact, Artifact) else self.get_artifact(artifact)
-        )
+        target = self._resolve_artifact_ref(artifact)
         if target is None or target.content_id is None:
             return []
         artifacts = self.db.find_artifacts_by_content_id(target.content_id)
@@ -86,12 +91,62 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         """
         if not self.db:
             return []
-        target = (
-            artifact if isinstance(artifact, Artifact) else self.get_artifact(artifact)
-        )
+        target = self._resolve_artifact_ref(artifact)
         if target is None or target.content_id is None:
             return []
         return self.db.find_runs_producing_content(target.content_id)
+
+    def get_child_artifacts(
+        self, parent: Union[Artifact, str, uuid.UUID]
+    ) -> List[Artifact]:
+        """
+        Return child artifacts for a parent artifact, ordered by creation time.
+
+        Parameters
+        ----------
+        parent : Artifact | str | uuid.UUID
+            Parent artifact instance or identifier to resolve first.
+
+        Returns
+        -------
+        List[Artifact]
+            Child artifacts linked to the resolved parent.
+        """
+        if not self.db:
+            return []
+        target = self._resolve_artifact_ref(parent)
+        if target is None:
+            return []
+        artifacts = self.db.get_child_artifacts(target.id)
+        for artifact in artifacts:
+            set_tracker_ref(artifact, self._tracker)
+        return artifacts
+
+    def get_parent_artifact(
+        self, child: Union[Artifact, str, uuid.UUID]
+    ) -> Optional[Artifact]:
+        """
+        Return the parent artifact for a child artifact when one is recorded.
+
+        Parameters
+        ----------
+        child : Artifact | str | uuid.UUID
+            Child artifact instance or identifier to resolve first.
+
+        Returns
+        -------
+        Optional[Artifact]
+            Parent artifact, or ``None`` if the child has no recorded parent.
+        """
+        if not self.db:
+            return None
+        target = self._resolve_artifact_ref(child)
+        if target is None:
+            return None
+        artifact = self.db.get_parent_artifact(target.id)
+        if artifact is not None:
+            set_tracker_ref(artifact, self._tracker)
+        return artifact
 
     def select_artifact_schema_for_artifact(
         self,

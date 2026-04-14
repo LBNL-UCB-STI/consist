@@ -104,6 +104,8 @@ from consist.types import (
     CodeIdentityMode,
     ExecutionOptions,
     FacetLike,
+    H5ChildSelectionMode,
+    H5ChildSpec,
     HashInputs,
     IdentityInputs,
     OutputPolicyOptions,
@@ -2787,6 +2789,8 @@ class Tracker:
         table_filter: Optional[Union[Callable[[str], bool], List[str]]] = None,
         hash_tables: Literal["always", "if_unchanged", "never"] = "if_unchanged",
         table_hash_chunk_rows: Optional[int] = None,
+        child_specs: Optional[Mapping[str, H5ChildSpec]] = None,
+        child_selection: H5ChildSelectionMode = "all",
         **meta: Any,
     ) -> Tuple[Artifact, List[Artifact]]:
         """
@@ -2817,6 +2821,12 @@ class Tracker:
             skips hashing when a table appears unchanged based on lightweight checks.
         table_hash_chunk_rows : Optional[int], optional
             Row chunk size to use when hashing large tables.
+        child_specs : Optional[Mapping[str, H5ChildSpec]], optional
+            Optional per-dataset semantic customization keyed by HDF5 dataset path.
+            Keys may be written with or without a leading ``/``.
+        child_selection : {"all", "include_only"}, default "all"
+            Whether all discovered datasets are eligible for logging or only the
+            dataset paths named in ``child_specs``.
         **meta : Any
             Additional metadata for the container artifact.
 
@@ -2862,6 +2872,8 @@ class Tracker:
             table_filter=table_filter,
             hash_tables=hash_tables,
             table_hash_chunk_rows=table_hash_chunk_rows,
+            child_specs=child_specs,
+            child_selection=child_selection,
             **meta,
         )
 
@@ -2877,6 +2889,10 @@ class Tracker:
         table_hash_chunk_rows: Optional[int] = None,
         profile_file_schema: bool | Literal["if_changed"] = False,
         file_schema_sample_rows: Optional[int] = None,
+        description: Optional[str] = None,
+        facet: Optional[FacetLike] = None,
+        facet_schema_version: Optional[Union[str, int]] = None,
+        facet_index: bool = False,
         **meta: Any,
     ) -> Artifact:
         """
@@ -2905,6 +2921,14 @@ class Tracker:
             for legacy rows).
         file_schema_sample_rows : Optional[int], optional
             Number of rows to sample when profiling schema.
+        description : Optional[str], optional
+            Optional description stored in the child artifact metadata.
+        facet : Optional[FacetLike], optional
+            Optional artifact-level facet payload for this child artifact.
+        facet_schema_version : Optional[Union[str, int]], optional
+            Optional facet schema version.
+        facet_index : bool, default False
+            Whether to index scalar facet fields for querying.
         **meta : Any
             Additional metadata to store on the artifact.
 
@@ -2923,6 +2947,10 @@ class Tracker:
             table_hash_chunk_rows=table_hash_chunk_rows,
             profile_file_schema=profile_file_schema,
             file_schema_sample_rows=file_schema_sample_rows,
+            description=description,
+            facet=facet,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
             **meta,
         )
 
@@ -3857,6 +3885,16 @@ class Tracker:
         self, artifact: Union[Artifact, str, uuid.UUID]
     ) -> List[str]:
         return self._artifact_queries.find_runs_producing_same_content(artifact)
+
+    def get_child_artifacts(
+        self, parent: Union[Artifact, str, uuid.UUID]
+    ) -> List[Artifact]:
+        return self._artifact_queries.get_child_artifacts(parent)
+
+    def get_parent_artifact(
+        self, child: Union[Artifact, str, uuid.UUID]
+    ) -> Optional[Artifact]:
+        return self._artifact_queries.get_parent_artifact(child)
 
     def select_artifact_schema_for_artifact(
         self,
@@ -4974,6 +5012,8 @@ _TRACKER_WRAPPER_DOCS = {
     "find_runs_producing_same_content": (
         TrackerArtifactQueryService.find_runs_producing_same_content
     ),
+    "get_child_artifacts": TrackerArtifactQueryService.get_child_artifacts,
+    "get_parent_artifact": TrackerArtifactQueryService.get_parent_artifact,
     "select_artifact_schema_for_artifact": (
         TrackerArtifactQueryService.select_artifact_schema_for_artifact
     ),

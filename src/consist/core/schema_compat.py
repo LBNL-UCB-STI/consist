@@ -24,6 +24,17 @@ def apply_content_identity_compatibility(db: DatabaseManager) -> None:
     _ensure_artifact_content_id_index(db)
 
 
+def apply_artifact_parent_compatibility(db: DatabaseManager) -> None:
+    """
+    Apply additive schema compatibility for artifact parent-child relations.
+
+    This adds the canonical ``artifact.parent_artifact_id`` column and index for
+    older databases without requiring row backfills.
+    """
+    _ensure_artifact_parent_artifact_id_column(db)
+    _ensure_artifact_parent_artifact_id_index(db)
+
+
 def apply_run_stage_phase_compatibility(db: DatabaseManager) -> None:
     """
     Apply additive schema compatibility for run stage/phase support.
@@ -157,6 +168,39 @@ def _ensure_artifact_content_id_index(db: DatabaseManager) -> None:
             )
     except Exception as exc:
         logging.warning("Failed to create artifact.content_id index: %s", exc)
+
+
+def _ensure_artifact_parent_artifact_id_column(db: DatabaseManager) -> None:
+    """Ensure ``artifact.parent_artifact_id`` exists for container child relations."""
+    if db._table_has_column(table_name="artifact", column_name="parent_artifact_id"):
+        return
+    try:
+        with db.engine.begin() as conn:
+            conn.exec_driver_sql(
+                "ALTER TABLE artifact ADD COLUMN parent_artifact_id CHAR(36)"
+            )
+    except Exception as exc:
+        logging.warning("Failed to add artifact.parent_artifact_id column: %s", exc)
+
+
+def _ensure_artifact_parent_artifact_id_index(db: DatabaseManager) -> None:
+    """Ensure upgraded databases also index ``artifact.parent_artifact_id``."""
+    if not db._table_has_column(
+        table_name="artifact", column_name="parent_artifact_id"
+    ):
+        return
+    if db._table_has_index_on_column(
+        table_name="artifact", column_name="parent_artifact_id"
+    ):
+        return
+    try:
+        with db.engine.begin() as conn:
+            conn.exec_driver_sql(
+                "CREATE INDEX idx_artifact_parent_artifact_id "
+                "ON artifact(parent_artifact_id)"
+            )
+    except Exception as exc:
+        logging.warning("Failed to create artifact.parent_artifact_id index: %s", exc)
 
 
 def _ensure_run_stage_phase_columns(db: DatabaseManager) -> None:

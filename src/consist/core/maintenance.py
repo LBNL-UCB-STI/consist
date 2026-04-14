@@ -2283,6 +2283,7 @@ class DatabaseMaintenance:
                         array_path=artifact.array_path,
                         driver=artifact.driver,
                         hash=artifact.hash,
+                        parent_artifact_id=artifact.parent_artifact_id,
                         run_id=artifact.run_id,
                         meta=dict(artifact.meta)
                         if isinstance(artifact.meta, dict)

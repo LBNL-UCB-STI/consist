@@ -92,6 +92,7 @@ from consist.types import (
     CacheOptions,
     DriverType,
     ExecutionOptions,
+    H5ChildSpec,
     OutputPolicyOptions,
 )
 from consist.core.noop import (
@@ -132,6 +133,7 @@ __all__ = [
     "CacheOptions",
     "OutputPolicyOptions",
     "ExecutionOptions",
+    "H5ChildSpec",
     "NoopArtifact",
     "NoopCoupler",
     "NoopRunResult",

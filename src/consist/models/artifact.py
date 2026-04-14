@@ -162,6 +162,8 @@ class Artifact(SQLModel, table=True):
                       (e.g., "parquet", "csv", "zarr").
         hash (Optional[str]): SHA256 content hash of the artifact's data, enabling content-addressable
                               lookups and deduplication.
+        parent_artifact_id (Optional[uuid.UUID]): Canonical parent artifact relation for
+                              container child artifacts. Null for standalone artifacts.
         run_id (Optional[str]): The ID of the run that generated this artifact. Null for inputs.
         meta (dict[str, object]): A flexible JSON field for storing arbitrary metadata, such as
                                schema signatures, or data dimensions.
@@ -210,6 +212,14 @@ class Artifact(SQLModel, table=True):
         index=True,
         sa_type=UUIDType,
         description="Pointer to shared ArtifactContent metadata when available",
+    )
+    parent_artifact_id: Optional[uuid.UUID] = Field(
+        default=None,
+        index=True,
+        sa_type=UUIDType,
+        description=(
+            "Canonical parent artifact relation for container child artifacts."
+        ),
     )
 
     # Lineage
