@@ -71,6 +71,20 @@
   color: #ffffff;
 }
 
+[data-md-color-scheme="default"] .md-header .md-version__list {
+  color: var(--md-default-fg-color);
+  background-color: var(--md-default-bg-color);
+}
+
+[data-md-color-scheme="default"] .md-header .md-version__link {
+  color: var(--md-default-fg-color);
+}
+
+[data-md-color-scheme="default"] .md-header .md-version__link:is(:hover, :focus) {
+  color: var(--consist-teal);
+  background-color: rgba(0, 118, 129, 0.08);
+}
+
 [data-md-color-scheme="default"] .md-header .md-search__form,
 [data-md-color-scheme="default"] .md-header .md-search__input {
   color: var(--md-primary-bg-color);
@@ -239,8 +253,8 @@
 }
 
 #home-page + .home-hero {
-  margin: -2rem 0 3rem;
-  padding: 4rem 0 2.25rem;
+  margin: -2rem 0 2.5rem;
+  padding: 3.25rem 0 2rem;
   text-align: center;
   border-bottom: 1px solid rgba(0, 49, 60, 0.1);
 }
@@ -256,20 +270,15 @@
   max-width: 40rem;
   margin: 0 auto;
   font-size: 1.15rem;
-  letter-spacing: -0.01em;
 }
 
 [data-md-color-scheme="default"] #home-page + .home-hero {
-  background:
-    radial-gradient(circle at top, rgba(0, 118, 129, 0.08), transparent 48%),
-    linear-gradient(180deg, rgba(0, 49, 60, 0.02), rgba(0, 49, 60, 0));
+  background: transparent;
 }
 
 [data-md-color-scheme="slate"] #home-page + .home-hero {
   border-bottom-color: rgba(247, 250, 251, 0.12);
-  background:
-    radial-gradient(circle at top, rgba(66, 152, 181, 0.14), transparent 48%),
-    linear-gradient(180deg, rgba(247, 250, 251, 0.03), rgba(247, 250, 251, 0));
+  background: transparent;
 }
 
 [data-md-color-scheme="default"] #home-page ~ h2 {
@@ -305,6 +314,24 @@
 [data-md-color-scheme="slate"] #home-page ~ ol li,
 [data-md-color-scheme="slate"] #home-page ~ ul li {
   margin-bottom: 0.45rem;
+}
+
+#home-page ~ ol {
+  border-left: 3px solid rgba(0, 118, 129, 0.28);
+  padding-left: 1.2rem;
+}
+
+#home-page ~ ol li {
+  padding-left: 0.2rem;
+}
+
+#home-page ~ ol li::marker {
+  color: var(--consist-teal);
+  font-weight: 700;
+}
+
+[data-md-color-scheme="slate"] #home-page ~ ol {
+  border-left-color: rgba(66, 152, 181, 0.42);
 }
 
 [data-md-color-scheme="default"] #home-page ~ .tabbed-set {
