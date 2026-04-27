@@ -162,6 +162,7 @@ Scenario defaults like `name_template` and `cache_epoch` are configured via `con
 - [`consist.set_artifact_recovery_roots`](api_helpers.md#consist.api.set_artifact_recovery_roots)
 - [`consist.archive_artifact`](api_helpers.md#consist.api.archive_artifact)
 - [`consist.archive_run_outputs`](api_helpers.md#consist.api.archive_run_outputs)
+- [`consist.archive_current_run_outputs`](api_helpers.md#consist.api.archive_current_run_outputs)
 - [`consist.register_artifact_facet_parser`](api_helpers.md#consist.api.register_artifact_facet_parser)
 - [`consist.cached_output`](api_helpers.md#consist.api.cached_output)
 - [`consist.cached_artifacts`](api_helpers.md#consist.api.cached_artifacts)
@@ -200,11 +201,11 @@ you can filter historical runs with `consist.find_runs(...)`,
 `consist.find_latest_run(...)`, or `Tracker.find_latest_run(...)` without
 treating those values as opaque metadata.
 
-### Tracker methods (complete public surface)
+### Tracker methods
 
-This section enumerates all non-underscore `Tracker` methods. If you're new to Consist,
-start with the **Core** and **Logging/Loading** groups and reach for **Advanced** only
-as needed.
+This section groups commonly documented public `Tracker` methods. If you're new
+to Consist, start with the **Core** and **Logging/Loading** groups and reach for
+**Advanced** only as needed.
 
 #### Core lifecycle
 
@@ -225,7 +226,8 @@ as needed.
 - `get_run`, `get_run_config`, `get_run_inputs`, `get_run_outputs`
 - `hydrate_run_outputs`, `materialize_run_outputs`
 - `stage_artifact`, `stage_inputs`
-- `set_artifact_recovery_roots`, `archive_artifact`, `archive_run_outputs`
+- `set_artifact_recovery_roots`, `archive_artifact`, `archive_run_outputs`,
+  `archive_current_run_outputs`
 - `get_artifact_lineage`, `print_lineage`, `history`
 - `diff_runs`, `get_config_facet`, `get_config_facets`, `get_run_config_kv`
 - `get_config_values`, `get_config_value`, `find_runs_by_facet_kv`

@@ -1,20 +1,16 @@
 # Mounts & Portability
 
-Consist stores portable URIs instead of absolute filesystem paths so runs can move
-between machines without breaking lineage. This page explains how mounts, workspace
-URIs, and historical path resolution work.
+Consist stores portable URIs where it can, instead of baking in one machine's
+absolute paths. Mounts let each machine map the same logical URI scheme to its
+own filesystem.
 
 !!! note "Recommended path"
-    For most workflow code, prefer `tracker.run(...)`, `tracker.trace(...)`, or
-    `consist.scenario(...)` with `scenario.run(...)` / `scenario.trace(...)`.
-    This page includes `tracker.start_run(...)` / `consist.log_artifact(...)`
-    snippets as low-level examples for path and URI mechanics.
+    Use `tracker.run(...)`, `tracker.trace(...)`, or `scenario.run(...)` for
+    normal workflows. This page focuses on path behavior and URI mechanics.
 
----
+## Mounts at a Glance
 
-## Mounts at a glance
-
-Mounts map a short scheme name to a real path on disk:
+Mounts map a short scheme to a local root:
 
 ```python
 from consist import Tracker
@@ -24,281 +20,148 @@ tracker = Tracker(
     db_path="./provenance.duckdb",
     mounts={
         "inputs": "/shared/inputs",
-        "scratch": "/scratch/users/MY_USERNAME",
+        "outputs": "/scratch/outputs",
     },
 )
 ```
 
-When you log a path under a mount, Consist stores a URI such as:
+Artifacts under those roots are stored as URIs:
 
-```
+```text
 inputs://land_use.csv
-scratch://temp/output.parquet
+outputs://baseline/results.parquet
 ```
 
-This keeps provenance portable and lets each user remap mounts on their machine.
+Another user can open the same provenance database with different physical
+paths, as long as the mount names keep the same meaning.
 
----
+## What Mounts Do Not Do
 
-## Example: Shared Research Team
+Mounts make paths portable; they do not replicate bytes.
 
-Suppose your team shares a simulation project across machines with different
-filesystem layouts. Agree on mount *names* and let each person map them locally.
+| Situation | Result |
+|---|---|
+| Current machine can resolve the URI and the file exists | Artifact bytes are usable |
+| Current machine can resolve the URI but the file is missing | Metadata remains, byte access fails or skips |
+| Current machine lacks the mount | Consist cannot safely resolve the URI |
+| Artifact has `recovery_roots` | Hydration may find archived bytes elsewhere |
 
-```python
-# Shared setup (agreed upon by the team)
-tracker = Tracker(
-    run_dir="./runs",
-    db_path="./provenance.duckdb",
-    mounts={
-        "inputs": "/shared/data/activitysim_inputs",      # Shared NFS mount
-        "outputs": "/local/activitysim_outputs",          # Local SSD for speed
-        "scratch": "/scratch/users/YOUR_USERNAME",        # Temporary workspace
-    },
-)
-```
+For durable archived outputs, see [Historical Recovery](guides/historical-recovery.md).
 
-**On each team member's machine**, the paths differ but mount names stay the same:
+## Container Volumes
 
-```python
-# Alice's setup
-tracker = Tracker(
-    run_dir="./runs",
-    db_path="./provenance.duckdb",
-    mounts={
-        "inputs": "/mnt/nfs/activitysim_inputs",
-        "outputs": "/home/alice/activitysim_outputs",
-        "scratch": "/scratch/alice",
-    },
-)
-
-# Bob's setup
-tracker = Tracker(
-    run_dir="./runs",
-    db_path="./provenance.duckdb",
-    mounts={
-        "inputs": "/data/nfs/inputs",
-        "outputs": "/var/cache/bob/outputs",
-        "scratch": "/tmp/bob_scratch",
-    },
-)
-```
-
-When Alice logs an output (inside a run context):
-
-```python
-with tracker.start_run("asim_baseline", model="activitysim"):
-    consist.log_artifact(
-        Path("/home/alice/activitysim_outputs/results.parquet"),
-        key="results",
-        direction="output",
-    )
-```
-
-Consist detects the mount and stores a portable URI:
-
-```
-outputs://results.parquet
-```
-
-When Bob retrieves this artifact, Consist resolves it using *his* mount configuration:
-
-```
-outputs:// → /var/cache/bob/outputs/ → /var/cache/bob/outputs/results.parquet
-```
-
-This is **URI portability**, not automatic byte replication. Bob only gets a
-usable local file if his `outputs` mount points at the same underlying dataset,
-or if the artifact can be rehydrated another way.
-
----
-
-## Container volumes aligned with mounts
-
-When using `run_container(...)`, map container host volume roots from
-`Tracker(mounts=...)` so paths remain portable across machines.
+For container runs, keep in-container paths stable and map host roots through
+tracker mounts:
 
 ```python
 from pathlib import Path
-from consist import Tracker
 
-tracker = Tracker(
-    run_dir="/shared/team_scratch/consist_runs",
-    db_path="./provenance.duckdb",
-    mounts={
-        "inputs": "/shared/team_inputs",
-        "runs": "/shared/team_scratch/consist_runs",
-    },
-)
+from consist.integrations.containers import run_container
 
 inputs_root = Path(tracker.mounts["inputs"]).resolve()
-runs_root = Path(tracker.mounts["runs"]).resolve()
+runs_root = Path(tracker.run_dir).resolve()
 
-volumes = {
-    str(inputs_root): "/inputs",
-    str(runs_root): "/outputs",
-}
-outputs = [runs_root / "beam_step" / "summary.csv"]  # under tracker.run_dir
+container = run_container(
+    tracker=tracker,
+    run_id="model_step",
+    image="my-model:1.0",
+    command=["python", "/app/run.py", "--input", "/inputs/data.csv"],
+    volumes={
+        str(inputs_root): "/inputs",
+        str(runs_root): "/outputs",
+    },
+    inputs=[inputs_root / "data.csv"],
+    outputs=[runs_root / "model" / "summary.csv"],
+    backend_type="docker",
+)
 ```
 
 Guidelines:
 
-- Keep container paths stable (`/inputs`, `/outputs`) across environments.
-- Keep host paths machine-specific via tracker mounts.
-- Keep host volume roots stable too if you want cross-machine cache reuse.
-- Keep `strict_mounts=True` unless you intentionally allow external paths.
+- Use stable container paths such as `/inputs` and `/outputs`.
+- Use tracker mounts for machine-specific host paths.
+- Keep `strict_mounts=True` unless an external path is intentional.
+- Remember that container cache identity currently includes resolved host
+  volume paths, so different host roots can miss cache even if mounted data is
+  logically the same.
 
-Current caveat: container cache identity includes the resolved host `volumes`
-mapping, not just the in-container mount points. If one machine uses
-`/shared/team_inputs` and another uses `/mnt/nfs/team_inputs`, those runs will
-not currently share the same container cache signature.
+See [Container Guide](containers-guide.md) for runnable container examples.
 
-For a complete runnable example using this mapping pattern, see
-[Container Integration Guide](containers-guide.md).
-
----
-
-## Run-local outputs
+## Run-Local Outputs
 
 Paths under the run directory are usually stored relative to the active run:
 
-```
+```text
 ./outputs/<run_id>/model.csv
 ```
 
-Current runs typically store these as `./...` paths. Historical resolution also
-accepts `workspace://...` as an alias and uses the run's `_physical_run_dir`
-metadata field, which records the absolute run directory at execution time.
+Historical resolution uses the producing run's `_physical_run_dir` metadata for
+workspace-relative paths. If that directory moves or is deleted, metadata-only
+cache hits can still work, but byte access needs a recovery path.
 
-| Scenario | Behavior |
-|----------|----------|
-| Current run directory matches original | Files accessible |
-| Run directory moved | Metadata-only cache hits work; file access fails |
-| Run directory deleted | Metadata-only cache hits work; file access fails |
+## Historical Path Resolution
 
-!!! note "`_physical_run_dir`"
-    Stored in `run.meta["_physical_run_dir"]`. Used for historical path resolution when hydrating artifacts from prior runs.
+When Consist needs bytes from a prior run, it resolves paths in this order:
 
----
+1. Per-call `source_root=...` override.
+2. Workspace-relative paths under the producing run's `_physical_run_dir`.
+3. Mount-backed URIs through the historical mount snapshot or current mounts.
+4. Ordered `artifact.meta["recovery_roots"]`.
+5. DuckDB export fallback for ingested tabular artifacts.
 
-## Historical path resolution
+Absolute paths and `file://...` URIs are treated conservatively. Consist avoids
+silently reinterpreting them under unrelated roots.
 
-When Consist needs bytes from a historical run (e.g., cache hydration or
-`inputs-missing`), it resolves paths in this order:
+## Sharing A Database
 
-1) If the URI uses `workspace://` or `./`, resolve relative to the original run's
-   `_physical_run_dir`.
-2) If the URI uses a mount scheme (e.g., `inputs://`), resolve using the current
-   tracker mounts.
-3) Otherwise, treat the URI as an absolute path.
-
-If a mount is missing or points somewhere else, materialization will warn and skip
-missing files rather than crashing (unless explicitly set to raise).
-
-For the newer historical output recovery flow
-(`tracker.hydrate_run_outputs(...)`), output layout resolution is more
-conservative and history-aware:
-
-1) `workspace://...` and `./...` are re-rooted under the producing run's
-   `_physical_run_dir`.
-2) mount-backed output URIs such as `outputs://...` prefer the historical mount
-   snapshot stored in `run.meta["mounts"]`.
-3) if that snapshot is unavailable, Consist falls back to
-   `artifact.meta["mount_root"]` when present.
-4) absolute paths and `file://...` URIs are treated as unmapped rather than
-   being silently reinterpreted.
-
-This is what allows run-scoped output recovery to preserve historical relative
-layout even when current mounts differ from the machine that produced the run.
-
----
-
-## Sharing a database across machines
-
-Sharing a DuckDB provenance file across a team is supported, but you must keep
-mounts consistent in intent even if the physical paths differ.
+Sharing a DuckDB provenance file across machines is supported when the team
+agrees on mount names and each user maps those names locally.
 
 Recommended practice:
-- Agree on mount *names* (`inputs`, `outputs`, `scratch`, `shared`).
-- Each user maps those names to their local filesystem.
-- Store the DB in a shared location with write access controls.
 
-If a user hits a cache hit but cannot access the source filesystem, Consist will
-log a warning and proceed without materializing the files.
+- Use shared mount names such as `inputs`, `outputs`, `scratch`, and `archive`.
+- Keep the database in a shared location with write access controls.
+- Archive or ingest outputs that must survive workspace cleanup.
+- Record `recovery_roots` when archived bytes should remain discoverable.
 
----
+## Cache-Hit File Behavior
 
-## Hydration implications for container workflows
+Function runs and container runs differ:
 
-Container runs and function runs differ on cache-hit file behavior:
+| Surface | Default cache-hit bytes behavior |
+|---|---|
+| `tracker.run(...)` / `scenario.run(...)` | Hydrate metadata only unless output materialization is requested |
+| `run_container(...)` | Materialize cached outputs to requested host output paths |
+| `hydrate_run_outputs(...)` | Restore selected historical outputs into a target root |
 
-- `run_container(...)`: cache hits copy cached outputs to requested host output
-  paths (materialized bytes expected on disk).
-- `consist.run(...)`/`tracker.run(...)`: default cache hits hydrate metadata
-  only (`cache_hydration="metadata"`), and bytes are loaded/copied on demand.
+Use `cache_hydration="outputs-requested"` when a function step needs selected
+output files copied on cache hit. Use historical recovery APIs for restart or
+workspace rebuild flows.
 
-Portability implications:
+## Best Practices
 
-- If mounts are mapped correctly, container cache-hit materialization can
-  succeed on each machine's local host paths.
-- If mounts are missing/misaligned, cache metadata can still exist but output
-  file materialization may warn/skip.
-- If host volume roots differ across machines, container cache reuse may be
-  missed entirely because those host paths are part of the container signature.
-
-See [Container Integration Guide](containers-guide.md#cache-behavior-hydration)
-for container cache details and [Caching & Hydration](concepts/caching-and-hydration.md)
-for non-container run policies.
-
----
-
-## Best practices
-
-- Prefer mounts for shared data directories; avoid absolute paths in artifacts.
-- Keep run directories local and disposable; treat cached outputs as rehydratable.
-- Distinguish portable URIs from portable bytes: a remapped URI still needs an
-  accessible underlying file or a recovery path.
-- Use `cache_hydration="outputs-requested"` for only the outputs you need.
-- Use `cache_hydration="inputs-missing"` to backfill inputs when a run moves
-  across machines or directories.
-- For archive-mirror cache hydration, use
-  `cache_options=CacheOptions(materialize_cached_outputs_source_root=...)` on
-  `run(...)` / scenario steps, or pass
-  `materialize_cached_outputs_source_root=...` on low-level
-  `tracker.start_run(...)` / `tracker.begin_run(...)` workflows.
-- For stable archive roots that should keep working across resumes, prefer
-  recording `artifact.meta["recovery_roots"]` once via
-  `tracker.set_artifact_recovery_roots(...)`,
-  `tracker.archive_artifact(...)`, or `tracker.archive_run_outputs(...)`
-  instead of repeating per-call source-root overrides.
-- Use `tracker.hydrate_run_outputs(..., source_root=...)` when you want
-  key-indexed recovery results and detached artifacts that are immediately
-  usable in the new workspace.
-- Keep `tracker.materialize_run_outputs(..., source_root=...)` only for
-  compatibility when you intentionally want the aggregate summary buckets.
-- `tracker.hydrate_run_outputs(...)` accepts `target_root` under either the
-  tracker `run_dir` or a configured mount root. Other destinations still
-  require `allow_external_paths=True`.
-
----
+- Prefer mount-backed paths for shared data and archived outputs.
+- Treat run directories as local workspaces, not durable archives.
+- Keep artifact identity canonical even when bytes are copied elsewhere.
+- Record `recovery_roots` once instead of passing ad hoc source roots forever.
+- Prefer `hydrate_run_outputs(...)` over legacy aggregate materialization for
+  new restart or recovery code.
+- Keep external target paths opt-in with `allow_external_paths=True`.
 
 ## Troubleshooting
 
-- **Missing file on cache hit**: Check that mounts map to the correct root and the
-  original run directory still exists for workspace URIs. If outputs are
-  intentionally archived elsewhere, record that archive root in
-  `recovery_roots` so cache validation and hydration can find the bytes.
-- **Moved run directory**: Cache metadata is still valid, but byte materialization
-  will warn because `_physical_run_dir` no longer points to the original location.
-- **Permission denied**: Consist warns and continues; adjust mount permissions or
-  use a shared accessible path for cached outputs you need to materialize.
+- **Cache hit but file missing:** Check the original run directory, mount map,
+  and `recovery_roots`.
+- **URI does not resolve:** Add the missing mount or use a tracker configured
+  with the same mount names used by the producer.
+- **Moved run directory:** Metadata can still hydrate, but workspace-relative
+  bytes need an archive, recovery root, or DB fallback.
+- **Container cache miss across machines:** Compare resolved host volume roots;
+  those paths are part of the container signature today.
 
----
+## See Also
 
-## See also
-
-- [Container Integration Guide](containers-guide.md)
-- [Containers API Reference](integrations/containers.md)
+- [Container Guide](containers-guide.md)
 - [Caching & Hydration](concepts/caching-and-hydration.md)
-
----
+- [Historical Recovery](guides/historical-recovery.md)
+- [Materialization API](api/materialize.md)

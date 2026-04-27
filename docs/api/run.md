@@ -41,8 +41,10 @@ That pattern applies equally to `Tracker.run(...)` and
 `inputs={...}` while ensuring the callable sees a real local file at the
 requested destination, including on cache hits.
 
-For migration details, see
-[Options Objects Migration Guide](../migrations/options-objects-migration-guide.md).
+When migrating legacy calls, move direct policy kwargs into the matching options
+object: cache behavior goes in `CacheOptions(...)`, output validation and
+materialization behavior goes in `OutputPolicyOptions(...)`, and runtime binding
+or input-staging behavior goes in `ExecutionOptions(...)`.
 
 ## Identity kwargs for run/trace surfaces
 

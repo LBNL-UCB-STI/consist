@@ -1,6 +1,9 @@
 # Schema Export (SQLModel Stubs)
 
-Consist can capture the observed (post-ingest) schema of tabular artifacts and export that schema as a **static SQLModel class stub** you can commit and edit. This reduces “retype the table definition” friction while keeping Consist honest about what it can and cannot infer.
+Consist can capture the observed schema of tabular artifacts and export that
+schema as a **static SQLModel class stub** you can commit and edit. The export
+removes the mechanical work of retyping columns while keeping semantic choices
+in your hands.
 
 ## What You Get
 
@@ -30,7 +33,8 @@ By default, Consist exports SQLModel classes as **abstract** (`__abstract__ = Tr
 
 ## What You Still Do Manually
 
-Consist does not infer semantic intent. You typically edit the stub to add:
+Consist does not infer semantic intent. Treat the generated file as a starting
+point and edit it to add:
 
 - primary keys / foreign keys
 - indexes / uniqueness constraints
@@ -190,7 +194,7 @@ For views to “pick up” your data, the model’s `__tablename__` should match
 - for ingested (“hot”) data, this is typically the DuckDB table name used at ingest time
 - for file-based (“cold”) data, this is typically the `Artifact.key`
 
-If you want your curated model name to differ from the ingestion key, you can:
+If you want your curated model name to differ from the ingestion key, either:
 
 - override `--table-name` / `table_name=...` during export, or
 - set `__tablename__ = "..."` manually after editing
@@ -204,11 +208,13 @@ By default, exported stubs omit system/ingestion columns:
 
 Use `--include-system-cols` if you need a faithful “as-ingested” representation.
 
-## Notes on Wide / Sparse Tables
+## Wide / Sparse Tables
 
 Very wide tables can cause the stored JSON profile to truncate. Consist still persists per-field rows so schema export continues to work, and emits a warning when truncation occurs.
 
-If your upstream workflow produces sparse wide tables, consider reshaping to a long format before ingestion (or as a dedicated transformation step). Future Consist work may add first-class “pre/post ingestion transforms”, but schema export is designed to work even when the JSON blob is truncated.
+If your upstream workflow produces sparse wide tables, consider reshaping to a
+long format before ingestion or as a dedicated transformation step. Schema
+export is designed to keep working even when the summary JSON is truncated.
 
 ---
 

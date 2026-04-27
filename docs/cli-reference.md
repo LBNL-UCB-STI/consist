@@ -179,6 +179,55 @@ Options:
 - `--trust-db`: allow metadata-based mount inference when resolving paths
 - `--db-path`: explicit DB path
 
+### consist schema export
+
+Export a captured artifact schema as an editable SQLModel stub. Select exactly
+one schema source by schema id, artifact id, or artifact key.
+
+```bash
+# Export by schema id to stdout
+consist schema export --schema-id <schema_hash>
+
+# Export the schema associated with an artifact key
+consist schema export --artifact-key trip_table --class-name TripTable
+
+# Write a concrete model stub to a file
+consist schema export \
+  --artifact-id 00000000-0000-0000-0000-000000000000 \
+  --out models/trip_table_schema.py \
+  --concrete
+```
+
+Options:
+
+- `--schema-id`: captured artifact schema id/hash to export
+- `--artifact-key` / `--table-key`: artifact key whose captured schema should be exported
+- `--artifact-id`: artifact UUID whose captured schema should be exported
+- `--out PATH`: write the generated stub to a file instead of stdout
+- `--class-name NAME`: override the generated SQLModel class name
+- `--table-name NAME`: override the generated `__tablename__`
+- `--include-system-cols`: include ingestion/system columns such as `consist_*` and `_dlt_*`
+- `--stats-comments` / `--no-stats-comments`: include or suppress profile comments
+- `--abstract` / `--concrete`: export an abstract import-safe class or a concrete table model
+- `--prefer-source file|duckdb`: prefer file or DuckDB schema profiles when no user-provided schema exists
+- `--db-path`: explicit DB path
+
+User-provided schema profiles are always preferred when present. Use
+`--prefer-source` only to choose between generated file and DuckDB profiles.
+
+### consist schema apply-fks
+
+Apply physical foreign key constraints to the provenance database on a
+best-effort basis.
+
+```bash
+consist schema apply-fks --db-path ./provenance.duckdb
+```
+
+Options:
+
+- `--db-path`: explicit DB path
+
 ### consist views create
 
 Create a grouped hybrid view from schema identity + facet/run filters.

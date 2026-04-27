@@ -1,743 +1,282 @@
-# Caching and Artifact Hydration Patterns
+# Caching and Hydration
 
-Consist's core loop: declare inputs → compute signature → check cache → load or execute.
+Consist's execution loop is:
 
-!!! info "Terminology"
-    **Hydration** recovers metadata and provenance about a prior run's outputs without copying file bytes. **Materialization** ensures file bytes exist on disk (copying them from their original location). A cache hit always hydrates; it only materializes if you request it via a specific hydration policy.
-
-This page covers patterns for making caching reliable, keeping pipelines portable, and choosing when artifacts should be hydrated or materialized.
-
-!!! note "Recommended path"
-    For routine workflow code, prefer `tracker.run(...)`, `tracker.trace(...)`,
-    or `consist.scenario(...)` with `scenario.run(...)` / `scenario.trace(...)`.
-    Low-level lifecycle snippets in this page (for example
-    `tracker.start_run(...)`) are advanced examples to make
-    hydration/materialization mechanics explicit.
-
----
-
-Canonical one-line definitions for cache hit, hydration, materialization, and
-ghost mode live in [Core Concepts Overview](overview.md). This page focuses on
-operational behavior, policies, and workflow patterns.
-
-## Hydration vs Materialization
-
-When Consist finds a cached result, it "brings back" information about that result—but what does that mean?
-
-Consider a electric grid simulation in `/scratch/simulation_2024/` that produces a 50GB results file. Six months later, you run analysis with the same inputs. Consist recognizes a cache hit.
-
-**Artifact Hydration** recovers *information*: the result came from run `abc123`, it's a Parquet file called `results.parquet`, it contains monthly precipitation data. Consist creates an `Artifact` object with metadata, URIs, and provenance.
-
-**Materialization** ensures *bytes exist*: copying the 50GB file from its original location into your new run directory.
-
-Hydration is fast and automatic. Materialization is optional and explicit.
-
-### Default Behavior
-
-Consist hydrates metadata only. Metadata recovery is instant (database lookup). Files stay in their original location. You pay for copying only when requested.
-
-This matters for parameter sweeps: 100 demand model variations do not require 100 copies of a 50GB input file. Downstream code loads from the original path or database fallback.
-
-### When to Materialize
-
-Materialize cached outputs (copy bytes to your current run) in three cases:
-
-1. **Extending a scenario in a new workspace**: Cached results in `/workspace/2024`, continuing in `/workspace/2025`. Use `cache_hydration="inputs-missing"` to copy input files.
-
-2. **Preparing declared inputs for path-bound steps**: A callable or wrapped tool expects one or more inputs at fixed local destinations. Use `ExecutionOptions(input_binding="paths", input_materialization="requested", input_paths={...})`.
-
-3. **Preparing outputs for external tools**: Tools expect local files. Use `cache_hydration="outputs-requested"` with `materialize_cached_output_paths`. With `consist.run(...)` or `sc.run(...)`, use `output_paths={...}`.
-
-4. **Ensuring local reproducibility**: All results accessible without remote mounts. Use `cache_hydration="outputs-all"` to copy all cached outputs.
-
-### Example: Electric Grid Modeling Workflow
-
-!!! note "Advanced lifecycle example"
-    This walkthrough uses low-level lifecycle APIs to show cache and hydration
-    behavior step-by-step. Prefer the explicit tracker/scenario execution path
-    for new workflow code.
-
-``` python
-from pathlib import Path
-
-with tracker.start_run(  # (1)!
-    "grid_dispatch_baseline",
-    model="grid_sim",
-    year=2024,
-    cache_mode="overwrite"  # (2)!
-):
-    results = run_dispatch_model()  # (3)!
-    tracker.log_artifact(results, key="dispatch")  # (4)!
-
-with tracker.start_run(  # (5)!
-    "reliability_analysis",
-    model="analysis",
-    inputs=[cached_dispatch_artifact],  # (6)!
-    cache_hydration="metadata",  # (7)!
-):
-    print(f"Result came from run {cached_dispatch_artifact.run_id}")  # (8)!
-
-    df = consist.load_df(cached_dispatch_artifact)  # (9)!
-
-with tracker.start_run(  # (10)!
-    "export_for_reporting",
-    model="export",
-    cache_hydration="outputs-requested",  # (11)!
-    materialize_cached_output_paths={
-        "dispatch": Path("./local_outputs/dispatch.parquet")  # (12)!
-    }
-):
-    subprocess.run(["report_generator", "annual_summary.py"])  # (13)!
+```text
+declare inputs -> compute identity -> check cache -> hydrate or execute
 ```
 
-1. First run: simulate regional grid dispatch for 2024, takes 18 hours.
-2. **Overwrite mode**: Forces re-execution and overwrites any cached results. Use for baseline runs or when upstream data has changed outside Consist's tracking.
-3. Dispatch models produce large outputs—hourly resolution across 8,760 hours for all generators and transmission lines.
-4. **Artifact logging**: Consist records the file's hash, location, and lineage. This artifact can now be referenced as an input to downstream runs.
-5. Later: analysis that only needs metadata about the result.
-6. **Input declaration**: Tells Consist this run depends on the dispatch artifact. If the upstream run is invalidated, this run's cache is also invalidated.
-7. **Metadata-only hydration**: Consist loads the Artifact object (provenance, signatures, URIs) without copying the 40GB file. Default behavior—saves disk space.
-8. Even without file bytes, you can query provenance: which run produced this, when, with what config.
-9. **Explicit loading**: When you actually need the data, `load_df()` reads from the original location (or database if ingested). This is the only point where bytes move.
-10. Later: need to ensure files exist locally for regulatory reporting tool.
-11. **Outputs-requested mode**: Tells Consist to copy cached output files to disk. Use when external tools need real files, not just metadata.
-12. **Materialization path**: Specifies where Consist should copy the cached artifact. The external reporting tool will find the file here.
-13. Now the regulatory reporting tool can access real files at known paths—Consist handled the copying.
+This page focuses on cache identity, cache hit/miss behavior, hydration versus
+materialization, and the policy knobs you are likely to use. For runnable
+workflow patterns, see the [Usage Guide](../usage-guide.md).
 
-### Default Behavior: Metadata-Only Hydration
+## Core Terms
 
-The default `cache_hydration="metadata"` performs no filesystem operations and no disk duplication. Use `consist.load_df()` or `consist.load()` when you need bytes.
+| Term | Meaning |
+|---|---|
+| Signature | Cache key built from code identity, config identity, and input identity. |
+| Cache hit | A completed prior run has the same signature and reusable outputs. |
+| Cache miss | No reusable completed run matches, so Consist executes the step. |
+| Hydration | Recover artifact metadata, paths, and provenance records. |
+| Materialization | Ensure artifact bytes exist at a target filesystem path. |
+| Ghost mode | Recovery path when provenance exists but original files are missing. |
 
-This default suits scientific workflows: large simulations benefit from avoiding disk copies, and provenance verification does not need bytes on disk.
+Hydration and materialization are deliberately separate. A cache hit can return
+artifact metadata without copying bytes.
 
-### Practical Decision Table
+## Cache Identity
 
-| Your Need | Use This | Tradeoff |
-|-----------|----------|----------|
-| Run parameter sweeps on cached simulation | `metadata` (default) | No disk copy; must load data via `consist.load_df()`/`consist.load()` |
-| Extend analysis in a new workspace | `inputs-missing` | Copies only missing input files; fast on cache hits |
-| Run external tool that needs local files | `outputs-requested` | Copy only what you ask for; must list outputs explicitly |
-| Ensure all cached data is accessible locally | `outputs-all` | Copies everything; uses disk space but guarantees file paths exist |
+For `Tracker.run(...)`, `Tracker.trace(...)`, `ScenarioContext.run(...)`, and
+`ScenarioContext.trace(...)`, the practical identity model is:
 
-### How Input Binding Interacts with Hydration
+```text
+signature = code identity + config identity + input identity
+```
 
-`cache_hydration` controls when bytes are materialized. `input_binding`
-controls what your callable receives. They are related, but they are not the
-same setting.
+### Code Identity
 
-| `input_binding` | Function receives | What hydration must guarantee |
-|-----------------|-------------------|-------------------------------|
-| `"paths"` | local `Path` objects | the input must exist as a usable local file or directory |
-| `"loaded"` | loaded `DataFrame` / Python objects | Consist can load from the filesystem or from ingested / DB-backed storage |
-| `"none"` | nothing automatically | no binding guarantee; inputs still affect identity and lineage |
-
-For recommended-path workflows:
-
-- Use `input_binding="paths"` when you want the callable to own its own I/O.
-- Use `input_binding="loaded"` when you want hydrated tabular/object inputs.
-- Use `input_binding="none"` for identity-only inputs or advanced wrappers.
-
-The key tradeoff is capability versus explicitness:
-
-- `"paths"` is the clearest mode, but it requires a local materialized path.
-- `"loaded"` is more flexible, because Consist can often hydrate from ingested
-  data or database-backed storage even when no local file is present.
-
-That is why path-oriented workflows often pair naturally with
-`cache_hydration="inputs-missing"` when work moves across run directories.
-Loaded workflows can often keep using `cache_hydration="metadata"` and let
-Consist load the bytes on demand.
-
-### Requested Input Materialization for Path Binding
-
-`cache_hydration` is about reusing prior outputs. Requested input
-materialization is the complementary input-side mechanism for path-bound runs.
-
-Use it when a declared input artifact is canonical in provenance terms, but the
-callable needs a staged local copy at a specific destination:
+By default, Consist uses repository Git state. For function-shaped steps, you
+can narrow code identity with `CacheOptions`:
 
 ```python
-from pathlib import Path
-import consist
-from consist import ExecutionOptions
+from consist import CacheOptions
 
-result = tracker.run(
-    fn=run_tool,
-    inputs={"config_path": consist.ref(prepare, key="config")},
-    outputs=["report"],
-    execution_options=ExecutionOptions(
-        input_binding="paths",
-        input_materialization="requested",
-        input_paths={"config_path": Path("./workspace/tool-config.yaml")},
-    ),
+cache_options = CacheOptions(
+    code_identity="callable_module",
+    code_identity_extra_deps=["shared/helpers.py"],
 )
 ```
 
-This gives you a clear split of responsibilities:
+Supported modes are:
 
-- `inputs={...}` declares identity and lineage.
-- `input_binding="paths"` says the callable wants filesystem paths.
-- `input_paths={...}` names the exact local destinations that must exist.
-- `input_materialization="requested"` tells Consist to create those paths on
-  cache misses and cache hits.
+| Mode | Use when |
+|---|---|
+| `repo_git` | Repository state is the right invalidation boundary. |
+| `callable_module` | Unrelated repo edits should not invalidate this callable. |
+| `callable_source` | Only the function source should drive code identity. |
 
-Use this when a tool expects exact workspace-local filenames or when you need a
-fresh local copy instead of reading from the artifact's canonical path.
+Use `code_identity_extra_deps` when a callable-scoped mode also depends on
+helper files.
 
-### Signatures and Cache Behavior
+### Config Identity
 
-Every run's **signature** is derived from code hash, config hash, and input hash. If Consist finds a completed run with the same signature and valid outputs, the new run is a **cache hit** and reuses prior outputs.
+`config={...}` contributes to the signature. Adapters can also contribute
+canonical config identity through `adapter=...`. Query-oriented facets are for
+filtering and grouping; do not rely on them as a replacement for identity
+inputs or config.
 
-#### Unified identity model: code + config + inputs
+See [Config Management](config-management.md) for config/facet guidance.
 
-For recommended-path runs, treat cache identity as one model:
+### Input Identity
 
-1. **Code identity**: selected by `CacheOptions(code_identity=...)`.
-2. **Config identity**: `config=...` plus run fields folded into config hashing.
-3. **Input identity**: declared `inputs=...` plus `identity_inputs=[...]` digests.
+Declared `inputs={...}` contribute to lineage and input hashing. Produced
+Consist artifacts link through their producing run identity. Raw files are
+hashed according to the active hashing strategy.
 
-Identity-related kwargs on `run(...)`/`trace(...)`/`scenario(...).run(...)`:
+Use `identity_inputs=[...]` for additional hash-only files or directories that
+should affect the signature without being passed as callable inputs.
 
-- `adapter=...` contributes canonical config identity (adapter hash).
-- `identity_inputs=[...]` contributes hash-only file/dir digests.
+## Hit and Miss Behavior
 
-When debugging a cache miss or unexpected hit, inspect `run.identity_summary`
-first instead of recomputing hashes manually:
+On a cache hit, Consist:
+
+- Finds a matching completed prior run.
+- Hydrates the prior output artifacts into the current result.
+- Preserves lineage to the producing run.
+- Skips callable execution for `run(...)`-style function execution.
+
+On a cache hit, Consist does not automatically copy every output file into the
+new run directory. That only happens when a materialization policy asks for it.
+
+On a cache miss, Consist executes the step, records a new run, logs declared
+outputs, and stores enough identity metadata to explain future hits and misses.
+
+`trace(...)` is different from function-shaped `run(...)`: the Python block is
+entered so you can perform explicit lifecycle work. Use `run(...)` when
+skip-on-hit callable execution is the important behavior.
+
+## Diagnosing Cache Misses
+
+Start with the persisted identity summary:
 
 ```python
-run = tracker.get_run("my_run_id")
+run = tracker.get_run("run_id")
 summary = run.identity_summary
 
 print(summary["signature"])
 print(summary["code_version"])
 print(summary["config_hash"])
 print(summary["input_hash"])
-print(summary["adapter"])
-print(summary["identity_inputs"])
+print(summary.get("identity_inputs"))
 ```
 
-Use this as the canonical explanation for "why this run did or did not reuse
-cache."
-
-If a run re-executed and you want the reason in plain language, Consist also
-records a structured cache miss explanation on the run itself:
+If a run re-executed, inspect the cache miss explanation:
 
 ```python
-run = tracker.get_run("my_run_id")
 explanation = run.meta.get("cache_miss_explanation")
 
-print(explanation["reason"])
-print(explanation["candidate_run_id"])
-print(explanation["matched_components"])
-print(explanation["mismatched_components"])
-print(explanation.get("details", {}))
+if explanation:
+    print(explanation["reason"])
+    print(explanation.get("candidate_run_id"))
+    print(explanation.get("matched_components"))
+    print(explanation.get("mismatched_components"))
+    print(explanation.get("details", {}))
 ```
 
-The explanation is best read alongside `run.identity_summary`:
+Common reasons include config drift, input drift, code drift, invalid cached
+outputs, or no similar prior run.
 
-- `run.identity_summary` tells you the hashes and identity inputs that formed
-  the cache key.
-- `run.meta["cache_miss_explanation"]` tells you why the key did not reuse a
-  prior run, and which likely constituent fields changed.
+## Hydration vs Materialization
 
-Typical `reason` values are:
+Hydration recovers information about an artifact:
 
-- `config_changed`
-- `inputs_changed`
-- `code_changed`
-- `config_and_inputs_changed`
-- `config_and_code_changed`
-- `inputs_and_code_changed`
-- `all_components_changed`
-- `candidate_outputs_invalid`
-- `no_similar_prior_run`
+- artifact key
+- producing run
+- logical URI and resolved path
+- metadata and format
+- canonical fingerprint on `artifact.hash`
 
-The `details` payload is intentionally best-effort. Common keys are:
+Materialization moves or recreates bytes:
 
-- `identity_inputs_changed`: named digest inputs that changed
-- `config_keys_changed` / `config_keys_added` / `config_keys_removed`: config
-  facet or snapshot keys that changed
-- `adapter_identity_changed`: adapter metadata that changed
-- `input_keys_added` / `input_keys_removed`: input artifact keys that changed
-- `input_artifact_changes`: per-key input drift details such as
-  upstream-run changes, content-hash changes, content-id changes, or container
-  location changes
-- `code_identity_changed`: code-identity mode inputs that changed
-- `code_identity_mode_changed`: code-identity mode changed, such as
-  `repo_git` to `callable_module`
-- `code_identity_extra_deps_changed`: callable extra-dependency drift
-- `repo_git_identity_changed` or `code_hash_changed`: code hash changed, with
-  or without richer metadata
-- `fallbacks_used`: which fallback sources were used to build the explanation
+- copy a cached output to a requested path
+- stage an input file for a path-bound tool
+- export an ingested CSV/Parquet artifact from DuckDB fallback
+- restore historical outputs into a restart workspace
 
-If you only need a quick read, start with `reason`, then check `details` only
-when you need the specific fields that likely changed.
+Default cache-hit behavior is metadata hydration. This keeps parameter sweeps
+and large simulations from duplicating files unnecessarily.
 
-#### Code Identity Modes
+Use `consist.load_df(...)`, `consist.load(...)`, or `consist.load_relation(...)`
+when you need to read artifact bytes. See
+[Data Materialization](data-materialization.md) for ingestion and database
+fallback behavior.
 
-By default, code hash uses repository Git state (`repo_git`). For function-shaped runs, you can opt into callable-scoped code identity with `CacheOptions`:
+## Cache Hydration Policies
 
-- `repo_git` (default): repository-level hash via Git commit/dirty state.
-- `callable_module`: hash the module file containing `fn`.
-- `callable_source`: hash only `fn` source text.
-- `code_identity_extra_deps`: additional relative file paths to fold into callable-scoped hashes.
+Set cache-hit materialization behavior with
+`CacheOptions(cache_hydration=...)` on `run(...)`, or the equivalent lifecycle
+argument on lower-level APIs.
+
+| Policy | Behavior | Typical use |
+|---|---|---|
+| `metadata` | Hydrate artifact records only. | Default for provenance and most analysis. |
+| `inputs-missing` | Materialize missing declared inputs before execution. | Continue workflows across run directories. |
+| `outputs-requested` | Materialize selected cached outputs to requested paths. | External tools need known output filenames. |
+| `outputs-all` | Materialize all cached outputs under a target directory. | Build a self-contained local copy. |
+
+For `outputs-requested`, provide explicit output paths. For `outputs-all`,
+provide a target output directory. `run(...)` accepts the high-level
+`output_paths={...}` pattern for requested outputs.
+
+## Input Binding and Hydration
+
+`input_binding` controls what the callable receives. `cache_hydration` controls
+which cached bytes are made available. They often work together, but they are
+not the same knob.
+
+| Input binding | Callable receives | Hydration concern |
+|---|---|---|
+| `"paths"` | Local `Path` objects | Inputs must resolve to usable local files or directories. |
+| `"loaded"` | Loaded Python objects | Consist can load from files or supported ingested storage. |
+| `"none"` | Nothing automatically | Inputs still affect identity and lineage. |
+
+Path-bound workflows often use `cache_hydration="inputs-missing"` when work
+moves across run directories. Loaded workflows can often keep
+`cache_hydration="metadata"` and load data on demand.
+
+## Requested Input Staging
+
+Requested input staging is input-side materialization attached to normal run
+execution. Use it when a declared input has a canonical provenance identity but
+the callable needs it at an exact workspace-local path.
 
 ```python
-from consist import CacheOptions
+from pathlib import Path
+
+from consist import ExecutionOptions
 
 result = tracker.run(
-    fn=simulate_step,
-    inputs={"raw": "inputs://raw.csv"},
-    cache_options=CacheOptions(
-        code_identity="callable_module",
-        code_identity_extra_deps=["pilates/common_utils.py"],
+    fn=run_tool,
+    inputs={"config_path": config_artifact},
+    outputs=["report"],
+    execution_options=ExecutionOptions(
+        input_binding="paths",
+        input_materialization="requested",
+        input_materialization_mode="copy",
+        input_paths={"config_path": Path("./workspace/tool-config.yaml")},
     ),
 )
 ```
 
-Use callable-scoped modes when unrelated repo edits are causing unnecessary cache misses.
+This staging runs before execution on cache misses and before returning cached
+results on cache hits. It keeps `inputs={...}` as the source of identity and
+lineage while making fixed-path tools practical.
 
-#### Intentional Cache Invalidation
+Use low-level `stage_artifact(...)` or `stage_inputs(...)` only when staging is
+needed outside a run lifecycle. See [Materialization](../api/materialize.md).
 
-Sometimes you need to invalidate caches globally or for a specific step (e.g., after a schema change or a bug fix that didn't change the config signature).
+## Output Recovery and Historical Hydration
 
-- **Global Invalidation**: Increment `Tracker(cache_epoch=N)`. This bumps the version for every run in that tracker.
-- **Scenario Invalidation**: Use `tracker.scenario(..., cache_epoch=N)`.
-- **Step Invalidation**: Use `@define_step(cache_version=N)`.
+For restart or archive workflows, prefer `hydrate_run_outputs(...)` over
+manually copying old output paths. It returns keyed hydration records that say
+which requested outputs were restored, where they landed, and whether the
+resulting detached artifact is resolvable.
 
-The `cache_epoch` and `cache_version` are folded into the run's identity hash, so a bump guarantees a cache miss.
+Recovery sources are checked in this order:
 
-For decorator defaults, callable metadata, and name templates, see
-**[Decorators & Metadata](decorators-and-metadata.md)**.
+1. Per-call `source_root=...`
+2. Historical source path or recorded mount root
+3. `artifact.meta["recovery_roots"]`
+4. DuckDB export fallback for ingested CSV/Parquet artifacts
+
+See [Materialization](../api/materialize.md) for the detailed status meanings
+and archive helpers.
+
+## Policy Summary
+
+| Goal | Prefer |
+|---|---|
+| Fast reruns without copying large outputs | `cache_hydration="metadata"` |
+| Continue a workflow when cached inputs are missing locally | `cache_hydration="inputs-missing"` |
+| Give a path-bound callable exact input filenames | `ExecutionOptions(input_materialization="requested", input_paths={...})` |
+| Give an external consumer selected cached outputs | `cache_hydration="outputs-requested"` plus requested output paths |
+| Make all cached outputs local | `cache_hydration="outputs-all"` |
+| Rehydrate old run outputs into a new workspace | `hydrate_run_outputs(...)` |
+| Query or recover tabular bytes from DuckDB | Ingest artifacts; see [Data Materialization](data-materialization.md) |
+
+## Intentional Invalidation
+
+Use explicit version knobs when a schema or semantic change should invalidate
+cache even if file hashes did not change:
 
 ```python
+from consist import CacheOptions, Tracker, define_step
+
 tracker = Tracker(run_dir="runs", cache_epoch=2)
 
+
 @define_step(cache_version=3)
-def simulate(...) -> None:
+def simulate(...):
     ...
 
-with tracker.scenario("baseline", cache_epoch=4) as sc:
-    sc.run(simulate, ...)
-```
-
-| `cache_mode` | Behavior |
-|--------------|----------|
-| `reuse` (default) | Reuse matching completed runs |
-| `overwrite` | Always execute (no cache lookup) |
-| `readonly` | Read cache but avoid persisting changes |
-
-### Artifact Identity vs. Bytes
-
-Consist distinguishes **provenance identity** (where an artifact came from, via `artifact.run_id`) from **physical bytes** (on-disk file contents).
-
-For Consist-produced artifacts, inputs are hashed by linking to the producing run's signature (Merkle-style). For raw files (no `run_id`), Consist hashes file contents or metadata depending on configuration.
-
-To skip hashing when you already know the artifact fingerprint (for example
-after copying a file), pass `content_hash=` to `log_artifact`. Consist stores
-that value on `artifact.hash`, the canonical public fingerprint field. Consist
-ignores mismatched overrides unless `force_hash_override=True`. Use
-`validate_content_hash=True` to verify the override against on-disk data. Under
-`fast` hashing, the fingerprint may be metadata-based rather than a strict
-byte-content digest.
-
-### Portability and Path Resolution
-
-An artifact has a portable `artifact.container_uri` and a runtime-resolved `artifact.path`. Call `tracker.resolve_uri(uri)` to translate a portable URI into a host filesystem path using mounts.
-
-On cache hits, Consist attaches cached output `Artifact` objects to the active run context. Code consumes `Artifact` objects and resolves paths through the tracker, keeping pipelines portable across machines.
-
----
-
-## Pattern 1: Step Caching with Explicit Artifact Handoff
-
-For multi-step workflows, each step logs outputs as artifacts and the next step declares those artifacts as inputs.
-
-``` python
-import consist
-from consist import use_tracker
-from pathlib import Path
-import pandas as pd
-
-def ingest_raw(raw: pd.DataFrame) -> pd.DataFrame:
-    return raw
-
-with use_tracker(tracker):
-    with consist.scenario("my_scenario") as scenario:
-        ingest_result = scenario.run(
-            name="ingest",
-            fn=ingest_raw,
-            inputs={"raw": Path("raw.csv")},
-            outputs=["raw"],
-        )
-        transform_inputs = consist.refs(ingest_result, "raw")
-
-        with scenario.trace(
-            "transform",
-            inputs=transform_inputs,
-        ):  # (1)!
-            raw_art = transform_inputs["raw"]  # (2)!
-            df = consist.load_df(raw_art, tracker=tracker)
-```
-
-1. `inputs={...}` links to the exact upstream output artifact.
-2. `consist.refs(...)` builds a reusable explicit input mapping from the prior run result.
-
-Use `consist.ref(run_result, key="...")` for one-off links, or
-`consist.refs(run_result, ...)` when wiring multiple linked inputs. Legacy
-coupler-key indirection (`inputs=["raw"]`) still works, but it is not the
-preferred pattern for new workflows.
-
-!!! note "Step bodies execute on cache hits"
-    Consist does not skip Python blocks. On cache hits, `tracker.log_artifact(..., direction="output")` returns the hydrated cached output when the `key` matches. If code produces a different output, Consist demotes the cache hit to an executing run.
-
-### Function-Shaped Steps (Skip on Cache Hit)
-
-Use `ScenarioContext.run(...)` to skip execution on cache hits. The `output_paths={...}` values are interpreted as relative paths (to `t.run_dir`), URI-like strings (resolved via mounts), or absolute paths.
-
----
-
-## Pattern 2: Cached Runs with `consist.run`
-
-Use `tracker.run(...)` with declared outputs for cache-aware function execution.
-
-```python
-def clean(raw_file: Path):
-    ...
-    return {"cleaned": cleaned_df}
-
-import consist
-from consist import ExecutionOptions, use_tracker
-
-with use_tracker(tracker):
-    result = consist.run(
-        fn=clean,
-        inputs={"raw_file": Path("raw.csv")},
-        outputs=["cleaned"],
-        execution_options=ExecutionOptions(input_binding="loaded"),
-    )
-```
-
----
-
-## Pattern 3: Resuming After Failures
-
-When early steps succeed (and cache) but a late step fails, re-running reuses upstream cached results and continues from the failure point.
-
-Requirements: upstream outputs are logged as artifacts, downstream steps declare those artifacts as inputs, and Consist only reuses completed runs. Re-running cache-hits earlier steps; the failed step re-executes because no valid completed run exists.
-
----
-
-## Pattern 4: Hot vs. Cold Data
-
-See [Data Materialization](data-materialization.md) for ingestion patterns, schema validation, and database fallback behavior.
-
----
-
-## What Happens on a Cache Hit?
-
-### Core Tracker Behavior
-
-On a cache hit, Consist:
-
-- Finds a matching **completed** prior run with the same signature
-- Skips filesystem checks for cached outputs (for `run(...)`, use
-  `cache_options=CacheOptions(validate_cached_outputs="eager")` to require files
-  exist or are ingested)
-- Hydrates artifact objects into the current run context; paths resolve lazily via the active tracker
-
-On a cache hit, Consist does **not**:
-
-- Copy files into a new run directory
-- Recreate missing files from DuckDB automatically
-- Guarantee that `artifact.path` exists on disk
-
-To access bytes: call `consist.load_df(...)` for DataFrames or `consist.load(...)` for Relations. Use `consist.load_relation(...)` as a context manager to ensure the DuckDB connection closes. Consist warns when active relation count exceeds `CONSIST_RELATION_WARN_THRESHOLD` (default 100).
-
-### Cache Misses with Cached Inputs
-
-If a run is not a cache hit but its inputs include artifacts from cached runs, those inputs are referenced by portable URIs (e.g., `./outputs/foo.parquet`). By default, URIs resolve to the current run directory, which may not contain bytes from the original run.
-
-To extend a scenario in a new `run_dir` without re-running cached steps, use the cache hydration policy:
-
-```python
-with tracker.start_run(
-    "next_step",
-    model="step",
-    inputs=[cached_artifact],
-    cache_hydration="inputs-missing",
-):
-    ...
-```
-
-With `cache_hydration="inputs-missing"`, Consist detects missing input paths, locates the original run directory from provenance, and copies input bytes into the current `run_dir` before execution.
-
-If the original file is missing but the artifact was ingested, Consist reconstructs inputs from DuckDB for CSV and Parquet artifacts only. Other drivers raise a `ValueError` to avoid silent or lossy conversions.
-
-### Optional Cache-Hit Materialization
-
-Consist supports opt-in cache-hit materialization when downstream code needs real
-files on disk.
-
-- `outputs-requested` still writes selected outputs to the explicit paths you
-  provide.
-- `outputs-all` now preserves the historical relative layout of the cached
-  outputs under the target directory instead of flattening everything to one
-  level.
-- When cold files are missing, cache-hit output recovery can reconstruct
-  ingested CSV/Parquet outputs from DuckDB before failing.
-
-Enable at run start:
-
-```python
-with tracker.start_run(
-    "r2",
-    model="step",
-    cache_hydration="outputs-all",
-    materialize_cached_outputs_dir=Path("some/output/dir"),
-    materialize_cached_outputs_source_root=Path("/archive/outputs_mirror"),  # optional
-):
-    ...
-```
-
-Materialize specific cached outputs by artifact key:
-
-```python
-with tracker.start_run(
-    "r2",
-    model="step",
-    cache_hydration="outputs-requested",
-    materialize_cached_output_paths={"features": Path("outputs/features.csv")},
-):
-    ...
-```
-
-Equivalent with `tracker.run(...)`:
-
-```python
-from consist import CacheOptions
 
 result = tracker.run(
-    fn=step,
-    cache_options=CacheOptions(cache_hydration="outputs-requested"),
-    output_paths={"features": Path("outputs/features.csv")},
+    fn=simulate,
+    cache_options=CacheOptions(cache_version=4),
 )
 ```
 
-Default is `cache_hydration="metadata"` (artifact hydration only). For
-`tracker.run(...)` or `sc.run(...)`, use `output_paths={...}` with
-`cache_options=CacheOptions(cache_hydration="outputs-requested")`.
+Use the narrowest invalidation boundary that matches the change: step version,
+scenario epoch, or tracker epoch.
 
-| Policy | Requires | Rejects |
-|--------|----------|---------|
-| `outputs-requested` | `materialize_cached_output_paths` or `output_paths` | `materialize_cached_outputs_dir` |
-| `outputs-all` | `materialize_cached_outputs_dir` | `materialize_cached_output_paths` |
-| `metadata` / `inputs-missing` | — | Both materialization args |
+## Related Pages
 
-`outputs-requested` logs a warning for missing keys. `outputs-all` first tries
-the historical filesystem path and, for ingested CSV/Parquet outputs, DuckDB
-reconstruction. It raises only when the requested bytes still cannot be
-recovered.
-
-For archive-mirror recovery or export workflows, use the explicit run-scoped
-API instead of cache hydration. In almost all new code, that means
-`hydrate_run_outputs(...)`:
-
-```python
-hydrated = tracker.hydrate_run_outputs(
-    "prior_run_id",
-    keys=["features"],
-    target_root=Path("restored_outputs"),
-    source_root=Path("/archive/outputs_mirror"),
-)
-
-features = hydrated["features"]
-assert features.resolvable
-print(features.status)
-print(features.artifact.as_path())
-print(features.artifact.hash)
-```
-
-`features.artifact.hash` remains the canonical artifact fingerprint after
-hydration. Downstream provenance code should read that field rather than
-guessing among wrapper-specific names. Fingerprint semantics follow the active
-hashing strategy, so under `fast` hashing the value may be metadata-based.
-
-Cache hydration exposes an archive-mirror override via
-`materialize_cached_outputs_source_root=...` for `outputs-requested` and
-`outputs-all`. On the preferred execution path, pass it through
-`cache_options=CacheOptions(materialize_cached_outputs_source_root=...)` on
-`tracker.run(...)` or scenario steps. The deprecated `consist.run(...)`
-wrapper also forwards it. The same override is available on low-level `tracker.start_run(...)` /
-`tracker.begin_run(...)` flows.
-
-For recurring archive workflows, prefer artifact-level recovery metadata over
-repeating per-call source-root overrides. Consist can record ordered
-`recovery_roots` on the artifact itself:
-
-```python
-tracker.archive_run_outputs(
-    "prior_run_id",
-    Path("/archive/iteration_004"),
-    mode="copy",
-)
-```
-
-After that, both explicit historical recovery and cache-hit output hydration
-can recover from the archived bytes without a manual
-`materialize_cached_outputs_source_root=...` or `source_root=...` on every
-restart. Use `tracker.set_artifact_recovery_roots(...)` if your workflow copies
-or moves the files outside Consist and only needs to record the archive root.
-
-For explicit historical output recovery,
-`tracker.hydrate_run_outputs(...)` accepts `target_root` under either the
-tracker `run_dir` or any configured tracker mount root without requiring
-`allow_external_paths=True`.
-
-Keep `tracker.materialize_run_outputs(...)` for compatibility if you only need
-aggregate summary buckets rather than keyed per-output results.
-
-### Containers Integration
-
-The containers API defaults to copying cached outputs to requested host output paths so downstream tooling sees real files. This uses the same copy-based materialization helper as core runs, but containers default to "requested outputs" because the caller explicitly provides host output paths.
-
----
-
-## Hydration Policy Summary
-
-| Workflow | `cache_hydration` | When Bytes Copy | Notes |
-|----------|-------------------|-----------------|-------|
-| Fast cache hits | `metadata` | Never | Default; paths may not exist in new run dirs |
-| Extend scenario in new `run_dir` | `inputs-missing` | Cache misses, missing inputs only | Ensures executing steps read cached inputs |
-| Materialize specific outputs | `outputs-requested` | Cache hits, requested outputs | Requires `materialize_cached_output_paths` or `output_paths` |
-| All outputs local | `outputs-all` | Cache hits, all outputs | Preserves historical relative layout under `materialize_cached_outputs_dir` |
-
-Use `metadata` (the default) unless downstream tools require files on disk.
-
----
-
-## See Also
-
-- **[Data Materialization](data-materialization.md)** — When to ingest data and use hybrid views
-- **[Config Management](config-management.md)** — How configuration affects cache invalidation
-
----
-
-## Practical Guidance
-
-### Make Caching Predictable
-
-Declare all dependencies as inputs (`inputs=[...]` or task parameters). Keep configs deterministic—avoid embedding timestamps or randomness unless intended. Prefer stable code identity in tests (the Consist test suite patches the code hash for determinism).
-
-### Decide What to Ingest
-
-Ingest for queryable DuckDB tables, schema profiling, and optional recovery if files are deleted. Keep as cold files when you do not want to duplicate storage or artifacts are large and already in an external system.
-
-### Safe Deletion
-
-Delete artifacts when you are confident they will not be loaded again, or when they were ingested and you allow DB recovery (via `db_fallback="always"` or by declaring them as inputs). For aggressive GC while keeping provenance usable, use ingestion + intentional DB fallback.
-
----
-
-## Cache-Hit Performance and Diagnostics
-
-Consist's cache-hit path minimizes filesystem work by default: `validate_cached_outputs="lazy"` skips per-output existence checks, and `cache_hydration="metadata"` avoids copying bytes.
-
-### Configuration Summary
-
-| Parameter | Options |
-|-----------|---------|
-| `cache_mode` | `reuse` (default), `overwrite`, `readonly` |
-| `validate_cached_outputs` | `lazy` (default), `eager` |
-| `cache_hydration` | `metadata` (default), `inputs-missing`, `outputs-requested`, `outputs-all` |
-| `step_cache_hydration` | Scenario-level default for all steps |
-| `materialize_cached_output_paths` | Required for `outputs-requested` |
-| `materialize_cached_outputs_dir` | Required for `outputs-all` |
-
-For large iterative workflows, cache-hit time is spent fetching cached outputs and hashing raw-file inputs. Enable diagnostics:
-
-- `CONSIST_CACHE_TIMING=1`: logs timing for signature prefetch, input hashing, cache lookup, validation, hydration
-- `CONSIST_CACHE_DEBUG=1`: logs cache hit/miss details and signatures
-
-For run-level identity debugging (including `identity_inputs` digests and
-adapter metadata), inspect `run.identity_summary`:
-
-```python
-run = tracker.get_run("my_run_id")
-print(run.identity_summary)
-```
-
-```text
-[cache_timing] signature_prefetch=2.1ms input_hashing=145.8ms cache_lookup=3.4ms validate=0.6ms hydration=0.2ms
-```
-
-If input hashing dominates, ingest large tabular inputs or pass Consist-produced artifacts instead of raw files.
-
-```text
-[cache_debug] hit=True signature=7e9c1c inputs=3 outputs=2 hydration=metadata
-```
-
-If downstream tools need files, select an outputs hydration mode. Use `validate_cached_outputs="eager"` for strict output existence checks.
-
----
-
-## Pattern 5: Shared Input Bundles
-
-Package all required inputs in a standalone DuckDB file. Create a "bundle" run that logs inputs as outputs and ingests them. Share the DB file to reproduce inputs without shipping original raw files.
-
-### Bundle Creation (Producer)
-
-```python
-tracker = Tracker(run_dir="bundle_build", db_path="inputs.duckdb")
-
-with tracker.start_run("inputs_bundle_v1", model="input_bundle", cache_mode="overwrite"):
-    households = tracker.log_artifact("households.csv", key="households", direction="output")
-    persons = tracker.log_artifact("persons.csv", key="persons", direction="output")
-    tracker.ingest(households)
-    tracker.ingest(persons)
-```
-
-Run the bundle creation code once. Share `inputs.duckdb` with collaborators—they do not need the original CSV files.
-
-### Bundle Consumption (Consumer)
-
-```python
-tracker = Tracker(run_dir="runs", db_path="inputs.duckdb")
-
-bundle_outputs = tracker.load_input_bundle("inputs_bundle_v1")
-inputs = list(bundle_outputs.values())
-
-with tracker.start_run(
-    "simulate",
-    model="simulate",
-    inputs=inputs,
-    cache_hydration="inputs-missing",
-):
-    ...
-```
-
-The bundle is identified by `run_id` only—no hard-coded hashes. With `cache_hydration="inputs-missing"`, Consist reconstructs CSV/Parquet inputs from the shared DuckDB file if original bytes are missing.
-
-### Multi-Model Workflows
-
-Bundles contain inputs for multiple downstream steps. Each run selects the inputs it needs:
-
-```python
-bundle_outputs = tracker.load_input_bundle("inputs_bundle_v1")
-
-with tracker.start_run(
-    "model_a",
-    model="model_a",
-    inputs=[bundle_outputs["input_a"]],
-    cache_hydration="inputs-missing",
-):
-    ...
-
-with tracker.start_run(
-    "model_b",
-    model="model_b",
-    inputs=[bundle_outputs["input_b"]],
-    cache_hydration="inputs-missing",
-):
-    ...
-```
+- [Usage Guide](../usage-guide.md): choosing `run`, `trace`, `scenario`, input
+  binding, and step references.
+- [Data Materialization](data-materialization.md): ingestion, hot/cold data,
+  hybrid views, and loader fallback.
+- [Materialization](../api/materialize.md): input staging,
+  `hydrate_run_outputs(...)`, and recovery status objects.
+- [Run API](../api/run.md): accepted options and generated reference.
+- [Core Concepts Overview](overview.md): one-line definitions and the mental
+  model for runs, artifacts, scenarios, and couplers.

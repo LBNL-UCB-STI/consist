@@ -2,117 +2,91 @@
 hide:
   - navigation
   - title
+  - toc
 ---
 
-<div id="home-page"></div>
+<section id="home-page" class="home-hero">
+  <div class="home-hero__inner">
+    <p class="home-hero__eyebrow">Consist documentation</p>
+    <picture class="home-hero__logo">
+      <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="assets/logo.png">
+      <img src="assets/logo.png" alt="Consist">
+    </picture>
+    <h1>Provenance tracking and cache management for scientific workflows.</h1>
+    <p class="tagline">Reference documentation for recording workflow runs, recovering outputs, and analyzing scenario lineage with DuckDB-backed metadata.</p>
+    <div class="home-actions">
+      <a class="md-button md-button--primary" href="getting-started/quickstart/">Quickstart</a>
+      <a class="md-button" href="usage-guide/">Usage guide</a>
+      <a class="md-button" href="api/">API reference</a>
+    </div>
+    <dl class="home-summary">
+      <div class="home-summary__item">
+        <dt>Recorded state</dt>
+        <dd>Code, config, inputs, outputs, and scenario metadata</dd>
+      </div>
+      <div class="home-summary__item">
+        <dt>Cached execution</dt>
+        <dd>Reuse unchanged runs and hydrate prior outputs on demand</dd>
+      </div>
+      <div class="home-summary__item">
+        <dt>Queryable history</dt>
+        <dd>Search past runs, recorded files, and scenario metadata in DuckDB</dd>
+      </div>
+    </dl>
+  </div>
+</section>
 
-<div class="home-hero">
-  <picture class="home-hero__logo">
-    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.png">
-    <source media="(prefers-color-scheme: light)" srcset="assets/logo.png">
-    <img src="assets/logo.png" alt="Consist" width="320">
-  </picture>
-  <p class="tagline">Provenance tracking and intelligent caching for scientific simulation workflows.</p>
-</div>
+<section class="home-docs">
+  <section class="home-section">
+    <h2>Start here</h2>
+    <p>Read these pages first if you are new to Consist.</p>
+    <ol class="home-simple-list">
+      <li><a href="getting-started/installation/">Installation</a></li>
+      <li><a href="getting-started/quickstart/">Quickstart</a></li>
+      <li><a href="getting-started/first-workflow/">First Workflow</a></li>
+      <li><a href="concepts/overview/">Core Concepts</a></li>
+      <li><a href="usage-guide/">Usage Guide</a></li>
+    </ol>
+  </section>
 
-## Start Here
+  <section class="home-section">
+    <h2>What Consist records</h2>
+    <p>For each run, Consist records the execution context and artifact metadata needed to reproduce or inspect a result.</p>
+    <ul class="home-simple-list">
+      <li>the function or external tool that ran</li>
+      <li>config and identity inputs that affect cache identity</li>
+      <li>input and output artifacts, including file hashes and lineage</li>
+      <li>scenario, stage, phase, and facet metadata for later querying</li>
+    </ul>
+    <p>On a cache hit, Consist returns previous output artifact metadata instead of re-running the step. Load, hydrate, or materialize bytes only when the next tool needs them.</p>
+  </section>
 
-Follow this path in order if you are new to Consist:
+  <section class="home-section">
+    <h2>Common reference needs</h2>
+    <ul class="home-link-list">
+      <li><a href="usage-guide/"><strong>Usage Guide</strong><span>Choose between <code>run</code>, <code>trace</code>, and <code>scenario</code>.</span></a></li>
+      <li><a href="concepts/caching-and-hydration/"><strong>Caching & Hydration</strong><span>Understand cache hits, misses, hydration, and materialization.</span></a></li>
+      <li><a href="getting-started/first-workflow/"><strong>First Workflow</strong><span>Pass artifacts between workflow steps.</span></a></li>
+      <li><a href="guides/historical-recovery/"><strong>Historical Recovery</strong><span>Restore historical outputs or stage inputs.</span></a></li>
+      <li><a href="containers-guide/"><strong>Container Guide</strong><span>Run Docker, Singularity, or Apptainer tools.</span></a></li>
+      <li><a href="concepts/data-materialization/"><strong>Data Materialization</strong><span>Ingest data for SQL analysis.</span></a></li>
+      <li><a href="schema-export/"><strong>Schema Export</strong><span>Generate SQLModel schemas from captured files.</span></a></li>
+      <li><a href="cli-reference/"><strong>CLI Reference</strong><span>Inspect runs from the terminal.</span></a></li>
+      <li><a href="db-maintenance/"><strong>DB Maintenance</strong><span>Repair or compact the provenance database.</span></a></li>
+      <li><a href="troubleshooting/"><strong>Troubleshooting</strong><span>Debug a cache miss or missing output.</span></a></li>
+      <li><a href="api/"><strong>API Reference</strong><span>Look up Python signatures.</span></a></li>
+    </ul>
+  </section>
 
-1. [Installation](getting-started/installation.md)
-2. [Quickstart](getting-started/quickstart.md)
-3. [First Workflow](getting-started/first-workflow.md)
-4. [Core Concepts](concepts/overview.md)
-5. [Usage Guide](usage-guide.md)
-6. [Example Gallery](examples.md)
-7. [Advanced Usage](advanced/index.md)
-
-This path takes you from a fresh environment to a working multi-step cached
-pipeline, then into deeper usage patterns.
-
-!!! note
-
-    - Python 3.11+
-    - Base install:
-    `pip install consist`
-    - See [Installation](getting-started/installation.md) for complete options,
-      including source installs and optional extras.
-
-## What is Consist?
-
-Consist is a Python library for **provenance tracking and intelligent caching**
-in scientific simulation workflows. Tasks are ordinary Python functions;
-Consist records lineage without restructuring your code or introducing implicit
-dependencies.
-
-It helps you:
-
-- Answer "what exactly produced this result?"—code version, config, and inputs, all queryable after the fact
-- Skip redundant computation: cache hits fire automatically when code, config, and inputs are unchanged
-- Wire multi-step pipelines explicitly via artifact references, not name-based injection or global state
-- Query and compare results across runs using DuckDB-backed SQL
-- Keep pipelines portable across machines via URI + mount resolution
-
-## Secondary Navigation
-
-After completing the onboarding path above, use these role/topic guides for
-deeper work.
-
-=== "By Role"
-
-    - **Simulation developers**: [Architecture](architecture.md),
-      [Config Adapters](integrations/config_adapters.md),
-      [Container Integration](containers-guide.md)
-    - **Pipeline operators**: [CLI Reference](cli-reference.md),
-      [DB Maintenance Guide](db-maintenance.md),
-      [Troubleshooting](troubleshooting.md)
-    - **Researchers**: [Data Materialization](concepts/data-materialization.md),
-      [Mounts & Portability](mounts-and-portability.md),
-      [Glossary](glossary.md)
-
-=== "By Topic"
-
-    - **Caching and reuse**: [Caching & Hydration](concepts/caching-and-hydration.md)
-    - **Path-bound external tools**:
-      [Usage Guide](usage-guide.md),
-      [Materialization](api/materialize.md)
-    - **Configuration and identity**: [Config Management](concepts/config-management.md)
-    - **SQL analytics and ingestion**:
-      [Data Materialization](concepts/data-materialization.md),
-      [DLT Loader Guide](dlt-loader-guide.md), [Schema Export](schema-export.md)
-    - **Workflow patterns**: [Usage Guide](usage-guide.md),
-      [Workflow Contexts API](api/workflow.md)
-    - **Programmatic API**: [API Reference](api/index.md)
-
-## Common follow-up tasks
-
-| I want to...                           | Go to                                                                                   |
-|----------------------------------------|-----------------------------------------------------------------------------------------|
-| Speed up my pipeline                   | [Caching & Hydration](concepts/caching-and-hydration.md)                                |
-| Run a tool that needs fixed local input files | [Usage Guide](usage-guide.md) or [Materialization](api/materialize.md)           |
-| Debug a cache miss                     | [Troubleshooting](troubleshooting.md)                                                   |
-| Operate or repair the provenance DB    | [DB Maintenance Guide](db-maintenance.md)                                               |
-| Find which config produced a result    | [`consist lineage`](cli-reference.md#consist-lineage)                                   |
-| Compare results across scenarios       | [Data Materialization](concepts/data-materialization.md)                                |
-| Ingest data for SQL analysis           | [Data Materialization](concepts/data-materialization.md)                                |
-| Understand config vs. facets           | [Config Management](concepts/config-management.md)                                      |
-| Share a reproducible study             | [Mounts & Portability](mounts-and-portability.md)                                       |
-| Integrate with ActivitySim/BEAM/MATSim | [Config Adapters](integrations/config_adapters.md) or [Containers](containers-guide.md) |
-
-## Built on Open Standards
-
-Consist relies on modern, high-performance data engineering tools:
-
-- **[DuckDB](https://duckdb.org/)**: A fast and powerful embedded database that enables provenance queries and data 
-  virtualization.
-- **[SQLModel](https://sqlmodel.tiangolo.com/)**: Combines SQLAlchemy and Pydantic for robust, type-safe data modeling
-  and schema validation.
-- **[DLT (Data Load Tool)](https://dlthub.com/)**: Handles robust, schema-aware data ingestion from diverse sources into
-  your provenance database.
-- **[Apache Parquet & Zarr](https://parquet.apache.org/)**: Industry-standard formats for efficient, compressed storage
-  of tabular and multi-dimensional scientific data.
-
-## Learn More
-
-See [Core Concepts](concepts/overview.md) for a complete mental model, or [Glossary](glossary.md) for quick term
-definitions.
+  <section class="home-section">
+    <h2>Reference paths</h2>
+    <ul class="home-link-list home-link-list--compact">
+      <li><a href="concepts/overview/"><strong>Concepts</strong><span>Mental model and behavior.</span></a></li>
+      <li><a href="usage-guide/"><strong>Guides</strong><span>Workflow patterns and integrations.</span></a></li>
+      <li><a href="cli-reference/"><strong>Operations</strong><span>CLI, maintenance, and troubleshooting.</span></a></li>
+      <li><a href="api/"><strong>API Reference</strong><span>Generated Python API pages.</span></a></li>
+      <li><a href="glossary/"><strong>Glossary</strong><span>Short definitions for Consist terms.</span></a></li>
+    </ul>
+  </section>
+</section>
