@@ -41,9 +41,13 @@ def test_hydrated_run_output_types_are_exported_from_top_level() -> None:
 
 def test_recovery_copy_types_and_helpers_are_exported_from_top_level() -> None:
     assert ArtifactRecoveryCopyRegistration is CoreArtifactRecoveryCopyRegistration
-    assert RunOutputRecoveryCopiesRegistration is CoreRunOutputRecoveryCopiesRegistration
+    assert (
+        RunOutputRecoveryCopiesRegistration is CoreRunOutputRecoveryCopiesRegistration
+    )
     assert register_artifact_recovery_copy is register_artifact_recovery_copy_api
-    assert register_run_output_recovery_copies is register_run_output_recovery_copies_api
+    assert (
+        register_run_output_recovery_copies is register_run_output_recovery_copies_api
+    )
 
 
 def test_staged_input_types_and_helpers_are_exported_from_top_level() -> None:

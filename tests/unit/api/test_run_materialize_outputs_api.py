@@ -831,7 +831,9 @@ def test_api_register_artifact_recovery_copy_delegates_with_default_tracker(
     expected = object()
 
     class _FakeTracker:
-        def register_artifact_recovery_copy(self, artifact_arg, recovery_root, **kwargs):
+        def register_artifact_recovery_copy(
+            self, artifact_arg, recovery_root, **kwargs
+        ):
             calls["artifact"] = artifact_arg
             calls["recovery_root"] = recovery_root
             calls["kwargs"] = kwargs
@@ -859,7 +861,9 @@ def test_api_register_artifact_recovery_copy_delegates_with_default_tracker(
             "append": False,
         },
     }
-    assert consist.register_artifact_recovery_copy is register_artifact_recovery_copy_api
+    assert (
+        consist.register_artifact_recovery_copy is register_artifact_recovery_copy_api
+    )
 
 
 def test_api_register_run_output_recovery_copies_delegates_with_default_tracker(
