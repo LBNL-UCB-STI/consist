@@ -69,8 +69,10 @@ from consist.types import (
 if TYPE_CHECKING:
     from consist.core.config_canonicalization import ConfigAdapter
     from consist.core.materialize import (
+        ArtifactRecoveryCopyRegistration,
         HydratedRunOutputsResult,
         MaterializationResult,
+        RunOutputRecoveryCopiesRegistration,
         StagedInput,
         StagedInputsResult,
     )
@@ -1286,6 +1288,65 @@ def set_artifact_recovery_roots(
     """
     return _resolve_tracker(tracker).set_artifact_recovery_roots(
         artifact, roots, append=append
+    )
+
+
+def register_artifact_recovery_copy(
+    artifact: Artifact,
+    recovery_root: str | Path,
+    *,
+    verify: bool = True,
+    content_hash: str | None = None,
+    append: bool = True,
+    tracker: Optional["Tracker"] = None,
+) -> "ArtifactRecoveryCopyRegistration":
+    """
+    Verify and record an externally copied artifact recovery location.
+
+    The expected copy must already exist at
+    ``recovery_root / <artifact-uri-relative-path>``. Consist verifies the
+    existing file and then records ``recovery_root`` in
+    ``artifact.meta["recovery_roots"]`` without copying bytes itself.
+
+    ``content_hash`` is interpreted as a full file SHA-256 and takes precedence
+    when supplied. Without it, ``artifact.hash`` is only used for byte
+    verification when the tracker is using full content hashing. Directory
+    artifacts are intentionally blocked until directory manifest support exists.
+    """
+    return _resolve_tracker(tracker).register_artifact_recovery_copy(
+        artifact,
+        recovery_root,
+        verify=verify,
+        content_hash=content_hash,
+        append=append,
+    )
+
+
+def register_run_output_recovery_copies(
+    run_id: str,
+    recovery_root: str | Path,
+    *,
+    keys: Sequence[str] | None = None,
+    verify: bool = True,
+    append: bool = True,
+    content_hashes: Mapping[str, str] | None = None,
+    tracker: Optional["Tracker"] = None,
+) -> "RunOutputRecoveryCopiesRegistration":
+    """
+    Verify and record externally copied recovery locations for run outputs.
+
+    This is the bulk form of ``register_artifact_recovery_copy(...)`` for
+    workflows where an external archive or HPC process has already copied run
+    outputs into a recovery root. Unknown requested output keys raise
+    immediately; per-artifact blockers are returned in the keyed result.
+    """
+    return _resolve_tracker(tracker).register_run_output_recovery_copies(
+        run_id,
+        recovery_root,
+        keys=keys,
+        verify=verify,
+        append=append,
+        content_hashes=content_hashes,
     )
 
 

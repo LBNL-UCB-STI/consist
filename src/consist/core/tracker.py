@@ -1,3 +1,4 @@
+import hashlib
 import re
 import shutil
 from collections.abc import Mapping as MappingABC
@@ -64,6 +65,7 @@ from consist.core.config_canonicalization import (
 )
 from consist.core.config_facets import ConfigFacetManager
 from consist.core.decorators import define_step as define_step_decorator
+from consist.core.error_messages import format_problem_cause_fix
 from consist.core.events import EventManager
 from consist.core.fs import FileSystemManager
 from consist.core.identity import IdentityManager
@@ -78,13 +80,15 @@ from consist.core.views import ViewFactory, ViewRegistry
 from consist.core.ingestion import ingest_artifact
 from consist.core.lineage import LineageService
 from consist.core.materialize import (
+    ArtifactRecoveryCopyRegistration,
+    RecoveryCopyStatus,
+    RunOutputRecoveryCopiesRegistration,
     hydrate_run_outputs as hydrate_run_outputs_core,  # noqa: F401
 )
 from consist.core.materialize_options import normalize_materialize_output_keys
 from consist.core.matrix import MatrixViewFactory
 from consist.core.netcdf_views import NetCdfMetadataView
 from consist.core.openmatrix_views import OpenMatrixMetadataView
-from consist.core.error_messages import format_problem_cause_fix
 from consist.core.spatial_views import SpatialMetadataView
 from consist.core.queries import RunQueryService
 from consist.core.settings import ConsistSettings
@@ -125,6 +129,18 @@ if TYPE_CHECKING:
 
 AccessMode = Literal["standard", "analysis", "read_only"]
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _compute_file_sha256(path: Path) -> str:
+    """Compute a full content SHA-256 for one regular file."""
+    sha256 = hashlib.sha256()
+    with path.open("rb") as file:
+        while True:
+            chunk = file.read(65536)
+            if not chunk:
+                break
+            sha256.update(chunk)
+    return sha256.hexdigest()
 
 
 def _is_safe_identifier(identifier: str) -> bool:
@@ -1067,6 +1083,218 @@ class Tracker:
         if mode == "move":
             artifact.abs_path = str(destination.resolve())
         return destination
+
+    def register_artifact_recovery_copy(
+        self,
+        artifact: Artifact,
+        recovery_root: str | os.PathLike[str],
+        *,
+        verify: bool = True,
+        content_hash: str | None = None,
+        append: bool = True,
+    ) -> ArtifactRecoveryCopyRegistration:
+        """
+        Verify and record an externally copied artifact recovery location.
+
+        Unlike ``archive_artifact(...)``, this helper never copies bytes. It
+        expects external infrastructure to have already copied the artifact to
+        ``recovery_root / <uri-relative-path>``. Consist verifies that location
+        and only then appends or replaces ``artifact.meta["recovery_roots"]``.
+
+        Directory artifacts are intentionally blocked here until Consist has a
+        first-class directory manifest contract for recovery-root equivalence.
+        ``content_hash`` is interpreted as a full file SHA-256 and takes
+        precedence when supplied. Without it, ``artifact.hash`` is only used for
+        byte verification when this tracker is using full content hashing; fast
+        metadata hashes are not byte-equivalence proofs.
+        """
+        if not isinstance(artifact, Artifact):
+            raise TypeError("artifact must be an Artifact instance.")
+        if self.db is None:
+            raise RuntimeError(
+                "Cannot register artifact recovery copy: tracker has no database configured."
+            )
+
+        recovery_root_path = Path(recovery_root).resolve()
+        artifact_id = str(artifact.id) if artifact.id is not None else ""
+
+        def _result(
+            status: str,
+            *,
+            expected_path: Path | None = None,
+            message: str | None = None,
+            metadata_updated: bool = False,
+        ) -> ArtifactRecoveryCopyRegistration:
+            return ArtifactRecoveryCopyRegistration(
+                artifact=artifact,
+                key=artifact.key,
+                artifact_id=artifact_id,
+                recovery_root=recovery_root_path,
+                expected_path=expected_path,
+                status=cast(RecoveryCopyStatus, status),
+                message=message,
+                metadata_updated=metadata_updated,
+            )
+
+        relative_path = self.fs.get_remappable_relative_path(artifact.container_uri)
+        if relative_path is None:
+            return _result(
+                "skipped_unmapped",
+                message=(
+                    f"Artifact {artifact.key!r} does not have a rematerializable URI "
+                    "layout. Absolute-path and file:// artifacts cannot be adopted "
+                    "from root-only recovery metadata."
+                ),
+            )
+
+        expected_path = recovery_root_path / relative_path
+        expected_path_resolved = expected_path.resolve()
+        if expected_path.is_symlink():
+            return _result(
+                "symlink_destination",
+                expected_path=expected_path_resolved,
+                message=(
+                    "Symlink detected in recovery destination: "
+                    f"{expected_path_resolved}"
+                ),
+            )
+        if not expected_path.exists():
+            return _result(
+                "missing_copy",
+                expected_path=expected_path_resolved,
+                message=f"Expected recovery copy does not exist: {expected_path_resolved}",
+            )
+        if expected_path.is_dir():
+            return _result(
+                "unsupported_directory",
+                expected_path=expected_path_resolved,
+                message=(
+                    "Directory recovery-copy adoption is not supported yet; use "
+                    "archive_artifact(...) or wait for directory manifest support."
+                ),
+            )
+        if not expected_path.is_file():
+            return _result(
+                "failed",
+                expected_path=expected_path_resolved,
+                message=(
+                    "Expected recovery copy is not a regular file: "
+                    f"{expected_path_resolved}"
+                ),
+            )
+
+        expected_hashes: list[tuple[str, str]] = []
+        if content_hash:
+            expected_hashes.append(("content_hash", content_hash))
+        elif artifact.hash and self.identity.hashing_strategy == "full":
+            expected_hashes.append(("artifact.hash", artifact.hash))
+
+        if verify and not expected_hashes:
+            return _result(
+                "unverifiable_hash",
+                expected_path=expected_path_resolved,
+                message=(
+                    "Verification requested, but no full file hash is available. "
+                    "Pass content_hash=<sha256> or use verify=False to register "
+                    "the existing copy without byte verification."
+                ),
+            )
+
+        if verify and expected_hashes:
+            try:
+                actual_hash = _compute_file_sha256(expected_path_resolved)
+            except Exception as exc:
+                return _result(
+                    "failed",
+                    expected_path=expected_path_resolved,
+                    message=(
+                        f"Could not hash recovery copy {expected_path_resolved}: {exc}"
+                    ),
+                )
+            mismatches = [
+                label
+                for label, expected_hash in expected_hashes
+                if actual_hash != expected_hash
+            ]
+            if mismatches:
+                return _result(
+                    "hash_mismatch",
+                    expected_path=expected_path_resolved,
+                    message=(
+                        "Recovery copy hash did not match "
+                        f"{', '.join(mismatches)} for artifact {artifact.key!r}."
+                    ),
+                )
+
+        try:
+            self.set_artifact_recovery_roots(
+                artifact, [recovery_root_path], append=append
+            )
+        except Exception as exc:
+            return _result(
+                "failed",
+                expected_path=expected_path_resolved,
+                message=f"Could not update recovery_roots metadata: {exc}",
+            )
+
+        return _result(
+            "registered",
+            expected_path=expected_path_resolved,
+            message="Recovery copy verified and registered.",
+            metadata_updated=True,
+        )
+
+    def register_run_output_recovery_copies(
+        self,
+        run_id: str,
+        recovery_root: str | os.PathLike[str],
+        *,
+        keys: Sequence[str] | None = None,
+        verify: bool = True,
+        append: bool = True,
+        content_hashes: Mapping[str, str] | None = None,
+    ) -> RunOutputRecoveryCopiesRegistration:
+        """
+        Verify and record externally copied recovery locations for run outputs.
+
+        Unknown requested output keys raise immediately. Per-artifact blockers
+        such as missing files or hash mismatches are returned in the keyed
+        result without aborting the rest of the requested outputs.
+        """
+        normalized_keys = normalize_materialize_output_keys(
+            keys,
+            caller="register_run_output_recovery_copies",
+        )
+        outputs = self.get_run_outputs(run_id)
+        if normalized_keys is not None:
+            missing = [key for key in normalized_keys if key not in outputs]
+            if missing:
+                raise KeyError(
+                    "Requested output keys were not found for run "
+                    f"{run_id!r}: {', '.join(repr(key) for key in missing)}"
+                )
+            selected = {key: outputs[key] for key in normalized_keys}
+        else:
+            selected = outputs
+
+        if content_hashes is not None:
+            unknown_hash_keys = [key for key in content_hashes if key not in selected]
+            if unknown_hash_keys:
+                raise KeyError(
+                    "content_hashes contained keys that were not selected for run "
+                    f"{run_id!r}: {', '.join(repr(key) for key in unknown_hash_keys)}"
+                )
+
+        registered: dict[str, ArtifactRecoveryCopyRegistration] = {}
+        for key, artifact in selected.items():
+            registered[key] = self.register_artifact_recovery_copy(
+                artifact,
+                recovery_root,
+                verify=verify,
+                content_hash=content_hashes.get(key) if content_hashes else None,
+                append=append,
+            )
+        return RunOutputRecoveryCopiesRegistration(outputs=registered)
 
     def archive_run_outputs(
         self,

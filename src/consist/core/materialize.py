@@ -53,6 +53,17 @@ StagingStatus = Literal[
     "failed",
 ]
 
+RecoveryCopyStatus = Literal[
+    "registered",
+    "missing_copy",
+    "hash_mismatch",
+    "skipped_unmapped",
+    "symlink_destination",
+    "unsupported_directory",
+    "unverifiable_hash",
+    "failed",
+]
+
 
 @dataclass(slots=True)
 class MaterializationResult:
@@ -257,6 +268,98 @@ class HydratedRunOutputsResult(MappingABC[str, HydratedRunOutput]):
             f"preserved_existing={counts['preserved_existing']} "
             f"skipped_unmapped={counts['skipped_unmapped']} "
             f"missing_source={counts['missing_source']} "
+            f"failed={counts['failed']}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactRecoveryCopyRegistration:
+    """Outcome for adopting one externally copied artifact recovery location.
+
+    ``registered`` means Consist verified the existing copy according to the
+    requested policy and persisted the recovery root. Other statuses are
+    advisory blockers; the artifact identity is unchanged and recovery metadata
+    was not updated.
+    """
+
+    artifact: Artifact
+    key: str | None
+    artifact_id: str
+    recovery_root: Path
+    expected_path: Path | None
+    status: RecoveryCopyStatus
+    message: str | None = None
+    metadata_updated: bool = False
+
+
+@dataclass(slots=True)
+class RunOutputRecoveryCopiesRegistration(
+    MappingABC[str, ArtifactRecoveryCopyRegistration]
+):
+    """Key-indexed result for adopting externally copied run-output bytes."""
+
+    outputs: dict[str, ArtifactRecoveryCopyRegistration] = field(default_factory=dict)
+
+    def __getitem__(self, key: str) -> ArtifactRecoveryCopyRegistration:
+        return self.outputs[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.outputs)
+
+    def __len__(self) -> int:
+        return len(self.outputs)
+
+    def items(self):
+        return self.outputs.items()
+
+    def keys(self):
+        return self.outputs.keys()
+
+    def values(self):
+        return self.outputs.values()
+
+    @property
+    def registered(self) -> dict[str, ArtifactRecoveryCopyRegistration]:
+        return {
+            key: output
+            for key, output in self.outputs.items()
+            if output.status == "registered"
+        }
+
+    @property
+    def blocked(self) -> dict[str, ArtifactRecoveryCopyRegistration]:
+        return {
+            key: output
+            for key, output in self.outputs.items()
+            if output.status != "registered"
+        }
+
+    @property
+    def complete(self) -> bool:
+        return not self.blocked
+
+    @property
+    def summary(self) -> str:
+        counts: dict[str, int] = {
+            "registered": 0,
+            "missing_copy": 0,
+            "hash_mismatch": 0,
+            "skipped_unmapped": 0,
+            "symlink_destination": 0,
+            "unsupported_directory": 0,
+            "unverifiable_hash": 0,
+            "failed": 0,
+        }
+        for output in self.outputs.values():
+            counts[output.status] += 1
+        return (
+            f"registered={counts['registered']} "
+            f"missing_copy={counts['missing_copy']} "
+            f"hash_mismatch={counts['hash_mismatch']} "
+            f"skipped_unmapped={counts['skipped_unmapped']} "
+            f"symlink_destination={counts['symlink_destination']} "
+            f"unsupported_directory={counts['unsupported_directory']} "
+            f"unverifiable_hash={counts['unverifiable_hash']} "
             f"failed={counts['failed']}"
         )
 
