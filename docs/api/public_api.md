@@ -108,6 +108,8 @@ with tracker.scenario("baseline") as sc:
 - [`consist.Artifact`](artifact.md)
 - [`consist.HydratedRunOutput`](materialize.md#consist.core.materialize.HydratedRunOutput)
 - [`consist.HydratedRunOutputsResult`](materialize.md#consist.core.materialize.HydratedRunOutputsResult)
+- [`consist.ArtifactRecoveryCopyRegistration`](materialize.md#consist.core.materialize.ArtifactRecoveryCopyRegistration)
+- [`consist.RunOutputRecoveryCopiesRegistration`](materialize.md#consist.core.materialize.RunOutputRecoveryCopiesRegistration)
 - [`consist.MaterializationResult`](materialize.md#consist.core.materialize.MaterializationResult)
 - [`consist.StagedInput`](materialize.md#consist.core.materialize.StagedInput)
 - [`consist.StagedInputsResult`](materialize.md#consist.core.materialize.StagedInputsResult)
@@ -226,7 +228,8 @@ to Consist, start with the **Core** and **Logging/Loading** groups and reach for
 - `get_run`, `get_run_config`, `get_run_inputs`, `get_run_outputs`
 - `hydrate_run_outputs`, `materialize_run_outputs`
 - `stage_artifact`, `stage_inputs`
-- `set_artifact_recovery_roots`, `archive_artifact`, `archive_run_outputs`,
+- `set_artifact_recovery_roots`, `register_artifact_recovery_copy`,
+  `register_run_output_recovery_copies`, `archive_artifact`, `archive_run_outputs`,
   `archive_current_run_outputs`
 - `get_artifact_lineage`, `print_lineage`, `history`
 - `diff_runs`, `get_config_facet`, `get_config_facets`, `get_run_config_kv`

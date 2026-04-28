@@ -67,7 +67,11 @@ hydrated = tracker.hydrate_run_outputs(
 Use the lower-level helpers when you want to manage archival yourself:
 
 - `tracker.set_artifact_recovery_roots(...)` records one or more archive roots
-  without copying bytes.
+  without copying bytes or verifying the archive-side files.
+- `tracker.register_artifact_recovery_copy(...)` verifies an externally copied
+  artifact file before recording the recovery root.
+- `tracker.register_run_output_recovery_copies(...)` applies verified
+  external-copy adoption to all or selected outputs for a run.
 - `tracker.archive_current_run_outputs(...)` archives the outputs of the active
   run without manually extracting the run ID first.
 - `tracker.archive_artifact(...)` copies or moves a single artifact into an
@@ -203,6 +207,8 @@ signatures and attribute details, use the generated reference below.
         - stage_inputs
         - StagedInput
         - StagedInputsResult
+        - ArtifactRecoveryCopyRegistration
+        - RunOutputRecoveryCopiesRegistration
         - HydratedRunOutput
         - HydratedRunOutputsResult
         - MaterializationResult
