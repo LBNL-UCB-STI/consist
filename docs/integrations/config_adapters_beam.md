@@ -235,6 +235,6 @@ Override runs persist `run.meta["resolved_config_identity"]` with `mode`,
 
 For detailed method signatures, parameters, and return types, see:
 
-- [`BeamConfigAdapter`](../api/public_api.md#consist.integrations.beam.BeamConfigAdapter)
-- [`BeamConfigOverrides`](../api/public_api.md#consist.integrations.beam.BeamConfigOverrides)
+- `consist.integrations.beam.BeamConfigAdapter` in the source API.
+- `consist.integrations.beam.BeamConfigOverrides` in the source API.
 - [`Tracker.canonicalize_config()`](../api/tracker.md#consist.core.tracker.Tracker.canonicalize_config)

@@ -484,6 +484,6 @@ with Session(tracker.engine) as session:
 
 For detailed method signatures, parameters, and return types, see:
 
-- [`ActivitySimConfigAdapter`](../api/public_api.md#consist.integrations.activitysim.ActivitySimConfigAdapter)
-- [`ConfigOverrides`](../api/public_api.md#consist.integrations.activitysim.ConfigOverrides)
+- `consist.integrations.activitysim.ActivitySimConfigAdapter` in the source API.
+- `consist.integrations.activitysim.ConfigOverrides` in the source API.
 - [`Tracker.canonicalize_config()`](../api/tracker.md#consist.core.tracker.Tracker.canonicalize_config)

@@ -184,6 +184,14 @@ and `digest`.
         - get_run_inputs
         - get_run_outputs
         - get_config_bundle
+        - hydrate_run_outputs
+        - materialize_run_outputs
+        - stage_artifact
+        - stage_inputs
+        - set_artifact_recovery_roots
+        - archive_artifact
+        - archive_run_outputs
+        - archive_current_run_outputs
         - get_artifact_lineage
         - print_lineage
         - history

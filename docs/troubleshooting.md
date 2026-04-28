@@ -1,246 +1,186 @@
 # Troubleshooting Guide
 
-This guide organizes issues by symptom. For concept definitions, see [Core Concepts](concepts/overview.md). For topic-specific guides, see:
+This guide is a symptom index: find the message or behavior, confirm the likely
+cause, then apply the shortest fix. For concept definitions, see
+[Core Concepts](concepts/overview.md). For deeper topic guides, see:
 
 - [Container Integration](containers-guide.md#error-handling)
 - [DLT Loader](dlt-loader-guide.md#common-errors)
 - [Mounts & Portability](mounts-and-portability.md#troubleshooting)
+- [Database Maintenance](db-maintenance.md)
+- [Historical Recovery](guides/historical-recovery.md)
 
-!!! note "Recommended path"
-    For normal workflow code, prefer `tracker.run(...)`, `tracker.trace(...)`,
-    or `consist.scenario(...)` with `scenario.run(...)` / `scenario.trace(...)`.
-    Some troubleshooting sections intentionally use low-level lifecycle APIs
-    (for example `tracker.start_run(...)` and manual materialization helpers) to
-    isolate specific failure modes.
+## Database Maintenance
 
----
+### "I need to inspect or repair the provenance DB"
 
-## Database Maintenance Runbook (Snapshot -> Diagnose -> Action)
+**Diagnosis:** DB maintenance is safest when you snapshot before mutating and
+diagnose before deleting or merging anything.
 
-When troubleshooting provenance DB health, prefer this safe sequence:
+**Fix:** Use the full runbook in [Database Maintenance](db-maintenance.md). The
+short sequence is:
 
-1. **Snapshot first (rollback safety):**
+```bash
+consist db snapshot --out ./snapshots/provenance.pre-maintenance.duckdb --db-path ./provenance.duckdb
+consist db inspect --db-path ./provenance.duckdb
+consist db doctor --db-path ./provenance.duckdb
+```
 
-   ```bash
-   consist db snapshot --out ./snapshots/provenance.pre-maintenance.duckdb --db-path ./provenance.duckdb
-   ```
+Then take one action at a time: `consist db purge --dry-run`, `consist db merge`,
+`consist db rebuild`, and finally `consist db compact`.
 
-2. **Diagnose before mutating:**
+### "Database locked"
 
-   ```bash
-   consist db inspect --db-path ./provenance.duckdb
-   consist db doctor --db-path ./provenance.duckdb
-   ```
+**Diagnosis:** DuckDB allows only one writer at a time. Concurrent Consist
+processes can collide during run, artifact, or dlt sync writes.
 
-3. **Take one action at a time (preview first):**
+**Fix:** Prefer sequential writes or separate DB files per process. On shared HPC
+filesystems, tune retries before redesigning the workflow:
 
-   - Purge with preview:
-
-     ```bash
-     consist db purge RUN_ID --dry-run --db-path ./provenance.duckdb
-     consist db purge RUN_ID --delete-ingested-data --yes --db-path ./provenance.duckdb
-     ```
-
-   - Optional unscoped cache pruning:
-
-     ```bash
-     consist db purge RUN_ID --delete-ingested-data --prune-cache --yes --db-path ./provenance.duckdb
-     ```
-
-     `--prune-cache` behavior:
-     - only applies when `--delete-ingested-data` is enabled
-     - only applies when references are derivable (for example, `run_link` tables with `run_id` + `content_hash`)
-     - assumes `content_hash` has equivalent semantics across derivable `run_link` and `unscoped_cache` tables
-     - becomes a skip/no-op when references are not derivable
-
-   - Merge shards with explicit conflict policy:
-
-     ```bash
-     consist db merge shard.duckdb --conflict error --db-path ./provenance.duckdb
-     consist db merge shard.duckdb --conflict skip --db-path ./provenance.duckdb
-     ```
-
-     `--conflict error` aborts on incompatible global-table schema checks.
-     `--conflict skip` merges compatible data and skips incompatible tables with warnings.
-
-   - Rebuild from JSON snapshots:
-
-     ```bash
-     consist db rebuild --json-dir ./runs/consist_runs --mode minimal --db-path ./provenance.duckdb
-     consist db rebuild --json-dir ./runs/consist_runs --mode full --db-path ./provenance.duckdb
-     ```
-
-     `minimal` restores run/artifact/link baseline.
-     `full` additionally attempts facet/schema/index restoration where snapshot
-     content and DB schema compatibility allow.
-     `stage` and `phase` are restored into canonical run columns when present in
-     the snapshot metadata, with legacy `run.meta` values preserved for
-     compatibility.
-
-4. **Compact after bulk changes:**
-
-   ```bash
-   consist db compact --db-path ./provenance.duckdb
-   ```
+```bash
+export CONSIST_DLT_LOCK_RETRIES=40
+export CONSIST_DLT_LOCK_BASE_SLEEP_SECONDS=0.2
+export CONSIST_DLT_LOCK_MAX_SLEEP_SECONDS=5.0
+export CONSIST_DB_LOCK_RETRIES=40
+export CONSIST_DB_LOCK_BASE_SLEEP_SECONDS=0.2
+export CONSIST_DB_LOCK_MAX_SLEEP_SECONDS=5.0
+```
 
 ---
 
-## Run Invocation Diagnostics (Recommended Path)
-
-New run/trace/scenario validation errors follow a consistent structure:
-
-- `Problem`: what failed
-- `Cause`: why Consist rejected the invocation
-- `Fix`: the concrete remediation
-
-Common messages and fixes:
+## Run Invocation
 
 ### "unexpected keyword argument 'hash_inputs'"
 
-- `Cause`: `hash_inputs` is no longer accepted on `run(...)`, `trace(...)`, and step-level `scenario.run(...)` / `scenario.trace(...)` surfaces.
-- `Fix`: on those surfaces, use `identity_inputs=[...]`. Scenario header contexts still route through `begin_run(...)`, where `hash_inputs` remains a legacy low-level option.
+**Diagnosis:** `hash_inputs` is no longer accepted on `run(...)`, `trace(...)`,
+or step-level scenario execution surfaces.
+
+**Fix:** Use `identity_inputs=[...]`. Scenario header contexts still route
+through `begin_run(...)`, where `hash_inputs` remains a legacy low-level option.
 
 ### "unexpected keyword argument 'config_plan'"
 
-- `Cause`: `config_plan` is no longer accepted on `run(...)`, `trace(...)`, and step-level `scenario.run(...)` / `scenario.trace(...)` surfaces.
-- `Fix`: on those surfaces, pass `adapter=...` (and optional `identity_inputs=[...]`) instead. Scenario headers do not currently support header-level `adapter=...`.
+**Diagnosis:** `config_plan` is no longer accepted on `run(...)`, `trace(...)`,
+or step-level scenario execution surfaces.
+
+**Fix:** Pass `adapter=...` and optional `identity_inputs=[...]`. Scenario
+headers do not currently support header-level `adapter=...`.
 
 ### "identity_inputs/hash_inputs must be a list of paths."
 
-- `Cause`: a single string/path or invalid shape was passed instead of a list.
-- `Fix`: pass `identity_inputs=[Path(...)]` or `identity_inputs=[(\"label\", Path(...))]`.
+**Diagnosis:** A scalar string/path or invalid shape was passed where Consist
+expects a list.
+
+**Fix:** Pass `identity_inputs=[Path(...)]` or
+`identity_inputs=[("label", Path(...))]`.
 
 ### "Failed to compute identity input digests ..."
 
-- `Cause`: one or more identity input paths are missing or unreadable.
-- `Fix`: verify every identity input path exists and is readable before running.
+**Diagnosis:** One or more identity input paths are missing or unreadable.
+
+**Fix:** Verify that each path exists and is readable before starting the run.
 
 ### "load_inputs=True requires inputs to be a dict." / "input_binding=... requires inputs to be a dict."
 
-- `Cause`: automatic input binding requires named inputs so Consist can match function parameters.
-- `Fix`: pass `inputs={\"param_name\": path_or_artifact}`. To disable binding, use `ExecutionOptions(input_binding=\"none\")` (or legacy `ExecutionOptions(load_inputs=False)`).
+**Diagnosis:** Automatic input binding needs named inputs so Consist can match
+function parameters.
+
+**Fix:** Pass `inputs={"param_name": path_or_artifact}`. To disable binding, use
+`ExecutionOptions(input_binding="none")`.
 
 ### "cache_hydration='outputs-requested' requires output_paths."
 
-- `Cause`: requested-output hydration needs explicit destination mappings.
-- `Fix`: declare `output_paths={...}` whenever using `cache_hydration='outputs-requested'`.
+**Diagnosis:** Requested-output hydration needs explicit destination mappings.
+
+**Fix:** Declare `output_paths={...}` whenever using
+`cache_hydration="outputs-requested"`.
 
 ### "Tracker.run supports executor='python' or 'container'."
 
-- `Cause`: an unsupported executor value was provided.
-- `Fix`: set `ExecutionOptions(executor='python')` or `ExecutionOptions(executor='container', container={...})`.
+**Diagnosis:** The executor value is not supported.
+
+**Fix:** Use `ExecutionOptions(executor="python")` or
+`ExecutionOptions(executor="container", container={...})`.
 
 ### "cache_options.code_identity callable modes require executor='python'."
 
-- `Cause`: callable code identity modes require Python callable execution.
-- `Fix`: either switch to `executor='python'` or use `code_identity='repo_git'` for container runs.
+**Diagnosis:** Callable code identity modes require Python callable execution.
+
+**Fix:** Switch to `executor="python"` or use `code_identity="repo_git"` for
+container runs.
 
 ### "executor='container' requires output_paths."
 
-- `Cause`: container runs cannot infer outputs from Python return values.
-- `Fix`: provide explicit output mappings with `output_paths={key: path}`.
+**Diagnosis:** Container runs cannot infer outputs from Python return values.
+
+**Fix:** Provide explicit output mappings with `output_paths={key: path}`.
 
 ### "Scenario input string did not resolve ..."
 
-- `Cause`: the scenario input string matched neither a Coupler key nor an existing filesystem path.
-- `Fix`: pass a real path, or on the preferred execution path use `consist.refs(...)` between steps.
+**Diagnosis:** The string matched neither a Coupler key nor an existing
+filesystem path.
+
+**Fix:** Pass a real path, or use `consist.refs(...)` between scenario steps on
+the preferred execution path.
 
 ---
 
-## Cache & Provenance Issues
+## Cache And Provenance
 
-### "Relation leak warnings"
+### "Consist has N active DuckDB relations..."
 
-**Symptom:** Warning: `Consist has N active DuckDB relations...`
+**Diagnosis:** Relations returned by `consist.load(...)` for tabular artifacts
+keep a DuckDB connection open until closed.
 
-**Root Cause:** Relations returned by `consist.load(...)` (tabular artifacts) keep a
-DuckDB connection open until you close them.
-
-**Solution:**
-
-- Prefer `consist.load_df(...)` if you only need a pandas DataFrame.
-- Use `consist.load_relation(...)` as a context manager to ensure connections are closed.
-- If you're intentionally holding many Relations, increase the warning threshold:
-  `CONSIST_RELATION_WARN_THRESHOLD=500`.
+**Fix:** Prefer `consist.load_df(...)` when a pandas DataFrame is enough, or use
+`consist.load_relation(...)` as a context manager. For intentional high fan-out,
+raise `CONSIST_RELATION_WARN_THRESHOLD`.
 
 ### "Old DBs no longer load after the Relation-first refactor"
 
-**Symptom:** Errors when reading artifacts or querying the DB after upgrading.
+**Diagnosis:** The artifact schema changed: `uri` became `container_uri`, child
+artifacts now use first-class `table_path`, `array_path`, and
+`parent_artifact_id` fields, and `meta["table_path"]` is no longer canonical.
 
-**Root Cause:** The artifact schema changed:
-- `Artifact.uri` → `Artifact.container_uri`
-- `Artifact.table_path` added (nullable) for container formats (HDF5 tables)
-- `Artifact.array_path` added (nullable) for array formats
-- `Artifact.parent_artifact_id` added (nullable) as the canonical container
-  child-artifact relation
-- `meta["table_path"]` is no longer used
-
-**Solution:**
-
-Reset your Consist database(s) and re-run workflows:
+**Fix:** Reset old local DBs and re-run workflows:
 
 ```bash
 rm ./provenance.duckdb
 rm ./test_db.duckdb
 ```
 
-Then update any code that referenced `artifact.uri`,
-`artifact.meta["table_path"]`, or relied on metadata-only parent-child links:
-
-```python
-# Before
-artifact.uri
-artifact.meta.get("table_path")
-artifact.meta.get("parent_id")  # legacy compatibility mirror only
-
-# After
-artifact.container_uri
-artifact.table_path
-artifact.parent_artifact_id
-```
-
-If you need to traverse container child artifacts, prefer the first-class query
-helpers:
-
-```python
-children = tracker.get_child_artifacts(container_artifact)
-parent = tracker.get_parent_artifact(child_artifact)
-```
-
----
+Then update code to use `artifact.container_uri`, `artifact.table_path`, and
+`artifact.parent_artifact_id`. Use `tracker.get_child_artifacts(...)` and
+`tracker.get_parent_artifact(...)` for container traversal.
 
 ### "Cache hit but output files are missing"
 
-**Symptom:** `cache_hit=True` but `artifact.path` doesn't exist on disk.
+**Diagnosis:** Consist found matching provenance metadata, but default cache hits
+do not copy bytes back to disk.
 
-**Root Cause:** Consist returned a cache hit but didn't materialize the files to disk.
-
-Why this happens: Consist defaults to metadata-only cache hits to keep cache checks fast and avoid duplicating large files. You explicitly opt in to file copying via hydration/materialization when you need bytes on disk.
-
-**Solution:**
-
-Use cache hydration to copy files:
+**Fix:** Opt into hydration:
 
 ```python
 from consist import CacheOptions
 
-result = consist.run(
+result = tracker.run(
     fn=my_function,
     inputs={...},
-    cache_options=CacheOptions(cache_hydration="outputs-all"),  # Copy all cached outputs
-    ...
+    outputs=["results"],
+    cache_options=CacheOptions(cache_hydration="outputs-all"),
 )
 ```
+
+For a prior run, archive mirror, or restart workspace, use
+`tracker.hydrate_run_outputs(...)`; see
+[Historical Recovery](guides/historical-recovery.md).
 
 ### "I want to know why this run missed cache"
 
-**Symptom:** A run missed cache, but `cache_hit=False` only tells you that the
-signature did not match.
+**Diagnosis:** `cache_hit=False` means the signature did not match, but the
+reason is recorded on the completed run.
 
-**Root Cause:** The cache miss explanation is recorded on the completed run as
-`run.meta["cache_miss_explanation"]`.
-
-**Solution:**
+**Fix:** Inspect `run.meta["cache_miss_explanation"]`:
 
 ```python
 run = tracker.get_run("my_run_id")
@@ -251,734 +191,160 @@ print(explanation.get("candidate_run_id"))
 print(explanation.get("details", {}))
 ```
 
-How to read it:
-
-- `reason` gives the broad miss category, such as `config_changed`,
-  `inputs_changed`, `code_changed`, or `candidate_outputs_invalid`.
-- `candidate_run_id` points to the prior completed run that was compared, if one
-  was found.
-- `details` contains the evidence. For config misses, look for changed config
-  keys or identity-input digests. For input misses, look for changed input keys
-  or per-artifact drift. For code misses, look for code-identity mode, extra
-  dependency, or code-hash changes.
-- `fallbacks_used` tells you when the explainer had to rely on a weaker source
-  like the JSON snapshot or missing artifact history.
-
-If `reason` is `no_similar_prior_run`, the explainer could not find a useful
-same-model comparison candidate yet.
-
-Or use the explicit run-scoped recovery API when you need to rebuild a prior
-run's outputs into a new directory or recover from an archive mirror:
-
-```python
-from pathlib import Path
-
-hydrated = tracker.hydrate_run_outputs(
-    "prior_run_id",
-    keys=["persons", "households"],
-    target_root=Path("rehydrated"),
-    source_root=Path("/archive/outputs_mirror"),  # optional
-)
-
-for key, output in hydrated.items():
-    print(key, output.status, output.path)
-```
-
-This preserves historical relative layout under `target_root`. If the original
-cold files are missing but the outputs were ingested, Consist can reconstruct
-CSV/Parquet outputs from DuckDB.
-
-For archive-mirror cache-hit hydration, you can either pass
-`cache_options=CacheOptions(materialize_cached_outputs_source_root=Path(...))`
-on `run(...)` / scenario steps, or use the same
-`materialize_cached_outputs_source_root=Path(...)` override on low-level
-`tracker.start_run(...)` flows.
-
-If the archive root is part of the workflow rather than a one-off override,
-record it on the artifact once instead:
-
-```python
-tracker.archive_run_outputs(
-    "prior_run_id",
-    Path("/archive/iteration_004"),
-    mode="copy",
-)
-```
-
-That updates `artifact.meta["recovery_roots"]`, so future historical recovery,
-cache-hit output hydration, and eager cache validation can locate the archived
-bytes without repeating a manual source-root override.
-
-`tracker.hydrate_run_outputs(...)` can restore into a configured mount root
-without enabling `allow_external_paths=True`.
-
-Keep `tracker.materialize_run_outputs(...)` for compatibility when you only
-need aggregate summary buckets rather than the keyed per-output result shown
-above.
-
----
+Use `reason`, `candidate_run_id`, `matched_components`,
+`mismatched_components`, and `details` to identify config, input, code, or
+candidate-output drift.
 
 ### "Same inputs/config but cache not found"
 
-**Symptom:** Code hasn't changed, inputs haven't changed, but run re-executes instead of hitting cache.
+**Diagnosis:** A cache-key component changed. Common causes are code changes,
+config type drift such as `0` versus `0.0`, changed input fingerprints, changed
+`model` / `year` / `iteration`, or dependency changes.
 
-**Root Cause:** Signature mismatch. Something in the cache key changed.
-
-**Solution:**
-
-Debug the signature:
-
-```python
-from pathlib import Path
-
-identity = tracker.identity
-code_hash = identity.get_code_version()
-# If you want to match Consist's exact run hash, include model/year/iteration:
-# config_hash = identity.compute_run_config_hash(config={"param": value}, model="my_model", year=2030)
-config_hash = identity.compute_config_hash({"param": value})
-input_hash = identity.compute_file_checksum(Path("input.csv"))
-
-print(f"Code: {code_hash}")
-print(f"Config: {config_hash}")
-print(f"Inputs: {input_hash}")
-
-# Check if these match a prior run
-prior_runs = tracker.find_runs()
-for run in prior_runs:
-    print(f"Run {run.id}: signature={run.signature}")
-```
-
-If you want a human-readable explanation for the miss, inspect the recorded
-cache miss payload on the run:
-
-```python
-run = tracker.get_run("my_run_id")
-explanation = run.meta.get("cache_miss_explanation", {})
-
-print(explanation.get("reason"))
-print(explanation.get("candidate_run_id"))
-print(explanation.get("matched_components"))
-print(explanation.get("mismatched_components"))
-print(explanation.get("details", {}))
-```
-
-How to interpret it:
-
-- `reason` is the top-level classification. It tells you whether the miss was
-  mostly about config, inputs, code, or validation.
-- `candidate_run_id` is the closest prior completed run Consist compared
-  against.
-- `matched_components` and `mismatched_components` show the high-level
-  identity hashes that matched or differed.
-- `details` gives the likely constituent cause, such as named config digest
-  inputs, config keys, input artifact keys, or code-identity metadata.
-- `fallbacks_used` inside `details` means Consist had to fall back to a less
-  structured source, so the explanation is still useful but less precise.
-
-For a quick first pass, pair this with `run.identity_summary` from the API
-reference. `identity_summary` tells you the hashes that formed the key; the
-cache miss explanation tells you which part of that key likely drifted.
-
-**Common causes:**
-- **Code changed:** Check git status, function definitions
-- **Config changed:** Check parameter types (0 vs 0.0, "0" vs 0)
-- **Input file changed:** Check file modification time and artifact fingerprint
-- **Run fields changed:** `model`, `year`, or `iteration` are folded into the config hash
-- **Dependencies changed:** Installed package versions can affect behavior
-
----
+**Fix:** Compare the run's `identity_summary` and
+`run.meta["cache_miss_explanation"]`. For manual checks, compute the relevant
+code, config, and input hashes with `tracker.identity`.
 
 ### "How do I clear/reset cache?"
 
-**Solution:**
+**Diagnosis:** You either want to remove all history or keep history while
+forcing one run to execute again.
 
-Delete the database file:
+**Fix:** Delete the DB only when you want a full reset:
 
 ```bash
 rm ./provenance.duckdb
 ```
 
-This clears all run history and cache. Next run will re-execute everything.
-
-To keep history but force re-execution:
-
-```python
-from consist import CacheOptions
-
-result = consist.run(
-    fn=your_fn,
-    inputs={...},
-    outputs=[...],
-    cache_options=CacheOptions(cache_mode="overwrite"),
-)
-```
+To keep history but force execution, use
+`CacheOptions(cache_mode="overwrite")`.
 
 ---
 
-### "Database locked" error
+## Mounts And Paths
 
-**Symptom:** `database is locked` or similar error when running multiple Consist processes.
+### "Container runs but /inputs is empty"
 
-**Root Cause:** DuckDB locks the database during writes. Concurrent write attempts fail.
+**Diagnosis:** A host mount path does not exist, is relative when Docker needs an
+absolute path, or is unreadable.
 
-**Solution:**
-
-1. **Run sequentially** (recommended):
-   ```bash
-   python workflow1.py
-   python workflow2.py
-   ```
-
-2. **Use separate databases per process:**
-   ```python
-   tracker = Tracker(
-       run_dir="./runs",
-       db_path=f"./provenance_{process_id}.duckdb",  # Unique per process
-   )
-   ```
-
-3. **Tune Consist retry/backoff settings** (best for shared HPC DB files):
-
-   ```bash
-   # dlt ingest lock retries
-   export CONSIST_DLT_LOCK_RETRIES=40
-   export CONSIST_DLT_LOCK_BASE_SLEEP_SECONDS=0.2
-   export CONSIST_DLT_LOCK_MAX_SLEEP_SECONDS=5.0
-
-   # run/artifact/config sync lock retries
-   export CONSIST_DB_LOCK_RETRIES=40
-   export CONSIST_DB_LOCK_BASE_SLEEP_SECONDS=0.2
-   export CONSIST_DB_LOCK_MAX_SLEEP_SECONDS=5.0
-   ```
-
-   These settings apply process-wide for each `Tracker` instance.
-
-   Defaults:
-   - `CONSIST_DLT_LOCK_RETRIES=20`
-   - `CONSIST_DLT_LOCK_BASE_SLEEP_SECONDS=0.1`
-   - `CONSIST_DLT_LOCK_MAX_SLEEP_SECONDS=2.0`
-   - `CONSIST_DB_LOCK_RETRIES=20`
-   - `CONSIST_DB_LOCK_BASE_SLEEP_SECONDS=0.1`
-   - `CONSIST_DB_LOCK_MAX_SLEEP_SECONDS=2.0`
-
-4. **HPC starting profile** (multiple concurrent writers):
-   - Start with retries at `40`.
-   - Start with base sleep at `0.2` seconds.
-   - Start with max sleep at `5.0` seconds.
-   - If lock failures persist, increase retries first, then max sleep.
-   - If runs feel too slow to fail when lock is permanent, lower retries.
-
----
-
-## Mount & Path Issues
-
-### "Mount not resolving" (Container integration)
-
-**Symptom:** Container runs but `/inputs` is empty or doesn't exist.
-
-**Root Cause:** Volume mount paths don't exist or are incorrect.
-
-**Solution:**
-
-1. **Check paths exist on host:**
-   ```python
-   from pathlib import Path
-   for host_path in volumes.keys():
-       assert Path(host_path).exists(), f"Missing: {host_path}"
-   ```
-
-2. **Use absolute paths:**
-   ```python
-   # DON'T:
-   volumes={"./data": "/inputs"}
-
-   # DO:
-   volumes={str(Path("./data").resolve()): "/inputs"}
-   ```
-
-3. **Check permissions:**
-   ```bash
-   ls -la ./data
-   # Must be readable by your user (and by Docker if using docker-in-docker)
-   ```
-
-4. **Debug mount:**
-   ```bash
-   docker run -it -v ./data:/inputs my-image ls -la /inputs
-   ```
-
-If Consist errors about host paths not living under configured mounts, either add the
-mount in your `Tracker` or pass `strict_mounts=False` to `run_container()`.
-
----
+**Fix:** Verify host paths with `Path(...).exists()`, pass absolute mount paths,
+check permissions, and debug with a direct `docker run -v ... ls` command. If
+Consist rejects paths outside configured mounts, add the mount to the `Tracker`
+or pass `strict_mounts=False` to `run_container()`.
 
 ### "URI resolution failed"
 
-**Symptom:** Error like `Cannot resolve URI: outputs://key/file.csv`
+**Diagnosis:** The URI scheme is unknown, the mount was not registered, or the
+artifact points at bytes that are no longer reachable from this machine.
 
-**Root Cause:** URI scheme not recognized or mount not registered.
-
-**Solution:**
-
-Use absolute paths instead of URI schemes for file operations:
-
-```python
-# DON'T:
-artifact_uri = "outputs://key/result.csv"
-df = pd.read_csv(artifact_uri)  # Fails
-
-# DO:
-with tracker.start_run("resolve_uri", model="example"):
-    artifact = tracker.log_artifact(result_path, key="key", direction="output")
-    df = pd.read_csv(artifact.path)  # Use .path property
-```
-
-Or resolve URI explicitly:
-
-```python
-resolved_path = tracker.resolve_uri("outputs://key/result.csv")
-df = pd.read_csv(resolved_path)
-```
-
----
+**Fix:** Register the mount, fix the URI scheme, or hydrate from a recovery root.
+For portable path rules, see [Mounts & Portability](mounts-and-portability.md).
 
 ### "Working directory changed between runs"
 
-**Symptom:** File paths work in first run but fail in second run (re-run from different directory).
+**Diagnosis:** Relative paths were resolved from different working directories,
+so the recorded provenance path no longer points at the same bytes.
 
-**Root Cause:** Relative paths depend on current working directory.
-
-**Solution:**
-
-Use absolute paths everywhere:
-
-```python
-# DON'T:
-output_file = "results.csv"  # Relative to cwd
-
-# DO:
-output_file = Path(tracker.run_dir) / "results.csv"  # Absolute
-```
-
-Or use artifact URIs:
-
-```python
-with tracker.start_run("log_output", model="example"):
-    tracker.log_artifact(result, key="output", direction="output")
-# Later, access via:
-artifact = tracker.get_artifacts_for_run("run_id").outputs["output"]
-print(artifact.path)  # Absolute path
-```
+**Fix:** Prefer tracker-managed output paths, absolute mount-backed paths, or
+configured mount roots. For archived historical bytes, record
+`artifact.meta["recovery_roots"]` instead of depending on a mutable cwd.
 
 ---
 
-## Data & Schema Issues
+## Data And Schema
 
 ### "Schema mismatch during ingestion"
 
-**Symptom:** Error like `Column 'age' expected int, got str`
+**Diagnosis:** The file columns, dtypes, or table layout changed after the first
+ingest or no longer match the expected schema.
 
-**Root Cause:** DataFrame column type doesn't match schema definition.
-
-**Solution:**
-
-Convert DataFrame types before ingestion:
-
-```python
-from your_pkg.models import MySchema
-
-# Check types
-print(df.dtypes)
-
-# Convert if needed
-df = df.astype({
-    "age": "int64",
-    "income": "float64",
-    "name": "object",
-})
-
-with tracker.start_run("ingest_data", model="example"):
-    tracker.log_dataframe(df, key="data", schema=MySchema)
-```
-
-Or use Pandas casting:
-
-```python
-df["age"] = pd.to_numeric(df["age"], errors="coerce")  # Convert with fallback
-```
-
----
+**Fix:** Inspect the actual file, schema metadata, and dlt loader logs. For
+loader-specific cases, see [DLT Loader](dlt-loader-guide.md#common-errors).
 
 ### "Null in non-optional field"
 
-**Symptom:** Warning like `Null value in non-optional field 'age'`
+**Diagnosis:** Input data contains nulls where the table schema requires a value.
 
-**Root Cause:** DataFrame has NaN/None in a field that schema requires non-null.
-
-**Solution:**
-
-1. **Drop nulls:**
-   ```python
-   df = df.dropna(subset=["age"])
-   ```
-
-2. **Fill nulls:**
-   ```python
-   df["age"] = df["age"].fillna(0)  # Default value
-   ```
-
-3. **Make field optional:**
-   ```python
-   from typing import Optional
-
-   class MySchema(SQLModel, table=True):
-       age: Optional[int]  # Can be None
-   ```
-
----
+**Fix:** Clean or fill the source data before ingestion, or update the schema if
+null is a valid domain value.
 
 ### "Duplicate primary keys"
 
-**Symptom:** Error like `Primary key violation: duplicate ID`
+**Diagnosis:** The source table has repeated keys for a field Consist or the
+loader treats as unique.
 
-**Root Cause:** DataFrame has duplicate values in the primary key column.
-
-**Solution:**
-
-Deduplicate before ingestion:
-
-```python
-# Keep last occurrence (or "first")
-df = df.drop_duplicates(subset=["id"], keep="last")
-
-# Or remove all duplicates
-df = df[~df.duplicated(subset=["id"], keep=False)]
-
-with tracker.start_run("ingest_deduped", model="example"):
-    tracker.log_dataframe(df, key="data", schema=MySchema)
-```
-
----
+**Fix:** Deduplicate upstream or change the declared key. Do not suppress the
+error until you know whether duplicate rows are legitimate.
 
 ### "Can't query across runs"
 
-**Symptom:** `tracker.views.MySchema` doesn't exist or returns empty results.
+**Diagnosis:** The target records were never ingested, live in a different DB, or
+use incompatible schema/table names.
 
-**Root Cause:** Schema not registered or data not ingested with schema.
-
-**Solution:**
-
-1. **Register schema on Tracker creation:**
-   ```python
-   tracker = Tracker(
-       run_dir="./runs",
-       db_path="./provenance.duckdb",
-       schemas=[Person, Trip],  # Register here
-   )
-   ```
-
-2. **Ingest with schema:**
-   ```python
-with tracker.start_run("ingest_persons", model="example"):
-    tracker.log_dataframe(df, key="persons", schema=Person)
-   ```
-
-3. **Verify schema exists:**
-   ```python
-   print(tracker.views.Person)  # Should not raise AttributeError
-   ```
+**Fix:** Confirm the run IDs in the active DB, inspect artifact metadata, and
+query only ingested tables or relations opened through Consist.
 
 ---
 
-## Container Execution Issues
+## Container Execution
 
 ### "Container execution failed"
 
-**Symptom:** Error: `RuntimeError: Container execution failed`
+**Diagnosis:** The image, command, environment, mount, or output contract failed.
 
-**Root Cause:** Container exited with non-zero code.
-
-**Solution:**
-
-1. **Test container manually:**
-   ```bash
-   docker run -it -v ./data:/inputs my-image python script.py
-   ```
-
-2. **Check logs:**
-   ```bash
-   docker logs <container_id>
-   ```
-
-3. **Add verbose output:**
-   ```python
-   result = run_container(
-       ...
-       environment={"DEBUG": "1"},  # Enable debug output in container
-   )
-   ```
-
-4. **Verify input paths:**
-   ```python
-   from pathlib import Path
-   for input_path in inputs:
-       assert Path(input_path).exists(), f"Missing: {input_path}"
-   ```
-
----
+**Fix:** Re-run the equivalent `docker run` command with the same mounts and
+environment, then compare the container's expected outputs against
+`output_paths`.
 
 ### "Output files not found after container"
 
-**Symptom:** Warning: `Expected output not found: ./outputs/result.csv`
+**Diagnosis:** The container completed but did not write the declared files where
+Consist expected them.
 
-**Root Cause:** Container didn't create output at expected location.
-
-**Solution:**
-
-1. **Verify container creates outputs:**
-   ```bash
-   docker run -it -v ./outputs:/outputs my-image sh -c "ls -la /outputs && echo 'done'"
-   ```
-
-2. **Check output paths in container:**
-   ```python
-   run_container(
-       ...
-       command=["python", "script.py"],  # Ensure script creates output
-   )
-   ```
-
-3. **Use correct host paths:**
-   ```python
-   output_dir = Path("./outputs").mkdir(parents=True, exist_ok=True)
-   result = run_container(
-       ...
-       outputs=[str(output_dir / "result.csv")],
-   )
-   ```
-
----
+**Fix:** Check the container working directory, mount targets, file names, and
+permissions. Container runs must declare explicit `output_paths`.
 
 ### "Image pull failed"
 
-**Symptom:** Error: `Error pulling image: authentication required`
+**Diagnosis:** The registry, tag, credentials, or network path is unavailable.
 
-**Root Cause:** Docker can't access the image registry.
-
-**Solution:**
-
-1. **Authenticate:**
-   ```bash
-   docker login
-   ```
-
-2. **Use public images:**
-   ```python
-   run_container(
-       image="ubuntu:latest",  # Public image
-       ...
-   )
-   ```
-
-3. **Check image exists locally:**
-   ```bash
-   docker images | grep my-image
-   ```
-
-4. **Disable pull:**
-   ```python
-   run_container(
-       ...
-       pull_latest=False,  # Use local image if available
-   )
-   ```
-
----
+**Fix:** Pull the image manually first, verify credentials, and pin an available
+tag for reproducible workflow runs.
 
 ### "Permission denied in container"
 
-**Symptom:** `Permission denied` when container writes to mounted volume.
+**Diagnosis:** The container user cannot read inputs or write mounted outputs.
 
-**Root Cause:** Container user doesn't have write permission on host mount.
-
-**Solution:**
-
-1. **Make directory writable:**
-   ```bash
-   chmod 777 ./outputs
-   ```
-
-2. **Run container as current user:**
-   ```python
-   # (Requires custom Dockerfile or user configuration)
-   # docker run --user $(id -u):$(id -g) ...
-   ```
-
-3. **Create output directory with correct permissions:**
-   ```python
-   output_dir = Path("./outputs")
-   output_dir.mkdir(parents=True, exist_ok=True, mode=0o777)
-   ```
+**Fix:** Adjust host permissions, write to a mounted output directory owned by
+the executing user, or configure the container user to match the host workflow.
 
 ---
 
-## Performance Issues
+## Performance
 
 ### "Runs are very slow"
 
-**Symptom:** Each run takes much longer than expected.
+**Diagnosis:** Slow runs usually come from hashing large inputs, copying cached
+outputs, container startup, DB contention, or expensive fallback recovery.
 
-**Root Cause:** Several possibilities:
-
-1. **No cache hits:** Check if signature is changing unexpectedly.
-2. **File I/O bottleneck:** Large artifact materialization.
-3. **Database queries slow:** Too many cross-run queries.
-4. **Container startup overhead:** Each container run adds 1-2 seconds.
-
-**Solution:**
-
-1. **Profile execution:**
-   ```python
-   import time
-   start = time.time()
-   result = consist.run(...)
-   print(f"Elapsed: {time.time() - start}s")
-   print(f"Cache hit: {result.cache_hit}")
-   ```
-
-2. **Avoid unnecessary materialization:**
-   ```python
-   from consist import CacheOptions
-
-   # Don't materialize if you don't need it
-   result = consist.run(
-       ...,
-       cache_options=CacheOptions(cache_hydration="none"),
-   )
-   ```
-
-3. **Use Parquet instead of CSV** (faster parsing):
-   ```python
-   df.to_parquet("output.parquet")  # Instead of .to_csv()
-   ```
-
-4. **Batch containers to reduce startup overhead:**
-   ```python
-   # DON'T:
-   for i in range(100):
-       run_container(...)  # 100 containers, 100 startups
-
-   # DO:
-   run_container(
-       command=["python", "process_batch.py", "--n", "100"],
-       ...
-   )
-   ```
-
----
+**Fix:** Check which phase is slow. Use narrower `identity_inputs`, avoid
+unneeded cache hydration, reduce concurrent DB writers, and hydrate only the
+keys you need.
 
 ### "Database is huge and slow"
 
-**Symptom:** Queries are slow, database file is large.
+**Diagnosis:** Old runs, ingested data, cache entries, or un-compacted deletes
+are accumulating.
 
-**Root Cause:** Too much data ingested or too many runs.
-
-**Solution:**
-
-1. **Vacuum database:**
-   ```python
-   with tracker.engine.begin() as conn:
-       conn.exec_driver_sql("VACUUM")
-   ```
-
-2. **Archive old runs:**
-   ```bash
-   # Move old database
-   mv provenance.duckdb provenance.backup.duckdb
-   # Start fresh
-   ```
-
-3. **Use selective ingestion:**
-   ```python
-   # Don't ingest everything, just what you need
-with tracker.start_run("sample_ingest", model="example"):
-    tracker.log_dataframe(df.head(1000), key="sample")  # Sample instead of all
-   ```
-
----
-
-## Debugging Tools
-
-### Enable Logging
-
-```python
-import logging
-
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger("consist")
-logger.setLevel(logging.DEBUG)
-```
-
-This prints detailed provenance tracking, signature computation, and cache decisions.
-
-### Inspect Run Metadata
-
-```python
-run = tracker.get_run("run_id")
-print(f"Signature: {run.signature}")
-print(f"Code hash: {run.git_hash}")
-print(f"Meta: {run.meta}")
-```
-
-### Inspect Database
-
-```python
-import duckdb
-
-conn = duckdb.connect("provenance.duckdb")
-print(conn.query("SELECT * FROM run LIMIT 5").df())
-print(conn.query("SELECT * FROM artifact LIMIT 5").df())
-```
-
-### Check File Hashes
-
-```python
-from pathlib import Path
-
-with tracker.start_run("hash_input", model="example"):
-    artifact = tracker.log_artifact(Path("input.csv"), key="input", direction="input")
-    print(f"Path: {artifact.path}")
-    print(f"Artifact Fingerprint: {artifact.hash}")
-    print(f"Size: {artifact.path.stat().st_size}")
-```
-
----
-
-## Getting Help
-
-If you hit an issue not covered here:
-
-1. **Check the logs:**
-   ```python
-   logging.basicConfig(level=logging.DEBUG)
-   ```
-
-2. **Inspect database:**
-   ```bash
-   duckdb provenance.duckdb ".schema"
-   ```
-
-3. **File an issue** on GitHub with:
-   - Error message and traceback
-   - Minimal reproducible example
-   - Output of `consist runs` (recent run history)
-   - Output of logging (with DEBUG enabled)
-
----
+**Fix:** Follow [Database Maintenance](db-maintenance.md): snapshot, inspect,
+purge with `--dry-run`, optionally prune cache where references are derivable,
+then compact.
 
 ## See Also
 
+- [Historical Recovery](guides/historical-recovery.md)
 - [Container Integration](containers-guide.md#error-handling)
 - [DLT Loader](dlt-loader-guide.md#common-errors)
-- [Architecture](architecture.md) (for implementation details)
-- [CLI Reference](cli-reference.md) (for debugging commands)
+- [Architecture](architecture.md)
+- [CLI Reference](cli-reference.md)

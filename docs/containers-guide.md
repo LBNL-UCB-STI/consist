@@ -1,719 +1,283 @@
 # Container Integration Guide
 
-Consist executes containerized tools (Docker, Singularity) with automatic provenance tracking and caching based on **image digest** and parameters.
+Consist can run Docker or Singularity commands while recording the container
+image, command, inputs, outputs, environment hash, and mount layout used for
+cache identity.
 
-!!! note "Image Digest"
-    An image digest is the SHA256 hash of a container image's content (e.g., `sha256:a1b2c3...`). Unlike tags (`:latest`, `:v1.0`), digests are immutable—the same digest always refers to the same image bytes.
-
-!!! note "Recommended path"
-    `run_container(...)` is an integration-specific API for external tools. For
-    Python workflow steps, prefer `tracker.run(...)`, `tracker.trace(...)`, or
-    `consist.scenario(...)` with `scenario.run(...)` / `scenario.trace(...)`.
-
----
+Use `run_container(...)` for external tools that are easiest to package as a
+container. For normal Python workflow code, prefer `tracker.run(...)`,
+`tracker.trace(...)`, or `consist.scenario(...)`.
 
 ## When to Use Containers
 
-| Use case | Recommendation |
-|----------|----------------|
-| Wrapping existing tools (ActivitySim, SUMO, BEAM, R scripts) | Container |
-| Complex dependencies easier to package than install | Container |
-| Black-box or non-deterministic tools | Container |
-| Tool expects specific file paths | Container |
-| Simple Python functions | `tracker.run()` |
-| Fine-grained step caching | `scenario()` + `sc.run()` |
-| Development/debugging with fast iteration | Native execution |
+| Use container execution | Prefer native Consist execution |
+| --- | --- |
+| Existing command-line tools such as BEAM, ActivitySim, SUMO, R scripts, or compiled models | Python functions you control |
+| Dependencies are hard to reproduce locally | Fast iterative development |
+| The tool requires a fixed filesystem layout | Fine-grained function-level caching |
+| You need to preserve the runtime image as provenance | The runtime is already your project environment |
 
----
+Containers are a coarse workflow boundary. Keep the container step large enough
+that startup overhead is not dominant, and pass every cache-relevant config or
+input file through `inputs=`.
 
-## How Caching Works
-
-Consist computes a container signature from:
-
-| Component | Included in signature | Notes |
-|-----------|----------------------|-------|
-| Image digest | Yes | Resolved from registry if `pull_latest=True` |
-| Command | Yes | Exact command string and arguments |
-| Environment variables | Yes | Deterministic hash |
-| Container mount paths | Yes | e.g., `/inputs`, `/outputs` |
-| Host paths | **No** | Run-specific; not part of cache key |
-| Input file content | Yes | SHA256 hashes |
-
-If all components match a prior run, Consist returns cached outputs without executing the container.
-
-!!! warning "Host paths are not cached"
-    Volume host paths (e.g., `./data:/inputs`) are excluded from the cache key because they vary between runs. To ensure config changes invalidate cache, pass config files via `inputs=`.
-
----
-
-## Basic Example: Single Container Run
-
-```python
-from consist import Tracker
-from consist.integrations.containers import run_container
-from pathlib import Path
-
-tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
-
-# Create input data
-input_path = Path("./data/input.csv")
-input_path.parent.mkdir(exist_ok=True)
-input_path.write_text("x,y\n1,2\n3,4\n")
-
-# Execute container
-result = run_container(
-    tracker=tracker,
-    run_id="my_model_run",
-    image="my-org/my-model:v1.0",
-    command=["python", "process.py", "--input", "/inputs/input.csv"],
-    volumes={
-        "./data": "/inputs",      # Host path → Container path
-        "./outputs": "/outputs",
-    },
-    inputs=[input_path],          # Files to hash (for cache key)
-    outputs=["./outputs/result.csv"],  # Files to capture as artifacts
-    backend_type="docker",
-)
-
-# Access results
-if result.cache_hit:
-    print(f"Cache hit from {result.cache_source}")
-else:
-    print("Container executed")
-
-for key, artifact in result.artifacts.items():
-    print(f"Output: {key} → {artifact.path}")
-```
-
-**What happened:**
-
-1. Consist created a signature from image + command + inputs
-2. Checked if this signature exists in the database
-3. If no prior run: executed the container, scanned outputs, logged them as artifacts
-4. If prior run exists: copied cached artifacts to `./outputs/result.csv` (no container execution)
-
----
-
-## ActivitySim Integration
-
-ActivitySim is a commonly used transportation demand modeling tool. Here's how to integrate it with Consist:
-
-### Setup
-
-1. Create a Docker image with ActivitySim installed:
-
-    ```dockerfile
-    FROM python:3.11
-    RUN pip install activitysim numpy pandas
-    COPY . /workspace
-    WORKDIR /workspace
-    ```
-
-    Build and push to registry:
-
-    ```bash
-    docker build -t my-org/activitysim:v1.0 .
-    docker push my-org/activitysim:v1.0
-    ```
-
-2. Create ActivitySim config files (as usual) in a local directory:
-
-    ```text
-    ./configs/
-    ├── settings.yaml
-    ├── accessibility_coefficients.csv
-    ├── mode_choice_coefficients.csv
-    └── ...
-    ```
-
-### Running a Scenario
-
-```python
-from consist import Tracker
-from consist.integrations.containers import run_container
-from pathlib import Path
-
-tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
-
-def run_activitysim_scenario(scenario_name: str, configs_dir: Path):
-    """Execute ActivitySim with Consist provenance."""
-
-    # Ensure output directory exists
-    output_dir = Path(f"./outputs/{scenario_name}")
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    result = run_container(
-        tracker=tracker,
-        run_id=f"activitysim_{scenario_name}",
-        image="my-org/activitysim:v1.0",
-        command=[
-            "python", "-m", "activitysim.core.workflow",
-            "-c", "/configs",
-            "-o", f"/outputs/{scenario_name}",
-        ],
-        volumes={
-            str(configs_dir): "/configs",
-            "./outputs": "/outputs",
-        },
-        inputs=[configs_dir],  # Hash all configs
-        outputs=[f"./outputs/{scenario_name}"],  # Capture all outputs
-        environment={
-            "ACTIVITYSIM_CHUNK_SIZE": "100000",  # Optional: tune performance
-        },
-        backend_type="docker",
-    )
-
-    return result
-
-# Run baseline scenario
-result_baseline = run_activitysim_scenario(
-    "baseline",
-    configs_dir=Path("./configs"),
-)
-
-# Run scenario with modified coefficients
-# (New output directory and modified config) → new cache entry
-result_modified = run_activitysim_scenario(
-    "high_income_sensitivity",
-    configs_dir=Path("./configs_modified"),
-)
-```
-
-### Querying Results
-
-After running scenarios, query outputs across runs:
-
-```python
-import pandas as pd
-from pathlib import Path
-
-# Find all ActivitySim outputs
-for run_subdir in Path("./runs").glob("activitysim_*/"):
-    output_artifacts = tracker.get_artifacts_for_run(run_subdir.name)
-    for key, artifact in output_artifacts.outputs.items():
-        if "summary" in key:
-            df = pd.read_csv(artifact.path)
-            print(f"Scenario: {run_subdir.name}")
-            print(df.head())
-```
-
-Or use Consist's database queries:
-
-```python
-from sqlmodel import Session, select
-
-with Session(tracker.engine) as session:
-    # Find all ActivitySim runs
-    runs = session.exec(
-        select(Run).where(Run.model == "activitysim")
-    ).all()
-
-    for run in runs:
-        artifacts = tracker.get_artifacts_for_run(run.id)
-        print(f"Run: {run.id}, Outputs: {list(artifacts.outputs.keys())}")
-```
-
----
-
-## Singularity / Apptainer (HPC)
-
-Docker is unavailable on most HPC clusters due to privilege requirements.
-Singularity and its community fork Apptainer are the standard alternatives —
-both run rootless and are accepted on shared compute resources. Consist supports
-both with the same `run_container()` API; swap `backend_type="singularity"` for
-`backend_type="apptainer"` depending on which is installed (`which apptainer`).
-
-### Getting a `.sif` File
-
-The typical HPC workflow is to pull a Docker image and convert it to a Singularity
-Image File (`.sif`) on a machine where Docker is available, then transfer it to
-a shared filesystem the cluster can read:
-
-```bash
-# Pull from Docker Hub and convert (run locally or on a build/login node)
-singularity pull my_model.sif docker://my-org/my-model:v1.0
-
-# Or build from a definition file
-singularity build my_model.sif my_model.def
-```
-
-Place `.sif` files on a **shared filesystem** (e.g., `/project/containers/`) that
-all compute nodes can access. A node-local path breaks caching across nodes because
-the same file lives at different absolute paths.
-
-### Running with Consist
+## Minimal Docker Example
 
 ```python
 from pathlib import Path
+
 from consist import Tracker
 from consist.integrations.containers import run_container
 
 tracker = Tracker(
-    run_dir="/scratch/consist_runs",
+    run_dir="./runs",
+    db_path="./provenance.duckdb",
+    mounts={
+        "data": str(Path("data").resolve()),
+        "runs": str(Path("runs").resolve()),
+    },
+)
+
+result = run_container(
+    tracker=tracker,
+    run_id="model_step",
+    image="my-org/my-model:v1.0",
+    command=["python", "process.py", "--input", "/inputs/input.csv"],
+    volumes={
+        str(Path("data").resolve()): "/inputs",
+        str(Path("runs/model_step").resolve()): "/outputs",
+    },
+    inputs=[Path(tracker.mounts["data"]) / "input.csv"],
+    outputs=[Path(tracker.mounts["runs"]) / "model_step/result.csv"],
+    backend_type="docker",
+)
+
+if result.cache_hit:
+    print(f"hydrated from {result.cache_source}")
+```
+
+The host paths can differ by machine. The container paths (`/inputs`,
+`/outputs`) are part of the command contract and should stay stable.
+
+## Minimal Singularity Example
+
+On clusters, keep `.sif` files on a shared filesystem visible from all compute
+nodes:
+
+```bash
+singularity pull /project/containers/my_model_v1.0.sif docker://my-org/my-model:v1.0
+```
+
+Then run through the same API with tracker mounts for the shared input root and
+scratch output root:
+
+```python
+tracker = Tracker(
+    run_dir="/scratch/my-run/outputs",
     db_path="/project/provenance.duckdb",
     mounts={
         "inputs": "/project/shared/inputs",
-        "runs": "/scratch/consist_runs",
+        "outputs": "/scratch/my-run/outputs",
     },
 )
 
 result = run_container(
     tracker=tracker,
-    run_id="hpc_job",
-    image="/project/containers/my_model.sif",  # shared filesystem path
-    command=["python", "model.py", "--input", "/inputs/data.csv"],
+    run_id="hpc_model_step",
+    image="/project/containers/my_model_v1.0.sif",
+    command=["python", "process.py", "--input", "/inputs/input.csv"],
     volumes={
         "/project/shared/inputs": "/inputs",
-        "/scratch/outputs": "/outputs",
+        "/scratch/my-run/outputs": "/outputs",
     },
-    inputs=[Path("/project/shared/inputs/data.csv")],
-    outputs=["/scratch/outputs/result.csv"],
-    backend_type="singularity",  # or "apptainer"
-)
-```
-
-### Cache Identity for Local `.sif` Files
-
-For local `.sif` files, Consist uses the **absolute file path** as the cache
-identity — not the file's content. The path string is what gets hashed into the
-run signature.
-
-Practical implications:
-
-- Same `.sif` path, same content → cache hit ✓
-- Same `.sif` path, **file replaced in place** → **cache hit** (path unchanged — stale result)
-- New versioned filename (`my_model_v1.1.sif`) → cache miss ✓
-
-!!! danger "Overwriting a `.sif` in place silently reuses the old cache"
-    If you rebuild and overwrite `my_model.sif` at the same path, Consist sees
-    the same path string and returns cached outputs from the previous image.
-    **Always use versioned filenames** (`my_model_v1.0.sif`, `my_model_v1.1.sif`)
-    and never overwrite an existing `.sif`. The version is the only signal Consist
-    has that the image changed.
-
-### Alternative: `docker://` URIs (Recommended for Most Cases)
-
-Singularity and Apptainer can pull directly from Docker registries at runtime
-using `docker://` URIs, without creating a local `.sif` file:
-
-```python
-result = run_container(
-    tracker=tracker,
-    run_id="hpc_job",
-    image="docker://my-org/my-model:v1.0",  # pulled at runtime
-    command=["python", "model.py"],
-    volumes={"/scratch/inputs": "/inputs", "/scratch/outputs": "/outputs"},
-    inputs=[Path("/scratch/inputs/data.csv")],
-    outputs=["/scratch/outputs/result.csv"],
+    inputs=[Path("/project/shared/inputs/input.csv")],
+    outputs=[Path("/scratch/my-run/outputs/result.csv")],
     backend_type="singularity",
 )
 ```
 
-The URI string (including the tag) becomes the cache identity. Bumping
-`v1.0` → `v1.1` causes an automatic cache miss — no local file management
-required. This avoids the overwrite hazard entirely and is the pattern used
-in production PILATES workflows.
-
----
-
-## Volume Mounting Best Practices
-
-### Portable Mapping: `Tracker(mounts=...)` + container `volumes={...}`
-
-For portable container runs across machines, keep container paths stable
-(`"/inputs"`, `"/outputs"`) and map host paths from tracker mounts.
+You can also use registry URIs directly when the cluster's Singularity runtime
+supports them:
 
 ```python
-from pathlib import Path
-from consist import Tracker
-from consist.integrations.containers import run_container
+result = run_container(
+    tracker=tracker,
+    run_id="hpc_model_step",
+    image="docker://my-org/my-model:v1.0",
+    command=["python", "process.py"],
+    volumes={"/project/inputs": "/inputs", "/scratch/outputs": "/outputs"},
+    inputs=[Path("/project/inputs/input.csv")],
+    outputs=[Path("/scratch/outputs/result.csv")],
+    backend_type="singularity",
+    strict_mounts=False,  # or configure tracker mounts for these roots
+)
+```
 
+## Cache Identity
+
+Consist builds the container cache key from deterministic runtime identity:
+
+| Component | In cache key | Notes |
+| --- | --- | --- |
+| Image identity | Yes | Docker image digest when resolved; local `.sif` path or registry URI for Singularity |
+| Command | Yes | Exact argv values |
+| Environment | Yes | Stored as a deterministic hash, not raw values |
+| Container mount paths | Yes | For example `/inputs`, `/outputs` |
+| Host mount paths | No | Host-specific paths are excluded |
+| Input content | Yes | Paths passed in `inputs=` are hashed |
+
+On a cache hit, `run_container(...)` does not execute the container. It
+materializes the requested output files at the requested host paths and returns
+the prior run as `result.cache_source`.
+
+### Docker Image Tags
+
+Pin image versions. If you use mutable tags such as `latest`, cache behavior is
+only as good as the resolved image identity. Use `pull_latest=True` only when you
+want Consist to re-check the registry for a changed digest.
+
+### Local `.sif` Files
+
+For local Singularity images, the path is the image identity. Do not overwrite a
+`.sif` in place:
+
+```text
+/project/containers/my_model_v1.0.sif  # good
+/project/containers/my_model_v1.1.sif  # good
+/project/containers/my_model.sif       # risky if overwritten
+```
+
+Replacing `/project/containers/my_model.sif` with new bytes at the same path can
+reuse the old cache entry because the path string did not change.
+
+## Mounts
+
+Keep three path layers separate:
+
+| Layer | Example | Purpose |
+| --- | --- | --- |
+| Host path | `/project/inputs` | Real local or cluster path |
+| Container path | `/inputs` | Path the command sees |
+| Consist mount name | `inputs` | Optional portable alias in `Tracker(mounts=...)` |
+
+Use stable container paths and include cache-relevant files in `inputs=`:
+
+```python
 tracker = Tracker(
-    run_dir="/data/project_scratch/consist_runs",
-    db_path="./provenance.duckdb",
+    run_dir="/scratch/consist-runs",
+    db_path="/project/provenance.duckdb",
     mounts={
-        "inputs": "/data/project_inputs",
-        "runs": "/data/project_scratch/consist_runs",
+        "inputs": "/project/inputs",
+        "runs": "/scratch/consist-runs",
     },
 )
 
-inputs_root = Path(tracker.mounts["inputs"]).resolve()
-runs_root = Path(tracker.mounts["runs"]).resolve()
+inputs_root = Path(tracker.mounts["inputs"])
+runs_root = Path(tracker.mounts["runs"])
 
 result = run_container(
     tracker=tracker,
-    run_id="asim_baseline",
+    run_id="activitysim_baseline",
     image="my-org/activitysim:v1.0",
-    command=["python", "-m", "activitysim.core.workflow", "-c", "/inputs", "-o", "/outputs"],
+    command=[
+        "python",
+        "-m",
+        "activitysim.core.workflow",
+        "-c",
+        "/configs",
+        "-o",
+        "/outputs",
+    ],
     volumes={
-        str(inputs_root): "/inputs",   # host mount root -> stable container path
-        str(runs_root): "/outputs",
+        str(inputs_root / "configs"): "/configs",
+        str(runs_root / "activitysim_baseline"): "/outputs",
     },
-    inputs=[inputs_root / "settings.yaml", inputs_root / "households.csv"],
-    outputs=[runs_root / "asim_baseline" / "final_trips.csv"],
+    inputs=[
+        inputs_root / "configs/settings.yaml",
+        inputs_root / "configs/tour_mode_choice.yaml",
+    ],
+    outputs=[runs_root / "activitysim_baseline/final_trips.csv"],
     backend_type="docker",
 )
 ```
 
-Why this works:
+By default, Consist expects host paths to live under configured mounts or
+`tracker.run_dir`. Use `strict_mounts=False` or `allow_external_paths=True` only
+when the workflow genuinely needs paths outside those roots.
 
-- Different users can map the same mount names to different local paths.
-- Container-internal paths stay stable, so command lines do not change.
-- Requested outputs stay under `tracker.run_dir` (`runs_root`), so defaults work
-  with `strict_mounts=True` and `allow_external_paths=False`.
-- `strict_mounts=True` (default) enforces that host paths are under configured
-  tracker mounts.
+## Outputs
 
-See [Mounts & Portability](mounts-and-portability.md) for mount semantics and
-cross-machine path resolution.
-
-### Mount Paths
-
-Map host directories to container paths consistently:
+`outputs=` can be a list of paths or a mapping from artifact key to path:
 
 ```python
-volumes = {
-    "/host/absolute/path": "/container/path",  # Use absolute paths
-    "./relative": "/container/relative",        # Or relative (resolved against cwd)
+run_output = Path(tracker.mounts["runs"]) / "model_step"
+
+outputs=[run_output / "result.csv"]
+
+outputs={
+    "result": run_output / "result.csv",
+    "diagnostics": run_output / "log.txt",
 }
 ```
 
-By default, Consist only allows host paths that live under configured mounts. If you need
-to allow arbitrary absolute host paths, pass `strict_mounts=False` to `run_container()`.
+Consist scans host output paths after the container exits. If the tool writes to
+a different container path than the one mounted to the expected host location,
+the output will not be found.
 
-To ensure config changes invalidate the cache, pass config files via `inputs`:
+## Environment Variables
 
-```python
-result = run_container(
-    ...
-    volumes={
-        "./config_dir": "/configs",
-        "./data": "/data",
-    },
-    inputs=[Path("./config_dir/settings.yaml"), Path("./data/input.csv")],
-    ...
-)
-```
-
-### Handling Outputs
-
-Outputs can be specified as:
-
-- **List of paths** (logged with filename as key):
-  ```python
-  outputs=["./outputs/result.csv", "./outputs/logs.txt"]
-  # Artifact keys: "result.csv", "logs.txt"
-  ```
-
-- **Dict mapping keys to paths** (custom artifact keys):
-  ```python
-  outputs={
-      "main_result": "./outputs/result.csv",
-      "diagnostics": "./outputs/logs.txt",
-  }
-  # Artifact keys: "main_result", "diagnostics"
-  ```
-
-Consist scans output directories on the **host** after container exits. Files created inside the container at mounted paths are detected automatically.
-
-Outputs must live under `tracker.run_dir` or a configured mount unless
-`allow_external_paths=True` (or `CONSIST_ALLOW_EXTERNAL_PATHS=1`) is set on the tracker.
-
-**Warning:** If the container doesn't create files at the expected paths, Consist logs a warning but doesn't fail (use `lineage_mode="full"` to capture what was created).
-
----
-
-## Environment Variables & Configuration
-
-Pass environment variables to the container:
+Environment variables are included in the cache key by hash:
 
 ```python
 result = run_container(
-    ...
-    environment={
-        "MODEL_PARAM_1": "value1",
-        "MODEL_PARAM_2": "value2",
-        "DEBUG": "true",
-    },
-    ...
-)
-```
-
-These variables are **part of the cache key**. Changing them invalidates the cache.
-
-Consist does **not** persist raw environment values in run metadata or container
-manifests. It stores a deterministic hash instead. If you need those values for
-reproducibility, include them in config files and add those files to `inputs`.
-
-For large configurations, mount config files instead of passing via environment:
-
-```python
-# DON'T do this for large configs:
-environment={"CONFIG": json.dumps(huge_config)}  # Bad: unreadable, cache-unfriendly
-
-# DO this:
-volumes={"./config.json": "/app/config.json"}
-inputs=[Path("./config.json")]
-command=["python", "app.py", "--config", "/app/config.json"]
-```
-
----
-
-## Cache Behavior & Hydration
-
-### Cache Hits
-
-On a cache hit:
-
-1. Consist finds a prior run with the same signature
-2. **No container execution** occurs
-3. Cached output files are **materialized (copied) to requested host output paths**
-4. `result.cache_hit == True`, `result.cache_source` = prior run ID
-
-```python
-result = run_container(...)
-if result.cache_hit:
-    print(f"Cache hit from {result.cache_source}")
-    # result.artifacts are materialized (files exist on disk)
-```
-
-!!! note "Container cache hits vs standard run hydration"
-    `run_container(...)` materializes requested output files on cache hits so
-    expected host output paths exist. This differs from default
-    `consist.run(...)` behavior (`cache_hydration="metadata"`), which hydrates
-    artifact metadata without copying bytes unless explicitly requested.
-
-For byte-recovery and hydration policy details, see
-[Mounts & Portability](mounts-and-portability.md) and
-[Caching & Hydration](concepts/caching-and-hydration.md).
-
-### Cache Invalidation
-
-Cache is invalidated (new run executed) if any of these change:
-
-- **Image**: `my-model:v1` → `my-model:v2` (or image pulled with different digest if `pull_latest=True`)
-- **Command**: Arguments to the tool
-- **Environment**: Any env var changes
-- **Inputs**: Hash of input files changes
-- **Volumes**: Container mount paths change
-
-### Manual Cache Bypass
-
-To force re-execution even with matching signature:
-
-!!! note "Advanced lifecycle pattern"
-    The `tracker.begin_run(...)`/`tracker.end_run()` wrapper below is low-level.
-    Prefer the explicit tracker/scenario execution path unless you need manual
-    lifecycle control around container orchestration.
-
-```python
-# No built-in flag, but you can:
-# 1. Change a trivial env var to force cache miss:
-environment={"CACHE_BYPASS": str(time.time())}
-
-# 2. Or use a cache_mode on the enclosing run:
-tracker.begin_run(..., cache_mode="overwrite")
-result = run_container(...)
-tracker.end_run()
-```
-
----
-
-## Nested Containers (Inside Scenarios)
-
-Use `run_container()` inside `tracker.scenario()` for multi-step workflows where
-each container step caches independently.
-
-=== "Without Consist"
-
-    ```python
-    import subprocess
-
-    # Step 1: Preprocess
-    subprocess.run([
-        "singularity", "run",
-        "--bind", "/scratch/raw_data:/data",
-        "/containers/preprocess.sif",
-        "python", "preprocess.py",
-    ], check=True)
-
-    # Step 2: Model — assumes Step 1 wrote to a known path
-    subprocess.run([
-        "singularity", "run",
-        "--bind", "/project/configs:/configs",
-        "--bind", "/scratch/model_outputs:/outputs",
-        "/containers/activitysim.sif",
-        "python", "-m", "activitysim.core.workflow",
-    ], check=True)
-    ```
-
-    Both steps re-run every time. There is no record of which image version or
-    config produced which outputs, and no way to skip a step whose inputs haven't
-    changed.
-
-=== "With Consist"
-
-    ```python
-    from pathlib import Path
-    from consist import Tracker
-    from consist.integrations.containers import run_container
-
-    tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
-
-    with tracker.scenario("multi_model_workflow") as sc:
-
-        # Step 1: Preprocess — cached by image digest + inputs
-        preprocess_result = run_container(
-            tracker=tracker,
-            run_id="preprocess",
-            image="/containers/preprocess.sif",
-            command=["python", "preprocess.py"],
-            volumes={"/scratch/raw_data": "/data"},
-            inputs=[Path("/scratch/raw_data")],
-            outputs=["/scratch/preprocessed"],
-            backend_type="singularity",
-        )
-        sc.coupler.set("preprocessed_data", preprocess_result.output)
-
-        # Step 2: Model — skipped automatically if image + configs unchanged
-        model_result = run_container(
-            tracker=tracker,
-            run_id="activitysim",
-            image="/containers/activitysim.sif",
-            command=["python", "-m", "activitysim.core.workflow"],
-            volumes={
-                "/project/configs": "/configs",
-                "/scratch/model_outputs": "/outputs",
-            },
-            inputs=[Path("/project/configs")],
-            outputs=["/scratch/model_outputs"],
-            backend_type="singularity",
-        )
-        sc.coupler.set("model_outputs", model_result.output)
-    ```
-
-    Each container step caches independently. If preprocessing inputs haven't
-    changed, that step is skipped. Lineage links both steps to the scenario,
-    so you can query which image version and config produced any output.
-
----
-
-## Error Handling
-
-### Container Execution Fails
-
-If the container exits with a non-zero code:
-
-```python
-try:
-    result = run_container(...)
-except RuntimeError as e:
-    print(f"Container failed: {e}")
-    # Debug: check container logs, input paths, volume mounts
-```
-
-**Debugging steps:**
-1. Run the container manually to check for errors:
-   ```bash
-   docker run -it -v ./data:/inputs my-org/my-model:v1 python process.py
-   ```
-2. Check that input paths exist and are readable by the container
-3. Ensure output directories are writable (containers often run as root)
-4. Check volume mount paths are absolute or correctly resolved
-
-### Output Files Not Found
-
-If Consist doesn't find expected outputs:
-
-```python
-result = run_container(...)
-# Warning logged: "Expected output not found: ./outputs/result.csv"
-
-# Check what was actually created:
-import subprocess
-subprocess.run(["docker", "run", "--rm",
-                "-v", "./outputs:/outputs",
-                "my-org/my-model:v1",
-                "ls", "-la", "/outputs"])
-```
-
-### Image Pull Errors
-
-If the image cannot be pulled:
-
-```python
-result = run_container(
-    ...
+    tracker=tracker,
+    run_id="model_step",
     image="my-org/my-model:v1.0",
-    pull_latest=False,  # Avoid registry roundtrip if not needed
+    command=["python", "process.py"],
+    volumes={
+        str(Path(tracker.mounts["data"]).resolve()): "/inputs",
+        str(Path(tracker.mounts["runs"]).resolve() / "model_step"): "/outputs",
+    },
+    inputs=[Path(tracker.mounts["data"]) / "input.csv"],
+    outputs=[Path(tracker.mounts["runs"]) / "model_step/result.csv"],
+    environment={"MODEL_YEAR": "2030"},
     backend_type="docker",
 )
-# Check docker auth:
-# docker login
-# docker pull my-org/my-model:v1.0
 ```
 
----
+Consist does not persist raw environment values in run metadata. Put
+reproducibility-critical settings in files and pass those files through
+`inputs=`.
 
-## Performance Tuning
+## Top Gotchas
 
-### Container Startup Overhead
+1. **Mounted config is not enough for cache invalidation.** If a file matters,
+   include it in `inputs=`.
+2. **Host paths do not identify the cache entry.** Moving the same inputs to a
+   different machine should not invalidate the run.
+3. **Container paths do identify the cache entry.** Changing `/inputs` to
+   `/data` changes the command/runtime contract.
+4. **Do not overwrite local `.sif` images in place.** Use versioned filenames.
+5. **Avoid mutable image tags for production runs.** Prefer immutable tags or
+   digest-aware pulls.
+6. **Expected outputs must be written through mounted paths.** A file created
+   only inside the container filesystem disappears when the container exits.
+7. **Batch tiny work.** Container startup overhead makes many one-row or
+   one-file invocations expensive.
 
-Container creation/startup is ~1-2 seconds. For workflows with many short-lived steps, batch them:
+## Troubleshooting Checklist
 
-```python
-# DON'T do this (N containers, N startups):
-for i in range(100):
-    run_container(...)
+- Run the equivalent `docker run` or `singularity run` command manually.
+- Confirm every host input path exists before the container starts.
+- Confirm every output directory is writable by the container process.
+- Check that the command uses container paths, not host paths.
+- Confirm changed config files are listed in `inputs=`.
+- For registry images, verify authentication with `docker pull` or the cluster's
+  Singularity pull mechanism.
 
-# DO this (1 container, batch processing inside):
-run_container(
-    command=["python", "batch_process.py", "--n", "100"],
-    ...
-)
-```
+## API Links
 
-### Image Size & Registry
-
-Large images slow down pulls. Optimize:
-- Use slim base images (`python:3.11-slim` not `python:3.11`)
-- Only install required dependencies
-- Use multi-stage builds
-
-### Persistent Caching
-
-If you re-run the same container frequently, Consist's cache avoids re-execution. But if cache is disabled or cleared:
-
-```python
-# Cache is per (image_digest, command, inputs) signature
-# To maximize cache reuse:
-# 1. Pin image versions (don't use :latest)
-# 2. Use `pull_latest=False` unless you need latest code
-# 3. Log inputs consistently (same file paths, same hashes)
-```
-
----
-
-## Lineage Mode: "full" vs "none"
-
-By default, `lineage_mode="full"` performs provenance tracking. If you need to execute containers without Consist logging (for external tools), use `lineage_mode="none"`:
-
-```python
-result = run_container(
-    ...
-    lineage_mode="none",  # Don't create a Consist run
-)
-# No provenance logged, but you still get manifest_hash for external tracking
-```
-
-This is useful if you're embedding Consist-executed containers inside a non-Consist workflow.
-
----
-
-## See Also
-
-- [Usage Guide: Pattern 3 (Container Integration)](usage-guide.md#pattern-3-container-integration)
-- [Architecture: Container Integration](architecture.md#container-integration)
-- [Troubleshooting: Container Execution](troubleshooting.md#container-execution-issues)
-- [Mounts & Portability](mounts-and-portability.md) — host path remapping and historical resolution
-- [Containers API Reference](integrations/containers.md) — `run_container` and `ContainerDefinition`
+- [Containers API Reference](integrations/containers.md)
+- [Mounts and Portability](mounts-and-portability.md)
+- [Caching and Hydration](concepts/caching-and-hydration.md)
+- [Config Adapters](integrations/config_adapters.md)

@@ -10,24 +10,18 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-BSD--3--Clause-blue.svg" alt="License BSD 3-Clause"></a>
 </p>
 
-**Consist** is a caching layer for scientific simulation workflows that makes provenance queryable. It automatically
-records what code, configuration, and input data produced each output in your pipeline—eliminating redundant computation
-and enabling post-hoc inspection of results via SQL.
+**Consist** is a caching and provenance layer for scientific simulation
+workflows. It records the code, configuration, input data, and output artifacts
+behind each run so expensive steps can be skipped safely and results remain
+queryable after the fact.
 
-### Why Consist?
+Consist is useful when a workflow has:
 
-Multi-run simulation workflows typically accumulate friction:
-
-- **Provenance ambiguity**: "Which configuration produced those results in Figure 3?"
-- **Redundant computation**: Re-running a 4-hour pipeline because you changed one unrelated parameter.
-- **Scattered outputs**: Finding and comparing results across scenario variants manually.
-- **Hidden wiring**: Tools with implicit dependencies (name-based injection, global state) are hard to debug and modify
-  when something breaks.
-
-Consist tracks lineage explicitly. Tasks are ordinary Python functions; dependencies flow through concrete values, not
-framework magic. Your pipeline remains inspectable and testable.
-
----
+- long-running model steps that should cache-hit when inputs are unchanged;
+- scenario variants that need explicit lineage and comparison;
+- file-based tools that need stable local paths but still need canonical
+  provenance;
+- post-run questions like "which config produced this output?"
 
 ## Installation
 
@@ -35,25 +29,26 @@ framework magic. Your pipeline remains inspectable and testable.
 pip install consist
 ```
 
-Optional extras:
+Optional integrations are installed as extras:
 
 ```bash
 pip install "consist[ingest]"
+pip install "consist[docker]"
 ```
 
 > [!NOTE]
-> Consist is pre-`1.0`. The library is ready for real workflows, but minor
-> releases may still include breaking changes while the API continues to settle.
-
----
+> Consist is pre-`1.0`. It is ready for real workflows, but minor releases may
+> still include breaking changes while the API settles.
 
 ## Quick Example
 
 ```python
-import consist
 from pathlib import Path
-from consist import ExecutionOptions, Tracker
+
 import pandas as pd
+
+import consist
+from consist import ExecutionOptions, Tracker
 
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
@@ -65,17 +60,7 @@ def clean_data(raw: Path, threshold: float = 0.5) -> dict[str, Path]:
     return {"cleaned": out}
 
 
-# Executes function and records inputs, config, and output artifact
-result = tracker.run(
-    fn=clean_data,
-    inputs={"raw": Path("raw.parquet")},  # hashed for cache identity
-    config={"threshold": 0.5},  # hashed for cache identity
-    outputs=["cleaned"],
-    execution_options=ExecutionOptions(input_binding="paths"),
-)
-
-# Second call with identical inputs: instant cache hit, no execution
-result = tracker.run(
+first = tracker.run(
     fn=clean_data,
     inputs={"raw": Path("raw.parquet")},
     config={"threshold": 0.5},
@@ -83,107 +68,37 @@ result = tracker.run(
     execution_options=ExecutionOptions(input_binding="paths"),
 )
 
-# Artifact: the output file with provenance metadata attached
-artifact = result.outputs["cleaned"]
-print(artifact.path)  # -> PosixPath('./cleaned.parquet')
-
-# Load as a DataFrame when needed
-cleaned_df = consist.load_df(artifact)
-```
-
-`input_binding="paths"` keeps the file boundary explicit: the function receives
-the local `Path` values named in `inputs`, while those same inputs still define
-cache identity and lineage.
-
-When a path-bound step needs inputs at specific local destinations, request
-staging through `ExecutionOptions` instead of manually copying files:
-
-```python
-result = tracker.run(
-    fn=clean_data,
-    inputs={"raw": Path("raw.parquet")},
-    outputs=["cleaned"],
-    execution_options=ExecutionOptions(
-        input_binding="paths",
-        input_materialization="requested",
-        input_paths={"raw": Path("./workspace/raw.parquet")},
-    ),
-)
-```
-
-That keeps artifact identity canonical while ensuring the callable sees a real
-local file at the requested path, including on cache hits.
-
-**Summary**: Consist computes a deterministic fingerprint from your code version, config, and input files. If you change
-anything upstream, only affected downstream steps will re-execute.
-
-### Multi-Step Pipeline
-
-Dependencies are explicit: the output of one step becomes the input of the next via a concrete reference, not name
-matching or injection.
-
-```python
-def analyze_data(cleaned: Path) -> dict[str, Path]:
-    df = pd.read_parquet(cleaned)
-    out = Path("./analysis.parquet")
-    summary = df.groupby("category")["value"].mean()
-    summary.to_parquet(out)
-    return {"analysis": out}
-
-
-preprocess = tracker.run(
+second = tracker.run(
     fn=clean_data,
     inputs={"raw": Path("raw.parquet")},
     config={"threshold": 0.5},
     outputs=["cleaned"],
     execution_options=ExecutionOptions(input_binding="paths"),
 )
-analyze = tracker.run(
-    fn=analyze_data,
-    inputs={"cleaned": consist.ref(preprocess, key="cleaned")},  # explicit artifact reference
-    outputs=["analysis"],
-    execution_options=ExecutionOptions(input_binding="paths"),
-)
+
+print(first.cache_hit, second.cache_hit)  # False, True
+cleaned = consist.load_df(second.outputs["cleaned"])
 ```
 
-Use `output_paths` when a function returns `None` but writes files, or when you need explicit destination control.
+`input_binding="paths"` keeps the function boundary explicit: the callable
+receives local `Path` values, while those same inputs define cache identity and
+lineage. When a path-bound tool needs a specific local destination, request
+staging with `ExecutionOptions(input_materialization="requested", ...)`.
 
----
+## Documentation
 
-## Key Features
-
-- **Deterministic Caching**: Cache identity is based on an inspectable fingerprint of code, config, and inputs. Only
-  affected downstream steps re-execute when any upstream piece changes.
-- **Plain Python**: Tasks are ordinary Python functions—callable and testable without the tracker. The tracker is
-  additive and does not restructure your code.
-- **Explicit File Workflows**: Path-bound steps can request staged local inputs without giving up canonical artifact
-  identity, which is useful for subprocesses, external tools, and workspace-local contracts.
-- **Complete Lineage**: Every result is tagged with the exact code and config that created it. Trace lineage from any
-  output back to its sources.
-- **SQL-Native Analysis**: All metadata is indexed in DuckDB. Query across runs, join tables, and compare variants using
-  standard SQL.
-- **HPC and Container Support**: Run tasks in Docker and Singularity containers, with image digests and mounted
-  volumes included in the cache signature. Ideal for long-running jobs on shared compute.
-- **Queryable CLI**: Inspect history, trace lineage, and compare results from the command line after a job completes. No
-  code required.
-
----
-
-## Documentation Index
-
-| Section                                                   | Description                                                  |
-|:----------------------------------------------------------|:-------------------------------------------------------------|
-| **[Getting Started](docs/getting-started/quickstart.md)** | 5-minute guide to your first tracked run.                    |
-| **[Usage Guide](docs/usage-guide.md)**                    | Detailed patterns for scenarios and complex workflows.       |
-| **[Architecture](docs/architecture.md)**                  | Deep dive into hashing, lineage, and the DuckDB core.        |
-| **[CLI Reference](docs/cli-reference.md)**                | Guide to the `consist` command-line tools.                   |
-| **[DB Maintenance](docs/db-maintenance.md)**              | Operational runbooks for inspect/doctor/purge/merge/rebuild. |
-| **[Example Gallery](docs/examples.md)**                   | Interactive notebooks for Monte Carlo, Demand Modeling, etc. |
-
----
+| Start here | Use it for |
+|:--|:--|
+| [Quickstart](docs/getting-started/quickstart.md) | First tracked run and cache hit |
+| [First Workflow](docs/getting-started/first-workflow.md) | Two-step pipeline with explicit artifact links |
+| [Usage Guide](docs/usage-guide.md) | Choosing between `run`, `trace`, and `scenario` |
+| [Caching & Hydration](docs/concepts/caching-and-hydration.md) | Cache identity, hit behavior, and output recovery concepts |
+| [Historical Recovery](docs/guides/historical-recovery.md) | Restoring archived outputs and staging inputs |
+| [CLI Reference](docs/cli-reference.md) | Inspecting runs, artifacts, lineage, and schemas |
+| [API Reference](docs/api/index.md) | Public Python API and generated signatures |
 
 ## Etymology
 
-In railroad terminology, a **consist** (noun, pronounced *CON-sist*) is the specific lineup of locomotives and cars that
-make up a train. In this library, a **consist** is the immutable record of exactly which components—code, config, and
-inputs—were coupled together to produce a result.
+In railroad terminology, a **consist** is the lineup of locomotives and cars
+that make up a train. In this library, a consist is the immutable record of the
+code, config, inputs, and outputs coupled together to produce a result.

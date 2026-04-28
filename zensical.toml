@@ -51,14 +51,13 @@ Copyright &copy; 2026 The Regents of the University of California, through Lawre
 # ]
 nav = [
     { "Home" = "index.md" },
-    { "Getting Started" = ["getting-started/installation.md", "getting-started/quickstart.md", "getting-started/first-workflow.md", { "Command Line Interface" = "cli-reference.md" }] },
+    { "Getting Started" = ["getting-started/installation.md", "getting-started/quickstart.md", "getting-started/first-workflow.md"] },
     { "Concepts" = ["concepts/overview.md", "concepts/config-management.md", "concepts/decorators-and-metadata.md", "concepts/caching-and-hydration.md", "concepts/data-materialization.md"] },
-    { "Guides" = ["usage-guide.md", "building-domain-tracker.md", "dlt-loader-guide.md", "containers-guide.md", "mounts-and-portability.md", "schema-export.md"] },
+    { "Guides" = ["usage-guide.md", "building-domain-tracker.md", "containers-guide.md", "dlt-loader-guide.md", "schema-export.md", "mounts-and-portability.md", "guides/historical-recovery.md"] },
+    { "Operations" = ["cli-reference.md", "db-maintenance.md", "troubleshooting.md"] },
     { "Integrations" = ["integrations/index.md", "integrations/containers.md", "integrations/dlt_loader.md", { "Config Adapters" = [{ "Overview" = "integrations/config_adapters.md" }, { "BEAM" = "integrations/config_adapters_beam.md" }, { "ActivitySim" = "integrations/config_adapters_activitysim.md" }] }] },
-    { "Examples" = "examples.md" },
-    { "Advanced" = ["advanced/index.md", "advanced/execution-style-decision-tree.md", "advanced/manual-lifecycle-and-decorators.md"] },
-    { "Support & Reference" = ["troubleshooting.md", "db-maintenance.md", "cli-error-style.md", "glossary.md", "architecture.md"] },
     { "API Reference" = ["api/index.md", "api/essentials.md", "api/advanced.md", "api/public_api.md", "api/api_helpers.md", "api/tracker.md", "api/workflow.md", "api/artifact.md", "api/run.md", "api/indexing.md", "api/identity.md", "api/views.md", "api/matrix.md", "api/materialize.md"] },
+    { "Reference" = ["examples.md", "glossary.md", "architecture.md", "faq.md", "cli-error-style.md", { "Advanced" = ["advanced/index.md", "advanced/execution-style-decision-tree.md", "advanced/manual-lifecycle-and-decorators.md"] }] },
 ]
 
 # With the "extra_css" option you can add your own CSS styling to customizeo

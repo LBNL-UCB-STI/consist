@@ -20,6 +20,11 @@ a tracker object to every call.
   `consist.output_path`
 - Artifact logging/loading: `consist.log_artifact`, `consist.log_dataframe`,
   `consist.load`, `consist.load_df`
+- Recovery/staging/archive: `consist.hydrate_run_outputs`,
+  `consist.materialize_run_outputs`, `consist.stage_artifact`,
+  `consist.stage_inputs`, `consist.set_artifact_recovery_roots`,
+  `consist.archive_artifact`, `consist.archive_run_outputs`,
+  `consist.archive_current_run_outputs`
 - Querying: `consist.find_run`, `consist.find_runs`,
   `consist.find_latest_run`, `consist.run_query`, `consist.run_set`,
   `consist.get_run_result`, `consist.config_run_query`,
@@ -102,6 +107,14 @@ For class-level equivalents, see [Tracker](tracker.md) and
         - load
         - load_df
         - load_relation
+        - hydrate_run_outputs
+        - materialize_run_outputs
+        - stage_artifact
+        - stage_inputs
+        - set_artifact_recovery_roots
+        - archive_artifact
+        - archive_run_outputs
+        - archive_current_run_outputs
         - to_df
         - active_relation_count
         - set_current_tracker
