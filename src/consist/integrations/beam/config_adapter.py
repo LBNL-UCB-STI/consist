@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass, field, replace
 import shutil
 from pathlib import Path
-from typing import Any, Iterable, Literal, Mapping, Optional, Sequence, TYPE_CHECKING
+from typing import Any, cast, Iterable, Literal, Mapping, Optional, Sequence, TYPE_CHECKING
 
 from sqlmodel import SQLModel
 
@@ -19,6 +19,8 @@ from consist.core.config_canonicalization import (
     CanonicalizationResult,
     ConfigAdapterOptions,
     ConfigReference,
+    ConfigReferenceIdentityPolicy,
+    ConfigReferenceStatus,
     DirectoryIdentity,
     IngestSpec,
 )
@@ -1096,10 +1098,10 @@ def _build_beam_config_identity(
                 config_key=candidate.config_key,
                 raw_value=candidate.raw_value,
                 canonical_value=canonical_value,
-                status=status,  # type: ignore[arg-type]
+                status=cast(ConfigReferenceStatus, status),
                 required=required,
                 role=policy.role,
-                identity_policy=identity_policy,  # type: ignore[arg-type]
+                identity_policy=cast(ConfigReferenceIdentityPolicy, identity_policy),
                 reason=reason,
                 hash=digest,
                 delegated_artifact_keys=delegated_artifact_keys,

@@ -1012,7 +1012,7 @@ class RunTraceCoordinator:
             )
 
         output_base_dir = tracker.run_artifact_dir()
-        resolved_output_paths = {
+        resolved_output_paths: Dict[str, Union[str, Path]] = {
             str(key): self._helpers.resolve_output_path(tracker, ref, output_base_dir)
             for key, ref in output_paths.items()
         }
