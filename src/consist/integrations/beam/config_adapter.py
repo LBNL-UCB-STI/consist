@@ -8,7 +8,16 @@ import re
 from dataclasses import dataclass, field, replace
 import shutil
 from pathlib import Path
-from typing import Any, cast, Iterable, Literal, Mapping, Optional, Sequence, TYPE_CHECKING
+from typing import (
+    Any,
+    cast,
+    Iterable,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    TYPE_CHECKING,
+)
 
 from sqlmodel import SQLModel
 
