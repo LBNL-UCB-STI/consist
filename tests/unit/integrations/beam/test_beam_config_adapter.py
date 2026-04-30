@@ -9,7 +9,9 @@ import pytest
 from sqlalchemy import func, select
 from sqlmodel import Session, SQLModel
 
+from consist.core.config_canonicalization import ConfigAdapterOptions
 from consist.integrations.beam import BeamConfigAdapter, BeamConfigOverrides
+from consist.integrations.beam.config_adapter import BeamReferencePolicy
 from consist.integrations.beam.config_adapter import _load_config_tree
 from consist.models.beam import BeamConfigCache, BeamConfigIngestRunLink
 from consist.types import CacheOptions, ExecutionOptions
@@ -75,6 +77,177 @@ def test_beam_canonicalize_artifacts_and_rows(tracker, tmp_path: Path, caplog):
     ingest_tables = {spec.table_name for spec in result.ingestables}
     assert "beam_config_cache" in ingest_tables
     assert "beam_config_ingest_run_link" in ingest_tables
+    assert result.identity.adapter_name == "beam"
+    assert result.identity.identity_hash
+    refs_by_key = {ref.config_key: ref for ref in result.identity.references}
+    assert refs_by_key["beam.inputDirectory"].identity_policy == "path_alias"
+    assert refs_by_key["beam.inputDirectory"].delegated_artifact_keys
+    assert (
+        refs_by_key[
+            "beam.agentsim.agents.vehicles.vehicleTypesFilePath"
+        ].identity_policy
+        == "content_hash"
+    )
+    missing_ref = refs_by_key["beam.agentsim.overridePath"]
+    assert missing_ref.status == "missing_required"
+    assert missing_ref.canonical_value is not None
+    assert missing_ref.canonical_value.endswith("missing/does-not-exist.csv")
+    assert any("beam.agentsim.overridePath" in r.message for r in caplog.records)
+
+
+def test_beam_canonicalize_normalizes_path_aliases(tracker, tmp_path: Path):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    external_root = tmp_path / "machine_local"
+    external_root.mkdir()
+    data_path = external_root / "scenario.csv"
+    data_path.write_text("id,value\n1,2\n", encoding="utf-8")
+    overlay_conf.write_text(
+        overlay_conf.read_text(encoding="utf-8")
+        + f'\nbeam.agentsim.aliasInput = "{data_path}"\n',
+        encoding="utf-8",
+    )
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    canonical = adapter.discover([case_dir], identity=tracker.identity)
+    run = tracker.begin_run("beam_alias_unit", "beam")
+    result = adapter.canonicalize(
+        canonical,
+        run=run,
+        tracker=tracker,
+        options=ConfigAdapterOptions(path_aliases={"local_inputs": external_root}),
+    )
+
+    alias_ref = next(
+        ref
+        for ref in result.identity.references
+        if ref.config_key == "beam.agentsim.aliasInput"
+    )
+    assert alias_ref.identity_policy == "content_hash"
+    assert alias_ref.canonical_value == "local_inputs/scenario.csv"
+    assert alias_ref.hash
+    assert result.identity.scalars["options"]["path_aliases"] == {
+        "local_inputs": external_root.resolve().as_posix()
+    }
+    tracker.end_run()
+
+    data_path.write_text("id,value\n1,3\n", encoding="utf-8")
+    run_changed = tracker.begin_run("beam_alias_unit_changed", "beam")
+    changed = adapter.canonicalize(
+        canonical,
+        run=run_changed,
+        tracker=tracker,
+        options=ConfigAdapterOptions(path_aliases={"local_inputs": external_root}),
+    )
+    assert changed.identity.identity_hash != result.identity.identity_hash
+
+
+def test_beam_canonicalize_ignores_output_runtime_paths(tracker, tmp_path: Path):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    existing_events = tmp_path / "runtime" / "events.xml.gz"
+    existing_events.parent.mkdir()
+    existing_events.write_text("events\n", encoding="utf-8")
+    overlay_conf.write_text(
+        overlay_conf.read_text(encoding="utf-8")
+        + f'\nbeam.outputs.eventsFilePath = "{existing_events}"\n',
+        encoding="utf-8",
+    )
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    canonical_a = adapter.discover([case_dir], identity=tracker.identity)
+    run_a = tracker.begin_run("beam_output_identity_a", "beam")
+    result_a = adapter.canonicalize(canonical_a, run=run_a, tracker=tracker)
+    tracker.end_run()
+
+    overlay_conf.write_text(
+        overlay_conf.read_text(encoding="utf-8").replace(
+            str(existing_events),
+            str(tmp_path / "runtime_other" / "events.xml.gz"),
+        ),
+        encoding="utf-8",
+    )
+    canonical_b = adapter.discover([case_dir], identity=tracker.identity)
+    run_b = tracker.begin_run("beam_output_identity_b", "beam")
+    result_b = adapter.canonicalize(canonical_b, run=run_b, tracker=tracker)
+
+    output_ref = next(
+        ref
+        for ref in result_b.identity.references
+        if ref.config_key == "beam.outputs.eventsFilePath"
+    )
+    assert output_ref.identity_policy == "output_or_runtime_ignored"
+    assert output_ref.required is False
+    assert result_b.identity.identity_hash == result_a.identity.identity_hash
+
+
+def test_beam_canonicalize_does_not_treat_scalar_input_keys_as_paths(
+    tracker,
+    tmp_path: Path,
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    overlay_conf.write_text(
+        overlay_conf.read_text(encoding="utf-8")
+        + '\nbeam.inputs.networkMode = "car"\n'
+        + '\nbeam.agentsim.vehicles.assignment = "household"\n',
+        encoding="utf-8",
+    )
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    canonical = adapter.discover([case_dir], identity=tracker.identity)
+    run = tracker.begin_run("beam_scalar_path_key_unit", "beam")
+    result = adapter.canonicalize(canonical, run=run, tracker=tracker)
+
+    refs_by_key = {ref.config_key: ref for ref in result.identity.references}
+    assert "beam.inputs.networkMode" not in refs_by_key
+    assert "beam.agentsim.vehicles.assignment" not in refs_by_key
+
+
+def test_beam_canonicalize_can_disable_key_based_path_heuristics(
+    tracker,
+    tmp_path: Path,
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    overlay_conf.write_text(
+        overlay_conf.read_text(encoding="utf-8")
+        + '\nbeam.agentsim.customFileLabel = "scenario-a"\n',
+        encoding="utf-8",
+    )
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    canonical = adapter.discover([case_dir], identity=tracker.identity)
+    run = tracker.begin_run("beam_no_heuristic_refs_unit", "beam")
+    result = adapter.canonicalize(
+        canonical,
+        run=run,
+        tracker=tracker,
+        strict=True,
+        options=ConfigAdapterOptions(allow_heuristic_refs=False),
+    )
+
+    refs_by_key = {ref.config_key: ref for ref in result.identity.references}
+    assert "beam.agentsim.customFileLabel" not in refs_by_key
+    assert result.identity.scalars["options"]["allow_heuristic_refs"] is False
+
+
+def test_beam_canonicalize_supports_explicit_reference_policy(tracker, tmp_path: Path):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    adapter = BeamConfigAdapter(
+        primary_config=overlay_conf,
+        reference_policies={
+            "beam.agentsim.overridePath": BeamReferencePolicy(
+                identity_policy="ignored",
+                required=False,
+                reason="dormant_test_reference",
+            )
+        },
+    )
+    canonical = adapter.discover([case_dir], identity=tracker.identity)
+    run = tracker.begin_run("beam_policy_unit", "beam")
+    result = adapter.canonicalize(canonical, run=run, tracker=tracker, strict=True)
+
+    override_ref = next(
+        ref
+        for ref in result.identity.references
+        if ref.config_key == "beam.agentsim.overridePath"
+    )
+    assert override_ref.identity_policy == "ignored"
+    assert override_ref.status == "missing_ignored"
+    assert override_ref.reason == "dormant_test_reference"
 
 
 def test_beam_materialize_overrides(tracker, tmp_path: Path):

@@ -5,6 +5,7 @@ from pathlib import Path
 from consist.core.config_canonicalization import (
     CanonicalConfig,
     CanonicalizationResult,
+    canonical_identity_from_config,
 )
 
 
@@ -40,7 +41,15 @@ class _BundleTrackerProbeAdapter:
         plan_only: bool = False,
         options=None,
     ) -> CanonicalizationResult:
-        return CanonicalizationResult(artifacts=[], ingestables=[])
+        return CanonicalizationResult(
+            artifacts=[],
+            ingestables=[],
+            identity=canonical_identity_from_config(
+                adapter_name=self.model_name,
+                adapter_version=None,
+                config=config,
+            ),
+        )
 
     def bundle_artifact(self, config: CanonicalConfig, *, run, tracker):
         self.seen_tracker = tracker

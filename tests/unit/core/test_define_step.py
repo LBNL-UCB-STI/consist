@@ -2,7 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
+from consist.core.config_canonicalization import (
+    CanonicalConfig,
+    ConfigPlan,
+    canonical_identity_from_config,
+)
 from consist.core.decorators import define_step
 from consist.core.tracker import Tracker
 from consist.types import CacheOptions, ExecutionOptions
@@ -68,18 +72,24 @@ def test_define_step_adapter_default_applied(
         del kwargs
         assert adapter is not None
         captured.extend(Path(p) for p in config_dirs)
+        canonical = CanonicalConfig(
+            root_dirs=[Path(p) for p in config_dirs],
+            primary_config=None,
+            config_files=[],
+            external_files=[],
+            content_hash="hash_a",
+        )
         return ConfigPlan(
             adapter_name="dummy",
             adapter_version="1.0",
-            canonical=CanonicalConfig(
-                root_dirs=[Path(p) for p in config_dirs],
-                primary_config=None,
-                config_files=[],
-                external_files=[],
-                content_hash="hash_a",
-            ),
+            canonical=canonical,
             artifacts=[],
             ingestables=[],
+            identity=canonical_identity_from_config(
+                adapter_name="dummy",
+                adapter_version="1.0",
+                config=canonical,
+            ),
         )
 
     # Keep behavior realistic while still asserting adapter resolution path.
@@ -123,18 +133,24 @@ def test_define_step_adapter_explicit_override(
     def fake_prepare_config(*, adapter, config_dirs, **kwargs):
         del adapter, kwargs
         called.extend(Path(p) for p in config_dirs)
+        canonical = CanonicalConfig(
+            root_dirs=[Path(p) for p in config_dirs],
+            primary_config=None,
+            config_files=[],
+            external_files=[],
+            content_hash="hash_b",
+        )
         return ConfigPlan(
             adapter_name="dummy",
             adapter_version="1.0",
-            canonical=CanonicalConfig(
-                root_dirs=[Path(p) for p in config_dirs],
-                primary_config=None,
-                config_files=[],
-                external_files=[],
-                content_hash="hash_b",
-            ),
+            canonical=canonical,
             artifacts=[],
             ingestables=[],
+            identity=canonical_identity_from_config(
+                adapter_name="dummy",
+                adapter_version="1.0",
+                config=canonical,
+            ),
         )
 
     monkeypatch.setattr(tracker, "prepare_config", fake_prepare_config)

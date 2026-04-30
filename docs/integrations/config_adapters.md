@@ -26,12 +26,25 @@ CanonicalConfig
     ↓
 canonicalize()       ← Generate artifact specs + ingest specs
     ↓
-CanonicalizationResult (artifacts + ingestables)
+CanonicalizationResult (identity + artifacts + ingestables)
     ↓
 tracker.canonicalize_config()  ← Log artifacts, ingest to DB
     ↓
 Queryable Tables + Full Provenance
 ```
+
+Adapter-backed runs also persist `run.meta["config_identity_manifest"]`, a
+structured manifest of the adapter identity inputs. This is part of the adapter
+contract: custom adapters must return `CanonicalizationResult(..., identity=...)`.
+Cache-miss explanations use that manifest before falling back to facets or JSON
+snapshots, so config misses can point to changed, added, or removed config
+references and files, reference status changes such as `missing_optional` to
+`resolved`, and changed adapter identity options.
+
+Config identity is still separate from runtime materialization. If a container
+mounts a broad mutable directory whose meaningful children are already declared
+as artifacts, that directory de-duplication belongs to the container/input
+identity layer rather than the config adapter manifest.
 
 ---
 

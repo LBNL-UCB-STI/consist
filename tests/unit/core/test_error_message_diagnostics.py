@@ -5,7 +5,11 @@ from typing import Any, cast
 
 import pytest
 
-from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
+from consist.core.config_canonicalization import (
+    CanonicalConfig,
+    ConfigPlan,
+    canonical_identity_from_config,
+)
 from consist.types import CacheOptions, ExecutionOptions
 
 
@@ -45,18 +49,24 @@ def test_run_rejects_removed_config_plan_kwarg(tracker, tmp_path: Path) -> None:
     config_root = tmp_path / "cfg"
     config_root.mkdir(parents=True, exist_ok=True)
 
+    canonical = CanonicalConfig(
+        root_dirs=[config_root],
+        primary_config=None,
+        config_files=[],
+        external_files=[],
+        content_hash="hash",
+    )
     plan = ConfigPlan(
         adapter_name="dummy",
         adapter_version="1.0",
-        canonical=CanonicalConfig(
-            root_dirs=[config_root],
-            primary_config=None,
-            config_files=[],
-            external_files=[],
-            content_hash="hash",
-        ),
+        canonical=canonical,
         artifacts=[],
         ingestables=[],
+        identity=canonical_identity_from_config(
+            adapter_name="dummy",
+            adapter_version="1.0",
+            config=canonical,
+        ),
     )
 
     class DummyAdapter:

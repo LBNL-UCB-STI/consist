@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -105,6 +106,44 @@ def test_canonicalize_builds_ingestables_and_constants(tracker, tmp_path: Path):
         "activitysim_probabilities_meta_entries_cache",
         "activitysim_config_ingest_run_link",
     }
+
+
+def test_canonicalize_builds_path_stable_identity_manifest(tracker, tmp_path: Path):
+    case_a = tmp_path / "case_a"
+    base_dir, overlay_dir = build_activitysim_test_configs(case_a)
+    case_b = tmp_path / "case_b"
+    shutil.copytree(base_dir.parent, case_b)
+    clone_base = case_b / "base"
+    clone_overlay = case_b / "overlay"
+
+    adapter = ActivitySimConfigAdapter()
+    canonical_a = adapter.discover(
+        [overlay_dir, base_dir], identity=tracker.identity, strict=True
+    )
+    canonical_b = adapter.discover(
+        [clone_overlay, clone_base], identity=tracker.identity, strict=True
+    )
+
+    result_a = adapter.canonicalize(canonical_a, strict=True, plan_only=True)
+    result_b = adapter.canonicalize(canonical_b, strict=True, plan_only=True)
+
+    assert result_a.identity.identity_hash == result_b.identity.identity_hash
+    assert result_a.identity.primary_config == "root:0:settings.yaml"
+
+    refs = {ref.canonical_value: ref for ref in result_a.identity.references}
+    assert refs["root:1:settings_local.yaml"].role == "yaml"
+    assert refs["root:1:constants.yaml"].role == "yaml"
+    assert refs["root:1:stop_frequency_probs.csv"].role == "csv"
+    assert all(ref.hash for ref in refs.values())
+
+    scalars = result_a.identity.scalars
+    assert scalars["options"]["allow_heuristic_refs"] is True
+    assert "active_yaml_hash" in scalars["component_hashes"]
+    assert "referenced_csv_hash" in scalars["component_hashes"]
+    assert scalars["roles"]["yaml"]
+    assert scalars["roles"]["csv"]
+    assert result_a.identity.directory_hash
+    assert result_a.identity.directories
 
 
 def test_digest_includes_file_name(tmp_path: Path):

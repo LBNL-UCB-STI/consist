@@ -3,7 +3,11 @@ from pathlib import Path
 import pytest
 from sqlmodel import Session, select
 
-from consist.core.config_canonicalization import ArtifactSpec, ConfigContribution
+from consist.core.config_canonicalization import (
+    ArtifactSpec,
+    CanonicalConfigIdentity,
+    ConfigContribution,
+)
 from consist.models.run import RunArtifactLink
 from consist.types import ExecutionOptions
 
@@ -431,7 +435,12 @@ def test_apply_config_contribution_batches_artifact_sync(
     monkeypatch.setattr(tracker.db, "sync_artifact", counting_sync_artifact)
 
     contribution = ConfigContribution(
-        identity_hash="config-batch",
+        identity=CanonicalConfigIdentity(
+            adapter_name="test",
+            adapter_version="test-adapter",
+            primary_config=None,
+            identity_hash="config-batch",
+        ),
         adapter_version="test-adapter",
         artifacts=[
             ArtifactSpec(first, "config_a", "input", {"kind": "config"}),

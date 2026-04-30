@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
 import json
 import logging
 import re
@@ -14,8 +15,11 @@ from sqlmodel import SQLModel
 from consist.core.config_canonicalization import (
     ArtifactSpec,
     CanonicalConfig,
+    CanonicalConfigIdentity,
     CanonicalizationResult,
     ConfigAdapterOptions,
+    ConfigReference,
+    DirectoryIdentity,
     IngestSpec,
 )
 from consist.core.config_canonicalization import ConfigPlan
@@ -79,6 +83,22 @@ class BeamConfigOverrides:
         return {"values": self.values}
 
 
+@dataclass(frozen=True)
+class BeamReferencePolicy:
+    identity_policy: str
+    role: Optional[str] = None
+    required: bool = True
+    reason: Optional[str] = None
+    delegated_artifact_keys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _BeamPathCandidate:
+    config_key: str
+    raw_value: str
+    index: int = 0
+
+
 @dataclass
 class BeamConfigAdapter:
     model_name: str = "beam"
@@ -88,6 +108,10 @@ class BeamConfigAdapter:
     resolve_substitutions: bool = True
     env_overrides: Optional[dict[str, str]] = None
     ingest_specs: list[BeamIngestSpec] = field(default_factory=list)
+    path_aliases: Optional[dict[str, str | Path]] = None
+    reference_policies: dict[str, BeamReferencePolicy | dict[str, Any]] = field(
+        default_factory=dict
+    )
 
     def discover(
         self,
@@ -153,29 +177,73 @@ class BeamConfigAdapter:
             resolve=self.resolve_substitutions,
             env_overrides=self.env_overrides,
         )
-        referenced_paths = _collect_path_references(config_tree)
-        for value in referenced_paths:
-            resolved = _resolve_reference(value, config.root_dirs)
+        path_aliases = _merge_path_aliases(
+            self.path_aliases,
+            options.path_aliases if options is not None else None,
+        )
+        reference_identity = _build_beam_config_identity(
+            adapter_name=self.model_name,
+            adapter_version=self.adapter_version,
+            primary_config=config.primary_config,
+            config_tree=config_tree,
+            root_dirs=config.root_dirs,
+            path_aliases=path_aliases,
+            reference_policies=self.reference_policies,
+            allow_heuristic_refs=(
+                options.allow_heuristic_refs if options is not None else True
+            ),
+            tracker=tracker,
+        )
+        canonical_config_tree = _canonicalize_config_tree_paths(
+            config_tree,
+            references=reference_identity.references,
+        )
+        for ref in reference_identity.references:
+            if ref.status.startswith("missing"):
+                if ref.status != "missing_ignored":
+                    logging.warning(
+                        "[Consist][BEAM] Missing referenced path for config key %s "
+                        "(status=%s, policy=%s, canonical=%s): %s. "
+                        "If this is a run-local or machine-local path, pass "
+                        "ConfigAdapterOptions(path_aliases=...).",
+                        ref.config_key or "<unknown>",
+                        ref.status,
+                        ref.identity_policy,
+                        ref.canonical_value,
+                        ref.raw_value,
+                    )
+                if resolved_strict and ref.status == "missing_required":
+                    raise FileNotFoundError(
+                        f"{ref.config_key or '<unknown>'}: {ref.raw_value}"
+                    )
+                continue
+            if ref.identity_policy in {"ignored", "output_or_runtime_ignored"}:
+                continue
+            resolved = _resolve_reference(ref.raw_value, config.root_dirs)
             if resolved is None or not resolved.exists():
-                logging.warning("[Consist][BEAM] Missing referenced path: %s", value)
-                if resolved_strict:
-                    raise FileNotFoundError(value)
                 continue
             _add_artifact(
                 artifacts_by_path,
                 resolved,
                 config.root_dirs,
                 role="ref",
-                meta={"config_reference": value},
+                meta={
+                    "config_reference": ref.raw_value,
+                    "config_reference_key": ref.config_key,
+                    "config_reference_policy": ref.identity_policy,
+                },
             )
 
-        rows = _iter_config_rows(config_tree, content_hash=config.content_hash)
+        rows = _iter_config_rows(
+            canonical_config_tree,
+            content_hash=reference_identity.identity_hash,
+        )
         if plan_only:
             # Return a fresh iterator each time the plan is materialized.
             def rows_factory(
                 run_id: str,
-                tree: dict[str, Any] = config_tree,
-                h: str = config.content_hash,
+                tree: dict[str, Any] = canonical_config_tree,
+                h: str = reference_identity.identity_hash,
             ) -> Iterable[dict[str, Any]]:
                 return _iter_config_rows(tree, content_hash=h)
         else:
@@ -188,12 +256,12 @@ class BeamConfigAdapter:
                 rows=rows_factory,
                 source_path=config.primary_config,
                 source=source_key,
-                content_hash=config.content_hash,
+                content_hash=reference_identity.identity_hash,
                 dedupe_on_hash=True,
             ),
             _run_link_spec(
                 table_name="beam_config_cache",
-                content_hash=config.content_hash,
+                content_hash=reference_identity.identity_hash,
                 config_name=config.primary_config.name,
                 run_id=run.id if run else None,
                 plan_only=plan_only,
@@ -214,7 +282,11 @@ class BeamConfigAdapter:
 
         artifacts = list(artifacts_by_path.values())
 
-        return CanonicalizationResult(artifacts=artifacts, ingestables=ingestables)
+        return CanonicalizationResult(
+            artifacts=artifacts,
+            ingestables=ingestables,
+            identity=reference_identity,
+        )
 
     def materialize(
         self,
@@ -258,6 +330,8 @@ class BeamConfigAdapter:
             resolve_substitutions=self.resolve_substitutions,
             env_overrides=self.env_overrides,
             ingest_specs=self.ingest_specs,
+            path_aliases=self.path_aliases,
+            reference_policies=self.reference_policies,
         )
         return materialized_adapter.discover(
             staged_root_dirs, identity=identity, strict=strict
@@ -717,50 +791,389 @@ def _normalize_value(
     return "json", None, None, None, json.dumps(value, sort_keys=True)
 
 
-def _collect_path_references(config_tree: dict[str, Any]) -> set[str]:
-    refs: set[str] = set()
-    ignore_tokens = {
-        "csv",
-        "csv.gz",
-        "xml",
-        "xml.gz",
-        "parquet",
-        "omx",
-        "h5",
-    }
+def _canonical_json_sha256(payload: Any) -> str:
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
-    def walk(node: Any) -> None:
+
+def _is_path_like_config_value(value: str) -> bool:
+    candidate = value.strip()
+    if not candidate:
+        return False
+    if candidate in {"csv", "csv.gz", "xml", "xml.gz", "parquet", "omx", "h5"}:
+        return False
+    if candidate.startswith(("http://", "https://", "tcp://")):
+        return False
+    return "/" in candidate or candidate.endswith(
+        (
+            ".csv",
+            ".csv.gz",
+            ".xml",
+            ".xml.gz",
+            ".gz",
+            ".parquet",
+            ".zip",
+            ".omx",
+            ".h5",
+        )
+    )
+
+
+def _collect_path_candidates(
+    config_tree: dict[str, Any],
+    *,
+    allow_heuristic_refs: bool,
+) -> list[_BeamPathCandidate]:
+    candidates: list[_BeamPathCandidate] = []
+
+    def walk(node: Any, prefix: str) -> None:
         if isinstance(node, dict):
-            for value in node.values():
-                walk(value)
-        elif isinstance(node, list):
-            for item in node:
-                walk(item)
-        elif isinstance(node, str):
-            candidate = node.strip()
-            if not candidate:
-                return
-            if candidate in ignore_tokens:
-                return
-            if candidate.startswith(("http://", "https://", "tcp://")):
-                return
-            if "/" in candidate or candidate.endswith(
-                (
-                    ".csv",
-                    ".csv.gz",
-                    ".xml",
-                    ".xml.gz",
-                    ".gz",
-                    ".parquet",
-                    ".zip",
-                    ".omx",
-                    ".h5",
+            for key, value in node.items():
+                next_prefix = f"{prefix}.{key}" if prefix else str(key)
+                walk(value, next_prefix)
+            return
+        if isinstance(node, list):
+            for index, item in enumerate(node):
+                walk(item, f"{prefix}[{index}]")
+            return
+        if isinstance(node, str) and (
+            _is_path_like_config_value(node)
+            or (allow_heuristic_refs and _is_path_like_config_key(prefix))
+        ):
+            candidates.append(
+                _BeamPathCandidate(
+                    config_key=prefix,
+                    raw_value=node.strip(),
+                    index=len(candidates),
                 )
-            ):
-                refs.add(candidate)
+            )
 
-    walk(config_tree)
-    return refs
+    walk(config_tree, "")
+    return candidates
+
+
+def _merge_path_aliases(
+    base: Optional[Mapping[str, str | Path]],
+    override: Optional[Mapping[str, str | Path]],
+) -> dict[str, Path]:
+    merged: dict[str, Path] = {}
+    for source in (base, override):
+        if not source:
+            continue
+        for alias, path in source.items():
+            if alias:
+                merged[str(alias)] = Path(path).expanduser().resolve()
+    return merged
+
+
+def _normalize_reference_policy(
+    value: BeamReferencePolicy | Mapping[str, Any] | None,
+) -> BeamReferencePolicy | None:
+    if value is None:
+        return None
+    if isinstance(value, BeamReferencePolicy):
+        return value
+    return BeamReferencePolicy(
+        identity_policy=str(value.get("identity_policy", "content_hash")),
+        role=value.get("role"),
+        required=bool(value.get("required", True)),
+        reason=value.get("reason"),
+        delegated_artifact_keys=tuple(value.get("delegated_artifact_keys", ())),
+    )
+
+
+def _reference_policy_options(
+    value: BeamReferencePolicy | Mapping[str, Any],
+) -> dict[str, Any]:
+    policy = _normalize_reference_policy(value)
+    if policy is None:
+        return {}
+    data = {
+        "identity_policy": policy.identity_policy,
+        "role": policy.role,
+        "required": policy.required,
+        "reason": policy.reason,
+        "delegated_artifact_keys": list(policy.delegated_artifact_keys),
+    }
+    return {key: item for key, item in data.items() if item not in (None, [], ())}
+
+
+def _policy_for_candidate(
+    candidate: _BeamPathCandidate,
+    policies: Mapping[str, BeamReferencePolicy | Mapping[str, Any]],
+) -> BeamReferencePolicy:
+    explicit = _normalize_reference_policy(policies.get(candidate.config_key))
+    if explicit is not None:
+        return explicit
+
+    key_lower = candidate.config_key.lower()
+    if key_lower.endswith("inputdirectory"):
+        return BeamReferencePolicy(
+            identity_policy="path_alias",
+            role="beam_input_root",
+            required=True,
+        )
+    if "output" in key_lower:
+        return BeamReferencePolicy(
+            identity_policy="output_or_runtime_ignored",
+            role="runtime_output",
+            required=False,
+            reason="runtime_output_path",
+        )
+    return BeamReferencePolicy(identity_policy="content_hash", required=True)
+
+
+def _is_path_like_config_key(config_key: str) -> bool:
+    normalized_key = config_key.lower()
+    compact_key = re.sub(r"[^a-z0-9]", "", normalized_key)
+    return any(
+        token in normalized_key or token in compact_key
+        for token in (
+            "directory",
+            "dir",
+            "filepath",
+            "file",
+            "path",
+        )
+    )
+
+
+def _canonical_path_value(
+    *,
+    raw_value: str,
+    resolved: Optional[Path],
+    root_dirs: Sequence[Path],
+    path_aliases: Mapping[str, Path],
+) -> str:
+    path = resolved or Path(raw_value)
+    path = path.expanduser()
+    if path.is_absolute():
+        resolved_path = path.resolve()
+        alias_matches = sorted(
+            (
+                (alias, root)
+                for alias, root in path_aliases.items()
+                if resolved_path == root or resolved_path.is_relative_to(root)
+            ),
+            key=lambda item: len(item[1].parts),
+            reverse=True,
+        )
+        if alias_matches:
+            alias, root = alias_matches[0]
+            rel = resolved_path.relative_to(root).as_posix()
+            return alias if not rel else f"{alias}/{rel}"
+        for root in root_dirs:
+            root_resolved = root.resolve()
+            if resolved_path == root_resolved or resolved_path.is_relative_to(
+                root_resolved
+            ):
+                rel = resolved_path.relative_to(root_resolved).as_posix()
+                return (
+                    f"config:{root_resolved.name}/{rel}"
+                    if rel
+                    else f"config:{root_resolved.name}"
+                )
+        return raw_value
+
+    if resolved is not None:
+        return _canonical_path_value(
+            raw_value=raw_value,
+            resolved=resolved.resolve(),
+            root_dirs=root_dirs,
+            path_aliases=path_aliases,
+        )
+    return raw_value
+
+
+def _canonicalize_config_tree_paths(
+    node: Any,
+    *,
+    references: Sequence[ConfigReference],
+    prefix: str = "",
+) -> Any:
+    by_key = {
+        ref.config_key: ref
+        for ref in references
+        if ref.config_key and ref.canonical_value is not None
+    }
+    if isinstance(node, dict):
+        return {
+            key: _canonicalize_config_tree_paths(
+                value,
+                references=references,
+                prefix=f"{prefix}.{key}" if prefix else str(key),
+            )
+            for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [
+            _canonicalize_config_tree_paths(
+                item,
+                references=references,
+                prefix=f"{prefix}[{index}]",
+            )
+            for index, item in enumerate(node)
+        ]
+    if isinstance(node, str):
+        ref = by_key.get(prefix)
+        if ref is not None:
+            if ref.identity_policy in {"ignored", "output_or_runtime_ignored"}:
+                return {"identity_policy": ref.identity_policy}
+            return ref.canonical_value
+    return node
+
+
+def _build_beam_config_identity(
+    *,
+    adapter_name: str,
+    adapter_version: Optional[str],
+    primary_config: Optional[Path],
+    config_tree: dict[str, Any],
+    root_dirs: Sequence[Path],
+    path_aliases: Mapping[str, Path],
+    reference_policies: Mapping[str, BeamReferencePolicy | Mapping[str, Any]],
+    allow_heuristic_refs: bool,
+    tracker: Optional["Tracker"],
+) -> CanonicalConfigIdentity:
+    references: list[ConfigReference] = []
+    directories: list[DirectoryIdentity] = []
+    for candidate in _collect_path_candidates(
+        config_tree,
+        allow_heuristic_refs=allow_heuristic_refs,
+    ):
+        policy = _policy_for_candidate(candidate, reference_policies)
+        resolved = _resolve_reference(candidate.raw_value, root_dirs)
+        exists = bool(resolved is not None and resolved.exists())
+        canonical_value = _canonical_path_value(
+            raw_value=candidate.raw_value,
+            resolved=resolved,
+            root_dirs=root_dirs,
+            path_aliases=path_aliases,
+        )
+        required = policy.required
+        identity_policy = policy.identity_policy
+        reason = policy.reason
+        delegated_artifact_keys = policy.delegated_artifact_keys
+        if exists:
+            status = "resolved"
+        elif identity_policy in {"ignored", "output_or_runtime_ignored"}:
+            status = "missing_ignored"
+            required = False
+        elif required:
+            status = "missing_required"
+        else:
+            status = "missing_optional"
+
+        digest: Optional[str] = None
+        if exists and resolved is not None:
+            if identity_policy == "content_hash" and resolved.is_file():
+                digest = _digest_path(resolved, tracker)
+            elif identity_policy == "content_hash" and resolved.is_dir():
+                identity_policy = "delegated_to_artifacts"
+                reason = reason or "directory_content_delegated_to_artifact_inputs"
+                delegated_artifact_keys = delegated_artifact_keys or (
+                    _artifact_key_for_path(resolved, root_dirs),
+                )
+            elif identity_policy in {"path_alias", "delegated_to_artifacts"}:
+                delegated_artifact_keys = delegated_artifact_keys or (
+                    _artifact_key_for_path(resolved, root_dirs),
+                )
+        if exists and resolved is not None and resolved.is_dir():
+            directories.append(
+                DirectoryIdentity(
+                    canonical_value=canonical_value,
+                    role=policy.role,
+                    identity_policy=identity_policy,
+                    hash_strategy=getattr(
+                        getattr(tracker, "identity", None), "hashing_strategy", None
+                    ),
+                    hash=digest,
+                )
+            )
+
+        references.append(
+            ConfigReference(
+                config_key=candidate.config_key,
+                raw_value=candidate.raw_value,
+                canonical_value=canonical_value,
+                status=status,  # type: ignore[arg-type]
+                required=required,
+                role=policy.role,
+                identity_policy=identity_policy,  # type: ignore[arg-type]
+                reason=reason,
+                hash=digest,
+                delegated_artifact_keys=delegated_artifact_keys,
+            )
+        )
+
+    references = sorted(
+        references,
+        key=lambda ref: (ref.config_key or "", ref.raw_value, ref.identity_policy),
+    )
+    canonical_tree = _canonicalize_config_tree_paths(
+        config_tree,
+        references=references,
+    )
+    reference_payload = [
+        {
+            "config_key": ref.config_key,
+            "canonical_value": ref.canonical_value
+            if ref.canonical_value is not None
+            else ref.raw_value,
+            "status": ref.status,
+            "required": ref.required,
+            "role": ref.role,
+            "identity_policy": ref.identity_policy,
+            "hash": ref.hash,
+            "delegated_artifact_keys": list(ref.delegated_artifact_keys),
+            "reason": ref.reason,
+        }
+        for ref in references
+        if ref.identity_policy not in {"ignored", "output_or_runtime_ignored"}
+    ]
+    scalar_hash = _canonical_json_sha256({"config": canonical_tree})
+    reference_hash = _canonical_json_sha256({"references": reference_payload})
+    directory_hash = _canonical_json_sha256(
+        {"directories": [item.to_meta_dict() for item in directories]}
+    )
+    options_payload = {
+        "allow_heuristic_refs": allow_heuristic_refs,
+        "path_aliases": {
+            alias: path.as_posix() for alias, path in sorted(path_aliases.items())
+        },
+        "reference_policies": {
+            key: _reference_policy_options(value)
+            for key, value in sorted(reference_policies.items())
+        },
+    }
+    primary_config_key = (
+        _artifact_key_for_path(primary_config, root_dirs)
+        if primary_config is not None
+        else None
+    )
+    identity_hash = _canonical_json_sha256(
+        {
+            "identity_schema_version": 1,
+            "adapter_name": adapter_name,
+            "adapter_version": adapter_version,
+            "primary_config": primary_config_key,
+            "scalar_hash": scalar_hash,
+            "reference_hash": reference_hash,
+            "directory_hash": directory_hash,
+        }
+    )
+    return CanonicalConfigIdentity(
+        adapter_name=adapter_name,
+        adapter_version=adapter_version,
+        primary_config=primary_config_key,
+        identity_hash=identity_hash,
+        scalar_hash=scalar_hash,
+        reference_hash=reference_hash,
+        directory_hash=directory_hash,
+        scalars={"options": options_payload},
+        references=tuple(references),
+        directories=tuple(directories),
+    )
 
 
 def _resolve_reference(value: str, root_dirs: Sequence[Path]) -> Optional[Path]:

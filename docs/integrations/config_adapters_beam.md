@@ -170,6 +170,38 @@ with Session(tracker.engine) as session:
 - `resolve_substitutions=True` resolves HOCON substitutions; set to False to keep raw expressions.
 - `env_overrides` supplies environment variables for optional substitutions (e.g., `${?BEAM_OUTPUT}`).
 - `strict=True` raises on missing referenced files; otherwise missing paths are logged as warnings.
+- Canonicalization returns a structured `CanonicalConfigIdentity` manifest.
+  Path-like config values are recorded as keyed `ConfigReference` entries with
+  their dotted BEAM config key, canonical value, status, role, and identity
+  policy.
+- Reference identity policies are:
+  - `content_hash` for resolved file inputs.
+  - `path_alias` for aliased or logical input roots such as
+    `beam.inputDirectory`.
+  - `delegated_to_artifacts` for directories whose content identity is handled
+    by logged input artifacts instead of hashing the whole directory in the
+    config manifest.
+  - `ignored` for explicitly dormant or non-identity references configured via
+    `BeamReferencePolicy`.
+  - `output_or_runtime_ignored` for output/runtime locations that should not
+    make equivalent runs miss cache.
+
+Path aliases can be supplied on the adapter or per call:
+
+```python
+from consist.core.config_canonicalization import ConfigAdapterOptions
+
+tracker.canonicalize_config(
+    adapter,
+    [config_root],
+    options=ConfigAdapterOptions(
+        path_aliases={"beam_workspace": Path("/local/job123/workspace")}
+    ),
+)
+```
+
+Missing-reference warnings include the config key, status, policy, canonical
+value, and raw value. Use `strict=True` to make missing required references fail.
 
 ## Materialize Overrides
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
     Any,
@@ -27,6 +27,33 @@ from consist.types import IdentityInputs
 
 RowFactory = Callable[[str], Iterable[dict[str, Any]]]
 RowSource = Union[Iterable[dict[str, Any]], RowFactory]
+ConfigReferenceStatus = Literal[
+    "resolved",
+    "missing_required",
+    "missing_optional",
+    "missing_ignored",
+    "unresolved_expression",
+]
+ConfigReferenceIdentityPolicy = Literal[
+    "content_hash",
+    "directory_hash",
+    "fingerprint_manifest",
+    "path_alias",
+    "delegated_to_artifacts",
+    "scalar_value",
+    "ignored",
+    "output_or_runtime_ignored",
+]
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, Path):
+        return value.as_posix()
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 class CanonicalConfig(NamedTuple):
@@ -97,6 +124,153 @@ class ConfigAdapterOptions:
     bundle: bool = True
     ingest: bool = True
     allow_heuristic_refs: bool = True
+    path_aliases: Optional[Mapping[str, Union[str, Path]]] = None
+
+
+@dataclass(frozen=True)
+class ConfigPathAlias:
+    alias: str
+    path: Union[str, Path]
+    role: Optional[str] = None
+
+    def to_meta_dict(self) -> dict[str, Any]:
+        return {
+            "alias": self.alias,
+            "path": _json_safe(self.path),
+            "role": self.role,
+        }
+
+
+@dataclass(frozen=True)
+class ConfigReference:
+    config_key: Optional[str]
+    raw_value: str
+    canonical_value: Optional[str]
+    status: ConfigReferenceStatus
+    required: bool
+    role: Optional[str] = None
+    identity_policy: ConfigReferenceIdentityPolicy = "content_hash"
+    reason: Optional[str] = None
+    hash: Optional[str] = None
+    delegated_artifact_keys: tuple[str, ...] = ()
+
+    def to_meta_dict(self) -> dict[str, Any]:
+        data = {
+            "config_key": self.config_key,
+            "raw_value": self.raw_value,
+            "canonical_value": self.canonical_value,
+            "status": self.status,
+            "required": self.required,
+            "role": self.role,
+            "identity_policy": self.identity_policy,
+            "reason": self.reason,
+            "hash": self.hash,
+            "delegated_artifact_keys": list(self.delegated_artifact_keys),
+        }
+        return {key: value for key, value in data.items() if value not in (None, [])}
+
+
+@dataclass(frozen=True)
+class DirectoryIdentity:
+    canonical_value: str
+    role: Optional[str]
+    identity_policy: str
+    hash_strategy: Optional[str] = None
+    hash: Optional[str] = None
+
+    def to_meta_dict(self) -> dict[str, Any]:
+        data = {
+            "canonical_value": self.canonical_value,
+            "role": self.role,
+            "identity_policy": self.identity_policy,
+            "hash_strategy": self.hash_strategy,
+            "hash": self.hash,
+        }
+        return {key: value for key, value in data.items() if value is not None}
+
+
+@dataclass(frozen=True)
+class MaterializationRequirement:
+    canonical_value: str
+    required: bool
+    role: Optional[str] = None
+    reason: Optional[str] = None
+
+    def to_meta_dict(self) -> dict[str, Any]:
+        data = {
+            "canonical_value": self.canonical_value,
+            "required": self.required,
+            "role": self.role,
+            "reason": self.reason,
+        }
+        return {key: value for key, value in data.items() if value is not None}
+
+
+@dataclass(frozen=True)
+class CanonicalConfigIdentity:
+    adapter_name: str
+    adapter_version: Optional[str]
+    primary_config: Optional[str]
+    identity_hash: str
+    identity_schema_version: int = 1
+    scalar_hash: Optional[str] = None
+    reference_hash: Optional[str] = None
+    directory_hash: Optional[str] = None
+    scalars: Mapping[str, Any] = field(default_factory=dict)
+    references: tuple[ConfigReference, ...] = ()
+    directories: tuple[DirectoryIdentity, ...] = ()
+    materialization_requirements: tuple[MaterializationRequirement, ...] = ()
+    diagnostics: tuple[ConfigDiagnostic, ...] = ()
+
+    def to_meta_dict(self) -> dict[str, Any]:
+        data = {
+            "identity_schema_version": self.identity_schema_version,
+            "adapter_name": self.adapter_name,
+            "adapter_version": self.adapter_version,
+            "primary_config": self.primary_config,
+            "identity_hash": self.identity_hash,
+            "scalar_hash": self.scalar_hash,
+            "reference_hash": self.reference_hash,
+            "directory_hash": self.directory_hash,
+            "scalars": _json_safe(dict(self.scalars)),
+            "references": [ref.to_meta_dict() for ref in self.references],
+            "directories": [item.to_meta_dict() for item in self.directories],
+            "materialization_requirements": [
+                item.to_meta_dict() for item in self.materialization_requirements
+            ],
+            "diagnostics": [
+                {
+                    "message": diagnostic.message,
+                    "table_name": diagnostic.table_name,
+                    "source_path": _json_safe(diagnostic.source_path),
+                    "artifact_key": diagnostic.artifact_key,
+                    "exception_type": diagnostic.exception_type,
+                }
+                for diagnostic in self.diagnostics
+            ],
+        }
+        return {
+            key: value for key, value in data.items() if value not in (None, {}, [], ())
+        }
+
+
+def canonical_identity_from_config(
+    *,
+    adapter_name: str,
+    adapter_version: Optional[str],
+    config: CanonicalConfig,
+    identity_hash: Optional[str] = None,
+) -> CanonicalConfigIdentity:
+    return CanonicalConfigIdentity(
+        adapter_name=adapter_name,
+        adapter_version=adapter_version,
+        primary_config=(
+            config.primary_config.as_posix()
+            if config.primary_config is not None
+            else None
+        ),
+        identity_hash=identity_hash or config.content_hash,
+    )
 
 
 @dataclass(frozen=True)
@@ -200,10 +374,13 @@ class CanonicalizationResult(NamedTuple):
         Artifacts discovered for logging.
     ingestables : list[IngestSpec]
         Table ingestion specs for queryable config slices.
+    identity : CanonicalConfigIdentity
+        Structured adapter identity manifest.
     """
 
     artifacts: list[ArtifactSpec]
     ingestables: list[IngestSpec]
+    identity: CanonicalConfigIdentity
 
 
 class _IngestableDataFrameMixin:
@@ -257,8 +434,8 @@ class ConfigContribution(_IngestableDataFrameMixin):
 
     Attributes
     ----------
-    identity_hash : str
-        Hash that identifies the canonical config state.
+    identity : CanonicalConfigIdentity
+        Structured adapter identity manifest.
     adapter_version : Optional[str]
         Adapter version used to generate the contribution.
     artifacts : list[ArtifactSpec]
@@ -275,7 +452,7 @@ class ConfigContribution(_IngestableDataFrameMixin):
         Optional metadata for the contribution.
     """
 
-    identity_hash: str
+    identity: CanonicalConfigIdentity
     adapter_version: Optional[str]
     artifacts: list[ArtifactSpec]
     ingestables: list[IngestSpec]
@@ -283,6 +460,10 @@ class ConfigContribution(_IngestableDataFrameMixin):
     facet_schema_name: Optional[str] = None
     facet_schema_version: Optional[Union[str, int]] = None
     meta: Optional[dict[str, Any]] = None
+
+    @property
+    def identity_hash(self) -> str:
+        return self.identity.identity_hash
 
 
 @dataclass(frozen=True)
@@ -302,6 +483,8 @@ class ConfigPlan(_IngestableDataFrameMixin):
         Artifact specs to log at apply time.
     ingestables : list[IngestSpec]
         Ingest specs to apply at apply time.
+    identity : CanonicalConfigIdentity
+        Structured adapter identity manifest.
     facet : Optional[dict[str, Any]]
         Optional facet data derived from the config plan.
     facet_schema_name : Optional[str]
@@ -323,6 +506,7 @@ class ConfigPlan(_IngestableDataFrameMixin):
     canonical: CanonicalConfig
     artifacts: list[ArtifactSpec]
     ingestables: list[IngestSpec]
+    identity: CanonicalConfigIdentity
     facet: Optional[dict[str, Any]] = None
     facet_schema_name: Optional[str] = None
     facet_schema_version: Optional[Union[str, int]] = None
@@ -333,7 +517,7 @@ class ConfigPlan(_IngestableDataFrameMixin):
 
     @property
     def identity_hash(self) -> str:
-        return self.canonical.content_hash
+        return self.identity.identity_hash
 
     @property
     def signature(self) -> str:
@@ -492,6 +676,13 @@ def validate_config_plan(
 
 __all__ = [
     "CanonicalConfig",
+    "CanonicalConfigIdentity",
+    "ConfigPathAlias",
+    "ConfigReference",
+    "ConfigReferenceStatus",
+    "ConfigReferenceIdentityPolicy",
+    "DirectoryIdentity",
+    "MaterializationRequirement",
     "ArtifactSpec",
     "ConfigAdapterOptions",
     "ConfigDiagnostic",
@@ -504,6 +695,7 @@ __all__ = [
     "SupportsRunWithConfigOverrides",
     "RowFactory",
     "RowSource",
+    "canonical_identity_from_config",
     "compute_config_pack_hash",
     "validate_config_plan",
 ]
