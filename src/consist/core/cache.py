@@ -56,8 +56,21 @@ class CacheFs(Protocol):
 
 
 @runtime_checkable
+class CacheIdentity(Protocol):
+    def compute_file_checksum(self, file_path: str | Path) -> str: ...
+
+
+@runtime_checkable
+class CacheMaterializationRootContext(Protocol):
+    run_dir: Path
+    mounts: Dict[str, str]
+    allow_external_paths: bool
+
+
+@runtime_checkable
 class CacheHydrationContext(Protocol):
     run_dir: Path
+    allow_external_paths: bool
     current_consist: Optional[ConsistRecord]
     db: Optional[CacheDb]
     fs: CacheFs
@@ -108,7 +121,9 @@ class CacheMaterializationContext(Protocol):
     current_consist: Optional[ConsistRecord]
     db: Optional[CacheDb]
     fs: CacheFs
+    identity: CacheIdentity
     run_dir: Path
+    allow_external_paths: bool
     mounts: Dict[str, str]
 
     def resolve_uri(self, uri: str) -> str: ...
@@ -144,7 +159,7 @@ def _can_delegate_run_output_materialization(tracker: CacheHydrationContext) -> 
 
 
 def _allowed_materialization_roots(
-    tracker: CacheMaterializationContext,
+    tracker: CacheMaterializationRootContext,
     *,
     target_run: Run | None = None,
 ) -> tuple[Path, ...] | None:
@@ -835,6 +850,11 @@ def materialize_requested_inputs(
             return ("file", _file_hash(path))
         return None
 
+    def _artifact_hash_matches_path(artifact: Artifact, path: Path) -> bool:
+        if not artifact.hash:
+            return False
+        return tracker.identity.compute_file_checksum(path) == artifact.hash
+
     def _paths_match(source: Path, destination: Path) -> bool:
         if source.resolve() == destination.resolve():
             return True
@@ -935,8 +955,7 @@ def materialize_requested_inputs(
             if (
                 source_path is None
                 and artifact.hash
-                and destination_path.is_file()
-                and _file_hash(destination_path) == artifact.hash
+                and _artifact_hash_matches_path(artifact, destination_path)
             ):
                 artifact.abs_path = str(destination_path)
                 staged[key] = str(destination_path)
@@ -973,8 +992,7 @@ def materialize_requested_inputs(
                 if (
                     active_options.requested_input_validate_content_hash == "if-present"
                     and artifact.hash
-                    and staged_path.is_file()
-                    and _file_hash(staged_path) != artifact.hash
+                    and not _artifact_hash_matches_path(artifact, staged_path)
                 ):
                     raise ValueError(
                         format_problem_cause_fix(
@@ -1011,8 +1029,7 @@ def materialize_requested_inputs(
         if (
             active_options.requested_input_validate_content_hash == "if-present"
             and artifact.hash
-            and destination_path.is_file()
-            and _file_hash(destination_path) != artifact.hash
+            and not _artifact_hash_matches_path(artifact, destination_path)
         ):
             raise ValueError(
                 format_problem_cause_fix(
