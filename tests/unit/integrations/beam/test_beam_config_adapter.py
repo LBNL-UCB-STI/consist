@@ -364,9 +364,7 @@ def test_beam_canonicalize_explicit_reference_policy_forces_bare_scalar(
     assert scalar_ref.status == "missing_ignored"
     assert scalar_ref.reason == "explicit_scalar_policy"
 
-    basename_ref = refs_by_key[
-        "beam.router.skim.activity-sim-skimmer.fileBaseName"
-    ]
+    basename_ref = refs_by_key["beam.router.skim.activity-sim-skimmer.fileBaseName"]
     assert basename_ref.raw_value == "activitySimODSkims"
     assert basename_ref.identity_policy == "output_or_runtime_ignored"
     assert basename_ref.status == "missing_ignored"
