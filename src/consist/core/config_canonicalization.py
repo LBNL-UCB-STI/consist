@@ -128,14 +128,15 @@ class ConfigAdapterOptions:
         Whether to bundle configs when the adapter supports it.
     ingest : bool
         Whether to ingest queryable slices after canonicalization.
-    allow_heuristic_refs : bool
-        Whether adapters should scan heuristic keys for references.
+    allow_heuristic_refs : Optional[bool]
+        Whether adapters should scan heuristic keys for references. ``None``
+        means use the adapter's constructor default.
     """
 
     strict: bool = False
     bundle: bool = True
     ingest: bool = True
-    allow_heuristic_refs: bool = True
+    allow_heuristic_refs: Optional[bool] = None
     path_aliases: Optional[Mapping[str, Union[str, Path]]] = None
 
 

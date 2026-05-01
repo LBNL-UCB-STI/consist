@@ -198,30 +198,102 @@ def test_beam_canonicalize_does_not_treat_scalar_input_keys_as_paths(
     assert "beam.agentsim.vehicles.assignment" not in refs_by_key
 
 
-def test_beam_canonicalize_can_disable_key_based_path_heuristics(
+def test_beam_canonicalize_keeps_file_format_scalars_out_of_references(
+    tracker,
+    tmp_path: Path,
+    caplog,
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    overlay_conf.write_text(
+        overlay_conf.read_text(encoding="utf-8")
+        + '\nbeam.exchange.scenario.fileFormat = "parquet"\n'
+        + '\nmatsim.modules.controler.eventsFileFormat = "xml"\n'
+        + '\nmatsim.modules.controler.overwriteFiles = "overwriteExistingFiles"\n'
+        + '\nmatsim.modules.controler.overwriteExistingFiles = "overwriteExistingFiles"\n'
+        + '\nbeam.router.skim.activity-sim-skimmer.fileBaseName = "activitySimODSkims"\n'
+        + '\nbeam.router.skim.drive-time-skimmer.fileBaseName = "skimsTravelTimeObservedVsSimulated"\n',
+        encoding="utf-8",
+    )
+    adapter = BeamConfigAdapter(
+        primary_config=overlay_conf,
+        reference_policies={
+            "beam.agentsim.overridePath": BeamReferencePolicy(
+                identity_policy="ignored",
+                required=False,
+                reason="dormant_test_reference",
+            )
+        },
+    )
+    canonical = adapter.discover([case_dir], identity=tracker.identity)
+    run = tracker.begin_run("beam_scalar_formats_unit", "beam")
+    with caplog.at_level(logging.WARNING):
+        result = adapter.canonicalize(
+            canonical,
+            run=run,
+            tracker=tracker,
+            strict=True,
+        )
+
+    refs_by_key = {ref.config_key: ref for ref in result.identity.references}
+    for scalar_key in (
+        "beam.exchange.scenario.fileFormat",
+        "matsim.modules.controler.eventsFileFormat",
+        "matsim.modules.controler.overwriteFiles",
+        "matsim.modules.controler.overwriteExistingFiles",
+        "beam.router.skim.activity-sim-skimmer.fileBaseName",
+        "beam.router.skim.drive-time-skimmer.fileBaseName",
+    ):
+        assert scalar_key not in refs_by_key
+        assert scalar_key not in caplog.text
+
+
+def test_beam_canonicalize_does_not_use_key_only_path_heuristics_by_default(
     tracker,
     tmp_path: Path,
 ):
     case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
     overlay_conf.write_text(
         overlay_conf.read_text(encoding="utf-8")
-        + '\nbeam.agentsim.customFileLabel = "scenario-a"\n',
+        + '\nbeam.agentsim.customFile = "scenario-a"\n',
         encoding="utf-8",
     )
-    adapter = BeamConfigAdapter(primary_config=overlay_conf)
-    canonical = adapter.discover([case_dir], identity=tracker.identity)
-    run = tracker.begin_run("beam_no_heuristic_refs_unit", "beam")
-    result = adapter.canonicalize(
-        canonical,
-        run=run,
-        tracker=tracker,
-        strict=True,
-        options=ConfigAdapterOptions(allow_heuristic_refs=False),
+    adapter = BeamConfigAdapter(
+        primary_config=overlay_conf,
+        reference_policies={
+            "beam.agentsim.overridePath": BeamReferencePolicy(
+                identity_policy="ignored",
+                required=False,
+                reason="dormant_test_reference",
+            )
+        },
     )
+    canonical = adapter.discover([case_dir], identity=tracker.identity)
+    run = tracker.begin_run("beam_default_no_heuristic_refs_unit", "beam")
+    result = adapter.canonicalize(canonical, run=run, tracker=tracker, strict=True)
 
     refs_by_key = {ref.config_key: ref for ref in result.identity.references}
-    assert "beam.agentsim.customFileLabel" not in refs_by_key
+    assert "beam.agentsim.customFile" not in refs_by_key
     assert result.identity.scalars["options"]["allow_heuristic_refs"] is False
+
+
+def test_beam_canonicalize_can_enable_key_based_path_heuristics(
+    tracker,
+    tmp_path: Path,
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    overlay_conf.write_text(
+        overlay_conf.read_text(encoding="utf-8")
+        + '\nbeam.agentsim.customFile = "scenario-a"\n',
+        encoding="utf-8",
+    )
+    adapter = BeamConfigAdapter(primary_config=overlay_conf, allow_heuristic_refs=True)
+    canonical = adapter.discover([case_dir], identity=tracker.identity)
+    run = tracker.begin_run("beam_enable_heuristic_refs_unit", "beam")
+    result = adapter.canonicalize(canonical, run=run, tracker=tracker)
+
+    refs_by_key = {ref.config_key: ref for ref in result.identity.references}
+    assert refs_by_key["beam.agentsim.customFile"].status == "missing_required"
+    assert result.identity.scalars["options"]["allow_heuristic_refs"] is True
 
 
 def test_beam_canonicalize_supports_explicit_reference_policy(tracker, tmp_path: Path):
@@ -248,6 +320,57 @@ def test_beam_canonicalize_supports_explicit_reference_policy(tracker, tmp_path:
     assert override_ref.identity_policy == "ignored"
     assert override_ref.status == "missing_ignored"
     assert override_ref.reason == "dormant_test_reference"
+
+
+def test_beam_canonicalize_explicit_reference_policy_forces_bare_scalar(
+    tracker,
+    tmp_path: Path,
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    overlay_conf.write_text(
+        overlay_conf.read_text(encoding="utf-8")
+        + '\nbeam.inputs.networkMode = "car"\n'
+        + '\nbeam.router.skim.activity-sim-skimmer.fileBaseName = "activitySimODSkims"\n',
+        encoding="utf-8",
+    )
+    adapter = BeamConfigAdapter(
+        primary_config=overlay_conf,
+        reference_policies={
+            "beam.inputs.networkMode": BeamReferencePolicy(
+                identity_policy="ignored",
+                required=False,
+                reason="explicit_scalar_policy",
+            ),
+            "beam.router.skim.activity-sim-skimmer.fileBaseName": BeamReferencePolicy(
+                identity_policy="output_or_runtime_ignored",
+                required=False,
+                reason="explicit_runtime_basename",
+            ),
+            "beam.agentsim.overridePath": BeamReferencePolicy(
+                identity_policy="ignored",
+                required=False,
+                reason="dormant_test_reference",
+            ),
+        },
+    )
+    canonical = adapter.discover([case_dir], identity=tracker.identity)
+    run = tracker.begin_run("beam_explicit_scalar_policy_unit", "beam")
+    result = adapter.canonicalize(canonical, run=run, tracker=tracker, strict=True)
+
+    refs_by_key = {ref.config_key: ref for ref in result.identity.references}
+    scalar_ref = refs_by_key["beam.inputs.networkMode"]
+    assert scalar_ref.raw_value == "car"
+    assert scalar_ref.identity_policy == "ignored"
+    assert scalar_ref.status == "missing_ignored"
+    assert scalar_ref.reason == "explicit_scalar_policy"
+
+    basename_ref = refs_by_key[
+        "beam.router.skim.activity-sim-skimmer.fileBaseName"
+    ]
+    assert basename_ref.raw_value == "activitySimODSkims"
+    assert basename_ref.identity_policy == "output_or_runtime_ignored"
+    assert basename_ref.status == "missing_ignored"
+    assert basename_ref.reason == "explicit_runtime_basename"
 
 
 def test_beam_materialize_overrides(tracker, tmp_path: Path):

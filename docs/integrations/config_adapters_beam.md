@@ -171,9 +171,17 @@ with Session(tracker.engine) as session:
 - `env_overrides` supplies environment variables for optional substitutions (e.g., `${?BEAM_OUTPUT}`).
 - `strict=True` raises on missing referenced files; otherwise missing paths are logged as warnings.
 - Canonicalization returns a structured `CanonicalConfigIdentity` manifest.
-  Path-like config values are recorded as keyed `ConfigReference` entries with
-  their dotted BEAM config key, canonical value, status, role, and identity
-  policy.
+  Reference discovery is value-first: scalar strings become keyed
+  `ConfigReference` entries when the value itself looks like a path, resolves
+  under a config root, or the exact config key has an explicit
+  `BeamReferencePolicy`. Generic key-name scanning is disabled by default so
+  enum/control settings such as `fileFormat = "parquet"` and
+  `overwriteFiles = "overwriteExistingFiles"` remain ordinary scalar config
+  identity.
+- `BeamConfigAdapter(allow_heuristic_refs=True)` or
+  `ConfigAdapterOptions(allow_heuristic_refs=True)` re-enables key-suffix
+  discovery for legacy configs with bare filename values, but explicit
+  `reference_policies` are preferred for ambiguous scenario-specific settings.
 - Reference identity policies are:
   - `content_hash` for resolved file inputs.
   - `path_alias` for aliased or logical input roots such as
@@ -185,6 +193,29 @@ with Session(tracker.engine) as session:
     `BeamReferencePolicy`.
   - `output_or_runtime_ignored` for output/runtime locations that should not
     make equivalent runs miss cache.
+
+For ambiguous bare scalar values, configure a key-specific policy instead of
+relying on key-name inference:
+
+```python
+from consist.integrations.beam import BeamReferencePolicy
+
+adapter = BeamConfigAdapter(
+    primary_config=config_root / "sfbay-pilates-base.conf",
+    reference_policies={
+        "beam.agentsim.optionalExamplePath": BeamReferencePolicy(
+            identity_policy="ignored",
+            required=False,
+            reason="dormant_example_config",
+        ),
+        "beam.router.skim.activity-sim-skimmer.fileBaseName": BeamReferencePolicy(
+            identity_policy="output_or_runtime_ignored",
+            required=False,
+            reason="runtime_output_prefix",
+        ),
+    },
+)
+```
 
 Path aliases can be supplied on the adapter or per call:
 

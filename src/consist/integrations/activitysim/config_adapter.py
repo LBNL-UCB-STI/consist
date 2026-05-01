@@ -442,7 +442,7 @@ class ActivitySimConfigAdapter:
         resolved_strict = options.strict if options is not None else strict
         allow_heuristics = (
             options.allow_heuristic_refs
-            if options is not None
+            if options is not None and options.allow_heuristic_refs is not None
             else self.allow_heuristic_refs
         )
         bundle_configs = options.bundle if options is not None else self.bundle_configs

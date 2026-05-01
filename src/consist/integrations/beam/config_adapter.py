@@ -119,6 +119,7 @@ class BeamConfigAdapter:
     env_overrides: Optional[dict[str, str]] = None
     ingest_specs: list[BeamIngestSpec] = field(default_factory=list)
     path_aliases: Optional[dict[str, str | Path]] = None
+    allow_heuristic_refs: bool = False
     reference_policies: dict[str, BeamReferencePolicy | dict[str, Any]] = field(
         default_factory=dict
     )
@@ -200,7 +201,9 @@ class BeamConfigAdapter:
             path_aliases=path_aliases,
             reference_policies=self.reference_policies,
             allow_heuristic_refs=(
-                options.allow_heuristic_refs if options is not None else True
+                options.allow_heuristic_refs
+                if options is not None and options.allow_heuristic_refs is not None
+                else self.allow_heuristic_refs
             ),
             tracker=tracker,
         )
@@ -827,9 +830,12 @@ def _is_path_like_config_value(value: str) -> bool:
 def _collect_path_candidates(
     config_tree: dict[str, Any],
     *,
+    root_dirs: Sequence[Path],
+    reference_policies: Mapping[str, BeamReferencePolicy | Mapping[str, Any]],
     allow_heuristic_refs: bool,
 ) -> list[_BeamPathCandidate]:
     candidates: list[_BeamPathCandidate] = []
+    explicit_policy_keys = set(reference_policies)
 
     def walk(node: Any, prefix: str) -> None:
         if isinstance(node, dict):
@@ -842,7 +848,9 @@ def _collect_path_candidates(
                 walk(item, f"{prefix}[{index}]")
             return
         if isinstance(node, str) and (
-            _is_path_like_config_value(node)
+            prefix in explicit_policy_keys
+            or _is_path_like_config_value(node)
+            or _resolves_under_config_root(node, root_dirs)
             or (allow_heuristic_refs and _is_path_like_config_key(prefix))
         ):
             candidates.append(
@@ -855,6 +863,20 @@ def _collect_path_candidates(
 
     walk(config_tree, "")
     return candidates
+
+
+def _resolves_under_config_root(value: str, root_dirs: Sequence[Path]) -> bool:
+    raw = value.strip()
+    if not raw:
+        return False
+    candidate = Path(raw).expanduser()
+    if candidate.is_absolute():
+        resolved = candidate.resolve()
+        return resolved.exists() and any(
+            resolved == root.resolve() or resolved.is_relative_to(root.resolve())
+            for root in root_dirs
+        )
+    return any((root / candidate).resolve().exists() for root in root_dirs)
 
 
 def _merge_path_aliases(
@@ -918,7 +940,7 @@ def _policy_for_candidate(
             role="beam_input_root",
             required=True,
         )
-    if "output" in key_lower:
+    if "output" in key_lower or _is_runtime_output_config_key(candidate.config_key):
         return BeamReferencePolicy(
             identity_policy="output_or_runtime_ignored",
             role="runtime_output",
@@ -929,18 +951,16 @@ def _policy_for_candidate(
 
 
 def _is_path_like_config_key(config_key: str) -> bool:
-    normalized_key = config_key.lower()
-    compact_key = re.sub(r"[^a-z0-9]", "", normalized_key)
+    compact_key = re.sub(r"[^a-z0-9]", "", config_key.lower())
     return any(
-        token in normalized_key or token in compact_key
-        for token in (
-            "directory",
-            "dir",
-            "filepath",
-            "file",
-            "path",
-        )
+        compact_key.endswith(suffix)
+        for suffix in ("directory", "dir", "filepath", "filename", "path", "file")
     )
+
+
+def _is_runtime_output_config_key(config_key: str) -> bool:
+    compact_key = re.sub(r"[^a-z0-9]", "", config_key.lower())
+    return compact_key.endswith("filebasename")
 
 
 def _canonical_path_value(
@@ -1038,6 +1058,8 @@ def _build_beam_config_identity(
     directories: list[DirectoryIdentity] = []
     for candidate in _collect_path_candidates(
         config_tree,
+        root_dirs=root_dirs,
+        reference_policies=reference_policies,
         allow_heuristic_refs=allow_heuristic_refs,
     ):
         policy = _policy_for_candidate(candidate, reference_policies)
