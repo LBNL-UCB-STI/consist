@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import os
 from pathlib import Path
 import uuid
 
@@ -12,6 +14,12 @@ from consist.api import materialize_run_outputs as materialize_run_outputs_api
 from consist.api import archive_artifact as archive_artifact_api
 from consist.api import archive_current_run_outputs as archive_current_run_outputs_api
 from consist.api import archive_run_outputs as archive_run_outputs_api
+from consist.api import (
+    register_artifact_recovery_copy as register_artifact_recovery_copy_api,
+)
+from consist.api import (
+    register_run_output_recovery_copies as register_run_output_recovery_copies_api,
+)
 from consist.api import set_artifact_recovery_roots as set_artifact_recovery_roots_api
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
@@ -302,6 +310,324 @@ def test_archive_artifact_copies_bytes_and_records_recovery_root(
     assert refreshed.meta["recovery_roots"] == [str(archive_root.resolve())]
 
 
+def test_register_artifact_recovery_copy_verifies_existing_file_without_copying(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "adopted.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n1\n", encoding="utf-8")
+    recovery_root = tmp_path / "external_archive"
+
+    with tracker.start_run("producer_adopt_copy", model="producer"):
+        artifact = tracker.log_artifact(output_path, key="adopted", direction="output")
+
+    expected_path = recovery_root / "outputs" / "adopted.csv"
+    expected_path.parent.mkdir(parents=True, exist_ok=True)
+    expected_path.write_text("value\n1\n", encoding="utf-8")
+
+    result = register_artifact_recovery_copy_api(
+        artifact,
+        recovery_root,
+        tracker=tracker,
+    )
+
+    assert result.status == "registered"
+    assert result.expected_path == expected_path.resolve()
+    assert result.metadata_updated is True
+    assert output_path.exists()
+    refreshed = tracker.get_run_outputs("producer_adopt_copy")["adopted"]
+    assert refreshed.recovery_roots == [str(recovery_root.resolve())]
+
+
+def test_register_artifact_recovery_copy_missing_file_blocks_metadata_update(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "missing_archive.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n1\n", encoding="utf-8")
+    recovery_root = tmp_path / "external_archive_missing"
+
+    with tracker.start_run("producer_adopt_missing", model="producer"):
+        artifact = tracker.log_artifact(
+            output_path, key="missing_archive", direction="output"
+        )
+
+    result = tracker.register_artifact_recovery_copy(artifact, recovery_root)
+
+    assert result.status == "missing_copy"
+    assert result.metadata_updated is False
+    refreshed = tracker.get_run_outputs("producer_adopt_missing")["missing_archive"]
+    assert "recovery_roots" not in refreshed.meta
+
+
+def test_register_artifact_recovery_copy_hash_mismatch_blocks_metadata_update(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "mismatch.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n1\n", encoding="utf-8")
+    recovery_root = tmp_path / "external_archive_mismatch"
+
+    with tracker.start_run("producer_adopt_mismatch", model="producer"):
+        artifact = tracker.log_artifact(output_path, key="mismatch", direction="output")
+
+    expected_path = recovery_root / "outputs" / "mismatch.csv"
+    expected_path.parent.mkdir(parents=True, exist_ok=True)
+    expected_path.write_text("value\n999\n", encoding="utf-8")
+
+    result = tracker.register_artifact_recovery_copy(artifact, recovery_root)
+
+    assert result.status == "hash_mismatch"
+    assert result.metadata_updated is False
+    refreshed = tracker.get_run_outputs("producer_adopt_mismatch")["mismatch"]
+    assert "recovery_roots" not in refreshed.meta
+
+
+def test_register_artifact_recovery_copy_uses_full_hash_when_tracker_is_fast(
+    tmp_path: Path,
+) -> None:
+    tracker = Tracker(
+        run_dir=tmp_path / "runs_fast",
+        db_path=str(tmp_path / "fast.duckdb"),
+        hashing_strategy="fast",
+    )
+    try:
+        output_path = tracker.run_dir / "outputs" / "fast_hash.csv"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_text = "value\n1\n"
+        output_path.write_text(output_text, encoding="utf-8")
+        recovery_root = tmp_path / "external_archive_fast"
+
+        with tracker.start_run("producer_adopt_fast", model="producer"):
+            artifact = tracker.log_artifact(
+                output_path, key="fast_hash", direction="output"
+            )
+
+        expected_path = recovery_root / "outputs" / "fast_hash.csv"
+        expected_path.parent.mkdir(parents=True, exist_ok=True)
+        expected_path.write_text(output_text, encoding="utf-8")
+        content_hash = hashlib.sha256(output_text.encode("utf-8")).hexdigest()
+
+        result = tracker.register_artifact_recovery_copy(
+            artifact,
+            recovery_root,
+            content_hash=content_hash,
+        )
+
+        assert result.status == "registered"
+        refreshed = tracker.get_run_outputs("producer_adopt_fast")["fast_hash"]
+        assert refreshed.recovery_roots == [str(recovery_root.resolve())]
+    finally:
+        if tracker.engine:
+            tracker.engine.dispose()
+
+
+def test_register_artifact_recovery_copy_fast_hash_requires_byte_hash(
+    tmp_path: Path,
+) -> None:
+    tracker = Tracker(
+        run_dir=tmp_path / "runs_fast_unverifiable",
+        db_path=str(tmp_path / "fast_unverifiable.duckdb"),
+        hashing_strategy="fast",
+    )
+    try:
+        output_path = tracker.run_dir / "outputs" / "fast_unverifiable.csv"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("value\n1\n", encoding="utf-8")
+        recovery_root = tmp_path / "external_archive_fast_unverifiable"
+
+        with tracker.start_run("producer_adopt_fast_unverifiable", model="producer"):
+            artifact = tracker.log_artifact(
+                output_path, key="fast_unverifiable", direction="output"
+            )
+
+        expected_path = recovery_root / "outputs" / "fast_unverifiable.csv"
+        expected_path.parent.mkdir(parents=True, exist_ok=True)
+        expected_path.write_text("value\n1\n", encoding="utf-8")
+
+        result = tracker.register_artifact_recovery_copy(artifact, recovery_root)
+
+        assert result.status == "unverifiable_hash"
+        assert result.expected_path == expected_path.resolve()
+        assert result.metadata_updated is False
+        refreshed = tracker.get_run_outputs("producer_adopt_fast_unverifiable")[
+            "fast_unverifiable"
+        ]
+        assert "recovery_roots" not in refreshed.meta
+    finally:
+        if tracker.engine:
+            tracker.engine.dispose()
+
+
+def test_register_artifact_recovery_copy_verify_false_adopts_existing_copy(
+    tmp_path: Path,
+) -> None:
+    tracker = Tracker(
+        run_dir=tmp_path / "runs_verify_false",
+        db_path=str(tmp_path / "verify_false.duckdb"),
+        hashing_strategy="fast",
+    )
+    try:
+        output_path = tracker.run_dir / "outputs" / "verify_false.csv"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("value\n1\n", encoding="utf-8")
+        recovery_root = tmp_path / "external_archive_verify_false"
+
+        with tracker.start_run("producer_adopt_verify_false", model="producer"):
+            artifact = tracker.log_artifact(
+                output_path, key="verify_false", direction="output"
+            )
+
+        expected_path = recovery_root / "outputs" / "verify_false.csv"
+        expected_path.parent.mkdir(parents=True, exist_ok=True)
+        expected_path.write_text("different bytes\n", encoding="utf-8")
+
+        result = tracker.register_artifact_recovery_copy(
+            artifact,
+            recovery_root,
+            verify=False,
+        )
+
+        assert result.status == "registered"
+        assert result.expected_path == expected_path.resolve()
+        assert result.metadata_updated is True
+        refreshed = tracker.get_run_outputs("producer_adopt_verify_false")[
+            "verify_false"
+        ]
+        assert refreshed.recovery_roots == [str(recovery_root.resolve())]
+    finally:
+        if tracker.engine:
+            tracker.engine.dispose()
+
+
+def test_register_artifact_recovery_copy_empty_content_hash_is_explicit(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "empty_hash.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n1\n", encoding="utf-8")
+    recovery_root = tmp_path / "external_archive_empty_hash"
+
+    with tracker.start_run("producer_adopt_empty_hash", model="producer"):
+        artifact = tracker.log_artifact(
+            output_path, key="empty_hash", direction="output"
+        )
+
+    expected_path = recovery_root / "outputs" / "empty_hash.csv"
+    expected_path.parent.mkdir(parents=True, exist_ok=True)
+    expected_path.write_text("value\n1\n", encoding="utf-8")
+
+    result = tracker.register_artifact_recovery_copy(
+        artifact,
+        recovery_root,
+        content_hash="",
+    )
+
+    assert result.status == "hash_mismatch"
+    assert result.expected_path == expected_path.resolve()
+    assert result.metadata_updated is False
+    refreshed = tracker.get_run_outputs("producer_adopt_empty_hash")["empty_hash"]
+    assert "recovery_roots" not in refreshed.meta
+
+
+def test_register_artifact_recovery_copy_rejects_same_metadata_wrong_bytes(
+    tmp_path: Path,
+) -> None:
+    tracker = Tracker(
+        run_dir=tmp_path / "runs_fast_same_metadata",
+        db_path=str(tmp_path / "fast_same_metadata.duckdb"),
+        hashing_strategy="fast",
+    )
+    try:
+        output_path = tracker.run_dir / "outputs" / "same_metadata.csv"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_text = "value\n1\n"
+        output_path.write_text(output_text, encoding="utf-8")
+        recovery_root = tmp_path / "external_archive_same_metadata"
+
+        with tracker.start_run("producer_adopt_same_metadata", model="producer"):
+            artifact = tracker.log_artifact(
+                output_path, key="same_metadata", direction="output"
+            )
+
+        expected_path = recovery_root / "outputs" / "same_metadata.csv"
+        expected_path.parent.mkdir(parents=True, exist_ok=True)
+        expected_path.write_text("value\n9\n", encoding="utf-8")
+        source_stat = output_path.stat()
+        os.utime(
+            expected_path,
+            ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns),
+        )
+        content_hash = hashlib.sha256(output_text.encode("utf-8")).hexdigest()
+
+        result = tracker.register_artifact_recovery_copy(
+            artifact,
+            recovery_root,
+            content_hash=content_hash,
+        )
+
+        assert result.status == "hash_mismatch"
+        assert result.metadata_updated is False
+        refreshed = tracker.get_run_outputs("producer_adopt_same_metadata")[
+            "same_metadata"
+        ]
+        assert "recovery_roots" not in refreshed.meta
+    finally:
+        if tracker.engine:
+            tracker.engine.dispose()
+
+
+def test_register_artifact_recovery_copy_unmappable_layout_blocks_clearly(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    artifact = Artifact(
+        id=uuid.uuid4(),
+        key="absolute",
+        container_uri=str((tmp_path / "absolute.csv").resolve()),
+        driver="csv",
+        meta={},
+    )
+
+    result = tracker.register_artifact_recovery_copy(
+        artifact,
+        tmp_path / "external_archive_unmappable",
+    )
+
+    assert result.status == "skipped_unmapped"
+    assert result.expected_path is None
+    assert "root-only recovery metadata" in str(result.message)
+    assert result.metadata_updated is False
+
+
+def test_register_artifact_recovery_copy_symlink_destination_blocks_metadata_update(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "symlink.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n1\n", encoding="utf-8")
+    recovery_root = tmp_path / "external_archive_symlink"
+
+    with tracker.start_run("producer_adopt_symlink", model="producer"):
+        artifact = tracker.log_artifact(output_path, key="symlink", direction="output")
+
+    expected_path = recovery_root / "outputs" / "symlink.csv"
+    expected_path.parent.mkdir(parents=True, exist_ok=True)
+    expected_path.symlink_to(output_path)
+
+    result = tracker.register_artifact_recovery_copy(artifact, recovery_root)
+
+    assert result.status == "symlink_destination"
+    assert result.metadata_updated is False
+    refreshed = tracker.get_run_outputs("producer_adopt_symlink")["symlink"]
+    assert "recovery_roots" not in refreshed.meta
+
+
 def test_archive_artifact_unmappable_layout_has_actionable_error(
     tracker: Tracker,
     tmp_path: Path,
@@ -493,6 +819,167 @@ def test_archive_run_outputs_archives_selected_keys(
     outputs = tracker.get_run_outputs("producer_archive_bulk")
     assert outputs["a"].meta["recovery_roots"] == [str(archive_root.resolve())]
     assert "recovery_roots" not in outputs["b"].meta
+
+
+def test_register_run_output_recovery_copies_reports_mixed_statuses_and_unknown_keys(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    a_path = tracker.run_dir / "outputs" / "bulk_a.csv"
+    b_path = tracker.run_dir / "outputs" / "bulk_b.csv"
+    a_path.parent.mkdir(parents=True, exist_ok=True)
+    a_path.write_text("value\n1\n", encoding="utf-8")
+    b_path.write_text("value\n2\n", encoding="utf-8")
+    recovery_root = tmp_path / "external_archive_bulk"
+
+    with tracker.start_run("producer_adopt_bulk", model="producer"):
+        tracker.log_artifact(a_path, key="a", direction="output")
+        tracker.log_artifact(b_path, key="b", direction="output")
+
+    expected_a = recovery_root / "outputs" / "bulk_a.csv"
+    expected_a.parent.mkdir(parents=True, exist_ok=True)
+    expected_a.write_text("value\n1\n", encoding="utf-8")
+
+    result = register_run_output_recovery_copies_api(
+        "producer_adopt_bulk",
+        recovery_root,
+        keys=["a", "b"],
+        tracker=tracker,
+    )
+
+    assert result["a"].status == "registered"
+    assert result["b"].status == "missing_copy"
+    assert result.complete is False
+    assert result.summary == (
+        "registered=1 missing_copy=1 hash_mismatch=0 skipped_unmapped=0 "
+        "symlink_destination=0 unsupported_directory=0 unverifiable_hash=0 failed=0"
+    )
+    outputs = tracker.get_run_outputs("producer_adopt_bulk")
+    assert outputs["a"].recovery_roots == [str(recovery_root.resolve())]
+    assert "recovery_roots" not in outputs["b"].meta
+
+    with pytest.raises(KeyError, match="Requested output keys were not found"):
+        tracker.register_run_output_recovery_copies(
+            "producer_adopt_bulk",
+            recovery_root,
+            keys=["missing"],
+        )
+
+
+def test_register_run_output_recovery_copies_rejects_hashes_outside_selected_keys(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    a_path = tracker.run_dir / "outputs" / "selected_a.csv"
+    b_path = tracker.run_dir / "outputs" / "selected_b.csv"
+    a_path.parent.mkdir(parents=True, exist_ok=True)
+    a_path.write_text("value\n1\n", encoding="utf-8")
+    b_path.write_text("value\n2\n", encoding="utf-8")
+    recovery_root = tmp_path / "external_archive_selected"
+
+    with tracker.start_run("producer_adopt_selected", model="producer"):
+        tracker.log_artifact(a_path, key="a", direction="output")
+        tracker.log_artifact(b_path, key="b", direction="output")
+
+    with pytest.raises(KeyError, match="content_hashes contained keys"):
+        tracker.register_run_output_recovery_copies(
+            "producer_adopt_selected",
+            recovery_root,
+            keys=["a"],
+            content_hashes={"b": "unused"},
+        )
+
+
+def test_api_register_artifact_recovery_copy_delegates_with_default_tracker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = Artifact(
+        id=uuid.uuid4(),
+        key="x",
+        container_uri="./x.csv",
+        driver="csv",
+        meta={},
+    )
+    calls: dict[str, object] = {}
+    expected = object()
+
+    class _FakeTracker:
+        def register_artifact_recovery_copy(
+            self, artifact_arg, recovery_root, **kwargs
+        ):
+            calls["artifact"] = artifact_arg
+            calls["recovery_root"] = recovery_root
+            calls["kwargs"] = kwargs
+            return expected
+
+    monkeypatch.setattr(
+        "consist.api._resolve_tracker", lambda tracker=None: _FakeTracker()
+    )
+
+    result = register_artifact_recovery_copy_api(
+        artifact,
+        "/tmp/recovery",
+        verify=False,
+        content_hash="abc",
+        append=False,
+    )
+
+    assert result is expected
+    assert calls == {
+        "artifact": artifact,
+        "recovery_root": "/tmp/recovery",
+        "kwargs": {
+            "verify": False,
+            "content_hash": "abc",
+            "append": False,
+        },
+    }
+    assert (
+        consist.register_artifact_recovery_copy is register_artifact_recovery_copy_api
+    )
+
+
+def test_api_register_run_output_recovery_copies_delegates_with_default_tracker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+    expected = object()
+
+    class _FakeTracker:
+        def register_run_output_recovery_copies(self, run_id, recovery_root, **kwargs):
+            calls["run_id"] = run_id
+            calls["recovery_root"] = recovery_root
+            calls["kwargs"] = kwargs
+            return expected
+
+    monkeypatch.setattr(
+        "consist.api._resolve_tracker", lambda tracker=None: _FakeTracker()
+    )
+
+    result = register_run_output_recovery_copies_api(
+        "run_1",
+        "/tmp/recovery",
+        keys=("a",),
+        verify=False,
+        append=False,
+        content_hashes={"a": "abc"},
+    )
+
+    assert result is expected
+    assert calls == {
+        "run_id": "run_1",
+        "recovery_root": "/tmp/recovery",
+        "kwargs": {
+            "keys": ("a",),
+            "verify": False,
+            "append": False,
+            "content_hashes": {"a": "abc"},
+        },
+    }
+    assert (
+        consist.register_run_output_recovery_copies
+        is register_run_output_recovery_copies_api
+    )
 
 
 def test_api_archive_current_run_outputs_delegates_with_default_tracker(

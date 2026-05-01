@@ -15,6 +15,7 @@ only need summary buckets.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterator, Mapping as MappingABC
 from dataclasses import dataclass, field
 from contextlib import suppress
@@ -24,7 +25,15 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Iterable, Literal, Mapping, Sequence, TYPE_CHECKING, cast
+from typing import (
+    Iterable,
+    Literal,
+    Mapping,
+    Sequence,
+    TYPE_CHECKING,
+    cast,
+    get_args,
+)
 
 import pandas as pd
 from sqlalchemy import MetaData, Table, select
@@ -50,6 +59,17 @@ StagingStatus = Literal[
     "staged",
     "preserved_existing",
     "missing_source",
+    "failed",
+]
+
+RecoveryCopyStatus = Literal[
+    "registered",
+    "missing_copy",
+    "hash_mismatch",
+    "skipped_unmapped",
+    "symlink_destination",
+    "unsupported_directory",
+    "unverifiable_hash",
     "failed",
 ]
 
@@ -258,6 +278,82 @@ class HydratedRunOutputsResult(MappingABC[str, HydratedRunOutput]):
             f"skipped_unmapped={counts['skipped_unmapped']} "
             f"missing_source={counts['missing_source']} "
             f"failed={counts['failed']}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactRecoveryCopyRegistration:
+    """Outcome for adopting one externally copied artifact recovery location.
+
+    ``registered`` means Consist verified the existing copy according to the
+    requested policy and persisted the recovery root. Other statuses are
+    advisory blockers; the artifact identity is unchanged and recovery metadata
+    was not updated.
+    """
+
+    artifact: Artifact
+    key: str | None
+    artifact_id: str
+    recovery_root: Path
+    expected_path: Path | None
+    status: RecoveryCopyStatus
+    message: str | None = None
+    metadata_updated: bool = False
+
+
+@dataclass(slots=True)
+class RunOutputRecoveryCopiesRegistration(
+    MappingABC[str, ArtifactRecoveryCopyRegistration]
+):
+    """Key-indexed result for adopting externally copied run-output bytes."""
+
+    outputs: dict[str, ArtifactRecoveryCopyRegistration] = field(default_factory=dict)
+
+    def __getitem__(self, key: str) -> ArtifactRecoveryCopyRegistration:
+        return self.outputs[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.outputs)
+
+    def __len__(self) -> int:
+        return len(self.outputs)
+
+    def items(self):
+        return self.outputs.items()
+
+    def keys(self):
+        return self.outputs.keys()
+
+    def values(self):
+        return self.outputs.values()
+
+    @property
+    def registered(self) -> dict[str, ArtifactRecoveryCopyRegistration]:
+        return {
+            key: output
+            for key, output in self.outputs.items()
+            if output.status == "registered"
+        }
+
+    @property
+    def blocked(self) -> dict[str, ArtifactRecoveryCopyRegistration]:
+        return {
+            key: output
+            for key, output in self.outputs.items()
+            if output.status != "registered"
+        }
+
+    @property
+    def complete(self) -> bool:
+        return not self.blocked
+
+    @property
+    def summary(self) -> str:
+        counts = Counter(output.status for output in self.outputs.values())
+        known_statuses = list(get_args(RecoveryCopyStatus))
+        extra_statuses = sorted(set(counts) - set(known_statuses))
+        return " ".join(
+            f"{status}={counts[status]}" for status in known_statuses + extra_statuses
         )
 
 

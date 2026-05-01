@@ -163,8 +163,11 @@ registered = tracker.register_run_output_recovery_copies(
 `register_artifact_recovery_copy(...)` does not copy bytes. It expects the
 artifact to already exist at
 `recovery_root / <artifact-uri-relative-path>`, blocks symlinks and directory
-artifacts, and compares the file bytes to `artifact.hash` and any supplied
-`content_hash` before updating metadata.
+artifacts, and compares the file bytes to a full SHA-256 before updating
+metadata. Pass `content_hash` when the artifact was logged with fast metadata
+hashing or otherwise lacks a byte-level `artifact.hash`; without a byte-level
+hash, verified registration returns `unverifiable_hash` and leaves metadata
+unchanged.
 
 Use the low-level metadata helper only when verification is handled elsewhere
 or you intentionally need to override recovery metadata:

@@ -189,6 +189,8 @@ and `digest`.
         - stage_artifact
         - stage_inputs
         - set_artifact_recovery_roots
+        - register_artifact_recovery_copy
+        - register_run_output_recovery_copies
         - archive_artifact
         - archive_run_outputs
         - archive_current_run_outputs
