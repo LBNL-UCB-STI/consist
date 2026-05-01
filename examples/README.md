@@ -11,19 +11,20 @@ Examples are tiered:
 ## Essentials tier
 
 - `../00_quickstart.ipynb`: shortest recommended path walkthrough.
-- `../01_parameter_sweep_monte_carlo.ipynb`: moderate-scale sweep with
+- `../01_beam_core_demo.ipynb`: BEAM CORE-style linear scenario workflow for
+  introducing scenario diffs, lineage, cache behavior, and path-bound input
+  staging.
+- `../02_parameter_sweep_monte_carlo.ipynb`: moderate-scale sweep with
   `scenario.run(...)` + `scenario.trace(...)`.
 - `scripts/research_pipeline_native.py`: compact script template for native
   Python workflows.
 
 ## Advanced tier
 
-- `../02_iterative_workflows.ipynb`: iterative scenario loops and cache
+- `../03_iterative_workflows.ipynb`: iterative scenario loops and cache
   extension runs.
-- `../03_transportation_demand_modeling.ipynb`: end-to-end transportation
+- `../04_transportation_demand_modeling.ipynb`: end-to-end transportation
   scenario analysis with multi-run comparison via `RunSet`.
-- `../04_beam_core_demo.ipynb`: BEAM CORE-style linear workflow demo focused
-  on provenance diff, lineage, cache behavior, and `RunSet` alignment patterns.
 - `scripts/model_integrator_wrapper.py`: integration-style scenario template
   for wrapping external tools, including `RunSet`-based baseline/policy pairing.
 
