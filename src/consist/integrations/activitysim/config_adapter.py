@@ -37,6 +37,7 @@ from consist.core.config_canonicalization import (
     ConfigReference,
     DirectoryIdentity,
     IngestSpec,
+    _canonical_json_sha256,
     compute_config_pack_hash,
 )
 from consist.core.identity import IdentityManager
@@ -90,17 +91,6 @@ try:
     import yaml
 except ImportError:  # pragma: no cover - optional dependency
     yaml = None
-
-
-def _canonical_json_sha256(payload: Any) -> str:
-    encoded = json.dumps(
-        payload,
-        sort_keys=True,
-        ensure_ascii=True,
-        separators=(",", ":"),
-        default=str,
-    )
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 _REFERENCE_KEYS = {

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,7 +34,6 @@ ConfigReferenceStatus = Literal[
     "missing_required",
     "missing_optional",
     "missing_ignored",
-    "unresolved_expression",
 ]
 ConfigReferenceIdentityPolicy = Literal[
     "content_hash",
@@ -54,6 +55,17 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_json_safe(item) for item in value]
     return value
+
+
+def _canonical_json_sha256(payload: Any) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 class CanonicalConfig(NamedTuple):
@@ -249,6 +261,14 @@ class CanonicalConfigIdentity:
                 for diagnostic in self.diagnostics
             ],
         }
+        scalars = data["scalars"]
+        if isinstance(scalars, Mapping):
+            files = scalars.get("files")
+            if files not in (None, [], ()):
+                data["files"] = _json_safe(files)
+            options = scalars.get("options")
+            if options not in (None, {}, []):
+                data["options"] = _json_safe(options)
         return {
             key: value for key, value in data.items() if value not in (None, {}, [], ())
         }

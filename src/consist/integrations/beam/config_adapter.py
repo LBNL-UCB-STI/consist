@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib
-import hashlib
 import json
 import logging
 import re
@@ -29,9 +28,9 @@ from consist.core.config_canonicalization import (
     ConfigAdapterOptions,
     ConfigReference,
     ConfigReferenceIdentityPolicy,
-    ConfigReferenceStatus,
     DirectoryIdentity,
     IngestSpec,
+    _canonical_json_sha256,
 )
 from consist.core.config_canonicalization import ConfigPlan
 from consist.core.identity import IdentityManager
@@ -802,11 +801,6 @@ def _normalize_value(
     return "json", None, None, None, json.dumps(value, sort_keys=True)
 
 
-def _canonical_json_sha256(payload: Any) -> str:
-    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-
-
 def _is_path_like_config_value(value: str) -> bool:
     candidate = value.strip()
     if not candidate:
@@ -1000,38 +994,32 @@ def _canonicalize_config_tree_paths(
     node: Any,
     *,
     references: Sequence[ConfigReference],
-    prefix: str = "",
 ) -> Any:
     by_key = {
         ref.config_key: ref
         for ref in references
         if ref.config_key and ref.canonical_value is not None
     }
-    if isinstance(node, dict):
-        return {
-            key: _canonicalize_config_tree_paths(
-                value,
-                references=references,
-                prefix=f"{prefix}.{key}" if prefix else str(key),
-            )
-            for key, value in node.items()
-        }
-    if isinstance(node, list):
-        return [
-            _canonicalize_config_tree_paths(
-                item,
-                references=references,
-                prefix=f"{prefix}[{index}]",
-            )
-            for index, item in enumerate(node)
-        ]
-    if isinstance(node, str):
-        ref = by_key.get(prefix)
-        if ref is not None:
-            if ref.identity_policy in {"ignored", "output_or_runtime_ignored"}:
-                return {"identity_policy": ref.identity_policy}
-            return ref.canonical_value
-    return node
+
+    def walk(value: Any, prefix: str = "") -> Any:
+        if isinstance(value, dict):
+            return {
+                key: walk(item, f"{prefix}.{key}" if prefix else str(key))
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [
+                walk(item, f"{prefix}[{index}]") for index, item in enumerate(value)
+            ]
+        if isinstance(value, str):
+            ref = by_key.get(prefix)
+            if ref is not None:
+                if ref.identity_policy in {"ignored", "output_or_runtime_ignored"}:
+                    return {"identity_policy": ref.identity_policy}
+                return ref.canonical_value
+        return value
+
+    return walk(node)
 
 
 def _build_beam_config_identity(
@@ -1082,13 +1070,15 @@ def _build_beam_config_identity(
             elif identity_policy == "content_hash" and resolved.is_dir():
                 identity_policy = "delegated_to_artifacts"
                 reason = reason or "directory_content_delegated_to_artifact_inputs"
-                delegated_artifact_keys = delegated_artifact_keys or (
-                    _artifact_key_for_path(resolved, root_dirs),
-                )
+                if not delegated_artifact_keys:
+                    delegated_artifact_keys = (
+                        _artifact_key_for_path(resolved, root_dirs),
+                    )
             elif identity_policy in {"path_alias", "delegated_to_artifacts"}:
-                delegated_artifact_keys = delegated_artifact_keys or (
-                    _artifact_key_for_path(resolved, root_dirs),
-                )
+                if not delegated_artifact_keys:
+                    delegated_artifact_keys = (
+                        _artifact_key_for_path(resolved, root_dirs),
+                    )
         if exists and resolved is not None and resolved.is_dir():
             directories.append(
                 DirectoryIdentity(
@@ -1107,7 +1097,7 @@ def _build_beam_config_identity(
                 config_key=candidate.config_key,
                 raw_value=candidate.raw_value,
                 canonical_value=canonical_value,
-                status=cast(ConfigReferenceStatus, status),
+                status=status,
                 required=required,
                 role=policy.role,
                 identity_policy=cast(ConfigReferenceIdentityPolicy, identity_policy),

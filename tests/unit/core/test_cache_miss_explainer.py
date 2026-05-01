@@ -294,6 +294,8 @@ def test_cache_miss_explanation_reads_canonical_identity_scalar_files():
             "options": {"allow_heuristic_refs": False},
         },
     ).to_meta_dict()
+    assert current_manifest["files"][0]["key"] == "root:0:settings.yaml"
+    assert current_manifest["options"]["allow_heuristic_refs"] is False
     candidate_manifest = CanonicalConfigIdentity(
         adapter_name="activitysim",
         adapter_version="test",
@@ -351,6 +353,67 @@ def test_cache_miss_explanation_reads_canonical_identity_scalar_files():
     assert explanation.details["config_identity_options_changed"] == [
         "allow_heuristic_refs"
     ]
+
+
+def test_cache_miss_explanation_falls_back_when_manifest_diff_empty():
+    """Identical manifests should not suppress older facet fallback details."""
+
+    manifest = CanonicalConfigIdentity(
+        adapter_name="activitysim",
+        adapter_version="test",
+        primary_config="root:0:settings.yaml",
+        identity_hash="identity",
+        scalars={
+            "files": [
+                {
+                    "key": "root:0:settings.yaml",
+                    "role": "yaml",
+                    "hash": "settings",
+                }
+            ]
+        },
+    ).to_meta_dict()
+    current = Run(
+        id="current",
+        model_name="activitysim",
+        config_hash="config_hash_current",
+        input_hash="input_hash",
+        git_hash="git_hash",
+        meta={"config_identity_manifest": manifest},
+    )
+    candidate = Run(
+        id="candidate",
+        model_name="activitysim",
+        config_hash="config_hash_candidate",
+        input_hash="input_hash",
+        git_hash="git_hash",
+        status="completed",
+        meta={"config_identity_manifest": manifest},
+    )
+
+    class StubTracker:
+        db = object()
+        current_consist = SimpleNamespace(facet={"sample_rate": 0.2})
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            assert model_name == "activitysim"
+            assert limit == 20
+            return [candidate]
+
+        def get_config_values(self, run_id: str):
+            assert run_id == "candidate"
+            return {"sample_rate": 0.1}
+
+        def get_run_config(self, run_id: str, *, allow_missing: bool = False):
+            raise AssertionError("JSON snapshot fallback should not be needed.")
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert explanation.reason == "config_changed"
+    assert explanation.details["config_keys_changed"] == ["sample_rate"]
+    assert explanation.details["fallbacks_used"] == ["config_facet"]
 
 
 def test_cache_miss_explanation_records_callable_identity_mode_drift():
