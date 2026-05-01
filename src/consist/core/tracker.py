@@ -1107,6 +1107,11 @@ class Tracker:
         precedence when supplied. Without it, ``artifact.hash`` is only used for
         byte verification when this tracker is using full content hashing; fast
         metadata hashes are not byte-equivalence proofs.
+
+        ``append`` defaults to True so verified adoption behaves like
+        ``archive_artifact(...)``: the newly verified root is added to existing
+        recovery metadata. Use ``append=False`` to replace existing recovery
+        roots, matching ``set_artifact_recovery_roots(...)`` replace semantics.
         """
         if not isinstance(artifact, Artifact):
             raise TypeError("artifact must be an Artifact instance.")
@@ -1119,7 +1124,7 @@ class Tracker:
         artifact_id = str(artifact.id) if artifact.id is not None else ""
 
         def _result(
-            status: str,
+            status: RecoveryCopyStatus,
             *,
             expected_path: Path | None = None,
             message: str | None = None,
@@ -1131,7 +1136,7 @@ class Tracker:
                 artifact_id=artifact_id,
                 recovery_root=recovery_root_path,
                 expected_path=expected_path,
-                status=cast(RecoveryCopyStatus, status),
+                status=status,
                 message=message,
                 metadata_updated=metadata_updated,
             )
@@ -1184,7 +1189,7 @@ class Tracker:
             )
 
         expected_hashes: list[tuple[str, str]] = []
-        if content_hash:
+        if content_hash is not None:
             expected_hashes.append(("content_hash", content_hash))
         elif artifact.hash and self.identity.hashing_strategy == "full":
             expected_hashes.append(("artifact.hash", artifact.hash))
@@ -1260,6 +1265,11 @@ class Tracker:
         Unknown requested output keys raise immediately. Per-artifact blockers
         such as missing files or hash mismatches are returned in the keyed
         result without aborting the rest of the requested outputs.
+
+        ``append`` defaults to True so verified adoption behaves like
+        ``archive_run_outputs(...)``: the newly verified root is added to
+        existing recovery metadata. Use ``append=False`` to replace existing
+        recovery roots.
         """
         normalized_keys = normalize_materialize_output_keys(
             keys,

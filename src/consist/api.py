@@ -1312,6 +1312,8 @@ def register_artifact_recovery_copy(
     when supplied. Without it, ``artifact.hash`` is only used for byte
     verification when the tracker is using full content hashing. Directory
     artifacts are intentionally blocked until directory manifest support exists.
+    ``append`` defaults to True, like ``archive_artifact(...)``; pass
+    ``append=False`` to replace existing recovery roots.
     """
     return _resolve_tracker(tracker).register_artifact_recovery_copy(
         artifact,
@@ -1339,6 +1341,8 @@ def register_run_output_recovery_copies(
     workflows where an external archive or HPC process has already copied run
     outputs into a recovery root. Unknown requested output keys raise
     immediately; per-artifact blockers are returned in the keyed result.
+    ``append`` defaults to True, like ``archive_run_outputs(...)``; pass
+    ``append=False`` to replace existing recovery roots.
     """
     return _resolve_tracker(tracker).register_run_output_recovery_copies(
         run_id,
