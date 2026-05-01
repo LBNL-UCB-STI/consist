@@ -8,11 +8,10 @@ hide:
 <section id="home-page" class="home-hero">
   <div class="home-hero__inner">
     <p class="home-hero__eyebrow">Consist documentation</p>
-    <picture class="home-hero__logo">
-      <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.png">
-      <source media="(prefers-color-scheme: light)" srcset="assets/logo.png">
-      <img src="assets/logo.png" alt="Consist">
-    </picture>
+    <span class="home-hero__logo" role="img" aria-label="Consist">
+      <img class="logo-light" src="assets/logo.png#gh-light-mode-only" alt="">
+      <img class="logo-dark" src="assets/logo-dark.png#gh-dark-mode-only" alt="">
+    </span>
     <h1>Know exactly which code, config, and data produced every result.</h1>
     <p class="tagline">Consist records what your simulation runs consumed and produced, reuses prior outputs when nothing changed, and lets you trace any figure back to the inputs that made it. Built for scientific workflows where reproducibility is not optional.</p>
     <p class="tagline">Reference documentation for recording workflow runs, recovering outputs, and analyzing scenario lineage with DuckDB-backed metadata.</p>

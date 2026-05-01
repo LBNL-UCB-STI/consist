@@ -104,7 +104,7 @@ extra_css = ["stylesheets/extra.css"]
 # - https://zensical.org/docs/setup/logo-and-icons/#favicon
 # - https://developer.mozilla.org/en-US/docs/Glossary/Favicon
 #
-favicon = "assets/logo.png"
+favicon = "assets/logo-square.png"
 logo = "assets/logo-square-dark.png"
 
 # Zensical supports more than 60 different languages. This means that the
@@ -168,7 +168,6 @@ features = [
     # of the header when the user scrolls past a certain point.
     # https://zensical.org/docs/setup/header/#automatic-hiding
     "header.autohide",
-
     # Turn on this feature to expand all collapsible sections in the
     # navigation sidebar by default.
     # https://zensical.org/docs/setup/navigation/#navigation-expansion

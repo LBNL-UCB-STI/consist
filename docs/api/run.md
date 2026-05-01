@@ -1,6 +1,6 @@
 # Run
 
-## `consist.run` options contract
+## Run Options Contract
 
 `consist.run(...)` is a deprecated compatibility wrapper around
 `Tracker.run(...)`. It still rejects legacy direct policy kwargs (for example
