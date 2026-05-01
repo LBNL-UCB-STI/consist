@@ -222,10 +222,10 @@ table name before registering it.
 | Export a SQLModel stub later | DLT ingestion or file schema profiling |
 | Record a non-tabular artifact such as Zarr/NetCDF | Direct artifact logging plus any separate metadata table you create |
 
-## API Links
+## See Also
 
+- [DLT Loader API Reference](integrations/dlt_loader.md) — generated API signatures
+- [Data Materialization](concepts/data-materialization.md) — when to ingest vs. keep cold
+- [Integrations Overview](integrations/index.md)
 - [Schema Export](schema-export.md)
-- [Data Materialization Strategy](concepts/data-materialization.md)
-- [Config Adapters](integrations/config_adapters.md)
-- [Public API Reference](api/public_api.md)
 - [dlt Documentation](https://dlthub.com/docs)

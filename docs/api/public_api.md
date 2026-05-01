@@ -77,7 +77,7 @@ This applies to:
 `config_plan=` and `hash_inputs=` are not accepted on these run/trace surfaces.
 Passing them raises `TypeError` (`unexpected keyword argument ...`).
 
-For cache identity debugging, use `run.identity_summary`.
+For signature debugging, use `run.identity_summary`.
 
 ## Minimal runnable comparison
 

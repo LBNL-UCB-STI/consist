@@ -81,7 +81,7 @@ For the lower-level staging helpers, see [Materialization](materialize.md).
 
 ## `Run` model
 
-Use `run.identity_summary` to debug cache identity composition
+Use `run.identity_summary` to debug signature composition
 (`config_hash`, `input_hash`, `code_hash`, adapter metadata, and
 `identity_inputs` digests).
 

@@ -81,7 +81,7 @@ Guidelines:
 - Use stable container paths such as `/inputs` and `/outputs`.
 - Use tracker mounts for machine-specific host paths.
 - Keep `strict_mounts=True` unless an external path is intentional.
-- Remember that container cache identity currently includes resolved host
+- Remember that the container run signature currently includes resolved host
   volume paths, so different host roots can miss cache even if mounted data is
   logically the same.
 

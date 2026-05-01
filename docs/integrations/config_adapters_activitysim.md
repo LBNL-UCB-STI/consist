@@ -487,3 +487,9 @@ For detailed method signatures, parameters, and return types, see:
 - `consist.integrations.activitysim.ActivitySimConfigAdapter` in the source API.
 - `consist.integrations.activitysim.ConfigOverrides` in the source API.
 - [`Tracker.canonicalize_config()`](../api/tracker.md#consist.core.tracker.Tracker.canonicalize_config)
+
+## See Also
+
+- [Example 03: Demand Modeling](../examples.md) — end-to-end transportation simulation workflow
+- [Config Adapters Overview](config_adapters.md)
+- [Config, Facets, and Identity Inputs](../concepts/config-management.md)

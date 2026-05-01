@@ -12,3 +12,8 @@ Requires the optional `ingest` extra before using DLT features:
         - ingest_artifact
       filters:
         - "!^_"
+
+## See Also
+
+- [DLT Loader Guide](../dlt-loader-guide.md) — prose guide with examples and decision criteria
+- [Data Materialization](../concepts/data-materialization.md)

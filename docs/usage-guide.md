@@ -91,7 +91,7 @@ For the full run API contract, see [Run](api/run.md).
 ## Input Binding
 
 `input_binding` controls what Consist passes into your callable for named
-`inputs={...}`. It is a runtime execution choice, not the whole cache identity
+`inputs={...}`. It is a runtime execution choice, not the whole signature
 model.
 
 | Mode | Callable receives | Use when |
@@ -157,7 +157,7 @@ For lower-level staging helpers, see [Materialization](api/materialize.md).
 ## `scenario(...)`: Multi-Step Workflows
 
 Use a scenario when steps belong to one workflow and should be queried together.
-Each child step gets its own cache identity, so upstream hits can be reused
+Each child step gets its own signature, so upstream hits can be reused
 while downstream misses re-execute.
 
 ```python
@@ -304,7 +304,7 @@ For indexed metadata and query helpers, see:
 
 ## Where Deeper Detail Lives
 
-- [Caching and Hydration](concepts/caching-and-hydration.md): cache identity,
+- [Caching and Hydration](concepts/caching-and-hydration.md): signatures,
   hit/miss behavior, hydration, and materialization policies.
 - [Data Materialization](concepts/data-materialization.md): ingestion,
   database fallback, and hybrid views.

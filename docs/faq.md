@@ -38,7 +38,27 @@ You can safely delete intermediate output files if they have been **ingested** i
 Consist is a Python library, but you can track *any* external tool using the **Container Integration** or by wrapping a subprocess call in a Python function. As long as you can define the inputs and capture the outputs, Consist can track it.
 
 ### How does this compare to DVC or MLflow?
-- **DVC**: Focuses on large file versioning and pipeline orchestration. Consist focuses on **fine-grained provenance** and **SQL-native analytics** via DuckDB.
-- **MLflow**: Focuses on experiment tracking and model deployment. Consist focuses on **scientific simulation lineage** and **data handoffs** between complex model steps.
+The short version: pick based on what your team actually does day-to-day.
 
-Consist is designed specifically for "heavy" scientific workflows where data integrity and SQL queryability are paramount.
+- **Consist** fits teams running large simulation codebases — travel demand models, power grid simulations, weather and climate models, etc. — where a single workflow runs for hours, produces many intermediate files, gets re-run across parameter variations, and needs to be auditable years later. It's strongest when you want to ask "which config produced this output?" or "what changed between this run and last week's?" using SQL.
+- **DVC** is built around versioning large binary files alongside Git and orchestrating pipelines that produce them. If your primary need is "treat this 10GB dataset like a Git-tracked file," DVC is a closer fit.
+- **MLflow** is built around model training experiments — its UI and abstractions center on metrics, hyperparameters, and model artifacts for ML workflows. If you're tracking accuracy across training runs, MLflow's experiment-tracking surface is more idiomatic.
+
+These tools aren't mutually exclusive — Consist focuses on the lineage and caching layer for simulation work, and stays out of model registries or large-file Git replacement.
+
+---
+
+## What you get
+
+### What does Consist record for each run?
+At minimum, each tracked run captures:
+
+- **Status and timing**: started_at, ended_at, duration, success/failure
+- **Code version**: Git commit SHA (and dirty state) or a callable-source hash
+- **Config snapshot**: the full config dict that affected the cache signature
+- **Input artifacts**: paths and content hashes for every file the run consumed
+- **Output artifacts**: paths, content hashes, and format metadata for everything the run produced
+- **Lineage**: which prior runs produced the inputs to this run
+- **Scenario / facet metadata**: scenario id, stage, year, iteration, tags, and any custom facets you logged
+
+All of this is stored in two synchronized places — a per-run `consist.json` snapshot in `run_dir`, and a queryable DuckDB database — so you can both inspect a single run on disk and run SQL across the full history.

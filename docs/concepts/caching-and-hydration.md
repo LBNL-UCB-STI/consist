@@ -3,18 +3,18 @@
 Consist's execution loop is:
 
 ```text
-declare inputs -> compute identity -> check cache -> hydrate or execute
+declare inputs -> compute signature -> check cache -> hydrate or execute
 ```
 
-This page focuses on cache identity, cache hit/miss behavior, hydration versus
-materialization, and the policy knobs you are likely to use. For runnable
-workflow patterns, see the [Usage Guide](../usage-guide.md).
+This page focuses on the run signature, cache hit/miss behavior, hydration
+versus materialization, and the policy knobs you are likely to use. For
+runnable workflow patterns, see the [Usage Guide](../usage-guide.md).
 
 ## Core Terms
 
 | Term | Meaning |
 |---|---|
-| Signature | Cache key built from code identity, config identity, and input identity. |
+| Signature | Deterministic fingerprint built from code identity, config identity, and input identity. Used for cache lookup. |
 | Cache hit | A completed prior run has the same signature and reusable outputs. |
 | Cache miss | No reusable completed run matches, so Consist executes the step. |
 | Hydration | Recover artifact metadata, paths, and provenance records. |
@@ -24,10 +24,10 @@ workflow patterns, see the [Usage Guide](../usage-guide.md).
 Hydration and materialization are deliberately separate. A cache hit can return
 artifact metadata without copying bytes.
 
-## Cache Identity
+## Run Signature
 
 For `Tracker.run(...)`, `Tracker.trace(...)`, `ScenarioContext.run(...)`, and
-`ScenarioContext.trace(...)`, the practical identity model is:
+`ScenarioContext.trace(...)`, the practical signature model is:
 
 ```text
 signature = code identity + config identity + input identity
@@ -70,7 +70,7 @@ See [Config Management](config-management.md) for config/facet guidance.
 ### Input Identity
 
 Declared `inputs={...}` contribute to lineage and input hashing. Produced
-Consist artifacts link through their producing run identity. Raw files are
+Consist artifacts link through their producing run signature. Raw files are
 hashed according to the active hashing strategy.
 
 Use `identity_inputs=[...]` for additional hash-only files or directories that

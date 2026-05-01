@@ -39,3 +39,11 @@ Model-specific configuration discovery and tracking.
 - Automatic discovery of YAML/HOCON hierarchies
 - Queryable configuration tables for sensitivity analysis
 - [Full guide](config_adapters.md) | [ActivitySim](config_adapters_activitysim.md) | [BEAM](config_adapters_beam.md)
+
+---
+
+## Building a Domain Tracker
+
+For teams that run the same model repeatedly with different configurations, wrapping Consist in a domain-specific class reduces per-callsite boilerplate and centralizes identity wiring.
+
+- [Full guide](../building-domain-tracker.md)

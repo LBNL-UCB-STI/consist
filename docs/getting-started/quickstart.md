@@ -1,5 +1,7 @@
 # Quickstart
 
+Imagine you ran your model last week, tweaked a config file, and now the result has changed — but you can't tell which input or parameter actually moved the number. Or you re-ran a parameter sweep and watched 30 minutes of preprocessing repeat for inputs that hadn't changed. Consist exists to make both of those problems go away: it records exactly what code, config, and inputs went into each step, and skips re-execution when nothing relevant has changed.
+
 Consist has one recommended onboarding path:
 
 1. `run(...)` for cacheable function steps

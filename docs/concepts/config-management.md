@@ -10,7 +10,7 @@ re-execution on change, be searchable for later filtering, or both.
 - **Should changing this parameter re-run my model?** → `config`
 - **Do I need to search/filter by this value later?** → `facet`
 - **Both?** → Use both. A value can appear in `config` (cache invalidation) and `facet` (queryable).
-- **Large external config files that must affect the cache key?** → `identity_inputs`
+- **Large external config files that must affect the signature?** → `identity_inputs`
 
 ---
 
@@ -29,7 +29,7 @@ re-execution on change, be searchable for later filtering, or both.
 
 `config` accepts a plain `dict` or a Pydantic model. It is:
 
-- **Hashed** into the run signature (cache identity).
+- **Hashed** into the run signature.
 - **Stored** in the per-run `consist.json` snapshot under `config`.
 - **Not** stored as structured/queryable data in DuckDB by default.
 
@@ -63,8 +63,8 @@ mirrored into `run.meta` only for backward compatibility with older databases.
 ## Facets
 
 Facets are compact, queryable config subsets persisted to DuckDB. They do not
-affect the cache key — they exist purely for filtering and grouping runs after
-the fact.
+affect the signature — they exist purely for filtering and grouping runs
+after the fact.
 
 **Sources:**
 
@@ -135,8 +135,8 @@ consist.run(
 )
 ```
 
-1. Hashed into cache key; changes trigger re-runs.
-2. Queryable in DuckDB; does not affect the cache key.
+1. Hashed into the signature; changes trigger re-runs.
+2. Queryable in DuckDB; does not affect the signature.
 
 This enables queries like `mode_choice_coefficient > 0.4` without bloating
 the database with raw config files, while still invalidating the cache
@@ -147,7 +147,7 @@ when the full config changes.
 ## Identity Inputs
 
 `identity_inputs` solves a specific problem: **configuration files that must
-affect the cache key but are too large or unstructured to store as queryable
+affect the signature but are too large or unstructured to store as queryable
 metadata.**
 
 Use `identity_inputs` to include file or directory content in the run signature
@@ -167,7 +167,7 @@ Normally, large external configs fall into one of two unsatisfying patterns:
 | `config={"yaml": large_dict}` | JSON snapshot only | No (by default) | Respects changes |
 | Not tracked at all | None | No | **Stale cache if files change** |
 
-`identity_inputs` is the middle ground: hash the files so the cache key changes
+`identity_inputs` is the middle ground: hash the files so the signature changes
 when they do, without storing the file content.
 
 **Example: ActivitySim**
