@@ -15,6 +15,7 @@ only need summary buckets.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterator, Mapping as MappingABC
 from dataclasses import dataclass, field
 from contextlib import suppress
@@ -24,7 +25,15 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Iterable, Literal, Mapping, Sequence, TYPE_CHECKING, cast
+from typing import (
+    Iterable,
+    Literal,
+    Mapping,
+    Sequence,
+    TYPE_CHECKING,
+    cast,
+    get_args,
+)
 
 import pandas as pd
 from sqlalchemy import MetaData, Table, select
@@ -340,27 +349,11 @@ class RunOutputRecoveryCopiesRegistration(
 
     @property
     def summary(self) -> str:
-        counts: dict[str, int] = {
-            "registered": 0,
-            "missing_copy": 0,
-            "hash_mismatch": 0,
-            "skipped_unmapped": 0,
-            "symlink_destination": 0,
-            "unsupported_directory": 0,
-            "unverifiable_hash": 0,
-            "failed": 0,
-        }
-        for output in self.outputs.values():
-            counts[output.status] += 1
-        return (
-            f"registered={counts['registered']} "
-            f"missing_copy={counts['missing_copy']} "
-            f"hash_mismatch={counts['hash_mismatch']} "
-            f"skipped_unmapped={counts['skipped_unmapped']} "
-            f"symlink_destination={counts['symlink_destination']} "
-            f"unsupported_directory={counts['unsupported_directory']} "
-            f"unverifiable_hash={counts['unverifiable_hash']} "
-            f"failed={counts['failed']}"
+        counts = Counter(output.status for output in self.outputs.values())
+        known_statuses = list(get_args(RecoveryCopyStatus))
+        extra_statuses = sorted(set(counts) - set(known_statuses))
+        return " ".join(
+            f"{status}={counts[status]}" for status in known_statuses + extra_statuses
         )
 
 

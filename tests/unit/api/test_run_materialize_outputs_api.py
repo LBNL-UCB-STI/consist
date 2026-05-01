@@ -451,6 +451,7 @@ def test_register_artifact_recovery_copy_fast_hash_requires_byte_hash(
         result = tracker.register_artifact_recovery_copy(artifact, recovery_root)
 
         assert result.status == "unverifiable_hash"
+        assert result.expected_path == expected_path.resolve()
         assert result.metadata_updated is False
         refreshed = tracker.get_run_outputs("producer_adopt_fast_unverifiable")[
             "fast_unverifiable"
@@ -459,6 +460,78 @@ def test_register_artifact_recovery_copy_fast_hash_requires_byte_hash(
     finally:
         if tracker.engine:
             tracker.engine.dispose()
+
+
+def test_register_artifact_recovery_copy_verify_false_adopts_existing_copy(
+    tmp_path: Path,
+) -> None:
+    tracker = Tracker(
+        run_dir=tmp_path / "runs_verify_false",
+        db_path=str(tmp_path / "verify_false.duckdb"),
+        hashing_strategy="fast",
+    )
+    try:
+        output_path = tracker.run_dir / "outputs" / "verify_false.csv"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("value\n1\n", encoding="utf-8")
+        recovery_root = tmp_path / "external_archive_verify_false"
+
+        with tracker.start_run("producer_adopt_verify_false", model="producer"):
+            artifact = tracker.log_artifact(
+                output_path, key="verify_false", direction="output"
+            )
+
+        expected_path = recovery_root / "outputs" / "verify_false.csv"
+        expected_path.parent.mkdir(parents=True, exist_ok=True)
+        expected_path.write_text("different bytes\n", encoding="utf-8")
+
+        result = tracker.register_artifact_recovery_copy(
+            artifact,
+            recovery_root,
+            verify=False,
+        )
+
+        assert result.status == "registered"
+        assert result.expected_path == expected_path.resolve()
+        assert result.metadata_updated is True
+        refreshed = tracker.get_run_outputs("producer_adopt_verify_false")[
+            "verify_false"
+        ]
+        assert refreshed.recovery_roots == [str(recovery_root.resolve())]
+    finally:
+        if tracker.engine:
+            tracker.engine.dispose()
+
+
+def test_register_artifact_recovery_copy_empty_content_hash_is_explicit(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "empty_hash.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n1\n", encoding="utf-8")
+    recovery_root = tmp_path / "external_archive_empty_hash"
+
+    with tracker.start_run("producer_adopt_empty_hash", model="producer"):
+        artifact = tracker.log_artifact(
+            output_path, key="empty_hash", direction="output"
+        )
+
+    expected_path = recovery_root / "outputs" / "empty_hash.csv"
+    expected_path.parent.mkdir(parents=True, exist_ok=True)
+    expected_path.write_text("value\n1\n", encoding="utf-8")
+
+    result = tracker.register_artifact_recovery_copy(
+        artifact,
+        recovery_root,
+        content_hash="",
+    )
+
+    assert result.status == "hash_mismatch"
+    assert result.expected_path == expected_path.resolve()
+    assert result.metadata_updated is False
+    refreshed = tracker.get_run_outputs("producer_adopt_empty_hash")["empty_hash"]
+    assert "recovery_roots" not in refreshed.meta
 
 
 def test_register_artifact_recovery_copy_rejects_same_metadata_wrong_bytes(
