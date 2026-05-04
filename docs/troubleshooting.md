@@ -4,7 +4,7 @@ This guide is a symptom index: find the message or behavior, confirm the likely
 cause, then apply the shortest fix. For concept definitions, see
 [Core Concepts](concepts/overview.md). For deeper topic guides, see:
 
-- [Container Integration](containers-guide.md#error-handling)
+- [Container Integration](containers-guide.md#troubleshooting-checklist)
 - [DLT Loader](dlt-loader-guide.md#common-errors)
 - [Mounts & Portability](mounts-and-portability.md#troubleshooting)
 - [Database Maintenance](db-maintenance.md)
@@ -344,7 +344,7 @@ then compact.
 ## See Also
 
 - [Historical Recovery](guides/historical-recovery.md)
-- [Container Integration](containers-guide.md#error-handling)
+- [Container Integration](containers-guide.md#troubleshooting-checklist)
 - [DLT Loader](dlt-loader-guide.md#common-errors)
 - [Architecture](architecture.md)
 - [CLI Reference](cli-reference.md)

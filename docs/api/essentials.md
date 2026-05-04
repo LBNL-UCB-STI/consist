@@ -23,7 +23,7 @@ step-to-step wiring and primitive `inputs=` kwargs for ordinary scenario code.
 ## Essential helpers
 
 - Tracker setup and context:
-  [`Tracker`](tracker.md#consist.core.tracker.Tracker),
+  [`Tracker`](tracker.md),
   [`consist.use_tracker`](api_helpers.md#consist.api.use_tracker)
 - Linking artifacts:
   [`consist.ref`](api_helpers.md#consist.api.ref),

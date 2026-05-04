@@ -1,8 +1,8 @@
 # Container Integration Guide
 
 Consist can run Docker or Singularity commands while recording the container
-image, command, inputs, outputs, environment hash, and mount layout used for
-cache identity.
+image, command, inputs, outputs, environment hash, and mount layout that
+contribute to the run signature.
 
 Use `run_container(...)` for external tools that are easiest to package as a
 container. For normal Python workflow code, prefer `tracker.run(...)`,
@@ -113,11 +113,11 @@ result = run_container(
 )
 ```
 
-## Cache Identity
+## Run Signature
 
-Consist builds the container cache key from deterministic runtime identity:
+Consist builds the container run signature from deterministic runtime identity:
 
-| Component | In cache key | Notes |
+| Component | In signature | Notes |
 | --- | --- | --- |
 | Image identity | Yes | Docker image digest when resolved; local `.sif` path or registry URI for Singularity |
 | Command | Yes | Exact argv values |
@@ -226,7 +226,7 @@ the output will not be found.
 
 ## Environment Variables
 
-Environment variables are included in the cache key by hash:
+Environment variables are included in the signature by hash:
 
 ```python
 result = run_container(
@@ -275,9 +275,8 @@ reproducibility-critical settings in files and pass those files through
 - For registry images, verify authentication with `docker pull` or the cluster's
   Singularity pull mechanism.
 
-## API Links
+## See Also
 
-- [Containers API Reference](integrations/containers.md)
-- [Mounts and Portability](mounts-and-portability.md)
-- [Caching and Hydration](concepts/caching-and-hydration.md)
-- [Config Adapters](integrations/config_adapters.md)
+- [Container Integration API Reference](integrations/containers.md) — generated API signatures
+- [Mounts & Portability](mounts-and-portability.md)
+- [Integrations Overview](integrations/index.md)

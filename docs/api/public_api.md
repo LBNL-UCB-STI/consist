@@ -15,7 +15,7 @@ For tiered guidance:
 |---|---|---|
 | [`Tracker.run`](tracker.md#consist.core.tracker.Tracker.run) | You want explicit tracker ownership for one cache-aware function | Preferred single-step entry point |
 | [`Tracker.trace`](tracker.md#consist.core.tracker.Tracker.trace) | You need inline execution with explicit tracker control | Block executes every time |
-| [`consist.scenario`](api_helpers.md#consist.api.scenario) | You need multi-step workflows with shared scenario context | Returns [`ScenarioContext`](workflow.md#consist.core.workflow.ScenarioContext) |
+| [`consist.scenario`](api_helpers.md#consist.api.scenario) | You need multi-step workflows with shared scenario context | Returns [`ScenarioContext`](workflow.md#scenario-context) |
 | [`ScenarioContext.run`](workflow.md#consist.core.workflow.ScenarioContext.run) | You are inside a scenario and want cache-aware steps | Step-level equivalent of `Tracker.run`; also accepts `binding=BindingResult(...)` for orchestrator-resolved inputs |
 | [`ScenarioContext.trace`](workflow.md#consist.core.workflow.ScenarioContext.trace) | You are inside a scenario and need inline step execution | Step-level equivalent of `Tracker.trace` |
 | [`consist.run`](api_helpers.md#consist.api.run) | You need the legacy context-resolving convenience wrapper | Deprecated compatibility wrapper around `Tracker.run` |
@@ -77,7 +77,7 @@ This applies to:
 `config_plan=` and `hash_inputs=` are not accepted on these run/trace surfaces.
 Passing them raises `TypeError` (`unexpected keyword argument ...`).
 
-For cache identity debugging, use `run.identity_summary`.
+For signature debugging, use `run.identity_summary`.
 
 ## Minimal runnable comparison
 
@@ -132,19 +132,19 @@ with tracker.scenario("baseline") as sc:
 - [`consist.run`](api_helpers.md#consist.api.run) (deprecated compatibility wrapper)
 - [`consist.trace`](api_helpers.md#consist.api.trace) (deprecated compatibility wrapper)
 - [`consist.start_run`](api_helpers.md#consist.api.start_run) (deprecated compatibility wrapper)
-- [`ScenarioContext`](workflow.md#consist.core.workflow.ScenarioContext) (returned by `consist.scenario(...)`)
+- [`ScenarioContext`](workflow.md#scenario-context) (returned by `consist.scenario(...)`)
   - `run_id`, `config`, `inputs`, `add_input`, `declare_outputs`, `require_outputs`, `collect_by_keys`, `run`, `trace`
   - `run(..., binding=BindingResult(...))` for resolved orchestrator plans
-- [`RunContext`](workflow.md#consist.core.workflow.RunContext) (injected via `execution_options=ExecutionOptions(inject_context=True)`)
+- [`RunContext`](workflow.md#run-context) (injected via `execution_options=ExecutionOptions(inject_context=True)`)
   - `run_dir`, `output_dir`, `output_path`, `inputs`, `load`, `log_artifact`, `log_artifacts`, `log_input`, `log_output`, `log_meta`, `capture_outputs`
-- [`Coupler`](workflow.md#consist.core.coupler.Coupler) (available at `scenario.coupler`)
+- [`Coupler`](workflow.md#coupler) (available at `scenario.coupler`)
 
 Scenario defaults like `name_template` and `cache_epoch` are configured via `consist.scenario(...)` and flow into `ScenarioContext.run(...)`.
 
 ### Utilities and Introspection
 
-- [`collect_step_schema`](../schema-export.md#introspection) (Extract outputs for Coupler schemas)
-- [`ArtifactKeyRegistry`](../usage-guide.md#artifact-key-registries) (Manage consistent artifact keys)
+- [`collect_step_schema`](../concepts/decorators-and-metadata.md#schema-introspection) (Extract outputs for Coupler schemas)
+- [`ArtifactKeyRegistry`](../concepts/decorators-and-metadata.md#artifact-key-registries) (Manage consistent artifact keys)
 
 ### Artifact logging and loading
 
@@ -194,8 +194,8 @@ Scenario defaults like `name_template` and `cache_epoch` are configured via `con
 - [`consist.db_session`](api_helpers.md#consist.api.db_session)
 - [`consist.pivot_facets`](api_helpers.md#consist.api.pivot_facets)
 - Indexing helpers: [`consist.index_by_field`](indexing.md#consist.core.indexing.index_by_field), [`consist.index_by_facet`](indexing.md#consist.core.indexing.index_by_facet), plus [`RunFieldIndex`](indexing.md#consist.core.indexing.RunFieldIndex) / [`FacetIndex`](indexing.md#consist.core.indexing.FacetIndex)
-- Views registry: `tracker.views` ([`ViewRegistry`](views.md#consist.core.views.ViewRegistry))
-- Matrix utilities: [`Tracker.load_matrix(...)`](tracker.md#consist.core.tracker.Tracker.load_matrix), [`MatrixViewFactory`](matrix.md#consist.core.matrix.MatrixViewFactory)
+- Views registry: `tracker.views` ([`ViewRegistry`](views.md#view-registry))
+- Matrix utilities: [`Tracker.load_matrix(...)`](tracker.md#consist.core.tracker.Tracker.load_matrix), [`MatrixViewFactory`](matrix.md#matrix-views)
 - Schema export: [`Tracker.export_schema_sqlmodel(...)`](tracker.md#consist.core.tracker.Tracker.export_schema_sqlmodel)
 
 Run lookup helpers treat `stage` and `phase` as first-class run dimensions, so

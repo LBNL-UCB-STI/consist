@@ -2,6 +2,9 @@
 
 This section establishes the mental model for Consist before covering API details.
 
+!!! tip "Why this matters"
+    Modeling work generates a long tail of "which run produced this?" questions: a reviewer asks which scenario backed a published mode-share figure, a colleague needs to reproduce last quarter's forecast after configs have drifted, or a parameter sweep wastes hours re-running preprocessing that didn't change. Consist is built around recording enough to answer those questions without manual bookkeeping, and around skipping work whose inputs haven't moved.
+
 ---
 
 ## Core Abstractions
@@ -21,6 +24,12 @@ may be metadata-based rather than a strict byte-content digest.
 
 ## How Caching Works
 
+!!! example "Example: sensitivity analysis"
+    In a parameter sweep testing 20 demand elasticity values, the first run executes preprocessing and the demand model. Runs 2–20 cache-hit on preprocessing (same inputs, same code) but cache-miss on the demand model (different elasticity). Consist skips 19 preprocessing executions — without you having to reason about what is or isn't safe to skip.
+
+!!! example "Example: operational reproducibility"
+    Six months after publishing a mode-share figure, a funder asks which configuration produced it. With Consist, the figure traces back through its producing run to the exact code version, config snapshot, and input file hashes that generated it — even if the working files on disk have since been deleted or moved.
+
 Consist computes a signature from code version, config, and input artifact hashes:
 
 ```mermaid
@@ -36,8 +45,6 @@ graph LR
 Same signature → return cached outputs. Different signature → execute and record new lineage.
 
 On cache hits, Consist returns output artifact metadata without copying files. Load or hydrate outputs when you need bytes.
-
-**Example**: In a parameter sweep testing 20 demand elasticity values, the first run executes preprocessing and the demand model. Runs 2–20 cache-hit on preprocessing (same inputs, same code) but cache-miss on the demand model (different elasticity). Consist skips 19 preprocessing executions.
 
 ---
 
@@ -71,7 +78,7 @@ live in the linked specialized pages.
 | Term | Definition | Deep dive |
 |---|---|---|
 | **Signature** | Fingerprint of code + config + inputs used for cache lookup. | [Caching & Hydration](caching-and-hydration.md) |
-| **Facet** | Queryable metadata subset used for filtering runs (not cache identity). | [Config Management](config-management.md) |
+| **Facet** | Queryable metadata subset used for filtering runs (does not contribute to the signature). | [Config Management](config-management.md) |
 | **Cache hit / miss** | Hit reuses prior completed outputs; miss executes and records new lineage. | [Caching & Hydration](caching-and-hydration.md) |
 | **Hydration** | Recover artifact metadata/paths without copying bytes. | [Caching & Hydration](caching-and-hydration.md) |
 | **Materialization** | Ensure bytes exist in a target location (filesystem or DB path). | [Data Materialization](data-materialization.md) |
@@ -112,7 +119,7 @@ def summarize_trips(trips_path: Path) -> dict[str, Path]:
 
 result = tracker.run(
     fn=summarize_trips,
-    inputs={"trips_path": trips_artifact},  # path resolved from artifact; hashed for cache identity
+    inputs={"trips_path": trips_artifact},  # path resolved from artifact; hashed into the signature
     outputs=["summary"],
 )
 ```

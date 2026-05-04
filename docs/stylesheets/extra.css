@@ -237,14 +237,21 @@ body {
   --md-hue: 10;
 }
 
-/* Light mode: show light logo, hide dark */
+/* Logo variants: GitHub uses the URL fragments; the docs theme uses classes. */
+.logo-dark {
+  display: none;
+}
+
 [data-md-color-scheme="default"] .logo-dark {
   display: none;
 }
 
-/* Dark mode: show dark logo, hide light */
 [data-md-color-scheme="slate"] .logo-light {
   display: none;
+}
+
+[data-md-color-scheme="slate"] .logo-dark {
+  display: block;
 }
 
 /* Tagline styling */

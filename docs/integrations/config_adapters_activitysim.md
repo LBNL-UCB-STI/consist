@@ -1,309 +1,149 @@
 # ActivitySim Config Adapter
 
-The ActivitySim config adapter discovers and canonicalizes ActivitySim configuration
-directories (with support for YAML inheritance, CSV references, and config bundling).
+ActivitySim projects accumulate config complexity fast: `settings.yaml` pulling
+in model YAMLs via `inherit_settings`, coefficient CSVs referenced by name,
+CONSTANTS scattered across files. When you're running calibration sweeps or
+comparing scenarios, you need to know exactly which config files and parameter
+values went into each run — and catch immediately if something changed.
 
-!!! note "Recommended path"
-    For workflow execution, prefer `tracker.run(...)`, `tracker.trace(...)`, or
-    `consist.scenario(...)` with `adapter=` and `identity_inputs=`. Lifecycle
-    snippets using `tracker.begin_run(...)`, `tracker.canonicalize_config(...)`,
-    and `tracker.end_run()` are integration-specific advanced patterns for
-    manual orchestration.
+The ActivitySim adapter handles all of this automatically. Point it at your
+config directory and it will:
 
-## Overview
+- Walk the full inheritance chain and hash every relevant file
+- Extract CONSTANTS, settings, and coefficients into queryable SQL tables
+- Record a config bundle (tarball) so any run can be exactly reproduced
+- Generate cache-invalidating signatures that change when any config file changes
 
-**Features:**
+The result: Consist can tell you *which specific files or keys changed* when a
+run misses cache, and you can query `AUTO_TIME` or `car_ASC` across every run
+you've ever recorded.
 
-- **YAML Discovery**: Resolves `settings.yaml` and active model YAMLs via `inherit_settings` and `include_settings`
-- **CSV Reference Detection**: Finds coefficients, probabilities, and specification files via registry + heuristics
-- **Constants Extraction**: Flattens YAML `CONSTANTS` sections into queryable rows
-- **Config Bundling**: Creates tarball archives for full config provenance
-- **Config Materialization**: Apply parameter overrides to base bundles for scenario-based runs
-- **Strict/Lenient Modes**: Error on file integrity issues or gracefully skip
+---
 
-## Use Cases
-
-**1. Track calibration parameters across scenarios**
-
-Compare how constants and coefficients change between runs:
-
-!!! note "Integration-specific advanced lifecycle snippet"
-    This example uses explicit lifecycle APIs for adapter-centric ingestion and
-    diagnostics. Use the explicit tracker/scenario execution path for day-to-day
-    workflow execution.
+## Setup
 
 ```python
+from pathlib import Path
+from consist import Tracker
 from consist.integrations.activitysim import ActivitySimConfigAdapter
 
+tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 adapter = ActivitySimConfigAdapter()
-
-# Run baseline scenario
-run_a = tracker.begin_run("baseline", "activitysim", cache_mode="overwrite")
-tracker.canonicalize_config(adapter, [config_dir], ingest=True)
-tracker.end_run()
-
-# Run adjusted scenario
-run_b = tracker.begin_run("adjusted", "activitysim", cache_mode="overwrite")
-tracker.canonicalize_config(adapter, [config_dir_adjusted], ingest=True)
-tracker.end_run()
-
-# Query which runs used a specific sample_rate
-rows_by_run = adapter.constants_by_run(
-    key="sample_rate",
-    collapse="first",
-    tracker=tracker,
-)
-
-# Use in joins/facet analyses
-sample_rate_sq = adapter.constants_query(key="sample_rate").subquery()
 ```
 
-**2. Use adapter handoff on run/trace surfaces**
+---
 
-For run/trace APIs, pass `adapter=...` and `identity_inputs=...` directly:
+## How config composition works
+
+ActivitySim projects typically layer configs in two ways, and Consist handles
+both:
+
+**1. Directory layering (`root_dirs` order)**
+
+When you pass multiple directories to the adapter, the first directory wins on
+any file that exists in more than one. This mirrors how ActivitySim itself
+resolves configs:
 
 ```python
-from consist.integrations.activitysim import ActivitySimConfigAdapter
-
-import consist
-from consist import CacheOptions, use_tracker
-
-adapter = ActivitySimConfigAdapter()
-
-with use_tracker(tracker):
-    consist.run(
-        fn=run_activitysim,
-        name="activitysim",
-        config={"scenario": "baseline"},
-        adapter=adapter,
-        identity_inputs=[("asim_config", overlay_dir)],
-        cache_options=CacheOptions(cache_mode="auto"),
-    )
-
-    with consist.trace(
-        name="activitysim_trace",
-        adapter=adapter,
-        identity_inputs=[("asim_config", overlay_dir)],
-    ):
-        run_activitysim()
+# overlay_dir/settings.yaml takes precedence over base_dir/settings.yaml
+identity_inputs=[("asim_config", overlay_dir), ("asim_base", base_dir)]
 ```
 
-`config_plan` is not accepted on run/trace public surfaces. Use `adapter=...`
-and `identity_inputs=...`.
+If `overlay_dir/settings.yaml` contains `inherit_settings: true`, the adapter
+deep-merges all `settings.yaml` files it finds across `root_dirs` (base first,
+overlay on top), which is how ActivitySim's own inheritance chain works.
 
-You can still precompute plans for validation and orchestration workflows:
+One important subtlety: the adapter hashes **the full contents of every
+`root_dir`**, not just the files that win after merging. If you change a value
+in `base_dir/settings.yaml` that is overridden by `overlay_dir/settings.yaml`,
+ActivitySim would never see that change — but Consist will still invalidate the
+cache. This is conservative by design: Consist doesn't simulate ActivitySim's
+merge logic to determine what "actually" changed. If you want a base-file edit
+to be a no-op for caching purposes, make the edit in the overlay instead, or
+accept the cache miss.
 
-```python
-from consist.core.config_canonicalization import ConfigAdapterOptions
+**2. Programmatic overrides (`ConfigOverrides`)**
 
-options = ConfigAdapterOptions(strict=True, bundle=False, ingest=False)
-plan = tracker.prepare_config(
-    adapter,
-    [overlay_dir, base_dir],
-    options=options,
-    validate_only=True,
-)
-if plan.diagnostics and not plan.diagnostics.ok:
-    raise ValueError("Config validation failed.")
-```
-
-**3. Apply parameter adjustments for sensitivity testing**
-
-Use the `materialize()` method to apply overrides to a baseline config:
-
-!!! note "Integration-specific advanced lifecycle snippet"
-    The final `begin_run`/`canonicalize_config`/`end_run` block below is advanced
-    adapter orchestration. Keep standard execution on the explicit
-    tracker/scenario execution path.
+`ConfigOverrides` is a separate, code-level layer applied on top of your config
+directories. Use it when you want to sweep a parameter value without editing
+files:
 
 ```python
 from consist.integrations.activitysim import ConfigOverrides
 
-# Load baseline bundle
-baseline_bundle = Path("outputs/base_run/config_bundle_xxxxx.tar.gz")
-
-# Create overrides
 overrides = ConfigOverrides(
     constants={
-        ("settings.yaml", "sample_rate"): 0.1,
+        ("settings.yaml", "sample_rate"): 0.1,          # (file, key): value
         ("accessibility.yaml", "CONSTANTS.AUTO_TIME"): 60.0,
     },
     coefficients={
-        ("tour_mode_coeffs.csv", "car_ASC", ""): -0.5,  # "" for direct coefficients
-    }
-)
-
-# Materialize new config with overrides
-materialized = adapter.materialize(
-    baseline_bundle,
-    overrides,
-    output_dir=Path("temp/adjusted_config"),
-    identity=tracker.identity,
-)
-
-# Canonicalize the adjusted config
-run = tracker.begin_run("sensitivity_test", "activitysim")
-tracker.canonicalize_config(adapter, materialized.root_dirs, ingest=True)
-tracker.end_run()
-```
-
-For historical runs, you can skip manual bundle lookup:
-
-```python
-materialized = adapter.materialize_from_run(
-    tracker=tracker,
-    run_id="baseline_run_id",
-    overrides=ConfigOverrides(constants={("settings.yaml", "sample_rate"): 0.1}),
-    output_dir=Path("temp/materialized"),
-)
-
-# Choose a deterministic preferred root (optionally enforce a required file).
-root_dir = adapter.select_root_dir(materialized, required_file="settings.yaml")
-```
-
-For one-off coefficient reads, use either config directories or a historical run:
-
-```python
-coef = adapter.get_coefficient_value(
-    run_id="baseline_run_id",
-    tracker=tracker,
-    file_name="accessibility_coefficients.csv",
-    coefficient_name="time",
+        ("tour_mode_coeffs.csv", "car_ASC", ""): -0.5,  # (file, coef, segment): value
+    },
 )
 ```
 
-For end-to-end override execution with no prior run, use config roots directly:
+The `""` segment means the coefficient file uses a direct `value` column (not
+template-style segment columns). `ConfigOverrides` are hashed into the run
+signature, so two runs with different overrides produce different cache entries
+even if the underlying config files are identical.
+
+Use `tracker.run_with_config_overrides(...)` to apply these — it handles
+materializing the modified config to a temp directory and feeding it to the
+adapter automatically. See [Sensitivity testing](#sensitivity-testing-apply-parameter-overrides)
+below.
+
+---
+
+## Common workflows
+
+### Run a model with full config tracking
+
+For day-to-day runs, pass the adapter directly to `tracker.run(...)`:
 
 ```python
-result = tracker.run_with_config_overrides(
+from consist import CacheOptions
+
+result = tracker.run(
+    fn=run_activitysim,
+    name="activitysim",
+    config={"scenario": "baseline"},
     adapter=adapter,
-    base_config_dirs=[overlay_dir, base_dir],
-    base_primary_config=Path("settings.yaml"),  # optional hint
-    overrides=ConfigOverrides(
-        coefficients={("accessibility_coefficients.csv", "time", ""): 2.3}
-    ),
-    output_dir=Path("temp/materialized"),
-    fn=run_model_step,
-    name="activitysim_calibration_step",
-    model="activitysim",
-    config={"iteration": 2},
+    identity_inputs=[("asim_config", config_dir)],
+    cache_options=CacheOptions(cache_mode="auto"),
 )
 ```
 
-`run_with_config_overrides(...)` supports additive manual identity inputs:
+Consist hashes every config file in `config_dir`, records them as artifacts,
+and ingests extracted parameters to DuckDB. On the next run with identical
+config, it returns a cache hit without re-executing.
+
+For `trace` blocks (always-execute steps you still want to track):
 
 ```python
-result = tracker.run_with_config_overrides(
+with tracker.trace(
+    name="postprocess",
     adapter=adapter,
-    base_config_dirs=[overlay_dir, base_dir],
-    overrides=ConfigOverrides(),
-    output_dir=Path("temp/materialized"),
-    fn=run_model_step,
-    name="activitysim_calibration_step",
-    identity_inputs=[("manual_context", Path("calibration_notes.yaml"))],
-)
+    identity_inputs=[("asim_config", config_dir)],
+) as t:
+    postprocess()
+    t.log_output(Path("./outputs/summary.csv"), key="summary")
 ```
 
-By default, the adapter also auto-adds the selected resolved config root to
-identity hashing (`resolved_config_identity="auto"`). To disable this escape
-hatch, pass `resolved_config_identity="off"` and only your manual
-`identity_inputs` are used.
+---
 
-Each override run stores `run.meta["resolved_config_identity"]` with:
-`mode`, `adapter`, `label`, `path`, and `digest`.
+### Query parameters across runs
 
-You can still use a historical run as the base selector:
-
-```python
-result = tracker.run_with_config_overrides(
-    adapter=adapter,
-    base_run_id="baseline_run_id",
-    overrides=ConfigOverrides(
-        coefficients={("accessibility_coefficients.csv", "time", ""): 2.3}
-    ),
-    output_dir=Path("temp/materialized"),
-    fn=run_model_step,
-    name="activitysim_calibration_step",
-    model="activitysim",
-    config={"iteration": 2},
-)
-```
-
-## Discovery and Canonicalization Workflow
-
-### Discovery Phase (`adapter.discover()`)
-
-1. Locates `settings.yaml` and loads active `models` list
-2. Resolves model YAMLs via suffix stripping and alias mapping
-3. Supports YAML `include_settings` for file references
-4. Computes content hash of all config directories
-5. Returns `CanonicalConfig` with file inventory
-
-**Configuration options:**
-
-```python
-adapter = ActivitySimConfigAdapter(
-    model_name="activitysim",        # Metadata label
-    adapter_version="0.1",           # For run.meta tracking
-    allow_heuristic_refs=True,       # Detect *_FILE, *_PATH keys
-    bundle_configs=True,             # Create tarball archive
-    bundle_cache_dir=None,           # Default: <run_dir>/config_bundles
-)
-
-canonical = adapter.discover(
-    root_dirs=[config_dir],
-    identity=tracker.identity,
-    strict=False,  # Warn on missing settings.yaml
-)
-```
-
-### Canonicalization Phase (`adapter.canonicalize()`)
-
-1. Loads effective settings (after merging inheritance chain)
-2. Logs active YAMLs and referenced CSVs as input artifacts
-3. Extracts `CONSTANTS` + allowlisted settings → ingestion spec
-4. Classifies CSVs as coefficients or probabilities → ingestion specs
-5. Creates config bundle tarball (cached by content hash)
-6. Returns specs for artifact logging and ingest
-
-**Key behaviors:**
-
-- **Constant Attribution**: Constants attributed to effective YAML after inheritance
-- **CSV Classification**: Files ending in `_coefficients.csv`, `_coeffs.csv`, `_coefficients_template.csv`, or `_probs.csv`
-- **CSV Format Support**: Both direct (`value` column) and template (segment columns) coefficient formats
-- **Gzip Support**: Transparently handles `.csv.gz` files
-- **Lenient Mode** (default): Missing referenced CSVs logged as warnings; ingestion proceeds
-- **Strict Mode**: Raises on missing files or malformed CSVs
-
-## Queryable Schemas
-
-ActivitySim config tables are deduplicated by content hash. To map rows back to
-individual runs, join against `activitysim_config_ingest_run_link` on
-`content_hash` and `table_name`.
-
-### `activitysim_constants_cache`
-
-Flattened YAML constants and allowlisted settings, deduplicated by content hash.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `content_hash` | str | Primary key: content hash for the source file |
-| `file_name` | str | Primary key: source YAML file name |
-| `key` | str | Primary key: dot-notation constant key (e.g., `CONSTANTS.AUTO_TIME`, `sample_rate`) |
-| `value_type` | str | Type tag: `null`, `bool`, `num`, `str`, `json` |
-| `value_str` | str \| NULL | String value when `value_type == "str"` |
-| `value_num` | float \| NULL | Numeric value when `value_type == "num"` |
-| `value_bool` | bool \| NULL | Boolean value when `value_type == "bool"` |
-| `value_json` | JSON \| NULL | Complex value when `value_type == "json"` |
-
-**Query example**: Find runs with specific constant values
+After a few runs, the ingested tables let you ask questions that would otherwise
+require grepping config directories or reading old notes:
 
 ```python
 from sqlmodel import Session, select
-from consist.models.activitysim import ActivitySimConstantsCache
+from consist.models.activitysim import (
+    ActivitySimConstantsCache,
+    ActivitySimConfigIngestRunLink,
+)
 
 with Session(tracker.engine) as session:
-    # Find runs where AUTO_TIME > 50
     rows = session.exec(
         select(
             ActivitySimConfigIngestRunLink.run_id,
@@ -316,174 +156,190 @@ with Session(tracker.engine) as session:
         )
         .where(ActivitySimConfigIngestRunLink.table_name == "activitysim_constants_cache")
         .where(ActivitySimConstantsCache.key == "CONSTANTS.AUTO_TIME")
-        .where(ActivitySimConstantsCache.value_num > 50)
     ).all()
 
-    for run_id, value_num in rows:
-        print(f"{run_id}: AUTO_TIME = {value_num}")
+for run_id, value in rows:
+    print(f"{run_id}: AUTO_TIME = {value}")
 ```
 
-### `activitysim_coefficients_cache`
+Or use the adapter's helper to get a constant grouped by run:
 
-Parsed coefficient rows from CSV files, deduplicated by content hash.
+```python
+rows_by_run = adapter.constants_by_run(
+    key="sample_rate",
+    collapse="first",
+    tracker=tracker,
+)
+```
+
+---
+
+### Sensitivity testing: apply parameter overrides
+
+To run a sweep over coefficient values without manually editing files, use
+`tracker.run_with_config_overrides(...)`. It takes your base config, applies
+the overrides, runs the model, and records everything with full provenance:
+
+```python
+from consist.integrations.activitysim import ConfigOverrides
+
+result = tracker.run_with_config_overrides(
+    adapter=adapter,
+    base_config_dirs=[overlay_dir, base_dir],
+    overrides=ConfigOverrides(
+        constants={
+            ("settings.yaml", "sample_rate"): 0.1,
+        },
+        coefficients={
+            ("tour_mode_coeffs.csv", "car_ASC", ""): -0.5,
+        },
+    ),
+    output_dir=Path("temp/adjusted_config"),
+    fn=run_activitysim,
+    name="activitysim_sensitivity",
+    model="activitysim",
+    config={"iteration": 1},
+)
+```
+
+To base the sweep on a previously recorded run rather than config directories:
+
+```python
+result = tracker.run_with_config_overrides(
+    adapter=adapter,
+    base_run_id="baseline_run_id",
+    overrides=ConfigOverrides(
+        coefficients={("accessibility_coefficients.csv", "time", ""): 2.3}
+    ),
+    output_dir=Path("temp/adjusted"),
+    fn=run_activitysim,
+    name="activitysim_sensitivity",
+    model="activitysim",
+    config={"iteration": 2},
+)
+```
+
+Each override run automatically records which resolved config root was used
+(`run.meta["resolved_config_identity"]`), so you can trace any result back to
+the exact parameter values that produced it.
+
+---
+
+### Read a single coefficient from a historical run
+
+```python
+coef = adapter.get_coefficient_value(
+    run_id="baseline_run_id",
+    tracker=tracker,
+    file_name="accessibility_coefficients.csv",
+    coefficient_name="time",
+)
+```
+
+---
+
+### Validate config before running
+
+Catch missing files or broken inheritance chains before a long run starts:
+
+```python
+from consist.core.config_canonicalization import ConfigAdapterOptions
+
+plan = tracker.prepare_config(
+    adapter,
+    [overlay_dir, base_dir],
+    options=ConfigAdapterOptions(strict=True, bundle=False, ingest=False),
+    validate_only=True,
+)
+if plan.diagnostics and not plan.diagnostics.ok:
+    raise ValueError("Config validation failed.")
+```
+
+---
+
+## What gets discovered and extracted
+
+### Discovery
+
+The adapter locates and hashes these files:
+
+1. `settings.yaml` — resolves the active `models` list
+2. Model YAMLs — resolved via suffix stripping and `include_settings` references
+3. Referenced CSVs — found via registry keys (`*_FILE`, `*_PATH`) and heuristics
+
+**Constructor options:**
+
+```python
+adapter = ActivitySimConfigAdapter(
+    model_name="activitysim",     # label in run metadata
+    adapter_version="0.1",        # version tag for run.meta
+    allow_heuristic_refs=True,    # detect *_FILE, *_PATH keys automatically
+    bundle_configs=True,          # create a tarball of the full config
+    bundle_cache_dir=None,        # defaults to <run_dir>/config_bundles
+)
+```
+
+**Layered config directories** (overlay takes precedence):
+
+```python
+tracker.run(
+    ...,
+    identity_inputs=[("asim_config", overlay_dir), ("asim_base", base_dir)],
+)
+```
+
+### Extracted tables
+
+| Table | Contents |
+|---|---|
+| `activitysim_constants_cache` | Flattened YAML CONSTANTS and allowlisted settings |
+| `activitysim_coefficients_cache` | Parsed rows from coefficient CSVs |
+| `activitysim_probabilities_cache` | Parsed probability table rows |
+| `activitysim_config_ingest_run_link` | Join table: maps content hashes to run IDs |
+
+Tables are deduplicated by content hash, so identical config files across runs
+produce one row, not duplicates. To query by run, join against
+`activitysim_config_ingest_run_link`.
+
+#### `activitysim_constants_cache` schema
 
 | Column | Type | Notes |
-|--------|------|-------|
-| `content_hash` | str | Primary key: content hash for the source file |
-| `file_name` | str | Primary key: source CSV file name |
-| `coefficient_name` | str | Primary key: coefficient identifier |
-| `segment` | str | Primary key: segment name (template) or "" (direct) |
-| `source_type` | str | "direct" (value column) or "template" (segment columns) |
+|---|---|---|
+| `content_hash` | str | Source file identity |
+| `file_name` | str | Source YAML file |
+| `key` | str | Dot-notation key, e.g. `CONSTANTS.AUTO_TIME`, `sample_rate` |
+| `value_type` | str | `null`, `bool`, `num`, `str`, or `json` |
+| `value_num` | float \| NULL | Set when `value_type == "num"` |
+| `value_str` | str \| NULL | Set when `value_type == "str"` |
+| `value_bool` | bool \| NULL | Set when `value_type == "bool"` |
+| `value_json` | JSON \| NULL | Set when `value_type == "json"` |
+
+#### `activitysim_coefficients_cache` schema
+
+| Column | Type | Notes |
+|---|---|---|
+| `content_hash` | str | Source file identity |
+| `file_name` | str | Source CSV file |
+| `coefficient_name` | str | Coefficient identifier |
+| `segment` | str | Segment name (template format) or `""` (direct) |
+| `source_type` | str | `"direct"` or `"template"` |
 | `value_raw` | str | Raw CSV cell value |
 | `value_num` | float \| NULL | Parsed numeric value |
-| `constrain` | str \| NULL | Constraint flag from CSV (if present) |
+| `constrain` | str \| NULL | Constraint flag from CSV |
 | `is_constrained` | bool \| NULL | Parsed constraint boolean |
 
-**Query example**: Compare coefficients across runs
+---
 
-```python
-from sqlmodel import Session, select
-from consist.models.activitysim import ActivitySimCoefficientsCache
+## API reference
 
-with Session(tracker.engine) as session:
-    # Find how a specific coefficient changed
-    rows = session.exec(
-        select(
-            ActivitySimConfigIngestRunLink.run_id,
-            ActivitySimCoefficientsCache.coefficient_name,
-            ActivitySimCoefficientsCache.segment,
-            ActivitySimCoefficientsCache.value_raw,
-        )
-        .join(
-            ActivitySimCoefficientsCache,
-            ActivitySimCoefficientsCache.content_hash
-            == ActivitySimConfigIngestRunLink.content_hash,
-        )
-        .where(
-            ActivitySimConfigIngestRunLink.table_name
-            == "activitysim_coefficients_cache"
-        )
-        .where(ActivitySimCoefficientsCache.coefficient_name == "car_ASC")
-    ).all()
-
-    for run_id, coef_name, segment, value_raw in rows:
-        print(f"{run_id}: {coef_name}[{segment}] = {value_raw}")
-```
-
-### `activitysim_probabilities_cache`
-
-Parsed probability table rows (dims and numeric probabilities separated), deduplicated by content hash.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `content_hash` | str | Primary key: content hash for the source file |
-| `file_name` | str | Primary key: source CSV file name |
-| `row_index` | int | Primary key: row index in source file |
-| `dims` | JSON | Non-numeric dimension values (e.g., `{"mode": "drive", "income": "high"}`) |
-| `probs` | JSON | Numeric probability/weight values (e.g., `{"prob_0": 0.3, "prob_1": 0.7}`) |
-
-**Query example**: Inspect probability tables
-
-```python
-from sqlmodel import Session, select
-from consist.models.activitysim import ActivitySimProbabilitiesCache
-
-with Session(tracker.engine) as session:
-    # Find probability rows for a specific file
-    rows = session.exec(
-        select(
-            ActivitySimConfigIngestRunLink.run_id,
-            ActivitySimProbabilitiesCache.row_index,
-            ActivitySimProbabilitiesCache.dims,
-            ActivitySimProbabilitiesCache.probs,
-        )
-        .join(
-            ActivitySimProbabilitiesCache,
-            ActivitySimProbabilitiesCache.content_hash
-            == ActivitySimConfigIngestRunLink.content_hash,
-        )
-        .where(
-            ActivitySimConfigIngestRunLink.table_name
-            == "activitysim_probabilities_cache"
-        )
-        .where(ActivitySimProbabilitiesCache.file_name == "atwork_probs.csv")
-    ).all()
-```
-
-#### Additional Tables
-
-- `activitysim_probabilities_entries_cache`
-- `activitysim_probabilities_meta_entries_cache`
-- `activitysim_coefficients_template_refs_cache`
-- `activitysim_config_ingest_run_link`
-
-## Configuration Best Practices
-
-**1. Organize config directories with inheritance**
-
-```
-configs/
-  base/
-    settings.yaml      # inherit_settings: true
-    accessibility.yaml
-    coefficients.csv
-  overlay/
-    settings.yaml      # inherits from base
-    local_overrides.yaml
-```
-
-Call with overlay first (takes precedence):
-
-```python
-tracker.canonicalize_config(adapter, [overlay_dir, base_dir])
-```
-
-**2. Use strict mode for validation**
-
-In development/testing, catch config problems early:
-
-```python
-tracker.canonicalize_config(adapter, config_dirs, strict=True)
-```
-
-**3. Leverage config bundling for reconstruction**
-
-The bundle tarball preserves full config state, enabling:
-- Auditing exact config used for a run
-- Reproducing runs via `materialize()`
-- Sharing configs across machines
-
-Bundles are cached by content hash, so repeated canonicalizations are efficient.
-
-**4. Query constants before running**
-
-Use `activitysim_constants_cache` + `activitysim_config_ingest_run_link` queries to validate assumptions:
-
-```python
-from sqlmodel import Session, select
-from consist.models.activitysim import ActivitySimConstantsCache, ActivitySimConfigIngestRunLink
-
-# Verify sample_rate is set to expected value
-with Session(tracker.engine) as session:
-    result = session.exec(
-        select(ActivitySimConstantsCache.value_num)
-        .join(
-            ActivitySimConfigIngestRunLink,
-            ActivitySimConfigIngestRunLink.content_hash
-            == ActivitySimConstantsCache.content_hash,
-        )
-        .where(ActivitySimConfigIngestRunLink.run_id == run.id)
-        .where(ActivitySimConfigIngestRunLink.table_name == "activitysim_constants_cache")
-        .where(ActivitySimConstantsCache.key == "sample_rate")
-    ).first()
-    value_num = result[0] if result else None
-    assert value_num == 0.25, f"Expected sample_rate=0.25, got {value_num}"
-```
-
-## API Reference
-
-For detailed method signatures, parameters, and return types, see:
-
-- `consist.integrations.activitysim.ActivitySimConfigAdapter` in the source API.
-- `consist.integrations.activitysim.ConfigOverrides` in the source API.
+- `consist.integrations.activitysim.ActivitySimConfigAdapter`
+- `consist.integrations.activitysim.ConfigOverrides`
+- [`Tracker.run_with_config_overrides()`](../api/tracker.md)
+- [`Tracker.prepare_config()`](../api/tracker.md#consist.core.tracker.Tracker.prepare_config)
 - [`Tracker.canonicalize_config()`](../api/tracker.md#consist.core.tracker.Tracker.canonicalize_config)
+
+## See Also
+
+- [Example 03: Demand Modeling](../examples.md) — end-to-end transportation simulation workflow
+- [Config Adapters Overview](config_adapters.md)
+- [Config, Facets, and Identity Inputs](../concepts/config-management.md)

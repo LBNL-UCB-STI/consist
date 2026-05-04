@@ -1,6 +1,6 @@
 # Run
 
-## `consist.run` options contract
+## Run Options Contract
 
 `consist.run(...)` is a deprecated compatibility wrapper around
 `Tracker.run(...)`. It still rejects legacy direct policy kwargs (for example
@@ -81,7 +81,7 @@ For the lower-level staging helpers, see [Materialization](materialize.md).
 
 ## `Run` model
 
-Use `run.identity_summary` to debug cache identity composition
+Use `run.identity_summary` to debug signature composition
 (`config_hash`, `input_hash`, `code_hash`, adapter metadata, and
 `identity_inputs` digests).
 

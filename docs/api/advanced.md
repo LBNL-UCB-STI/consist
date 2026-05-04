@@ -16,10 +16,10 @@ Guidance: [Manual Lifecycle and Decorators](../advanced/manual-lifecycle-and-dec
 
 ## Advanced cache/execution controls
 
-- [`CacheOptions`](run.md#consist.run-options-contract)
-- [`OutputPolicyOptions`](run.md#consist.run-options-contract)
-- [`ExecutionOptions`](run.md#consist.run-options-contract)
-- [`run.identity_summary`](run.md#run-model) for cache identity debugging
+- [`CacheOptions`](run.md#run-options-contract)
+- [`OutputPolicyOptions`](run.md#run-options-contract)
+- [`ExecutionOptions`](run.md#run-options-contract)
+- [`run.identity_summary`](run.md#run-model) for signature debugging
 
 ## Data/system integrations
 

@@ -1,11 +1,6 @@
 # Architecture
 
-!!! note "Recommended path"
-    For most user workflows, prefer `tracker.run(...)`, `tracker.trace(...)`,
-    or `consist.scenario(...)` with `scenario.run(...)` / `scenario.trace(...)`.
-    Low-level lifecycle snippets in this page (for example
-    `tracker.start_run(...)` + `tracker.log_artifact(...)`) are advanced and
-    primarily explain internal behavior.
+This page explains how Consist works under the hood: how signatures are computed, what gets stored, and how persistence is layered. Read it when you want to understand cache behavior, the data model, or the storage layout — these sections are appropriate for any user.
 
 ## How Caching Works
 
@@ -73,7 +68,7 @@ Key fields for workflow tracking:
 - `Artifact.hash` — Canonical portable artifact fingerprint for downstream provenance, verification, and deduplication
 - `Artifact.content_id` — DB-local dedupe identity; not the public fingerprint surface
 
-Consist provides three strategies for tracking configuration: `config=` (hashed into the cache key, stored as a JSON snapshot), `facet=` (queryable in DuckDB, does not affect the cache), and `identity_inputs=` (large external files hashed into the cache key but not stored as content). For full usage, guardrails, and query examples, see [Config, Facets, and Identity Inputs](concepts/config-management.md).
+Consist provides three strategies for tracking configuration: `config=` (hashed into the signature, stored as a JSON snapshot), `facet=` (queryable in DuckDB, does not affect the signature), and `identity_inputs=` (large external files hashed into the signature but not stored as content). For full usage, guardrails, and query examples, see [Config, Facets, and Identity Inputs](concepts/config-management.md).
 
 ---
 
@@ -138,7 +133,7 @@ For schemas, ingestion, and query examples, see [DLT Loader Guide](dlt-loader-gu
 
 ## Container Integration
 
-Containers are treated as pure functions. The cache signature extends the
+Containers are treated as pure functions. The run signature extends the
 standard formula with container-specific components including image digest,
 command, environment hash, backend, working directory, declared host `volumes`,
 and backend-specific extra args:

@@ -80,10 +80,10 @@ print(first.cache_hit, second.cache_hit)  # False, True
 cleaned = consist.load_df(second.outputs["cleaned"])
 ```
 
-`input_binding="paths"` keeps the function boundary explicit: the callable
-receives local `Path` values, while those same inputs define cache identity and
-lineage. When a path-bound tool needs a specific local destination, request
-staging with `ExecutionOptions(input_materialization="requested", ...)`.
+In this example, `input_binding="paths"` tells Consist to pass local `Path` objects 
+into the callable instead of loading input files. Those same paths are still hashed 
+and recorded for cache identity and lineage. For tools that need inputs copied to
+specific local filenames, see [Usage Guide](docs/usage-guide.md#path-staging-example).
 
 ## Documentation
 
