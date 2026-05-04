@@ -5,21 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
-## Unreleased
+## [0.1.3] - 2026-05-04
 
 ### Added
 
-- Add structured config identity manifests for adapter-backed runs. This is a
-  breaking adapter API change: custom `ConfigAdapter.canonicalize(...)`
-  implementations must now return `CanonicalizationResult(..., identity=...)`.
-  The in-repo ActivitySim and BEAM adapters have been migrated.
-- Add manifest-first cache-miss details for adapter-backed config identity,
+- Add verified recovery-copy registration APIs for artifacts copied by external
+  infrastructure, including `register_artifact_recovery_copy(...)` and
+  `register_run_output_recovery_copies(...)`. These helpers verify existing
+  archive-side bytes before recording recovery roots
+  by @zneedell ([#116](https://github.com/LBNL-UCB-STI/consist/pull/116)).
+- Add structured config identity manifests for adapter-backed runs, persisted
+  in `run.meta["config_identity_manifest"]` and exposed through
+  `Run.identity_summary`
+  by @zneedell ([#117](https://github.com/LBNL-UCB-STI/consist/pull/117)).
+- Add manifest-first cache-miss diagnostics for adapter-backed config identity,
   including changed, added, and removed config references/files, reference
-  status changes, and adapter identity option drift.
-- Add BEAM config reference policies and path alias normalization so run-local
-  config roots can be represented as stable logical references. Broader
-  container mount/directory input de-duplication remains a follow-up outside the
-  config-adapter contract.
+  status changes, and adapter identity option drift
+  by @zneedell ([#117](https://github.com/LBNL-UCB-STI/consist/pull/117)).
+- Add BEAM config reference policies and path alias support so scenario-specific
+  paths, runtime/output locations, delegated artifact roots, and ignored dormant
+  references can be represented explicitly in config identity
+  by @zneedell ([#117](https://github.com/LBNL-UCB-STI/consist/pull/117)).
+
+### Changed
+
+- **Breaking for custom config adapters:** `ConfigAdapter.canonicalize(...)`
+  implementations must now return `CanonicalizationResult(..., identity=...)`.
+  The in-repo ActivitySim and BEAM adapters have been migrated to the structured
+  identity contract
+  by @zneedell ([#117](https://github.com/LBNL-UCB-STI/consist/pull/117)).
+- Reorganize and simplify the documentation surface around a smaller
+  reference-first structure, with clearer navigation, expanded API/CLI coverage,
+  focused historical recovery guidance, and refreshed landing-page copy
+  by @zneedell ([#115](https://github.com/LBNL-UCB-STI/consist/pull/115)).
+- Reorder and refresh the example notebooks into a clearer learning path from
+  quickstart through BEAM, parameter sweeps, iterative workflows, and
+  transportation demand modeling, while updating examples to emphasize current
+  preferred APIs such as run-managed outputs, matrix loading, materialization,
+  Pydantic config objects, and requested input staging
+  by @zneedell ([#119](https://github.com/LBNL-UCB-STI/consist/pull/119)).
+- Refresh config adapter documentation, especially ActivitySim and BEAM adapter
+  guidance, to match the structured identity, cache-miss, and path-staging
+  surfaces
+  by @zneedell ([#117](https://github.com/LBNL-UCB-STI/consist/pull/117),
+  [#119](https://github.com/LBNL-UCB-STI/consist/pull/119)).
+- Upgrade the docs generator dependency to `zensical>=0.0.39`
+  by @zneedell ([#119](https://github.com/LBNL-UCB-STI/consist/pull/119)).
+
+### Fixed
+
+- Fix requested input staging validation so
+  `ExecutionOptions(input_materialization="requested", input_paths={...})`
+  respects the tracker’s configured artifact identity strategy, including
+  `hashing_strategy="fast"`
+  by @zneedell ([#118](https://github.com/LBNL-UCB-STI/consist/pull/118)).
+- Fix docs homepage/version-menu contrast so versioned docs controls remain
+  visible against the light header/background
+  by @zneedell ([#114](https://github.com/LBNL-UCB-STI/consist/pull/114)).
 
 ## [0.1.2] - 2026-04-14
 
@@ -273,7 +315,9 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
 
-[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.3...HEAD
+
+[0.1.3]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.2...v0.1.3
 
 [0.1.2]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.1...v0.1.2
 
