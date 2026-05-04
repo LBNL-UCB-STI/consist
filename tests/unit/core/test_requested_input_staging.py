@@ -45,6 +45,7 @@ class _FakeTracker:
             get_remappable_relative_path=lambda uri: None,
             get_historical_root=lambda **kwargs: None,
         )
+        self.identity = SimpleNamespace(compute_file_checksum=_sha256)
         self.run_dir = run_dir
         self.mounts = {}
 

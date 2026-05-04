@@ -57,6 +57,34 @@ def test_tracker_run_requested_input_materialization_stages_before_execution(
     assert result.run.meta["staged_inputs"]["data"] == str(staged_path.resolve())
 
 
+def test_tracker_run_requested_input_materialization_validates_fast_hash(
+    tracker, sample_csv
+) -> None:
+    tracker.identity.hashing_strategy = "fast"
+    source = sample_csv("runtime_stage_fast.csv", rows=3)
+    staged_path = tracker.run_dir / "workspace" / "runtime_stage_fast.csv"
+
+    def step(data: Path) -> None:
+        assert data == staged_path
+        assert pd.read_csv(data)["value"].tolist() == [0, 1, 2]
+
+    result = tracker.run(
+        fn=step,
+        name="requested_input_stage_fast_hash",
+        inputs={"data": source},
+        execution_options=ExecutionOptions(
+            input_binding="paths",
+            input_materialization="requested",
+            input_paths={"data": staged_path},
+        ),
+    )
+
+    assert result.cache_hit is False
+    assert staged_path.exists()
+    input_artifact = tracker.get_artifacts_for_run(result.run.id).inputs["data"]
+    assert tracker.identity.compute_file_checksum(staged_path) == input_artifact.hash
+
+
 def test_tracker_run_requested_input_materialization_runs_on_cache_hit(
     tracker, sample_csv
 ) -> None:
