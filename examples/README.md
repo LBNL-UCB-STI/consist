@@ -10,35 +10,35 @@ Examples are tiered:
 
 ## Essentials tier
 
-- `../00_quickstart.ipynb`: shortest recommended path walkthrough.
-- `../01_beam_core_demo.ipynb`: BEAM CORE-style linear scenario workflow for
+- `00_quickstart.ipynb`: shortest recommended path walkthrough.
+- `01_beam_core_demo.ipynb`: BEAM CORE-style linear scenario workflow for
   introducing scenario diffs, lineage, cache behavior, and path-bound input
   staging.
-- `../02_parameter_sweep_monte_carlo.ipynb`: moderate-scale sweep with
+- `02_parameter_sweep_monte_carlo.ipynb`: moderate-scale sweep with
   `scenario.run(...)` + `scenario.trace(...)`.
 - `scripts/research_pipeline_native.py`: compact script template for native
   Python workflows.
 
 ## Advanced tier
 
-- `../03_iterative_workflows.ipynb`: iterative scenario loops and cache
+- `03_iterative_workflows.ipynb`: iterative scenario loops and cache
   extension runs.
-- `../04_transportation_demand_modeling.ipynb`: end-to-end transportation
+- `04_transportation_demand_modeling.ipynb`: end-to-end transportation
   scenario analysis with multi-run comparison via `RunSet`.
 - `scripts/model_integrator_wrapper.py`: integration-style scenario template
   for wrapping external tools, including `RunSet`-based baseline/policy pairing.
 
 For manual lifecycle/decorator APIs (`start_run`, `begin_run/end_run`,
 `define_step`), see:
-`docs/advanced/manual-lifecycle-and-decorators.md`.
+`../docs/advanced/manual-lifecycle-and-decorators.md`.
 
 ## Helper modules
 
-- `synth_simulation.py`: deterministic Monte Carlo simulation helpers.
-- `pipeline_steps.py`: sweep registry and aggregation helpers.
-- `checked_models.py`: checked-in SQLModel contracts for comparison with
+- `src/synth_simulation.py`: deterministic Monte Carlo simulation helpers.
+- `src/pipeline_steps.py`: sweep registry and aggregation helpers.
+- `src/checked_models.py`: checked-in SQLModel contracts for comparison with
   generated schema code.
-- `travel_demand_functions.py`: transport model logic (skims/distribution/mode
+- `src/travel_demand_functions.py`: transport model logic (skims/distribution/mode
   choice/assignment).
 - `generated/`: target location for generated SQLModel modules.
 
