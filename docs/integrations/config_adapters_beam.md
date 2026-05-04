@@ -170,6 +170,69 @@ with Session(tracker.engine) as session:
 - `resolve_substitutions=True` resolves HOCON substitutions; set to False to keep raw expressions.
 - `env_overrides` supplies environment variables for optional substitutions (e.g., `${?BEAM_OUTPUT}`).
 - `strict=True` raises on missing referenced files; otherwise missing paths are logged as warnings.
+- Canonicalization returns a structured `CanonicalConfigIdentity` manifest.
+  Reference discovery is value-first: scalar strings become keyed
+  `ConfigReference` entries when the value itself looks like a path, resolves
+  under a config root, or the exact config key has an explicit
+  `BeamReferencePolicy`. Generic key-name scanning is disabled by default so
+  enum/control settings such as `fileFormat = "parquet"` and
+  `overwriteFiles = "overwriteExistingFiles"` remain ordinary scalar config
+  identity.
+- `BeamConfigAdapter(allow_heuristic_refs=True)` or
+  `ConfigAdapterOptions(allow_heuristic_refs=True)` re-enables key-suffix
+  discovery for legacy configs with bare filename values, but explicit
+  `reference_policies` are preferred for ambiguous scenario-specific settings.
+- Reference identity policies are:
+  - `content_hash` for resolved file inputs.
+  - `path_alias` for aliased or logical input roots such as
+    `beam.inputDirectory`.
+  - `delegated_to_artifacts` for directories whose content identity is handled
+    by logged input artifacts instead of hashing the whole directory in the
+    config manifest.
+  - `ignored` for explicitly dormant or non-identity references configured via
+    `BeamReferencePolicy`.
+  - `output_or_runtime_ignored` for output/runtime locations that should not
+    make equivalent runs miss cache.
+
+For ambiguous bare scalar values, configure a key-specific policy instead of
+relying on key-name inference:
+
+```python
+from consist.integrations.beam import BeamReferencePolicy
+
+adapter = BeamConfigAdapter(
+    primary_config=config_root / "sfbay-pilates-base.conf",
+    reference_policies={
+        "beam.agentsim.optionalExamplePath": BeamReferencePolicy(
+            identity_policy="ignored",
+            required=False,
+            reason="dormant_example_config",
+        ),
+        "beam.router.skim.activity-sim-skimmer.fileBaseName": BeamReferencePolicy(
+            identity_policy="output_or_runtime_ignored",
+            required=False,
+            reason="runtime_output_prefix",
+        ),
+    },
+)
+```
+
+Path aliases can be supplied on the adapter or per call:
+
+```python
+from consist.core.config_canonicalization import ConfigAdapterOptions
+
+tracker.canonicalize_config(
+    adapter,
+    [config_root],
+    options=ConfigAdapterOptions(
+        path_aliases={"beam_workspace": Path("/local/job123/workspace")}
+    ),
+)
+```
+
+Missing-reference warnings include the config key, status, policy, canonical
+value, and raw value. Use `strict=True` to make missing required references fail.
 
 ## Materialize Overrides
 

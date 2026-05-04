@@ -31,9 +31,13 @@ from sqlmodel import SQLModel, col
 from consist.core.config_canonicalization import (
     ArtifactSpec,
     CanonicalConfig,
+    CanonicalConfigIdentity,
     CanonicalizationResult,
     ConfigAdapterOptions,
+    ConfigReference,
+    DirectoryIdentity,
     IngestSpec,
+    _canonical_json_sha256,
     compute_config_pack_hash,
 )
 from consist.core.identity import IdentityManager
@@ -438,7 +442,7 @@ class ActivitySimConfigAdapter:
         resolved_strict = options.strict if options is not None else strict
         allow_heuristics = (
             options.allow_heuristic_refs
-            if options is not None
+            if options is not None and options.allow_heuristic_refs is not None
             else self.allow_heuristic_refs
         )
         bundle_configs = options.bundle if options is not None else self.bundle_configs
@@ -478,9 +482,30 @@ class ActivitySimConfigAdapter:
             allow_heuristics=allow_heuristics,
             strict=resolved_strict,
             allow_out_of_root_refs=self.allow_out_of_root_csv_refs,
+            allow_out_of_root_yaml_includes=self.allow_out_of_root_yaml_includes,
         )
         for csv_path in referenced:
             add_artifact(csv_path, role="csv")
+
+        identity = _build_activitysim_config_identity(
+            adapter_name=self.model_name,
+            adapter_version=self.adapter_version,
+            config=config,
+            inherit_settings=inherit_settings,
+            referenced_csvs=referenced,
+            options={
+                "allow_heuristic_refs": allow_heuristics,
+                "allow_out_of_root_yaml_includes": (
+                    self.allow_out_of_root_yaml_includes
+                ),
+                "allow_out_of_root_csv_refs": self.allow_out_of_root_csv_refs,
+            },
+            runtime_options={
+                "bundle_configs": bundle_configs,
+                "check_probabilities": self.check_probabilities,
+                "strict": resolved_strict,
+            },
+        )
 
         if bundle_configs and not plan_only:
             if run is None or tracker is None:
@@ -489,11 +514,11 @@ class ActivitySimConfigAdapter:
                 config_dirs=config.root_dirs,
                 run=run,
                 tracker=tracker,
-                content_hash=config.content_hash,
+                content_hash=identity.identity_hash,
                 cache_dir=self.bundle_cache_dir,
             )
             add_artifact(bundle_path, role="bundle")
-            artifacts_by_path[bundle_path].meta["content_hash"] = config.content_hash
+            artifacts_by_path[bundle_path].meta["content_hash"] = identity.identity_hash
 
         artifacts = list(artifacts_by_path.values())
 
@@ -503,7 +528,7 @@ class ActivitySimConfigAdapter:
 
         if config.primary_config:
             source_key = _artifact_key_for_path(config.primary_config, config.root_dirs)
-            file_hash = config.content_hash
+            file_hash = identity.identity_hash
 
             def rows_factory(
                 run_id: str,
@@ -561,7 +586,11 @@ class ActivitySimConfigAdapter:
                     )
                     break
 
-        return CanonicalizationResult(artifacts=artifacts, ingestables=ingestables)
+        return CanonicalizationResult(
+            artifacts=artifacts,
+            ingestables=ingestables,
+            identity=identity,
+        )
 
     def _build_probabilities_ingest_specs(
         self,
@@ -2089,11 +2118,17 @@ def _collect_referenced_csvs(
     allow_heuristics: bool,
     strict: bool,
     allow_out_of_root_refs: bool,
+    allow_out_of_root_yaml_includes: bool = False,
 ) -> list[Path]:
     referenced: list[Path] = []
     seen: Set[Path] = set()
     for path in yaml_paths:
-        data = _load_effective_yaml(path.name, config_dirs, inherit_settings)
+        data = _load_effective_yaml(
+            path.name,
+            config_dirs,
+            inherit_settings,
+            allow_out_of_root_includes=allow_out_of_root_yaml_includes,
+        )
         for ref in sorted(
             _collect_reference_values(data, allow_heuristics=allow_heuristics)
         ):
@@ -2609,6 +2644,244 @@ def _digest_path_with_name(path: Path, tracker: Optional["Tracker"]) -> str:
     digest.update(b":")
     digest.update(content_hash.encode("utf-8"))
     return digest.hexdigest()
+
+
+def _build_activitysim_config_identity(
+    *,
+    adapter_name: str,
+    adapter_version: Optional[str],
+    config: CanonicalConfig,
+    inherit_settings: bool,
+    referenced_csvs: Sequence[Path],
+    options: Mapping[str, Any],
+    runtime_options: Mapping[str, Any],
+) -> CanonicalConfigIdentity:
+    file_entries: list[dict[str, Any]] = []
+    references: list[ConfigReference] = []
+
+    def add_file(path: Path, *, role: str) -> None:
+        key = _logical_config_key(path, config.root_dirs)
+        digest = _file_sha256(path)
+        root_index = _config_root_index(path, config.root_dirs)
+        entry = {"key": key, "role": role, "hash": digest}
+        if root_index is not None:
+            entry["root_index"] = root_index
+        file_entries.append(entry)
+        references.append(
+            ConfigReference(
+                config_key=key,
+                raw_value=path.name,
+                canonical_value=key,
+                status="resolved",
+                required=True,
+                role=role,
+                identity_policy="content_hash",
+                hash=digest,
+            )
+        )
+
+    active_yamls = _collect_active_yaml_files(
+        config,
+        inherit_settings=inherit_settings,
+        allow_out_of_root_includes=bool(options.get("allow_out_of_root_yaml_includes")),
+    )
+    for yaml_path in active_yamls:
+        add_file(yaml_path, role="yaml")
+    for csv_path in referenced_csvs:
+        add_file(csv_path, role="csv")
+
+    file_entries = sorted(file_entries, key=lambda item: (item["role"], item["key"]))
+    options_payload = dict(sorted(options.items()))
+    runtime_options_payload = dict(sorted(runtime_options.items()))
+    yaml_entries = [item for item in file_entries if item["role"] == "yaml"]
+    csv_entries = [item for item in file_entries if item["role"] == "csv"]
+    component_hashes = {
+        "active_yaml_hash": _canonical_json_sha256({"files": yaml_entries}),
+        "referenced_csv_hash": _canonical_json_sha256({"files": csv_entries}),
+    }
+    files_hash = _canonical_json_sha256({"files": file_entries})
+    options_hash = _canonical_json_sha256({"options": options_payload})
+    directory_entries = _build_directory_identity_entries(
+        file_entries=file_entries,
+        root_dirs=config.root_dirs,
+    )
+    directory_hash = _canonical_json_sha256({"directories": directory_entries})
+    primary_config = (
+        _logical_config_key(config.primary_config, config.root_dirs)
+        if config.primary_config is not None
+        else None
+    )
+    identity_hash = _canonical_json_sha256(
+        {
+            "identity_schema_version": 1,
+            "adapter_name": adapter_name,
+            "adapter_version": adapter_version,
+            "primary_config": primary_config,
+            "files_hash": files_hash,
+            "options_hash": options_hash,
+            "directory_hash": directory_hash,
+        }
+    )
+    return CanonicalConfigIdentity(
+        adapter_name=adapter_name,
+        adapter_version=adapter_version,
+        primary_config=primary_config,
+        identity_hash=identity_hash,
+        scalar_hash=options_hash,
+        reference_hash=files_hash,
+        directory_hash=directory_hash,
+        scalars={
+            "options": options_payload,
+            "runtime_options": runtime_options_payload,
+            "component_hashes": component_hashes,
+            "roles": {
+                "yaml": [item["key"] for item in yaml_entries],
+                "csv": [item["key"] for item in csv_entries],
+            },
+            "files": file_entries,
+        },
+        references=tuple(
+            sorted(
+                references,
+                key=lambda ref: (ref.role or "", ref.canonical_value or ""),
+            )
+        ),
+        directories=tuple(
+            DirectoryIdentity(
+                canonical_value=item["canonical_value"],
+                role=item["role"],
+                identity_policy=item["identity_policy"],
+                hash_strategy=item["hash_strategy"],
+                hash=item["hash"],
+            )
+            for item in directory_entries
+        ),
+    )
+
+
+def _config_root_index(path: Path, config_dirs: Sequence[Path]) -> int | None:
+    resolved = path.resolve()
+    for index, config_dir in enumerate(config_dirs):
+        root = config_dir.resolve()
+        if resolved.is_relative_to(root):
+            return index
+    return None
+
+
+def _logical_config_key(path: Path, config_dirs: Sequence[Path]) -> str:
+    resolved = path.resolve()
+    for index, config_dir in enumerate(config_dirs):
+        root = config_dir.resolve()
+        if resolved.is_relative_to(root):
+            return f"root:{index}:{resolved.relative_to(root).as_posix()}"
+    return f"external:{resolved.name}"
+
+
+def _collect_active_yaml_files(
+    config: CanonicalConfig,
+    *,
+    inherit_settings: bool,
+    allow_out_of_root_includes: bool,
+) -> list[Path]:
+    active: list[Path] = []
+    seen: set[Path] = set()
+
+    def add_with_includes(path: Path) -> None:
+        resolved = path.resolve()
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        active.append(resolved)
+        data = _load_yaml(resolved)
+        include_settings = data.get("include_settings")
+        if isinstance(include_settings, str):
+            include_names = [include_settings]
+        elif isinstance(include_settings, list):
+            include_names = [str(item) for item in include_settings]
+        else:
+            include_names = []
+        for include_name in include_names:
+            include_path = _resolve_yaml_path(
+                include_name,
+                config.root_dirs,
+                base_dir=resolved.parent,
+                allow_out_of_root=allow_out_of_root_includes,
+            )
+            if include_path is not None:
+                add_with_includes(include_path)
+
+    names: list[str] = []
+    for yaml_path in config.config_files:
+        if yaml_path.name not in names:
+            names.append(yaml_path.name)
+
+    if inherit_settings:
+        for name in names:
+            found_in_roots = False
+            for root_dir in config.root_dirs:
+                path = (root_dir / name).resolve()
+                if path.exists() and (
+                    allow_out_of_root_includes
+                    or _is_within_roots(path, config.root_dirs)
+                ):
+                    found_in_roots = True
+                    add_with_includes(path)
+            if not found_in_roots:
+                for yaml_path in config.config_files:
+                    if yaml_path.name == name and yaml_path.exists():
+                        add_with_includes(yaml_path)
+    else:
+        for yaml_path in config.config_files:
+            add_with_includes(yaml_path)
+    return active
+
+
+def _build_directory_identity_entries(
+    *,
+    file_entries: Sequence[Mapping[str, Any]],
+    root_dirs: Sequence[Path],
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for index, _root_dir in enumerate(root_dirs):
+        root_files = [
+            {
+                "key": item["key"],
+                "role": item["role"],
+                "hash": item["hash"],
+            }
+            for item in file_entries
+            if item.get("root_index") == index
+        ]
+        root_hash = _canonical_json_sha256({"root_index": index, "files": root_files})
+        entries.append(
+            {
+                "canonical_value": f"root:{index}",
+                "role": "config_root",
+                "identity_policy": "fingerprint_manifest",
+                "hash_strategy": "active-files",
+                "hash": root_hash,
+            }
+        )
+    external_files = [
+        {
+            "key": item["key"],
+            "role": item["role"],
+            "hash": item["hash"],
+        }
+        for item in file_entries
+        if item.get("root_index") is None
+    ]
+    if external_files:
+        entries.append(
+            {
+                "canonical_value": "external",
+                "role": "external_config_files",
+                "identity_policy": "fingerprint_manifest",
+                "hash_strategy": "active-files",
+                "hash": _canonical_json_sha256({"files": external_files}),
+            }
+        )
+    return entries
 
 
 def _file_sha256(path: Path) -> str:

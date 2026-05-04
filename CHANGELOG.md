@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## Unreleased
+
+### Added
+
+- Add structured config identity manifests for adapter-backed runs. This is a
+  breaking adapter API change: custom `ConfigAdapter.canonicalize(...)`
+  implementations must now return `CanonicalizationResult(..., identity=...)`.
+  The in-repo ActivitySim and BEAM adapters have been migrated.
+- Add manifest-first cache-miss details for adapter-backed config identity,
+  including changed, added, and removed config references/files, reference
+  status changes, and adapter identity option drift.
+- Add BEAM config reference policies and path alias normalization so run-local
+  config roots can be represented as stable logical references. Broader
+  container mount/directory input de-duplication remains a follow-up outside the
+  config-adapter contract.
+
 ## [0.1.2] - 2026-04-14
 
 ### Added

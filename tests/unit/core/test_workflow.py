@@ -3,7 +3,11 @@ from pathlib import Path
 import pandas as pd
 import pytest
 from consist.core.coupler import Coupler
-from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
+from consist.core.config_canonicalization import (
+    CanonicalConfig,
+    ConfigPlan,
+    canonical_identity_from_config,
+)
 from consist.core.tracker import Tracker
 from consist.core.workflow import RunContext
 from consist.types import CacheOptions, ExecutionOptions
@@ -25,6 +29,11 @@ def _dummy_config_plan(
         canonical=canonical,
         artifacts=[],
         ingestables=[],
+        identity=canonical_identity_from_config(
+            adapter_name="dummy",
+            adapter_version=adapter_version,
+            config=canonical,
+        ),
     )
 
 

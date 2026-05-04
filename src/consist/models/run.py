@@ -225,6 +225,7 @@ class Run(SQLModel, table=True):
             "name": meta.get("config_adapter"),
             "hash": meta.get("config_bundle_hash"),
             "version": meta.get("config_adapter_version"),
+            "identity_manifest": meta.get("config_identity_manifest"),
         }
 
         config_payload = meta.get("config")
@@ -259,6 +260,7 @@ class Run(SQLModel, table=True):
                 "name": meta.get("config_adapter"),
                 "version": meta.get("config_adapter_version"),
                 "identity_hash": meta.get("config_bundle_hash"),
+                "identity_manifest": meta.get("config_identity_manifest"),
             },
             "code_identity": {
                 "mode": meta.get("code_identity", "repo_git"),

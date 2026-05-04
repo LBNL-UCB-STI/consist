@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
+from consist.core.config_canonicalization import (
+    CanonicalConfig,
+    ConfigPlan,
+    canonical_identity_from_config,
+)
 from consist.types import CacheOptions
 
 
@@ -23,18 +27,24 @@ def test_pre_pilates_adapter_and_identity_inputs_surface(
     config_root = tmp_path / "adapter_config"
     config_root.mkdir(parents=True, exist_ok=True)
 
+    canonical = CanonicalConfig(
+        root_dirs=[config_root],
+        primary_config=None,
+        config_files=[],
+        external_files=[],
+        content_hash="adapter_identity_hash",
+    )
     adapter_plan = ConfigPlan(
         adapter_name="dummy_adapter",
         adapter_version="1.0",
-        canonical=CanonicalConfig(
-            root_dirs=[config_root],
-            primary_config=None,
-            config_files=[],
-            external_files=[],
-            content_hash="adapter_identity_hash",
-        ),
+        canonical=canonical,
         artifacts=[],
         ingestables=[],
+        identity=canonical_identity_from_config(
+            adapter_name="dummy_adapter",
+            adapter_version="1.0",
+            config=canonical,
+        ),
     )
 
     class DummyAdapter:

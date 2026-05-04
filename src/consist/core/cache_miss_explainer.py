@@ -646,6 +646,222 @@ def _config_facet_diff(
     return diff, has_payload
 
 
+def _config_identity_manifest(run: Run) -> dict[str, Any]:
+    value = _get_run_meta_value(run, "config_identity_manifest")
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+def _manifest_list_entries(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    entries: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, Mapping):
+            entries.append(dict(item))
+        elif isinstance(item, str):
+            entries.append({"path": item})
+    return entries
+
+
+def _manifest_entry_label(
+    entry: Mapping[str, Any],
+    fields: Sequence[str],
+) -> Optional[str]:
+    for field_name in fields:
+        value = entry.get(field_name)
+        if value is None:
+            continue
+        label = str(value)
+        if label:
+            return label
+    return None
+
+
+def _manifest_entry_map(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    label_fields: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    mapped: dict[str, dict[str, Any]] = {}
+    for index, entry in enumerate(entries):
+        label = _manifest_entry_label(entry, label_fields)
+        if label is None:
+            label = f"entry_{index}"
+        mapped[label] = dict(entry)
+    return mapped
+
+
+def _without_keys(payload: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
+    return {key: value for key, value in payload.items() if key not in keys}
+
+
+def _manifest_entry_diff(
+    current: Mapping[str, Mapping[str, Any]],
+    prior: Mapping[str, Mapping[str, Any]],
+    *,
+    ignore_changed_fields: set[str] | None = None,
+) -> dict[str, list[str]]:
+    ignored = ignore_changed_fields or set()
+    current_keys = set(current)
+    prior_keys = set(prior)
+    changed = sorted(
+        key
+        for key in current_keys & prior_keys
+        if _without_keys(current[key], ignored) != _without_keys(prior[key], ignored)
+    )
+    added = sorted(current_keys - prior_keys)
+    removed = sorted(prior_keys - current_keys)
+    diff: dict[str, list[str]] = {}
+    if changed:
+        diff["changed"] = changed
+    if added:
+        diff["added"] = added
+    if removed:
+        diff["removed"] = removed
+    return diff
+
+
+def _manifest_reference_map(manifest: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    return _manifest_entry_map(
+        _manifest_list_entries(manifest.get("references")),
+        label_fields=("config_key", "key", "canonical_value", "raw_value", "role"),
+    )
+
+
+def _manifest_config_file_entries(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    primary_config = manifest.get("primary_config")
+    if isinstance(primary_config, str) and primary_config:
+        entries.append({"path": primary_config, "role": "primary_config"})
+
+    explicit_entries: list[dict[str, Any]] = []
+    for key in ("config_files", "files"):
+        explicit_entries.extend(_manifest_list_entries(manifest.get(key)))
+    scalars = manifest.get("scalars")
+    if isinstance(scalars, Mapping):
+        explicit_entries.extend(_manifest_list_entries(scalars.get("files")))
+
+    if explicit_entries:
+        entries.extend(explicit_entries)
+        return entries
+
+    entries.extend(_manifest_list_entries(manifest.get("directories")))
+    return entries
+
+
+def _manifest_config_file_map(
+    manifest: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    return _manifest_entry_map(
+        _manifest_config_file_entries(manifest),
+        label_fields=("path", "canonical_value", "config_key", "key", "raw_value"),
+    )
+
+
+def _manifest_option_map(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    for key in (
+        "config_identity_options",
+        "identity_options",
+        "adapter_options",
+        "options",
+    ):
+        options = manifest.get(key)
+        if isinstance(options, Mapping):
+            return _flatten_config_payload(options)
+    scalars = manifest.get("scalars")
+    if isinstance(scalars, Mapping):
+        for key in ("options", "config_identity_options", "identity_options"):
+            options = scalars.get(key)
+            if isinstance(options, Mapping):
+                return _flatten_config_payload(options)
+    return {}
+
+
+def _changed_manifest_option_labels(
+    current: Mapping[str, Any],
+    prior: Mapping[str, Any],
+) -> list[str]:
+    diff = _changed_keys(current, prior)
+    labels = set()
+    for values in diff.values():
+        labels.update(values)
+    return sorted(labels)
+
+
+def _reference_status_changes(
+    current: Mapping[str, Mapping[str, Any]],
+    prior: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    changes: list[dict[str, Any]] = []
+    for key in sorted(set(current) & set(prior)):
+        current_status = current[key].get("status")
+        prior_status = prior[key].get("status")
+        if current_status == prior_status:
+            continue
+        if current_status is None and prior_status is None:
+            continue
+        changes.append(
+            {
+                "reference": key,
+                "candidate": prior_status,
+                "current": current_status,
+            }
+        )
+    return changes
+
+
+def _config_manifest_diff(run: Run, candidate: Run) -> dict[str, Any]:
+    current_manifest = _config_identity_manifest(run)
+    prior_manifest = _config_identity_manifest(candidate)
+    if not current_manifest or not prior_manifest:
+        return {}
+
+    details: dict[str, Any] = {}
+
+    current_references = _manifest_reference_map(current_manifest)
+    prior_references = _manifest_reference_map(prior_manifest)
+    reference_diff = _manifest_entry_diff(
+        current_references,
+        prior_references,
+        ignore_changed_fields={"status"},
+    )
+    for output_key, diff_key in (
+        ("config_references_changed", "changed"),
+        ("config_references_added", "added"),
+        ("config_references_removed", "removed"),
+    ):
+        values = reference_diff.get(diff_key)
+        if values:
+            details[output_key] = values
+
+    status_changes = _reference_status_changes(current_references, prior_references)
+    if status_changes:
+        details["reference_status_changed"] = status_changes
+
+    current_files = _manifest_config_file_map(current_manifest)
+    prior_files = _manifest_config_file_map(prior_manifest)
+    file_diff = _manifest_entry_diff(current_files, prior_files)
+    for output_key, diff_key in (
+        ("config_files_changed", "changed"),
+        ("config_files_added", "added"),
+        ("config_files_removed", "removed"),
+    ):
+        values = file_diff.get(diff_key)
+        if values:
+            details[output_key] = values
+
+    option_changes = _changed_manifest_option_labels(
+        _manifest_option_map(current_manifest),
+        _manifest_option_map(prior_manifest),
+    )
+    if option_changes:
+        details["config_identity_options_changed"] = option_changes
+
+    return details
+
+
 def _build_config_details(
     tracker: CacheMissExplainerContext,
     run: Run,
@@ -660,6 +876,11 @@ def _build_config_details(
     changed_adapter_identity = _changed_adapter_identity(run, candidate)
     if changed_adapter_identity:
         details["adapter_identity_changed"] = changed_adapter_identity
+
+    manifest_diff = _config_manifest_diff(run, candidate)
+    if manifest_diff:
+        details.update(manifest_diff)
+        return details
 
     facet_diff, has_facet_payload = _config_facet_diff(tracker, run, candidate)
     if facet_diff:

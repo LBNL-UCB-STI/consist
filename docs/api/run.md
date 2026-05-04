@@ -99,6 +99,14 @@ The payload is intentionally compact:
   input keys, code-identity drift, or `fallbacks_used` when the explainer had
   to lean on fallback data.
 
+For adapter-backed runs, config miss details prefer
+`run.meta["config_identity_manifest"]` when both the current run and comparison
+candidate have one. That manifest-first path can report
+`config_references_changed` / `added` / `removed`,
+`config_files_changed` / `added` / `removed`, `reference_status_changed`, and
+`config_identity_options_changed`. Older or non-adapter runs still fall back to
+indexed config facets first and then the persisted JSON config snapshot.
+
 ::: consist.models.run.Run
     options:
       show_source: false

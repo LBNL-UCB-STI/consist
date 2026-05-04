@@ -47,6 +47,22 @@ def _quote_ident(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
+def _persist_config_identity_meta(
+    run: Run,
+    *,
+    adapter_name: str,
+    adapter_version: Optional[str],
+    contribution: ConfigContribution,
+) -> None:
+    if run.meta is None:
+        run.meta = {}
+    run.meta["config_bundle_hash"] = contribution.identity_hash
+    run.meta["config_adapter"] = adapter_name
+    if adapter_version is not None:
+        run.meta["config_adapter_version"] = adapter_version
+    run.meta["config_identity_manifest"] = contribution.identity.to_meta_dict()
+
+
 class TrackerConfigPlanService(_TrackerServiceBase):
     """
     Config planning and apply-time helpers extracted from ``Tracker``.
@@ -103,7 +119,7 @@ class TrackerConfigPlanService(_TrackerServiceBase):
             adapter, "canonicalize"
         ):
             kwargs["options"] = options
-        return adapter.canonicalize(
+        result = adapter.canonicalize(
             canonical,
             run=run,
             tracker=tracker,
@@ -111,6 +127,16 @@ class TrackerConfigPlanService(_TrackerServiceBase):
             plan_only=plan_only,
             **kwargs,
         )
+        if not result.identity.identity_hash:
+            raise ValueError(
+                "ConfigAdapter.canonicalize() returned an empty identity_hash."
+            )
+        if result.identity.adapter_name != adapter.model_name:
+            raise ValueError(
+                "ConfigAdapter.canonicalize() returned identity for "
+                f"{result.identity.adapter_name!r}, expected {adapter.model_name!r}."
+            )
+        return result
 
     def canonicalize_config(
         self,
@@ -160,7 +186,7 @@ class TrackerConfigPlanService(_TrackerServiceBase):
         )
 
         contribution = ConfigContribution(
-            identity_hash=canonical.content_hash,
+            identity=result.identity,
             adapter_version=getattr(adapter, "adapter_version", None),
             artifacts=result.artifacts,
             ingestables=result.ingestables,
@@ -177,12 +203,12 @@ class TrackerConfigPlanService(_TrackerServiceBase):
             profile_schema=profile_schema,
         )
 
-        if target_run.meta is None:
-            target_run.meta = {}
-        target_run.meta["config_bundle_hash"] = canonical.content_hash
-        target_run.meta["config_adapter"] = adapter.model_name
-        if contribution.adapter_version is not None:
-            target_run.meta["config_adapter_version"] = contribution.adapter_version
+        _persist_config_identity_meta(
+            target_run,
+            adapter_name=adapter.model_name,
+            adapter_version=contribution.adapter_version,
+            contribution=contribution,
+        )
 
         return contribution
 
@@ -231,6 +257,7 @@ class TrackerConfigPlanService(_TrackerServiceBase):
             canonical=canonical,
             artifacts=result.artifacts,
             ingestables=result.ingestables,
+            identity=result.identity,
             facet=facet_data,
             facet_schema_name=facet_schema_name,
             facet_schema_version=facet_schema_version,
@@ -362,7 +389,7 @@ class TrackerConfigPlanService(_TrackerServiceBase):
                     artifacts.append(bundle_spec)
 
         contribution = ConfigContribution(
-            identity_hash=plan.identity_hash,
+            identity=plan.identity,
             adapter_version=plan.adapter_version,
             artifacts=artifacts,
             ingestables=plan.ingestables,
@@ -379,12 +406,12 @@ class TrackerConfigPlanService(_TrackerServiceBase):
             profile_schema=profile_schema,
         )
 
-        if target_run.meta is None:
-            target_run.meta = {}
-        target_run.meta["config_bundle_hash"] = plan.identity_hash
-        target_run.meta["config_adapter"] = plan.adapter_name
-        if plan.adapter_version is not None:
-            target_run.meta["config_adapter_version"] = plan.adapter_version
+        _persist_config_identity_meta(
+            target_run,
+            adapter_name=plan.adapter_name,
+            adapter_version=plan.adapter_version,
+            contribution=contribution,
+        )
 
         if plan.facet is not None:
             facet_dict = plan.facet

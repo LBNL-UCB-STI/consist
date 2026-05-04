@@ -5,8 +5,12 @@ import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
-from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
 from consist.core.cache_miss_explainer import CacheMissExplainer
+from consist.core.config_canonicalization import (
+    CanonicalConfig,
+    CanonicalConfigIdentity,
+    ConfigPlan,
+)
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 from consist.types import CacheOptions
@@ -124,6 +128,292 @@ def test_cache_miss_explanation_records_identity_input_digest_changes():
 
     assert explanation.reason == "config_changed"
     assert explanation.details["identity_inputs_changed"] == ["scenario_cfg"]
+
+
+def test_cache_miss_explanation_prefers_config_identity_manifest_diff():
+    """Structured adapter manifests should explain config misses before fallbacks.
+
+    The manifest carries adapter-native identity detail that is more precise than
+    indexed facets or JSON snapshots. When both runs have manifests, the
+    explainer should report reference, file, status, and option drift directly
+    and avoid labeling the result as a fallback.
+    """
+
+    current = Run(
+        id="current",
+        model_name="manifest_model",
+        config_hash="config_hash_current",
+        input_hash="input_hash",
+        git_hash="git_hash",
+        meta={
+            "config_identity_manifest": {
+                "references": [
+                    {
+                        "config_key": "coefficients",
+                        "canonical_value": "coefficients.csv",
+                        "status": "resolved",
+                        "hash": "coeff_hash_v2",
+                    },
+                    {
+                        "config_key": "skims",
+                        "canonical_value": "skims.omx",
+                        "status": "resolved",
+                        "hash": "skims_hash",
+                    },
+                    {
+                        "config_key": "land_use",
+                        "canonical_value": "land_use.csv",
+                        "status": "resolved",
+                        "hash": "land_use_hash",
+                    },
+                ],
+                "primary_config": "settings.yaml",
+                "directories": [
+                    {"canonical_value": "config_root", "hash": "settings_hash_v2"},
+                    {"canonical_value": "extra_config", "hash": "extra_hash"},
+                ],
+                "options": {
+                    "strict": True,
+                    "path_aliases": {"data": "/new/data"},
+                },
+            }
+        },
+    )
+    candidate = Run(
+        id="candidate",
+        model_name="manifest_model",
+        config_hash="config_hash_candidate",
+        input_hash="input_hash",
+        git_hash="git_hash",
+        status="completed",
+        meta={
+            "config_identity_manifest": {
+                "references": [
+                    {
+                        "config_key": "coefficients",
+                        "canonical_value": "coefficients.csv",
+                        "status": "resolved",
+                        "hash": "coeff_hash_v1",
+                    },
+                    {
+                        "config_key": "skims",
+                        "canonical_value": "skims.omx",
+                        "status": "missing_optional",
+                        "hash": "skims_hash",
+                    },
+                    {
+                        "config_key": "households",
+                        "canonical_value": "households.csv",
+                        "status": "resolved",
+                        "hash": "households_hash",
+                    },
+                ],
+                "primary_config": "settings.yaml",
+                "directories": [
+                    {"canonical_value": "config_root", "hash": "settings_hash_v1"},
+                    {"canonical_value": "legacy_config", "hash": "legacy_hash"},
+                ],
+                "options": {
+                    "strict": False,
+                    "path_aliases": {"data": "/old/data"},
+                    "allow_heuristic_refs": True,
+                },
+            }
+        },
+    )
+
+    class StubTracker:
+        db = object()
+        current_consist = SimpleNamespace(
+            config={"fallback": "current"},
+            facet={"fallback": "current"},
+        )
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            assert model_name == "manifest_model"
+            assert limit == 20
+            return [candidate]
+
+        def get_config_values(self, run_id: str):
+            assert run_id == "candidate"
+            return {"fallback": "candidate"}
+
+        def get_run_config(self, run_id: str, *, allow_missing: bool = False):
+            assert run_id == "candidate"
+            assert allow_missing is True
+            return {"fallback": "candidate"}
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert explanation.reason == "config_changed"
+    assert explanation.details["config_references_changed"] == ["coefficients"]
+    assert explanation.details["config_references_added"] == ["land_use"]
+    assert explanation.details["config_references_removed"] == ["households"]
+    assert explanation.details["reference_status_changed"] == [
+        {
+            "reference": "skims",
+            "candidate": "missing_optional",
+            "current": "resolved",
+        }
+    ]
+    assert explanation.details["config_files_changed"] == ["config_root"]
+    assert explanation.details["config_files_added"] == ["extra_config"]
+    assert explanation.details["config_files_removed"] == ["legacy_config"]
+    assert set(explanation.details["config_identity_options_changed"]) == {
+        "allow_heuristic_refs",
+        "path_aliases.data",
+        "strict",
+    }
+    assert "config_keys_changed" not in explanation.details
+    assert "fallbacks_used" not in explanation.details
+
+
+def test_cache_miss_explanation_reads_canonical_identity_scalar_files():
+    """Real adapter manifests store file and option details in identity scalars."""
+
+    current_manifest = CanonicalConfigIdentity(
+        adapter_name="activitysim",
+        adapter_version="test",
+        primary_config="root:0:settings.yaml",
+        identity_hash="identity_v2",
+        scalars={
+            "files": [
+                {
+                    "key": "root:0:settings.yaml",
+                    "role": "yaml",
+                    "hash": "settings_v2",
+                },
+                {
+                    "key": "root:0:coefficients.csv",
+                    "role": "csv",
+                    "hash": "coefficients_v1",
+                },
+            ],
+            "options": {"allow_heuristic_refs": False},
+        },
+    ).to_meta_dict()
+    assert current_manifest["files"][0]["key"] == "root:0:settings.yaml"
+    assert current_manifest["options"]["allow_heuristic_refs"] is False
+    candidate_manifest = CanonicalConfigIdentity(
+        adapter_name="activitysim",
+        adapter_version="test",
+        primary_config="root:0:settings.yaml",
+        identity_hash="identity_v1",
+        scalars={
+            "files": [
+                {
+                    "key": "root:0:settings.yaml",
+                    "role": "yaml",
+                    "hash": "settings_v1",
+                },
+                {
+                    "key": "root:0:coefficients.csv",
+                    "role": "csv",
+                    "hash": "coefficients_v1",
+                },
+            ],
+            "options": {"allow_heuristic_refs": True},
+        },
+    ).to_meta_dict()
+    current = Run(
+        id="current",
+        model_name="activitysim",
+        config_hash="config_hash_current",
+        input_hash="input_hash",
+        git_hash="git_hash",
+        meta={"config_identity_manifest": current_manifest},
+    )
+    candidate = Run(
+        id="candidate",
+        model_name="activitysim",
+        config_hash="config_hash_candidate",
+        input_hash="input_hash",
+        git_hash="git_hash",
+        status="completed",
+        meta={"config_identity_manifest": candidate_manifest},
+    )
+
+    class StubTracker:
+        db = object()
+        current_consist = None
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            assert model_name == "activitysim"
+            assert limit == 20
+            return [candidate]
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert explanation.reason == "config_changed"
+    assert explanation.details["config_files_changed"] == ["root:0:settings.yaml"]
+    assert explanation.details["config_identity_options_changed"] == [
+        "allow_heuristic_refs"
+    ]
+
+
+def test_cache_miss_explanation_falls_back_when_manifest_diff_empty():
+    """Identical manifests should not suppress older facet fallback details."""
+
+    manifest = CanonicalConfigIdentity(
+        adapter_name="activitysim",
+        adapter_version="test",
+        primary_config="root:0:settings.yaml",
+        identity_hash="identity",
+        scalars={
+            "files": [
+                {
+                    "key": "root:0:settings.yaml",
+                    "role": "yaml",
+                    "hash": "settings",
+                }
+            ]
+        },
+    ).to_meta_dict()
+    current = Run(
+        id="current",
+        model_name="activitysim",
+        config_hash="config_hash_current",
+        input_hash="input_hash",
+        git_hash="git_hash",
+        meta={"config_identity_manifest": manifest},
+    )
+    candidate = Run(
+        id="candidate",
+        model_name="activitysim",
+        config_hash="config_hash_candidate",
+        input_hash="input_hash",
+        git_hash="git_hash",
+        status="completed",
+        meta={"config_identity_manifest": manifest},
+    )
+
+    class StubTracker:
+        db = object()
+        current_consist = SimpleNamespace(facet={"sample_rate": 0.2})
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            assert model_name == "activitysim"
+            assert limit == 20
+            return [candidate]
+
+        def get_config_values(self, run_id: str):
+            assert run_id == "candidate"
+            return {"sample_rate": 0.1}
+
+        def get_run_config(self, run_id: str, *, allow_missing: bool = False):
+            raise AssertionError("JSON snapshot fallback should not be needed.")
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert explanation.reason == "config_changed"
+    assert explanation.details["config_keys_changed"] == ["sample_rate"]
+    assert explanation.details["fallbacks_used"] == ["config_facet"]
 
 
 def test_cache_miss_explanation_records_callable_identity_mode_drift():
@@ -672,6 +962,12 @@ def test_cache_miss_explanation_records_adapter_identity_changes(
             ),
             artifacts=[],
             ingestables=[],
+            identity=CanonicalConfigIdentity(
+                adapter_name="dummy_adapter",
+                adapter_version="1.0",
+                primary_config=None,
+                identity_hash="adapter_hash_v1",
+            ),
         ),
         ConfigPlan(
             adapter_name="dummy_adapter",
@@ -685,6 +981,12 @@ def test_cache_miss_explanation_records_adapter_identity_changes(
             ),
             artifacts=[],
             ingestables=[],
+            identity=CanonicalConfigIdentity(
+                adapter_name="dummy_adapter",
+                adapter_version="2.0",
+                primary_config=None,
+                identity_hash="adapter_hash_v2",
+            ),
         ),
     ]
     calls = {"count": 0}

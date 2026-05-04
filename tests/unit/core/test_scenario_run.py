@@ -7,7 +7,11 @@ import pandas as pd
 import pytest
 
 import consist
-from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
+from consist.core.config_canonicalization import (
+    CanonicalConfig,
+    ConfigPlan,
+    canonical_identity_from_config,
+)
 from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
 
 
@@ -396,18 +400,24 @@ def test_scenario_run_accepts_adapter_identity_flow(tracker, tmp_path, monkeypat
     config_root = tmp_path / "sc_adapter"
     config_root.mkdir(parents=True, exist_ok=True)
 
+    canonical = CanonicalConfig(
+        root_dirs=[config_root],
+        primary_config=None,
+        config_files=[],
+        external_files=[],
+        content_hash="scenario_adapter_hash",
+    )
     adapter_plan = ConfigPlan(
         adapter_name="scenario_adapter",
         adapter_version="1.0",
-        canonical=CanonicalConfig(
-            root_dirs=[config_root],
-            primary_config=None,
-            config_files=[],
-            external_files=[],
-            content_hash="scenario_adapter_hash",
-        ),
+        canonical=canonical,
         artifacts=[],
         ingestables=[],
+        identity=canonical_identity_from_config(
+            adapter_name="scenario_adapter",
+            adapter_version="1.0",
+            config=canonical,
+        ),
     )
 
     class DummyAdapter:
@@ -447,18 +457,24 @@ def test_scenario_run_forwards_define_step_adapter_identity_metadata(
     config_root = tmp_path / "sc_adapter_metadata"
     config_root.mkdir(parents=True, exist_ok=True)
 
+    canonical = CanonicalConfig(
+        root_dirs=[config_root],
+        primary_config=None,
+        config_files=[],
+        external_files=[],
+        content_hash="scenario_adapter_metadata_hash",
+    )
     adapter_plan = ConfigPlan(
         adapter_name="scenario_adapter_metadata",
         adapter_version="1.1",
-        canonical=CanonicalConfig(
-            root_dirs=[config_root],
-            primary_config=None,
-            config_files=[],
-            external_files=[],
-            content_hash="scenario_adapter_metadata_hash",
-        ),
+        canonical=canonical,
         artifacts=[],
         ingestables=[],
+        identity=canonical_identity_from_config(
+            adapter_name="scenario_adapter_metadata",
+            adapter_version="1.1",
+            config=canonical,
+        ),
     )
 
     class DummyAdapter:

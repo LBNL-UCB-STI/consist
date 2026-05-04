@@ -10,7 +10,11 @@ import pandas as pd
 import pytest
 
 import consist
-from consist.core.config_canonicalization import CanonicalConfig, ConfigPlan
+from consist.core.config_canonicalization import (
+    CanonicalConfig,
+    ConfigPlan,
+    canonical_identity_from_config,
+)
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
 from consist.models.run import RunResult
@@ -1135,18 +1139,24 @@ def test_tracker_run_adapter_identity_populates_meta(tracker, tmp_path, monkeypa
     config_root = tmp_path / "adapter_config"
     config_root.mkdir(parents=True, exist_ok=True)
 
+    canonical = CanonicalConfig(
+        root_dirs=[config_root],
+        primary_config=None,
+        config_files=[],
+        external_files=[],
+        content_hash="adapter_identity_hash",
+    )
     adapter_plan = ConfigPlan(
         adapter_name="dummy_adapter",
         adapter_version="1.0",
-        canonical=CanonicalConfig(
-            root_dirs=[config_root],
-            primary_config=None,
-            config_files=[],
-            external_files=[],
-            content_hash="adapter_identity_hash",
-        ),
+        canonical=canonical,
         artifacts=[],
         ingestables=[],
+        identity=canonical_identity_from_config(
+            adapter_name="dummy_adapter",
+            adapter_version="1.0",
+            config=canonical,
+        ),
     )
 
     class DummyAdapter:
@@ -1179,6 +1189,16 @@ def test_tracker_run_adapter_identity_populates_meta(tracker, tmp_path, monkeypa
     assert calls == [[config_root]]
     assert adapter_run.run.meta["config_adapter"] == "dummy_adapter"
     assert adapter_run.run.meta["config_bundle_hash"] == "adapter_identity_hash"
+    assert (
+        adapter_run.run.meta["config_identity_manifest"]["identity_hash"]
+        == "adapter_identity_hash"
+    )
+    assert (
+        adapter_run.run.identity_summary["config_adapter"]["identity_manifest"][
+            "identity_hash"
+        ]
+        == "adapter_identity_hash"
+    )
     assert adapter_run.run.meta["consist_hash_inputs"]
 
 
