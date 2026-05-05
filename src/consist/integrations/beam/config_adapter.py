@@ -70,6 +70,8 @@ except ImportError:  # pragma: no cover
 
 
 _INCLUDE_RE = re.compile(r"^\s*include\s+(?:\"([^\"]+)\"|file\(\"([^\"]+)\"\))")
+_MAX_IMPLICIT_PATH_VALUE_LENGTH = 512
+_PATH_PROBE_EXCEPTIONS = (OSError, ValueError, RuntimeError)
 
 _DEFAULT_OVERRIDE_RUNTIME_KWARGS: dict[str, str] = {
     "config_dir": "selected_root_dir",
@@ -233,7 +235,7 @@ class BeamConfigAdapter:
             if ref.identity_policy in {"ignored", "output_or_runtime_ignored"}:
                 continue
             resolved = _resolve_reference(ref.raw_value, config.root_dirs)
-            if resolved is None or not resolved.exists():
+            if resolved is None or not _path_exists(resolved):
                 continue
             _add_artifact(
                 artifacts_by_path,
@@ -827,6 +829,21 @@ def _is_path_like_config_value(value: str) -> bool:
     )
 
 
+def _can_probe_implicit_path_value(value: str) -> bool:
+    candidate = value.strip()
+    if not candidate:
+        return False
+    if "\n" in candidate or "\r" in candidate:
+        return False
+    if len(candidate) > _MAX_IMPLICIT_PATH_VALUE_LENGTH:
+        return False
+    if "," in candidate and "/" not in candidate and "\\" not in candidate:
+        tokens = [token.strip() for token in candidate.split(",")]
+        if sum(bool(token) for token in tokens) > 1:
+            return False
+    return True
+
+
 def _collect_path_candidates(
     config_tree: dict[str, Any],
     *,
@@ -847,9 +864,21 @@ def _collect_path_candidates(
             for index, item in enumerate(node):
                 walk(item, f"{prefix}[{index}]")
             return
-        if isinstance(node, str) and (
-            prefix in explicit_policy_keys
-            or _is_path_like_config_value(node)
+        if not isinstance(node, str):
+            return
+        if prefix in explicit_policy_keys:
+            candidates.append(
+                _BeamPathCandidate(
+                    config_key=prefix,
+                    raw_value=node.strip(),
+                    index=len(candidates),
+                )
+            )
+            return
+        if not _can_probe_implicit_path_value(node):
+            return
+        if (
+            _is_path_like_config_value(node)
             or _resolves_under_config_root(node, root_dirs)
             or (allow_heuristic_refs and _is_path_like_config_key(prefix))
         ):
@@ -869,14 +898,22 @@ def _resolves_under_config_root(value: str, root_dirs: Sequence[Path]) -> bool:
     raw = value.strip()
     if not raw:
         return False
-    candidate = Path(raw).expanduser()
+    candidate = _safe_path(raw)
+    if candidate is None:
+        return False
     if candidate.is_absolute():
-        resolved = candidate.resolve()
-        return resolved.exists() and any(
-            resolved == root.resolve() or resolved.is_relative_to(root.resolve())
-            for root in root_dirs
+        resolved = _safe_resolve(candidate)
+        if resolved is None or not _path_exists(resolved):
+            return False
+        return any(
+            root_resolved is not None
+            and (resolved == root_resolved or resolved.is_relative_to(root_resolved))
+            for root_resolved in (_safe_resolve(root) for root in root_dirs)
         )
-    return any((root / candidate).resolve().exists() for root in root_dirs)
+    return any(
+        resolved is not None and _path_exists(resolved)
+        for resolved in (_safe_resolve(root / candidate) for root in root_dirs)
+    )
 
 
 def _merge_path_aliases(
@@ -963,6 +1000,41 @@ def _is_runtime_output_config_key(config_key: str) -> bool:
     return compact_key.endswith("filebasename")
 
 
+def _safe_path(value: str | Path) -> Optional[Path]:
+    try:
+        return Path(value).expanduser()
+    except _PATH_PROBE_EXCEPTIONS:
+        return None
+
+
+def _safe_resolve(path: Path) -> Optional[Path]:
+    try:
+        return path.resolve()
+    except _PATH_PROBE_EXCEPTIONS:
+        return None
+
+
+def _path_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except _PATH_PROBE_EXCEPTIONS:
+        return False
+
+
+def _path_is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except _PATH_PROBE_EXCEPTIONS:
+        return False
+
+
+def _path_is_dir(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except _PATH_PROBE_EXCEPTIONS:
+        return False
+
+
 def _canonical_path_value(
     *,
     raw_value: str,
@@ -970,10 +1042,13 @@ def _canonical_path_value(
     root_dirs: Sequence[Path],
     path_aliases: Mapping[str, Path],
 ) -> str:
-    path = resolved or Path(raw_value)
-    path = path.expanduser()
+    path = resolved or _safe_path(raw_value)
+    if path is None:
+        return raw_value
     if path.is_absolute():
-        resolved_path = path.resolve()
+        resolved_path = _safe_resolve(path)
+        if resolved_path is None:
+            return raw_value
         alias_matches = sorted(
             (
                 (alias, root)
@@ -988,7 +1063,9 @@ def _canonical_path_value(
             rel = resolved_path.relative_to(root).as_posix()
             return alias if not rel else f"{alias}/{rel}"
         for root in root_dirs:
-            root_resolved = root.resolve()
+            root_resolved = _safe_resolve(root)
+            if root_resolved is None:
+                continue
             if resolved_path == root_resolved or resolved_path.is_relative_to(
                 root_resolved
             ):
@@ -1001,9 +1078,12 @@ def _canonical_path_value(
         return raw_value
 
     if resolved is not None:
+        resolved_path = _safe_resolve(resolved)
+        if resolved_path is None:
+            return raw_value
         return _canonical_path_value(
             raw_value=raw_value,
-            resolved=resolved.resolve(),
+            resolved=resolved_path,
             root_dirs=root_dirs,
             path_aliases=path_aliases,
         )
@@ -1064,7 +1144,7 @@ def _build_beam_config_identity(
     ):
         policy = _policy_for_candidate(candidate, reference_policies)
         resolved = _resolve_reference(candidate.raw_value, root_dirs)
-        exists = bool(resolved is not None and resolved.exists())
+        exists = bool(resolved is not None and _path_exists(resolved))
         canonical_value = _canonical_path_value(
             raw_value=candidate.raw_value,
             resolved=resolved,
@@ -1087,9 +1167,9 @@ def _build_beam_config_identity(
 
         digest: Optional[str] = None
         if exists and resolved is not None:
-            if identity_policy == "content_hash" and resolved.is_file():
+            if identity_policy == "content_hash" and _path_is_file(resolved):
                 digest = _digest_path(resolved, tracker)
-            elif identity_policy == "content_hash" and resolved.is_dir():
+            elif identity_policy == "content_hash" and _path_is_dir(resolved):
                 identity_policy = "delegated_to_artifacts"
                 reason = reason or "directory_content_delegated_to_artifact_inputs"
                 if not delegated_artifact_keys:
@@ -1101,7 +1181,7 @@ def _build_beam_config_identity(
                     delegated_artifact_keys = (
                         _artifact_key_for_path(resolved, root_dirs),
                     )
-        if exists and resolved is not None and resolved.is_dir():
+        if exists and resolved is not None and _path_is_dir(resolved):
             directories.append(
                 DirectoryIdentity(
                     canonical_value=canonical_value,
@@ -1200,14 +1280,21 @@ def _build_beam_config_identity(
 
 
 def _resolve_reference(value: str, root_dirs: Sequence[Path]) -> Optional[Path]:
-    candidate = Path(value)
+    raw = value.strip()
+    if not raw:
+        return None
+    candidate = _safe_path(raw)
+    if candidate is None:
+        return None
     if candidate.is_absolute():
         return candidate
     for root in root_dirs:
-        resolved = (root / candidate).resolve()
-        if resolved.exists():
+        resolved = _safe_resolve(root / candidate)
+        if resolved is not None and _path_exists(resolved):
             return resolved
-    return (root_dirs[0] / candidate).resolve() if root_dirs else None
+    if not root_dirs:
+        return None
+    return _safe_resolve(root_dirs[0] / candidate)
 
 
 def _artifact_key_for_path(path: Path, config_dirs: Sequence[Path]) -> str:
@@ -1406,7 +1493,7 @@ def _build_tabular_ingest_specs(
         candidates = _coerce_to_path_values(value)
         for candidate in candidates:
             resolved = _resolve_reference(candidate, root_dirs)
-            if resolved is None or not resolved.exists():
+            if resolved is None or not _path_exists(resolved):
                 logging.warning(
                     "[Consist][BEAM] Missing referenced path: %s", candidate
                 )

@@ -13,6 +13,8 @@ from consist.core.config_canonicalization import ConfigAdapterOptions
 from consist.integrations.beam import BeamConfigAdapter, BeamConfigOverrides
 from consist.integrations.beam.config_adapter import BeamReferencePolicy
 from consist.integrations.beam.config_adapter import _load_config_tree
+from consist.integrations.beam.config_adapter import _resolve_reference
+from consist.integrations.beam.config_adapter import _resolves_under_config_root
 from consist.models.beam import BeamConfigCache, BeamConfigIngestRunLink
 from consist.types import CacheOptions, ExecutionOptions
 from tests.helpers.beam_fixtures import build_beam_test_configs
@@ -245,6 +247,164 @@ def test_beam_canonicalize_keeps_file_format_scalars_out_of_references(
     ):
         assert scalar_key not in refs_by_key
         assert scalar_key not in caplog.text
+
+
+def test_beam_canonicalize_keeps_multiline_scalars_out_of_references(
+    tracker,
+    tmp_path: Path,
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    overlay_conf.write_text(
+        overlay_conf.read_text(encoding="utf-8")
+        + """
+beam.sim.metric.collector.metrics = \"\"\"
+beam-run, beam-iteration, beam-map-envelope,
+beam-run-households, beam-run-population-size,
+ride-hail-waiting-time, ride-hail-waiting-time-map, ride-hail-trip-distance
+\"\"\"
+""",
+        encoding="utf-8",
+    )
+    adapter = BeamConfigAdapter(
+        primary_config=overlay_conf,
+        reference_policies={
+            "beam.agentsim.overridePath": BeamReferencePolicy(
+                identity_policy="ignored",
+                required=False,
+                reason="dormant_test_reference",
+            )
+        },
+    )
+    canonical = adapter.discover([case_dir], identity=tracker.identity)
+    run = tracker.begin_run("beam_multiline_scalar_unit", "beam")
+    result = adapter.canonicalize(
+        canonical,
+        run=run,
+        tracker=tracker,
+        strict=True,
+    )
+
+    refs_by_key = {ref.config_key: ref for ref in result.identity.references}
+    assert "beam.sim.metric.collector.metrics" not in refs_by_key
+    assert refs_by_key["beam.inputDirectory"].status == "resolved"
+    assert (
+        refs_by_key["beam.agentsim.agents.vehicles.vehicleTypesFilePath"].status
+        == "resolved"
+    )
+    assert refs_by_key["beam.agentsim.overridePath"].status == "missing_ignored"
+
+
+def test_beam_canonicalize_keeps_long_comma_scalars_out_of_references(
+    tracker,
+    tmp_path: Path,
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    event_list = ",".join(f"PersonSyntheticEvent{index}" for index in range(40))
+    assert len(event_list) > 512
+    overlay_conf.write_text(
+        overlay_conf.read_text(encoding="utf-8")
+        + f'\nbeam.outputs.events.eventsToWrite = "{event_list}"\n',
+        encoding="utf-8",
+    )
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    canonical = adapter.discover([case_dir], identity=tracker.identity)
+    run = tracker.begin_run("beam_long_comma_scalar_unit", "beam")
+    result = adapter.canonicalize(canonical, run=run, tracker=tracker)
+
+    refs_by_key = {ref.config_key: ref for ref in result.identity.references}
+    assert "beam.outputs.events.eventsToWrite" not in refs_by_key
+
+
+def test_beam_multiline_scalar_changes_scalar_identity_not_reference_identity(
+    tracker,
+    tmp_path: Path,
+):
+    results = []
+    for suffix, metric_value in (
+        ("a", "beam-run, beam-iteration"),
+        ("b", "beam-run, beam-iteration, ride-hail-waiting-time"),
+    ):
+        case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path / suffix)
+        overlay_conf.write_text(
+            overlay_conf.read_text(encoding="utf-8")
+            + f'\nbeam.sim.metric.collector.metrics = """\n{metric_value}\n"""\n',
+            encoding="utf-8",
+        )
+        adapter = BeamConfigAdapter(
+            primary_config=overlay_conf,
+            reference_policies={
+                "beam.agentsim.overridePath": BeamReferencePolicy(
+                    identity_policy="ignored",
+                    required=False,
+                    reason="dormant_test_reference",
+                )
+            },
+        )
+        canonical = adapter.discover([case_dir], identity=tracker.identity)
+        run = tracker.begin_run(f"beam_scalar_identity_{suffix}", "beam")
+        results.append(
+            adapter.canonicalize(
+                canonical,
+                run=run,
+                tracker=tracker,
+                strict=True,
+            )
+        )
+        tracker.end_run()
+
+    assert results[0].identity.scalar_hash != results[1].identity.scalar_hash
+    assert results[0].identity.reference_hash == results[1].identity.reference_hash
+
+
+def test_beam_explicit_policy_overrides_scalar_path_prefilter(
+    tracker,
+    tmp_path: Path,
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    event_list = "PersonArrivalEvent,PersonDepartureEvent,ActivityEndEvent"
+    overlay_conf.write_text(
+        overlay_conf.read_text(encoding="utf-8")
+        + f'\nbeam.outputs.events.eventsToWrite = "{event_list}"\n',
+        encoding="utf-8",
+    )
+    adapter = BeamConfigAdapter(
+        primary_config=overlay_conf,
+        reference_policies={
+            "beam.outputs.events.eventsToWrite": BeamReferencePolicy(
+                identity_policy="ignored",
+                required=False,
+                reason="explicit_event_scalar",
+            ),
+            "beam.agentsim.overridePath": BeamReferencePolicy(
+                identity_policy="ignored",
+                required=False,
+                reason="dormant_test_reference",
+            ),
+        },
+    )
+    canonical = adapter.discover([case_dir], identity=tracker.identity)
+    run = tracker.begin_run("beam_explicit_filtered_scalar_policy_unit", "beam")
+    result = adapter.canonicalize(
+        canonical,
+        run=run,
+        tracker=tracker,
+        strict=True,
+    )
+
+    refs_by_key = {ref.config_key: ref for ref in result.identity.references}
+    event_ref = refs_by_key["beam.outputs.events.eventsToWrite"]
+    assert event_ref.raw_value == event_list
+    assert event_ref.identity_policy == "ignored"
+    assert event_ref.status == "missing_ignored"
+    assert event_ref.reason == "explicit_event_scalar"
+
+
+def test_beam_path_probe_errors_fail_closed(tmp_path: Path):
+    with patch.object(Path, "exists", side_effect=OSError("file name too long")):
+        assert _resolves_under_config_root("candidate.csv", [tmp_path]) is False
+
+    with patch.object(Path, "resolve", side_effect=OSError("file name too long")):
+        assert _resolve_reference("candidate.csv", [tmp_path]) is None
 
 
 def test_beam_canonicalize_does_not_use_key_only_path_heuristics_by_default(
