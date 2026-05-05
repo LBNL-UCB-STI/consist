@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## [0.1.4] - 2026-05-05
+
+### Fixed
+
+- Fix BEAM config reference discovery so multiline and long comma-separated
+  scalar values are not probed as filesystem paths, and path-resolution errors
+  fail closed during canonicalization.
+
 ## [0.1.3] - 2026-05-04
 
 ### Added
@@ -315,7 +323,9 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
 
-[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.4...HEAD
+
+[0.1.4]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.3...v0.1.4
 
 [0.1.3]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.2...v0.1.3
 
