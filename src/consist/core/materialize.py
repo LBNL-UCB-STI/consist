@@ -1090,16 +1090,7 @@ def _get_artifact_run(tracker: "Tracker", *, artifact: Artifact):
     if not artifact.run_id:
         return None
 
-    get_run = getattr(tracker, "get_run", None)
-    if callable(get_run):
-        run = get_run(str(artifact.run_id))
-        if run is not None:
-            return run
-
-    db = cast("DatabaseManager | None", getattr(tracker, "db", None))
-    if db is not None:
-        return db.get_run(str(artifact.run_id))
-    return None
+    return tracker.get_run(str(artifact.run_id))
 
 
 def _direct_artifact_source_path(
@@ -1109,7 +1100,7 @@ def _direct_artifact_source_path(
     relative_path: Path,
     allow_tracker_uri: bool,
 ) -> Path | None:
-    runtime_abs_path = getattr(artifact, "abs_path", None)
+    runtime_abs_path = artifact.abs_path
     if runtime_abs_path:
         candidate = Path(str(runtime_abs_path))
         if candidate.exists():
@@ -1120,17 +1111,14 @@ def _direct_artifact_source_path(
 
     uri = artifact.container_uri
     if uri.startswith("workspace://") or uri.startswith("./"):
-        run_dir = getattr(tracker, "run_dir", None)
-        if run_dir is not None:
-            candidate = Path(run_dir) / relative_path
-            if candidate.exists():
-                return candidate
+        candidate = Path(tracker.run_dir) / relative_path
+        if candidate.exists():
+            return candidate
 
     if "://" in uri:
         scheme, _ = uri.split("://", 1)
-        fs = getattr(tracker, "fs", None)
-        mounts = getattr(fs, "mounts", None)
-        if isinstance(mounts, Mapping) and scheme in mounts:
+        mounts = tracker.fs.mounts
+        if scheme in mounts:
             candidate = Path(mounts[scheme]) / relative_path
             if candidate.exists():
                 return candidate
@@ -1226,8 +1214,7 @@ def _materialized_status_for_source(
 
 
 def _portable_artifact_hash(tracker: "Tracker", artifact: Artifact) -> str | None:
-    identity = getattr(tracker, "identity", None)
-    if getattr(identity, "hashing_strategy", None) != "full":
+    if tracker.identity.hashing_strategy != "full":
         return None
     return artifact.hash
 
@@ -1260,10 +1247,7 @@ def materialize_artifact(
         )
 
     if artifact.driver == "h5_table":
-        parent = None
-        get_parent = getattr(tracker, "get_parent_artifact", None)
-        if callable(get_parent):
-            parent = get_parent(artifact)
+        parent = tracker.get_parent_artifact(artifact)
         policy_validation = validate_recovery_registration_policy(
             artifact,
             parent=parent,

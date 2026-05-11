@@ -75,13 +75,16 @@ def _stub_tracker(
     runs: dict[str, Run],
     mounts: dict[str, str] | None = None,
 ):
+    db = StubDb(outputs_by_run=outputs_by_run, runs=runs)
     return SimpleNamespace(
-        db=StubDb(outputs_by_run=outputs_by_run, runs=runs),
+        db=db,
         fs=FileSystemManager(run_dir, mounts),
         run_dir=run_dir,
         allow_external_paths=True,
         identity=SimpleNamespace(hashing_strategy="full"),
         engine=None,
+        get_run=db.get_run,
+        get_parent_artifact=lambda artifact: None,
     )
 
 
