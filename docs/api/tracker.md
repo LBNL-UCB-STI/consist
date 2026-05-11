@@ -101,6 +101,22 @@ safe policy for restart-critical HDF5 files is to register verified recovery
 copies on the parent H5 artifact and keep child `h5_table` artifacts
 descriptive-only for schema, lineage, diffing, and diagnostics.
 
+```python
+from consist import H5ChildSpec
+
+container, children = tracker.log_h5_container(
+    "input_data_for_2019_outputs.h5",
+    key="usim_input_archive_2019",
+    child_selection="include_only",
+    child_specs={
+        "/households": H5ChildSpec(key="usim_households"),
+        "/persons": H5ChildSpec(key="usim_persons"),
+    },
+    container_recovery_unit="parent_file",
+    child_recovery_policy="descriptive_only",
+)
+```
+
 ## Constructing with `TrackerConfig`
 
 Use `Tracker.from_config(...)` when you want a typed configuration object for

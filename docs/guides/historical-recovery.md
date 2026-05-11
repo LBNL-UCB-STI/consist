@@ -208,6 +208,33 @@ H5 file but child `h5_table` artifacts return
 not independently recoverable unless its parent container policy explicitly
 allows child recovery.
 
+```python
+from consist import H5ChildSpec
+
+container, children = tracker.log_h5_container(
+    "input_data_for_2019_outputs.h5",
+    key="usim_input_archive_2019",
+    child_selection="include_only",
+    child_specs={
+        "/households": H5ChildSpec(key="usim_households"),
+        "/persons": H5ChildSpec(key="usim_persons"),
+    },
+    container_recovery_unit="parent_file",
+    child_recovery_policy="descriptive_only",
+)
+
+registered = tracker.register_run_output_recovery_copies(
+    "prior_run_id",
+    Path("/archive/iteration_004"),
+    keys=["usim_input_archive_2019"],
+)
+```
+
+Keep `keys=[...]` pointed at the parent H5 artifact for restart recovery. Child
+table artifacts remain useful for schema, lineage, diffing, and diagnostics, but
+they should not be used as recovery roots unless a future parent policy makes
+child recovery explicitly authoritative.
+
 Use the low-level metadata helper only when verification is handled elsewhere
 or you intentionally need to override recovery metadata:
 
