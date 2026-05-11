@@ -246,8 +246,7 @@ def _to_class_name(table_name: str) -> str:
 def _validate_class_name(class_name: str) -> str:
     if not class_name.isidentifier() or keyword.iskeyword(class_name):
         raise ValueError(
-            "class_name must be a valid Python class identifier, "
-            f"got {class_name!r}."
+            f"class_name must be a valid Python class identifier, got {class_name!r}."
         )
     return class_name
 
