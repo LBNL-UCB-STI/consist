@@ -484,6 +484,7 @@ def test_shell_routed_schema_capture_file_applies_shell_defaults(tmp_path) -> No
         shell = ConsistShell(
             tracker,
             db_path="shell.db",
+            run_dir="/archive/run",
             trust_db=True,
             mount_overrides={"workspace": "/archive/workspace"},
         )
@@ -494,6 +495,34 @@ def test_shell_routed_schema_capture_file_applies_shell_defaults(tmp_path) -> No
     app_mock.assert_called_once()
     routed_args = app_mock.call_args.kwargs["args"]
     assert routed_args[:4] == ["schema", "capture-file", "--artifact-key", "trips"]
+    assert "--db-path" in routed_args
+    assert "shell.db" in routed_args
+    assert "--run-dir" in routed_args
+    assert "/archive/run" in routed_args
+    assert "--trust-db" in routed_args
+    assert "--mount" in routed_args
+    assert "workspace=/archive/workspace" in routed_args
+
+
+def test_shell_routed_validate_applies_mount_defaults(tmp_path) -> None:
+    tracker = MagicMock()
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(
+            tracker,
+            db_path="shell.db",
+            trust_db=True,
+            mount_overrides={"workspace": "/archive/workspace"},
+        )
+
+    with patch("consist.cli.app") as app_mock:
+        shell.do_validate("")
+
+    app_mock.assert_called_once()
+    routed_args = app_mock.call_args.kwargs["args"]
+    assert routed_args[:1] == ["validate"]
     assert "--db-path" in routed_args
     assert "shell.db" in routed_args
     assert "--trust-db" in routed_args

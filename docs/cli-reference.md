@@ -16,16 +16,21 @@ The CLI looks for the provenance database in this order:
 
 ## Artifact Path Resolution
 
-Some artifacts are stored with relative URIs like `./outputs/...`. For commands that load
-or validate artifact files (`preview`, `validate`, and shell `preview`/`schema_profile`),
-Consist resolves relative paths in this order:
+Some artifacts are stored with relative URIs like `./outputs/...`. For commands
+that load, validate, or profile artifact files (`preview`, `validate`,
+`schema capture-file`, and shell `preview`/`schema_profile`), Consist resolves
+relative paths in this order:
 
 1. Explicit `--run-dir`
 2. Parent directory of `--db-path`
 3. Current working directory
 4. `_physical_run_dir` from run metadata (**only** when `--trust-db` is enabled)
+5. Ordered `artifact.meta["recovery_roots"]`
 
 This keeps default behavior safe while still supporting archived/moved run directories.
+Recovery roots are checked from metadata without requiring a separate CLI flag; use
+`--trust-db` when you also want the CLI to reuse recorded run directories or mount
+snapshots from the database.
 
 Examples:
 
@@ -40,6 +45,10 @@ consist preview trip_table \
 
 # Allow fallback to _physical_run_dir metadata from the DB
 consist preview trip_table --db-path archives/beam_core_demo.duckdb --trust-db
+
+# Mount-backed artifacts can use explicit mounts or trusted DB mount snapshots
+consist preview trips --db-path archive.duckdb --mount inputs=/data/archive/inputs
+consist validate --db-path archive.duckdb --trust-db
 ```
 
 ## Global Options
@@ -176,7 +185,9 @@ Options:
 
 - `--sample-rows N`: rows to sample during inference (default `1000`)
 - `--if-changed`: reuse a prior schema observation when the artifact hash is unchanged; this affects schema capture only, not artifact-row reuse
+- `--run-dir PATH`: base directory for resolving relative artifact paths
 - `--trust-db`: allow metadata-based mount inference when resolving paths
+- `--mount NAME=PATH`: explicit mount override; repeat for multiple schemes
 - `--db-path`: explicit DB path
 
 ### consist schema export
@@ -321,6 +332,7 @@ consist validate
 consist validate --fix  # Mark missing artifacts
 consist validate --db-path examples/runs/beam_core_demo/beam_core_demo_demo.duckdb
 consist validate --db-path archives/beam_core_demo.duckdb --run-dir /data/archive/beam_core_demo
+consist validate --db-path archives/beam_core_demo.duckdb --mount workspace=/data/archive/beam_core_demo
 consist validate --db-path archives/beam_core_demo.duckdb --trust-db
 ```
 
@@ -332,6 +344,7 @@ Start an interactive session for exploring provenance.
 consist shell
 consist shell --db-path examples/runs/beam_core_demo/beam_core_demo_demo.duckdb
 consist shell --run-dir /data/archive/beam_core_demo
+consist shell --mount workspace=/data/archive/beam_core_demo
 consist shell --trust-db  # Allow metadata-based mount/run-dir inference
 ```
 
@@ -358,6 +371,9 @@ Useful shell shortcuts:
   cached shell artifact refs and route them to `--artifact-id`.
 - `context` prints the active shell defaults for `db_path`, `run_dir`,
   `trust_db`, and mount overrides.
+- Shell defaults are applied to routed `preview`, `validate`, and
+  `schema capture-file` commands, so you do not need to repeat `--db-path`,
+  `--run-dir`, `--trust-db`, or `--mount` inside the shell.
 - `preview --hash <prefix>` and `schema_profile --hash <prefix>` search all
   artifacts by hash prefix.
 - `schema_stub --hash <prefix> --run-id <run_id>` narrows hash lookup to one run
