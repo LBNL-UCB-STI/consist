@@ -85,6 +85,8 @@ def _escape_like_literal(value: str) -> str:
         .replace("%", f"{LIKE_ESCAPE_CHAR}%")
         .replace("_", f"{LIKE_ESCAPE_CHAR}_")
     )
+
+
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 SchemaProfileSource = Literal["file", "duckdb", "user_provided"]
