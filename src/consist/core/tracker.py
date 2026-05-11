@@ -2501,6 +2501,59 @@ class Tracker:
             name=name,
         )
 
+    def find_matching_runs(
+        self,
+        *,
+        model: Optional[str] = None,
+        status: Optional[str] = None,
+        year: Optional[Union[int, str]] = None,
+        iteration: Optional[Union[int, str]] = None,
+        stage: Optional[str] = None,
+        phase: Optional[str] = None,
+        cache_epoch: Optional[Union[int, str]] = None,
+        run_scope: Optional[str] = None,
+        parent_id: Optional[str] = None,
+        facet: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        limit: int = 100,
+        allow_missing_cache_epoch: bool = False,
+    ) -> List[Run]:
+        """
+        Return runs matching semantic workflow fields in recency order.
+
+        This helper is intended for historical run reuse and restart recovery.
+        It supports canonical run fields such as ``model``, ``status``,
+        ``year``, ``iteration``, ``stage``, and ``phase``; exact facet and
+        metadata predicates; optional ``cache_epoch`` matching; and a
+        caller-owned ``run_scope`` prefix.
+
+        ``run_scope`` is a string prefix constraint applied to ``Run.id`` and
+        ``Run.description``. A run matches when either field equals the scope or
+        starts with ``f"{run_scope}__"``. Consist does not derive this value from
+        paths, workspaces, or archive roots.
+
+        Missing ``cache_epoch`` values do not match by default. Set
+        ``allow_missing_cache_epoch=True`` only when a caller explicitly wants a
+        migration path for older stores.
+
+        Unexpected query failures are not swallowed by this helper.
+        """
+        return self.queries.find_matching_runs(
+            model=model,
+            status=status,
+            year=year,
+            iteration=iteration,
+            stage=stage,
+            phase=phase,
+            cache_epoch=cache_epoch,
+            run_scope=run_scope,
+            parent_id=parent_id,
+            facet=facet,
+            metadata=metadata,
+            limit=limit,
+            allow_missing_cache_epoch=allow_missing_cache_epoch,
+        )
+
     def get_latest_run_id(self, **kwargs) -> str:
         """
         Convenience wrapper to return the latest run ID for the given filters.
@@ -4701,12 +4754,38 @@ class Tracker:
 
     def find_matching_run(
         self,
-        config_hash: str,
-        input_hash: str,
-        git_hash: str,
+        config_hash: Optional[str] = None,
+        input_hash: Optional[str] = None,
+        git_hash: Optional[str] = None,
         *,
         signature: Optional[str] = None,
+        **filters: Any,
     ) -> Optional[Run]:
+        """
+        Return a matching run by cache identity or semantic workflow filters.
+
+        Positional ``config_hash``, ``input_hash``, and ``git_hash`` preserve
+        the original cache-identity lookup. When called with keyword semantic
+        filters such as ``model=``, ``stage=``, ``phase=``, ``year=``,
+        ``iteration=``, ``cache_epoch=``, or ``run_scope=``, the method returns
+        the latest semantic match or ``None``.
+        """
+        if config_hash is None and input_hash is None and git_hash is None:
+            if signature is not None:
+                raise TypeError(
+                    "signature matching requires config_hash, input_hash, and git_hash"
+                )
+            return self.queries.find_matching_run(**filters)
+        if filters:
+            unexpected = ", ".join(sorted(filters))
+            raise TypeError(
+                "semantic filters cannot be combined with cache-identity "
+                f"matching arguments: {unexpected}"
+            )
+        if config_hash is None or input_hash is None or git_hash is None:
+            raise TypeError(
+                "cache-identity matching requires config_hash, input_hash, and git_hash"
+            )
         return self._history_service.find_matching_run(
             config_hash,
             input_hash,

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, Hashable, Iterable, List, Optional, Union, TYPE_CHECKING
 
 from consist.core.indexing import FacetIndex, IndexBySpec, RunFieldIndex
+from consist.core.run_matching import find_matching_runs_for_tracker
 from consist.models.run import Run
 from consist.models.run_config_kv import RunConfigKV
 
@@ -33,6 +34,8 @@ class RunQueryService:
         limit: int = 100,
         index_by: Optional[Union[str, IndexBySpec]] = None,
         name: Optional[str] = None,
+        run_scope: Optional[str] = None,
+        raise_on_error: bool = False,
     ) -> Union[List[Run], Dict[Hashable, Run]]:
         runs: List[Run] = []
         if self._tracker.db:
@@ -49,6 +52,8 @@ class RunQueryService:
                 metadata,
                 limit,
                 name,
+                run_scope,
+                raise_on_error,
             )
 
         if index_by:
@@ -154,6 +159,46 @@ class RunQueryService:
             return (has_iteration, iteration_value, created_at_ts, run.id)
 
         return max(runs, key=_latest_key)
+
+    def find_matching_runs(
+        self,
+        *,
+        model: Optional[str] = None,
+        status: Optional[str] = None,
+        year: Optional[Union[int, str]] = None,
+        iteration: Optional[Union[int, str]] = None,
+        stage: Optional[str] = None,
+        phase: Optional[str] = None,
+        cache_epoch: Optional[Union[int, str]] = None,
+        run_scope: Optional[str] = None,
+        parent_id: Optional[str] = None,
+        facet: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        limit: int = 100,
+        allow_missing_cache_epoch: bool = False,
+    ) -> List[Run]:
+        return find_matching_runs_for_tracker(
+            self.find_runs,
+            model=model,
+            status=status,
+            year=year,
+            iteration=iteration,
+            stage=stage,
+            phase=phase,
+            cache_epoch=cache_epoch,
+            run_scope=run_scope,
+            parent_id=parent_id,
+            facet=facet,
+            metadata=metadata,
+            limit=limit,
+            allow_missing_cache_epoch=allow_missing_cache_epoch,
+        )
+
+    def find_matching_run(self, **filters: Any) -> Optional[Run]:
+        matches = self.find_matching_runs(**filters)
+        if not matches:
+            return None
+        return matches[0]
 
     def get_latest_run_id(self, **kwargs: Any) -> str:
         return self.find_latest_run(**kwargs).id

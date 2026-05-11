@@ -181,10 +181,14 @@ Scenario defaults like `name_template` and `cache_epoch` are configured via `con
 - [`consist.find_run`](api_helpers.md#consist.api.find_run)
 - [`consist.find_runs`](api_helpers.md#consist.api.find_runs)
 - [`consist.find_latest_run`](api_helpers.md#consist.api.find_latest_run)
+- [`consist.find_matching_run`](api_helpers.md#consist.api.find_matching_run)
+- [`consist.find_matching_runs`](api_helpers.md#consist.api.find_matching_runs)
 - [`consist.run_set`](api_helpers.md#consist.api.run_set)
 - [`Tracker.run_set(...)`](tracker.md#consist.core.tracker.Tracker.run_set)
 - [`RunSet`](runset.md#consist.runset.RunSet) and [`AlignedPair`](runset.md#consist.runset.AlignedPair)
 - [`Tracker.find_latest_run(...)`](tracker.md#consist.core.tracker.Tracker.find_latest_run)
+- [`Tracker.find_matching_run(...)`](tracker.md#consist.core.tracker.Tracker.find_matching_run)
+- [`Tracker.find_matching_runs(...)`](tracker.md#consist.core.tracker.Tracker.find_matching_runs)
 - [`Tracker.diff_runs(...)`](tracker.md#consist.core.tracker.Tracker.diff_runs)
 - [`Tracker.get_child_artifacts(...)`](tracker.md#consist.core.tracker.Tracker.get_child_artifacts) / [`Tracker.get_parent_artifact(...)`](tracker.md#consist.core.tracker.Tracker.get_parent_artifact)
 - [`Tracker.get_run_inputs(...)`](tracker.md#consist.core.tracker.Tracker.get_run_inputs) / [`Tracker.get_run_outputs(...)`](tracker.md#consist.core.tracker.Tracker.get_run_outputs)
@@ -202,6 +206,8 @@ Run lookup helpers treat `stage` and `phase` as first-class run dimensions, so
 you can filter historical runs with `consist.find_runs(...)`,
 `consist.find_latest_run(...)`, or `Tracker.find_latest_run(...)` without
 treating those values as opaque metadata.
+Use `find_matching_run(...)` when restart or reuse code needs the latest run
+matching a semantic target with optional `cache_epoch=` and `run_scope=`.
 
 ### Tracker methods
 
@@ -222,7 +228,8 @@ to Consist, start with the **Core** and **Logging/Loading** groups and reach for
 
 #### Querying and history
 
-- `find_runs`, `run_set`, `find_run`, `find_latest_run`, `get_latest_run_id`
+- `find_runs`, `run_set`, `find_run`, `find_latest_run`, `find_matching_run`,
+  `find_matching_runs`, `get_latest_run_id`
 - `find_artifacts`, `get_artifact`, `get_child_artifacts`, `get_parent_artifact`, `get_artifacts_for_run`
 - `find_artifacts_by_params`, `get_artifact_kv`, `register_artifact_facet_parser`
 - `get_run`, `get_run_config`, `get_run_inputs`, `get_run_outputs`

@@ -27,13 +27,17 @@ a tracker object to every call.
   `consist.register_run_output_recovery_copies`, `consist.archive_artifact`,
   `consist.archive_run_outputs`, `consist.archive_current_run_outputs`
 - Querying: `consist.find_run`, `consist.find_runs`,
-  `consist.find_latest_run`, `consist.run_query`, `consist.run_set`,
+  `consist.find_latest_run`, `consist.find_matching_run`,
+  `consist.find_matching_runs`, `consist.run_query`, `consist.run_set`,
   `consist.get_run_result`, `consist.config_run_query`,
   `consist.config_run_rows`
 
 `consist.find_runs(...)`, `consist.find_run(...)`, and
 `consist.find_latest_run(...)` forward standard run filters, including
 `stage=` and `phase=` for workflow-level queries.
+`consist.find_matching_run(...)` and `consist.find_matching_runs(...)` add a
+restart-friendly semantic matcher with optional `cache_epoch=` and caller-owned
+`run_scope=` prefix filtering.
 
 ## Minimal runnable helper workflow
 
@@ -98,6 +102,8 @@ For class-level equivalents, see [Tracker](tracker.md) and
         - find_run
         - find_runs
         - find_latest_run
+        - find_matching_run
+        - find_matching_runs
         - run_set
         - db_session
         - run_query

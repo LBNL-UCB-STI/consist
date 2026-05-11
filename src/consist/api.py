@@ -2089,6 +2089,50 @@ def find_latest_run(tracker: Optional["Tracker"] = None, **filters: Any) -> Run:
     return tr.find_latest_run(**filters)
 
 
+def find_matching_runs(
+    tracker: Optional["Tracker"] = None, **filters: Any
+) -> list[Run]:
+    """
+    Convenience proxy for ``Tracker.find_matching_runs``.
+
+    Parameters
+    ----------
+    tracker : Optional[Tracker], optional
+        Tracker instance to query; defaults to the active tracker.
+    **filters : Any
+        Semantic filters forwarded to ``Tracker.find_matching_runs``.
+
+    Returns
+    -------
+    list[Run]
+        Matching runs in deterministic recency order.
+    """
+    tr = tracker or current_tracker()
+    return tr.find_matching_runs(**filters)
+
+
+def find_matching_run(
+    tracker: Optional["Tracker"] = None, **filters: Any
+) -> Optional[Run]:
+    """
+    Convenience proxy for ``Tracker.find_matching_run``.
+
+    Parameters
+    ----------
+    tracker : Optional[Tracker], optional
+        Tracker instance to query; defaults to the active tracker.
+    **filters : Any
+        Semantic filters forwarded to ``Tracker.find_matching_run``.
+
+    Returns
+    -------
+    Optional[Run]
+        Latest matching run, or ``None`` when no run matches.
+    """
+    tr = tracker or current_tracker()
+    return tr.find_matching_run(**filters)
+
+
 def run_set(
     tracker: Optional["Tracker"] = None,
     label: Optional[str] = None,

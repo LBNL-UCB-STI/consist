@@ -50,6 +50,34 @@ archive layout before recording it.
 Do not create a second "archived artifact" just because bytes moved. Keep the
 original artifact identity and record the additional byte root.
 
+## Finding A Prior Run
+
+If restart code does not already know the exact run ID, use
+`tracker.find_matching_run(...)` to select the latest completed run for the
+semantic workflow target, then hydrate outputs from that run:
+
+```python
+previous = tracker.find_matching_run(
+    model="traffic_assignment",
+    stage="assignment",
+    phase="run",
+    status="completed",
+    year=2030,
+    iteration=2,
+    cache_epoch=4,
+    run_scope="scenario_2030_base",
+)
+
+if previous is None:
+    raise RuntimeError("No completed assignment run found for restart recovery.")
+```
+
+`run_scope` is supplied by the caller and constrains matches to runs whose ID or
+description equals that scope or starts with `f"{run_scope}__"`. Use it when an
+archive or workspace contains runs from multiple scenarios or restart attempts.
+`find_matching_run(...)` returns `None` for a successful lookup with no match;
+database or query failures remain visible.
+
 ## Recommended Output Recovery
 
 Use `tracker.hydrate_run_outputs(...)` when you need historical outputs for a
@@ -59,7 +87,7 @@ known run:
 from pathlib import Path
 
 hydrated = tracker.hydrate_run_outputs(
-    "prior_run_id",
+    previous.id,
     keys=["persons", "households"],
     target_root=tracker.run_dir / "restored_workspace",
     source_root=Path("/archive/outputs_mirror"),  # optional
@@ -227,6 +255,7 @@ including `recovery_roots`, but do not create a new run.
 
 | Need | Use |
 |---|---|
+| Find the latest completed run for a restart/reuse target | `find_matching_run(...)` |
 | Restore selected outputs from a prior run into a workspace | `hydrate_run_outputs(...)` |
 | Preserve compatibility with code expecting aggregate materialization buckets | `materialize_run_outputs(...)` |
 | Copy or move current run outputs into an archive and record the root | `archive_current_run_outputs(...)` |

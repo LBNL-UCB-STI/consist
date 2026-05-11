@@ -222,6 +222,11 @@ manually copying old output paths. It returns keyed hydration records that say
 which requested outputs were restored, where they landed, and whether the
 resulting detached artifact is resolvable.
 
+When restart code needs to choose the historical run first, use
+`find_matching_run(...)` with semantic fields such as `model`, `stage`,
+`phase`, `year`, `iteration`, `cache_epoch`, and `run_scope`, then pass the
+matched run ID to `hydrate_run_outputs(...)`.
+
 Recovery sources are checked in this order:
 
 1. Per-call `source_root=...`
@@ -241,6 +246,7 @@ and archive helpers.
 | Give a path-bound callable exact input filenames | `ExecutionOptions(input_materialization="requested", input_paths={...})` |
 | Give an external consumer selected cached outputs | `cache_hydration="outputs-requested"` plus requested output paths |
 | Make all cached outputs local | `cache_hydration="outputs-all"` |
+| Find the prior run for restart recovery | `find_matching_run(...)` |
 | Rehydrate old run outputs into a new workspace | `hydrate_run_outputs(...)` |
 | Query or recover tabular bytes from DuckDB | Ingest artifacts; see [Data Materialization](data-materialization.md) |
 

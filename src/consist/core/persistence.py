@@ -27,6 +27,7 @@ from typing import (
 )
 
 import pandas as pd
+from sqlalchemy import or_
 from sqlalchemy.orm import aliased
 from sqlalchemy.pool import NullPool
 from sqlmodel import create_engine, Session, select, SQLModel, col, delete
@@ -2606,6 +2607,8 @@ class DatabaseManager:
         metadata: Optional[Dict[str, Any]] = None,
         limit: int = 100,
         name: Optional[str] = None,
+        run_scope: Optional[str] = None,
+        raise_on_error: bool = False,
     ) -> List[Run]:
         def _apply_facet_predicates(statement: Any) -> Any:
             if not facet:
@@ -2667,6 +2670,17 @@ class DatabaseManager:
                     statement = statement.where(Run.parent_run_id == parent_id)
                 if name:
                     statement = statement.where(Run.description == name)
+                if run_scope and run_scope.strip():
+                    scope = run_scope.strip()
+                    scope_prefix = f"{scope}__"
+                    statement = statement.where(
+                        or_(
+                            Run.id == scope,
+                            Run.id.startswith(scope_prefix, autoescape=True),
+                            Run.description == scope,
+                            Run.description.startswith(scope_prefix, autoescape=True),
+                        )
+                    )
 
                 if tags:
                     for tag in tags:
@@ -2702,6 +2716,8 @@ class DatabaseManager:
         try:
             return self.execute_with_retry(_query, operation_name="find_runs")
         except Exception as e:
+            if raise_on_error:
+                raise
             logging.warning(f"Failed to find runs: {e}")
             return []
 

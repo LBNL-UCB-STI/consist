@@ -51,6 +51,25 @@ matches against persisted facet values. Consist mirrors the workflow values
 into `run.meta` for backward compatibility, but the canonical fields live on
 `Run`.
 
+Use `find_matching_run(...)` when a workflow needs the latest prior run matching
+a semantic target rather than a unique database row. It returns `None` when no
+run matches, preserves query errors, and supports explicit `cache_epoch=`
+matching plus a caller-owned `run_scope=` prefix on `Run.id` or
+`Run.description`.
+
+```python
+previous = tracker.find_matching_run(
+    model="traffic_assignment",
+    stage="assignment",
+    phase="run",
+    status="completed",
+    year=2030,
+    iteration=2,
+    cache_epoch=4,
+    run_scope="scenario_2030_base",
+)
+```
+
 For top-level wrappers around these methods, see [API Helpers](api_helpers.md).
 For grouped workflows, see [Workflow Contexts](workflow.md).
 
@@ -173,6 +192,8 @@ and `digest`.
         - run_set
         - find_run
         - find_latest_run
+        - find_matching_run
+        - find_matching_runs
         - get_latest_run_id
         - find_artifacts
         - get_artifact
