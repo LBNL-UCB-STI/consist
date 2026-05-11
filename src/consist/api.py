@@ -682,12 +682,14 @@ def _add_run_result_refs(
 @overload
 def refs(
     run_result: RunResult,
+    /,
 ) -> Dict[str, Artifact]: ...
 
 
 @overload
 def refs(
     run_result: RunResult,
+    /,
     *keys: str,
 ) -> Dict[str, Artifact]: ...
 
@@ -696,6 +698,7 @@ def refs(
 def refs(
     run_result: RunResult,
     alias_map: Mapping[str, str],
+    /,
 ) -> Dict[str, Artifact]: ...
 
 

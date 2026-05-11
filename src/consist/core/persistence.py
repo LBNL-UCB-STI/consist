@@ -75,6 +75,16 @@ _RETRYABLE_DB_ERROR_MARKERS = (
     "another connection",
     "another process",
 )
+
+LIKE_ESCAPE_CHAR = "~"
+
+
+def _escape_like_literal(value: str) -> str:
+    return (
+        value.replace(LIKE_ESCAPE_CHAR, LIKE_ESCAPE_CHAR * 2)
+        .replace("%", f"{LIKE_ESCAPE_CHAR}%")
+        .replace("_", f"{LIKE_ESCAPE_CHAR}_")
+    )
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 SchemaProfileSource = Literal["file", "duckdb", "user_provided"]
@@ -2673,12 +2683,19 @@ class DatabaseManager:
                 if run_scope and run_scope.strip():
                     scope = run_scope.strip()
                     scope_prefix = f"{scope}__"
+                    scope_pattern = f"{_escape_like_literal(scope_prefix)}%"
                     statement = statement.where(
                         or_(
-                            Run.id == scope,
-                            Run.id.startswith(scope_prefix, autoescape=True),
-                            Run.description == scope,
-                            Run.description.startswith(scope_prefix, autoescape=True),
+                            col(Run.id) == scope,
+                            col(Run.id).like(
+                                scope_pattern,
+                                escape=LIKE_ESCAPE_CHAR,
+                            ),
+                            col(Run.description) == scope,
+                            col(Run.description).like(
+                                scope_pattern,
+                                escape=LIKE_ESCAPE_CHAR,
+                            ),
                         )
                     )
 
