@@ -17,10 +17,6 @@ class RunMatchTarget:
     phase: Optional[str] = None
     cache_epoch: Optional[Union[int, str]] = None
     run_scope: Optional[str] = None
-    parent_id: Optional[str] = None
-    facet: Optional[Dict[str, Any]] = None
-    metadata: Optional[Dict[str, Any]] = None
-    limit: int = 100
     allow_missing_cache_epoch: bool = False
 
 
@@ -40,7 +36,6 @@ def find_matching_runs_for_tracker(
     run_scope: Optional[str] = None,
     parent_id: Optional[str] = None,
     facet: Optional[Dict[str, Any]] = None,
-    metadata: Optional[Dict[str, Any]] = None,
     limit: int = 100,
     allow_missing_cache_epoch: bool = False,
 ) -> List[Run]:
@@ -53,10 +48,6 @@ def find_matching_runs_for_tracker(
         phase=phase,
         cache_epoch=cache_epoch,
         run_scope=run_scope,
-        parent_id=parent_id,
-        facet=facet,
-        metadata=metadata,
-        limit=limit,
         allow_missing_cache_epoch=allow_missing_cache_epoch,
     )
     year_filter = _as_int(year) if year is not None else None
@@ -70,7 +61,6 @@ def find_matching_runs_for_tracker(
         phase=phase,
         parent_id=parent_id,
         facet=facet,
-        metadata=metadata,
         limit=limit,
         run_scope=run_scope,
         raise_on_error=True,

@@ -225,6 +225,21 @@ def test_signature_without_hash_tuple_is_rejected(tracker):
         tracker.find_matching_run(signature="signature_only")
 
 
+def test_metadata_filter_is_not_part_of_semantic_matching(tracker):
+    with pytest.raises(TypeError, match="metadata"):
+        tracker.find_matching_run(
+            model="traffic_assignment", metadata={"region": "west"}
+        )
+
+
+def test_find_matching_run_runtime_docstring_describes_semantic_mode(tracker):
+    doc = tracker.find_matching_run.__doc__
+
+    assert doc is not None
+    assert "semantic workflow filters" in doc
+    assert "cache identity" in doc
+
+
 def test_top_level_find_matching_run_helper(tracker):
     _record_run(tracker, "top_level_match")
 

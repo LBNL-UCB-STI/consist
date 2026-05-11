@@ -86,8 +86,10 @@ known run:
 ```python
 from pathlib import Path
 
+run_id = "prior_run_id"
+
 hydrated = tracker.hydrate_run_outputs(
-    previous.id,
+    run_id,
     keys=["persons", "households"],
     target_root=tracker.run_dir / "restored_workspace",
     source_root=Path("/archive/outputs_mirror"),  # optional

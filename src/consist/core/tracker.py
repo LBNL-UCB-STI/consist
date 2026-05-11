@@ -2514,7 +2514,6 @@ class Tracker:
         run_scope: Optional[str] = None,
         parent_id: Optional[str] = None,
         facet: Optional[Dict[str, Any]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
         limit: int = 100,
         allow_missing_cache_epoch: bool = False,
     ) -> List[Run]:
@@ -2524,8 +2523,8 @@ class Tracker:
         This helper is intended for historical run reuse and restart recovery.
         It supports canonical run fields such as ``model``, ``status``,
         ``year``, ``iteration``, ``stage``, and ``phase``; exact facet and
-        metadata predicates; optional ``cache_epoch`` matching; and a
-        caller-owned ``run_scope`` prefix.
+        optional ``cache_epoch`` matching; and a caller-owned ``run_scope``
+        prefix.
 
         ``run_scope`` is a string prefix constraint applied to ``Run.id`` and
         ``Run.description``. A run matches when either field equals the scope or
@@ -2549,7 +2548,6 @@ class Tracker:
             run_scope=run_scope,
             parent_id=parent_id,
             facet=facet,
-            metadata=metadata,
             limit=limit,
             allow_missing_cache_epoch=allow_missing_cache_epoch,
         )
@@ -5353,7 +5351,6 @@ _TRACKER_WRAPPER_DOCS = {
     "get_run_inputs": TrackerHistoryService.get_run_inputs,
     "get_run_artifact": TrackerHistoryService.get_run_artifact,
     "load_run_output": TrackerHistoryService.load_run_output,
-    "find_matching_run": TrackerHistoryService.find_matching_run,
     "find_recent_completed_runs_for_model": (
         TrackerHistoryService.find_recent_completed_runs_for_model
     ),

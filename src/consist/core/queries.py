@@ -173,7 +173,6 @@ class RunQueryService:
         run_scope: Optional[str] = None,
         parent_id: Optional[str] = None,
         facet: Optional[Dict[str, Any]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
         limit: int = 100,
         allow_missing_cache_epoch: bool = False,
     ) -> List[Run]:
@@ -189,7 +188,6 @@ class RunQueryService:
             run_scope=run_scope,
             parent_id=parent_id,
             facet=facet,
-            metadata=metadata,
             limit=limit,
             allow_missing_cache_epoch=allow_missing_cache_epoch,
         )
