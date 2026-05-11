@@ -3,6 +3,7 @@
 Consist has two related filesystem-recovery stories:
 
 - historical output recovery, which starts with `hydrate_run_outputs(...)`
+- single-artifact recovery, which starts with `materialize_artifact(...)`
 - canonical input staging, which starts with
   `ExecutionOptions(input_materialization="requested", input_paths={...})` on
   `run(...)` and `ScenarioContext.run(...)`
@@ -21,6 +22,11 @@ but returns the older aggregate
 [`MaterializationResult`](#consist.core.materialize.MaterializationResult).
 Keep it for compatibility or summary-style reporting; use
 `hydrate_run_outputs(...)` for new workflows.
+
+Use `materialize_artifact(...)` when you already have one artifact object and
+need Consist to recover its bytes into a target workspace root. It is the
+artifact-centric primitive beside the run-output-centric
+`hydrate_run_outputs(...)`.
 
 For input-side workflows, prefer requested input materialization on the run
 surface. It uses the same canonical artifact recovery rules, but keeps the
@@ -210,8 +216,10 @@ signatures and attribute details, use the generated reference below.
       show_root_heading: false
       show_root_toc_entry: false
       members:
+        - materialize_artifact
         - stage_artifact
         - stage_inputs
+        - MaterializedArtifact
         - StagedInput
         - StagedInputsResult
         - ArtifactRecoveryCopyRegistration

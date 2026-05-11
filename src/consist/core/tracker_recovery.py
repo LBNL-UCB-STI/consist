@@ -5,10 +5,13 @@ from typing import Literal, Mapping, Optional, Sequence, TYPE_CHECKING, Union
 
 from consist.core._tracker_service_base import _TrackerServiceBase
 from consist.core.materialize import (
+    build_allowed_materialization_roots,
     fold_hydrated_run_outputs_result,
     materialize_artifacts,
+    materialize_artifact as materialize_artifact_core,
     stage_artifact as stage_artifact_core,
     stage_inputs as stage_inputs_core,
+    validate_allowed_materialization_destination,
 )
 from consist.core.materialize_options import (
     VALID_MATERIALIZE_DB_FALLBACK as _VALID_MATERIALIZE_DB_FALLBACK,
@@ -21,6 +24,7 @@ from consist.models.artifact import Artifact
 if TYPE_CHECKING:
     from consist.core.materialize import (
         HydratedRunOutputsResult,
+        MaterializedArtifact,
         MaterializationResult,
         StagedInput,
         StagedInputsResult,
@@ -67,6 +71,52 @@ class TrackerRecoveryService(_TrackerServiceBase):
             overwrite=overwrite,
             validate_content_hash=validate_content_hash,
             allow_external_paths=allow_external_paths,
+        )
+
+    def materialize_artifact(
+        self,
+        artifact: Artifact,
+        *,
+        target_root: str | Path,
+        source_root: str | Path | None = None,
+        preserve_existing: bool = True,
+        on_missing: Literal["warn", "raise"] = "warn",
+        validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
+        allow_external_paths: Optional[bool] = None,
+    ) -> "MaterializedArtifact":
+        if not isinstance(artifact, Artifact):
+            raise TypeError("artifact must be an Artifact instance.")
+
+        validate_materialize_option(
+            name="on_missing",
+            value=on_missing,
+            allowed=_VALID_MATERIALIZE_ON_MISSING,
+        )
+
+        allow_external = (
+            self.allow_external_paths
+            if allow_external_paths is None
+            else allow_external_paths
+        )
+        allowed_roots = build_allowed_materialization_roots(
+            run_dir=self.run_dir,
+            mounts=self.mounts,
+            allow_external_paths=allow_external,
+        )
+        destination_root = Path(target_root).resolve()
+        validate_allowed_materialization_destination(destination_root, allowed_roots)
+        source_root_override = (
+            Path(source_root).resolve() if source_root is not None else None
+        )
+        return materialize_artifact_core(
+            self._tracker,
+            artifact,
+            target_root=destination_root,
+            source_root=source_root_override,
+            allowed_base=allowed_roots,
+            preserve_existing=preserve_existing,
+            on_missing=on_missing,
+            validate_content_hash=validate_content_hash,
         )
 
     def stage_inputs(

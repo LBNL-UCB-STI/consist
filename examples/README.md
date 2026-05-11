@@ -18,6 +18,8 @@ Examples are tiered:
   `scenario.run(...)` + `scenario.trace(...)`.
 - `scripts/research_pipeline_native.py`: compact script template for native
   Python workflows.
+- `scripts/artifact_recovery_materialization.py`: compact recovery example that
+  archives one artifact and materializes it into a fresh workspace root.
 
 ## Advanced tier
 
