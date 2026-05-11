@@ -17,14 +17,16 @@ The CLI looks for the provenance database in this order:
 ## Artifact Path Resolution
 
 Some artifacts are stored with relative URIs like `./outputs/...`. For commands
-that load, validate, or profile artifact files (`preview`, `validate`,
+that load,
+validate, or profile artifact files (`preview`, `validate`,
 `schema capture-file`, and shell `preview`/`schema_profile`), Consist resolves
 relative paths in this order:
 
 1. Explicit `--run-dir`
 2. Parent directory of `--db-path`
-3. Current working directory
-4. `_physical_run_dir` from run metadata (**only** when `--trust-db` is enabled)
+3. `consist_runs/` next to `--db-path`
+4. Current working directory
+5. `_physical_run_dir` from run metadata (**only** when `--trust-db` is enabled)
 5. Ordered `artifact.meta["recovery_roots"]` (**only** when `--trust-db` is enabled)
 
 This keeps default behavior safe while still supporting archived/moved run directories.
@@ -184,7 +186,7 @@ Options:
 
 - `--sample-rows N`: rows to sample during inference (default `1000`)
 - `--if-changed`: reuse a prior schema observation when the artifact hash is unchanged; this affects schema capture only, not artifact-row reuse
-- `--run-dir PATH`: base directory for resolving relative artifact paths
+- `--run-dir PATH`: explicit base directory for relative artifact paths
 - `--trust-db`: allow metadata-based mount inference when resolving paths
 - `--mount NAME=PATH`: explicit mount override; repeat for multiple schemes
 - `--db-path`: explicit DB path
