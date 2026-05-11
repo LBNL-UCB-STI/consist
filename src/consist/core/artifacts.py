@@ -8,6 +8,11 @@ from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, Type, 
 
 from sqlmodel import SQLModel
 
+from consist.core.container_policy import (
+    ChildRecoveryPolicy,
+    ContainerRecoveryUnit,
+    apply_container_policy_meta,
+)
 from consist.core.drivers import ARRAY_DRIVERS, TABLE_DRIVERS
 from consist.core.cache_output_logging import _demote_cache_hit
 from consist.core.validation import validate_artifact_key
@@ -654,6 +659,9 @@ class ArtifactManager:
         table_hash_chunk_rows: Optional[int] = None,
         child_specs: Optional[Mapping[str, H5ChildSpec]] = None,
         child_selection: H5ChildSelectionMode = "all",
+        container_recovery_unit: ContainerRecoveryUnit | None = None,
+        child_recovery_policy: ChildRecoveryPolicy | None = None,
+        representation_policy: Optional[Mapping[str, Any]] = None,
         **meta: Any,
     ) -> tuple[Artifact, List[Artifact]]:
         """
@@ -689,6 +697,16 @@ class ArtifactManager:
         child_selection : {"all", "include_only"}, default "all"
             Whether discovered tables are all eligible for logging or restricted
             to the dataset paths listed in ``child_specs``.
+        container_recovery_unit : {"parent_file", "derived_children"}, optional
+            Recovery authority for the HDF5 container. Use ``"parent_file"`` when
+            verified recovery roots apply to the whole H5 file.
+        child_recovery_policy : {"descriptive_only", "independent"}, optional
+            Recovery policy for child ``h5_table`` artifacts. Use
+            ``"descriptive_only"`` when children are lineage/schema records and
+            not independently recoverable.
+        representation_policy : Optional[Mapping[str, Any]], optional
+            Optional policy metadata for derived physical representations such
+            as future parquet inspection caches.
         **meta : Any
             Additional metadata for the container artifact.
 
@@ -706,6 +724,13 @@ class ArtifactManager:
             raise RuntimeError("Cannot log artifact outside of a run context.")
         if child_selection not in {"all", "include_only"}:
             raise ValueError("child_selection must be 'all' or 'include_only'.")
+
+        apply_container_policy_meta(
+            meta,
+            container_recovery_unit=container_recovery_unit,
+            child_recovery_policy=child_recovery_policy,
+            representation_policy=representation_policy,
+        )
 
         path_obj = Path(path)
         if key is None:

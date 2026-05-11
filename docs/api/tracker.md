@@ -86,11 +86,20 @@ supports:
 - child-spec fields that mirror normal artifact ergonomics: `key`,
   `description`, `facet`, `facet_schema_version`, `facet_index`, and extra
   metadata
+- `container_recovery_unit="parent_file"` and
+  `child_recovery_policy="descriptive_only"` to make HDF5 recovery semantics
+  explicit when the parent file is the authoritative recovery unit
 
 Use `log_h5_table(...)` when you want to register a single child artifact
 without scanning the whole container. It accepts the same semantic metadata
 surface (`description`, `facet`, `facet_schema_version`, `facet_index`) and can
 link the child to a parent container artifact.
+
+For HDF5 containers, a child table artifact is not independently recoverable
+unless its parent container policy explicitly allows child recovery. The current
+safe policy for restart-critical HDF5 files is to register verified recovery
+copies on the parent H5 artifact and keep child `h5_table` artifacts
+descriptive-only for schema, lineage, diffing, and diagnostics.
 
 ## Constructing with `TrackerConfig`
 

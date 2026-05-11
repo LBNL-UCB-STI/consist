@@ -79,6 +79,13 @@ Use the lower-level helpers when you want to manage archival yourself:
 - `tracker.archive_run_outputs(...)` applies the same pattern to all or a
   selected subset of outputs for a run.
 
+For HDF5 containers, verified recovery-copy adoption respects the parent
+container policy. Parent H5 files with
+`container_recovery_unit="parent_file"` can register recovery roots; child
+`h5_table` artifacts whose parent declares
+`child_recovery_policy="descriptive_only"` return
+`blocked_by_container_policy`.
+
 ## Recommended Workflow
 
 Hydrate only the outputs you need into a fresh workspace root:

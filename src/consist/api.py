@@ -1315,6 +1315,8 @@ def register_artifact_recovery_copy(
     when supplied. Without it, ``artifact.hash`` is only used for byte
     verification when the tracker is using full content hashing. Directory
     artifacts are intentionally blocked until directory manifest support exists.
+    HDF5 child table artifacts are also blocked unless a future parent
+    container policy explicitly supports independent child recovery.
     ``append`` defaults to True, like ``archive_artifact(...)``; pass
     ``append=False`` to replace existing recovery roots.
     """

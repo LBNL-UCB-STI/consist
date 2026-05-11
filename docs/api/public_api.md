@@ -258,6 +258,10 @@ to Consist, start with the **Core** and **Logging/Loading** groups and reach for
 `log_h5_container(...)` now supports `child_specs={...}` and
 `child_selection="all" | "include_only"` so callers can either customize
 discovered child artifacts or log only a selected subset of HDF5 dataset paths.
+It also accepts parent recovery policy kwargs such as
+`container_recovery_unit="parent_file"` and
+`child_recovery_policy="descriptive_only"` so downstream recovery tools can
+distinguish parent-file recovery from descriptive child-table artifacts.
 `log_h5_table(...)` accepts the same child-level semantic metadata surface as
 normal artifact logging: `description`, `facet`, `facet_schema_version`, and
 `facet_index`.

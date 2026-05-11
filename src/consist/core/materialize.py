@@ -67,6 +67,7 @@ RecoveryCopyStatus = Literal[
     "missing_copy",
     "hash_mismatch",
     "skipped_unmapped",
+    "blocked_by_container_policy",
     "symlink_destination",
     "unsupported_directory",
     "unverifiable_hash",

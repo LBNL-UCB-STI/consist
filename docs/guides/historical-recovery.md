@@ -199,6 +199,15 @@ hashing or otherwise lacks a byte-level `artifact.hash`; without a byte-level
 hash, verified registration returns `unverifiable_hash` and leaves metadata
 unchanged.
 
+HDF5 containers have an extra recovery policy guard. A parent H5 artifact can
+declare `container_recovery_unit="parent_file"` and
+`child_recovery_policy="descriptive_only"` through `log_h5_container(...)`.
+With that policy, verified recovery-copy registration is allowed on the parent
+H5 file but child `h5_table` artifacts return
+`blocked_by_container_policy`. For HDF5 containers, a child table artifact is
+not independently recoverable unless its parent container policy explicitly
+allows child recovery.
+
 Use the low-level metadata helper only when verification is handled elsewhere
 or you intentionally need to override recovery metadata:
 
