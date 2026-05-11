@@ -68,6 +68,14 @@ def test_preview_resolves_relative_paths_from_current_working_directory(
     assert "origin_zone" in result.stdout
 
 
+def test_preview_rejects_unbounded_rows_before_loading_artifact() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["preview", "trip_table", "--rows", "0"])
+
+    assert result.exit_code == 2
+
+
 def test_preview_accepts_run_dir_option_for_moved_run_roots(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -331,7 +339,7 @@ def test_schema_capture_file_accepts_trust_db_for_moved_relative_paths(
     assert "Captured file schema for artifact 'trip_table'" in result.stdout
 
 
-def test_preview_uses_recovery_roots_without_source_root_option(
+def test_preview_requires_trust_db_for_recovery_roots(
     tmp_path: Path, monkeypatch
 ) -> None:
     repo_root = tmp_path / "repo"
@@ -369,12 +377,28 @@ def test_preview_uses_recovery_roots_without_source_root_option(
         ],
     )
 
+    assert result.exit_code == 1
+    assert "Artifact file not found" in result.stdout
+
+    result = runner.invoke(
+        app,
+        [
+            "preview",
+            "trip_table",
+            "--db-path",
+            "db/beam_core_demo.duckdb",
+            "--trust-db",
+            "--rows",
+            "1",
+        ],
+    )
+
     assert result.exit_code == 0
     assert "Preview: trip_table" in result.stdout
     assert "origin_zone" in result.stdout
 
 
-def test_schema_capture_file_uses_recovery_roots_without_trust_db(
+def test_schema_capture_file_requires_trust_db_for_recovery_roots(
     tmp_path: Path, monkeypatch
 ) -> None:
     repo_root = tmp_path / "repo"
@@ -412,11 +436,27 @@ def test_schema_capture_file_uses_recovery_roots_without_trust_db(
         ],
     )
 
+    assert result.exit_code == 1
+    assert "Could not resolve an existing artifact file path" in result.stdout
+
+    result = runner.invoke(
+        app,
+        [
+            "schema",
+            "capture-file",
+            "--artifact-key",
+            "trip_table",
+            "--db-path",
+            "db/beam_core_demo.duckdb",
+            "--trust-db",
+        ],
+    )
+
     assert result.exit_code == 0
     assert "Captured file schema for artifact 'trip_table'" in result.stdout
 
 
-def test_validate_uses_recovery_roots_without_source_root_option(
+def test_validate_requires_trust_db_for_recovery_roots(
     tmp_path: Path, monkeypatch
 ) -> None:
     repo_root = tmp_path / "repo"
@@ -445,6 +485,14 @@ def test_validate_uses_recovery_roots_without_source_root_option(
     result = runner.invoke(
         app,
         ["validate", "--db-path", "db/beam_core_demo.duckdb"],
+    )
+
+    assert result.exit_code == 0
+    assert "missing artifacts" in result.stdout
+
+    result = runner.invoke(
+        app,
+        ["validate", "--db-path", "db/beam_core_demo.duckdb", "--trust-db"],
     )
 
     assert result.exit_code == 0
@@ -652,3 +700,11 @@ def test_shell_preview_uses_trust_db_mount_inference_for_workspace_uris(
     out = capsys.readouterr().out
     assert "Preview: trip_table" in out
     assert "origin_zone" in out
+    assert shell.tracker.mounts == {}
+
+    shell.do_schema_profile("trip_table")
+
+    out = capsys.readouterr().out
+    assert "Schema: trip_table" in out
+    assert "origin_zone" in out
+    assert shell.tracker.mounts == {}

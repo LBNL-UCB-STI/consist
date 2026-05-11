@@ -25,12 +25,11 @@ relative paths in this order:
 2. Parent directory of `--db-path`
 3. Current working directory
 4. `_physical_run_dir` from run metadata (**only** when `--trust-db` is enabled)
-5. Ordered `artifact.meta["recovery_roots"]`
+5. Ordered `artifact.meta["recovery_roots"]` (**only** when `--trust-db` is enabled)
 
 This keeps default behavior safe while still supporting archived/moved run directories.
-Recovery roots are checked from metadata without requiring a separate CLI flag; use
-`--trust-db` when you also want the CLI to reuse recorded run directories or mount
-snapshots from the database.
+Use `--trust-db` when you want the CLI to reuse recorded run directories, mount
+snapshots, or recovery roots from the database.
 
 Examples:
 
