@@ -1001,14 +1001,15 @@ def _resolve_schema_capture_path(
                 (label, (base_dir / artifact.container_uri[2:]).resolve())
             )
     else:
+        if trust_db:
+            _append_candidate(
+                "trusted historical run metadata",
+                lambda: tracker.resolve_historical_path(artifact, run),
+            )
         _append_candidate(
             "current tracker resolution",
             lambda: Path(tracker.resolve_uri(artifact.container_uri)).resolve(),
         )
-
-    candidates.extend(
-        _artifact_recovery_candidate_paths(tracker, artifact, trust_db=trust_db)
-    )
 
     for _, candidate in candidates:
         if candidate.exists():
@@ -2189,7 +2190,9 @@ def _build_relative_resolution_bases_for_uri(
         _append("explicit --run-dir", run_dir)
 
     if db_path:
-        _append("db-path parent", _resolve_cli_path(db_path).parent)
+        db_parent = _resolve_cli_path(db_path).parent
+        _append("db-path parent", db_parent)
+        _append("db-path parent / consist_runs", db_parent / "consist_runs")
 
     _append("current working directory", Path.cwd())
 
