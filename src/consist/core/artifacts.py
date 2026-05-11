@@ -4,7 +4,17 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, Type, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    List,
+    Literal,
+    Optional,
+    Type,
+    TypeAlias,
+    Union,
+)
 
 from sqlmodel import SQLModel
 
@@ -26,6 +36,11 @@ from consist.types import (
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
+
+
+ContainerPolicyMetaValue: TypeAlias = (
+    ContainerRecoveryUnit | ChildRecoveryPolicy | Mapping[str, object]
+)
 
 
 @dataclass(slots=True)
@@ -147,6 +162,45 @@ def _resolve_h5_child_spec(
         child_specs.get(normalized_path)
         or child_specs.get(normalized_path.lstrip("/"))
         or child_specs.get(table_path)
+    )
+
+
+def _container_policy_updates(
+    meta: Mapping[str, object],
+) -> dict[str, ContainerPolicyMetaValue]:
+    updates: dict[str, ContainerPolicyMetaValue] = {}
+    recovery_unit = meta.get("container_recovery_unit")
+    if recovery_unit == "parent_file":
+        updates["container_recovery_unit"] = "parent_file"
+    elif recovery_unit == "derived_children":
+        updates["container_recovery_unit"] = "derived_children"
+    child_policy = meta.get("child_recovery_policy")
+    if child_policy == "descriptive_only":
+        updates["child_recovery_policy"] = "descriptive_only"
+    elif child_policy == "independent":
+        updates["child_recovery_policy"] = "independent"
+    representation_policy = meta.get("representation_policy")
+    if isinstance(representation_policy, Mapping):
+        updates["representation_policy"] = {
+            str(key): value for key, value in representation_policy.items()
+        }
+    return updates
+
+
+def _clone_artifact_for_meta_update(artifact: Artifact) -> Artifact:
+    return Artifact(
+        id=artifact.id,
+        key=artifact.key,
+        container_uri=artifact.container_uri,
+        table_path=artifact.table_path,
+        array_path=artifact.array_path,
+        driver=artifact.driver,
+        hash=artifact.hash,
+        content_id=artifact.content_id,
+        parent_artifact_id=artifact.parent_artifact_id,
+        run_id=artifact.run_id,
+        meta=dict(artifact.meta or {}),
+        created_at=artifact.created_at,
     )
 
 
@@ -864,6 +918,15 @@ class ArtifactManager:
                     if cached_child_paths == requested_child_paths:
                         table_artifacts = list(cached_children)
                         reusing_cached_children = True
+                        policy_updates = _container_policy_updates(meta)
+                        if policy_updates:
+                            container.meta.update(policy_updates)
+                            if self.tracker.db is not None:
+                                self.tracker.db.update_artifact_meta(
+                                    _clone_artifact_for_meta_update(container),
+                                    dict(policy_updates),
+                                    raise_on_error=True,
+                                )
                     else:
                         _demote_cache_hit(
                             self.tracker.current_consist,

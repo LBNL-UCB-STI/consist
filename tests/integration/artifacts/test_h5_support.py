@@ -181,6 +181,7 @@ def test_h5_parent_file_policy_allows_parent_recovery_and_blocks_children(
     )
     assert child_result.status == "blocked_by_container_policy"
     assert child_result.metadata_updated is False
+    assert child_result.message is not None
     assert "child_recovery_policy='descriptive_only'" in child_result.message
     assert "parent H5 artifact" in child_result.message
 
@@ -367,6 +368,53 @@ def test_h5_container_cache_hit_reuses_cached_children(tracker: Tracker):
 
     assert container_hit.id == container_seed.id
     assert [child.id for child in children_hit] == [child.id for child in children_seed]
+
+
+def test_h5_container_cache_hit_persists_new_parent_recovery_policy(
+    tracker: Tracker,
+):
+    h5_path = tracker.run_dir / "cache_policy_reuse.h5"
+    h5_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(h5_path, "w") as f:
+        f.create_dataset("households", data=[1, 2, 3])
+
+    with tracker.start_run(
+        "run_h5_cache_policy_seed",
+        model="test_model",
+        cache_mode="overwrite",
+        config={"cache_policy_demo": True},
+    ) as t:
+        container_seed, _ = t.log_h5_container(
+            h5_path,
+            key="cached_h5_policy",
+            discover_tables=True,
+        )
+        assert "container_recovery_unit" not in container_seed.meta
+
+    with tracker.start_run(
+        "run_h5_cache_policy_hit",
+        model="test_model",
+        cache_mode="reuse",
+        config={"cache_policy_demo": True},
+    ) as t:
+        container_hit, _ = t.log_h5_container(
+            h5_path,
+            key="cached_h5_policy",
+            discover_tables=True,
+            container_recovery_unit="parent_file",
+            child_recovery_policy="descriptive_only",
+        )
+        assert t.is_cached
+
+    assert container_hit.id == container_seed.id
+    assert container_hit.meta["container_recovery_unit"] == "parent_file"
+    assert container_hit.meta["child_recovery_policy"] == "descriptive_only"
+
+    refreshed = tracker.get_artifact(container_seed.id)
+    assert refreshed is not None
+    assert refreshed.meta["container_recovery_unit"] == "parent_file"
+    assert refreshed.meta["child_recovery_policy"] == "descriptive_only"
 
 
 def test_h5_container_cache_hit_demotes_when_children_were_not_cached(
