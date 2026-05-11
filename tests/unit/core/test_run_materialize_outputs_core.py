@@ -200,6 +200,36 @@ def test_materialize_artifact_uses_historical_owning_run_metadata(
     assert result.source_path == source.resolve()
 
 
+def test_materialize_artifact_historical_artifact_does_not_use_current_workspace(
+    tmp_path: Path,
+) -> None:
+    current_workspace = tmp_path / "workspace"
+    current_file = current_workspace / "outputs" / "a.csv"
+    current_file.parent.mkdir(parents=True)
+    current_file.write_text("value\ncurrent-workspace\n", encoding="utf-8")
+    artifact = _artifact("table", "./outputs/a.csv", run_id="producer")
+    tracker = _stub_tracker(
+        run_dir=current_workspace,
+        outputs_by_run={},
+        runs={"producer": _run("producer", run_dir=tmp_path / "missing_producer")},
+    )
+
+    result = materialize_artifact(
+        tracker,
+        artifact,
+        target_root=tmp_path / "restore",
+        source_root=None,
+        allowed_base=None,
+        preserve_existing=True,
+        on_missing="warn",
+        validate_content_hash="never",
+    )
+
+    assert result.status == "missing_source"
+    assert not result.resolvable
+    assert not (tmp_path / "restore" / "outputs" / "a.csv").exists()
+
+
 def test_materialize_artifact_returns_already_present(tmp_path: Path) -> None:
     destination = tmp_path / "restore" / "outputs" / "a.csv"
     destination.parent.mkdir(parents=True)
@@ -341,6 +371,78 @@ def test_materialize_artifact_blocks_symlink_destination(tmp_path: Path) -> None
     assert not result.resolvable
 
 
+def test_materialize_artifact_blocks_symlink_recovery_source(tmp_path: Path) -> None:
+    outside_source = tmp_path / "outside.csv"
+    outside_source.write_text("value\noutside\n", encoding="utf-8")
+    recovery_root = tmp_path / "archive"
+    source = recovery_root / "outputs" / "a.csv"
+    source.parent.mkdir(parents=True)
+    source.symlink_to(outside_source)
+    artifact = _artifact(
+        "table",
+        "./outputs/a.csv",
+        meta={"recovery_roots": [str(recovery_root)]},
+    )
+    tracker = _stub_tracker(
+        run_dir=tmp_path / "workspace",
+        outputs_by_run={},
+        runs={},
+    )
+
+    result = materialize_artifact(
+        tracker,
+        artifact,
+        target_root=tmp_path / "restore",
+        source_root=None,
+        allowed_base=None,
+        preserve_existing=True,
+        on_missing="warn",
+        validate_content_hash="never",
+    )
+
+    assert result.status == "failed"
+    assert "Symlink detected in source path" in (result.message or "")
+    assert not result.resolvable
+    assert not (tmp_path / "restore" / "outputs" / "a.csv").exists()
+
+
+def test_materialize_artifact_blocks_symlink_parent_in_recovery_source(
+    tmp_path: Path,
+) -> None:
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (outside_dir / "a.csv").write_text("value\noutside\n", encoding="utf-8")
+    recovery_root = tmp_path / "archive"
+    recovery_root.mkdir()
+    (recovery_root / "outputs").symlink_to(outside_dir, target_is_directory=True)
+    artifact = _artifact(
+        "table",
+        "./outputs/a.csv",
+        meta={"recovery_roots": [str(recovery_root)]},
+    )
+    tracker = _stub_tracker(
+        run_dir=tmp_path / "workspace",
+        outputs_by_run={},
+        runs={},
+    )
+
+    result = materialize_artifact(
+        tracker,
+        artifact,
+        target_root=tmp_path / "restore",
+        source_root=None,
+        allowed_base=None,
+        preserve_existing=True,
+        on_missing="warn",
+        validate_content_hash="never",
+    )
+
+    assert result.status == "failed"
+    assert "Symlink detected in source path" in (result.message or "")
+    assert not result.resolvable
+    assert not (tmp_path / "restore" / "outputs" / "a.csv").exists()
+
+
 def test_materialize_artifact_blocks_directory_sources(tmp_path: Path) -> None:
     recovery_root = tmp_path / "archive"
     source_dir = recovery_root / "outputs" / "dir"
@@ -370,6 +472,44 @@ def test_materialize_artifact_blocks_directory_sources(tmp_path: Path) -> None:
 
     assert result.status == "unsupported_directory"
     assert not result.resolvable
+
+
+def test_materialize_artifact_direct_fallback_uses_tracker_uri_before_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cwd = tmp_path / "cwd"
+    cwd_source = cwd / "outputs" / "a.csv"
+    cwd_source.parent.mkdir(parents=True)
+    cwd_source.write_text("value\nwrong-cwd\n", encoding="utf-8")
+
+    workspace = tmp_path / "workspace"
+    tracker_source = workspace / "outputs" / "a.csv"
+    tracker_source.parent.mkdir(parents=True)
+    tracker_source.write_text("value\ntracker\n", encoding="utf-8")
+
+    monkeypatch.chdir(cwd)
+    artifact = _artifact("table", "./outputs/a.csv")
+    tracker = _stub_tracker(
+        run_dir=workspace,
+        outputs_by_run={},
+        runs={},
+    )
+
+    result = materialize_artifact(
+        tracker,
+        artifact,
+        target_root=tmp_path / "restore",
+        source_root=None,
+        allowed_base=None,
+        preserve_existing=True,
+        on_missing="warn",
+        validate_content_hash="never",
+    )
+
+    assert result.status == "materialized_from_artifact_uri"
+    assert result.source_path == tracker_source.resolve()
+    assert result.path.read_text(encoding="utf-8") == "value\ntracker\n"
 
 
 def test_tracker_materialize_artifact_returns_detached_resolvable_artifact(

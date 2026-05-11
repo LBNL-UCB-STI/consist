@@ -1106,13 +1106,32 @@ def _direct_artifact_source_path(
     tracker: "Tracker",
     *,
     artifact: Artifact,
+    relative_path: Path,
+    allow_tracker_uri: bool,
 ) -> Path | None:
-    for raw_candidate in (
-        getattr(artifact, "abs_path", None),
-        getattr(artifact, "path", None),
-    ):
-        if raw_candidate:
-            candidate = Path(str(raw_candidate)).resolve()
+    runtime_abs_path = getattr(artifact, "abs_path", None)
+    if runtime_abs_path:
+        candidate = Path(str(runtime_abs_path))
+        if candidate.exists():
+            return candidate
+
+    if not allow_tracker_uri:
+        return None
+
+    uri = artifact.container_uri
+    if uri.startswith("workspace://") or uri.startswith("./"):
+        run_dir = getattr(tracker, "run_dir", None)
+        if run_dir is not None:
+            candidate = Path(run_dir) / relative_path
+            if candidate.exists():
+                return candidate
+
+    if "://" in uri:
+        scheme, _ = uri.split("://", 1)
+        fs = getattr(tracker, "fs", None)
+        mounts = getattr(fs, "mounts", None)
+        if isinstance(mounts, Mapping) and scheme in mounts:
+            candidate = Path(mounts[scheme]) / relative_path
             if candidate.exists():
                 return candidate
 
@@ -1173,11 +1192,16 @@ def _select_materialize_artifact_source(
         if root_key in seen_roots:
             continue
         seen_roots.add(root_key)
-        candidate = (resolved_root / relative_path).resolve()
+        candidate = resolved_root / relative_path
         if candidate.exists():
             return candidate, source_kind, True
 
-    direct_source = _direct_artifact_source_path(tracker, artifact=artifact)
+    direct_source = _direct_artifact_source_path(
+        tracker,
+        artifact=artifact,
+        relative_path=relative_path,
+        allow_tracker_uri=not bool(artifact.run_id),
+    )
     if direct_source is not None:
         return direct_source, "artifact_uri", bool(candidate_roots)
 
@@ -1206,6 +1230,16 @@ def _portable_artifact_hash(tracker: "Tracker", artifact: Artifact) -> str | Non
     if getattr(identity, "hashing_strategy", None) != "full":
         return None
     return artifact.hash
+
+
+def _path_has_symlink_component(path: Path) -> bool:
+    candidate = path if path.is_absolute() else path.absolute()
+    current = Path(candidate.anchor)
+    for part in candidate.parts[1:]:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
 
 
 def materialize_artifact(
@@ -1363,7 +1397,7 @@ def materialize_artifact(
             resolvable=False,
         )
 
-    if source_path.is_symlink():
+    if _path_has_symlink_component(source_path):
         msg = f"Symlink detected in source path: {source_path}"
         if on_missing == "raise":
             raise ValueError(msg)
