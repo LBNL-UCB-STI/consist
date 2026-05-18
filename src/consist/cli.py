@@ -1011,6 +1011,11 @@ def _resolve_schema_capture_path(
             lambda: Path(tracker.resolve_uri(artifact.container_uri)).resolve(),
         )
 
+    for label, candidate in _artifact_recovery_candidate_paths(
+        tracker, artifact, trust_db=trust_db
+    ):
+        candidates.append((label, candidate))
+
     for _, candidate in candidates:
         if candidate.exists():
             return candidate
