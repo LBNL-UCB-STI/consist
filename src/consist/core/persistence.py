@@ -27,6 +27,7 @@ from typing import (
 )
 
 import pandas as pd
+from sqlalchemy import or_
 from sqlalchemy.orm import aliased
 from sqlalchemy.pool import NullPool
 from sqlmodel import create_engine, Session, select, SQLModel, col, delete
@@ -74,6 +75,18 @@ _RETRYABLE_DB_ERROR_MARKERS = (
     "another connection",
     "another process",
 )
+
+LIKE_ESCAPE_CHAR = "~"
+
+
+def _escape_like_literal(value: str) -> str:
+    return (
+        value.replace(LIKE_ESCAPE_CHAR, LIKE_ESCAPE_CHAR * 2)
+        .replace("%", f"{LIKE_ESCAPE_CHAR}%")
+        .replace("_", f"{LIKE_ESCAPE_CHAR}_")
+    )
+
+
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 SchemaProfileSource = Literal["file", "duckdb", "user_provided"]
@@ -2606,6 +2619,8 @@ class DatabaseManager:
         metadata: Optional[Dict[str, Any]] = None,
         limit: int = 100,
         name: Optional[str] = None,
+        run_scope: Optional[str] = None,
+        raise_on_error: bool = False,
     ) -> List[Run]:
         def _apply_facet_predicates(statement: Any) -> Any:
             if not facet:
@@ -2667,6 +2682,24 @@ class DatabaseManager:
                     statement = statement.where(Run.parent_run_id == parent_id)
                 if name:
                     statement = statement.where(Run.description == name)
+                if run_scope and run_scope.strip():
+                    scope = run_scope.strip()
+                    scope_prefix = f"{scope}__"
+                    scope_pattern = f"{_escape_like_literal(scope_prefix)}%"
+                    statement = statement.where(
+                        or_(
+                            col(Run.id) == scope,
+                            col(Run.id).like(
+                                scope_pattern,
+                                escape=LIKE_ESCAPE_CHAR,
+                            ),
+                            col(Run.description) == scope,
+                            col(Run.description).like(
+                                scope_pattern,
+                                escape=LIKE_ESCAPE_CHAR,
+                            ),
+                        )
+                    )
 
                 if tags:
                     for tag in tags:
@@ -2702,6 +2735,8 @@ class DatabaseManager:
         try:
             return self.execute_with_retry(_query, operation_name="find_runs")
         except Exception as e:
+            if raise_on_error:
+                raise
             logging.warning(f"Failed to find runs: {e}")
             return []
 
