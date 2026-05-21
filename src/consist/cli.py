@@ -53,7 +53,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
-from sqlalchemy import and_, or_, select as sa_select
+from sqlalchemy import and_, or_
 from sqlmodel import Session, col, select
 
 from consist import Tracker
@@ -853,6 +853,20 @@ def _apply_inferred_mounts(tracker: Tracker, mounts: Mapping[str, str]) -> None:
     tracker.mounts = tracker.fs.mounts
 
 
+def _set_tracker_mounts(tracker: Tracker, mounts: Mapping[str, str]) -> None:
+    tracker.fs.mounts = dict(mounts)
+    tracker.mounts = tracker.fs.mounts
+
+
+@contextmanager
+def _preserve_tracker_mounts(tracker: Tracker) -> Iterator[None]:
+    original_mounts = dict(tracker.mounts)
+    try:
+        yield
+    finally:
+        _set_tracker_mounts(tracker, original_mounts)
+
+
 def _ensure_tracker_mounts_for_artifact(
     tracker: Tracker, artifact: "Artifact", *, trust_db: bool
 ) -> None:
@@ -888,6 +902,58 @@ def _ensure_tracker_mounts_for_artifact(
             inferred[scheme] = mount_root
 
     _apply_inferred_mounts(tracker, inferred)
+
+
+def _artifact_recovery_candidate_paths(
+    tracker: Tracker, artifact: "Artifact", *, trust_db: bool
+) -> List[Tuple[str, Path]]:
+    """Return path candidates derived from artifact recovery roots."""
+    if not trust_db:
+        return []
+    fs = tracker.fs
+
+    relative_path = fs.get_remappable_relative_path(artifact.container_uri)
+    if relative_path is None:
+        return []
+
+    try:
+        roots = fs.normalize_recovery_roots((artifact.meta or {}).get("recovery_roots"))
+    except (TypeError, ValueError):
+        return []
+
+    candidates: List[Tuple[str, Path]] = []
+    seen: set[Path] = set()
+    for index, root in enumerate(roots, start=1):
+        try:
+            candidate = (Path(root) / relative_path).resolve()
+        except OSError:
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        candidates.append((f"artifact recovery_root #{index}", candidate))
+    return candidates
+
+
+def _load_artifact_from_resolved_path(
+    artifact: "Artifact",
+    path: Path,
+    *,
+    n_rows: int | None = None,
+) -> Any:
+    from consist.api import _load_from_disk
+
+    load_kwargs: Dict[str, Any] = {}
+    if artifact.driver == "csv" and n_rows is not None:
+        load_kwargs["nrows"] = n_rows
+    table_path = artifact.table_path
+    if table_path:
+        load_kwargs["table_path"] = table_path
+    array_path = artifact.array_path
+    if array_path:
+        load_kwargs["array_path"] = array_path
+
+    return _load_from_disk(str(path), artifact.driver, **load_kwargs)
 
 
 def _resolve_schema_capture_path(
@@ -940,6 +1006,11 @@ def _resolve_schema_capture_path(
             "current tracker resolution",
             lambda: Path(tracker.resolve_uri(artifact.container_uri)).resolve(),
         )
+
+    for label, candidate in _artifact_recovery_candidate_paths(
+        tracker, artifact, trust_db=trust_db
+    ):
+        candidates.append((label, candidate))
 
     for _, candidate in candidates:
         if candidate.exists():
@@ -1003,7 +1074,7 @@ def schema_capture_file(
     trust_db: bool = typer.Option(
         False,
         "--trust-db",
-        help="Allow metadata-based mount inference when resolving artifact paths.",
+        help="Allow metadata-based mount and run-dir inference when resolving artifact paths.",
     ),
     mount: Optional[List[str]] = typer.Option(
         None,
@@ -1419,8 +1490,16 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> List["Artifact"]:
     table.add_column("Key", style="green", overflow="fold")
     table.add_column("Artifact ID", style="cyan", overflow="fold")
     table.add_column("URI", style="dim", overflow="fold")
+    table.add_column("Access", overflow="fold")
     table.add_column("Driver")
     table.add_column("Hash", style="magenta")
+
+    def _style_artifact_access(status: str) -> str:
+        if status == "primary":
+            return "green"
+        if status == "recovery":
+            return "yellow"
+        return "red"
 
     inputs = sorted(run_artifacts.inputs.values(), key=lambda x: x.key)
     outputs = sorted(run_artifacts.outputs.values(), key=lambda x: x.key)
@@ -1428,12 +1507,15 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> List["Artifact"]:
 
     for artifact in inputs:
         rendered.append(artifact)
+        accessibility = artifact.accessibility(tracker=tracker)
+        access_status = accessibility.status
         table.add_row(
             str(ref_index),
             "[blue]Input[/blue]",
             artifact.key,
             str(artifact.id),
             artifact.container_uri,
+            f"[{_style_artifact_access(access_status)}]{access_status}[/]",
             artifact.driver,
             artifact.hash[:12] if artifact.hash else "N/A",
         )
@@ -1444,12 +1526,15 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> List["Artifact"]:
 
     for artifact in outputs:
         rendered.append(artifact)
+        accessibility = artifact.accessibility(tracker=tracker)
+        access_status = accessibility.status
         table.add_row(
             str(ref_index),
             "[green]Output[/green]",
             artifact.key,
             str(artifact.id),
             artifact.container_uri,
+            f"[{_style_artifact_access(access_status)}]{access_status}[/]",
             artifact.driver,
             artifact.hash[:12] if artifact.hash else "N/A",
         )
@@ -1581,22 +1666,14 @@ def _render_summary(summary_data: Dict[str, Any]) -> None:
     console.print(model_table)
 
 
-def _iter_artifact_rows(
-    session: Session, *, batch_size: int
-) -> Iterable[Tuple[uuid.UUID, str, str, Optional[str]]]:
+def _iter_artifact_rows(session: Session, *, batch_size: int) -> Iterable["Artifact"]:
     from consist.models.artifact import Artifact
 
     last_created = None
     last_id = None
     while True:
         stmt = (
-            sa_select(
-                col(Artifact.id),
-                col(Artifact.key),
-                col(Artifact.container_uri),
-                col(Artifact.run_id),
-                col(Artifact.created_at),
-            )
+            select(Artifact)
             .order_by(col(Artifact.created_at), col(Artifact.id))
             .limit(batch_size)
         )
@@ -1614,10 +1691,10 @@ def _iter_artifact_rows(
         batch = session.exec(cast(Any, stmt)).all()
         if not batch:
             break
-        for art_id, key, uri, run_id, created_at in batch:
-            yield art_id, key, uri, run_id
-        last_id = batch[-1][0]
-        last_created = batch[-1][4]
+        for artifact in batch:
+            yield artifact
+        last_id = batch[-1].id
+        last_created = batch[-1].created_at
 
 
 def _render_scenarios(tracker: Tracker, limit: int = 20) -> None:
@@ -1741,7 +1818,15 @@ def validate(
     trust_db: bool = typer.Option(
         False,
         "--trust-db",
-        help="Allow metadata-based run-dir inference for relative artifact validation.",
+        help="Allow metadata-based mount and run-dir inference for artifact validation.",
+    ),
+    mount: Optional[List[str]] = typer.Option(
+        None,
+        "--mount",
+        help=(
+            "Mount override mapping (repeatable): NAME=PATH. "
+            "Example: --mount workspace=/path/to/archive"
+        ),
     ),
     fix: bool = typer.Option(
         False, help="Attempt to fix issues (mark artifacts as missing)."
@@ -1749,7 +1834,12 @@ def validate(
 ) -> None:
     """Check that artifacts referenced in DB actually exist on disk."""
     resolved_db_path = find_db_path(db_path)
-    tracker = get_tracker(resolved_db_path, run_dir=run_dir)
+    mount_overrides = _resolve_mount_overrides_or_exit(mount)
+    tracker = get_tracker(
+        resolved_db_path,
+        run_dir=run_dir,
+        mounts=mount_overrides or None,
+    )
     from consist.models.artifact import Artifact
 
     with _tracker_session(tracker) as session:
@@ -1762,44 +1852,55 @@ def validate(
             except ValueError:
                 batch_size = 1000
 
-        for artifact_id, key, uri, run_id in _iter_artifact_rows(
-            session, batch_size=batch_size
-        ):
-            if uri.startswith("./"):
-                resolution_bases, _ = _build_relative_resolution_bases_for_uri(
-                    tracker,
-                    container_uri=uri,
-                    run_id=run_id,
-                    db_path=resolved_db_path,
-                    run_dir=run_dir,
-                    trust_db=trust_db,
+        for artifact in _iter_artifact_rows(session, batch_size=batch_size):
+            original_mounts = dict(tracker.mounts)
+            try:
+                _ensure_tracker_mounts_for_artifact(
+                    tracker, artifact, trust_db=trust_db
                 )
-                if resolution_bases:
-                    found = False
-                    for _, base_dir in resolution_bases:
-                        candidate = (base_dir / uri[2:]).resolve()
+                uri = artifact.container_uri
+                found = False
+                if uri.startswith("./"):
+                    resolution_bases, _ = _build_relative_resolution_bases_for_uri(
+                        tracker,
+                        container_uri=uri,
+                        run_id=artifact.run_id,
+                        db_path=resolved_db_path,
+                        run_dir=run_dir,
+                        trust_db=trust_db,
+                    )
+                    if resolution_bases:
+                        for _, base_dir in resolution_bases:
+                            candidate = (base_dir / uri[2:]).resolve()
+                            if candidate.exists():
+                                found = True
+                                break
+                if not found:
+                    for _, candidate in _artifact_recovery_candidate_paths(
+                        tracker, artifact, trust_db=trust_db
+                    ):
                         if candidate.exists():
                             found = True
                             break
-                    if not found:
-                        missing.append((key, uri, run_id))
-                        missing_ids.append(artifact_id)
+                if found:
                     continue
-            try:
-                abs_path = tracker.resolve_uri(uri)
-                if not Path(abs_path).exists():
-                    missing.append((key, uri, run_id))
-                    missing_ids.append(artifact_id)
-            except (
-                AttributeError,
-                NotImplementedError,
-                OSError,
-                RuntimeError,
-                TypeError,
-                ValueError,
-            ):
-                missing.append((key, uri, run_id))
-                missing_ids.append(artifact_id)
+                try:
+                    abs_path = tracker.resolve_uri(uri)
+                    if not Path(abs_path).exists():
+                        missing.append((artifact.key, uri, artifact.run_id))
+                        missing_ids.append(artifact.id)
+                except (
+                    AttributeError,
+                    NotImplementedError,
+                    OSError,
+                    RuntimeError,
+                    TypeError,
+                    ValueError,
+                ):
+                    missing.append((artifact.key, uri, artifact.run_id))
+                    missing_ids.append(artifact.id)
+            finally:
+                _set_tracker_mounts(tracker, original_mounts)
 
         if not missing:
             console.print("[green]✓ All artifacts validated successfully[/green]")
@@ -2195,6 +2296,9 @@ def _load_artifact_with_diagnostics(
     trust_db: bool = False,
 ) -> Any | None:
     attempted_paths: List[Tuple[str, Path]] = []
+    recovery_paths = _artifact_recovery_candidate_paths(
+        tracker, artifact, trust_db=trust_db
+    )
 
     def _load_once() -> Any:
         import consist
@@ -2221,6 +2325,20 @@ def _load_artifact_with_diagnostics(
         finally:
             _set_tracker_run_dir(tracker, original_run_dir)
 
+    def _load_from_recovery_roots() -> Any | None:
+        for label, candidate in recovery_paths:
+            if not candidate.exists():
+                attempted_paths.append((label, candidate))
+                continue
+            try:
+                return _load_artifact_from_resolved_path(
+                    artifact, candidate, n_rows=n_rows
+                )
+            except FileNotFoundError:
+                attempted_paths.append((label, candidate))
+                continue
+        return None
+
     try:
         if artifact.container_uri.startswith("./") and resolution_bases:
             original_run_dir = _resolve_cli_path(tracker.run_dir)
@@ -2228,6 +2346,9 @@ def _load_artifact_with_diagnostics(
                 loaded = _load_from_base(base_dir, label, original_run_dir)
                 if loaded is not None:
                     return loaded
+            loaded = _load_from_recovery_roots()
+            if loaded is not None:
+                return loaded
 
             _print_missing_artifact_file_help(
                 tracker,
@@ -2240,6 +2361,9 @@ def _load_artifact_with_diagnostics(
 
         return _load_once()
     except FileNotFoundError:
+        loaded = _load_from_recovery_roots()
+        if loaded is not None:
+            return loaded
         _print_missing_artifact_file_help(
             tracker,
             artifact,
@@ -2325,7 +2449,14 @@ def preview(
         "--run-dir",
         help="Base directory for resolving relative artifact paths like ./outputs/...",
     ),
-    n_rows: int = typer.Option(5, "--rows", "-n", help="Number of rows to display."),
+    n_rows: int = typer.Option(
+        5,
+        "--rows",
+        "-n",
+        min=1,
+        max=MAX_PREVIEW_ROWS,
+        help="Number of rows to display.",
+    ),
     trust_db: bool = typer.Option(
         False,
         "--trust-db",
@@ -2638,7 +2769,12 @@ class ConsistShell(cmd.Cmd):
             prepared.extend(["--db-path", self.db_path])
 
         if (
-            command_path in {("preview",), ("validate",)}
+            command_path
+            in {
+                ("preview",),
+                ("validate",),
+                ("schema", "capture-file"),
+            }
             and self.run_dir
             and not self._has_option(prepared, "--run-dir")
         ):
@@ -2657,7 +2793,12 @@ class ConsistShell(cmd.Cmd):
             prepared.append("--trust-db")
 
         if (
-            command_path in {("preview",), ("schema", "capture-file")}
+            command_path
+            in {
+                ("preview",),
+                ("validate",),
+                ("schema", "capture-file"),
+            }
             and self.mount_overrides
             and not self._has_option(prepared, "--mount")
         ):
@@ -3120,7 +3261,10 @@ class ConsistShell(cmd.Cmd):
         self._invoke_cli_command("search", arg)
 
     def do_validate(self, arg: str) -> None:
-        """Validate artifact files. Usage: validate [--fix] [--run-dir PATH]"""
+        """Validate artifact files.
+
+        Usage: validate [--fix] [--run-dir PATH] [--trust-db] [--mount NAME=PATH]
+        """
         self._invoke_cli_command("validate", arg)
 
     def do_scenario(self, arg: str) -> None:
@@ -3378,24 +3522,27 @@ class ConsistShell(cmd.Cmd):
                     )
                 return
 
-            _ensure_tracker_mounts_for_artifact(
-                self.tracker, artifact, trust_db=self.trust_db
-            )
-            resolution_bases, db_metadata_run_dir = _build_relative_resolution_bases(
-                self.tracker,
-                artifact,
-                db_path=self.db_path,
-                run_dir=self.run_dir,
-                trust_db=self.trust_db,
-            )
-            data = _load_artifact_with_diagnostics(
-                self.tracker,
-                artifact,
-                n_rows=n_rows,
-                resolution_bases=resolution_bases,
-                db_metadata_run_dir=db_metadata_run_dir,
-                trust_db=self.trust_db,
-            )
+            with _preserve_tracker_mounts(self.tracker):
+                _ensure_tracker_mounts_for_artifact(
+                    self.tracker, artifact, trust_db=self.trust_db
+                )
+                resolution_bases, db_metadata_run_dir = (
+                    _build_relative_resolution_bases(
+                        self.tracker,
+                        artifact,
+                        db_path=self.db_path,
+                        run_dir=self.run_dir,
+                        trust_db=self.trust_db,
+                    )
+                )
+                data = _load_artifact_with_diagnostics(
+                    self.tracker,
+                    artifact,
+                    n_rows=n_rows,
+                    resolution_bases=resolution_bases,
+                    db_metadata_run_dir=db_metadata_run_dir,
+                    trust_db=self.trust_db,
+                )
             if data is None:
                 return
 
@@ -3501,35 +3648,38 @@ class ConsistShell(cmd.Cmd):
                     )
                 return
 
-            _ensure_tracker_mounts_for_artifact(
-                self.tracker, artifact, trust_db=self.trust_db
-            )
-            resolution_bases, db_metadata_run_dir = _build_relative_resolution_bases(
-                self.tracker,
-                artifact,
-                db_path=self.db_path,
-                run_dir=self.run_dir,
-                trust_db=self.trust_db,
-            )
-
-            if self.tracker.db and artifact.id:
-                fetched = self.tracker.db.get_artifact_schema_for_artifact(
-                    artifact_id=artifact.id
+            with _preserve_tracker_mounts(self.tracker):
+                _ensure_tracker_mounts_for_artifact(
+                    self.tracker, artifact, trust_db=self.trust_db
                 )
-                if fetched is not None:
-                    schema, fields = fetched
-                    console.print(
-                        f"Schema: {artifact.key} [dim]({artifact.driver}, db profile)[/dim]"
+                resolution_bases, db_metadata_run_dir = (
+                    _build_relative_resolution_bases(
+                        self.tracker,
+                        artifact,
+                        db_path=self.db_path,
+                        run_dir=self.run_dir,
+                        trust_db=self.trust_db,
                     )
-                    _render_schema_profile(schema, fields)
-                    return
-            data = _load_artifact_with_diagnostics(
-                self.tracker,
-                artifact,
-                resolution_bases=resolution_bases,
-                db_metadata_run_dir=db_metadata_run_dir,
-                trust_db=self.trust_db,
-            )
+                )
+
+                if self.tracker.db and artifact.id:
+                    fetched = self.tracker.db.get_artifact_schema_for_artifact(
+                        artifact_id=artifact.id
+                    )
+                    if fetched is not None:
+                        schema, fields = fetched
+                        console.print(
+                            f"Schema: {artifact.key} [dim]({artifact.driver}, db profile)[/dim]"
+                        )
+                        _render_schema_profile(schema, fields)
+                        return
+                data = _load_artifact_with_diagnostics(
+                    self.tracker,
+                    artifact,
+                    resolution_bases=resolution_bases,
+                    db_metadata_run_dir=db_metadata_run_dir,
+                    trust_db=self.trust_db,
+                )
             if data is None:
                 return
 
@@ -3925,7 +4075,10 @@ def shell(
     run_dir: Optional[str] = typer.Option(
         None,
         "--run-dir",
-        help="Base directory for resolving relative artifact paths in shell preview/schema_profile.",
+        help=(
+            "Base directory for resolving relative artifact paths in shell "
+            "preview/schema_profile/validate/schema capture-file commands."
+        ),
     ),
     mount: Optional[List[str]] = typer.Option(
         None,

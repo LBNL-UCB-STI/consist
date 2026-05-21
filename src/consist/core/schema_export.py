@@ -243,6 +243,14 @@ def _to_class_name(table_name: str) -> str:
     return "".join(p[:1].upper() + p[1:] for p in parts)
 
 
+def _validate_class_name(class_name: str) -> str:
+    if not class_name.isidentifier() or keyword.iskeyword(class_name):
+        raise ValueError(
+            f"class_name must be a valid Python class identifier, got {class_name!r}."
+        )
+    return class_name
+
+
 def _iter_export_fields(
     fields: Iterable[ArtifactSchemaField],
     *,
@@ -291,7 +299,9 @@ def render_sqlmodel_stub(
         tname = summary.get("table_name")
         resolved_table_name = tname if isinstance(tname, str) and tname else "table"
 
-    resolved_class_name = class_name or _to_class_name(resolved_table_name)
+    resolved_class_name = _validate_class_name(
+        class_name or _to_class_name(resolved_table_name)
+    )
 
     export_fields = _iter_export_fields(
         fields,

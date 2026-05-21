@@ -90,6 +90,25 @@ def test_render_sqlmodel_stub_can_include_system_cols():
     assert "consist_run_id" in code
 
 
+def test_render_sqlmodel_stub_rejects_invalid_class_name():
+    schema = ArtifactSchema(
+        id="schema_bad_class",
+        summary_json={"table_name": "t"},
+        profile_json=None,
+    )
+
+    try:
+        render_sqlmodel_stub(
+            schema=schema,
+            fields=[],
+            class_name="Bad; import os",
+        )
+    except ValueError as exc:
+        assert "valid Python class identifier" in str(exc)
+    else:
+        raise AssertionError("Expected invalid class_name to be rejected")
+
+
 def test_render_sqlmodel_stub_renders_foreign_keys():
     schema = ArtifactSchema(
         id="schema_fk", summary_json={"table_name": "children"}, profile_json=None

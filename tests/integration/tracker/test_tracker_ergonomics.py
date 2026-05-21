@@ -1,4 +1,5 @@
 import pytest
+from pathlib import Path
 import consist
 from consist import Tracker
 from consist.models.artifact import Artifact
@@ -148,6 +149,50 @@ def test_artifact_accessor_helpers_support_attached_and_explicit_tracker(
     assert detached.as_path(tracker=tracker) == output_path
     fallback_df = detached.as_df(tracker=tracker)
     assert fallback_df.equals(attached_df)
+
+
+def test_artifact_accessibility_reports_primary_and_recovery_root(
+    tracker: Tracker, run_dir: Path
+) -> None:
+    primary_path = run_dir / "outputs" / "results.csv"
+    primary_path.parent.mkdir(parents=True, exist_ok=True)
+    primary_path.write_text("a,b\n1,2\n", encoding="utf-8")
+
+    archive_root = run_dir.parent / "archive"
+    archive_root.mkdir(parents=True, exist_ok=True)
+
+    with tracker.start_run("artifact_accessibility_run", "artifact_accessibility"):
+        tracker.log_output(primary_path, key="results")
+
+    artifact = tracker.get_artifact("results")
+    assert artifact is not None
+
+    accessibility = artifact.accessibility()
+    assert accessibility.status == "primary"
+    assert accessibility.accessible is True
+    assert accessibility.locations[0].label == "primary"
+    assert accessibility.locations[0].exists is True
+    assert artifact.locations == accessibility.locations
+
+    relative_path = tracker.fs.get_remappable_relative_path(artifact.container_uri)
+    assert relative_path is not None
+    archived_path = archive_root / relative_path
+    archived_path.parent.mkdir(parents=True, exist_ok=True)
+    archived_path.write_text("a,b\n1,2\n", encoding="utf-8")
+    tracker.set_artifact_recovery_roots(artifact, [archive_root])
+
+    primary_path.unlink()
+
+    refreshed = tracker.get_artifact("results")
+    assert refreshed is not None
+
+    refreshed_accessibility = refreshed.accessibility()
+    assert refreshed_accessibility.status == "recovery"
+    assert refreshed_accessibility.best_location is not None
+    assert refreshed_accessibility.best_location.label == "recovery_root #1"
+    assert refreshed_accessibility.locations[0].exists is False
+    assert any(location.exists for location in refreshed_accessibility.locations[1:])
+    assert refreshed.locations == refreshed_accessibility.locations
 
 
 def test_run_config_snapshot_access(tracker: Tracker):
