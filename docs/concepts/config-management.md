@@ -36,6 +36,16 @@ re-execution on change, be searchable for later filtering, or both.
 If you pass a Pydantic model, it is serialized via `model_dump()` before hashing
 and snapshotting.
 
+The full `config` payload is distinct from the canonical identity record that
+adapter-driven config planning can add to run metadata. When config adapters are
+used, Consist may also persist `run.meta["config_bundle_hash"]` and
+`run.meta["config_identity_manifest"]` as compact identity artifacts, plus
+queryable slices in `config_facet` and `run_config_kv`. Those records are for
+cache identity and filtering; they are not the full configuration payload.
+If a future storage split moves large config payloads into a separate database,
+keep that routing distinct from the identity manifest so cache semantics stay
+stable.
+
 ### Config Hashing
 
 Consist uses **canonical hashing**: converting dicts (and YAML/JSON) into a
