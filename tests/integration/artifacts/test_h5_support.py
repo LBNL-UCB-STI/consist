@@ -1,3 +1,5 @@
+import shutil
+
 import pytest
 from consist.core.coupler import Coupler
 from consist.core.tracker import Tracker
@@ -115,6 +117,120 @@ def test_h5_child_specs_include_only_and_semantic_overrides(tracker: Tracker):
 
     children_from_query = tracker.get_child_artifacts(container)
     assert [artifact.id for artifact in children_from_query] == [child.id]
+
+
+def test_h5_parent_file_policy_allows_parent_recovery_and_blocks_children(
+    tracker: Tracker,
+    tmp_path,
+):
+    h5_path = tracker.run_dir / "outputs" / "policy_store.h5"
+    h5_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(h5_path, "w") as f:
+        f.create_dataset("households", data=[1, 2, 3])
+        f.create_dataset("persons", data=[4, 5, 6])
+
+    with tracker.start_run("run_h5_policy", model="test_model"):
+        container, children = tracker.log_h5_container(
+            h5_path,
+            key="usim_store",
+            child_selection="include_only",
+            child_specs={
+                "/households": H5ChildSpec(key="households"),
+                "/persons": H5ChildSpec(key="persons"),
+            },
+            container_recovery_unit="parent_file",
+            child_recovery_policy="descriptive_only",
+        )
+
+    assert container.meta["container_recovery_unit"] == "parent_file"
+    assert container.meta["child_recovery_policy"] == "descriptive_only"
+    assert container.meta["representation_policy"]["tabular_parquet"] == {
+        "role": "none",
+        "complete_for_rebuild": False,
+    }
+
+    recovery_root = tmp_path / "external_archive_h5"
+    expected_path = recovery_root / "outputs" / "policy_store.h5"
+    expected_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(h5_path, expected_path)
+
+    refreshed_outputs = tracker.get_run_outputs("run_h5_policy")
+    refreshed_container = refreshed_outputs["usim_store"]
+    assert refreshed_container.meta["container_recovery_unit"] == "parent_file"
+
+    parent_result = tracker.register_artifact_recovery_copy(
+        refreshed_container,
+        recovery_root,
+    )
+    assert parent_result.status == "registered"
+    assert parent_result.metadata_updated is True
+
+    refreshed_after_parent = tracker.get_run_outputs("run_h5_policy")
+    assert refreshed_after_parent["usim_store"].recovery_roots == [
+        str(recovery_root.resolve())
+    ]
+
+    child = next(child for child in children if child.key == "households")
+    refreshed_child = refreshed_after_parent["households"]
+    assert refreshed_child.parent_artifact_id == child.parent_artifact_id
+
+    child_result = tracker.register_artifact_recovery_copy(
+        refreshed_child,
+        recovery_root,
+    )
+    assert child_result.status == "blocked_by_container_policy"
+    assert child_result.metadata_updated is False
+    assert child_result.message is not None
+    assert "child_recovery_policy='descriptive_only'" in child_result.message
+    assert "parent H5 artifact" in child_result.message
+
+    final_outputs = tracker.get_run_outputs("run_h5_policy")
+    assert "recovery_roots" not in final_outputs["households"].meta
+
+
+def test_h5_parent_child_policy_is_reported_in_bulk_recovery_registration(
+    tracker: Tracker,
+    tmp_path,
+):
+    h5_path = tracker.run_dir / "outputs" / "bulk_policy_store.h5"
+    h5_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(h5_path, "w") as f:
+        f.create_dataset("households", data=[1, 2, 3])
+
+    with tracker.start_run("run_h5_bulk_policy", model="test_model"):
+        tracker.log_h5_container(
+            h5_path,
+            key="bulk_usim_store",
+            child_selection="include_only",
+            child_specs={"/households": H5ChildSpec(key="bulk_households")},
+            container_recovery_unit="parent_file",
+            child_recovery_policy="descriptive_only",
+        )
+
+    recovery_root = tmp_path / "external_archive_h5_bulk"
+    expected_path = recovery_root / "outputs" / "bulk_policy_store.h5"
+    expected_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(h5_path, expected_path)
+
+    result = tracker.register_run_output_recovery_copies(
+        "run_h5_bulk_policy",
+        recovery_root,
+        keys=["bulk_usim_store", "bulk_households"],
+    )
+
+    assert result["bulk_usim_store"].status == "registered"
+    assert result["bulk_usim_store"].metadata_updated is True
+    assert result["bulk_households"].status == "blocked_by_container_policy"
+    assert result["bulk_households"].metadata_updated is False
+    assert result.registered.keys() == {"bulk_usim_store"}
+    assert result.blocked.keys() == {"bulk_households"}
+    assert "blocked_by_container_policy=1" in result.summary
+
+    refreshed = tracker.get_run_outputs("run_h5_bulk_policy")
+    assert refreshed["bulk_usim_store"].recovery_roots == [str(recovery_root.resolve())]
+    assert "recovery_roots" not in refreshed["bulk_households"].meta
 
 
 def test_h5_child_specs_include_only_with_empty_specs_logs_no_children(
@@ -252,6 +368,53 @@ def test_h5_container_cache_hit_reuses_cached_children(tracker: Tracker):
 
     assert container_hit.id == container_seed.id
     assert [child.id for child in children_hit] == [child.id for child in children_seed]
+
+
+def test_h5_container_cache_hit_persists_new_parent_recovery_policy(
+    tracker: Tracker,
+):
+    h5_path = tracker.run_dir / "cache_policy_reuse.h5"
+    h5_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(h5_path, "w") as f:
+        f.create_dataset("households", data=[1, 2, 3])
+
+    with tracker.start_run(
+        "run_h5_cache_policy_seed",
+        model="test_model",
+        cache_mode="overwrite",
+        config={"cache_policy_demo": True},
+    ) as t:
+        container_seed, _ = t.log_h5_container(
+            h5_path,
+            key="cached_h5_policy",
+            discover_tables=True,
+        )
+        assert "container_recovery_unit" not in container_seed.meta
+
+    with tracker.start_run(
+        "run_h5_cache_policy_hit",
+        model="test_model",
+        cache_mode="reuse",
+        config={"cache_policy_demo": True},
+    ) as t:
+        container_hit, _ = t.log_h5_container(
+            h5_path,
+            key="cached_h5_policy",
+            discover_tables=True,
+            container_recovery_unit="parent_file",
+            child_recovery_policy="descriptive_only",
+        )
+        assert t.is_cached
+
+    assert container_hit.id == container_seed.id
+    assert container_hit.meta["container_recovery_unit"] == "parent_file"
+    assert container_hit.meta["child_recovery_policy"] == "descriptive_only"
+
+    refreshed = tracker.get_artifact(container_seed.id)
+    assert refreshed is not None
+    assert refreshed.meta["container_recovery_unit"] == "parent_file"
+    assert refreshed.meta["child_recovery_policy"] == "descriptive_only"
 
 
 def test_h5_container_cache_hit_demotes_when_children_were_not_cached(

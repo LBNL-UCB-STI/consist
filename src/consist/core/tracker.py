@@ -65,6 +65,11 @@ from consist.core.config_canonicalization import (
 )
 from consist.core.config_facets import ConfigFacetManager
 from consist.core.decorators import define_step as define_step_decorator
+from consist.core.container_policy import (
+    ChildRecoveryPolicy,
+    ContainerRecoveryUnit,
+    validate_recovery_registration_policy,
+)
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.events import EventManager
 from consist.core.fs import FileSystemManager
@@ -1103,6 +1108,8 @@ class Tracker:
 
         Directory artifacts are intentionally blocked here until Consist has a
         first-class directory manifest contract for recovery-root equivalence.
+        HDF5 child table artifacts are also blocked unless a future parent
+        container policy explicitly supports independent child recovery.
         ``content_hash`` is interpreted as a full file SHA-256 and takes
         precedence when supplied. Without it, ``artifact.hash`` is only used for
         byte verification when this tracker is using full content hashing; fast
@@ -1139,6 +1146,21 @@ class Tracker:
                 status=status,
                 message=message,
                 metadata_updated=metadata_updated,
+            )
+
+        parent = (
+            self.get_parent_artifact(artifact)
+            if artifact.driver == "h5_table"
+            else None
+        )
+        policy_validation = validate_recovery_registration_policy(
+            artifact,
+            parent=parent,
+        )
+        if not policy_validation.allowed:
+            return _result(
+                "blocked_by_container_policy",
+                message=policy_validation.message,
             )
 
         relative_path = self.fs.get_remappable_relative_path(artifact.container_uri)
@@ -3083,6 +3105,9 @@ class Tracker:
         table_hash_chunk_rows: Optional[int] = None,
         child_specs: Optional[Mapping[str, H5ChildSpec]] = None,
         child_selection: H5ChildSelectionMode = "all",
+        container_recovery_unit: ContainerRecoveryUnit | None = None,
+        child_recovery_policy: ChildRecoveryPolicy | None = None,
+        representation_policy: Optional[Mapping[str, Any]] = None,
         **meta: Any,
     ) -> Tuple[Artifact, List[Artifact]]:
         """
@@ -3119,6 +3144,16 @@ class Tracker:
         child_selection : {"all", "include_only"}, default "all"
             Whether all discovered datasets are eligible for logging or only the
             dataset paths named in ``child_specs``.
+        container_recovery_unit : {"parent_file", "derived_children"}, optional
+            Recovery authority for the HDF5 container. Use ``"parent_file"`` when
+            verified recovery roots apply to the whole H5 file.
+        child_recovery_policy : {"descriptive_only", "independent"}, optional
+            Recovery policy for child ``h5_table`` artifacts. Use
+            ``"descriptive_only"`` when children are lineage/schema records and
+            not independently recoverable.
+        representation_policy : Optional[Mapping[str, Any]], optional
+            Optional policy metadata for derived physical representations such
+            as future parquet inspection caches.
         **meta : Any
             Additional metadata for the container artifact.
 
@@ -3166,6 +3201,9 @@ class Tracker:
             table_hash_chunk_rows=table_hash_chunk_rows,
             child_specs=child_specs,
             child_selection=child_selection,
+            container_recovery_unit=container_recovery_unit,
+            child_recovery_policy=child_recovery_policy,
+            representation_policy=representation_policy,
             **meta,
         )
 

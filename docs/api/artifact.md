@@ -24,6 +24,12 @@ Use `Tracker.get_child_artifacts(...)` and `Tracker.get_parent_artifact(...)`
 to navigate first-class parent-child artifact relations. This is the supported
 query surface for HDF5 container artifacts and other container-child patterns.
 
+The parent-child relation describes lineage and container membership; it does
+not by itself make a child artifact independently recoverable. For HDF5
+containers, recovery authority comes from the parent container policy recorded
+by `log_h5_container(...)`. The default restart-safe pattern is parent-file
+recovery with descriptive child `h5_table` artifacts.
+
 ## Minimal runnable example
 
 ```python

@@ -123,6 +123,7 @@ def test_schema_capture_file_passes_mount_overrides_to_tracker(tmp_path) -> None
     assert result.exit_code == 1
     mock_get_tracker.assert_called_once_with(
         "mock.db",
+        run_dir=None,
         mounts={"workspace": str(workspace_root.resolve())},
     )
 

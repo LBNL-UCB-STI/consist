@@ -896,15 +896,18 @@ def _resolve_schema_capture_path(
     artifact: "Artifact",
     run: "Run",
     override_path: Optional[Path],
+    db_path: Optional[str],
+    run_dir: Optional[str],
+    trust_db: bool,
 ) -> Path:
     if override_path is not None:
         return override_path.expanduser().resolve()
 
-    candidates: List[Path] = []
+    candidates: List[Tuple[str, Path]] = []
 
-    def _append_candidate(candidate_factory) -> None:
+    def _append_candidate(label: str, candidate_factory) -> None:
         try:
-            candidates.append(candidate_factory())
+            candidates.append((label, candidate_factory()))
         except (
             AttributeError,
             NotImplementedError,
@@ -915,17 +918,35 @@ def _resolve_schema_capture_path(
         ):
             return
 
-    _append_candidate(lambda: tracker.resolve_historical_path(artifact, run))
-    _append_candidate(
-        lambda: Path(tracker.resolve_uri(artifact.container_uri)).resolve()
-    )
+    if artifact.container_uri.startswith("./"):
+        resolution_bases, _ = _build_relative_resolution_bases(
+            tracker,
+            artifact,
+            db_path=db_path,
+            run_dir=run_dir,
+            trust_db=trust_db,
+        )
+        for label, base_dir in resolution_bases:
+            candidates.append(
+                (label, (base_dir / artifact.container_uri[2:]).resolve())
+            )
+    else:
+        if trust_db:
+            _append_candidate(
+                "trusted historical run metadata",
+                lambda: tracker.resolve_historical_path(artifact, run),
+            )
+        _append_candidate(
+            "current tracker resolution",
+            lambda: Path(tracker.resolve_uri(artifact.container_uri)).resolve(),
+        )
 
-    for candidate in candidates:
+    for _, candidate in candidates:
         if candidate.exists():
             return candidate
 
     if candidates:
-        rendered = ", ".join(str(path) for path in candidates)
+        rendered = ", ".join(f"{label}: {path}" for label, path in candidates)
         raise FileNotFoundError(
             "Could not resolve an existing artifact file path. "
             f"Tried: {rendered}. Provide --path to override."
@@ -958,6 +979,11 @@ def schema_capture_file(
         None,
         "--path",
         help="Override on-disk file path to profile.",
+    ),
+    run_dir: Optional[str] = typer.Option(
+        None,
+        "--run-dir",
+        help="Base directory for resolving relative artifact paths like ./outputs/...",
     ),
     sample_rows: int = typer.Option(
         1000,
@@ -1016,7 +1042,11 @@ def schema_capture_file(
 
     resolved_db_path = find_db_path(db_path)
     mount_overrides = _resolve_mount_overrides_or_exit(mount)
-    tracker = get_tracker(resolved_db_path, mounts=mount_overrides or None)
+    tracker = get_tracker(
+        resolved_db_path,
+        run_dir=run_dir,
+        mounts=mount_overrides or None,
+    )
     if artifact_id is not None:
         artifact = tracker.get_artifact(artifact_id)
     else:
@@ -1064,6 +1094,9 @@ def schema_capture_file(
             artifact=artifact,
             run=run,
             override_path=path,
+            db_path=resolved_db_path,
+            run_dir=run_dir,
+            trust_db=trust_db,
         )
     except FileNotFoundError as exc:
         console.print(f"[red]{exc}[/red]")
@@ -2071,7 +2104,9 @@ def _build_relative_resolution_bases_for_uri(
         _append("explicit --run-dir", run_dir)
 
     if db_path:
-        _append("db-path parent", _resolve_cli_path(db_path).parent)
+        db_parent = _resolve_cli_path(db_path).parent
+        _append("db-path parent", db_parent)
+        _append("db-path parent / consist_runs", db_parent / "consist_runs")
 
     _append("current working directory", Path.cwd())
 

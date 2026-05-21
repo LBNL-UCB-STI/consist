@@ -852,7 +852,8 @@ def test_register_run_output_recovery_copies_reports_mixed_statuses_and_unknown_
     assert result.complete is False
     assert result.summary == (
         "registered=1 missing_copy=1 hash_mismatch=0 skipped_unmapped=0 "
-        "symlink_destination=0 unsupported_directory=0 unverifiable_hash=0 failed=0"
+        "blocked_by_container_policy=0 symlink_destination=0 "
+        "unsupported_directory=0 unverifiable_hash=0 failed=0"
     )
     outputs = tracker.get_run_outputs("producer_adopt_bulk")
     assert outputs["a"].recovery_roots == [str(recovery_root.resolve())]
