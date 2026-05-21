@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uuid
 import weakref
+from dataclasses import dataclass
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,10 +31,17 @@ UTC = timezone.utc
 if TYPE_CHECKING:
     import pandas as pd
 
+    from consist.core.fs import FileSystemManager
     from consist.core.tracker import Tracker
 
 
 class _ArtifactTrackerRef(Protocol):
+    def resolve_uri(self, uri: str) -> str: ...
+
+
+class _TrackerWithFS(Protocol):
+    fs: "FileSystemManager"
+
     def resolve_uri(self, uri: str) -> str: ...
 
 
@@ -105,6 +113,45 @@ def set_tracker_ref(artifact: object, tracker: _ArtifactTrackerRef) -> None:
         object.__setattr__(artifact, "_tracker", tracker_ref)
     except (AttributeError, TypeError):
         return
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactLocationStatus:
+    """Reachability status for one artifact location."""
+
+    label: str
+    path: Path
+    exists: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactAccessibility:
+    """Structured accessibility report for an artifact."""
+
+    locations: tuple[ArtifactLocationStatus, ...]
+
+    @property
+    def status(self) -> str:
+        """Return a concise accessibility status string."""
+        if self.locations and self.locations[0].exists:
+            return "primary"
+        for location in self.locations[1:]:
+            if location.exists:
+                return "recovery"
+        return "missing"
+
+    @property
+    def accessible(self) -> bool:
+        """Return whether any checked location is reachable."""
+        return any(location.exists for location in self.locations)
+
+    @property
+    def best_location(self) -> Optional[ArtifactLocationStatus]:
+        """Return the first reachable location, if any."""
+        for location in self.locations:
+            if location.exists:
+                return location
+        return None
 
 
 class UUIDType(TypeDecorator):
@@ -296,6 +343,11 @@ class Artifact(SQLModel, table=True):
             return [str(item) for item in roots if isinstance(item, (str, Path))]
         return []
 
+    @property
+    def locations(self) -> tuple[ArtifactLocationStatus, ...]:
+        """Return the currently checked locations for this artifact."""
+        return self.accessibility().locations
+
     @abs_path.setter
     def abs_path(self, value: str) -> None:
         """
@@ -345,6 +397,71 @@ class Artifact(SQLModel, table=True):
         if tracker is not None:
             return Path(tracker.resolve_uri(self.container_uri))
         return self.path
+
+    def accessibility(
+        self, tracker: Optional["Tracker"] = None
+    ) -> ArtifactAccessibility:
+        """
+        Inspect the primary path and any advisory recovery roots.
+
+        The primary location uses the currently attached tracker when available,
+        or the explicit ``tracker`` argument when provided. Recovery roots are
+        only checked when a tracker is available so the remappable layout can be
+        derived safely.
+        """
+        tracker_obj: Optional[_TrackerWithFS] = None
+        if tracker is not None:
+            tracker_obj = cast(_TrackerWithFS, tracker)
+        if tracker_obj is None:
+            tracker_ref = get_tracker_ref(self)
+            if tracker_ref is not None:
+                tracker_candidate = tracker_ref()
+                if tracker_candidate is not None:
+                    tracker_obj = cast(_TrackerWithFS, tracker_candidate)
+
+        try:
+            primary_path = (
+                Path(tracker_obj.resolve_uri(self.container_uri))
+                if tracker_obj is not None
+                else self.path
+            )
+        except Exception:
+            primary_path = self.path
+        locations = [
+            ArtifactLocationStatus(
+                label="primary",
+                path=primary_path,
+                exists=primary_path.exists(),
+            )
+        ]
+
+        if tracker_obj is None:
+            return ArtifactAccessibility(locations=tuple(locations))
+
+        fs = tracker_obj.fs
+        relative_path_helper = fs.get_remappable_relative_path
+        roots_helper = fs.normalize_recovery_roots
+
+        relative_path = relative_path_helper(self.container_uri)
+        if relative_path is None:
+            return ArtifactAccessibility(locations=tuple(locations))
+
+        try:
+            roots = roots_helper(self.recovery_roots)
+        except (TypeError, ValueError):
+            return ArtifactAccessibility(locations=tuple(locations))
+
+        for index, root in enumerate(roots, start=1):
+            candidate = (Path(root) / relative_path).resolve()
+            locations.append(
+                ArtifactLocationStatus(
+                    label=f"recovery_root #{index}",
+                    path=candidate,
+                    exists=candidate.exists(),
+                )
+            )
+
+        return ArtifactAccessibility(locations=tuple(locations))
 
     def as_df(
         self,

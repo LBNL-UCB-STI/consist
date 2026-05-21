@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -183,3 +184,35 @@ def test_artifacts_query_mode_surfaces_value_errors(cli_runner) -> None:
 
     assert result.exit_code == 1
     assert "invalid --param expression" in result.stdout
+
+
+def test_artifacts_run_mode_shows_accessibility_status(
+    cli_runner, tracker, run_dir: Path
+) -> None:
+    """`artifacts` run mode should display a per-artifact accessibility indicator."""
+    primary_path = run_dir / "outputs" / "results.csv"
+    primary_path.parent.mkdir(parents=True, exist_ok=True)
+    primary_path.write_text("a,b\n1,2\n", encoding="utf-8")
+
+    archive_root = run_dir.parent / "archive"
+    archive_root.mkdir(parents=True, exist_ok=True)
+
+    with tracker.start_run("accessibility_run", "accessibility_model"):
+        tracker.log_output(primary_path, key="results")
+
+    artifact = tracker.get_artifact("results")
+    assert artifact is not None
+
+    relative_path = tracker.fs.get_remappable_relative_path(artifact.container_uri)
+    assert relative_path is not None
+    archived_path = archive_root / relative_path
+    archived_path.parent.mkdir(parents=True, exist_ok=True)
+    archived_path.write_text("a,b\n1,2\n", encoding="utf-8")
+    tracker.set_artifact_recovery_roots(artifact, [archive_root])
+    primary_path.unlink()
+
+    result = cli_runner.invoke(app, ["artifacts", "accessibility_run"])
+
+    assert result.exit_code == 0
+    assert "Access" in result.stdout
+    assert "recovery" in result.stdout

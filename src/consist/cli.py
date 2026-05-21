@@ -910,18 +910,14 @@ def _artifact_recovery_candidate_paths(
     """Return path candidates derived from artifact recovery roots."""
     if not trust_db:
         return []
-    fs = getattr(tracker, "fs", None)
-    relative_path_helper = getattr(fs, "get_remappable_relative_path", None)
-    roots_helper = getattr(fs, "normalize_recovery_roots", None)
-    if not callable(relative_path_helper) or not callable(roots_helper):
-        return []
+    fs = tracker.fs
 
-    relative_path = relative_path_helper(artifact.container_uri)
+    relative_path = fs.get_remappable_relative_path(artifact.container_uri)
     if relative_path is None:
         return []
 
     try:
-        roots = roots_helper((artifact.meta or {}).get("recovery_roots"))
+        roots = fs.normalize_recovery_roots((artifact.meta or {}).get("recovery_roots"))
     except (TypeError, ValueError):
         return []
 
@@ -950,10 +946,10 @@ def _load_artifact_from_resolved_path(
     load_kwargs: Dict[str, Any] = {}
     if artifact.driver == "csv" and n_rows is not None:
         load_kwargs["nrows"] = n_rows
-    table_path = getattr(artifact, "table_path", None)
+    table_path = artifact.table_path
     if table_path:
         load_kwargs["table_path"] = table_path
-    array_path = getattr(artifact, "array_path", None)
+    array_path = artifact.array_path
     if array_path:
         load_kwargs["array_path"] = array_path
 
@@ -1494,8 +1490,16 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> List["Artifact"]:
     table.add_column("Key", style="green", overflow="fold")
     table.add_column("Artifact ID", style="cyan", overflow="fold")
     table.add_column("URI", style="dim", overflow="fold")
+    table.add_column("Access", overflow="fold")
     table.add_column("Driver")
     table.add_column("Hash", style="magenta")
+
+    def _style_artifact_access(status: str) -> str:
+        if status == "primary":
+            return "green"
+        if status == "recovery":
+            return "yellow"
+        return "red"
 
     inputs = sorted(run_artifacts.inputs.values(), key=lambda x: x.key)
     outputs = sorted(run_artifacts.outputs.values(), key=lambda x: x.key)
@@ -1503,12 +1507,15 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> List["Artifact"]:
 
     for artifact in inputs:
         rendered.append(artifact)
+        accessibility = artifact.accessibility(tracker=tracker)
+        access_status = accessibility.status
         table.add_row(
             str(ref_index),
             "[blue]Input[/blue]",
             artifact.key,
             str(artifact.id),
             artifact.container_uri,
+            f"[{_style_artifact_access(access_status)}]{access_status}[/]",
             artifact.driver,
             artifact.hash[:12] if artifact.hash else "N/A",
         )
@@ -1519,12 +1526,15 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> List["Artifact"]:
 
     for artifact in outputs:
         rendered.append(artifact)
+        accessibility = artifact.accessibility(tracker=tracker)
+        access_status = accessibility.status
         table.add_row(
             str(ref_index),
             "[green]Output[/green]",
             artifact.key,
             str(artifact.id),
             artifact.container_uri,
+            f"[{_style_artifact_access(access_status)}]{access_status}[/]",
             artifact.driver,
             artifact.hash[:12] if artifact.hash else "N/A",
         )

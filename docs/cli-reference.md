@@ -140,6 +140,8 @@ Inspect artifacts in two modes:
 
 - **Run mode**: list input/output artifacts for one run.
 - **Query mode**: search artifacts by indexed facet predicates.
+- Run mode includes an `Access` column that shows whether each artifact is
+  reachable via its primary path or a recorded recovery root.
 
 ```bash
 consist artifacts <run_id>
