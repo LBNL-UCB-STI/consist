@@ -1308,11 +1308,13 @@ def materialize_artifact(
             resolvable=False,
         )
 
-    source_path, source_kind, _has_candidate_roots = _select_materialize_artifact_source(
-        tracker,
-        artifact=artifact,
-        relative_path=relative_path,
-        source_root=source_root,
+    source_path, source_kind, _has_candidate_roots = (
+        _select_materialize_artifact_source(
+            tracker,
+            artifact=artifact,
+            relative_path=relative_path,
+            source_root=source_root,
+        )
     )
 
     expected_hash = _portable_artifact_hash(tracker, artifact)
