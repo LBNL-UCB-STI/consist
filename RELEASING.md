@@ -157,13 +157,3 @@ explicitly rather than quietly changing the process.
 - Confirm the changelog compare links are correct for the new tag.
 - If the release exposed friction in the process, update this file while the
   details are still fresh.
-
-## Practical Notes for v0.1.0
-
-- `pyproject.toml` is already set to `0.1.0`.
-- `0.1.0` is the first non-beta release, so docs and README should stop
-  presenting GitHub install as the default path once PyPI is live.
-- There is currently no dedicated GitHub Actions workflow for PyPI publishing,
-  so do not assume release automation exists.
-- The docs workflow can also be backfilled manually with `workflow_dispatch`
-  by providing a `release_tag`, which is useful for older tags or reruns.
