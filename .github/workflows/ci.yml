@@ -45,14 +45,14 @@ jobs:
         if: runner.os == 'Linux'
         run: >
           uv sync --frozen
-          --extra test
+          --group dev
           --extra all
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         run: >
           uv sync --frozen
-          --extra test
+          --group dev
           --extra all
 
       - name: Ruff

@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## [0.1.5] - 2026-05-21
+
+### Added
+
+- Add first-class semantic run matching APIs for restart/reuse workflows,
+  including `Tracker.find_matching_runs(...)`, keyword-mode
+  `Tracker.find_matching_run(...)`, and top-level
+  `consist.find_matching_run(...)` / `consist.find_matching_runs(...)`
+  helpers that select prior runs by canonical workflow fields and deterministic
+  recency order by @zneedell
+  ([#124](https://github.com/LBNL-UCB-STI/consist/pull/124)).
+- Add HDF5 container recovery policy metadata for parent-file recovery and
+  descriptive child-table artifacts, including `container_recovery_unit`,
+  `child_recovery_policy`, `representation_policy`, and
+  `blocked_by_container_policy` registration results by @zneedell
+  ([#125](https://github.com/LBNL-UCB-STI/consist/pull/125)).
+- Add an `Access` indicator to `artifacts` run mode so archived or
+  recovery-root-backed artifacts show whether they are reachable on disk by
+  @zneedell ([#126](https://github.com/LBNL-UCB-STI/consist/pull/126)).
+
+### Changed
+
+- Update HDF5 container logging and cache-hit behavior so parent recovery
+  policy metadata is persisted when containers are re-logged, and verified
+  recovery-copy registration enforces parent-file recovery semantics for HDF5
+  parent artifacts by @zneedell
+  ([#125](https://github.com/LBNL-UCB-STI/consist/pull/125)).
+- Improve CLI artifact-path resolution for archived and moved runs:
+  `preview`, `validate`, and `schema capture-file` now consult recorded
+  recovery roots when trusted, `validate` accepts `--mount NAME=PATH`,
+  `schema capture-file` accepts `--run-dir`, and shell defaults propagate
+  consistently to routed commands by @zneedell
+  ([#126](https://github.com/LBNL-UCB-STI/consist/pull/126)).
+
+### Fixed
+
+- Fix trusted DB mount inference so `validate` resolves mounts per artifact
+  without leaking state between artifacts, and `preview` and
+  `schema capture-file` follow the same trust-aware recovery-root behavior by
+  @zneedell ([#126](https://github.com/LBNL-UCB-STI/consist/pull/126)).
+
 ## [0.1.4] - 2026-05-05
 
 ### Fixed
@@ -323,7 +364,9 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
 
-[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.5...HEAD
+
+[0.1.5]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.4...v0.1.5
 
 [0.1.4]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.3...v0.1.4
 
