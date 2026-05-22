@@ -1,15 +1,22 @@
+from types import SimpleNamespace
+
 from consist import (
     ArtifactRecoveryCopyRegistration,
     HydratedRunOutput,
     HydratedRunOutputsResult,
+    MaterializedArtifact,
     MaterializationResult,
     RunOutputRecoveryCopiesRegistration,
     StagedInput,
     StagedInputsResult,
+    materialize_artifact,
     register_artifact_recovery_copy,
     register_run_output_recovery_copies,
     stage_artifact,
     stage_inputs,
+)
+from consist.api import (
+    materialize_artifact as materialize_artifact_api,
 )
 from consist.api import (
     register_artifact_recovery_copy as register_artifact_recovery_copy_api,
@@ -23,6 +30,7 @@ from consist.core.materialize import (
     ArtifactRecoveryCopyRegistration as CoreArtifactRecoveryCopyRegistration,
     HydratedRunOutput as CoreHydratedRunOutput,
     HydratedRunOutputsResult as CoreHydratedRunOutputsResult,
+    MaterializedArtifact as CoreMaterializedArtifact,
     MaterializationResult as CoreMaterializationResult,
     RunOutputRecoveryCopiesRegistration as CoreRunOutputRecoveryCopiesRegistration,
     StagedInput as CoreStagedInput,
@@ -32,6 +40,25 @@ from consist.core.materialize import (
 
 def test_materialization_result_is_exported_from_top_level() -> None:
     assert MaterializationResult is CoreMaterializationResult
+    assert MaterializedArtifact is CoreMaterializedArtifact
+    assert materialize_artifact is materialize_artifact_api
+
+
+def test_materialize_artifact_top_level_delegates_to_tracker() -> None:
+    artifact = object()
+    sentinel = object()
+
+    def _materialize_artifact(received_artifact, **kwargs):
+        assert received_artifact is artifact
+        assert kwargs["target_root"] == "workspace"
+        return sentinel
+
+    tracker = SimpleNamespace(materialize_artifact=_materialize_artifact)
+
+    assert (
+        materialize_artifact(artifact, target_root="workspace", tracker=tracker)
+        is sentinel
+    )
 
 
 def test_hydrated_run_output_types_are_exported_from_top_level() -> None:
