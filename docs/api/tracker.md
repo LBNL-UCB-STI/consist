@@ -232,6 +232,7 @@ and `digest`.
         - get_config_bundle
         - hydrate_run_outputs
         - materialize_run_outputs
+        - materialize_artifact
         - stage_artifact
         - stage_inputs
         - set_artifact_recovery_roots

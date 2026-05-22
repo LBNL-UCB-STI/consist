@@ -128,6 +128,25 @@ print(result.skipped_missing_source)
 
 Prefer `hydrate_run_outputs(...)` for new restart or recovery workflows.
 
+## Single Artifact Recovery
+
+Use `tracker.materialize_artifact(...)` when you already have one artifact
+object and need its bytes restored into a fresh workspace root:
+
+```python
+result = tracker.materialize_artifact(
+    artifact,
+    target_root=Path("./fresh_workspace"),
+)
+
+if result.resolvable:
+    print(result.artifact.as_path())
+```
+
+For known historical run outputs, prefer `hydrate_run_outputs(...)`; it handles
+run-output lookup and returns keyed results. `materialize_artifact(...)` is the
+lower-level primitive for artifact-centric recovery outside that flow.
+
 ## Recording Archive Locations
 
 If the workflow itself manages archival, record roots once so future hydration
@@ -296,6 +315,7 @@ including `recovery_roots`, but do not create a new run.
 | Find the latest completed run for a restart/reuse target | `find_matching_run(...)` |
 | Restore selected outputs from a prior run into a workspace | `hydrate_run_outputs(...)` |
 | Preserve compatibility with code expecting aggregate materialization buckets | `materialize_run_outputs(...)` |
+| Restore one already-resolved artifact into a workspace | `materialize_artifact(...)` |
 | Copy or move current run outputs into an archive and record the root | `archive_current_run_outputs(...)` |
 | Copy or move selected prior run outputs into an archive and record the root | `archive_run_outputs(...)` |
 | Copy or move one artifact into an archive and record the root | `archive_artifact(...)` |

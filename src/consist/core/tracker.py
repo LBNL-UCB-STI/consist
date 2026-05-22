@@ -86,6 +86,7 @@ from consist.core.ingestion import ingest_artifact
 from consist.core.lineage import LineageService
 from consist.core.materialize import (
     ArtifactRecoveryCopyRegistration,
+    MaterializedArtifact,
     RecoveryCopyStatus,
     RunOutputRecoveryCopiesRegistration,
     hydrate_run_outputs as hydrate_run_outputs_core,  # noqa: F401
@@ -125,6 +126,7 @@ if TYPE_CHECKING:
     from consist.core.coupler import Coupler
     from consist.core.materialize import (
         HydratedRunOutputsResult,
+        MaterializedArtifact,
         MaterializationResult,
         StagedInput,
         StagedInputsResult,
@@ -4165,6 +4167,37 @@ class Tracker:
             destination=destination,
             mode=mode,
             overwrite=overwrite,
+            validate_content_hash=validate_content_hash,
+            allow_external_paths=allow_external_paths,
+        )
+
+    def materialize_artifact(
+        self,
+        artifact: Artifact,
+        *,
+        target_root: str | Path,
+        source_root: str | Path | None = None,
+        preserve_existing: bool = True,
+        on_missing: Literal["warn", "raise"] = "warn",
+        validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
+        allow_external_paths: Optional[bool] = None,
+    ) -> "MaterializedArtifact":
+        """
+        Materialize one tracked artifact under a target root.
+
+        This single-artifact recovery primitive uses the artifact's
+        remappable URI layout, owning run metadata, optional ``source_root``,
+        and recorded ``recovery_roots`` to make bytes available at
+        ``target_root / <artifact-relative-path>``. It returns a structured
+        result instead of requiring callers to manually rewrite historical
+        workspace paths.
+        """
+        return self._recovery_service.materialize_artifact(
+            artifact,
+            target_root=target_root,
+            source_root=source_root,
+            preserve_existing=preserve_existing,
+            on_missing=on_missing,
             validate_content_hash=validate_content_hash,
             allow_external_paths=allow_external_paths,
         )

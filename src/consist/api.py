@@ -71,6 +71,7 @@ if TYPE_CHECKING:
     from consist.core.materialize import (
         ArtifactRecoveryCopyRegistration,
         HydratedRunOutputsResult,
+        MaterializedArtifact,
         MaterializationResult,
         RunOutputRecoveryCopiesRegistration,
         StagedInput,
@@ -1225,6 +1226,35 @@ def stage_artifact(
         destination=destination,
         mode=mode,
         overwrite=overwrite,
+        validate_content_hash=validate_content_hash,
+        allow_external_paths=allow_external_paths,
+    )
+
+
+def materialize_artifact(
+    artifact: Artifact,
+    *,
+    target_root: str | Path,
+    source_root: str | Path | None = None,
+    preserve_existing: bool = True,
+    on_missing: Literal["warn", "raise"] = "warn",
+    validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
+    allow_external_paths: Optional[bool] = None,
+    tracker: Optional["Tracker"] = None,
+) -> "MaterializedArtifact":
+    """
+    Materialize one tracked artifact under a target root.
+
+    Use this helper when you already have an artifact object and need its bytes
+    restored into a fresh workspace root. For known historical run outputs,
+    prefer ``hydrate_run_outputs(...)``.
+    """
+    return _resolve_tracker(tracker).materialize_artifact(
+        artifact,
+        target_root=target_root,
+        source_root=source_root,
+        preserve_existing=preserve_existing,
+        on_missing=on_missing,
         validate_content_hash=validate_content_hash,
         allow_external_paths=allow_external_paths,
     )
