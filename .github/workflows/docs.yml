@@ -35,7 +35,7 @@ jobs:
         run: python -m pip install --upgrade uv
 
       - name: Install dependencies (frozen)
-        run: uv sync --frozen --extra docs
+        run: uv sync --frozen --group docs
 
       - name: Add venv to PATH
         run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
