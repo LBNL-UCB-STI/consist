@@ -57,6 +57,10 @@ python scripts/benchmarks/metadata_hot_path_profile.py \
 Output:
 - JSON report at `benchmarks/results/<timestamp>/metadata_hot_paths.json`
 - Concise summary printed to stdout
+- Attribution metric `cache.hit.begin_run_attribution`, which records a separate
+  warmed-path cache-hit sample broken down by internal `begin_run` seams:
+  config hashing, code identity, input binding, input hashing, cache lookup,
+  cache validation, cache hydration, JSON flush, and DB sync.
 
 Record representative A1 runs in
 `docs-internal/2026-06-03-roadmap-benchmark-log.md` before starting A2/A4+A5

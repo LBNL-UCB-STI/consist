@@ -10,15 +10,18 @@ import platform
 import statistics
 import sys
 import time
+from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from consist.core import tracker_lifecycle  # noqa: E402
 from consist.core.tracker import Tracker  # noqa: E402
 
 MODEL_NAME = "metadata_hot_paths"
@@ -33,6 +36,97 @@ class ReferenceRun:
     config_hash: str
     input_hash: str
     git_hash: str
+
+
+class AttributionTimer:
+    """Collect scoped timings for benchmark-local monkeypatch wrappers."""
+
+    def __init__(self) -> None:
+        self._samples_ms: dict[str, list[float]] = defaultdict(list)
+        self._restore_callbacks: list[Callable[[], None]] = []
+
+    @contextmanager
+    def track(self, label: str) -> Iterator[None]:
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._samples_ms[label].append((time.perf_counter() - started) * 1000.0)
+
+    def wrap_attr(self, owner: Any, attr: str, label: str) -> None:
+        original = getattr(owner, attr)
+
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            with self.track(label):
+                return original(*args, **kwargs)
+
+        setattr(owner, attr, wrapper)
+        self._restore_callbacks.append(lambda: setattr(owner, attr, original))
+
+    def restore(self) -> None:
+        while self._restore_callbacks:
+            self._restore_callbacks.pop()()
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            label: {
+                "calls": len(samples),
+                "summary_ms": _summarize_samples(samples),
+            }
+            for label, samples in sorted(self._samples_ms.items())
+            if samples
+        }
+
+
+@contextmanager
+def _begin_run_attribution(tracker: Tracker) -> Iterator[AttributionTimer]:
+    timer = AttributionTimer()
+    timer.wrap_attr(
+        tracker.identity,
+        "compute_run_config_hash",
+        "identity.compute_run_config_hash",
+    )
+    timer.wrap_attr(
+        tracker.identity,
+        "resolve_code_version",
+        "identity.resolve_code_version",
+    )
+    timer.wrap_attr(tracker, "log_artifact", "input_binding.log_artifact")
+    timer.wrap_attr(tracker, "_prefetch_run_signatures", "input.prefetch_run_signatures")
+    timer.wrap_attr(tracker.identity, "compute_input_hash", "identity.compute_input_hash")
+    timer.wrap_attr(tracker, "find_matching_run", "cache.find_matching_run")
+    timer.wrap_attr(tracker, "get_artifacts_for_run", "history.get_artifacts_for_run")
+    timer.wrap_attr(
+        tracker_lifecycle,
+        "validate_cached_run_outputs",
+        "cache.validate_cached_run_outputs",
+    )
+    timer.wrap_attr(
+        tracker_lifecycle,
+        "hydrate_cache_hit_outputs",
+        "cache.hydrate_cache_hit_outputs",
+    )
+    timer.wrap_attr(
+        tracker_lifecycle,
+        "materialize_missing_inputs",
+        "input.materialize_missing_inputs",
+    )
+    timer.wrap_attr(
+        tracker_lifecycle,
+        "materialize_requested_inputs",
+        "input.materialize_requested_inputs",
+    )
+    timer.wrap_attr(tracker, "_flush_json", "persistence.flush_json")
+    timer.wrap_attr(tracker, "_sync_run_to_db", "persistence.sync_run_to_db")
+    timer.wrap_attr(
+        tracker.persistence,
+        "sync_run_with_links",
+        "persistence.sync_run_with_links",
+    )
+    try:
+        yield timer
+    finally:
+        timer.restore()
 
 
 def _default_out_path() -> Path:
@@ -308,6 +402,71 @@ def _profile_cache_hit(
     return _measure_samples(repeats=repeats, warmup=warmup, sample=_sample)
 
 
+def _profile_cache_hit_attribution(
+    *,
+    tracker_factory: Callable[[], Tracker],
+    input_paths: list[Path],
+    config: dict[str, Any],
+    repeats: int,
+    warmup: int,
+) -> dict[str, Any]:
+    sample_counter = itertools.count()
+
+    def _sample() -> dict[str, Any]:
+        tracker = tracker_factory()
+        run_id = f"cache_hit_attr_{next(sample_counter):05d}"
+        started = time.perf_counter()
+        with _begin_run_attribution(tracker) as attribution:
+            with tracker.start_run(
+                run_id,
+                model=MODEL_NAME,
+                config=config,
+                inputs=input_paths,
+                cache_mode="reuse",
+                validate_cached_outputs="lazy",
+            ):
+                pass
+        return {
+            "total_ms": (time.perf_counter() - started) * 1000.0,
+            "attribution": attribution.summary(),
+        }
+
+    for _ in range(warmup):
+        _sample()
+    samples = [_sample() for _ in range(repeats)]
+    labels = sorted(
+        {
+            label
+            for sample in samples
+            for label in sample["attribution"]
+        }
+    )
+
+    return {
+        "samples_ms": samples,
+        "summary_ms": {
+            "total_ms": _summarize_samples([sample["total_ms"] for sample in samples]),
+        },
+        "attribution_summary_ms": {
+            label: {
+                "calls": [
+                    sample["attribution"].get(label, {}).get("calls", 0)
+                    for sample in samples
+                ],
+                "summary_ms": _summarize_samples(
+                    [
+                        sample["attribution"].get(label, {})
+                        .get("summary_ms", {})
+                        .get("mean", 0.0)
+                        for sample in samples
+                    ]
+                ),
+            }
+            for label in labels
+        },
+    }
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Profile Consist metadata hot paths and write a JSON report."
@@ -403,6 +562,14 @@ def main() -> int:
         output_paths=reference_outputs,
         config_keys=args.config_keys,
     )
+    attribution_reference_run = _seed_reference_run(
+        seed_tracker,
+        run_id="attribution_reference_run",
+        prefix="attribution_reference",
+        input_paths=reference_inputs,
+        output_paths=reference_outputs,
+        config_keys=args.config_keys,
+    )
 
     def replay_tracker_factory() -> Tracker:
         return _make_tracker(replay_run_dir, db_path)
@@ -440,6 +607,17 @@ def main() -> int:
         repeats=args.repeats,
         warmup=args.warmup,
     )
+    cache_hit_attribution_profile = _profile_cache_hit_attribution(
+        tracker_factory=replay_tracker_factory,
+        input_paths=reference_inputs,
+        config=_make_config(
+            "attribution_reference",
+            config_keys=args.config_keys,
+            sample_index=0,
+        ),
+        repeats=args.repeats,
+        warmup=args.warmup,
+    )
 
     report = {
         "benchmark": "metadata_hot_paths",
@@ -469,13 +647,14 @@ def main() -> int:
         },
         "database": {
             "size_mb": db_path.stat().st_size / (1024 * 1024),
-            "seeded_reference_runs": args.seed_runs + 1,
+            "seeded_reference_runs": args.seed_runs + 2,
         },
         "metrics": {
             "write.run.begin_log_end": write_profile,
             "cache.find_matching_run": lookup_profile,
             "cache.get_artifacts_for_run": artifact_profile,
             "cache.hit.start_run": cache_hit_profile,
+            "cache.hit.begin_run_attribution": cache_hit_attribution_profile,
         },
         "reference_runs": {
             "wide_output": {
@@ -485,6 +664,13 @@ def main() -> int:
                 "git_hash": wide_reference_run.git_hash,
                 "output_count": args.outputs,
             },
+            "attribution": {
+                "run_id": attribution_reference_run.run_id,
+                "config_hash": attribution_reference_run.config_hash,
+                "input_hash": attribution_reference_run.input_hash,
+                "git_hash": attribution_reference_run.git_hash,
+                "output_count": args.outputs,
+            },
         },
     }
 
@@ -492,7 +678,7 @@ def main() -> int:
 
     summary = [
         "[metadata-hot-paths] profile summary",
-        f"  seeded_runs={args.seed_runs + 1} db_size_mb={report['database']['size_mb']:,.3f}",
+        f"  seeded_runs={args.seed_runs + 2} db_size_mb={report['database']['size_mb']:,.3f}",
         (
             "  cache.find_matching_run.mean_ms="
             f"{lookup_profile['summary_ms']['mean']:.3f}"
@@ -504,6 +690,10 @@ def main() -> int:
         (
             "  cache.hit.start_run.mean_ms="
             f"{cache_hit_profile['summary_ms']['mean']:.3f}"
+        ),
+        (
+            "  cache.hit.begin_run_attribution.total.mean_ms="
+            f"{cache_hit_attribution_profile['summary_ms']['total_ms']['mean']:.3f}"
         ),
         f"  wrote_report={out_path}",
     ]
