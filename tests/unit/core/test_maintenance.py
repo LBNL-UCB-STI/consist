@@ -1876,6 +1876,30 @@ def test_export_copies_core_global_rows_and_snapshots(tmp_path: Path) -> None:
         db.engine.dispose()
 
 
+def test_detach_temporary_database_clears_transaction(tmp_path: Path) -> None:
+    db = DatabaseManager(str(tmp_path / "detach_source.duckdb"))
+    maintenance = DatabaseMaintenance(db=db, run_dir=tmp_path / "runs_source")
+    shard_db = DatabaseManager(str(tmp_path / "detach_shard.duckdb"))
+    try:
+        with db.engine.connect() as conn:
+            conn.exec_driver_sql(
+                f"ATTACH {maintenance._quote_sql_string_literal(str(shard_db.db_path))} "
+                f"AS {maintenance._quote_ident('shard_export')}"
+            )
+            conn.commit()
+            with conn.begin():
+                conn.exec_driver_sql(
+                    "CREATE TABLE IF NOT EXISTS shard_export.temp_table (id INTEGER)"
+                )
+
+            maintenance._detach_temporary_database(conn, "shard_export")
+
+            assert not conn.in_transaction()
+    finally:
+        shard_db.engine.dispose()
+        db.engine.dispose()
+
+
 def test_export_no_children_only_copies_requested_run(tmp_path: Path) -> None:
     db = DatabaseManager(str(tmp_path / "export_no_children_source.duckdb"))
     maintenance = DatabaseMaintenance(db=db, run_dir=tmp_path / "runs_source")
