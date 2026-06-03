@@ -441,6 +441,41 @@ class TestCodeVersion:
         assert im.get_code_version() == "abc12345"
 
     @patch("consist.core.identity.git")
+    def test_clean_repo_code_version_cached_per_manager(self, mock_git: MagicMock):
+        """Repeated repo Git identity lookups reuse the manager-local cache."""
+        im = IdentityManager()
+
+        first_repo = MagicMock()
+        first_repo.is_dirty.return_value = False
+        first_repo.head.object.hexsha = "abc12345"
+        second_repo = MagicMock()
+        second_repo.is_dirty.return_value = False
+        second_repo.head.object.hexsha = "def67890"
+        mock_git.Repo.side_effect = [first_repo, second_repo]
+
+        assert im.get_code_version() == "abc12345"
+        assert im.get_code_version() == "abc12345"
+        assert mock_git.Repo.call_count == 1
+
+    @patch("consist.core.identity.git")
+    def test_clear_code_version_cache_forces_repo_refresh(self, mock_git: MagicMock):
+        """Explicit invalidation refreshes repo Git identity on the next lookup."""
+        im = IdentityManager()
+
+        first_repo = MagicMock()
+        first_repo.is_dirty.return_value = False
+        first_repo.head.object.hexsha = "abc12345"
+        second_repo = MagicMock()
+        second_repo.is_dirty.return_value = False
+        second_repo.head.object.hexsha = "def67890"
+        mock_git.Repo.side_effect = [first_repo, second_repo]
+
+        assert im.get_code_version() == "abc12345"
+        im.clear_code_version_cache()
+        assert im.get_code_version() == "def67890"
+        assert mock_git.Repo.call_count == 2
+
+    @patch("consist.core.identity.git")
     def test_dirty_repo(self, mock_git: MagicMock):
         """Verifies dirty repo appends nonce."""
         im = IdentityManager()
@@ -453,6 +488,24 @@ class TestCodeVersion:
         version = im.get_code_version()
         assert version.startswith("abc12345-dirty-")
         assert len(version) > len("abc12345-dirty-")
+
+    @patch("consist.core.identity.git")
+    def test_dirty_repo_code_version_cached_per_manager(self, mock_git: MagicMock):
+        """Dirty repo identity is cached until explicitly invalidated."""
+        im = IdentityManager()
+
+        mock_repo = MagicMock()
+        mock_repo.is_dirty.return_value = True
+        mock_repo.head.object.hexsha = "abc12345"
+        mock_repo.git.diff.return_value = "print('changed')"
+        mock_git.Repo.return_value = mock_repo
+
+        first = im.get_code_version()
+        second = im.get_code_version()
+
+        assert first == second
+        assert first.startswith("abc12345-dirty-")
+        assert mock_git.Repo.call_count == 1
 
     @patch("consist.core.identity.git")
     def test_git_error_handling(self, mock_git: MagicMock):
@@ -484,3 +537,27 @@ class TestCodeVersion:
         with patch("consist.core.identity.git", None):
             im = IdentityManager()
             assert im.get_code_version() == "no_git_module_found"
+
+    @patch("consist.core.identity.git")
+    def test_callable_code_identity_does_not_use_repo_git_cache(
+        self, mock_git: MagicMock
+    ):
+        """Callable-scoped modes bypass get_code_version and its repo Git cache."""
+        im = IdentityManager()
+
+        mock_repo = MagicMock()
+        mock_repo.is_dirty.return_value = False
+        mock_repo.head.object.hexsha = "abc12345"
+        mock_git.Repo.return_value = mock_repo
+
+        assert im.get_code_version() == "abc12345"
+
+        def sample_func():
+            return "value"
+
+        callable_hash = im.resolve_code_version(
+            mode="callable_source", func=sample_func
+        )
+
+        assert callable_hash != "abc12345"
+        assert mock_git.Repo.call_count == 1

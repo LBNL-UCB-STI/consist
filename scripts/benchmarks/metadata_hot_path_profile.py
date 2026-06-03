@@ -109,8 +109,12 @@ def _begin_run_attribution(tracker: Tracker) -> Iterator[AttributionTimer]:
         "identity.resolve_code_version",
     )
     timer.wrap_attr(tracker, "log_artifact", "input_binding.log_artifact")
-    timer.wrap_attr(tracker, "_prefetch_run_signatures", "input.prefetch_run_signatures")
-    timer.wrap_attr(tracker.identity, "compute_input_hash", "identity.compute_input_hash")
+    timer.wrap_attr(
+        tracker, "_prefetch_run_signatures", "input.prefetch_run_signatures"
+    )
+    timer.wrap_attr(
+        tracker.identity, "compute_input_hash", "identity.compute_input_hash"
+    )
     timer.wrap_attr(tracker, "find_matching_run", "cache.find_matching_run")
     timer.wrap_attr(tracker, "get_artifacts_for_run", "history.get_artifacts_for_run")
     timer.wrap_attr(
@@ -204,7 +208,9 @@ def _make_config(prefix: str, *, config_keys: int, sample_index: int) -> dict[st
         "sample_index": sample_index,
     }
     for i in range(config_keys):
-        config[f"{prefix}_config_{i:03d}"] = f"{prefix}_value_{sample_index:03d}_{i:03d}"
+        config[f"{prefix}_config_{i:03d}"] = (
+            f"{prefix}_value_{sample_index:03d}_{i:03d}"
+        )
     return config
 
 
@@ -251,7 +257,9 @@ def _seed_background_runs(
         with tracker.start_run(
             run_id,
             model=MODEL_NAME,
-            config=_make_config("seed", config_keys=SEED_CONFIG_KEYS, sample_index=index),
+            config=_make_config(
+                "seed", config_keys=SEED_CONFIG_KEYS, sample_index=index
+            ),
             inputs=input_paths[:SEED_INPUT_COUNT],
             cache_mode="overwrite",
             **identity_kwargs,
@@ -474,13 +482,7 @@ def _profile_cache_hit_attribution(
     for _ in range(warmup):
         _sample()
     samples = [_sample() for _ in range(repeats)]
-    labels = sorted(
-        {
-            label
-            for sample in samples
-            for label in sample["attribution"]
-        }
-    )
+    labels = sorted({label for sample in samples for label in sample["attribution"]})
 
     return {
         "samples_ms": samples,
@@ -495,7 +497,8 @@ def _profile_cache_hit_attribution(
                 ],
                 "summary_ms": _summarize_samples(
                     [
-                        sample["attribution"].get(label, {})
+                        sample["attribution"]
+                        .get(label, {})
                         .get("summary_ms", {})
                         .get("mean", 0.0)
                         for sample in samples

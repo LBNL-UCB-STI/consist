@@ -69,6 +69,7 @@ class IdentityManager:
         """
         self.project_root = Path(project_root).resolve()
         self.hashing_strategy = hashing_strategy
+        self._repo_git_code_version_cache: Optional[str] = None
 
     # --- Canonical JSON utilities ---
 
@@ -132,8 +133,14 @@ class IdentityManager:
 
         This uses GitPython directly to avoid subprocess overhead and parsing fragility.
         """
+        if self._repo_git_code_version_cache is not None:
+            return self._repo_git_code_version_cache
+
+        code_version: str
         if git is None:
-            return "no_git_module_found"
+            code_version = "no_git_module_found"
+            self._repo_git_code_version_cache = code_version
+            return code_version
 
         # NOTE:
         # Tests patch `consist.core.identity.git` with a `MagicMock`. In that case,
@@ -188,9 +195,11 @@ class IdentityManager:
                 dirty_hash = hashlib.sha256(
                     dirty_payload.encode("utf-8", errors="replace")
                 ).hexdigest()[:12]
-                return f"{sha}-dirty-{dirty_hash}"
+                code_version = f"{sha}-dirty-{dirty_hash}"
+                self._repo_git_code_version_cache = code_version
+                return code_version
 
-            return sha
+            code_version = sha
         except Exception as e:
             # NOTE:
             # In production, we mainly care about "not a git repo" style failures;
@@ -198,8 +207,16 @@ class IdentityManager:
             # semantics. We keep this conservative (never crash) and return a stable
             # fallback string when anything goes wrong.
             if git_error_types and isinstance(e, git_error_types):
-                return "unknown_code_version"
-            return "unknown_code_version"
+                code_version = "unknown_code_version"
+            else:
+                code_version = "unknown_code_version"
+
+        self._repo_git_code_version_cache = code_version
+        return code_version
+
+    def clear_code_version_cache(self) -> None:
+        """Clear cached repo Git code identity for this identity manager."""
+        self._repo_git_code_version_cache = None
 
     def compute_callable_hash(
         self,
