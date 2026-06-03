@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union, cast
 
 from pydantic import BaseModel
 
+from consist.core.artifacts import _infer_driver_from_path
 from consist.core.cache import (
     ActiveRunCacheOptions,
     CacheHydrationContext,
@@ -36,6 +37,7 @@ from consist.core.cache_miss_explainer import (
 )
 from consist.core.context import pop_tracker, push_tracker
 from consist.core.error_messages import format_problem_cause_fix
+from consist.core.performance_attribution import track_begin_run_phase
 from consist.core.validation import (
     validate_config_structure,
     validate_run_meta,
@@ -233,284 +235,340 @@ class RunLifecycleCoordinator:
             if debug_cache:
                 logging.info("[Consist][cache] %s %.3fs", label, elapsed)
 
-        if tracker.current_consist is not None:
-            raise RuntimeError(
-                f"Cannot begin_run: A run is already active (id={tracker.current_consist.run.id}). "
-                "Call end_run() first."
-            )
-
-        validate_run_strings(model_name=model, description=description, tags=tags)
-
-        (
-            cache_hydration,
-            materialize_cached_output_paths,
-            materialize_cached_outputs_dir,
-            materialize_cached_outputs_source_root,
-            validate_cached_outputs,
-        ) = parse_materialize_cached_outputs_kwargs(kwargs)
-        requested_input_paths_raw = kwargs.pop("requested_input_paths", None)
-        requested_input_materialization = kwargs.pop(
-            "requested_input_materialization", None
-        )
-        requested_input_materialization_mode = kwargs.pop(
-            "requested_input_materialization_mode", None
-        )
-
-        requested_input_paths: Optional[Dict[str, Path]] = None
-        if requested_input_paths_raw is not None:
-            requested_input_paths = {
-                str(key): Path(value)
-                for key, value in dict(requested_input_paths_raw).items()
-            }
-        if (
-            requested_input_materialization_mode is not None
-            and requested_input_materialization_mode != "copy"
-        ):
-            raise ValueError(
-                format_problem_cause_fix(
-                    problem=(
-                        "requested_input_materialization_mode must be 'copy'. "
-                        f"Received {requested_input_materialization_mode!r}."
-                    ),
-                    cause="Only copy-based requested input staging is supported.",
-                    fix=(
-                        "Use execution_options=ExecutionOptions("
-                        "input_materialization_mode='copy')."
-                    ),
+        with track_begin_run_phase("lifecycle.validate_and_parse"):
+            if tracker.current_consist is not None:
+                raise RuntimeError(
+                    f"Cannot begin_run: A run is already active (id={tracker.current_consist.run.id}). "
+                    "Call end_run() first."
                 )
+
+            validate_run_strings(model_name=model, description=description, tags=tags)
+
+            (
+                cache_hydration,
+                materialize_cached_output_paths,
+                materialize_cached_outputs_dir,
+                materialize_cached_outputs_source_root,
+                validate_cached_outputs,
+            ) = parse_materialize_cached_outputs_kwargs(kwargs)
+            requested_input_paths_raw = kwargs.pop("requested_input_paths", None)
+            requested_input_materialization = kwargs.pop(
+                "requested_input_materialization", None
+            )
+            requested_input_materialization_mode = kwargs.pop(
+                "requested_input_materialization_mode", None
             )
 
-        raw_config_model: Optional[BaseModel] = (
-            config if isinstance(config, BaseModel) else None
-        )
-        if facet_from:
-            if isinstance(facet_from, str):
-                raise ValueError("facet_from must be a list of config keys.")
-            config_dict_for_facet = tracker._coerce_facet_mapping(config, "config")
-            missing = [key for key in facet_from if key not in config_dict_for_facet]
-            if missing:
-                raise KeyError(f"facet_from keys not found in config: {missing}")
-            derived = {key: config_dict_for_facet[key] for key in facet_from}
-            if facet is not None:
-                facet_dict = tracker._coerce_facet_mapping(facet, "facet")
-                merged = dict(derived)
-                merged.update(facet_dict)
-                facet = tracker.identity.normalize_json(merged)
-            else:
-                facet = tracker.identity.normalize_json(derived)
-
-        year = kwargs.pop("year", None)
-        iteration = kwargs.pop("iteration", None)
-        cache_epoch = kwargs.pop("cache_epoch", None)
-        cache_version = kwargs.pop("cache_version", None)
-        parent_run_id = kwargs.pop("parent_run_id", None)
-        code_identity_callable = kwargs.pop("_consist_code_identity_callable", None)
-
-        if artifact_dir is not None:
-            kwargs["artifact_dir"] = str(artifact_dir)
-        if allow_external_paths is not None:
-            kwargs["allow_external_paths"] = bool(allow_external_paths)
-
-        if config is None:
-            config_dict: Dict[str, Any] = {}
-        elif isinstance(config, BaseModel):
-            config_dict = config.model_dump()
-        else:
-            config_dict = config
-
-        normalized_hash_inputs = _normalize_identity_inputs(hash_inputs)
-        if normalized_hash_inputs:
-            config_dict = dict(config_dict)
-            digest_map = tracker.identity.compute_hash_inputs_digests(
-                normalized_hash_inputs
-            )
-            failed_digests = {
-                label: digest
-                for label, digest in digest_map.items()
-                if isinstance(digest, str) and digest.startswith("ERROR:")
-            }
-            if failed_digests:
-                failed_labels = ", ".join(sorted(failed_digests.keys()))
+            requested_input_paths: Optional[Dict[str, Path]] = None
+            if requested_input_paths_raw is not None:
+                requested_input_paths = {
+                    str(key): Path(value)
+                    for key, value in dict(requested_input_paths_raw).items()
+                }
+            if (
+                requested_input_materialization_mode is not None
+                and requested_input_materialization_mode != "copy"
+            ):
                 raise ValueError(
                     format_problem_cause_fix(
                         problem=(
-                            "Failed to compute identity input digests for: "
-                            f"{failed_labels}."
+                            "requested_input_materialization_mode must be 'copy'. "
+                            f"Received {requested_input_materialization_mode!r}."
                         ),
-                        cause=(
-                            "One or more identity_inputs/hash_inputs paths are missing "
-                            "or unreadable."
-                        ),
+                        cause="Only copy-based requested input staging is supported.",
                         fix=(
-                            "Use the recommended path and pass existing files/directories "
-                            "in identity_inputs=[...], then retry."
+                            "Use execution_options=ExecutionOptions("
+                            "input_materialization_mode='copy')."
                         ),
                     )
                 )
-            if "__consist_hash_inputs__" in config_dict:
-                logging.warning(
-                    "[Consist] Overwriting user-provided '__consist_hash_inputs__' in config for run %s.",
-                    run_id,
+
+            raw_config_model: Optional[BaseModel] = (
+                config if isinstance(config, BaseModel) else None
+            )
+            if facet_from:
+                if isinstance(facet_from, str):
+                    raise ValueError("facet_from must be a list of config keys.")
+                config_dict_for_facet = tracker._coerce_facet_mapping(config, "config")
+                missing = [
+                    key for key in facet_from if key not in config_dict_for_facet
+                ]
+                if missing:
+                    raise KeyError(f"facet_from keys not found in config: {missing}")
+                derived = {key: config_dict_for_facet[key] for key in facet_from}
+                if facet is not None:
+                    facet_dict = tracker._coerce_facet_mapping(facet, "facet")
+                    merged = dict(derived)
+                    merged.update(facet_dict)
+                    facet = tracker.identity.normalize_json(merged)
+                else:
+                    facet = tracker.identity.normalize_json(derived)
+
+            year = kwargs.pop("year", None)
+            iteration = kwargs.pop("iteration", None)
+            cache_epoch = kwargs.pop("cache_epoch", None)
+            cache_version = kwargs.pop("cache_version", None)
+            parent_run_id = kwargs.pop("parent_run_id", None)
+            code_identity_callable = kwargs.pop("_consist_code_identity_callable", None)
+
+            if artifact_dir is not None:
+                kwargs["artifact_dir"] = str(artifact_dir)
+            if allow_external_paths is not None:
+                kwargs["allow_external_paths"] = bool(allow_external_paths)
+
+        with track_begin_run_phase("lifecycle.config_normalize_and_hash"):
+            if config is None:
+                config_dict: Dict[str, Any] = {}
+            elif isinstance(config, BaseModel):
+                config_dict = config.model_dump()
+            else:
+                config_dict = config
+
+            normalized_hash_inputs = _normalize_identity_inputs(hash_inputs)
+            if normalized_hash_inputs:
+                config_dict = dict(config_dict)
+                digest_map = tracker.identity.compute_hash_inputs_digests(
+                    normalized_hash_inputs
                 )
-            config_dict["__consist_hash_inputs__"] = digest_map
-            kwargs["consist_hash_inputs"] = digest_map
+                failed_digests = {
+                    label: digest
+                    for label, digest in digest_map.items()
+                    if isinstance(digest, str) and digest.startswith("ERROR:")
+                }
+                if failed_digests:
+                    failed_labels = ", ".join(sorted(failed_digests.keys()))
+                    raise ValueError(
+                        format_problem_cause_fix(
+                            problem=(
+                                "Failed to compute identity input digests for: "
+                                f"{failed_labels}."
+                            ),
+                            cause=(
+                                "One or more identity_inputs/hash_inputs paths are missing "
+                                "or unreadable."
+                            ),
+                            fix=(
+                                "Use the recommended path and pass existing files/directories "
+                                "in identity_inputs=[...], then retry."
+                            ),
+                        )
+                    )
+                if "__consist_hash_inputs__" in config_dict:
+                    logging.warning(
+                        "[Consist] Overwriting user-provided '__consist_hash_inputs__' in config for run %s.",
+                        run_id,
+                    )
+                config_dict["__consist_hash_inputs__"] = digest_map
+                kwargs["consist_hash_inputs"] = digest_map
 
-        config_dict = tracker.identity.normalize_json(config_dict)
-        if not isinstance(config_dict, MappingABC):
-            raise TypeError("config must be a mapping after normalization.")
-        validate_config_structure(config_dict)
+            config_dict = tracker.identity.normalize_json(config_dict)
+            if not isinstance(config_dict, MappingABC):
+                raise TypeError("config must be a mapping after normalization.")
+            validate_config_structure(config_dict)
 
-        config_hash = tracker.identity.compute_run_config_hash(
-            config=config_dict,
-            model=model,
-            year=year,
-            iteration=iteration,
-            cache_epoch=cache_epoch,
-            cache_version=cache_version,
-        )
-        identity_mode = code_identity or "repo_git"
-        try:
-            git_hash = tracker.identity.resolve_code_version(
-                mode=identity_mode,
-                func=code_identity_callable,
-                extra_deps=code_identity_extra_deps,
-            )
-        except Exception as exc:
-            logging.warning(
-                "[Consist] Failed to resolve code identity mode=%s for run %s: %s. "
-                "Falling back to repo git identity.",
-                identity_mode,
-                run_id,
-                exc,
-            )
-            git_hash = tracker.identity.get_code_version()
-        if code_identity is not None:
-            kwargs["code_identity"] = identity_mode
-        if code_identity_extra_deps:
-            kwargs["code_identity_extra_deps"] = list(code_identity_extra_deps)
-
-        kwargs["_physical_run_dir"] = str(tracker.run_dir)
-        if cache_epoch is not None:
-            kwargs["cache_epoch"] = cache_epoch
-        if cache_version is not None:
-            kwargs["cache_version"] = cache_version
-        if kwargs:
-            validate_run_meta(kwargs)
-
-        now = datetime.now(UTC)
-        run_stage = kwargs.get("stage")
-        run_phase = kwargs.get("phase")
-        run = Run(
-            id=run_id,
-            model_name=model,
-            description=description,
-            year=year,
-            iteration=iteration,
-            stage=run_stage if isinstance(run_stage, str) else None,
-            phase=run_phase if isinstance(run_phase, str) else None,
-            parent_run_id=parent_run_id,
-            tags=tags or [],
-            status="running",
-            config_hash=config_hash,
-            git_hash=git_hash,
-            meta=kwargs,
-            started_at=now,
-            created_at=now,
-        )
-        tracker._runs_by_id[run.id] = run
-
-        if run.meta is None:
-            run.meta = {}
-        run.meta.setdefault("mounts", dict(tracker.mounts))
-        if requested_input_materialization == "requested" and requested_input_paths:
-            run.meta["requested_input_staging"] = {
-                "materialization": requested_input_materialization,
-                "mode": requested_input_materialization_mode or "copy",
-                "input_paths": {
-                    key: str(Path(value).resolve())
-                    for key, value in requested_input_paths.items()
-                },
-            }
-
-        push_tracker(tracker)
-        tracker.current_consist = ConsistRecord(run=run, config=config_dict)
-        tracker._active_run_cache_options = ActiveRunCacheOptions(
-            cache_mode=cache_mode,
-            cache_hydration=cache_hydration,
-            materialize_cached_output_paths=materialize_cached_output_paths,
-            materialize_cached_outputs_dir=materialize_cached_outputs_dir,
-            materialize_cached_outputs_source_root=(
-                materialize_cached_outputs_source_root
-            ),
-            validate_cached_outputs=validate_cached_outputs,
-            requested_input_paths=requested_input_paths,
-            requested_input_materialization=requested_input_materialization,
-            requested_input_materialization_mode=(
-                requested_input_materialization_mode
-                or ("copy" if requested_input_materialization == "requested" else None)
-            ),
-        )
-
-        facet_dict = tracker.config_facets.resolve_facet_dict(
-            model=model, raw_config_model=raw_config_model, facet=facet, run_id=run.id
-        )
-        if facet_dict is not None:
-            tracker.current_consist.facet = facet_dict
-            schema_version = facet_schema_version
-            if (
-                schema_version is None
-                and raw_config_model is not None
-                and isinstance(raw_config_model, HasFacetSchemaVersion)
-            ):
-                schema_version = raw_config_model.facet_schema_version
-            tracker.config_facets.persist_facet(
-                run=run,
+            config_hash = tracker.identity.compute_run_config_hash(
+                config=config_dict,
                 model=model,
-                facet_dict=facet_dict,
-                schema_name=tracker.config_facets.infer_schema_name(
-                    raw_config_model, facet
-                ),
-                schema_version=schema_version,
-                index_kv=facet_index,
+                year=year,
+                iteration=iteration,
+                cache_epoch=cache_epoch,
+                cache_version=cache_version,
             )
+
+        identity_mode = code_identity or "repo_git"
+        with track_begin_run_phase("lifecycle.resolve_code_identity"):
+            try:
+                git_hash = tracker.identity.resolve_code_version(
+                    mode=identity_mode,
+                    func=code_identity_callable,
+                    extra_deps=code_identity_extra_deps,
+                )
+            except Exception as exc:
+                logging.warning(
+                    "[Consist] Failed to resolve code identity mode=%s for run %s: %s. "
+                    "Falling back to repo git identity.",
+                    identity_mode,
+                    run_id,
+                    exc,
+                )
+                git_hash = tracker.identity.get_code_version()
+
+        with track_begin_run_phase("lifecycle.create_run_and_bind_state"):
+            if code_identity is not None:
+                kwargs["code_identity"] = identity_mode
+            if code_identity_extra_deps:
+                kwargs["code_identity_extra_deps"] = list(code_identity_extra_deps)
+
+            kwargs["_physical_run_dir"] = str(tracker.run_dir)
+            if cache_epoch is not None:
+                kwargs["cache_epoch"] = cache_epoch
+            if cache_version is not None:
+                kwargs["cache_version"] = cache_version
+            if kwargs:
+                validate_run_meta(kwargs)
+
+            now = datetime.now(UTC)
+            run_stage = kwargs.get("stage")
+            run_phase = kwargs.get("phase")
+            run = Run(
+                id=run_id,
+                model_name=model,
+                description=description,
+                year=year,
+                iteration=iteration,
+                stage=run_stage if isinstance(run_stage, str) else None,
+                phase=run_phase if isinstance(run_phase, str) else None,
+                parent_run_id=parent_run_id,
+                tags=tags or [],
+                status="running",
+                config_hash=config_hash,
+                git_hash=git_hash,
+                meta=kwargs,
+                started_at=now,
+                created_at=now,
+            )
+            tracker._runs_by_id[run.id] = run
+
+            if run.meta is None:
+                run.meta = {}
+            run.meta.setdefault("mounts", dict(tracker.mounts))
+            if requested_input_materialization == "requested" and requested_input_paths:
+                run.meta["requested_input_staging"] = {
+                    "materialization": requested_input_materialization,
+                    "mode": requested_input_materialization_mode or "copy",
+                    "input_paths": {
+                        key: str(Path(value).resolve())
+                        for key, value in requested_input_paths.items()
+                    },
+                }
+
+            push_tracker(tracker)
+            tracker.current_consist = ConsistRecord(run=run, config=config_dict)
+            tracker._active_run_cache_options = ActiveRunCacheOptions(
+                cache_mode=cache_mode,
+                cache_hydration=cache_hydration,
+                materialize_cached_output_paths=materialize_cached_output_paths,
+                materialize_cached_outputs_dir=materialize_cached_outputs_dir,
+                materialize_cached_outputs_source_root=(
+                    materialize_cached_outputs_source_root
+                ),
+                validate_cached_outputs=validate_cached_outputs,
+                requested_input_paths=requested_input_paths,
+                requested_input_materialization=requested_input_materialization,
+                requested_input_materialization_mode=(
+                    requested_input_materialization_mode
+                    or (
+                        "copy"
+                        if requested_input_materialization == "requested"
+                        else None
+                    )
+                ),
+            )
+
+        with track_begin_run_phase("lifecycle.persist_config_facet"):
+            facet_dict = tracker.config_facets.resolve_facet_dict(
+                model=model,
+                raw_config_model=raw_config_model,
+                facet=facet,
+                run_id=run.id,
+            )
+            if facet_dict is not None:
+                tracker.current_consist.facet = facet_dict
+                schema_version = facet_schema_version
+                if (
+                    schema_version is None
+                    and raw_config_model is not None
+                    and isinstance(raw_config_model, HasFacetSchemaVersion)
+                ):
+                    schema_version = raw_config_model.facet_schema_version
+                tracker.config_facets.persist_facet(
+                    run=run,
+                    model=model,
+                    facet_dict=facet_dict,
+                    schema_name=tracker.config_facets.infer_schema_name(
+                        raw_config_model, facet
+                    ),
+                    schema_version=schema_version,
+                    index_kv=facet_index,
+                )
 
         current_consist = tracker.current_consist
         if current_consist is None:
             raise RuntimeError("Cannot start run: no active consist record.")
 
-        if inputs:
-            with tracker.persistence.batch_artifact_writes():
-                for item in inputs:
-                    if isinstance(item, Artifact):
-                        tracker.log_artifact(item, direction="input")
-                    else:
-                        key = Path(item).stem
-                        tracker.log_artifact(item, key=key, direction="input")
+        with track_begin_run_phase("input_binding.total"):
+            if inputs:
+                known_latest_by_index: Dict[int, Optional[Artifact]] = {}
+                if tracker.db:
+                    lookup_by_index: Dict[
+                        int, tuple[str, Optional[str], Optional[str], Optional[str]]
+                    ] = {}
+                    for index, item in enumerate(inputs):
+                        if isinstance(item, Artifact):
+                            continue
+                        path_item = Path(item)
+                        lookup = (
+                            tracker.fs.virtualize_path(str(path_item.resolve())),
+                            _infer_driver_from_path(path_item),
+                            None,
+                            None,
+                        )
+                        lookup_by_index[index] = lookup
+                    if lookup_by_index:
+                        bulk_latest = tracker.db.find_latest_artifacts_at_uris(
+                            list(lookup_by_index.values())
+                        )
+                        known_latest_by_index = {
+                            index: bulk_latest.get(lookup)
+                            for index, lookup in lookup_by_index.items()
+                        }
+                with tracker.persistence.batch_artifact_writes():
+                    for index, item in enumerate(inputs):
+                        if isinstance(item, Artifact):
+                            tracker._artifact_logging.log_artifact(
+                                item,
+                                direction="input",
+                            )
+                        else:
+                            key = Path(item).stem
+                            tracker._artifact_logging.log_artifact(
+                                item,
+                                key=key,
+                                direction="input",
+                                known_latest_artifact_at_uri=known_latest_by_index.get(
+                                    index
+                                ),
+                                latest_artifact_lookup_done=(
+                                    index in known_latest_by_index
+                                ),
+                            )
 
-        if not run.parent_run_id:
-            parent_candidates = [
-                a.run_id for a in current_consist.inputs if a.run_id is not None
-            ]
-            if parent_candidates:
-                run.parent_run_id = parent_candidates[-1]
+        with track_begin_run_phase("input_binding.parent_run_inference"):
+            if not run.parent_run_id:
+                parent_candidates = [
+                    a.run_id for a in current_consist.inputs if a.run_id is not None
+                ]
+                if parent_candidates:
+                    run.parent_run_id = parent_candidates[-1]
 
         try:
-            t0 = time.perf_counter()
-            tracker._prefetch_run_signatures(current_consist.inputs)
-            _log_timing("prefetch_run_signatures", t0)
-            t0 = time.perf_counter()
-            input_hash = tracker.identity.compute_input_hash(
-                current_consist.inputs,
-                path_resolver=tracker.resolve_uri,
-                signature_lookup=tracker._resolve_run_signature,
-            )
-            run.input_hash = input_hash
-            run.signature = tracker.identity.calculate_run_signature(
-                code_hash=git_hash,
-                config_hash=config_hash,
-                input_hash=input_hash,
-            )
-            _log_timing("compute_input_hash", t0)
+            with track_begin_run_phase("input_signature.total"):
+                t0 = time.perf_counter()
+                tracker._prefetch_run_signatures(current_consist.inputs)
+                _log_timing("prefetch_run_signatures", t0)
+                t0 = time.perf_counter()
+                input_hash = tracker.identity.compute_input_hash(
+                    current_consist.inputs,
+                    path_resolver=tracker.resolve_uri,
+                    signature_lookup=tracker._resolve_run_signature,
+                )
+                run.input_hash = input_hash
+                run.signature = tracker.identity.calculate_run_signature(
+                    code_hash=git_hash,
+                    config_hash=config_hash,
+                    input_hash=input_hash,
+                )
+                _log_timing("compute_input_hash", t0)
         except Exception as exc:
             logging.warning(
                 "[Consist Warning] Failed to compute inputs hash for run %s: %s",
@@ -523,56 +581,61 @@ class RunLifecycleCoordinator:
         cached_output_ids: Optional[List[uuid.UUID]] = None
 
         if cache_mode == "reuse":
-            cache_key = (
-                (run.config_hash, run.input_hash, run.git_hash)
-                if run.config_hash and run.input_hash and run.git_hash
-                else None
-            )
-            if debug_cache:
-                logging.info(
-                    "[Consist][cache] lookup key config=%s input=%s code=%s",
-                    run.config_hash,
-                    run.input_hash,
-                    run.git_hash,
+            with track_begin_run_phase("cache.lookup"):
+                cache_key = (
+                    (run.config_hash, run.input_hash, run.git_hash)
+                    if run.config_hash and run.input_hash and run.git_hash
+                    else None
                 )
-
-            cached_run = (
-                tracker._local_cache_index.get(cache_key) if cache_key else None
-            )
-            if cached_run is None:
-                t0 = time.perf_counter()
-                if cache_key:
-                    config_h, input_h, git_h = cache_key
-                    cached_run = tracker.find_matching_run(
-                        config_hash=config_h,
-                        input_hash=input_h,
-                        git_hash=git_h,
-                        signature=run.signature,
+                if debug_cache:
+                    logging.info(
+                        "[Consist][cache] lookup key config=%s input=%s code=%s",
+                        run.config_hash,
+                        run.input_hash,
+                        run.git_hash,
                     )
-                _log_timing("find_matching_run", t0)
-            cache_valid = False
-            if cached_run:
-                t0 = time.perf_counter()
-                cache_valid = validate_cached_run_outputs(
-                    tracker=cast(CacheValidationContext, tracker),
-                    run=cached_run,
-                    options=tracker._active_run_cache_options,
+
+                cached_run = (
+                    tracker._local_cache_index.get(cache_key) if cache_key else None
                 )
-                _log_timing("validate_cached_outputs", t0)
-            elif debug_cache:
-                logging.info("[Consist][cache] miss: no matching completed run.")
+                if cached_run is None:
+                    t0 = time.perf_counter()
+                    if cache_key:
+                        config_h, input_h, git_h = cache_key
+                        cached_run = tracker.find_matching_run(
+                            config_hash=config_h,
+                            input_hash=input_h,
+                            git_hash=git_h,
+                            signature=run.signature,
+                        )
+                    _log_timing("find_matching_run", t0)
+            with track_begin_run_phase("cache.validate"):
+                cache_valid = False
+                if cached_run:
+                    t0 = time.perf_counter()
+                    cache_valid = validate_cached_run_outputs(
+                        tracker=cast(CacheValidationContext, tracker),
+                        run=cached_run,
+                        options=tracker._active_run_cache_options,
+                    )
+                    _log_timing("validate_cached_outputs", t0)
+                elif debug_cache:
+                    logging.info("[Consist][cache] miss: no matching completed run.")
 
             if cached_run and cache_valid:
-                t0 = time.perf_counter()
-                cached_items = hydrate_cache_hit_outputs(
-                    tracker=cast(CacheHydrationContext, tracker),
-                    run=run,
-                    cached_run=cached_run,
-                    options=tracker._active_run_cache_options,
-                    link_outputs=False,
-                )
-                cached_output_ids = [art.id for art in cached_items.outputs.values()]
-                _log_timing("hydrate_cache_hit_outputs", t0)
+                with track_begin_run_phase("cache.hydrate_outputs"):
+                    t0 = time.perf_counter()
+                    cached_items = hydrate_cache_hit_outputs(
+                        tracker=cast(CacheHydrationContext, tracker),
+                        run=run,
+                        cached_run=cached_run,
+                        options=tracker._active_run_cache_options,
+                        link_outputs=False,
+                    )
+                    cached_output_ids = [
+                        art.id for art in cached_items.outputs.values()
+                    ]
+                    _log_timing("hydrate_cache_hit_outputs", t0)
                 if debug_cache:
                     logging.info(
                         "[Consist][cache] hit: cached_run=%s outputs=%d hydration=%s",
@@ -581,54 +644,58 @@ class RunLifecycleCoordinator:
                         tracker._active_run_cache_options.cache_hydration,
                     )
             else:
-                explanation = CacheMissExplainer(
-                    cast(CacheMissExplainerContext, tracker)
-                ).explain(
-                    run,
-                    cached_run=cached_run,
-                    cache_valid=cache_valid if cached_run else None,
-                )
-                run.meta["cache_miss_explanation"] = explanation.as_dict()
-                logging.info(
-                    "[Consist][cache] miss explanation: reason=%s candidate=%s",
-                    explanation.reason,
-                    explanation.candidate_run_id,
-                )
-                if cached_run and not cache_valid and debug_cache:
-                    logging.info(
-                        "[Consist][cache] miss: cached run %s failed validation.",
-                        cached_run.id,
+                with track_begin_run_phase("cache.explain_miss"):
+                    explanation = CacheMissExplainer(
+                        cast(CacheMissExplainerContext, tracker)
+                    ).explain(
+                        run,
+                        cached_run=cached_run,
+                        cache_valid=cache_valid if cached_run else None,
                     )
+                    run.meta["cache_miss_explanation"] = explanation.as_dict()
+                    logging.info(
+                        "[Consist][cache] miss explanation: reason=%s candidate=%s",
+                        explanation.reason,
+                        explanation.candidate_run_id,
+                    )
+                    if cached_run and not cache_valid and debug_cache:
+                        logging.info(
+                            "[Consist][cache] miss: cached run %s failed validation.",
+                            cached_run.id,
+                        )
                 logging.debug("🔄 [Consist] Cache Miss. Running...")
         elif cache_mode == "overwrite":
             logging.debug("⚠️ [Consist] Cache lookup skipped (Mode: Overwrite).")
         elif cache_mode == "readonly":
             logging.debug("👁️ [Consist] Read-only mode.")
 
-        if not tracker.current_consist.cached_run:
-            materialize_missing_inputs(
-                tracker=cast(CacheMaterializationContext, tracker),
-                options=tracker._active_run_cache_options,
-            )
+        with track_begin_run_phase("input.materialize_missing_inputs"):
+            if not tracker.current_consist.cached_run:
+                materialize_missing_inputs(
+                    tracker=cast(CacheMaterializationContext, tracker),
+                    options=tracker._active_run_cache_options,
+                )
 
-        if requested_input_materialization == "requested" and requested_input_paths:
-            staged_inputs = materialize_requested_inputs(
-                tracker=cast(CacheMaterializationContext, tracker),
-                options=tracker._active_run_cache_options,
-            )
-            if staged_inputs:
-                run.meta["staged_inputs"] = staged_inputs
+        with track_begin_run_phase("input.materialize_requested_inputs"):
+            if requested_input_materialization == "requested" and requested_input_paths:
+                staged_inputs = materialize_requested_inputs(
+                    tracker=cast(CacheMaterializationContext, tracker),
+                    options=tracker._active_run_cache_options,
+                )
+                if staged_inputs:
+                    run.meta["staged_inputs"] = staged_inputs
 
-        tracker._flush_json()
-        if cached_output_ids and tracker.db:
-            tracker.persistence.sync_run_with_links(
-                run,
-                artifact_ids=cached_output_ids,
-                direction="output",
-            )
-        else:
-            tracker._sync_run_to_db(run)
-        tracker._emit_run_start(run)
+        with track_begin_run_phase("lifecycle.final_persist_and_emit"):
+            tracker._flush_json()
+            if cached_output_ids and tracker.db:
+                tracker.persistence.sync_run_with_links(
+                    run,
+                    artifact_ids=cached_output_ids,
+                    direction="output",
+                )
+            else:
+                tracker._sync_run_to_db(run)
+            tracker._emit_run_start(run)
 
         return run
 

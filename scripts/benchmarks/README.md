@@ -60,9 +60,15 @@ Output:
 - JSON report at `benchmarks/results/<timestamp>/metadata_hot_paths.json`
 - Concise summary printed to stdout
 - Attribution metric `cache.hit.begin_run_attribution`, which records a separate
-  warmed-path cache-hit sample broken down by internal `begin_run` seams:
-  config hashing, code identity, input binding, input hashing, cache lookup,
-  cache validation, cache hydration, JSON flush, and DB sync.
+  warmed-path cache-hit sample with `begin_run_ms` and `end_run_ms`, plus
+  internal `begin_run` phase seams: validation/option parsing, config hashing,
+  code identity, run-state setup, config facet persistence, input binding,
+  input hashing, cache lookup, cache validation, cache hydration, materialization,
+  JSON flush, and DB sync.
+- Input-binding sub-attribution labels include artifact construction,
+  bulk latest-artifact URI lookup, single latest-artifact URI lookup, inherited
+  metadata application, in-memory attachment, batched JSON flush, and batched
+  artifact DB sync.
 
 Useful diagnostic switches:
 - `--tracker-reuse cold|warm`: compare fresh tracker/session setup against in-process

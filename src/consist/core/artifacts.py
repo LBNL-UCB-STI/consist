@@ -260,6 +260,8 @@ class ArtifactManager:
         reuse_if_unchanged: bool = False,
         reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
         parent_artifact_id: Optional[uuid.UUID] = None,
+        known_latest_artifact_at_uri: Optional[Artifact] = None,
+        latest_artifact_lookup_done: bool = False,
         **meta: Any,
     ) -> Artifact:
         """
@@ -512,12 +514,14 @@ class ArtifactManager:
                 driver = _infer_driver_from_path(Path(path))
 
             if direction == "input" and self.tracker.db:
-                parent = self.tracker.db.find_latest_artifact_at_uri(
-                    container_uri,
-                    driver=driver,
-                    table_path=table_path,
-                    array_path=array_path,
-                )
+                parent = known_latest_artifact_at_uri
+                if not latest_artifact_lookup_done:
+                    parent = self.tracker.db.find_latest_artifact_at_uri(
+                        container_uri,
+                        driver=driver,
+                        table_path=table_path,
+                        array_path=array_path,
+                    )
                 if parent:
                     should_reuse = True
                     if driver in {"h5", "hdf5"}:

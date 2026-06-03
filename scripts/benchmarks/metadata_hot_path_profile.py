@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from consist.core import tracker_lifecycle  # noqa: E402
+from consist.core.performance_attribution import begin_run_phase_profiler  # noqa: E402
 from consist.core.tracker import Tracker  # noqa: E402
 
 MODEL_NAME = "metadata_hot_paths"
@@ -109,6 +110,17 @@ def _begin_run_attribution(tracker: Tracker) -> Iterator[AttributionTimer]:
         "identity.resolve_code_version",
     )
     timer.wrap_attr(tracker, "log_artifact", "input_binding.log_artifact")
+    if tracker.db is not None:
+        timer.wrap_attr(
+            tracker.db,
+            "find_latest_artifact_at_uri",
+            "input_binding.find_latest_artifact_at_uri",
+        )
+        timer.wrap_attr(
+            tracker.db,
+            "find_latest_artifacts_at_uris",
+            "input_binding.find_latest_artifacts_at_uris",
+        )
     timer.wrap_attr(
         tracker, "_prefetch_run_signatures", "input.prefetch_run_signatures"
     )
@@ -463,19 +475,28 @@ def _profile_cache_hit_attribution(
         tracker = warm_tracker or tracker_factory()
         run_id = f"cache_hit_attr_{next(sample_counter):05d}"
         started = time.perf_counter()
+        begin_started = started
+        begin_elapsed = 0.0
+        end_elapsed = 0.0
         with _begin_run_attribution(tracker) as attribution:
-            with tracker.start_run(
-                run_id,
-                model=MODEL_NAME,
-                config=config,
-                inputs=input_paths,
-                cache_mode="reuse",
-                validate_cached_outputs="lazy",
-                **identity_kwargs,
-            ):
-                pass
+            with begin_run_phase_profiler(attribution):
+                tracker.begin_run(
+                    run_id,
+                    model=MODEL_NAME,
+                    config=config,
+                    inputs=input_paths,
+                    cache_mode="reuse",
+                    validate_cached_outputs="lazy",
+                    **identity_kwargs,
+                )
+            begin_elapsed = (time.perf_counter() - begin_started) * 1000.0
+            end_started = time.perf_counter()
+            tracker.end_run()
+            end_elapsed = (time.perf_counter() - end_started) * 1000.0
         return {
             "total_ms": (time.perf_counter() - started) * 1000.0,
+            "begin_run_ms": begin_elapsed,
+            "end_run_ms": end_elapsed,
             "attribution": attribution.summary(),
         }
 
@@ -488,6 +509,12 @@ def _profile_cache_hit_attribution(
         "samples_ms": samples,
         "summary_ms": {
             "total_ms": _summarize_samples([sample["total_ms"] for sample in samples]),
+            "begin_run_ms": _summarize_samples(
+                [sample["begin_run_ms"] for sample in samples]
+            ),
+            "end_run_ms": _summarize_samples(
+                [sample["end_run_ms"] for sample in samples]
+            ),
         },
         "attribution_summary_ms": {
             label: {

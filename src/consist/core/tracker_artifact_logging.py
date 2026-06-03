@@ -15,6 +15,7 @@ from sqlmodel import SQLModel
 from consist.core.cache_output_logging import (
     maybe_return_cached_output_or_demote_cache_hit,
 )
+from consist.core.performance_attribution import track_begin_run_phase
 from consist.models.artifact import Artifact, set_tracker_ref
 from consist.types import ArtifactRef, FacetLike, HasFacetSchemaVersion
 
@@ -138,6 +139,8 @@ class ArtifactLoggingCoordinator:
         facet: Optional[FacetLike] = None,
         facet_schema_version: Optional[Union[str, int]] = None,
         facet_index: bool = False,
+        known_latest_artifact_at_uri: Optional[Artifact] = None,
+        latest_artifact_lookup_done: bool = False,
         **meta: Any,
     ) -> Artifact:
         """Log one artifact while preserving tracker run-state invariants.
@@ -214,28 +217,32 @@ class ArtifactLoggingCoordinator:
 
         run_id = tracker.current_consist.run.id if direction == "output" else None
 
-        artifact_obj = tracker.artifacts.create_artifact(
-            path,
-            run_id,
-            key,
-            direction,
-            schema,
-            driver,
-            table_path=table_path,
-            array_path=array_path,
-            content_hash=content_hash,
-            force_hash_override=force_hash_override,
-            validate_content_hash=validate_content_hash,
-            reuse_if_unchanged=reuse_if_unchanged,
-            reuse_scope=reuse_scope,
-            **meta,
-        )
-        prepared_artifact_facet_bundle = self.prepare_artifact_facet_bundle(
-            artifact=artifact_obj,
-            facet=facet,
-            facet_schema_version=facet_schema_version,
-            facet_index=facet_index,
-        )
+        with track_begin_run_phase("input_binding.create_artifact"):
+            artifact_obj = tracker.artifacts.create_artifact(
+                path,
+                run_id,
+                key,
+                direction,
+                schema,
+                driver,
+                table_path=table_path,
+                array_path=array_path,
+                content_hash=content_hash,
+                force_hash_override=force_hash_override,
+                validate_content_hash=validate_content_hash,
+                reuse_if_unchanged=reuse_if_unchanged,
+                reuse_scope=reuse_scope,
+                known_latest_artifact_at_uri=known_latest_artifact_at_uri,
+                latest_artifact_lookup_done=latest_artifact_lookup_done,
+                **meta,
+            )
+        with track_begin_run_phase("input_binding.prepare_facet"):
+            prepared_artifact_facet_bundle = self.prepare_artifact_facet_bundle(
+                artifact=artifact_obj,
+                facet=facet,
+                facet_schema_version=facet_schema_version,
+                facet_index=facet_index,
+            )
 
         if isinstance(path, Artifact) and direction == "output":
             producing_run_id = artifact_obj.run_id
@@ -249,12 +256,14 @@ class ArtifactLoggingCoordinator:
                     getattr(artifact_obj, "key", None),
                     getattr(artifact_obj, "id", None),
                 )
-        self.apply_inherited_run_metadata(artifact_obj)
-        self.attach_logged_artifact(
-            artifact=artifact_obj,
-            direction=direction,
-            register_with_coupler=True,
-        )
+        with track_begin_run_phase("input_binding.apply_inherited_metadata"):
+            self.apply_inherited_run_metadata(artifact_obj)
+        with track_begin_run_phase("input_binding.attach_logged_artifact"):
+            self.attach_logged_artifact(
+                artifact=artifact_obj,
+                direction=direction,
+                register_with_coupler=True,
+            )
 
         # Preserve dual-write ordering so snapshot state reflects artifact links
         # before DB synchronization side effects occur.

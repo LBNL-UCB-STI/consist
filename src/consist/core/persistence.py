@@ -281,6 +281,24 @@ def _clone_artifact_content(row: ArtifactContent) -> ArtifactContent:
     )
 
 
+def _clone_artifact(row: Artifact) -> Artifact:
+    """Return a detached artifact copy safe to reuse outside a DB session."""
+    return Artifact(
+        id=row.id,
+        key=row.key,
+        container_uri=row.container_uri,
+        table_path=row.table_path,
+        array_path=row.array_path,
+        driver=row.driver,
+        hash=row.hash,
+        content_id=row.content_id,
+        parent_artifact_id=row.parent_artifact_id,
+        run_id=row.run_id,
+        meta=dict(row.meta or {}),
+        created_at=row.created_at,
+    )
+
+
 def _profile_call_name(name: str, profile_label: Optional[str] = None) -> str:
     """Build an internal profiler label, optionally with a caller sub-label."""
     if not profile_label:
@@ -1789,6 +1807,74 @@ class DatabaseManager:
                 return self.execute_with_retry(_query)
         except Exception:
             return None
+
+    def find_latest_artifacts_at_uris(
+        self,
+        lookups: Sequence[Tuple[str, Optional[str], Optional[str], Optional[str]]],
+    ) -> Dict[
+        Tuple[str, Optional[str], Optional[str], Optional[str]], Optional[Artifact]
+    ]:
+        """
+        Bulk variant of produced-artifact URI lookup.
+
+        Each lookup tuple is ``(uri, driver, table_path, array_path)`` and mirrors
+        ``find_latest_artifact_at_uri(..., run_id=None, include_inputs=False)``.
+        """
+        if not lookups:
+            return {}
+
+        unique_lookups = list(dict.fromkeys(lookups))
+        results: Dict[
+            Tuple[str, Optional[str], Optional[str], Optional[str]], Optional[Artifact]
+        ] = {lookup: None for lookup in unique_lookups}
+        lookups_by_uri: Dict[
+            str, List[Tuple[str, Optional[str], Optional[str], Optional[str]]]
+        ] = {}
+        for lookup in unique_lookups:
+            lookups_by_uri.setdefault(lookup[0], []).append(lookup)
+
+        def _matches_lookup(
+            artifact: Artifact,
+            lookup: Tuple[str, Optional[str], Optional[str], Optional[str]],
+        ) -> bool:
+            _, lookup_driver, lookup_table_path, lookup_array_path = lookup
+            if lookup_driver is not None and artifact.driver != lookup_driver:
+                return False
+            if (
+                lookup_table_path is not None
+                and artifact.table_path != lookup_table_path
+            ):
+                return False
+            return not (
+                lookup_array_path is not None
+                and artifact.array_path != lookup_array_path
+            )
+
+        def _query() -> Dict[
+            Tuple[str, Optional[str], Optional[str], Optional[str]],
+            Optional[Artifact],
+        ]:
+            with self.session_scope() as session:
+                rows = session.exec(
+                    select(Artifact)
+                    .where(col(Artifact.container_uri).in_(list(lookups_by_uri)))
+                    .where(col(Artifact.run_id).is_not(None))
+                    .order_by(col(Artifact.created_at).desc())
+                ).all()
+
+            for row in rows:
+                for lookup in lookups_by_uri.get(row.container_uri, []):
+                    if results[lookup] is not None:
+                        continue
+                    if _matches_lookup(row, lookup):
+                        results[lookup] = _clone_artifact(row)
+            return dict(results)
+
+        try:
+            with _DB_CALL_PROFILER.track("find_latest_artifacts_at_uris"):
+                return self.execute_with_retry(_query)
+        except Exception:
+            return dict(results)
 
     def find_latest_artifact_by_hash(
         self,
