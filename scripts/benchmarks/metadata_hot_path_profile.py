@@ -28,6 +28,8 @@ MODEL_NAME = "metadata_hot_paths"
 SEED_INPUT_COUNT = 2
 SEED_OUTPUT_COUNT = 1
 SEED_CONFIG_KEYS = 8
+CODE_IDENTITY_MODES = ("repo_git", "callable_module", "callable_source")
+TRACKER_REUSE_MODES = ("cold", "warm")
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,21 @@ class ReferenceRun:
     config_hash: str
     input_hash: str
     git_hash: str
+
+
+def _benchmark_code_identity_callable() -> None:
+    """Stable top-level callable used for callable-scoped code identity modes."""
+
+
+def _code_identity_kwargs(mode: str) -> dict[str, Any]:
+    if mode == "repo_git":
+        return {"code_identity": "repo_git"}
+    if mode in {"callable_module", "callable_source"}:
+        return {
+            "code_identity": mode,
+            "_consist_code_identity_callable": _benchmark_code_identity_callable,
+        }
+    raise ValueError(f"Unsupported code identity mode: {mode!r}")
 
 
 class AttributionTimer:
@@ -226,7 +243,9 @@ def _seed_background_runs(
     input_paths: list[Path],
     output_path: Path,
     seed_runs: int,
+    code_identity: str,
 ) -> None:
+    identity_kwargs = _code_identity_kwargs(code_identity)
     for index in range(seed_runs):
         run_id = f"seed_{index:05d}"
         with tracker.start_run(
@@ -235,6 +254,7 @@ def _seed_background_runs(
             config=_make_config("seed", config_keys=SEED_CONFIG_KEYS, sample_index=index),
             inputs=input_paths[:SEED_INPUT_COUNT],
             cache_mode="overwrite",
+            **identity_kwargs,
         ):
             tracker.log_artifact(
                 output_path,
@@ -251,6 +271,7 @@ def _seed_reference_run(
     input_paths: list[Path],
     output_paths: dict[str, Path],
     config_keys: int,
+    code_identity: str,
 ) -> ReferenceRun:
     with tracker.start_run(
         run_id,
@@ -262,6 +283,7 @@ def _seed_reference_run(
         ),
         inputs=input_paths,
         cache_mode="overwrite",
+        **_code_identity_kwargs(code_identity),
     ):
         tracker.log_artifacts(output_paths, direction="output")
     run = tracker.get_run(run_id)
@@ -283,6 +305,7 @@ def _profile_write_path(
     input_paths: list[Path],
     output_paths: dict[str, Path],
     config_keys: int,
+    code_identity: str,
     repeats: int,
     warmup: int,
 ) -> dict[str, Any]:
@@ -303,6 +326,7 @@ def _profile_write_path(
             ),
             inputs=input_paths,
             cache_mode="overwrite",
+            **_code_identity_kwargs(code_identity),
         )
         begin_elapsed = (time.perf_counter() - started) * 1000.0
 
@@ -340,11 +364,14 @@ def _profile_find_matching_run(
     *,
     tracker_factory: Callable[[], Tracker],
     reference_run: ReferenceRun,
+    tracker_reuse: str,
     repeats: int,
     warmup: int,
 ) -> dict[str, Any]:
+    warm_tracker = tracker_factory() if tracker_reuse == "warm" else None
+
     def _sample() -> None:
-        tracker = tracker_factory()
+        tracker = warm_tracker or tracker_factory()
         match = tracker.find_matching_run(
             reference_run.config_hash,
             reference_run.input_hash,
@@ -364,11 +391,14 @@ def _profile_artifact_hydration(
     *,
     tracker_factory: Callable[[], Tracker],
     reference_run: ReferenceRun,
+    tracker_reuse: str,
     repeats: int,
     warmup: int,
 ) -> dict[str, Any]:
+    warm_tracker = tracker_factory() if tracker_reuse == "warm" else None
+
     def _sample() -> None:
-        tracker = tracker_factory()
+        tracker = warm_tracker or tracker_factory()
         artifacts = tracker.get_artifacts_for_run(reference_run.run_id)
         if not artifacts.outputs:
             raise RuntimeError("Expected hydrated outputs for the reference run.")
@@ -381,13 +411,17 @@ def _profile_cache_hit(
     tracker_factory: Callable[[], Tracker],
     input_paths: list[Path],
     config: dict[str, Any],
+    code_identity: str,
+    tracker_reuse: str,
     repeats: int,
     warmup: int,
 ) -> dict[str, Any]:
     sample_counter = itertools.count()
+    warm_tracker = tracker_factory() if tracker_reuse == "warm" else None
+    identity_kwargs = _code_identity_kwargs(code_identity)
 
     def _sample() -> None:
-        tracker = tracker_factory()
+        tracker = warm_tracker or tracker_factory()
         run_id = f"cache_hit_{next(sample_counter):05d}"
         with tracker.start_run(
             run_id,
@@ -396,6 +430,7 @@ def _profile_cache_hit(
             inputs=input_paths,
             cache_mode="reuse",
             validate_cached_outputs="lazy",
+            **identity_kwargs,
         ):
             pass
 
@@ -407,13 +442,17 @@ def _profile_cache_hit_attribution(
     tracker_factory: Callable[[], Tracker],
     input_paths: list[Path],
     config: dict[str, Any],
+    code_identity: str,
+    tracker_reuse: str,
     repeats: int,
     warmup: int,
 ) -> dict[str, Any]:
     sample_counter = itertools.count()
+    warm_tracker = tracker_factory() if tracker_reuse == "warm" else None
+    identity_kwargs = _code_identity_kwargs(code_identity)
 
     def _sample() -> dict[str, Any]:
-        tracker = tracker_factory()
+        tracker = warm_tracker or tracker_factory()
         run_id = f"cache_hit_attr_{next(sample_counter):05d}"
         started = time.perf_counter()
         with _begin_run_attribution(tracker) as attribution:
@@ -424,6 +463,7 @@ def _profile_cache_hit_attribution(
                 inputs=input_paths,
                 cache_mode="reuse",
                 validate_cached_outputs="lazy",
+                **identity_kwargs,
             ):
                 pass
         return {
@@ -513,6 +553,21 @@ def _parse_args() -> argparse.Namespace:
         default=1,
         help="Warmup samples to discard for each hot path.",
     )
+    parser.add_argument(
+        "--code-identity",
+        choices=CODE_IDENTITY_MODES,
+        default="repo_git",
+        help="Code identity mode used for seeded and measured runs.",
+    )
+    parser.add_argument(
+        "--tracker-reuse",
+        choices=TRACKER_REUSE_MODES,
+        default="cold",
+        help=(
+            "Use a fresh tracker per measured sample ('cold') or reuse one tracker "
+            "within each metric ('warm')."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -531,10 +586,12 @@ def main() -> int:
     if args.warmup < 0:
         raise ValueError("--warmup must be >= 0.")
 
+    explicit_out = args.out is not None
     out_path = args.out or _default_out_path()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    base_dir = out_path.parent
+    base_dir = out_path.with_suffix("") if explicit_out else out_path.parent
+    base_dir.mkdir(parents=True, exist_ok=True)
     seed_run_dir = base_dir / "seed_runs"
     replay_run_dir = base_dir / "replay_runs"
     db_path = base_dir / "metadata_hot_paths.duckdb"
@@ -553,6 +610,7 @@ def main() -> int:
         input_paths=reference_inputs,
         output_path=seed_output_path,
         seed_runs=args.seed_runs,
+        code_identity=args.code_identity,
     )
     wide_reference_run = _seed_reference_run(
         seed_tracker,
@@ -561,6 +619,7 @@ def main() -> int:
         input_paths=reference_inputs,
         output_paths=reference_outputs,
         config_keys=args.config_keys,
+        code_identity=args.code_identity,
     )
     attribution_reference_run = _seed_reference_run(
         seed_tracker,
@@ -569,6 +628,7 @@ def main() -> int:
         input_paths=reference_inputs,
         output_paths=reference_outputs,
         config_keys=args.config_keys,
+        code_identity=args.code_identity,
     )
 
     def replay_tracker_factory() -> Tracker:
@@ -580,6 +640,7 @@ def main() -> int:
         input_paths=reference_inputs,
         output_paths=reference_outputs,
         config_keys=args.config_keys,
+        code_identity=args.code_identity,
         repeats=args.repeats,
         warmup=args.warmup,
     )
@@ -587,12 +648,14 @@ def main() -> int:
     lookup_profile = _profile_find_matching_run(
         tracker_factory=replay_tracker_factory,
         reference_run=wide_reference_run,
+        tracker_reuse=args.tracker_reuse,
         repeats=args.repeats,
         warmup=args.warmup,
     )
     artifact_profile = _profile_artifact_hydration(
         tracker_factory=replay_tracker_factory,
         reference_run=wide_reference_run,
+        tracker_reuse=args.tracker_reuse,
         repeats=args.repeats,
         warmup=args.warmup,
     )
@@ -604,6 +667,8 @@ def main() -> int:
             config_keys=args.config_keys,
             sample_index=0,
         ),
+        code_identity=args.code_identity,
+        tracker_reuse=args.tracker_reuse,
         repeats=args.repeats,
         warmup=args.warmup,
     )
@@ -615,6 +680,8 @@ def main() -> int:
             config_keys=args.config_keys,
             sample_index=0,
         ),
+        code_identity=args.code_identity,
+        tracker_reuse=args.tracker_reuse,
         repeats=args.repeats,
         warmup=args.warmup,
     )
@@ -640,6 +707,8 @@ def main() -> int:
             "config_keys": args.config_keys,
             "repeats": args.repeats,
             "warmup": args.warmup,
+            "code_identity": args.code_identity,
+            "tracker_reuse": args.tracker_reuse,
             "seed_input_count": SEED_INPUT_COUNT,
             "seed_output_count": SEED_OUTPUT_COUNT,
             "seed_config_keys": SEED_CONFIG_KEYS,

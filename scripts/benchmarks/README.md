@@ -51,7 +51,9 @@ python scripts/benchmarks/metadata_hot_path_profile.py \
   --outputs 15 \
   --config-keys 200 \
   --repeats 5 \
-  --warmup 1
+  --warmup 1 \
+  --tracker-reuse cold \
+  --code-identity repo_git
 ```
 
 Output:
@@ -61,6 +63,12 @@ Output:
   warmed-path cache-hit sample broken down by internal `begin_run` seams:
   config hashing, code identity, input binding, input hashing, cache lookup,
   cache validation, cache hydration, JSON flush, and DB sync.
+
+Useful diagnostic switches:
+- `--tracker-reuse cold|warm`: compare fresh tracker/session setup against in-process
+  tracker reuse.
+- `--code-identity repo_git|callable_module|callable_source`: compare repository Git
+  identity against callable-scoped identity modes.
 
 Record representative A1 runs in
 `docs-internal/2026-06-03-roadmap-benchmark-log.md` before starting A2/A4+A5
