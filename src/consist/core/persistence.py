@@ -755,8 +755,8 @@ class DatabaseManager:
                 with self.session_scope() as session:
                     with track_begin_run_phase("db.sync_run.stage_phase"):
                         self._sync_run_stage_phase(run)
-                # Use merge for a simple upsert. DuckDB's MERGE semantics via SQLModel
-                # handle inserts and updates in one call and avoid stale state issues.
+                    # Use merge for a simple upsert. DuckDB's MERGE semantics via SQLModel
+                    # handle inserts and updates in one call and avoid stale state issues.
                     logging.debug(
                         f"[DB sync_run] upserting run={run.id} status={run.status}"
                     )
@@ -1639,9 +1639,7 @@ class DatabaseManager:
 
         try:
             with _DB_CALL_PROFILER.track("sync_run_with_links"):
-                with track_begin_run_phase(
-                    "db.sync_run_with_links.execute_with_retry"
-                ):
+                with track_begin_run_phase("db.sync_run_with_links.execute_with_retry"):
                     self.execute_with_retry(
                         _do_sync, operation_name="sync_run_with_links"
                     )
@@ -1752,9 +1750,14 @@ class DatabaseManager:
                                 new_artifacts.append(artifact)
 
                     if new_artifacts:
-                        with track_begin_run_phase("db.sync_artifacts.add_new_artifacts"):
+                        with track_begin_run_phase(
+                            "db.sync_artifacts.add_new_artifacts"
+                        ):
                             session.add_all(
-                                [_clone_artifact(artifact) for artifact in new_artifacts]
+                                [
+                                    _clone_artifact(artifact)
+                                    for artifact in new_artifacts
+                                ]
                             )
                     if existing_artifacts:
                         with track_begin_run_phase(
@@ -1763,7 +1766,9 @@ class DatabaseManager:
                             for artifact in existing_artifacts:
                                 session.merge(artifact)
 
-                    with track_begin_run_phase("db.sync_artifacts.query_existing_links"):
+                    with track_begin_run_phase(
+                        "db.sync_artifacts.query_existing_links"
+                    ):
                         existing = session.exec(
                             select(RunArtifactLink)
                             .where(RunArtifactLink.run_id == run_id)
