@@ -37,7 +37,7 @@ from consist.core.cache_miss_explainer import (
 )
 from consist.core.context import pop_tracker, push_tracker
 from consist.core.error_messages import format_problem_cause_fix
-from consist.core.performance_attribution import track_begin_run_phase
+from consist.core._performance_attribution import track_begin_run_phase
 from consist.core.validation import (
     validate_config_structure,
     validate_run_meta,

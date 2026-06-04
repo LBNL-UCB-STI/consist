@@ -8,7 +8,7 @@ import tempfile
 from typing import Any, Dict, Iterator, List, Optional, Sequence, TYPE_CHECKING
 import uuid
 
-from consist.core.performance_attribution import track_begin_run_phase
+from consist.core._performance_attribution import track_begin_run_phase
 from consist.models.artifact_facet import ArtifactFacet
 from consist.models.artifact_kv import ArtifactKV
 

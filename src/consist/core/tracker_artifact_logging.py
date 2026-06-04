@@ -15,7 +15,7 @@ from sqlmodel import SQLModel
 from consist.core.cache_output_logging import (
     maybe_return_cached_output_or_demote_cache_hit,
 )
-from consist.core.performance_attribution import track_begin_run_phase
+from consist.core._performance_attribution import track_begin_run_phase
 from consist.models.artifact import Artifact, set_tracker_ref
 from consist.types import ArtifactRef, FacetLike, HasFacetSchemaVersion
 

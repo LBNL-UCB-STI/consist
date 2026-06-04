@@ -22,7 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from consist.core import tracker_lifecycle  # noqa: E402
-from consist.core.performance_attribution import begin_run_phase_profiler  # noqa: E402
+from consist.core._performance_attribution import begin_run_phase_profiler  # noqa: E402
 from consist.core.tracker import Tracker  # noqa: E402
 
 MODEL_NAME = "metadata_hot_paths"

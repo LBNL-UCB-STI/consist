@@ -34,7 +34,7 @@ from sqlmodel import create_engine, Session, select, SQLModel, col, delete
 
 from consist.core.db_runtime import DatabaseRuntimeOps
 from consist.core.db_snapshot import DatabaseSnapshotOps
-from consist.core.performance_attribution import track_begin_run_phase
+from consist.core._performance_attribution import track_begin_run_phase
 from consist.core.provenance_writer import ProvenanceWriter
 from consist.core.schema_compat import (
     apply_artifact_parent_compatibility,
