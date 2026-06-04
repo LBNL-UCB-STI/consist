@@ -11,7 +11,6 @@ runnable and stable; put dated results and decisions in
 | Benchmark | Command | Measures | Roadmap use |
 |---|---|---|---|
 | Metadata hot paths | `python scripts/benchmarks/metadata_hot_path_profile.py` | Cache lookup, artifact/link hydration, cache-hit replay, run/logging persistence | Shared-DB A1 baseline; directs A2/A4+A5 |
-| Cache-hit profiler | `python scripts/profile_cache_hits.py` | Focused cache-hit behavior with output validation/access options | Debug cache-hit edge cases before/after A2 |
 | Large-DB stress profile | `python -m pytest -m heavy tests/stress/tracker/test_large_db_scale.py` | Scale queries, cache lookup, write hot paths at large DB sizes | Heavy validation before claiming scale improvements |
 | CLI startup | `python scripts/benchmarks/cli_startup_benchmark.py` | CLI cold-start latency | CLI UX/regression tracking |
 
