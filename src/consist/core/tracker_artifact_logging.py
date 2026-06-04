@@ -15,7 +15,7 @@ from sqlmodel import SQLModel
 from consist.core.cache_output_logging import (
     maybe_return_cached_output_or_demote_cache_hit,
 )
-from consist.core._performance_attribution import track_begin_run_phase
+from consist.core._performance_attribution import _track_begin_run_phase
 from consist.models.artifact import Artifact, set_tracker_ref
 from consist.types import ArtifactRef, FacetLike, HasFacetSchemaVersion
 
@@ -217,7 +217,7 @@ class ArtifactLoggingCoordinator:
 
         run_id = tracker.current_consist.run.id if direction == "output" else None
 
-        with track_begin_run_phase("input_binding.create_artifact"):
+        with _track_begin_run_phase("input_binding.create_artifact"):
             artifact_obj = tracker.artifacts.create_artifact(
                 path,
                 run_id,
@@ -236,7 +236,7 @@ class ArtifactLoggingCoordinator:
                 latest_artifact_lookup_done=latest_artifact_lookup_done,
                 **meta,
             )
-        with track_begin_run_phase("input_binding.prepare_facet"):
+        with _track_begin_run_phase("input_binding.prepare_facet"):
             prepared_artifact_facet_bundle = self.prepare_artifact_facet_bundle(
                 artifact=artifact_obj,
                 facet=facet,
@@ -256,9 +256,9 @@ class ArtifactLoggingCoordinator:
                     getattr(artifact_obj, "key", None),
                     getattr(artifact_obj, "id", None),
                 )
-        with track_begin_run_phase("input_binding.apply_inherited_metadata"):
+        with _track_begin_run_phase("input_binding.apply_inherited_metadata"):
             self.apply_inherited_run_metadata(artifact_obj)
-        with track_begin_run_phase("input_binding.attach_logged_artifact"):
+        with _track_begin_run_phase("input_binding.attach_logged_artifact"):
             self.attach_logged_artifact(
                 artifact=artifact_obj,
                 direction=direction,

@@ -31,7 +31,7 @@ def begin_run_phase_profiler(profiler: PhaseProfiler) -> Iterator[None]:
 
 
 @contextmanager
-def track_begin_run_phase(label: str) -> Iterator[None]:
+def _track_begin_run_phase(label: str) -> Iterator[None]:
     """Record a begin-run phase when benchmark attribution is active."""
     profiler = _BEGIN_RUN_PHASE_PROFILER.get()
     if profiler is None:

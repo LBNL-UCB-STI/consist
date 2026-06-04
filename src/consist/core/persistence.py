@@ -34,7 +34,7 @@ from sqlmodel import create_engine, Session, select, SQLModel, col, delete
 
 from consist.core.db_runtime import DatabaseRuntimeOps
 from consist.core.db_snapshot import DatabaseSnapshotOps
-from consist.core._performance_attribution import track_begin_run_phase
+from consist.core._performance_attribution import _track_begin_run_phase
 from consist.core.provenance_writer import ProvenanceWriter
 from consist.core.schema_compat import (
     apply_artifact_parent_compatibility,
@@ -751,18 +751,18 @@ class DatabaseManager:
         """Upserts a Run object."""
 
         def _do_sync():
-            with track_begin_run_phase("db.sync_run.session_scope"):
+            with _track_begin_run_phase("db.sync_run.session_scope"):
                 with self.session_scope() as session:
-                    with track_begin_run_phase("db.sync_run.stage_phase"):
+                    with _track_begin_run_phase("db.sync_run.stage_phase"):
                         self._sync_run_stage_phase(run)
                     # Use merge for a simple upsert. DuckDB's MERGE semantics via SQLModel
                     # handle inserts and updates in one call and avoid stale state issues.
                     logging.debug(
                         f"[DB sync_run] upserting run={run.id} status={run.status}"
                     )
-                    with track_begin_run_phase("db.sync_run.merge_run"):
+                    with _track_begin_run_phase("db.sync_run.merge_run"):
                         session.merge(run)
-                    with track_begin_run_phase("db.sync_run.commit"):
+                    with _track_begin_run_phase("db.sync_run.commit"):
                         session.commit()
                     if logging.getLogger().isEnabledFor(logging.DEBUG):
                         # Only pay for the diagnostic read-back when debug logging is enabled.
@@ -773,7 +773,7 @@ class DatabaseManager:
 
         try:
             with _DB_CALL_PROFILER.track("sync_run"):
-                with track_begin_run_phase("db.sync_run.execute_with_retry"):
+                with _track_begin_run_phase("db.sync_run.execute_with_retry"):
                     self.execute_with_retry(_do_sync, operation_name="sync_run")
         except Exception as e:
             logging.warning("Database sync failed: %s", e)
@@ -1586,12 +1586,12 @@ class DatabaseManager:
             return
 
         def _do_sync():
-            with track_begin_run_phase("db.sync_run_with_links.session_scope"):
+            with _track_begin_run_phase("db.sync_run_with_links.session_scope"):
                 with self.session_scope() as session:
-                    with track_begin_run_phase("db.sync_run_with_links.merge_run"):
+                    with _track_begin_run_phase("db.sync_run_with_links.merge_run"):
                         session.merge(run)
 
-                    with track_begin_run_phase(
+                    with _track_begin_run_phase(
                         "db.sync_run_with_links.query_existing_links"
                     ):
                         existing = session.exec(
@@ -1602,7 +1602,7 @@ class DatabaseManager:
 
                     existing_by_id = {row.artifact_id: row for row in existing}
                     new_links: List[RunArtifactLink] = []
-                    with track_begin_run_phase(
+                    with _track_begin_run_phase(
                         "db.sync_run_with_links.prepare_new_links"
                     ):
                         for artifact_id in artifact_ids:
@@ -1629,17 +1629,17 @@ class DatabaseManager:
                             )
 
                     if new_links:
-                        with track_begin_run_phase(
+                        with _track_begin_run_phase(
                             "db.sync_run_with_links.add_new_links"
                         ):
                             session.add_all(new_links)
 
-                    with track_begin_run_phase("db.sync_run_with_links.commit"):
+                    with _track_begin_run_phase("db.sync_run_with_links.commit"):
                         session.commit()
 
         try:
             with _DB_CALL_PROFILER.track("sync_run_with_links"):
-                with track_begin_run_phase("db.sync_run_with_links.execute_with_retry"):
+                with _track_begin_run_phase("db.sync_run_with_links.execute_with_retry"):
                     self.execute_with_retry(
                         _do_sync, operation_name="sync_run_with_links"
                     )
@@ -1721,15 +1721,15 @@ class DatabaseManager:
             return
 
         def _do_sync():
-            with track_begin_run_phase("db.sync_artifacts.session_scope"):
+            with _track_begin_run_phase("db.sync_artifacts.session_scope"):
                 with self.session_scope() as session:
-                    with track_begin_run_phase("db.sync_artifacts.dedupe"):
+                    with _track_begin_run_phase("db.sync_artifacts.dedupe"):
                         deduped: Dict[uuid.UUID, Artifact] = {}
                         for artifact in artifacts:
                             deduped[artifact.id] = artifact
 
                     artifact_ids = list(deduped.keys())
-                    with track_begin_run_phase(
+                    with _track_begin_run_phase(
                         "db.sync_artifacts.query_existing_artifacts"
                     ):
                         existing_artifact_ids = set(
@@ -1742,7 +1742,7 @@ class DatabaseManager:
 
                     new_artifacts: List[Artifact] = []
                     existing_artifacts: List[Artifact] = []
-                    with track_begin_run_phase("db.sync_artifacts.partition_artifacts"):
+                    with _track_begin_run_phase("db.sync_artifacts.partition_artifacts"):
                         for artifact in deduped.values():
                             if artifact.id in existing_artifact_ids:
                                 existing_artifacts.append(artifact)
@@ -1750,7 +1750,7 @@ class DatabaseManager:
                                 new_artifacts.append(artifact)
 
                     if new_artifacts:
-                        with track_begin_run_phase(
+                        with _track_begin_run_phase(
                             "db.sync_artifacts.add_new_artifacts"
                         ):
                             session.add_all(
@@ -1760,13 +1760,13 @@ class DatabaseManager:
                                 ]
                             )
                     if existing_artifacts:
-                        with track_begin_run_phase(
+                        with _track_begin_run_phase(
                             "db.sync_artifacts.merge_existing_artifacts"
                         ):
                             for artifact in existing_artifacts:
                                 session.merge(artifact)
 
-                    with track_begin_run_phase(
+                    with _track_begin_run_phase(
                         "db.sync_artifacts.query_existing_links"
                     ):
                         existing = session.exec(
@@ -1777,7 +1777,7 @@ class DatabaseManager:
                     existing_by_id = {row.artifact_id: row for row in existing}
 
                     new_links: List[RunArtifactLink] = []
-                    with track_begin_run_phase("db.sync_artifacts.prepare_new_links"):
+                    with _track_begin_run_phase("db.sync_artifacts.prepare_new_links"):
                         for artifact_id in artifact_ids:
                             row = existing_by_id.get(artifact_id)
                             if row is not None:
@@ -1802,14 +1802,14 @@ class DatabaseManager:
                             )
 
                     if new_links:
-                        with track_begin_run_phase("db.sync_artifacts.add_new_links"):
+                        with _track_begin_run_phase("db.sync_artifacts.add_new_links"):
                             session.add_all(new_links)
-                    with track_begin_run_phase("db.sync_artifacts.commit"):
+                    with _track_begin_run_phase("db.sync_artifacts.commit"):
                         session.commit()
 
         try:
             with _DB_CALL_PROFILER.track("sync_artifacts"):
-                with track_begin_run_phase("db.sync_artifacts.execute_with_retry"):
+                with _track_begin_run_phase("db.sync_artifacts.execute_with_retry"):
                     self.execute_with_retry(_do_sync, operation_name="sync_artifacts")
         except Exception as e:
             logging.warning("Artifacts sync failed: %s", e)

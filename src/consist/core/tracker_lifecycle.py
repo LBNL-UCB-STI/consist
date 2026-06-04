@@ -37,7 +37,7 @@ from consist.core.cache_miss_explainer import (
 )
 from consist.core.context import pop_tracker, push_tracker
 from consist.core.error_messages import format_problem_cause_fix
-from consist.core._performance_attribution import track_begin_run_phase
+from consist.core._performance_attribution import _track_begin_run_phase
 from consist.core.validation import (
     validate_config_structure,
     validate_run_meta,
@@ -235,7 +235,7 @@ class RunLifecycleCoordinator:
             if debug_cache:
                 logging.info("[Consist][cache] %s %.3fs", label, elapsed)
 
-        with track_begin_run_phase("lifecycle.validate_and_parse"):
+        with _track_begin_run_phase("lifecycle.validate_and_parse"):
             if tracker.current_consist is not None:
                 raise RuntimeError(
                     f"Cannot begin_run: A run is already active (id={tracker.current_consist.run.id}). "
@@ -316,7 +316,7 @@ class RunLifecycleCoordinator:
             if allow_external_paths is not None:
                 kwargs["allow_external_paths"] = bool(allow_external_paths)
 
-        with track_begin_run_phase("lifecycle.config_normalize_and_hash"):
+        with _track_begin_run_phase("lifecycle.config_normalize_and_hash"):
             if config is None:
                 config_dict: Dict[str, Any] = {}
             elif isinstance(config, BaseModel):
@@ -376,7 +376,7 @@ class RunLifecycleCoordinator:
             )
 
         identity_mode = code_identity or "repo_git"
-        with track_begin_run_phase("lifecycle.resolve_code_identity"):
+        with _track_begin_run_phase("lifecycle.resolve_code_identity"):
             try:
                 git_hash = tracker.identity.resolve_code_version(
                     mode=identity_mode,
@@ -393,7 +393,7 @@ class RunLifecycleCoordinator:
                 )
                 git_hash = tracker.identity.get_code_version()
 
-        with track_begin_run_phase("lifecycle.create_run_and_bind_state"):
+        with _track_begin_run_phase("lifecycle.create_run_and_bind_state"):
             if code_identity is not None:
                 kwargs["code_identity"] = identity_mode
             if code_identity_extra_deps:
@@ -465,7 +465,7 @@ class RunLifecycleCoordinator:
                 ),
             )
 
-        with track_begin_run_phase("lifecycle.persist_config_facet"):
+        with _track_begin_run_phase("lifecycle.persist_config_facet"):
             facet_dict = tracker.config_facets.resolve_facet_dict(
                 model=model,
                 raw_config_model=raw_config_model,
@@ -496,7 +496,7 @@ class RunLifecycleCoordinator:
         if current_consist is None:
             raise RuntimeError("Cannot start run: no active consist record.")
 
-        with track_begin_run_phase("input_binding.total"):
+        with _track_begin_run_phase("input_binding.total"):
             if inputs:
                 known_latest_by_index: Dict[int, Optional[Artifact]] = {}
                 if tracker.db:
@@ -543,7 +543,7 @@ class RunLifecycleCoordinator:
                                 ),
                             )
 
-        with track_begin_run_phase("input_binding.parent_run_inference"):
+        with _track_begin_run_phase("input_binding.parent_run_inference"):
             if not run.parent_run_id:
                 parent_candidates = [
                     a.run_id for a in current_consist.inputs if a.run_id is not None
@@ -552,7 +552,7 @@ class RunLifecycleCoordinator:
                     run.parent_run_id = parent_candidates[-1]
 
         try:
-            with track_begin_run_phase("input_signature.total"):
+            with _track_begin_run_phase("input_signature.total"):
                 t0 = time.perf_counter()
                 tracker._prefetch_run_signatures(current_consist.inputs)
                 _log_timing("prefetch_run_signatures", t0)
@@ -581,7 +581,7 @@ class RunLifecycleCoordinator:
         cached_output_ids: Optional[List[uuid.UUID]] = None
 
         if cache_mode == "reuse":
-            with track_begin_run_phase("cache.lookup"):
+            with _track_begin_run_phase("cache.lookup"):
                 cache_key = (
                     (run.config_hash, run.input_hash, run.git_hash)
                     if run.config_hash and run.input_hash and run.git_hash
@@ -609,7 +609,7 @@ class RunLifecycleCoordinator:
                             signature=run.signature,
                         )
                     _log_timing("find_matching_run", t0)
-            with track_begin_run_phase("cache.validate"):
+            with _track_begin_run_phase("cache.validate"):
                 cache_valid = False
                 if cached_run:
                     t0 = time.perf_counter()
@@ -623,7 +623,7 @@ class RunLifecycleCoordinator:
                     logging.info("[Consist][cache] miss: no matching completed run.")
 
             if cached_run and cache_valid:
-                with track_begin_run_phase("cache.hydrate_outputs"):
+                with _track_begin_run_phase("cache.hydrate_outputs"):
                     t0 = time.perf_counter()
                     cached_items = hydrate_cache_hit_outputs(
                         tracker=cast(CacheHydrationContext, tracker),
@@ -644,7 +644,7 @@ class RunLifecycleCoordinator:
                         tracker._active_run_cache_options.cache_hydration,
                     )
             else:
-                with track_begin_run_phase("cache.explain_miss"):
+                with _track_begin_run_phase("cache.explain_miss"):
                     explanation = CacheMissExplainer(
                         cast(CacheMissExplainerContext, tracker)
                     ).explain(
@@ -669,14 +669,14 @@ class RunLifecycleCoordinator:
         elif cache_mode == "readonly":
             logging.debug("👁️ [Consist] Read-only mode.")
 
-        with track_begin_run_phase("input.materialize_missing_inputs"):
+        with _track_begin_run_phase("input.materialize_missing_inputs"):
             if not tracker.current_consist.cached_run:
                 materialize_missing_inputs(
                     tracker=cast(CacheMaterializationContext, tracker),
                     options=tracker._active_run_cache_options,
                 )
 
-        with track_begin_run_phase("input.materialize_requested_inputs"):
+        with _track_begin_run_phase("input.materialize_requested_inputs"):
             if requested_input_materialization == "requested" and requested_input_paths:
                 staged_inputs = materialize_requested_inputs(
                     tracker=cast(CacheMaterializationContext, tracker),
@@ -685,7 +685,7 @@ class RunLifecycleCoordinator:
                 if staged_inputs:
                     run.meta["staged_inputs"] = staged_inputs
 
-        with track_begin_run_phase("lifecycle.final_persist_and_emit"):
+        with _track_begin_run_phase("lifecycle.final_persist_and_emit"):
             tracker._flush_json()
             if cached_output_ids and tracker.db:
                 tracker.persistence.sync_run_with_links(
