@@ -1639,7 +1639,9 @@ class DatabaseManager:
 
         try:
             with _DB_CALL_PROFILER.track("sync_run_with_links"):
-                with _track_begin_run_phase("db.sync_run_with_links.execute_with_retry"):
+                with _track_begin_run_phase(
+                    "db.sync_run_with_links.execute_with_retry"
+                ):
                     self.execute_with_retry(
                         _do_sync, operation_name="sync_run_with_links"
                     )
@@ -1742,7 +1744,9 @@ class DatabaseManager:
 
                     new_artifacts: List[Artifact] = []
                     existing_artifacts: List[Artifact] = []
-                    with _track_begin_run_phase("db.sync_artifacts.partition_artifacts"):
+                    with _track_begin_run_phase(
+                        "db.sync_artifacts.partition_artifacts"
+                    ):
                         for artifact in deduped.values():
                             if artifact.id in existing_artifact_ids:
                                 existing_artifacts.append(artifact)
