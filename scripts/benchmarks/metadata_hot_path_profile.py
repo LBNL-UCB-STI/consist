@@ -491,7 +491,8 @@ def _profile_cache_hit_attribution(
                 )
             begin_elapsed = (time.perf_counter() - begin_started) * 1000.0
             end_started = time.perf_counter()
-            tracker.end_run()
+            with begin_run_phase_profiler(attribution):
+                tracker.end_run()
             end_elapsed = (time.perf_counter() - end_started) * 1000.0
         return {
             "total_ms": (time.perf_counter() - started) * 1000.0,

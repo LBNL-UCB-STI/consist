@@ -69,6 +69,9 @@ Output:
   bulk latest-artifact URI lookup, single latest-artifact URI lookup, inherited
   metadata application, in-memory attachment, batched JSON flush, and batched
   artifact DB sync.
+- DB-internal sub-attribution labels include `db.sync_artifacts.*`,
+  `db.sync_run_with_links.*`, and `db.sync_run.*` timings for session/retry,
+  artifact add/merge, existing-link checks, run merge, link insertion, and commit.
 
 Useful diagnostic switches:
 - `--tracker-reuse cold|warm`: compare fresh tracker/session setup against in-process

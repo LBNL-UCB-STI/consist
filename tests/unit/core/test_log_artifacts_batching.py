@@ -8,7 +8,8 @@ from consist.core.config_canonicalization import (
     CanonicalConfigIdentity,
     ConfigContribution,
 )
-from consist.models.run import RunArtifactLink
+from consist.models.artifact import Artifact
+from consist.models.run import Run, RunArtifactLink
 from consist.types import ExecutionOptions
 
 
@@ -288,6 +289,69 @@ def test_begin_run_path_input_uses_bulk_prefetched_parent(tracker, run_dir: Path
     assert tracker.current_consist.inputs[0].run_id == "path_producer_run"
 
     tracker.end_run()
+
+
+def test_sync_artifacts_merges_existing_artifact_rows(tracker, run_dir: Path):
+    output = run_dir / "existing_artifact.csv"
+    output.write_text("a,b\n1,2\n", encoding="utf-8")
+
+    with tracker.start_run("run_existing_artifact_merge", "test_model"):
+        artifact = tracker.log_artifact(
+            output,
+            key="existing_artifact",
+            direction="output",
+        )
+
+        artifact.meta["merged_marker"] = "updated"
+        tracker.db.sync_artifacts(
+            artifacts=[artifact],
+            run_id="run_existing_artifact_merge",
+            direction="output",
+        )
+
+    with Session(tracker.engine) as session:
+        persisted = session.get(Artifact, artifact.id)
+    assert persisted is not None
+    assert persisted.meta["merged_marker"] == "updated"
+
+
+def test_cache_hit_persists_output_links_and_completion(tracker, run_dir: Path):
+    output = run_dir / "cached_output.txt"
+
+    with tracker.start_run(
+        "cache_seed_persisted_links",
+        "test_model",
+        config={"case": "persisted-links"},
+        cache_mode="overwrite",
+    ):
+        output.write_text("cached\n", encoding="utf-8")
+        tracker.log_artifact(output, key="cached_output", direction="output")
+
+    with tracker.start_run(
+        "cache_hit_persisted_links",
+        "test_model",
+        config={"case": "persisted-links"},
+        cache_mode="reuse",
+        validate_cached_outputs="lazy",
+    ):
+        assert tracker.current_consist.cached_run is not None
+        assert tracker.current_consist.cached_run.id == "cache_seed_persisted_links"
+
+    with Session(tracker.engine) as session:
+        links = session.exec(
+            select(RunArtifactLink).where(
+                RunArtifactLink.run_id == "cache_hit_persisted_links"
+            )
+        ).all()
+        run = session.get(Run, "cache_hit_persisted_links")
+
+    assert [link.direction for link in links] == ["output"]
+    assert run is not None
+    assert run.status == "completed"
+    assert run.ended_at is not None
+    assert run.updated_at is not None
+    assert run.meta["cache_hit"] is True
+    assert run.meta["cache_source"] == "cache_seed_persisted_links"
 
 
 def test_tracker_run_output_paths_batch_db_sync(tracker, monkeypatch):
