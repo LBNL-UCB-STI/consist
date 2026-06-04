@@ -476,6 +476,25 @@ class TestCodeVersion:
         assert mock_git.Repo.call_count == 2
 
     @patch("consist.core.identity.git")
+    def test_clean_repo_head_change_invalidates_code_version_cache(
+        self, mock_git: MagicMock
+    ):
+        """Long-lived managers refresh repo identity when HEAD changes."""
+        im = IdentityManager()
+
+        mock_repo = MagicMock()
+        mock_repo.is_dirty.return_value = False
+        mock_repo.head.object.hexsha = "abc12345"
+        mock_git.Repo.return_value = mock_repo
+
+        assert im.get_code_version() == "abc12345"
+
+        mock_repo.head.object.hexsha = "def67890"
+
+        assert im.get_code_version() == "def67890"
+        assert mock_git.Repo.call_count == 1
+
+    @patch("consist.core.identity.git")
     def test_dirty_repo(self, mock_git: MagicMock):
         """Verifies dirty repo appends nonce."""
         im = IdentityManager()
@@ -505,6 +524,36 @@ class TestCodeVersion:
 
         assert first == second
         assert first.startswith("abc12345-dirty-")
+        assert mock_git.Repo.call_count == 1
+
+    @patch("consist.core.identity.git")
+    def test_dirty_python_diff_change_invalidates_code_version_cache(
+        self, mock_git: MagicMock
+    ):
+        """Long-lived managers refresh repo identity when tracked Python diffs change."""
+        im = IdentityManager()
+
+        diff_state = {"head": "print('first')", "cached": ""}
+
+        def diff(*args: str) -> str:
+            if "--cached" in args:
+                return diff_state["cached"]
+            return diff_state["head"]
+
+        mock_repo = MagicMock()
+        mock_repo.is_dirty.return_value = True
+        mock_repo.head.object.hexsha = "abc12345"
+        mock_repo.git.diff.side_effect = diff
+        mock_git.Repo.return_value = mock_repo
+
+        first = im.get_code_version()
+
+        diff_state["head"] = "print('second')"
+        second = im.get_code_version()
+
+        assert first != second
+        assert first.startswith("abc12345-dirty-")
+        assert second.startswith("abc12345-dirty-")
         assert mock_git.Repo.call_count == 1
 
     @patch("consist.core.identity.git")
