@@ -34,6 +34,7 @@ from sqlmodel import create_engine, Session, select, SQLModel, col, delete
 
 from consist.core.db_runtime import DatabaseRuntimeOps
 from consist.core.db_snapshot import DatabaseSnapshotOps
+from consist.core._performance_attribution import _track_begin_run_phase
 from consist.core.provenance_writer import ProvenanceWriter
 from consist.core.schema_compat import (
     apply_artifact_parent_compatibility,
@@ -278,6 +279,24 @@ def _clone_artifact_content(row: ArtifactContent) -> ArtifactContent:
         driver=row.driver,
         created_at=row.created_at,
         meta=dict(row.meta or {}),
+    )
+
+
+def _clone_artifact(row: Artifact) -> Artifact:
+    """Return a detached artifact copy safe to reuse outside a DB session."""
+    return Artifact(
+        id=row.id,
+        key=row.key,
+        container_uri=row.container_uri,
+        table_path=row.table_path,
+        array_path=row.array_path,
+        driver=row.driver,
+        hash=row.hash,
+        content_id=row.content_id,
+        parent_artifact_id=row.parent_artifact_id,
+        run_id=row.run_id,
+        meta=dict(row.meta or {}),
+        created_at=row.created_at,
     )
 
 
@@ -732,25 +751,30 @@ class DatabaseManager:
         """Upserts a Run object."""
 
         def _do_sync():
-            with self.session_scope() as session:
-                self._sync_run_stage_phase(run)
-                # Use merge for a simple upsert. DuckDB's MERGE semantics via SQLModel
-                # handle inserts and updates in one call and avoid stale state issues.
-                logging.debug(
-                    f"[DB sync_run] upserting run={run.id} status={run.status}"
-                )
-                session.merge(run)
-                session.commit()
-                if logging.getLogger().isEnabledFor(logging.DEBUG):
-                    # Only pay for the diagnostic read-back when debug logging is enabled.
-                    persisted = session.get(Run, run.id)
+            with _track_begin_run_phase("db.sync_run.session_scope"):
+                with self.session_scope() as session:
+                    with _track_begin_run_phase("db.sync_run.stage_phase"):
+                        self._sync_run_stage_phase(run)
+                    # Use merge for a simple upsert. DuckDB's MERGE semantics via SQLModel
+                    # handle inserts and updates in one call and avoid stale state issues.
                     logging.debug(
-                        f"[DB sync_run] persisted run={run.id} status={getattr(persisted, 'status', None)}"
+                        f"[DB sync_run] upserting run={run.id} status={run.status}"
                     )
+                    with _track_begin_run_phase("db.sync_run.merge_run"):
+                        session.merge(run)
+                    with _track_begin_run_phase("db.sync_run.commit"):
+                        session.commit()
+                    if logging.getLogger().isEnabledFor(logging.DEBUG):
+                        # Only pay for the diagnostic read-back when debug logging is enabled.
+                        persisted = session.get(Run, run.id)
+                        logging.debug(
+                            f"[DB sync_run] persisted run={run.id} status={getattr(persisted, 'status', None)}"
+                        )
 
         try:
             with _DB_CALL_PROFILER.track("sync_run"):
-                self.execute_with_retry(_do_sync, operation_name="sync_run")
+                with _track_begin_run_phase("db.sync_run.execute_with_retry"):
+                    self.execute_with_retry(_do_sync, operation_name="sync_run")
         except Exception as e:
             logging.warning("Database sync failed: %s", e)
 
@@ -1562,46 +1586,65 @@ class DatabaseManager:
             return
 
         def _do_sync():
-            with self.session_scope() as session:
-                session.merge(run)
+            with _track_begin_run_phase("db.sync_run_with_links.session_scope"):
+                with self.session_scope() as session:
+                    with _track_begin_run_phase("db.sync_run_with_links.merge_run"):
+                        session.merge(run)
 
-                existing = session.exec(
-                    select(RunArtifactLink)
-                    .where(RunArtifactLink.run_id == run.id)
-                    .where(col(RunArtifactLink.artifact_id).in_(artifact_ids))
-                ).all()
+                    with _track_begin_run_phase(
+                        "db.sync_run_with_links.query_existing_links"
+                    ):
+                        existing = session.exec(
+                            select(RunArtifactLink)
+                            .where(RunArtifactLink.run_id == run.id)
+                            .where(col(RunArtifactLink.artifact_id).in_(artifact_ids))
+                        ).all()
 
-                existing_by_id = {row.artifact_id: row for row in existing}
-                new_links: List[RunArtifactLink] = []
-                for artifact_id in artifact_ids:
-                    row = existing_by_id.get(artifact_id)
-                    if row is not None:
-                        if row.direction != direction:
-                            logging.warning(
-                                "[Consist] Ignoring attempt to link artifact_id=%s to run_id=%s as '%s' "
-                                "because it is already linked as '%s'. "
-                                "If this step truly produces a new output, write to a new path (preferred), "
-                                "or log a distinct Artifact instance rather than reusing the same Artifact reference.",
-                                artifact_id,
-                                run.id,
-                                direction,
-                                row.direction,
+                    existing_by_id = {row.artifact_id: row for row in existing}
+                    new_links: List[RunArtifactLink] = []
+                    with _track_begin_run_phase(
+                        "db.sync_run_with_links.prepare_new_links"
+                    ):
+                        for artifact_id in artifact_ids:
+                            row = existing_by_id.get(artifact_id)
+                            if row is not None:
+                                if row.direction != direction:
+                                    logging.warning(
+                                        "[Consist] Ignoring attempt to link artifact_id=%s to run_id=%s as '%s' "
+                                        "because it is already linked as '%s'. "
+                                        "If this step truly produces a new output, write to a new path (preferred), "
+                                        "or log a distinct Artifact instance rather than reusing the same Artifact reference.",
+                                        artifact_id,
+                                        run.id,
+                                        direction,
+                                        row.direction,
+                                    )
+                                continue
+                            new_links.append(
+                                RunArtifactLink(
+                                    run_id=run.id,
+                                    artifact_id=artifact_id,
+                                    direction=direction,
+                                )
                             )
-                        continue
-                    new_links.append(
-                        RunArtifactLink(
-                            run_id=run.id, artifact_id=artifact_id, direction=direction
-                        )
-                    )
 
-                if new_links:
-                    session.add_all(new_links)
+                    if new_links:
+                        with _track_begin_run_phase(
+                            "db.sync_run_with_links.add_new_links"
+                        ):
+                            session.add_all(new_links)
 
-                session.commit()
+                    with _track_begin_run_phase("db.sync_run_with_links.commit"):
+                        session.commit()
 
         try:
             with _DB_CALL_PROFILER.track("sync_run_with_links"):
-                self.execute_with_retry(_do_sync, operation_name="sync_run_with_links")
+                with _track_begin_run_phase(
+                    "db.sync_run_with_links.execute_with_retry"
+                ):
+                    self.execute_with_retry(
+                        _do_sync, operation_name="sync_run_with_links"
+                    )
         except Exception as e:
             logging.warning("Database sync failed: %s", e)
 
@@ -1680,51 +1723,98 @@ class DatabaseManager:
             return
 
         def _do_sync():
-            with self.session_scope() as session:
-                deduped: Dict[uuid.UUID, Artifact] = {}
-                for artifact in artifacts:
-                    deduped[artifact.id] = artifact
+            with _track_begin_run_phase("db.sync_artifacts.session_scope"):
+                with self.session_scope() as session:
+                    with _track_begin_run_phase("db.sync_artifacts.dedupe"):
+                        deduped: Dict[uuid.UUID, Artifact] = {}
+                        for artifact in artifacts:
+                            deduped[artifact.id] = artifact
 
-                for artifact in deduped.values():
-                    session.merge(artifact)
-
-                artifact_ids = list(deduped.keys())
-                existing = session.exec(
-                    select(RunArtifactLink)
-                    .where(RunArtifactLink.run_id == run_id)
-                    .where(col(RunArtifactLink.artifact_id).in_(artifact_ids))
-                ).all()
-                existing_by_id = {row.artifact_id: row for row in existing}
-
-                new_links: List[RunArtifactLink] = []
-                for artifact_id in artifact_ids:
-                    row = existing_by_id.get(artifact_id)
-                    if row is not None:
-                        if row.direction != direction:
-                            logging.warning(
-                                "[Consist] Ignoring attempt to link artifact_id=%s to run_id=%s as '%s' "
-                                "because it is already linked as '%s'. "
-                                "If this step truly produces a new output, write to a new path (preferred), "
-                                "or log a distinct Artifact instance rather than reusing the same Artifact reference.",
-                                artifact_id,
-                                run_id,
-                                direction,
-                                row.direction,
-                            )
-                        continue
-                    new_links.append(
-                        RunArtifactLink(
-                            run_id=run_id, artifact_id=artifact_id, direction=direction
+                    artifact_ids = list(deduped.keys())
+                    with _track_begin_run_phase(
+                        "db.sync_artifacts.query_existing_artifacts"
+                    ):
+                        existing_artifact_ids = set(
+                            session.exec(
+                                select(Artifact.id).where(
+                                    col(Artifact.id).in_(artifact_ids)
+                                )
+                            ).all()
                         )
-                    )
 
-                if new_links:
-                    session.add_all(new_links)
-                session.commit()
+                    new_artifacts: List[Artifact] = []
+                    existing_artifacts: List[Artifact] = []
+                    with _track_begin_run_phase(
+                        "db.sync_artifacts.partition_artifacts"
+                    ):
+                        for artifact in deduped.values():
+                            if artifact.id in existing_artifact_ids:
+                                existing_artifacts.append(artifact)
+                            else:
+                                new_artifacts.append(artifact)
+
+                    if new_artifacts:
+                        with _track_begin_run_phase(
+                            "db.sync_artifacts.add_new_artifacts"
+                        ):
+                            session.add_all(
+                                [
+                                    _clone_artifact(artifact)
+                                    for artifact in new_artifacts
+                                ]
+                            )
+                    if existing_artifacts:
+                        with _track_begin_run_phase(
+                            "db.sync_artifacts.merge_existing_artifacts"
+                        ):
+                            for artifact in existing_artifacts:
+                                session.merge(artifact)
+
+                    with _track_begin_run_phase(
+                        "db.sync_artifacts.query_existing_links"
+                    ):
+                        existing = session.exec(
+                            select(RunArtifactLink)
+                            .where(RunArtifactLink.run_id == run_id)
+                            .where(col(RunArtifactLink.artifact_id).in_(artifact_ids))
+                        ).all()
+                    existing_by_id = {row.artifact_id: row for row in existing}
+
+                    new_links: List[RunArtifactLink] = []
+                    with _track_begin_run_phase("db.sync_artifacts.prepare_new_links"):
+                        for artifact_id in artifact_ids:
+                            row = existing_by_id.get(artifact_id)
+                            if row is not None:
+                                if row.direction != direction:
+                                    logging.warning(
+                                        "[Consist] Ignoring attempt to link artifact_id=%s to run_id=%s as '%s' "
+                                        "because it is already linked as '%s'. "
+                                        "If this step truly produces a new output, write to a new path (preferred), "
+                                        "or log a distinct Artifact instance rather than reusing the same Artifact reference.",
+                                        artifact_id,
+                                        run_id,
+                                        direction,
+                                        row.direction,
+                                    )
+                                continue
+                            new_links.append(
+                                RunArtifactLink(
+                                    run_id=run_id,
+                                    artifact_id=artifact_id,
+                                    direction=direction,
+                                )
+                            )
+
+                    if new_links:
+                        with _track_begin_run_phase("db.sync_artifacts.add_new_links"):
+                            session.add_all(new_links)
+                    with _track_begin_run_phase("db.sync_artifacts.commit"):
+                        session.commit()
 
         try:
             with _DB_CALL_PROFILER.track("sync_artifacts"):
-                self.execute_with_retry(_do_sync, operation_name="sync_artifacts")
+                with _track_begin_run_phase("db.sync_artifacts.execute_with_retry"):
+                    self.execute_with_retry(_do_sync, operation_name="sync_artifacts")
         except Exception as e:
             logging.warning("Artifacts sync failed: %s", e)
             logging.warning("Database sync failed: %s", e)
@@ -1789,6 +1879,74 @@ class DatabaseManager:
                 return self.execute_with_retry(_query)
         except Exception:
             return None
+
+    def find_latest_artifacts_at_uris(
+        self,
+        lookups: Sequence[Tuple[str, Optional[str], Optional[str], Optional[str]]],
+    ) -> Dict[
+        Tuple[str, Optional[str], Optional[str], Optional[str]], Optional[Artifact]
+    ]:
+        """
+        Bulk variant of produced-artifact URI lookup.
+
+        Each lookup tuple is ``(uri, driver, table_path, array_path)`` and mirrors
+        ``find_latest_artifact_at_uri(..., run_id=None, include_inputs=False)``.
+        """
+        if not lookups:
+            return {}
+
+        unique_lookups = list(dict.fromkeys(lookups))
+        results: Dict[
+            Tuple[str, Optional[str], Optional[str], Optional[str]], Optional[Artifact]
+        ] = {lookup: None for lookup in unique_lookups}
+        lookups_by_uri: Dict[
+            str, List[Tuple[str, Optional[str], Optional[str], Optional[str]]]
+        ] = {}
+        for lookup in unique_lookups:
+            lookups_by_uri.setdefault(lookup[0], []).append(lookup)
+
+        def _matches_lookup(
+            artifact: Artifact,
+            lookup: Tuple[str, Optional[str], Optional[str], Optional[str]],
+        ) -> bool:
+            _, lookup_driver, lookup_table_path, lookup_array_path = lookup
+            if lookup_driver is not None and artifact.driver != lookup_driver:
+                return False
+            if (
+                lookup_table_path is not None
+                and artifact.table_path != lookup_table_path
+            ):
+                return False
+            return not (
+                lookup_array_path is not None
+                and artifact.array_path != lookup_array_path
+            )
+
+        def _query() -> Dict[
+            Tuple[str, Optional[str], Optional[str], Optional[str]],
+            Optional[Artifact],
+        ]:
+            with self.session_scope() as session:
+                rows = session.exec(
+                    select(Artifact)
+                    .where(col(Artifact.container_uri).in_(list(lookups_by_uri)))
+                    .where(col(Artifact.run_id).is_not(None))
+                    .order_by(col(Artifact.created_at).desc())
+                ).all()
+
+            for row in rows:
+                for lookup in lookups_by_uri.get(row.container_uri, []):
+                    if results[lookup] is not None:
+                        continue
+                    if _matches_lookup(row, lookup):
+                        results[lookup] = _clone_artifact(row)
+            return dict(results)
+
+        try:
+            with _DB_CALL_PROFILER.track("find_latest_artifacts_at_uris"):
+                return self.execute_with_retry(_query)
+        except Exception:
+            return dict(results)
 
     def find_latest_artifact_by_hash(
         self,

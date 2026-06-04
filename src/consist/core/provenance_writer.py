@@ -8,6 +8,7 @@ import tempfile
 from typing import Any, Dict, Iterator, List, Optional, Sequence, TYPE_CHECKING
 import uuid
 
+from consist.core._performance_attribution import _track_begin_run_phase
 from consist.models.artifact_facet import ArtifactFacet
 from consist.models.artifact_kv import ArtifactKV
 
@@ -71,11 +72,16 @@ class ProvenanceWriter:
             self._batch_pending_artifact_facet_bundles = []
 
             if pending_json_flush:
-                self._flush_json_now()
+                with _track_begin_run_phase("input_binding.batch_flush_json"):
+                    self._flush_json_now()
             if pending_artifacts:
-                self._sync_artifacts_now(pending_artifacts)
+                with _track_begin_run_phase("input_binding.batch_sync_artifacts"):
+                    self._sync_artifacts_now(pending_artifacts)
             if pending_artifact_facet_bundles:
-                self._persist_artifact_facet_bundles_now(pending_artifact_facet_bundles)
+                with _track_begin_run_phase("input_binding.batch_persist_facets"):
+                    self._persist_artifact_facet_bundles_now(
+                        pending_artifact_facet_bundles
+                    )
 
     def flush_json(self) -> None:
         if self._artifact_batch_depth > 0:

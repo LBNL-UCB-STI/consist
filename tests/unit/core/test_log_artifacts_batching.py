@@ -8,7 +8,8 @@ from consist.core.config_canonicalization import (
     CanonicalConfigIdentity,
     ConfigContribution,
 )
-from consist.models.run import RunArtifactLink
+from consist.models.artifact import Artifact
+from consist.models.run import Run, RunArtifactLink
 from consist.types import ExecutionOptions
 
 
@@ -136,10 +137,14 @@ def test_begin_run_inputs_batch_flush_and_db_sync(tracker, run_dir: Path, monkey
     flush_now_calls = 0
     sync_batch_calls = 0
     sync_single_calls = 0
+    bulk_lookup_calls = 0
+    single_lookup_calls = 0
 
     original_flush_now = tracker.persistence._flush_json_now
     original_sync_artifacts = tracker.db.sync_artifacts
     original_sync_artifact = tracker.db.sync_artifact
+    original_bulk_lookup = tracker.db.find_latest_artifacts_at_uris
+    original_single_lookup = tracker.db.find_latest_artifact_at_uri
 
     def counting_flush_now() -> None:
         nonlocal flush_now_calls
@@ -162,9 +167,25 @@ def test_begin_run_inputs_batch_flush_and_db_sync(tracker, run_dir: Path, monkey
         sync_single_calls += 1
         original_sync_artifact(artifact, run_id, direction, profile_label=profile_label)
 
+    def counting_bulk_lookup(lookups):
+        nonlocal bulk_lookup_calls
+        bulk_lookup_calls += 1
+        return original_bulk_lookup(lookups)
+
+    def counting_single_lookup(*args, **kwargs):
+        nonlocal single_lookup_calls
+        single_lookup_calls += 1
+        return original_single_lookup(*args, **kwargs)
+
     monkeypatch.setattr(tracker.persistence, "_flush_json_now", counting_flush_now)
     monkeypatch.setattr(tracker.db, "sync_artifacts", counting_sync_artifacts)
     monkeypatch.setattr(tracker.db, "sync_artifact", counting_sync_artifact)
+    monkeypatch.setattr(
+        tracker.db, "find_latest_artifacts_at_uris", counting_bulk_lookup
+    )
+    monkeypatch.setattr(
+        tracker.db, "find_latest_artifact_at_uri", counting_single_lookup
+    )
 
     tracker.begin_run(
         "run_batch_begin_inputs",
@@ -183,6 +204,8 @@ def test_begin_run_inputs_batch_flush_and_db_sync(tracker, run_dir: Path, monkey
     assert flush_now_calls == 2
     assert sync_batch_calls == 1
     assert sync_single_calls == 0
+    assert bulk_lookup_calls == 1
+    assert single_lookup_calls == 0
 
     tracker.end_run()
 
@@ -193,6 +216,142 @@ def test_begin_run_inputs_batch_flush_and_db_sync(tracker, run_dir: Path, monkey
             )
         ).all()
     assert len(links) == 2
+
+
+def test_begin_run_existing_artifact_input_preserves_parent_and_link(
+    tracker, run_dir: Path, monkeypatch
+):
+    upstream_path = run_dir / "upstream_output.csv"
+    upstream_path.write_text("a,b\n1,2\n", encoding="utf-8")
+
+    with tracker.start_run("producer_run", "test_model", cache_mode="overwrite"):
+        upstream = tracker.log_artifact(
+            upstream_path,
+            key="upstream_output",
+            direction="output",
+        )
+
+    bulk_lookup_calls = 0
+
+    original_bulk_lookup = tracker.db.find_latest_artifacts_at_uris
+
+    def counting_bulk_lookup(lookups):
+        nonlocal bulk_lookup_calls
+        bulk_lookup_calls += 1
+        return original_bulk_lookup(lookups)
+
+    monkeypatch.setattr(
+        tracker.db, "find_latest_artifacts_at_uris", counting_bulk_lookup
+    )
+
+    tracker.begin_run(
+        "consumer_run",
+        "test_model",
+        inputs=[upstream],
+        cache_mode="overwrite",
+    )
+
+    assert tracker.current_consist.run.parent_run_id == "producer_run"
+    assert tracker.current_consist.inputs[0].id == upstream.id
+    assert bulk_lookup_calls == 0
+
+    tracker.end_run()
+
+    with Session(tracker.engine) as session:
+        links = session.exec(
+            select(RunArtifactLink).where(RunArtifactLink.run_id == "consumer_run")
+        ).all()
+    assert len(links) == 1
+    assert links[0].artifact_id == upstream.id
+    assert links[0].direction == "input"
+
+
+def test_begin_run_path_input_uses_bulk_prefetched_parent(tracker, run_dir: Path):
+    shared_path = run_dir / "shared_output.csv"
+    shared_path.write_text("a,b\n1,2\n", encoding="utf-8")
+
+    with tracker.start_run("path_producer_run", "test_model", cache_mode="overwrite"):
+        produced = tracker.log_artifact(
+            shared_path,
+            key="shared_output",
+            direction="output",
+        )
+
+    tracker.begin_run(
+        "path_consumer_run",
+        "test_model",
+        inputs=[shared_path],
+        cache_mode="overwrite",
+    )
+
+    assert tracker.current_consist.run.parent_run_id == "path_producer_run"
+    assert tracker.current_consist.inputs[0].id == produced.id
+    assert tracker.current_consist.inputs[0].run_id == "path_producer_run"
+
+    tracker.end_run()
+
+
+def test_sync_artifacts_merges_existing_artifact_rows(tracker, run_dir: Path):
+    output = run_dir / "existing_artifact.csv"
+    output.write_text("a,b\n1,2\n", encoding="utf-8")
+
+    with tracker.start_run("run_existing_artifact_merge", "test_model"):
+        artifact = tracker.log_artifact(
+            output,
+            key="existing_artifact",
+            direction="output",
+        )
+
+        artifact.meta["merged_marker"] = "updated"
+        tracker.db.sync_artifacts(
+            artifacts=[artifact],
+            run_id="run_existing_artifact_merge",
+            direction="output",
+        )
+
+    with Session(tracker.engine) as session:
+        persisted = session.get(Artifact, artifact.id)
+    assert persisted is not None
+    assert persisted.meta["merged_marker"] == "updated"
+
+
+def test_cache_hit_persists_output_links_and_completion(tracker, run_dir: Path):
+    output = run_dir / "cached_output.txt"
+
+    with tracker.start_run(
+        "cache_seed_persisted_links",
+        "test_model",
+        config={"case": "persisted-links"},
+        cache_mode="overwrite",
+    ):
+        output.write_text("cached\n", encoding="utf-8")
+        tracker.log_artifact(output, key="cached_output", direction="output")
+
+    with tracker.start_run(
+        "cache_hit_persisted_links",
+        "test_model",
+        config={"case": "persisted-links"},
+        cache_mode="reuse",
+        validate_cached_outputs="lazy",
+    ):
+        assert tracker.current_consist.cached_run is not None
+        assert tracker.current_consist.cached_run.id == "cache_seed_persisted_links"
+
+    with Session(tracker.engine) as session:
+        links = session.exec(
+            select(RunArtifactLink).where(
+                RunArtifactLink.run_id == "cache_hit_persisted_links"
+            )
+        ).all()
+        run = session.get(Run, "cache_hit_persisted_links")
+
+    assert [link.direction for link in links] == ["output"]
+    assert run is not None
+    assert run.status == "completed"
+    assert run.ended_at is not None
+    assert run.updated_at is not None
+    assert run.meta["cache_hit"] is True
+    assert run.meta["cache_source"] == "cache_seed_persisted_links"
 
 
 def test_tracker_run_output_paths_batch_db_sync(tracker, monkeypatch):

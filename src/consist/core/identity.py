@@ -69,6 +69,9 @@ class IdentityManager:
         """
         self.project_root = Path(project_root).resolve()
         self.hashing_strategy = hashing_strategy
+        self._repo_git_code_version_cache: Optional[str] = None
+        self._repo_git_code_version_fingerprint_cache: Optional[str] = None
+        self._repo_git_repo_cache: Optional[Any] = None
 
     # --- Canonical JSON utilities ---
 
@@ -126,14 +129,58 @@ class IdentityManager:
 
     # --- Component 1: Code Identity ---
 
+    def _repo_git_code_version(self, repo: Any) -> tuple[str, str]:
+        sha = str(repo.head.object.hexsha)
+
+        # IMPORTANT:
+        # We intentionally ignore untracked files when computing code identity.
+        #
+        # In typical Consist usage, runs create many untracked files (artifacts, DBs,
+        # notebooks outputs) inside a repo. Including untracked filenames in the
+        # code hash would make `git_hash` change during the workflow itself and
+        # effectively disable caching.
+        #
+        # Tracked modifications (diff vs HEAD / staged diff) still invalidate caches.
+        if not repo.is_dirty(untracked_files=False):
+            return sha, f"clean:{sha}"
+
+        # If dirty, append a stable content hash of the working tree.
+        #
+        # Rationale: a time-based nonce prevents false cache hits during dev,
+        # but it also disables caching entirely for notebooks/local iteration.
+        # Hashing the diff keeps cache keys stable until the working tree changes.
+        # Only include Python file diffs in the dirty hash to keep cache keys
+        # stable when non-code files (e.g., notebooks) change.
+        diff_head = self._safe_repo_git_diff(repo, "HEAD", "--", "*.py")
+        if diff_head is None:
+            diff_head = self._safe_repo_git_diff(repo, "--", "*.py")
+        diff_cached = self._safe_repo_git_diff(repo, "--cached", "--", "*.py") or ""
+        # NOTE:
+        # `repo.git.diff(...)` should return strings, but when `git`/`repo` is
+        # mocked, these can be `MagicMock` instances. Coerce to `str` so the
+        # join/hash logic is stable and doesn't crash under tests.
+        dirty_payload = "\n\n".join([sha, str(diff_cached), str(diff_head)])
+        dirty_hash = hashlib.sha256(
+            dirty_payload.encode("utf-8", errors="replace")
+        ).hexdigest()[:12]
+        code_version = f"{sha}-dirty-{dirty_hash}"
+        return code_version, f"dirty:{code_version}"
+
     def get_code_version(self) -> str:
         """
         Retrieves the global 'Code Identity' using the Git Commit SHA.
 
         This uses GitPython directly to avoid subprocess overhead and parsing fragility.
+        Repo identity is cached per manager, but each lookup validates a cheap
+        repository fingerprint so long-lived processes do not silently reuse stale
+        code identity after HEAD or tracked Python diffs change.
         """
+        code_version: str
         if git is None:
-            return "no_git_module_found"
+            code_version = "no_git_module_found"
+            self._repo_git_code_version_cache = code_version
+            self._repo_git_code_version_fingerprint_cache = code_version
+            return code_version
 
         # NOTE:
         # Tests patch `consist.core.identity.git` with a `MagicMock`. In that case,
@@ -154,43 +201,18 @@ class IdentityManager:
 
         try:
             # search_parent_directories=True helps if running from a subdir
-            repo = git.Repo(self.project_root, search_parent_directories=True)
-            sha = repo.head.object.hexsha
-
-            # IMPORTANT:
-            # We intentionally ignore untracked files when computing code identity.
-            #
-            # In typical Consist usage, runs create many untracked files (artifacts, DBs,
-            # notebooks outputs) inside a repo. Including untracked filenames in the
-            # code hash would make `git_hash` change during the workflow itself and
-            # effectively disable caching.
-            #
-            # Tracked modifications (diff vs HEAD / staged diff) still invalidate caches.
-            if repo.is_dirty(untracked_files=False):
-                # If dirty, append a stable content hash of the working tree.
-                #
-                # Rationale: a time-based nonce prevents false cache hits during dev,
-                # but it also disables caching entirely for notebooks/local iteration.
-                # Hashing the diff keeps cache keys stable until the working tree changes.
-                # Only include Python file diffs in the dirty hash to keep cache keys
-                # stable when non-code files (e.g., notebooks) change.
-                diff_head = self._safe_repo_git_diff(repo, "HEAD", "--", "*.py")
-                if diff_head is None:
-                    diff_head = self._safe_repo_git_diff(repo, "--", "*.py")
-                diff_cached = (
-                    self._safe_repo_git_diff(repo, "--cached", "--", "*.py") or ""
+            if self._repo_git_repo_cache is None:
+                self._repo_git_repo_cache = git.Repo(
+                    self.project_root, search_parent_directories=True
                 )
-                # NOTE:
-                # `repo.git.diff(...)` should return strings, but when `git`/`repo` is
-                # mocked, these can be `MagicMock` instances. Coerce to `str` so the
-                # join/hash logic is stable and doesn't crash under tests.
-                dirty_payload = "\n\n".join([sha, str(diff_cached), str(diff_head)])
-                dirty_hash = hashlib.sha256(
-                    dirty_payload.encode("utf-8", errors="replace")
-                ).hexdigest()[:12]
-                return f"{sha}-dirty-{dirty_hash}"
-
-            return sha
+            code_version, fingerprint = self._repo_git_code_version(
+                self._repo_git_repo_cache
+            )
+            if (
+                self._repo_git_code_version_cache is not None
+                and self._repo_git_code_version_fingerprint_cache == fingerprint
+            ):
+                return self._repo_git_code_version_cache
         except Exception as e:
             # NOTE:
             # In production, we mainly care about "not a git repo" style failures;
@@ -198,8 +220,20 @@ class IdentityManager:
             # semantics. We keep this conservative (never crash) and return a stable
             # fallback string when anything goes wrong.
             if git_error_types and isinstance(e, git_error_types):
-                return "unknown_code_version"
-            return "unknown_code_version"
+                code_version = "unknown_code_version"
+            else:
+                code_version = "unknown_code_version"
+            fingerprint = code_version
+
+        self._repo_git_code_version_cache = code_version
+        self._repo_git_code_version_fingerprint_cache = fingerprint
+        return code_version
+
+    def clear_code_version_cache(self) -> None:
+        """Clear cached repo Git code identity for this identity manager."""
+        self._repo_git_code_version_cache = None
+        self._repo_git_code_version_fingerprint_cache = None
+        self._repo_git_repo_cache = None
 
     def compute_callable_hash(
         self,
