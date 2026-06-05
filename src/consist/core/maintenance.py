@@ -1697,9 +1697,7 @@ class DatabaseMaintenance:
                     artifacts_merged = 0
 
                 snapshots_merged = 0
-                with _track_maintenance_merge_phase(
-                    "merge.dry_run.count_snapshots"
-                ):
+                with _track_maintenance_merge_phase("merge.dry_run.count_snapshots"):
                     if include_snapshots and runs_to_merge:
                         source_snapshot_dir = shard_path.parent / "shard_snapshots"
                         for run_id in runs_to_merge:
@@ -1759,7 +1757,7 @@ class DatabaseMaintenance:
                                 "run_id",
                                 runs_to_merge,
                             )
-    
+
                             def _core_columns(table_name: str) -> list[str]:
                                 return self._build_table_intersection_columns(
                                     table_name,
@@ -1781,7 +1779,7 @@ class DatabaseMaintenance:
                                     f"{self._quote_ident(safe_alias)}.{column}"
                                     for column in columns
                                 )
-    
+
                             run_columns = _core_columns("run")
                             run_source_columns = self._list_table_columns(
                                 "run",
@@ -1818,8 +1816,10 @@ class DatabaseMaintenance:
                                           )
                                         """
                                 )
-    
-                            run_artifact_link_columns = _core_columns("run_artifact_link")
+
+                            run_artifact_link_columns = _core_columns(
+                                "run_artifact_link"
+                            )
                             run_artifact_link_source_columns = self._list_table_columns(
                                 "run_artifact_link",
                                 schema=source_schema,
@@ -1856,7 +1856,7 @@ class DatabaseMaintenance:
                                     "artifact_id",
                                     [],
                                 )
-    
+
                             if run_artifact_link_columns and {
                                 "run_id",
                                 "artifact_id",
@@ -1964,7 +1964,7 @@ class DatabaseMaintenance:
                                               )
                                             """
                                     )
-    
+
                             run_config_kv_columns = _core_columns("run_config_kv")
                             run_config_source_columns = self._list_table_columns(
                                 "run_config_kv",
@@ -2014,7 +2014,7 @@ class DatabaseMaintenance:
                                           )
                                         """
                                 )
-    
+
                             if has_artifact_ids:
                                 artifact_kv_columns = _core_columns("artifact_kv")
                                 artifact_kv_source_columns = self._list_table_columns(
@@ -2037,7 +2037,9 @@ class DatabaseMaintenance:
                                         artifact_kv_target_columns
                                     )
                                 ):
-                                    artifact_kv_column_sql = ", ".join(artifact_kv_columns)
+                                    artifact_kv_column_sql = ", ".join(
+                                        artifact_kv_columns
+                                    )
                                     artifact_kv_select_column_sql = (
                                         _source_select_columns(
                                             "src_akv",
@@ -2064,7 +2066,7 @@ class DatabaseMaintenance:
                                               )
                                             """
                                     )
-    
+
                             observation_columns = _core_columns(
                                 "artifact_schema_observation"
                             )
@@ -2096,8 +2098,8 @@ class DatabaseMaintenance:
                                         "SELECT 1 "
                                         f"FROM {self._quote_ident('merge_run_ids')} "
                                         'AS "merge_ids" '
-                                        f"WHERE \"merge_ids\".{self._quote_ident('run_id')} "
-                                        f"= \"src_obs\".{self._quote_ident('run_id')}"
+                                        f'WHERE "merge_ids".{self._quote_ident("run_id")} '
+                                        f'= "src_obs".{self._quote_ident("run_id")}'
                                         ")"
                                     )
                                 )
@@ -2111,8 +2113,8 @@ class DatabaseMaintenance:
                                         "SELECT 1 "
                                         f"FROM {self._quote_ident('merge_artifact_ids')} "
                                         'AS "merge_artifacts" '
-                                        f"WHERE \"merge_artifacts\".{self._quote_ident('artifact_id')} "
-                                        f"= CAST(\"src_obs\".{self._quote_ident('artifact_id')} "
+                                        f'WHERE "merge_artifacts".{self._quote_ident("artifact_id")} '
+                                        f'= CAST("src_obs".{self._quote_ident("artifact_id")} '
                                         "AS VARCHAR)"
                                         ")"
                                     )
@@ -2202,7 +2204,7 @@ class DatabaseMaintenance:
                                                       )
                                                     """
                                             )
-    
+
                                 observation_column_sql = ", ".join(observation_columns)
                                 conn.exec_driver_sql(
                                     f"""
@@ -2218,7 +2220,7 @@ class DatabaseMaintenance:
                                           )
                                         """
                                 )
-    
+
                         if runs_to_merge:
                             with _track_maintenance_merge_phase(
                                 "merge.write.global_tables"
@@ -2230,7 +2232,9 @@ class DatabaseMaintenance:
                                         continue
                                     if table in incompatible_global_tables_skipped:
                                         continue
-                                    safe_table = self._validate_identifier(table, label="table")
+                                    safe_table = self._validate_identifier(
+                                        table, label="table"
+                                    )
                                     quoted_table = self._quote_ident(safe_table)
                                     conn.exec_driver_sql(
                                         f"""
@@ -2264,14 +2268,20 @@ class DatabaseMaintenance:
                                             WHERE {filter_sql}
                                             """
                                     ).fetchone()
-                                    candidate_rows = int(count_row[0] if count_row else 0)
+                                    candidate_rows = int(
+                                        count_row[0] if count_row else 0
+                                    )
                                     if candidate_rows <= 0:
                                         continue
-                                    source_lookup_name = self._qualified_table_lookup_name(
-                                        safe_table, schema=merge_source_schema
+                                    source_lookup_name = (
+                                        self._qualified_table_lookup_name(
+                                            safe_table, schema=merge_source_schema
+                                        )
                                     )
-                                    target_lookup_name = self._qualified_table_lookup_name(
-                                        safe_table, schema="global_tables"
+                                    target_lookup_name = (
+                                        self._qualified_table_lookup_name(
+                                            safe_table, schema="global_tables"
+                                        )
                                     )
                                     source_rows = conn.exec_driver_sql(
                                         f"""
@@ -2291,7 +2301,9 @@ class DatabaseMaintenance:
                                             ORDER BY cid
                                             """
                                     ).fetchall()
-                                    source_columns = {str(row[0]) for row in source_rows}
+                                    source_columns = {
+                                        str(row[0]) for row in source_rows
+                                    }
                                     columns: list[str] = []
                                     seen_columns: set[str] = set()
                                     for row in target_rows:
@@ -2300,7 +2312,9 @@ class DatabaseMaintenance:
                                             column_name in source_columns
                                             and column_name not in seen_columns
                                         ):
-                                            columns.append(self._quote_ident(column_name))
+                                            columns.append(
+                                                self._quote_ident(column_name)
+                                            )
                                             seen_columns.add(column_name)
                                     if not columns:
                                         continue
@@ -3161,8 +3175,8 @@ class DatabaseMaintenance:
         return (
             f"EXISTS ("
             f"SELECT 1 "
-            f"FROM {self._quote_ident(safe_temp_table)} AS \"merge_filter_ids\" "
-            f"WHERE \"merge_filter_ids\".{self._quote_ident(safe_temp_column)} "
+            f'FROM {self._quote_ident(safe_temp_table)} AS "merge_filter_ids" '
+            f'WHERE "merge_filter_ids".{self._quote_ident(safe_temp_column)} '
             f"= {self._quote_ident(safe_alias)}.{self._quote_ident(run_column)}"
             f")"
         )

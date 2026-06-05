@@ -1327,9 +1327,7 @@ class Tracker:
             )
             normalized = incoming
             if append:
-                normalized = self.fs.normalize_recovery_roots(
-                    [*existing, *incoming]
-                )
+                normalized = self.fs.normalize_recovery_roots([*existing, *incoming])
 
             next_meta = dict(artifact.meta or {})
             if normalized:
