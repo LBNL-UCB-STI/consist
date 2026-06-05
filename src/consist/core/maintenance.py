@@ -1603,7 +1603,6 @@ class DatabaseMaintenance:
                             )
 
                 return {
-                    "shard_run_ids": shard_run_ids,
                     "shard_global_tables": shard_global_tables,
                     "shard_table_modes": shard_table_modes,
                     "conflicts_detected": conflicts_detected,
@@ -1615,7 +1614,6 @@ class DatabaseMaintenance:
             merge_plan = self.db.execute_with_retry(
                 _prepare_merge, operation_name="maintenance_merge_preflight"
             )
-            shard_run_ids = merge_plan["shard_run_ids"]
             shard_global_tables = merge_plan["shard_global_tables"]
             shard_table_modes = merge_plan["shard_table_modes"]
             conflicts_detected = merge_plan["conflicts_detected"]
