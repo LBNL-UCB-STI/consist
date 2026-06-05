@@ -25,6 +25,7 @@ import json
 import logging
 import shlex
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Union
@@ -71,7 +72,7 @@ def _resolve_image_digest(backend, image: str, pull_latest: bool) -> str:
     return image
 
 
-def _hash_inputs(tracker: Tracker, items: List[ArtifactRef]) -> List[str]:
+def _hash_inputs(tracker: Tracker, items: Sequence[ArtifactRef]) -> List[str]:
     """Return deterministic hashes for container inputs."""
     hashes: List[str] = []
     for item in items:
@@ -107,7 +108,7 @@ def _hash_inputs(tracker: Tracker, items: List[ArtifactRef]) -> List[str]:
 
 def _container_signature(
     defn: ContainerDefinition,
-    inputs: List[ArtifactRef],
+    inputs: Sequence[ArtifactRef],
     tracker: Tracker,
 ) -> str:
     logger.debug(
@@ -257,7 +258,7 @@ def _coerce_container_command(command: Union[str, List[str]]) -> List[str]:
 def _reuse_or_execute_container(
     tracker: Tracker,
     defn: ContainerDefinition,
-    inputs: List[ArtifactRef],
+    inputs: Sequence[ArtifactRef],
     run_id: str,
     execute_fn,
     output_key_map: Optional[Dict[str, str]] = None,
