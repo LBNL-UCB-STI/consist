@@ -15,6 +15,7 @@ from urllib.parse import unquote, urlsplit
 from sqlalchemy.engine import Engine
 from sqlmodel import col, select
 
+from consist.core._performance_attribution import _track_maintenance_merge_phase
 from consist.core.facet_common import flatten_facet_values
 from consist.core.identity import IdentityManager
 from consist.models.artifact import Artifact
@@ -1492,186 +1493,254 @@ class DatabaseMaintenance:
 
         shard_db = self.db.__class__(str(shard_path))
         try:
-            shard_run_columns = self._list_table_columns("run", engine=shard_db.engine)
-            if shard_run_columns and "id" in shard_run_columns:
-                with shard_db.engine.begin() as conn:
-                    shard_run_rows = conn.exec_driver_sql(
-                        f"""
-                        SELECT {self._quote_ident("id")}
-                        FROM {self._quote_ident("run")}
-                        ORDER BY {self._quote_ident("id")}
-                        """
-                    ).fetchall()
-                shard_run_ids = [str(row[0]) for row in shard_run_rows]
-            else:
-                shard_run_ids = []
-            shard_global_tables = self._discover_global_tables(engine=shard_db.engine)
-            shard_table_modes: dict[str, GlobalTableMode] = {
-                table: self._classify_global_table(table, engine=shard_db.engine)
-                for table in shard_global_tables
-            }
 
-            with self.db.session_scope() as session:
-                existing_rows = session.exec(
-                    select(Run.id).where(col(Run.id).in_(shard_run_ids))
-                ).all()
-            existing_run_ids = {str(value) for value in existing_rows}
-            conflicts_detected = sorted(existing_run_ids.intersection(shard_run_ids))
-            conflict_set = set(conflicts_detected)
-
-            if conflicts_detected and conflict_mode == "error":
-                raise ValueError(
-                    "Run ID conflicts detected: " + ", ".join(conflicts_detected)
-                )
-
-            if conflict_mode == "skip":
-                runs_skipped = conflicts_detected
-                runs_to_merge = [
-                    run_id for run_id in shard_run_ids if run_id not in conflict_set
-                ]
-            else:
-                runs_skipped = []
-                runs_to_merge = list(shard_run_ids)
-
-            incompatible_global_tables_skipped: dict[str, str] = {}
-            if runs_to_merge:
-                compatibility_issues: dict[str, str] = {}
-                for table, mode in shard_table_modes.items():
-                    if mode == "unscoped_cache":
-                        continue
-                    compatibility_issue = self._global_table_merge_compatibility_issue(
-                        table,
-                        mode=mode,
-                        source_engine=shard_db.engine,
-                        target_engine=self.db.engine,
+            def _prepare_merge() -> dict[str, Any]:
+                with _track_maintenance_merge_phase("merge.load_shard_run_ids"):
+                    shard_run_columns = self._list_table_columns(
+                        "run", engine=shard_db.engine
                     )
-                    if compatibility_issue:
-                        compatibility_issues[table] = compatibility_issue
-
-                if compatibility_issues:
-                    incompatible_global_tables_skipped = {
-                        table: compatibility_issues[table]
-                        for table in sorted(compatibility_issues)
+                    if shard_run_columns and "id" in shard_run_columns:
+                        with shard_db.engine.begin() as conn:
+                            shard_run_rows = conn.exec_driver_sql(
+                                f"""
+                                SELECT {self._quote_ident("id")}
+                                FROM {self._quote_ident("run")}
+                                ORDER BY {self._quote_ident("id")}
+                                """
+                            ).fetchall()
+                        shard_run_ids = [str(row[0]) for row in shard_run_rows]
+                    else:
+                        shard_run_ids = []
+                with _track_maintenance_merge_phase("merge.discover_global_tables"):
+                    shard_global_tables = self._discover_global_tables(
+                        engine=shard_db.engine
+                    )
+                with _track_maintenance_merge_phase("merge.classify_global_tables"):
+                    shard_table_modes: dict[str, GlobalTableMode] = {
+                        table: self._classify_global_table(
+                            table, engine=shard_db.engine
+                        )
+                        for table in shard_global_tables
                     }
-                    if conflict_mode == "error":
-                        details = "; ".join(
-                            (
-                                f"{table}: {reason}"
-                                for table, reason in incompatible_global_tables_skipped.items()
-                            )
-                        )
-                        raise ValueError(
-                            "Global table schema compatibility check failed: " + details
-                        )
 
-            shard_table_filters: dict[str, Optional[str]] = {}
-            if runs_to_merge:
-                for table, mode in shard_table_modes.items():
-                    if mode == "unscoped_cache":
-                        continue
-                    if table in incompatible_global_tables_skipped:
-                        continue
-                    shard_table_filters[table] = self._resolve_global_table_filter_sql(
-                        table,
-                        runs_to_merge,
-                        table_alias="src_gt",
-                        engine=shard_db.engine,
+                with _track_maintenance_merge_phase("merge.detect_run_conflicts"):
+                    if shard_run_ids:
+                        with self.db.engine.begin() as conn:
+                            self._create_temp_string_table(
+                                conn,
+                                "merge_shard_run_ids",
+                                "run_id",
+                                shard_run_ids,
+                            )
+                            existing_rows = conn.exec_driver_sql(
+                                f"""
+                                SELECT CAST("dst_run".{self._quote_ident("id")} AS VARCHAR)
+                                FROM {self._qualified_table_sql("run")} AS "dst_run"
+                                JOIN {self._quote_ident("merge_shard_run_ids")} AS "merge_ids"
+                                  ON "merge_ids".{self._quote_ident("run_id")}
+                                     = "dst_run".{self._quote_ident("id")}
+                                ORDER BY CAST("dst_run".{self._quote_ident("id")} AS VARCHAR)
+                                """
+                            ).fetchall()
+                        existing_rows = [str(row[0]) for row in existing_rows]
+                    else:
+                        existing_rows = []
+                existing_run_ids = {str(value) for value in existing_rows}
+                conflicts_detected = sorted(
+                    existing_run_ids.intersection(shard_run_ids)
+                )
+                conflict_set = set(conflicts_detected)
+
+                if conflicts_detected and conflict_mode == "error":
+                    raise ValueError(
+                        "Run ID conflicts detected: " + ", ".join(conflicts_detected)
                     )
+
+                if conflict_mode == "skip":
+                    runs_skipped = conflicts_detected
+                    runs_to_merge = [
+                        run_id for run_id in shard_run_ids if run_id not in conflict_set
+                    ]
+                else:
+                    runs_skipped = []
+                    runs_to_merge = list(shard_run_ids)
+
+                incompatible_global_tables_skipped: dict[str, str] = {}
+                if runs_to_merge:
+                    compatibility_issues: dict[str, str] = {}
+                    with _track_maintenance_merge_phase(
+                        "merge.check_global_table_compatibility"
+                    ):
+                        for table, mode in shard_table_modes.items():
+                            if mode == "unscoped_cache":
+                                continue
+                            compatibility_issue = (
+                                self._global_table_merge_compatibility_issue(
+                                    table,
+                                    mode=mode,
+                                    source_engine=shard_db.engine,
+                                    target_engine=self.db.engine,
+                                )
+                            )
+                            if compatibility_issue:
+                                compatibility_issues[table] = compatibility_issue
+
+                    if compatibility_issues:
+                        incompatible_global_tables_skipped = {
+                            table: compatibility_issues[table]
+                            for table in sorted(compatibility_issues)
+                        }
+                        if conflict_mode == "error":
+                            details = "; ".join(
+                                (
+                                    f"{table}: {reason}"
+                                    for table, reason in incompatible_global_tables_skipped.items()
+                                )
+                            )
+                            raise ValueError(
+                                "Global table schema compatibility check failed: "
+                                + details
+                            )
+
+                return {
+                    "shard_global_tables": shard_global_tables,
+                    "shard_table_modes": shard_table_modes,
+                    "conflicts_detected": conflicts_detected,
+                    "runs_skipped": runs_skipped,
+                    "runs_to_merge": runs_to_merge,
+                    "incompatible_global_tables_skipped": incompatible_global_tables_skipped,
+                }
+
+            merge_plan = self.db.execute_with_retry(
+                _prepare_merge, operation_name="maintenance_merge_preflight"
+            )
+            shard_global_tables = merge_plan["shard_global_tables"]
+            shard_table_modes = merge_plan["shard_table_modes"]
+            conflicts_detected = merge_plan["conflicts_detected"]
+            runs_skipped = merge_plan["runs_skipped"]
+            runs_to_merge = merge_plan["runs_to_merge"]
+            incompatible_global_tables_skipped = merge_plan[
+                "incompatible_global_tables_skipped"
+            ]
 
             artifacts_merged = 0
             ingested_tables_merged: list[str] = []
             unscoped_cache_tables_skipped: list[str] = []
 
-            def _any_sql(values: list[str]) -> str:
-                literals = ", ".join(
-                    self._quote_sql_string_literal(value) for value in values
-                )
-                return f"ANY([{literals}])"
-
             if dry_run:
                 if runs_to_merge:
+                    dry_run_alias = "shard_merge_dry_run"
                     shard_link_columns = self._list_table_columns(
                         "run_artifact_link",
                         engine=shard_db.engine,
                     )
-                    if {"run_id", "artifact_id"}.issubset(set(shard_link_columns)):
-                        with shard_db.engine.begin() as conn:
-                            artifact_rows = conn.exec_driver_sql(
-                                f"""
-                                SELECT DISTINCT CAST({self._quote_ident("artifact_id")} AS VARCHAR)
-                                FROM {self._qualified_table_sql("run_artifact_link")}
-                                WHERE {self._quote_ident("run_id")} = {_any_sql(runs_to_merge)}
-                                ORDER BY CAST({self._quote_ident("artifact_id")} AS VARCHAR)
-                                """
-                            ).fetchall()
-                        artifact_ids = [str(row[0]) for row in artifact_rows]
-                    else:
-                        artifact_ids = []
-
-                    if artifact_ids:
-                        with self.db.engine.begin() as conn:
-                            existing_artifact_rows = conn.exec_driver_sql(
-                                f"""
-                                SELECT DISTINCT CAST({self._quote_ident("id")} AS VARCHAR)
-                                FROM {self._qualified_table_sql("artifact")}
-                                WHERE CAST({self._quote_ident("id")} AS VARCHAR)
-                                      = {_any_sql(artifact_ids)}
-                                """
-                            ).fetchall()
-                        existing_artifacts = {
-                            str(row[0]) for row in existing_artifact_rows
-                        }
-                        artifacts_merged = len(
-                            [
-                                value
-                                for value in artifact_ids
-                                if value not in existing_artifacts
-                            ]
+                    with self._attached_database(shard_path, dry_run_alias) as conn:
+                        self._create_temp_string_table(
+                            conn,
+                            "merge_run_ids",
+                            "run_id",
+                            runs_to_merge,
                         )
-                    else:
-                        artifacts_merged = 0
+                        with _track_maintenance_merge_phase(
+                            "merge.dry_run.select_artifacts"
+                        ):
+                            if {"run_id", "artifact_id"}.issubset(
+                                set(shard_link_columns)
+                            ):
+                                conn.exec_driver_sql(
+                                    f"""
+                                    CREATE TEMPORARY TABLE {self._quote_ident("merge_artifact_ids")} AS
+                                    SELECT DISTINCT
+                                        CAST("src_link".{self._quote_ident("artifact_id")} AS VARCHAR)
+                                            AS {self._quote_ident("artifact_id")}
+                                    FROM {self._qualified_table_sql("run_artifact_link", catalog=dry_run_alias)}
+                                        AS "src_link"
+                                    JOIN {self._quote_ident("merge_run_ids")} AS "merge_ids"
+                                      ON "merge_ids".{self._quote_ident("run_id")}
+                                         = "src_link".{self._quote_ident("run_id")}
+                                    WHERE "src_link".{self._quote_ident("artifact_id")}
+                                          IS NOT NULL
+                                    """
+                                )
+                            else:
+                                self._create_temp_string_table(
+                                    conn,
+                                    "merge_artifact_ids",
+                                    "artifact_id",
+                                    [],
+                                )
 
-                    for table in shard_global_tables:
-                        mode = shard_table_modes.get(table)
-                        if mode == "unscoped_cache":
-                            unscoped_cache_tables_skipped.append(table)
-                            continue
-                        if table in incompatible_global_tables_skipped:
-                            continue
-                        filter_sql = shard_table_filters.get(table)
-                        if filter_sql is None:
-                            continue
-                        quoted_table = self._quote_ident(
-                            self._validate_identifier(table, label="table")
-                        )
-                        with shard_db.engine.begin() as conn:
+                        with _track_maintenance_merge_phase(
+                            "merge.dry_run.count_new_artifacts"
+                        ):
                             row = conn.exec_driver_sql(
                                 f"""
                                 SELECT COUNT(*)
-                                FROM global_tables.{quoted_table} AS "src_gt"
-                                WHERE {filter_sql}
+                                FROM {self._quote_ident("merge_artifact_ids")}
+                                    AS "merge_artifacts"
+                                WHERE NOT EXISTS (
+                                    SELECT 1
+                                    FROM {self._qualified_table_sql("artifact")}
+                                        AS "dst_art"
+                                    WHERE CAST("dst_art".{self._quote_ident("id")}
+                                               AS VARCHAR)
+                                          = "merge_artifacts".{self._quote_ident("artifact_id")}
+                                )
                                 """
                             ).fetchone()
-                        candidate_rows = int(row[0] if row else 0)
-                        if candidate_rows > 0:
-                            ingested_tables_merged.append(table)
+                            artifacts_merged = int(row[0] if row else 0)
+
+                        with _track_maintenance_merge_phase(
+                            "merge.dry_run.count_global_tables"
+                        ):
+                            for table in shard_global_tables:
+                                mode = shard_table_modes.get(table)
+                                if mode == "unscoped_cache":
+                                    unscoped_cache_tables_skipped.append(table)
+                                    continue
+                                if table in incompatible_global_tables_skipped:
+                                    continue
+                                filter_sql = self._global_table_temp_filter_sql(
+                                    mode,
+                                    table_alias="src_gt",
+                                    temp_table="merge_run_ids",
+                                )
+                                if filter_sql is None:
+                                    continue
+                                quoted_table = self._quote_ident(
+                                    self._validate_identifier(table, label="table")
+                                )
+                                row = conn.exec_driver_sql(
+                                    f"""
+                                    SELECT COUNT(*)
+                                    FROM {self._quote_ident(dry_run_alias)}.global_tables.{quoted_table}
+                                        AS "src_gt"
+                                    WHERE {filter_sql}
+                                    """
+                                ).fetchone()
+                                candidate_rows = int(row[0] if row else 0)
+                                if candidate_rows > 0:
+                                    ingested_tables_merged.append(table)
                 else:
                     artifacts_merged = 0
 
                 snapshots_merged = 0
-                if include_snapshots and runs_to_merge:
-                    source_snapshot_dir = shard_path.parent / "shard_snapshots"
-                    for run_id in runs_to_merge:
-                        source_name = self._resolve_run_snapshot_path(run_id, None).name
-                        source_snapshot = source_snapshot_dir / source_name
-                        if not source_snapshot.exists():
-                            continue
-                        destination_snapshot = self._resolve_run_snapshot_path(
-                            run_id, None
-                        )
-                        if destination_snapshot.exists():
-                            continue
-                        snapshots_merged += 1
+                with _track_maintenance_merge_phase("merge.dry_run.count_snapshots"):
+                    if include_snapshots and runs_to_merge:
+                        source_snapshot_dir = shard_path.parent / "shard_snapshots"
+                        for run_id in runs_to_merge:
+                            source_name = self._resolve_run_snapshot_path(
+                                run_id, None
+                            ).name
+                            source_snapshot = source_snapshot_dir / source_name
+                            if not source_snapshot.exists():
+                                continue
+                            destination_snapshot = self._resolve_run_snapshot_path(
+                                run_id, None
+                            )
+                            if destination_snapshot.exists():
+                                continue
+                            snapshots_merged += 1
 
                 return MergeResult(
                     shard_path=shard_path,
@@ -1694,485 +1763,636 @@ class DatabaseMaintenance:
                     unscoped_cache_tables_skipped
                 alias = "shard_merge"
                 merge_source_schema = "merge_source"
-                with self._attached_database(shard_path, alias) as conn:
-                    conn.exec_driver_sql(
-                        f"""
-                            CREATE SCHEMA IF NOT EXISTS {self._quote_ident(merge_source_schema)}
-                            """
-                    )
-                    conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-                    if runs_to_merge:
-                        run_filter = _any_sql(runs_to_merge)
-                        source_schema = "main"
-                        target_schema = "main"
-
-                        def _core_columns(table_name: str) -> list[str]:
-                            return self._build_table_intersection_columns(
-                                table_name,
-                                source_schema=source_schema,
-                                source_catalog=alias,
-                                target_schema=target_schema,
-                                target_catalog=None,
-                                engine=self.db.engine,
-                            )
-
-                        run_columns = _core_columns("run")
-                        run_source_columns = self._list_table_columns(
-                            "run",
-                            schema=source_schema,
-                            catalog=alias,
-                            engine=self.db.engine,
-                        )
-                        run_target_columns = self._list_table_columns(
-                            "run",
-                            schema=target_schema,
-                            engine=self.db.engine,
-                        )
-                        if run_columns and {"id"}.issubset(
-                            set(run_source_columns).intersection(run_target_columns)
+                with _track_maintenance_merge_phase("merge.write.total"):
+                    with self._attached_database(shard_path, alias) as conn:
+                        with _track_maintenance_merge_phase(
+                            "merge.write.setup_schemas"
                         ):
-                            run_column_sql = ", ".join(run_columns)
                             conn.exec_driver_sql(
                                 f"""
-                                    INSERT INTO {self._qualified_table_sql("run")} ({run_column_sql})
-                                    SELECT {run_column_sql}
-                                    FROM {self._qualified_table_sql("run", catalog=alias)} AS "src_run"
-                                    WHERE "src_run".{self._quote_ident("id")} = {run_filter}
-                                      AND NOT EXISTS (
-                                          SELECT 1
-                                          FROM {self._qualified_table_sql("run")} AS "dst_run"
-                                          WHERE "dst_run".{self._quote_ident("id")}
-                                                = "src_run".{self._quote_ident("id")}
-                                      )
+                                    CREATE SCHEMA IF NOT EXISTS {self._quote_ident(merge_source_schema)}
                                     """
-                            )
-
-                        run_artifact_link_columns = _core_columns("run_artifact_link")
-                        run_artifact_link_source_columns = self._list_table_columns(
-                            "run_artifact_link",
-                            schema=source_schema,
-                            catalog=alias,
-                            engine=self.db.engine,
-                        )
-                        run_artifact_link_target_columns = self._list_table_columns(
-                            "run_artifact_link",
-                            schema=target_schema,
-                            engine=self.db.engine,
-                        )
-                        artifact_rows = []
-                        if {"run_id", "artifact_id"}.issubset(
-                            set(run_artifact_link_source_columns)
-                        ):
-                            artifact_rows = conn.exec_driver_sql(
-                                f"""
-                                    SELECT DISTINCT
-                                        CAST({self._quote_ident("artifact_id")} AS VARCHAR)
-                                    FROM {self._qualified_table_sql("run_artifact_link", catalog=alias)}
-                                    WHERE {self._quote_ident("run_id")} = {run_filter}
-                                    ORDER BY CAST({self._quote_ident("artifact_id")} AS VARCHAR)
-                                    """
-                            ).fetchall()
-
-                        if run_artifact_link_columns and {
-                            "run_id",
-                            "artifact_id",
-                        }.issubset(
-                            set(run_artifact_link_source_columns).intersection(
-                                run_artifact_link_target_columns
-                            )
-                        ):
-                            run_artifact_link_column_sql = ", ".join(
-                                run_artifact_link_columns
                             )
                             conn.exec_driver_sql(
-                                f"""
-                                    INSERT INTO {self._qualified_table_sql("run_artifact_link")} ({run_artifact_link_column_sql})
-                                    SELECT {run_artifact_link_column_sql}
-                                    FROM {self._qualified_table_sql("run_artifact_link", catalog=alias)} AS "src_link"
-                                    WHERE "src_link".{self._quote_ident("run_id")} = {run_filter}
-                                      AND NOT EXISTS (
-                                          SELECT 1
-                                          FROM {self._qualified_table_sql("run_artifact_link")} AS "dst_link"
-                                          WHERE "dst_link".{self._quote_ident("run_id")}
-                                                    = "src_link".{self._quote_ident("run_id")}
-                                            AND CAST("dst_link".{self._quote_ident("artifact_id")} AS VARCHAR)
-                                                    = CAST("src_link".{self._quote_ident("artifact_id")} AS VARCHAR)
-                                      )
-                                    """
+                                "CREATE SCHEMA IF NOT EXISTS global_tables"
+                            )
+                        if runs_to_merge:
+                            source_schema = "main"
+                            target_schema = "main"
+                            self._create_temp_string_table(
+                                conn,
+                                "merge_run_ids",
+                                "run_id",
+                                runs_to_merge,
                             )
 
-                        artifact_ids = [str(row[0]) for row in artifact_rows]
-                        if artifact_ids:
-                            artifact_columns = _core_columns("artifact")
-                            artifact_source_columns = self._list_table_columns(
-                                "artifact",
+                            def _core_columns(table_name: str) -> list[str]:
+                                return self._build_table_intersection_columns(
+                                    table_name,
+                                    source_schema=source_schema,
+                                    source_catalog=alias,
+                                    target_schema=target_schema,
+                                    target_catalog=None,
+                                    engine=self.db.engine,
+                                )
+
+                            def _source_select_columns(
+                                table_alias: str, columns: list[str]
+                            ) -> str:
+                                safe_alias = self._validate_identifier(
+                                    table_alias,
+                                    label="table_alias",
+                                )
+                                return ", ".join(
+                                    f"{self._quote_ident(safe_alias)}.{column}"
+                                    for column in columns
+                                )
+
+                            run_columns = _core_columns("run")
+                            run_source_columns = self._list_table_columns(
+                                "run",
                                 schema=source_schema,
                                 catalog=alias,
                                 engine=self.db.engine,
                             )
-                            artifact_target_columns = self._list_table_columns(
-                                "artifact",
+                            run_target_columns = self._list_table_columns(
+                                "run",
                                 schema=target_schema,
                                 engine=self.db.engine,
                             )
-                            new_artifact_rows = conn.exec_driver_sql(
-                                f"""
-                                    SELECT COUNT(*)
-                                    FROM {self._qualified_table_sql("artifact", catalog=alias)} AS "src_art"
-                                    WHERE CAST("src_art".{self._quote_ident("id")} AS VARCHAR)
-                                          = {_any_sql(artifact_ids)}
-                                      AND NOT EXISTS (
-                                          SELECT 1
-                                          FROM {self._qualified_table_sql("artifact")} AS "dst_art"
-                                          WHERE CAST("dst_art".{self._quote_ident("id")} AS VARCHAR)
-                                                = CAST("src_art".{self._quote_ident("id")} AS VARCHAR)
-                                      )
-                                    """
-                            ).fetchone()
-                            artifacts_merged = int(
-                                new_artifact_rows[0] if new_artifact_rows else 0
-                            )
-                            if artifact_columns and {"id"}.issubset(
-                                set(artifact_source_columns).intersection(
-                                    artifact_target_columns
-                                )
+                            if run_columns and {"id"}.issubset(
+                                set(run_source_columns).intersection(run_target_columns)
                             ):
-                                artifact_column_sql = ", ".join(artifact_columns)
+                                run_column_sql = ", ".join(run_columns)
+                                run_select_column_sql = _source_select_columns(
+                                    "src_run",
+                                    run_columns,
+                                )
                                 conn.exec_driver_sql(
                                     f"""
-                                        INSERT INTO {self._qualified_table_sql("artifact")} ({artifact_column_sql})
-                                        SELECT {artifact_column_sql}
+                                        INSERT INTO {self._qualified_table_sql("run")} ({run_column_sql})
+                                        SELECT {run_select_column_sql}
+                                        FROM {self._qualified_table_sql("run", catalog=alias)} AS "src_run"
+                                        JOIN {self._quote_ident("merge_run_ids")} AS "merge_ids"
+                                          ON "merge_ids".{self._quote_ident("run_id")}
+                                             = "src_run".{self._quote_ident("id")}
+                                        WHERE NOT EXISTS (
+                                              SELECT 1
+                                              FROM {self._qualified_table_sql("run")} AS "dst_run"
+                                              WHERE "dst_run".{self._quote_ident("id")}
+                                                    = "src_run".{self._quote_ident("id")}
+                                          )
+                                        """
+                                )
+
+                            run_artifact_link_columns = _core_columns(
+                                "run_artifact_link"
+                            )
+                            run_artifact_link_source_columns = self._list_table_columns(
+                                "run_artifact_link",
+                                schema=source_schema,
+                                catalog=alias,
+                                engine=self.db.engine,
+                            )
+                            run_artifact_link_target_columns = self._list_table_columns(
+                                "run_artifact_link",
+                                schema=target_schema,
+                                engine=self.db.engine,
+                            )
+                            if {"run_id", "artifact_id"}.issubset(
+                                set(run_artifact_link_source_columns)
+                            ):
+                                conn.exec_driver_sql(
+                                    f"""
+                                        CREATE TEMPORARY TABLE {self._quote_ident("merge_artifact_ids")} AS
+                                        SELECT DISTINCT
+                                            CAST("src_link".{self._quote_ident("artifact_id")} AS VARCHAR)
+                                                AS {self._quote_ident("artifact_id")}
+                                        FROM {self._qualified_table_sql("run_artifact_link", catalog=alias)}
+                                            AS "src_link"
+                                        JOIN {self._quote_ident("merge_run_ids")} AS "merge_ids"
+                                          ON "merge_ids".{self._quote_ident("run_id")}
+                                             = "src_link".{self._quote_ident("run_id")}
+                                        WHERE "src_link".{self._quote_ident("artifact_id")}
+                                              IS NOT NULL
+                                        """
+                                )
+                            else:
+                                self._create_temp_string_table(
+                                    conn,
+                                    "merge_artifact_ids",
+                                    "artifact_id",
+                                    [],
+                                )
+
+                            if run_artifact_link_columns and {
+                                "run_id",
+                                "artifact_id",
+                            }.issubset(
+                                set(run_artifact_link_source_columns).intersection(
+                                    run_artifact_link_target_columns
+                                )
+                            ):
+                                run_artifact_link_column_sql = ", ".join(
+                                    run_artifact_link_columns
+                                )
+                                run_artifact_link_select_column_sql = (
+                                    _source_select_columns(
+                                        "src_link",
+                                        run_artifact_link_columns,
+                                    )
+                                )
+                                conn.exec_driver_sql(
+                                    f"""
+                                        INSERT INTO {self._qualified_table_sql("run_artifact_link")} ({run_artifact_link_column_sql})
+                                        SELECT {run_artifact_link_select_column_sql}
+                                        FROM {self._qualified_table_sql("run_artifact_link", catalog=alias)} AS "src_link"
+                                        JOIN {self._quote_ident("merge_run_ids")} AS "merge_ids"
+                                          ON "merge_ids".{self._quote_ident("run_id")}
+                                             = "src_link".{self._quote_ident("run_id")}
+                                        WHERE NOT EXISTS (
+                                              SELECT 1
+                                              FROM {self._qualified_table_sql("run_artifact_link")} AS "dst_link"
+                                              WHERE "dst_link".{self._quote_ident("run_id")}
+                                                        = "src_link".{self._quote_ident("run_id")}
+                                                AND CAST("dst_link".{self._quote_ident("artifact_id")} AS VARCHAR)
+                                                        = CAST("src_link".{self._quote_ident("artifact_id")} AS VARCHAR)
+                                          )
+                                        """
+                                )
+
+                            has_artifact_ids_row = conn.exec_driver_sql(
+                                f"""
+                                SELECT EXISTS (
+                                    SELECT 1
+                                    FROM {self._quote_ident("merge_artifact_ids")}
+                                    LIMIT 1
+                                )
+                                """
+                            ).fetchone()
+                            has_artifact_ids = bool(
+                                has_artifact_ids_row[0]
+                                if has_artifact_ids_row
+                                else False
+                            )
+                            if has_artifact_ids:
+                                artifact_columns = _core_columns("artifact")
+                                artifact_source_columns = self._list_table_columns(
+                                    "artifact",
+                                    schema=source_schema,
+                                    catalog=alias,
+                                    engine=self.db.engine,
+                                )
+                                artifact_target_columns = self._list_table_columns(
+                                    "artifact",
+                                    schema=target_schema,
+                                    engine=self.db.engine,
+                                )
+                                new_artifact_rows = conn.exec_driver_sql(
+                                    f"""
+                                        SELECT COUNT(*)
                                         FROM {self._qualified_table_sql("artifact", catalog=alias)} AS "src_art"
-                                        WHERE CAST("src_art".{self._quote_ident("id")} AS VARCHAR)
-                                              = {_any_sql(artifact_ids)}
-                                          AND NOT EXISTS (
+                                        JOIN {self._quote_ident("merge_artifact_ids")} AS "merge_artifacts"
+                                          ON "merge_artifacts".{self._quote_ident("artifact_id")}
+                                             = CAST("src_art".{self._quote_ident("id")} AS VARCHAR)
+                                        WHERE NOT EXISTS (
                                               SELECT 1
                                               FROM {self._qualified_table_sql("artifact")} AS "dst_art"
                                               WHERE CAST("dst_art".{self._quote_ident("id")} AS VARCHAR)
                                                     = CAST("src_art".{self._quote_ident("id")} AS VARCHAR)
                                           )
                                         """
+                                ).fetchone()
+                                artifacts_merged = int(
+                                    new_artifact_rows[0] if new_artifact_rows else 0
                                 )
+                                if artifact_columns and {"id"}.issubset(
+                                    set(artifact_source_columns).intersection(
+                                        artifact_target_columns
+                                    )
+                                ):
+                                    artifact_column_sql = ", ".join(artifact_columns)
+                                    artifact_select_column_sql = _source_select_columns(
+                                        "src_art",
+                                        artifact_columns,
+                                    )
+                                    conn.exec_driver_sql(
+                                        f"""
+                                            INSERT INTO {self._qualified_table_sql("artifact")} ({artifact_column_sql})
+                                            SELECT {artifact_select_column_sql}
+                                            FROM {self._qualified_table_sql("artifact", catalog=alias)} AS "src_art"
+                                            JOIN {self._quote_ident("merge_artifact_ids")} AS "merge_artifacts"
+                                              ON "merge_artifacts".{self._quote_ident("artifact_id")}
+                                                 = CAST("src_art".{self._quote_ident("id")} AS VARCHAR)
+                                            WHERE NOT EXISTS (
+                                                  SELECT 1
+                                                  FROM {self._qualified_table_sql("artifact")} AS "dst_art"
+                                                  WHERE CAST("dst_art".{self._quote_ident("id")} AS VARCHAR)
+                                                        = CAST("src_art".{self._quote_ident("id")} AS VARCHAR)
+                                              )
+                                            """
+                                    )
 
-                        run_config_kv_columns = _core_columns("run_config_kv")
-                        run_config_source_columns = self._list_table_columns(
-                            "run_config_kv",
-                            schema=source_schema,
-                            catalog=alias,
-                            engine=self.db.engine,
-                        )
-                        run_config_target_columns = self._list_table_columns(
-                            "run_config_kv",
-                            schema=target_schema,
-                            engine=self.db.engine,
-                        )
-                        if run_config_kv_columns and {
-                            "run_id",
-                            "facet_id",
-                            "namespace",
-                            "key",
-                        }.issubset(
-                            set(run_config_source_columns).intersection(
-                                run_config_target_columns
-                            )
-                        ):
-                            run_config_column_sql = ", ".join(run_config_kv_columns)
-                            conn.exec_driver_sql(
-                                f"""
-                                    INSERT INTO {self._qualified_table_sql("run_config_kv")} ({run_config_column_sql})
-                                    SELECT {run_config_column_sql}
-                                    FROM {self._qualified_table_sql("run_config_kv", catalog=alias)} AS "src_cfg"
-                                    WHERE "src_cfg".{self._quote_ident("run_id")} = {run_filter}
-                                      AND NOT EXISTS (
-                                          SELECT 1
-                                          FROM {self._qualified_table_sql("run_config_kv")} AS "dst_cfg"
-                                          WHERE "dst_cfg".{self._quote_ident("run_id")}
-                                                    = "src_cfg".{self._quote_ident("run_id")}
-                                            AND "dst_cfg".{self._quote_ident("facet_id")}
-                                                    = "src_cfg".{self._quote_ident("facet_id")}
-                                            AND "dst_cfg".{self._quote_ident("namespace")}
-                                                    = "src_cfg".{self._quote_ident("namespace")}
-                                            AND "dst_cfg".{self._quote_ident("key")}
-                                                    = "src_cfg".{self._quote_ident("key")}
-                                      )
-                                    """
-                            )
-
-                        if artifact_ids:
-                            artifact_kv_columns = _core_columns("artifact_kv")
-                            artifact_kv_source_columns = self._list_table_columns(
-                                "artifact_kv",
+                            run_config_kv_columns = _core_columns("run_config_kv")
+                            run_config_source_columns = self._list_table_columns(
+                                "run_config_kv",
                                 schema=source_schema,
                                 catalog=alias,
                                 engine=self.db.engine,
                             )
-                            artifact_kv_target_columns = self._list_table_columns(
-                                "artifact_kv",
+                            run_config_target_columns = self._list_table_columns(
+                                "run_config_kv",
                                 schema=target_schema,
                                 engine=self.db.engine,
                             )
-                            if artifact_kv_columns and {
-                                "artifact_id",
+                            if run_config_kv_columns and {
+                                "run_id",
                                 "facet_id",
-                                "key_path",
+                                "namespace",
+                                "key",
                             }.issubset(
-                                set(artifact_kv_source_columns).intersection(
-                                    artifact_kv_target_columns
+                                set(run_config_source_columns).intersection(
+                                    run_config_target_columns
                                 )
                             ):
-                                artifact_kv_column_sql = ", ".join(artifact_kv_columns)
+                                run_config_column_sql = ", ".join(run_config_kv_columns)
+                                run_config_select_column_sql = _source_select_columns(
+                                    "src_cfg",
+                                    run_config_kv_columns,
+                                )
                                 conn.exec_driver_sql(
                                     f"""
-                                        INSERT INTO {self._qualified_table_sql("artifact_kv")} ({artifact_kv_column_sql})
-                                        SELECT {artifact_kv_column_sql}
-                                        FROM {self._qualified_table_sql("artifact_kv", catalog=alias)} AS "src_akv"
-                                        WHERE CAST("src_akv".{self._quote_ident("artifact_id")} AS VARCHAR)
-                                              = {_any_sql(artifact_ids)}
-                                          AND NOT EXISTS (
+                                        INSERT INTO {self._qualified_table_sql("run_config_kv")} ({run_config_column_sql})
+                                        SELECT {run_config_select_column_sql}
+                                        FROM {self._qualified_table_sql("run_config_kv", catalog=alias)} AS "src_cfg"
+                                        JOIN {self._quote_ident("merge_run_ids")} AS "merge_ids"
+                                          ON "merge_ids".{self._quote_ident("run_id")}
+                                             = "src_cfg".{self._quote_ident("run_id")}
+                                        WHERE NOT EXISTS (
                                               SELECT 1
-                                              FROM {self._qualified_table_sql("artifact_kv")} AS "dst_akv"
-                                              WHERE CAST("dst_akv".{self._quote_ident("artifact_id")} AS VARCHAR)
-                                                        = CAST("src_akv".{self._quote_ident("artifact_id")} AS VARCHAR)
-                                                AND "dst_akv".{self._quote_ident("facet_id")}
-                                                        = "src_akv".{self._quote_ident("facet_id")}
-                                                AND "dst_akv".{self._quote_ident("key_path")}
-                                                        = "src_akv".{self._quote_ident("key_path")}
+                                              FROM {self._qualified_table_sql("run_config_kv")} AS "dst_cfg"
+                                              WHERE "dst_cfg".{self._quote_ident("run_id")}
+                                                        = "src_cfg".{self._quote_ident("run_id")}
+                                                AND "dst_cfg".{self._quote_ident("facet_id")}
+                                                        = "src_cfg".{self._quote_ident("facet_id")}
+                                                AND "dst_cfg".{self._quote_ident("namespace")}
+                                                        = "src_cfg".{self._quote_ident("namespace")}
+                                                AND "dst_cfg".{self._quote_ident("key")}
+                                                        = "src_cfg".{self._quote_ident("key")}
                                           )
                                         """
                                 )
 
-                        observation_columns = _core_columns(
-                            "artifact_schema_observation"
-                        )
-                        observation_source_columns = set(
-                            self._list_table_columns(
-                                "artifact_schema_observation",
-                                schema=source_schema,
-                                catalog=alias,
-                                engine=self.db.engine,
+                            if has_artifact_ids:
+                                artifact_kv_columns = _core_columns("artifact_kv")
+                                artifact_kv_source_columns = self._list_table_columns(
+                                    "artifact_kv",
+                                    schema=source_schema,
+                                    catalog=alias,
+                                    engine=self.db.engine,
+                                )
+                                artifact_kv_target_columns = self._list_table_columns(
+                                    "artifact_kv",
+                                    schema=target_schema,
+                                    engine=self.db.engine,
+                                )
+                                if artifact_kv_columns and {
+                                    "artifact_id",
+                                    "facet_id",
+                                    "key_path",
+                                }.issubset(
+                                    set(artifact_kv_source_columns).intersection(
+                                        artifact_kv_target_columns
+                                    )
+                                ):
+                                    artifact_kv_column_sql = ", ".join(
+                                        artifact_kv_columns
+                                    )
+                                    artifact_kv_select_column_sql = (
+                                        _source_select_columns(
+                                            "src_akv",
+                                            artifact_kv_columns,
+                                        )
+                                    )
+                                    conn.exec_driver_sql(
+                                        f"""
+                                            INSERT INTO {self._qualified_table_sql("artifact_kv")} ({artifact_kv_column_sql})
+                                            SELECT {artifact_kv_select_column_sql}
+                                            FROM {self._qualified_table_sql("artifact_kv", catalog=alias)} AS "src_akv"
+                                            JOIN {self._quote_ident("merge_artifact_ids")} AS "merge_artifacts"
+                                              ON "merge_artifacts".{self._quote_ident("artifact_id")}
+                                                 = CAST("src_akv".{self._quote_ident("artifact_id")} AS VARCHAR)
+                                            WHERE NOT EXISTS (
+                                                  SELECT 1
+                                                  FROM {self._qualified_table_sql("artifact_kv")} AS "dst_akv"
+                                                  WHERE CAST("dst_akv".{self._quote_ident("artifact_id")} AS VARCHAR)
+                                                            = CAST("src_akv".{self._quote_ident("artifact_id")} AS VARCHAR)
+                                                    AND "dst_akv".{self._quote_ident("facet_id")}
+                                                            = "src_akv".{self._quote_ident("facet_id")}
+                                                    AND "dst_akv".{self._quote_ident("key_path")}
+                                                            = "src_akv".{self._quote_ident("key_path")}
+                                              )
+                                            """
+                                    )
+
+                            observation_columns = _core_columns(
+                                "artifact_schema_observation"
                             )
-                        )
-                        observation_target_columns = set(
-                            self._list_table_columns(
-                                "artifact_schema_observation",
-                                schema=target_schema,
-                                engine=self.db.engine,
+                            observation_source_columns = set(
+                                self._list_table_columns(
+                                    "artifact_schema_observation",
+                                    schema=source_schema,
+                                    catalog=alias,
+                                    engine=self.db.engine,
+                                )
                             )
-                        )
-                        shared_observation_columns = (
-                            observation_source_columns.intersection(
-                                observation_target_columns
+                            observation_target_columns = set(
+                                self._list_table_columns(
+                                    "artifact_schema_observation",
+                                    schema=target_schema,
+                                    engine=self.db.engine,
+                                )
                             )
-                        )
-                        observation_filters: list[str] = []
-                        if "run_id" in observation_source_columns:
-                            observation_filters.append(
-                                f'"src_obs".{self._quote_ident("run_id")} = {run_filter}'
+                            shared_observation_columns = (
+                                observation_source_columns.intersection(
+                                    observation_target_columns
+                                )
                             )
-                        if "artifact_id" in observation_source_columns and artifact_ids:
-                            observation_filters.append(
-                                f'CAST("src_obs".{self._quote_ident("artifact_id")} AS VARCHAR)'
-                                f" = {_any_sql(artifact_ids)}"
+                            observation_filters: list[str] = []
+                            if "run_id" in observation_source_columns:
+                                observation_filters.append(
+                                    (
+                                        "EXISTS ("
+                                        "SELECT 1 "
+                                        f"FROM {self._quote_ident('merge_run_ids')} "
+                                        'AS "merge_ids" '
+                                        f'WHERE "merge_ids".{self._quote_ident("run_id")} '
+                                        f'= "src_obs".{self._quote_ident("run_id")}'
+                                        ")"
+                                    )
+                                )
+                            if (
+                                "artifact_id" in observation_source_columns
+                                and has_artifact_ids
+                            ):
+                                observation_filters.append(
+                                    (
+                                        "EXISTS ("
+                                        "SELECT 1 "
+                                        f"FROM {self._quote_ident('merge_artifact_ids')} "
+                                        'AS "merge_artifacts" '
+                                        f'WHERE "merge_artifacts".{self._quote_ident("artifact_id")} '
+                                        f'= CAST("src_obs".{self._quote_ident("artifact_id")} '
+                                        "AS VARCHAR)"
+                                        ")"
+                                    )
+                                )
+                            observation_where = (
+                                " OR ".join(observation_filters)
+                                if observation_filters
+                                else None
                             )
-                        observation_where = (
-                            " OR ".join(observation_filters)
-                            if observation_filters
-                            else None
-                        )
-                        if (
-                            observation_columns
-                            and "id" in shared_observation_columns
-                            and observation_where is not None
-                        ):
-                            if "schema_id" in shared_observation_columns:
-                                schema_rows = conn.exec_driver_sql(
+                            if (
+                                observation_columns
+                                and "id" in shared_observation_columns
+                                and observation_where is not None
+                            ):
+                                if "schema_id" in shared_observation_columns:
+                                    conn.exec_driver_sql(
+                                        f"""
+                                            CREATE TEMPORARY TABLE {self._quote_ident("merge_schema_ids")} AS
+                                            SELECT DISTINCT
+                                                CAST("src_obs".{self._quote_ident("schema_id")} AS VARCHAR)
+                                                    AS {self._quote_ident("schema_id")}
+                                            FROM {self._qualified_table_sql("artifact_schema_observation", catalog=alias)} AS "src_obs"
+                                            WHERE ({observation_where})
+                                              AND "src_obs".{self._quote_ident("schema_id")} IS NOT NULL
+                                            """
+                                    )
+                                    has_schema_ids_row = conn.exec_driver_sql(
+                                        f"""
+                                        SELECT EXISTS (
+                                            SELECT 1
+                                            FROM {self._quote_ident("merge_schema_ids")}
+                                            LIMIT 1
+                                        )
+                                        """
+                                    ).fetchone()
+                                    has_schema_ids = bool(
+                                        has_schema_ids_row[0]
+                                        if has_schema_ids_row
+                                        else False
+                                    )
+                                    if has_schema_ids:
+                                        artifact_schema_columns = _core_columns(
+                                            "artifact_schema"
+                                        )
+                                        artifact_schema_source_columns = set(
+                                            self._list_table_columns(
+                                                "artifact_schema",
+                                                schema=source_schema,
+                                                catalog=alias,
+                                                engine=self.db.engine,
+                                            )
+                                        )
+                                        artifact_schema_target_columns = set(
+                                            self._list_table_columns(
+                                                "artifact_schema",
+                                                schema=target_schema,
+                                                engine=self.db.engine,
+                                            )
+                                        )
+                                        if artifact_schema_columns and {"id"}.issubset(
+                                            artifact_schema_source_columns.intersection(
+                                                artifact_schema_target_columns
+                                            )
+                                        ):
+                                            artifact_schema_column_sql = ", ".join(
+                                                artifact_schema_columns
+                                            )
+                                            artifact_schema_select_column_sql = (
+                                                _source_select_columns(
+                                                    "src_schema",
+                                                    artifact_schema_columns,
+                                                )
+                                            )
+                                            conn.exec_driver_sql(
+                                                f"""
+                                                    INSERT INTO {self._qualified_table_sql("artifact_schema")} ({artifact_schema_column_sql})
+                                                    SELECT {artifact_schema_select_column_sql}
+                                                    FROM {self._qualified_table_sql("artifact_schema", catalog=alias)} AS "src_schema"
+                                                    JOIN {self._quote_ident("merge_schema_ids")} AS "merge_schemas"
+                                                      ON "merge_schemas".{self._quote_ident("schema_id")}
+                                                         = CAST("src_schema".{self._quote_ident("id")} AS VARCHAR)
+                                                    WHERE NOT EXISTS (
+                                                          SELECT 1
+                                                          FROM {self._qualified_table_sql("artifact_schema")} AS "dst_schema"
+                                                          WHERE CAST("dst_schema".{self._quote_ident("id")} AS VARCHAR)
+                                                                = CAST("src_schema".{self._quote_ident("id")} AS VARCHAR)
+                                                      )
+                                                    """
+                                            )
+
+                                observation_column_sql = ", ".join(observation_columns)
+                                conn.exec_driver_sql(
                                     f"""
-                                        SELECT DISTINCT CAST("src_obs".{self._quote_ident("schema_id")} AS VARCHAR)
+                                        INSERT INTO {self._qualified_table_sql("artifact_schema_observation")} ({observation_column_sql})
+                                        SELECT {observation_column_sql}
                                         FROM {self._qualified_table_sql("artifact_schema_observation", catalog=alias)} AS "src_obs"
                                         WHERE ({observation_where})
-                                          AND "src_obs".{self._quote_ident("schema_id")} IS NOT NULL
-                                        ORDER BY CAST("src_obs".{self._quote_ident("schema_id")} AS VARCHAR)
+                                          AND NOT EXISTS (
+                                              SELECT 1
+                                              FROM {self._qualified_table_sql("artifact_schema_observation")} AS "dst_obs"
+                                              WHERE CAST("dst_obs".{self._quote_ident("id")} AS VARCHAR)
+                                                    = CAST("src_obs".{self._quote_ident("id")} AS VARCHAR)
+                                          )
                                         """
-                                ).fetchall()
-                                schema_ids = [str(row[0]) for row in schema_rows]
-                                if schema_ids:
-                                    artifact_schema_columns = _core_columns(
-                                        "artifact_schema"
-                                    )
-                                    artifact_schema_source_columns = set(
-                                        self._list_table_columns(
-                                            "artifact_schema",
-                                            schema=source_schema,
-                                            catalog=alias,
-                                            engine=self.db.engine,
-                                        )
-                                    )
-                                    artifact_schema_target_columns = set(
-                                        self._list_table_columns(
-                                            "artifact_schema",
-                                            schema=target_schema,
-                                            engine=self.db.engine,
-                                        )
-                                    )
-                                    if artifact_schema_columns and {"id"}.issubset(
-                                        artifact_schema_source_columns.intersection(
-                                            artifact_schema_target_columns
-                                        )
-                                    ):
-                                        artifact_schema_column_sql = ", ".join(
-                                            artifact_schema_columns
-                                        )
-                                        conn.exec_driver_sql(
-                                            f"""
-                                                INSERT INTO {self._qualified_table_sql("artifact_schema")} ({artifact_schema_column_sql})
-                                                SELECT {artifact_schema_column_sql}
-                                                FROM {self._qualified_table_sql("artifact_schema", catalog=alias)} AS "src_schema"
-                                                WHERE CAST("src_schema".{self._quote_ident("id")} AS VARCHAR)
-                                                      = {_any_sql(schema_ids)}
-                                                  AND NOT EXISTS (
-                                                      SELECT 1
-                                                      FROM {self._qualified_table_sql("artifact_schema")} AS "dst_schema"
-                                                      WHERE CAST("dst_schema".{self._quote_ident("id")} AS VARCHAR)
-                                                            = CAST("src_schema".{self._quote_ident("id")} AS VARCHAR)
-                                                  )
-                                                """
-                                        )
+                                )
 
-                            observation_column_sql = ", ".join(observation_columns)
+                        if runs_to_merge:
+                            with _track_maintenance_merge_phase(
+                                "merge.write.global_tables"
+                            ):
+                                for table in shard_global_tables:
+                                    mode = shard_table_modes.get(table)
+                                    if mode == "unscoped_cache":
+                                        unscoped_cache_tables_skipped.append(table)
+                                        continue
+                                    if table in incompatible_global_tables_skipped:
+                                        continue
+                                    safe_table = self._validate_identifier(
+                                        table, label="table"
+                                    )
+                                    quoted_table = self._quote_ident(safe_table)
+                                    conn.exec_driver_sql(
+                                        f"""
+                                            CREATE TABLE IF NOT EXISTS global_tables.{quoted_table}
+                                            AS
+                                            SELECT *
+                                            FROM {self._quote_ident(alias)}.global_tables.{quoted_table}
+                                            WHERE 1 = 0
+                                            """
+                                    )
+                                    conn.exec_driver_sql(
+                                        f"""
+                                            CREATE OR REPLACE TABLE {self._quote_ident(merge_source_schema)}.{quoted_table}
+                                            AS
+                                            SELECT *
+                                            FROM {self._quote_ident(alias)}.global_tables.{quoted_table}
+                                            WHERE 1 = 0
+                                            """
+                                    )
+                                    filter_sql = self._global_table_temp_filter_sql(
+                                        mode,
+                                        table_alias="src_gt",
+                                        temp_table="merge_run_ids",
+                                    )
+                                    if filter_sql is None:
+                                        continue
+                                    count_row = conn.exec_driver_sql(
+                                        f"""
+                                            SELECT COUNT(*)
+                                            FROM {self._quote_ident(alias)}.global_tables.{quoted_table} AS "src_gt"
+                                            WHERE {filter_sql}
+                                            """
+                                    ).fetchone()
+                                    candidate_rows = int(
+                                        count_row[0] if count_row else 0
+                                    )
+                                    if candidate_rows <= 0:
+                                        continue
+                                    source_lookup_name = (
+                                        self._qualified_table_lookup_name(
+                                            safe_table, schema=merge_source_schema
+                                        )
+                                    )
+                                    target_lookup_name = (
+                                        self._qualified_table_lookup_name(
+                                            safe_table, schema="global_tables"
+                                        )
+                                    )
+                                    source_rows = conn.exec_driver_sql(
+                                        f"""
+                                            SELECT name
+                                            FROM pragma_table_info(
+                                                {self._quote_sql_string_literal(source_lookup_name)}
+                                            )
+                                            ORDER BY cid
+                                            """
+                                    ).fetchall()
+                                    target_rows = conn.exec_driver_sql(
+                                        f"""
+                                            SELECT name
+                                            FROM pragma_table_info(
+                                                {self._quote_sql_string_literal(target_lookup_name)}
+                                            )
+                                            ORDER BY cid
+                                            """
+                                    ).fetchall()
+                                    source_columns = {
+                                        str(row[0]) for row in source_rows
+                                    }
+                                    columns: list[str] = []
+                                    seen_columns: set[str] = set()
+                                    for row in target_rows:
+                                        column_name = str(row[0])
+                                        if (
+                                            column_name in source_columns
+                                            and column_name not in seen_columns
+                                        ):
+                                            columns.append(
+                                                self._quote_ident(column_name)
+                                            )
+                                            seen_columns.add(column_name)
+                                    if not columns:
+                                        continue
+                                    column_sql = ", ".join(columns)
+                                    conn.exec_driver_sql(
+                                        f"""
+                                            INSERT INTO global_tables.{quoted_table} ({column_sql})
+                                            SELECT {column_sql}
+                                            FROM {self._quote_ident(alias)}.global_tables.{quoted_table} AS "src_gt"
+                                            WHERE {filter_sql}
+                                            """
+                                    )
+                                    ingested_tables_merged.append(safe_table)
+                        with _track_maintenance_merge_phase("merge.write.cleanup"):
                             conn.exec_driver_sql(
-                                f"""
-                                    INSERT INTO {self._qualified_table_sql("artifact_schema_observation")} ({observation_column_sql})
-                                    SELECT {observation_column_sql}
-                                    FROM {self._qualified_table_sql("artifact_schema_observation", catalog=alias)} AS "src_obs"
-                                    WHERE ({observation_where})
-                                      AND NOT EXISTS (
-                                          SELECT 1
-                                          FROM {self._qualified_table_sql("artifact_schema_observation")} AS "dst_obs"
-                                          WHERE CAST("dst_obs".{self._quote_ident("id")} AS VARCHAR)
-                                                = CAST("src_obs".{self._quote_ident("id")} AS VARCHAR)
-                                      )
-                                    """
+                                f"DROP SCHEMA IF EXISTS {self._quote_ident(merge_source_schema)} CASCADE"
                             )
 
-                    if runs_to_merge:
-                        for table in shard_global_tables:
-                            mode = shard_table_modes.get(table)
-                            if mode == "unscoped_cache":
-                                unscoped_cache_tables_skipped.append(table)
-                                continue
-                            if table in incompatible_global_tables_skipped:
-                                continue
-                            safe_table = self._validate_identifier(table, label="table")
-                            quoted_table = self._quote_ident(safe_table)
-                            conn.exec_driver_sql(
-                                f"""
-                                    CREATE TABLE IF NOT EXISTS global_tables.{quoted_table}
-                                    AS
-                                    SELECT *
-                                    FROM {self._quote_ident(alias)}.global_tables.{quoted_table}
-                                    WHERE 1 = 0
-                                    """
-                            )
-                            conn.exec_driver_sql(
-                                f"""
-                                    CREATE OR REPLACE TABLE {self._quote_ident(merge_source_schema)}.{quoted_table}
-                                    AS
-                                    SELECT *
-                                    FROM {self._quote_ident(alias)}.global_tables.{quoted_table}
-                                    WHERE 1 = 0
-                                    """
-                            )
-                            filter_sql = shard_table_filters.get(safe_table)
-                            if filter_sql is None:
-                                continue
-                            count_row = conn.exec_driver_sql(
-                                f"""
-                                    SELECT COUNT(*)
-                                    FROM {self._quote_ident(alias)}.global_tables.{quoted_table} AS "src_gt"
-                                    WHERE {filter_sql}
-                                    """
-                            ).fetchone()
-                            candidate_rows = int(count_row[0] if count_row else 0)
-                            if candidate_rows <= 0:
-                                continue
-                            source_lookup_name = self._qualified_table_lookup_name(
-                                safe_table, schema=merge_source_schema
-                            )
-                            target_lookup_name = self._qualified_table_lookup_name(
-                                safe_table, schema="global_tables"
-                            )
-                            source_rows = conn.exec_driver_sql(
-                                f"""
-                                    SELECT name
-                                    FROM pragma_table_info(
-                                        {self._quote_sql_string_literal(source_lookup_name)}
-                                    )
-                                    ORDER BY cid
-                                    """
-                            ).fetchall()
-                            target_rows = conn.exec_driver_sql(
-                                f"""
-                                    SELECT name
-                                    FROM pragma_table_info(
-                                        {self._quote_sql_string_literal(target_lookup_name)}
-                                    )
-                                    ORDER BY cid
-                                    """
-                            ).fetchall()
-                            source_columns = {str(row[0]) for row in source_rows}
-                            columns: list[str] = []
-                            seen_columns: set[str] = set()
-                            for row in target_rows:
-                                column_name = str(row[0])
-                                if (
-                                    column_name in source_columns
-                                    and column_name not in seen_columns
-                                ):
-                                    columns.append(self._quote_ident(column_name))
-                                    seen_columns.add(column_name)
-                            if not columns:
-                                continue
-                            column_sql = ", ".join(columns)
-                            conn.exec_driver_sql(
-                                f"""
-                                    INSERT INTO global_tables.{quoted_table} ({column_sql})
-                                    SELECT {column_sql}
-                                    FROM {self._quote_ident(alias)}.global_tables.{quoted_table} AS "src_gt"
-                                    WHERE {filter_sql}
-                                    """
-                            )
-                            ingested_tables_merged.append(safe_table)
-                    conn.exec_driver_sql(
-                        f"DROP SCHEMA IF EXISTS {self._quote_ident(merge_source_schema)} CASCADE"
-                    )
-
-            self.db.execute_with_retry(_write, operation_name="maintenance_merge")
+            with _track_maintenance_merge_phase("merge.execute_with_retry"):
+                self.db.execute_with_retry(_write, operation_name="maintenance_merge")
 
             snapshots_merged = 0
-            if include_snapshots and runs_to_merge:
-                source_snapshot_dir = shard_path.parent / "shard_snapshots"
-                for run_id in runs_to_merge:
-                    source_name = self._resolve_run_snapshot_path(run_id, None).name
-                    source_snapshot = source_snapshot_dir / source_name
-                    if not source_snapshot.exists():
-                        continue
-                    destination_snapshot = self._resolve_run_snapshot_path(run_id, None)
-                    if destination_snapshot.exists():
-                        continue
-                    destination_snapshot.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(source_snapshot, destination_snapshot)
-                    snapshots_merged += 1
+            with _track_maintenance_merge_phase("merge.copy_snapshots"):
+                if include_snapshots and runs_to_merge:
+                    source_snapshot_dir = shard_path.parent / "shard_snapshots"
+                    for run_id in runs_to_merge:
+                        source_name = self._resolve_run_snapshot_path(run_id, None).name
+                        source_snapshot = source_snapshot_dir / source_name
+                        if not source_snapshot.exists():
+                            continue
+                        destination_snapshot = self._resolve_run_snapshot_path(
+                            run_id, None
+                        )
+                        if destination_snapshot.exists():
+                            continue
+                        destination_snapshot.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(source_snapshot, destination_snapshot)
+                        snapshots_merged += 1
 
-            self._log_audit(
-                "merge",
-                (
-                    f"shard_path={shard_path} "
-                    f"runs_merged={len(runs_to_merge)} "
-                    f"conflicts={len(conflicts_detected)} "
-                    f"conflict_mode={conflict_mode} "
-                    f"include_snapshots={include_snapshots}"
-                ),
-            )
+            with _track_maintenance_merge_phase("merge.audit_log"):
+                self._log_audit(
+                    "merge",
+                    (
+                        f"shard_path={shard_path} "
+                        f"runs_merged={len(runs_to_merge)} "
+                        f"conflicts={len(conflicts_detected)} "
+                        f"conflict_mode={conflict_mode} "
+                        f"include_snapshots={include_snapshots}"
+                    ),
+                )
 
             return MergeResult(
                 shard_path=shard_path,
@@ -2942,6 +3162,52 @@ class DatabaseMaintenance:
             self._quote_sql_string_literal(run_id) for run_id in normalized_run_ids
         )
         return f"{column_ref} = ANY([{run_id_literals}])"
+
+    def _create_temp_string_table(
+        self,
+        conn: Any,
+        table_name: str,
+        column_name: str,
+        values: Iterable[str],
+    ) -> None:
+        safe_table = self._validate_identifier(table_name, label="table")
+        safe_column = self._validate_identifier(column_name, label="column")
+        quoted_table = self._quote_ident(safe_table)
+        quoted_column = self._quote_ident(safe_column)
+        conn.exec_driver_sql(
+            f"CREATE TEMPORARY TABLE {quoted_table} ({quoted_column} VARCHAR)"
+        )
+
+        rows = [(str(value),) for value in values]
+        for start in range(0, len(rows), 1000):
+            conn.exec_driver_sql(
+                f"INSERT INTO {quoted_table} ({quoted_column}) VALUES (?)",
+                rows[start : start + 1000],
+            )
+
+    def _global_table_temp_filter_sql(
+        self,
+        mode: GlobalTableMode | None,
+        *,
+        table_alias: str,
+        temp_table: str,
+        temp_column: str = "run_id",
+    ) -> Optional[str]:
+        if mode is None or mode == "unscoped_cache":
+            return None
+
+        run_column = "consist_run_id" if mode == "run_scoped" else "run_id"
+        safe_alias = self._validate_identifier(table_alias, label="table_alias")
+        safe_temp_table = self._validate_identifier(temp_table, label="table")
+        safe_temp_column = self._validate_identifier(temp_column, label="column")
+        return (
+            f"EXISTS ("
+            f"SELECT 1 "
+            f'FROM {self._quote_ident(safe_temp_table)} AS "merge_filter_ids" '
+            f'WHERE "merge_filter_ids".{self._quote_ident(safe_temp_column)} '
+            f"= {self._quote_ident(safe_alias)}.{self._quote_ident(run_column)}"
+            f")"
+        )
 
     @staticmethod
     def _required_global_table_column(mode: GlobalTableMode) -> Optional[str]:

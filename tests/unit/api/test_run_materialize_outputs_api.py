@@ -867,6 +867,98 @@ def test_register_run_output_recovery_copies_reports_mixed_statuses_and_unknown_
         )
 
 
+def test_register_run_output_recovery_copies_bulk_updates_successes(
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    a_path = tracker.run_dir / "outputs" / "bulk_update_a.csv"
+    b_path = tracker.run_dir / "outputs" / "bulk_update_b.csv"
+    a_path.parent.mkdir(parents=True, exist_ok=True)
+    a_path.write_text("value\n1\n", encoding="utf-8")
+    b_path.write_text("value\n2\n", encoding="utf-8")
+    recovery_root = tmp_path / "external_archive_bulk_update"
+
+    with tracker.start_run("producer_adopt_bulk_update", model="producer"):
+        tracker.log_artifact(a_path, key="a", direction="output")
+        tracker.log_artifact(b_path, key="b", direction="output")
+
+    expected_a = recovery_root / "outputs" / "bulk_update_a.csv"
+    expected_b = recovery_root / "outputs" / "bulk_update_b.csv"
+    expected_a.parent.mkdir(parents=True, exist_ok=True)
+    expected_a.write_text("value\n1\n", encoding="utf-8")
+    expected_b.write_text("value\n2\n", encoding="utf-8")
+
+    def fail_per_artifact_update(*args, **kwargs):
+        raise AssertionError("per-artifact update should not be used")
+
+    monkeypatch.setattr(
+        tracker,
+        "set_artifact_recovery_roots",
+        fail_per_artifact_update,
+    )
+
+    result = tracker.register_run_output_recovery_copies(
+        "producer_adopt_bulk_update",
+        recovery_root,
+        verify=False,
+    )
+
+    assert result["a"].status == "registered"
+    assert result["a"].metadata_updated is True
+    assert result["b"].status == "registered"
+    assert result["b"].metadata_updated is True
+    outputs = tracker.get_run_outputs("producer_adopt_bulk_update")
+    assert outputs["a"].recovery_roots == [str(recovery_root.resolve())]
+    assert outputs["b"].recovery_roots == [str(recovery_root.resolve())]
+
+
+def test_register_run_output_recovery_copies_falls_back_after_bulk_update_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    a_path = tracker.run_dir / "outputs" / "bulk_fallback_a.csv"
+    b_path = tracker.run_dir / "outputs" / "bulk_fallback_b.csv"
+    a_path.parent.mkdir(parents=True, exist_ok=True)
+    a_path.write_text("value\n1\n", encoding="utf-8")
+    b_path.write_text("value\n2\n", encoding="utf-8")
+    recovery_root = tmp_path / "external_archive_bulk_fallback"
+
+    with tracker.start_run("producer_adopt_bulk_fallback", model="producer"):
+        tracker.log_artifact(a_path, key="a", direction="output")
+        tracker.log_artifact(b_path, key="b", direction="output")
+
+    expected_a = recovery_root / "outputs" / "bulk_fallback_a.csv"
+    expected_b = recovery_root / "outputs" / "bulk_fallback_b.csv"
+    expected_a.parent.mkdir(parents=True, exist_ok=True)
+    expected_a.write_text("value\n1\n", encoding="utf-8")
+    expected_b.write_text("value\n2\n", encoding="utf-8")
+
+    def fail_bulk_update(*args, **kwargs):
+        raise RuntimeError("bulk update failed")
+
+    monkeypatch.setattr(
+        tracker,
+        "_set_artifact_recovery_roots_bulk",
+        fail_bulk_update,
+    )
+
+    result = tracker.register_run_output_recovery_copies(
+        "producer_adopt_bulk_fallback",
+        recovery_root,
+        verify=False,
+    )
+
+    assert result["a"].status == "registered"
+    assert result["a"].metadata_updated is True
+    assert result["b"].status == "registered"
+    assert result["b"].metadata_updated is True
+    outputs = tracker.get_run_outputs("producer_adopt_bulk_fallback")
+    assert outputs["a"].recovery_roots == [str(recovery_root.resolve())]
+    assert outputs["b"].recovery_roots == [str(recovery_root.resolve())]
+
+
 def test_register_run_output_recovery_copies_rejects_hashes_outside_selected_keys(
     tracker: Tracker,
     tmp_path: Path,

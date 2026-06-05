@@ -3,6 +3,7 @@ import re
 import shutil
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
+from dataclasses import replace
 import logging
 import os
 from types import MappingProxyType
@@ -30,7 +31,7 @@ from sqlalchemy.sql import Executable
 
 import pandas as pd
 from pydantic import BaseModel
-from sqlmodel import SQLModel, Session
+from sqlmodel import SQLModel, Session, col, select
 
 from consist.core.artifact_schemas import ArtifactSchemaManager
 from consist.core.artifact_facets import ArtifactFacetManager
@@ -136,6 +137,7 @@ if TYPE_CHECKING:
 
 AccessMode = Literal["standard", "analysis", "read_only"]
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_FILE_HASH_CHUNK_SIZE = 8 * 1024 * 1024
 
 
 def _compute_file_sha256(path: Path) -> str:
@@ -143,7 +145,7 @@ def _compute_file_sha256(path: Path) -> str:
     sha256 = hashlib.sha256()
     with path.open("rb") as file:
         while True:
-            chunk = file.read(65536)
+            chunk = file.read(_FILE_HASH_CHUNK_SIZE)
             if not chunk:
                 break
             sha256.update(chunk)
@@ -1122,6 +1124,26 @@ class Tracker:
         recovery metadata. Use ``append=False`` to replace existing recovery
         roots, matching ``set_artifact_recovery_roots(...)`` replace semantics.
         """
+        return self._register_artifact_recovery_copy(
+            artifact,
+            recovery_root,
+            verify=verify,
+            content_hash=content_hash,
+            append=append,
+            persist=True,
+        )
+
+    def _register_artifact_recovery_copy(
+        self,
+        artifact: Artifact,
+        recovery_root: str | os.PathLike[str],
+        *,
+        verify: bool,
+        content_hash: str | None,
+        append: bool,
+        persist: bool,
+    ) -> ArtifactRecoveryCopyRegistration:
+        """Validate a recovery copy and optionally persist recovery metadata."""
         if not isinstance(artifact, Artifact):
             raise TypeError("artifact must be an Artifact instance.")
         if self.db is None:
@@ -1255,15 +1277,22 @@ class Tracker:
                     ),
                 )
 
-        try:
-            self.set_artifact_recovery_roots(
-                artifact, [recovery_root_path], append=append
-            )
-        except Exception as exc:
+        if persist:
+            try:
+                self.set_artifact_recovery_roots(
+                    artifact, [recovery_root_path], append=append
+                )
+            except Exception as exc:
+                return _result(
+                    "failed",
+                    expected_path=expected_path_resolved,
+                    message=f"Could not update recovery_roots metadata: {exc}",
+                )
+        else:
             return _result(
-                "failed",
+                "registered",
                 expected_path=expected_path_resolved,
-                message=f"Could not update recovery_roots metadata: {exc}",
+                message="Recovery copy verified; metadata update deferred.",
             )
 
         return _result(
@@ -1272,6 +1301,68 @@ class Tracker:
             message="Recovery copy verified and registered.",
             metadata_updated=True,
         )
+
+    def _set_artifact_recovery_roots_bulk(
+        self,
+        artifacts: Sequence[Artifact],
+        roots: str | os.PathLike[str] | Sequence[str | os.PathLike[str]],
+        *,
+        append: bool,
+    ) -> None:
+        if self.db is None:
+            raise RuntimeError(
+                "Cannot update artifact recovery roots: tracker has no database configured."
+            )
+
+        incoming = self.fs.normalize_recovery_roots(roots)
+        updates: dict[str, tuple[Artifact, dict[str, Any]]] = {}
+        for artifact in artifacts:
+            if not isinstance(artifact, Artifact):
+                raise TypeError("artifact must be an Artifact instance.")
+            if artifact.id is None:
+                raise ValueError("artifact must have an id.")
+
+            existing = self.fs.normalize_recovery_roots(
+                (artifact.meta or {}).get("recovery_roots")
+            )
+            normalized = incoming
+            if append:
+                normalized = self.fs.normalize_recovery_roots([*existing, *incoming])
+
+            next_meta = dict(artifact.meta or {})
+            if normalized:
+                next_meta["recovery_roots"] = normalized
+            else:
+                next_meta.pop("recovery_roots", None)
+            updates[str(artifact.id)] = (artifact, next_meta)
+
+        if not updates:
+            return
+
+        artifact_ids = [artifact.id for artifact, _ in updates.values()]
+        with self.db.session_scope() as session:
+            db_artifacts = session.exec(
+                select(Artifact).where(col(Artifact.id).in_(artifact_ids))
+            ).all()
+            db_artifacts_by_id = {
+                str(db_artifact.id): db_artifact for db_artifact in db_artifacts
+            }
+            missing_ids = sorted(set(updates) - set(db_artifacts_by_id))
+            if missing_ids:
+                raise KeyError(
+                    "Artifacts were not found for recovery root update: "
+                    + ", ".join(missing_ids)
+                )
+
+            for artifact_id, (_, next_meta) in updates.items():
+                db_artifact = db_artifacts_by_id[artifact_id]
+                db_artifact.meta = dict(next_meta)
+                session.add(db_artifact)
+            session.commit()
+
+        for artifact, next_meta in updates.values():
+            artifact.meta = dict(next_meta)
+        self._run_artifacts_cache.clear()
 
     def register_run_output_recovery_copies(
         self,
@@ -1320,14 +1411,56 @@ class Tracker:
                 )
 
         registered: dict[str, ArtifactRecoveryCopyRegistration] = {}
+        pending_metadata_updates: list[
+            tuple[str, Artifact, ArtifactRecoveryCopyRegistration]
+        ] = []
         for key, artifact in selected.items():
-            registered[key] = self.register_artifact_recovery_copy(
+            registration = self._register_artifact_recovery_copy(
                 artifact,
                 recovery_root,
                 verify=verify,
                 content_hash=content_hashes.get(key) if content_hashes else None,
                 append=append,
+                persist=False,
             )
+            registered[key] = registration
+            if registration.status == "registered":
+                pending_metadata_updates.append((key, artifact, registration))
+
+        recovery_root_path = Path(recovery_root).resolve()
+        if pending_metadata_updates:
+            try:
+                self._set_artifact_recovery_roots_bulk(
+                    [artifact for _, artifact, _ in pending_metadata_updates],
+                    [recovery_root_path],
+                    append=append,
+                )
+            except Exception:
+                for key, artifact, registration in pending_metadata_updates:
+                    try:
+                        self.set_artifact_recovery_roots(
+                            artifact, [recovery_root_path], append=append
+                        )
+                    except Exception as exc:
+                        registered[key] = replace(
+                            registration,
+                            status="failed",
+                            message=f"Could not update recovery_roots metadata: {exc}",
+                            metadata_updated=False,
+                        )
+                    else:
+                        registered[key] = replace(
+                            registration,
+                            message="Recovery copy verified and registered.",
+                            metadata_updated=True,
+                        )
+            else:
+                for key, _, registration in pending_metadata_updates:
+                    registered[key] = replace(
+                        registration,
+                        message="Recovery copy verified and registered.",
+                        metadata_updated=True,
+                    )
         return RunOutputRecoveryCopiesRegistration(outputs=registered)
 
     def archive_run_outputs(
