@@ -1493,107 +1493,137 @@ class DatabaseMaintenance:
 
         shard_db = self.db.__class__(str(shard_path))
         try:
-            with _track_maintenance_merge_phase("merge.load_shard_run_ids"):
-                shard_run_columns = self._list_table_columns(
-                    "run", engine=shard_db.engine
+
+            def _prepare_merge() -> dict[str, Any]:
+                with _track_maintenance_merge_phase("merge.load_shard_run_ids"):
+                    shard_run_columns = self._list_table_columns(
+                        "run", engine=shard_db.engine
+                    )
+                    if shard_run_columns and "id" in shard_run_columns:
+                        with shard_db.engine.begin() as conn:
+                            shard_run_rows = conn.exec_driver_sql(
+                                f"""
+                                SELECT {self._quote_ident("id")}
+                                FROM {self._quote_ident("run")}
+                                ORDER BY {self._quote_ident("id")}
+                                """
+                            ).fetchall()
+                        shard_run_ids = [str(row[0]) for row in shard_run_rows]
+                    else:
+                        shard_run_ids = []
+                with _track_maintenance_merge_phase("merge.discover_global_tables"):
+                    shard_global_tables = self._discover_global_tables(
+                        engine=shard_db.engine
+                    )
+                with _track_maintenance_merge_phase("merge.classify_global_tables"):
+                    shard_table_modes: dict[str, GlobalTableMode] = {
+                        table: self._classify_global_table(
+                            table, engine=shard_db.engine
+                        )
+                        for table in shard_global_tables
+                    }
+
+                with _track_maintenance_merge_phase("merge.detect_run_conflicts"):
+                    if shard_run_ids:
+                        with self.db.engine.begin() as conn:
+                            self._create_temp_string_table(
+                                conn,
+                                "merge_shard_run_ids",
+                                "run_id",
+                                shard_run_ids,
+                            )
+                            existing_rows = conn.exec_driver_sql(
+                                f"""
+                                SELECT CAST("dst_run".{self._quote_ident("id")} AS VARCHAR)
+                                FROM {self._qualified_table_sql("run")} AS "dst_run"
+                                JOIN {self._quote_ident("merge_shard_run_ids")} AS "merge_ids"
+                                  ON "merge_ids".{self._quote_ident("run_id")}
+                                     = "dst_run".{self._quote_ident("id")}
+                                ORDER BY CAST("dst_run".{self._quote_ident("id")} AS VARCHAR)
+                                """
+                            ).fetchall()
+                        existing_rows = [str(row[0]) for row in existing_rows]
+                    else:
+                        existing_rows = []
+                existing_run_ids = {str(value) for value in existing_rows}
+                conflicts_detected = sorted(
+                    existing_run_ids.intersection(shard_run_ids)
                 )
-                if shard_run_columns and "id" in shard_run_columns:
-                    with shard_db.engine.begin() as conn:
-                        shard_run_rows = conn.exec_driver_sql(
-                            f"""
-                            SELECT {self._quote_ident("id")}
-                            FROM {self._quote_ident("run")}
-                            ORDER BY {self._quote_ident("id")}
-                            """
-                        ).fetchall()
-                    shard_run_ids = [str(row[0]) for row in shard_run_rows]
+                conflict_set = set(conflicts_detected)
+
+                if conflicts_detected and conflict_mode == "error":
+                    raise ValueError(
+                        "Run ID conflicts detected: " + ", ".join(conflicts_detected)
+                    )
+
+                if conflict_mode == "skip":
+                    runs_skipped = conflicts_detected
+                    runs_to_merge = [
+                        run_id for run_id in shard_run_ids if run_id not in conflict_set
+                    ]
                 else:
-                    shard_run_ids = []
-            with _track_maintenance_merge_phase("merge.discover_global_tables"):
-                shard_global_tables = self._discover_global_tables(
-                    engine=shard_db.engine
-                )
-            with _track_maintenance_merge_phase("merge.classify_global_tables"):
-                shard_table_modes: dict[str, GlobalTableMode] = {
-                    table: self._classify_global_table(table, engine=shard_db.engine)
-                    for table in shard_global_tables
+                    runs_skipped = []
+                    runs_to_merge = list(shard_run_ids)
+
+                incompatible_global_tables_skipped: dict[str, str] = {}
+                if runs_to_merge:
+                    compatibility_issues: dict[str, str] = {}
+                    with _track_maintenance_merge_phase(
+                        "merge.check_global_table_compatibility"
+                    ):
+                        for table, mode in shard_table_modes.items():
+                            if mode == "unscoped_cache":
+                                continue
+                            compatibility_issue = (
+                                self._global_table_merge_compatibility_issue(
+                                    table,
+                                    mode=mode,
+                                    source_engine=shard_db.engine,
+                                    target_engine=self.db.engine,
+                                )
+                            )
+                            if compatibility_issue:
+                                compatibility_issues[table] = compatibility_issue
+
+                    if compatibility_issues:
+                        incompatible_global_tables_skipped = {
+                            table: compatibility_issues[table]
+                            for table in sorted(compatibility_issues)
+                        }
+                        if conflict_mode == "error":
+                            details = "; ".join(
+                                (
+                                    f"{table}: {reason}"
+                                    for table, reason in incompatible_global_tables_skipped.items()
+                                )
+                            )
+                            raise ValueError(
+                                "Global table schema compatibility check failed: "
+                                + details
+                            )
+
+                return {
+                    "shard_run_ids": shard_run_ids,
+                    "shard_global_tables": shard_global_tables,
+                    "shard_table_modes": shard_table_modes,
+                    "conflicts_detected": conflicts_detected,
+                    "runs_skipped": runs_skipped,
+                    "runs_to_merge": runs_to_merge,
+                    "incompatible_global_tables_skipped": incompatible_global_tables_skipped,
                 }
 
-            with _track_maintenance_merge_phase("merge.detect_run_conflicts"):
-                if shard_run_ids:
-                    with self.db.engine.begin() as conn:
-                        self._create_temp_string_table(
-                            conn,
-                            "merge_shard_run_ids",
-                            "run_id",
-                            shard_run_ids,
-                        )
-                        existing_rows = conn.exec_driver_sql(
-                            f"""
-                            SELECT CAST("dst_run".{self._quote_ident("id")} AS VARCHAR)
-                            FROM {self._qualified_table_sql("run")} AS "dst_run"
-                            JOIN {self._quote_ident("merge_shard_run_ids")} AS "merge_ids"
-                              ON "merge_ids".{self._quote_ident("run_id")}
-                                 = "dst_run".{self._quote_ident("id")}
-                            ORDER BY CAST("dst_run".{self._quote_ident("id")} AS VARCHAR)
-                            """
-                        ).fetchall()
-                    existing_rows = [str(row[0]) for row in existing_rows]
-                else:
-                    existing_rows = []
-            existing_run_ids = {str(value) for value in existing_rows}
-            conflicts_detected = sorted(existing_run_ids.intersection(shard_run_ids))
-            conflict_set = set(conflicts_detected)
-
-            if conflicts_detected and conflict_mode == "error":
-                raise ValueError(
-                    "Run ID conflicts detected: " + ", ".join(conflicts_detected)
-                )
-
-            if conflict_mode == "skip":
-                runs_skipped = conflicts_detected
-                runs_to_merge = [
-                    run_id for run_id in shard_run_ids if run_id not in conflict_set
-                ]
-            else:
-                runs_skipped = []
-                runs_to_merge = list(shard_run_ids)
-
-            incompatible_global_tables_skipped: dict[str, str] = {}
-            if runs_to_merge:
-                compatibility_issues: dict[str, str] = {}
-                with _track_maintenance_merge_phase(
-                    "merge.check_global_table_compatibility"
-                ):
-                    for table, mode in shard_table_modes.items():
-                        if mode == "unscoped_cache":
-                            continue
-                        compatibility_issue = (
-                            self._global_table_merge_compatibility_issue(
-                                table,
-                                mode=mode,
-                                source_engine=shard_db.engine,
-                                target_engine=self.db.engine,
-                            )
-                        )
-                        if compatibility_issue:
-                            compatibility_issues[table] = compatibility_issue
-
-                if compatibility_issues:
-                    incompatible_global_tables_skipped = {
-                        table: compatibility_issues[table]
-                        for table in sorted(compatibility_issues)
-                    }
-                    if conflict_mode == "error":
-                        details = "; ".join(
-                            (
-                                f"{table}: {reason}"
-                                for table, reason in incompatible_global_tables_skipped.items()
-                            )
-                        )
-                        raise ValueError(
-                            "Global table schema compatibility check failed: " + details
-                        )
+            merge_plan = self.db.execute_with_retry(
+                _prepare_merge, operation_name="maintenance_merge_preflight"
+            )
+            shard_run_ids = merge_plan["shard_run_ids"]
+            shard_global_tables = merge_plan["shard_global_tables"]
+            shard_table_modes = merge_plan["shard_table_modes"]
+            conflicts_detected = merge_plan["conflicts_detected"]
+            runs_skipped = merge_plan["runs_skipped"]
+            runs_to_merge = merge_plan["runs_to_merge"]
+            incompatible_global_tables_skipped = merge_plan[
+                "incompatible_global_tables_skipped"
+            ]
 
             artifacts_merged = 0
             ingested_tables_merged: list[str] = []
