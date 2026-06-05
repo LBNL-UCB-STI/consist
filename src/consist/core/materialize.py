@@ -90,6 +90,8 @@ RecoveryCopyStatus = Literal[
     "failed",
 ]
 
+_FILE_HASH_CHUNK_SIZE = 8 * 1024 * 1024
+
 
 @dataclass(slots=True)
 class MaterializationResult:
@@ -703,7 +705,7 @@ def _ensure_destination_not_symlink(path: Path) -> None:
 def _compute_file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        for chunk in iter(lambda: handle.read(_FILE_HASH_CHUNK_SIZE), b""):
             digest.update(chunk)
     return digest.hexdigest()
 

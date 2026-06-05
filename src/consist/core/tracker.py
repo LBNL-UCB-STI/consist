@@ -136,6 +136,7 @@ if TYPE_CHECKING:
 
 AccessMode = Literal["standard", "analysis", "read_only"]
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_FILE_HASH_CHUNK_SIZE = 8 * 1024 * 1024
 
 
 def _compute_file_sha256(path: Path) -> str:
@@ -143,7 +144,7 @@ def _compute_file_sha256(path: Path) -> str:
     sha256 = hashlib.sha256()
     with path.open("rb") as file:
         while True:
-            chunk = file.read(65536)
+            chunk = file.read(_FILE_HASH_CHUNK_SIZE)
             if not chunk:
                 break
             sha256.update(chunk)
