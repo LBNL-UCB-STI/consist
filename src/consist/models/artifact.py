@@ -252,10 +252,10 @@ class Artifact(SQLModel, table=True):
     )
 
     # Driver Info
-    # Valid drivers: parquet, csv, zarr, json, h5_table, h5, hdf5, geojson, shapefile, geopackage, other
+    # Valid drivers: parquet, csv, gtfs, zarr, json, h5_table, h5, hdf5, geojson, shapefile, geopackage, other
     # (See DriverType enum in consist.types for the authoritative list)
     driver: str = Field(
-        description="Format handler: parquet, csv, zarr, json, h5_table, h5, hdf5, geojson, shapefile, geopackage, or other"
+        description="Format handler: parquet, csv, gtfs, zarr, json, h5_table, h5, hdf5, geojson, shapefile, geopackage, or other"
     )
 
     # Canonical artifact fingerprint (portable) plus DB-local content identity.

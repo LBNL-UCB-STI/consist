@@ -1139,9 +1139,9 @@ def schema_capture_file(
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
     driver = artifact.driver
-    if driver not in ("csv", "parquet", "h5_table"):
+    if driver not in ("csv", "parquet", "gtfs", "h5_table"):
         console.print(
-            "[red]Only csv/parquet/h5_table artifacts support file schema capture; "
+            "[red]Only csv/parquet/gtfs/h5_table artifacts support file schema capture; "
             f"got driver '{driver}'.[/red]"
         )
         raise typer.Exit(CLI_EXIT_USAGE_ERROR)
@@ -1183,7 +1183,7 @@ def schema_capture_file(
         artifact=artifact,
         run=run,
         resolved_path=str(resolved_path),
-        driver=cast(Literal["csv", "parquet", "h5_table"], driver),
+        driver=cast(Literal["csv", "parquet", "gtfs", "h5_table"], driver),
         sample_rows=sample_rows,
         source="file",
         reuse_if_unchanged=if_changed,

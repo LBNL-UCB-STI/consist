@@ -35,8 +35,8 @@ class ArtifactLoggingCoordinator:
         artifact: Artifact,
         direction: str,
     ) -> str:
-        if artifact.driver == "h5_table":
-            return f"log_artifact:h5_table:{direction}"
+        if artifact.driver in {"h5_table", "gtfs"}:
+            return f"log_artifact:{artifact.driver}:{direction}"
         return f"log_artifact:{direction}"
 
     def prepare_artifact_facet_bundle(
@@ -311,14 +311,15 @@ class ArtifactLoggingCoordinator:
                 )
                 if resolved_path:
                     resolved_driver = artifact_obj.driver
-                    if resolved_driver not in ("csv", "parquet", "h5_table"):
+                    if resolved_driver not in ("csv", "parquet", "gtfs", "h5_table"):
                         return artifact_obj
                     tracker.artifact_schemas.profile_file_artifact(
                         artifact=artifact_obj,
                         run=tracker.current_consist.run,
                         resolved_path=str(resolved_path),
                         driver=cast(
-                            Literal["csv", "parquet", "h5_table"], resolved_driver
+                            Literal["csv", "parquet", "gtfs", "h5_table"],
+                            resolved_driver,
                         ),
                         sample_rows=sample_rows,
                         source="file",

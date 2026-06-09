@@ -45,7 +45,9 @@ from sqlmodel import SQLModel
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 from consist.core.netcdf_utils import resolve_netcdf_engine
+from consist.core.gtfs import load_gtfs_member_df
 from consist.tools.file_batches import yield_file_batches
+from consist.types import DriverType, artifact_table_path
 
 # Optional dependency: `dlt` is only required when using ingestion helpers.
 try:
@@ -591,11 +593,14 @@ def ingest_artifact(
         elif artifact.driver == "csv":
             data_source = _yield_csv_batches(file_path)
 
-        elif artifact.driver == "h5_table":
-            table_path = getattr(artifact, "table_path", None)
+        elif artifact.driver in DriverType.table_path_drivers():
+            table_path = artifact_table_path(artifact)
             if not table_path:
                 raise ValueError(f"Artifact '{artifact.key}' missing 'table_path'.")
-            data_source = _yield_h5_batches(file_path, table_path)
+            if artifact.driver == "h5_table":
+                data_source = _yield_h5_batches(file_path, table_path)
+            else:
+                data_source = [load_gtfs_member_df(file_path, table_path)]
 
         elif artifact.driver == "json":
             data_source = pd.read_json(file_path).to_dict(orient="records")
@@ -664,8 +669,9 @@ def ingest_artifact(
     )
 
     # 3. Validation Setup
+    additive_schema = bool(getattr(schema_model, "__consist_additive_schema__", False))
     allowed_keys: Optional[Set[str]] = None
-    if schema_model:
+    if schema_model and not additive_schema:
         allowed_keys = set(schema_model.model_fields.keys())
         allowed_keys.update(
             {
@@ -740,7 +746,7 @@ def ingest_artifact(
     if schema_model:
         schema_contract = {
             "tables": "evolve",
-            "columns": "freeze",
+            "columns": "evolve" if additive_schema else "freeze",
             "data_type": "freeze",
         }
         columns = _sqlmodel_to_dlt_columns(schema_model)

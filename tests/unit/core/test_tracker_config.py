@@ -26,6 +26,7 @@ def test_tracker_from_config_matches_direct_constructor(tmp_path: Path) -> None:
         hashing_strategy="fast",
         cache_epoch=7,
         access_mode="analysis",
+        builtin_schemas=["gtfs"],
         run_subdir_fn=run_subdir,
         allow_external_paths=True,
         openlineage_enabled=False,
@@ -41,6 +42,7 @@ def test_tracker_from_config_matches_direct_constructor(tmp_path: Path) -> None:
         hashing_strategy="fast",
         cache_epoch=7,
         access_mode="analysis",
+        builtin_schemas=["gtfs"],
         run_subdir_fn=run_subdir,
         allow_external_paths=True,
         openlineage_enabled=False,
@@ -72,6 +74,8 @@ def test_tracker_from_config_matches_direct_constructor(tmp_path: Path) -> None:
         from_config_tracker.identity.hashing_strategy
         == direct_tracker.identity.hashing_strategy
     )
+    assert "GtfsTrips" in from_config_tracker.registered_schemas
+    assert "GtfsTrips" in direct_tracker.registered_schemas
     assert from_config_tracker.run_artifact_dir(
         sample_run
     ) == direct_tracker.run_artifact_dir(sample_run)

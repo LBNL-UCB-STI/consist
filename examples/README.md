@@ -14,6 +14,9 @@ Examples are tiered:
 - `01_beam_core_demo.ipynb`: BEAM CORE-style linear scenario workflow for
   introducing scenario diffs, lineage, cache behavior, and path-bound input
   staging.
+- `05_gtfs_support.ipynb`: a small UC Berkeley shuttle GTFS walkthrough showing
+  raw feed discovery, service-date canonicalization, semantic GTFS identity,
+  and a tiny route-summary model over the selected service slice.
 - `02_parameter_sweep_monte_carlo.ipynb`: moderate-scale sweep with
   `scenario.run(...)` + `scenario.trace(...)`.
 - `scripts/research_pipeline_native.py`: compact script template for native

@@ -51,9 +51,15 @@ changed — not just that "config changed."
 
 - [ActivitySim Config Adapter](config_adapters_activitysim.md)
 - [BEAM Config Adapter](config_adapters_beam.md)
+- [GTFS Support](gtfs.md)
 
 Each guide covers discovery behavior, which parameters are extracted, the
 ingestion schema, and query examples.
+
+GTFS is a little different from the other adapters: it is a standardized feed
+format, not a bespoke model config tree. If you only need the high-level
+transit story, start with [GTFS Support](gtfs.md). If you are wiring GTFS into
+BEAM, use the [BEAM guide](config_adapters_beam.md) as the entry point.
 
 ## Writing your own adapter
 

@@ -25,6 +25,8 @@ from typing import (
 import duckdb
 from pydantic import BaseModel
 
+from consist.core.gtfs import discover_gtfs_members, load_gtfs_member_relation
+
 
 class TableInfo(BaseModel):
     role: str
@@ -324,6 +326,51 @@ class H5TableDriver:
         return relation
 
 
+class GtfsDriver:
+    _SUPPORTED_LOAD_KWARGS = {"columns"}
+    _LOAD_ALIASES: Dict[str, str] = {}
+
+    def discover(self, container_uri: str) -> list[TableInfo]:
+        source_path = Path(container_uri)
+        members = discover_gtfs_members(source_path)
+        stem = source_path.stem
+        return [
+            TableInfo(
+                role=Path(member).stem or stem,
+                table_path=member,
+                container_uri=container_uri,
+                driver="gtfs",
+                schema_id=None,
+            )
+            for member in members
+        ]
+
+    def supported_load_kwargs(self) -> set[str]:
+        return set(self._SUPPORTED_LOAD_KWARGS)
+
+    def load(self, info: TableInfo, conn, **kwargs: Any):
+        normalized = _validate_load_kwargs(
+            driver_name="gtfs",
+            kwargs=kwargs,
+            supported=self._SUPPORTED_LOAD_KWARGS,
+            aliases=self._LOAD_ALIASES,
+        )
+        table_path = info.table_path
+        if not table_path:
+            raise ValueError("GTFS table load requires table_path.")
+        columns = _normalize_columns(normalized.get("columns"))
+        return load_gtfs_member_relation(
+            info.container_uri,
+            table_path,
+            conn,
+            columns=columns,
+        )
+
+    def schema(self, info: TableInfo, conn):
+        relation = self.load(info, conn)
+        return relation
+
+
 class ZarrArrayDriver:
     def discover(self, container_uri: str) -> list[ArrayInfo]:
         stem = Path(container_uri).stem
@@ -461,6 +508,7 @@ TABLE_DRIVERS.register(
     "parquet", ParquetDriver(), handles_exts=[".parquet", ".parquet.gz"]
 )
 TABLE_DRIVERS.register("csv", CsvDriver(), handles_exts=[".csv", ".csv.gz"])
+TABLE_DRIVERS.register("gtfs", GtfsDriver(), handles_exts=None)
 TABLE_DRIVERS.register("json", JsonDriver(), handles_exts=[".json", ".json.gz"])
 TABLE_DRIVERS.register("h5_table", H5TableDriver(), handles_exts=None)
 

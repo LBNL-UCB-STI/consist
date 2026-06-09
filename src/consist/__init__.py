@@ -8,6 +8,31 @@ the Tracker for managing runs, logging artifacts, and ingesting data.
 # Models
 from consist.models.run import Run, RunResult
 from consist.models.artifact import Artifact
+from consist.models.gtfs import (
+    GTFS_SCHEMA_BY_TABLE_NAME,
+    GTFS_SCHEMAS,
+    GTFS_TABLE_NAMES,
+    GtfsAgency,
+    GtfsCalendar,
+    GtfsCalendarDates,
+    GtfsFareAttributes,
+    GtfsFareRules,
+    GtfsFeedInfo,
+    GtfsFrequencies,
+    GtfsRoutes,
+    GtfsSchema,
+    GtfsShapes,
+    GtfsStopTimes,
+    GtfsStops,
+    GtfsTransfers,
+    GtfsTrips,
+)
+from consist.core.gtfs import (
+    GtfsCanonicalizationResult,
+    GtfsFeedSnapshot,
+    canonicalize_gtfs_bundle,
+    discover_gtfs_members,
+)
 from consist.runset import AlignedPair, RunSet
 
 # Core
@@ -41,6 +66,7 @@ from consist.api import (
     define_step,
     require_runtime_kwargs,
     ingest,
+    canonicalize_gtfs,
     capture_outputs,
     use_tracker,
     set_current_tracker,
@@ -94,6 +120,7 @@ from consist.api import (
 # Types
 from consist.types import (
     BindingResult,
+    BuiltinSchemaLiteral,
     CacheOptions,
     DriverType,
     ExecutionOptions,
@@ -135,8 +162,31 @@ __all__ = [
     "Artifact",
     "RunSet",
     "AlignedPair",
+    "GtfsSchema",
+    "GtfsAgency",
+    "GtfsStops",
+    "GtfsRoutes",
+    "GtfsCalendar",
+    "GtfsCalendarDates",
+    "GtfsFeedInfo",
+    "GtfsShapes",
+    "GtfsTrips",
+    "GtfsStopTimes",
+    "GtfsFrequencies",
+    "GtfsTransfers",
+    "GtfsFareAttributes",
+    "GtfsFareRules",
+    "GTFS_SCHEMAS",
+    "GTFS_SCHEMA_BY_TABLE_NAME",
+    "GTFS_TABLE_NAMES",
+    "GtfsCanonicalizationResult",
+    "GtfsFeedSnapshot",
+    "canonicalize_gtfs_bundle",
+    "canonicalize_gtfs",
+    "discover_gtfs_members",
     # Types
     "BindingResult",
+    "BuiltinSchemaLiteral",
     "DriverType",
     "CacheOptions",
     "OutputPolicyOptions",

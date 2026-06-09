@@ -4,10 +4,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel import SQLModel
 
 from consist.models.run import Run
+from consist.types import BuiltinSchemaLiteral
 
 AccessMode = Literal["standard", "analysis", "read_only"]
 
@@ -26,6 +27,7 @@ class TrackerConfig(BaseModel):
     hashing_strategy: str = "full"
     cache_epoch: int = 1
     schemas: Optional[list[type[SQLModel]]] = None
+    builtin_schemas: list[BuiltinSchemaLiteral] = Field(default_factory=list)
     access_mode: AccessMode = "standard"
     run_subdir_fn: Optional[Callable[[Run], str]] = None
     allow_external_paths: Optional[bool] = None
@@ -44,6 +46,7 @@ class TrackerConfig(BaseModel):
             "hashing_strategy": self.hashing_strategy,
             "cache_epoch": self.cache_epoch,
             "schemas": self.schemas,
+            "builtin_schemas": self.builtin_schemas,
             "access_mode": self.access_mode,
             "run_subdir_fn": self.run_subdir_fn,
             "allow_external_paths": self.allow_external_paths,
