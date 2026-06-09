@@ -343,7 +343,9 @@ def test_gtfs_canonicalizer_omits_all_null_extension_columns_from_ingest_rows(
         feed_keys=["feed"],
     )
 
-    routes_spec = next(spec for spec in result.ingestables if spec.table_name == "routes")
+    routes_spec = next(
+        spec for spec in result.ingestables if spec.table_name == "routes"
+    )
     rows = list(routes_spec.materialize_rows("run"))
 
     assert "publisher_extension" in result.selected_tables["routes"].columns
@@ -381,9 +383,8 @@ def test_tracker_canonicalize_gtfs_logs_manifest_metadata_and_ingests(
         trips_artifact = result.table_artifacts["trips"]
         assert Path(trips_artifact.path).exists()
         assert trips_artifact.meta["gtfs_selected_table"] is True
-        assert (
-            trips_artifact.meta["gtfs_manifest_artifact_id"]
-            == str(result.manifest_artifact.id)
+        assert trips_artifact.meta["gtfs_manifest_artifact_id"] == str(
+            result.manifest_artifact.id
         )
         assert trips_artifact.meta["gtfs_table_name"] == "trips"
         assert trips_artifact.meta["service_slice_hash"] == result.service_slice_hash

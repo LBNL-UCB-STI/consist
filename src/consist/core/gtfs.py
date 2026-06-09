@@ -595,9 +595,9 @@ def canonicalize_gtfs_bundle(
         if schema_model is None:
             continue
         frame_for_ingest = _ingest_frame(frame)
-        rows = frame_for_ingest.where(
-            pd.notnull(frame_for_ingest), None
-        ).to_dict(orient="records")
+        rows = frame_for_ingest.where(pd.notnull(frame_for_ingest), None).to_dict(
+            orient="records"
+        )
         ingestables.append(
             IngestSpec(
                 table_name=table_name,
