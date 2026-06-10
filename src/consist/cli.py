@@ -57,6 +57,7 @@ from sqlalchemy import and_, or_
 from sqlmodel import Session, col, select
 
 from consist import Tracker
+from consist.core.gtfs import GTFS_CORE_TABLE_NAMES, discover_gtfs_members
 from consist.core.maintenance import DatabaseMaintenance
 from consist.core.persistence import DatabaseManager
 from consist.core.run_ordering import recent_run_order_by
@@ -2286,6 +2287,81 @@ def _print_optional_dependency_hint(driver: str) -> None:
     )
 
 
+def _render_gtfs_bundle_preview(
+    tracker: Tracker,
+    artifact: "Artifact",
+    *,
+    n_rows: int,
+) -> bool:
+    """Render a compact GTFS bundle summary for bundle-level preview."""
+    if artifact.driver != "gtfs" or artifact.table_path:
+        return False
+
+    resolved_path = Path(tracker.resolve_uri(artifact.container_uri))
+    if not resolved_path.exists():
+        _print_missing_artifact_file_help(tracker, artifact)
+        return True
+
+    try:
+        members = discover_gtfs_members(resolved_path)
+    except FileNotFoundError:
+        _print_missing_artifact_file_help(tracker, artifact)
+        return True
+    except ValueError as exc:
+        console.print(f"[red]Error reading GTFS bundle: {exc}[/red]")
+        return True
+
+    standard_members = [
+        member
+        for member in members
+        if Path(member).stem.lower() in GTFS_CORE_TABLE_NAMES
+    ]
+    extra_members = [member for member in members if member not in standard_members]
+
+    summary = Table.grid(padding=(0, 2))
+    summary.add_column(style="bold cyan")
+    summary.add_column()
+    summary.add_row("Artifact", artifact.key)
+    summary.add_row("Type", "GTFS bundle")
+    summary.add_row("Source", artifact.container_uri)
+    if artifact.hash:
+        summary.add_row("Hash", artifact.hash[:12] + "...")
+    summary.add_row("Members", str(len(members)))
+    summary.add_row("Core tables", str(len(standard_members)))
+    summary.add_row("Extensions", str(len(extra_members)))
+
+    console.print(
+        Panel(summary, title="GTFS Bundle Summary", border_style="green", expand=False)
+    )
+
+    if not members:
+        console.print("[yellow]No GTFS member tables were discovered.[/yellow]")
+        return True
+
+    display_count = min(max(n_rows, 1), len(members))
+    member_table = Table(
+        title=f"Member Tables (showing {display_count} of {len(members)})"
+    )
+    member_table.add_column("Member", style="cyan", overflow="fold")
+    member_table.add_column("Kind", style="magenta")
+    member_table.add_column("Notes", style="dim", overflow="fold")
+
+    for member in members[:display_count]:
+        kind = "core" if Path(member).stem.lower() in GTFS_CORE_TABLE_NAMES else "extra"
+        note = "standard GTFS table" if kind == "core" else "publisher-specific table"
+        member_table.add_row(member, kind, note)
+
+    console.print(member_table)
+    if len(members) > display_count:
+        console.print(
+            f"[dim]... and {len(members) - display_count} more GTFS member tables[/dim]"
+        )
+    console.print(
+        "[dim]Preview a specific table member by logging or loading it with a table_path.[/dim]"
+    )
+    return True
+
+
 def _load_artifact_with_diagnostics(
     tracker: Tracker,
     artifact: "Artifact",
@@ -2471,7 +2547,7 @@ def preview(
         ),
     ),
 ) -> None:
-    """Shows a small preview of an artifact (tabular or array-like when supported)."""
+    """Shows a small preview of an artifact or GTFS bundle summary when supported."""
     resolved_db_path = find_db_path(db_path)
     mount_overrides = _resolve_mount_overrides_or_exit(mount)
     tracker = get_tracker(
@@ -2487,6 +2563,9 @@ def preview(
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
     _ensure_tracker_mounts_for_artifact(tracker, artifact, trust_db=trust_db)
+    if _render_gtfs_bundle_preview(tracker, artifact, n_rows=n_rows):
+        return
+
     resolution_bases, db_metadata_run_dir = _build_relative_resolution_bases(
         tracker,
         artifact,
@@ -2505,7 +2584,12 @@ def preview(
     if data is None:
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
-    console.print(f"Preview: {artifact_key} [dim]({artifact.driver})[/dim]")
+    preview_label = f"Preview: {artifact_key} [dim]({artifact.driver})[/dim]"
+    if artifact.driver == "gtfs" and artifact.table_path:
+        preview_label = (
+            f"Preview: {artifact_key} [dim](gtfs:{artifact.table_path})[/dim]"
+        )
+    console.print(preview_label)
 
     if isinstance(data, duckdb.DuckDBPyRelation):
         df = data.limit(n_rows).df()
