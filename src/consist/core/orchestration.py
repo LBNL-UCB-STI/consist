@@ -86,6 +86,7 @@ class RunSpecResult(BaseModel):
 
     spec_id: str
     run_id: str
+    persisted_run_id: Optional[str] = None
     status: str  # "success" | "failed"
     cache_hit: bool = False
     scalar_payload: Optional[Any] = None
@@ -311,6 +312,7 @@ def execute_worker_run(
         return RunSpecResult(
             spec_id=run_spec.run_id,
             run_id=run_res.run.id,
+            persisted_run_id=run_res.run.id,
             status="success",
             cache_hit=run_res.cache_hit,
             scalar_payload=scalar_payload,
@@ -323,9 +325,14 @@ def execute_worker_run(
         attempt.error_class = e.__class__.__name__
         attempt.error_message = str(e)
 
+        persisted_run_id = None
+        if tracker.get_run(run_spec.run_id) is not None:
+            persisted_run_id = run_spec.run_id
+
         return RunSpecResult(
             spec_id=run_spec.run_id,
             run_id=run_spec.run_id,
+            persisted_run_id=persisted_run_id,
             status="failed",
             cache_hit=False,
             error_message=str(e),

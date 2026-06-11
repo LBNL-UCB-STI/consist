@@ -1639,7 +1639,11 @@ class ScenarioContext:
                             pending_fut.cancel()
                         break
 
-        child_run_ids = [r.run_id for r in results if r is not None]
+        child_run_ids = [
+            r.persisted_run_id
+            for r in results
+            if r is not None and r.persisted_run_id is not None
+        ]
 
         return BatchResult(
             total_count=len(exec_specs),

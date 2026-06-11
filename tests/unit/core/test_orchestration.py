@@ -84,6 +84,7 @@ def test_models_serialization_and_pickling():
     run_result = RunSpecResult(
         spec_id="run-1",
         run_id="real-run-123",
+        persisted_run_id="real-run-123",
         status="success",
         cache_hit=True,
         scalar_payload={"foo": "bar"},
@@ -193,6 +194,7 @@ def test_execute_worker_run_success(run_dir: Path, tmp_path: Path):
     # Assert successful results
     assert result.status == "success"
     assert result.spec_id == "run-scalar-1"
+    assert result.persisted_run_id == "run-scalar-1"
     assert result.cache_hit is False
     assert result.scalar_payload == 100
     assert len(result.attempts) == 1
@@ -202,6 +204,7 @@ def test_execute_worker_run_success(run_dir: Path, tmp_path: Path):
     # Run again to verify cache hit behavior
     result_cached = execute_worker_run(tracker_config, exec_spec)
     assert result_cached.status == "success"
+    assert result_cached.persisted_run_id == "run-scalar-1"
     assert result_cached.cache_hit is True
     # Cache hit returns standard scalar_payload as None (since function is skipped)
     assert result_cached.scalar_payload is None
@@ -232,6 +235,7 @@ def test_execute_worker_run_failure(run_dir: Path, tmp_path: Path):
 
     # Assert failed results
     assert result.status == "failed"
+    assert result.persisted_run_id == "run-fail-1"
     assert result.error_message == "Intentional error in sample_failing_fn"
     assert result.error_traceback is not None
     assert len(result.attempts) == 1
@@ -259,6 +263,7 @@ def test_execute_worker_run_invalid_callable_fails_early(run_dir: Path, tmp_path
     result = execute_worker_run(tracker_config, exec_spec)
 
     assert result.status == "failed"
+    assert result.persisted_run_id is None
     assert result.error_message is not None
     assert "Could not import module" in result.error_message
     assert len(result.attempts) == 1
@@ -327,6 +332,7 @@ def test_scenario_map_runs_processes(tracker):
     assert res.total_count == 2
     assert res.success_count == 2
     assert res.failure_count == 0
+    assert res.child_run_ids == [result.persisted_run_id for result in res.results]
     assert res.results[0].scalar_payload == 5
     assert res.results[1].scalar_payload == 15
 
@@ -349,6 +355,11 @@ def test_scenario_map_runs_failures(tracker):
     assert res.total_count == 3
     assert res.success_count == 2
     assert res.failure_count == 1
+    assert set(res.child_run_ids) == {
+        result.persisted_run_id
+        for result in res.results
+        if result.persisted_run_id is not None
+    }
     assert len(res.failed_specs) == 1
     assert res.failed_specs[0].config["fail"] is True
     assert res.retry_rows() == [{"value": 2, "fail": True}]
