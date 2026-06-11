@@ -150,6 +150,7 @@ from consist.protocols import (
     RunIdentifiedResultLike,
     RunResultLike,
     ScenarioLike,
+    TrackerLike,
 )
 
 # Orchestration
