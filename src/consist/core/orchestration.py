@@ -5,7 +5,7 @@ import importlib
 import pickle
 import time
 import traceback
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -24,7 +24,7 @@ class PythonCallableTarget(ExecutionTarget):
     """Target representing a local Python callable."""
 
     target_type: str = "python_callable"
-    callable_ref: Union[str, Callable[..., Any]]
+    callable_ref: str
 
 
 # -------------------------------------------------------------------------
@@ -120,76 +120,72 @@ class BatchResult(BaseModel):
 # -------------------------------------------------------------------------
 
 
-def resolve_callable(ref: Union[str, Callable[..., Any]]) -> Callable[..., Any]:
+_CALLABLE_REF_FORMAT = "'module:function'"
+
+
+def _parse_callable_ref(ref: str) -> tuple[str, str]:
+    if ":" not in ref:
+        raise ValueError(
+            f"Invalid callable reference format: {ref!r}. "
+            f"Expected format {_CALLABLE_REF_FORMAT}."
+        )
+    module_name, attr_path = ref.split(":", 1)
+    if not module_name or not attr_path:
+        raise ValueError(
+            f"Invalid callable reference format: {ref!r}. "
+            f"Expected format {_CALLABLE_REF_FORMAT}."
+        )
+    return module_name, attr_path
+
+
+def _import_callable_ref(module_name: str, attr_path: str) -> Callable[..., Any]:
+    try:
+        mod = importlib.import_module(module_name)
+    except ImportError as e:
+        raise ValueError(f"Could not import module {module_name!r}: {e}") from e
+
+    obj: Any = mod
+    for attr_name in attr_path.split("."):
+        if not hasattr(obj, attr_name):
+            raise ValueError(
+                f"Module {module_name!r} has no attribute {attr_path!r}"
+            )
+        obj = getattr(obj, attr_name)
+
+    if not callable(obj):
+        raise ValueError(
+            f"Attribute {attr_path!r} in module {module_name!r} is not callable"
+        )
+    return obj
+
+
+def resolve_callable(ref: str) -> Callable[..., Any]:
     """
-    Resolves a string reference or directly validates a Python callable.
+    Resolve an importable ``"module:function"`` reference.
+
+    Direct callables are intentionally rejected for the process backend. Spawned
+    workers need importable references that can be reconstructed in a fresh
+    interpreter.
+
     Returns the resolved callable, or raises ValueError if invalid/not pickle-safe.
     """
-    if isinstance(ref, str):
-        # Format: "module.submodule:func_name" or "module:func_name"
-        if ":" not in ref:
-            raise ValueError(
-                f"Invalid callable reference format: '{ref}'. Expected format 'module:function'."
-            )
-        module_name, func_name = ref.split(":", 1)
-        try:
-            mod = importlib.import_module(module_name)
-        except ImportError as e:
-            raise ValueError(f"Could not import module '{module_name}': {e}") from e
-
-        if not hasattr(mod, func_name):
-            raise ValueError(f"Module '{module_name}' has no attribute '{func_name}'")
-
-        func = getattr(mod, func_name)
-        if not callable(func):
-            raise ValueError(
-                f"Attribute '{func_name}' in module '{module_name}' is not callable"
-            )
-
-        # Verify pickle-safety
-        try:
-            pickle.dumps(func)
-        except Exception as e:
-            raise ValueError(
-                f"Resolved callable '{ref}' is not pickle-safe: {e}"
-            ) from e
-
-        return func
-
-    elif callable(ref):
-        # Direct callable object validation
-        # Verify pickle-safety
-        try:
-            pickle.dumps(ref)
-        except Exception as e:
-            raise ValueError(f"Callable {ref} is not pickle-safe: {e}") from e
-
-        module_name = getattr(ref, "__module__", None)
-        qualname = getattr(ref, "__qualname__", None)
-        if not module_name or not qualname or module_name == "__main__":
-            # Non-importable but pickle-safe (e.g. from dynamic context/notebooks using serializers)
-            return ref
-
-        # If it claims to be importable, attempt to verify it
-        try:
-            mod = importlib.import_module(module_name)
-            parts = qualname.split(".")
-            obj = mod
-            for part in parts:
-                obj = getattr(obj, part)
-            if obj is not ref:
-                raise ValueError(
-                    "Imported object does not match the original callable."
-                )
-        except Exception:
-            # We don't raise here if pickling succeeds, but log/verify
-            pass
-
-        return ref
-    else:
+    if not isinstance(ref, str):
         raise ValueError(
-            f"Callable reference must be a string or callable, got {type(ref)}"
+            "backend='processes' requires fn to be an importable "
+            f"{_CALLABLE_REF_FORMAT} string. Direct callables, lambdas, and "
+            "notebook-local functions are not supported yet. Move the function "
+            f"into an importable module and pass {_CALLABLE_REF_FORMAT}."
         )
+
+    module_name, attr_path = _parse_callable_ref(ref)
+    func = _import_callable_ref(module_name, attr_path)
+
+    try:
+        pickle.dumps(func)
+    except Exception as e:
+        raise ValueError(f"Resolved callable {ref!r} is not pickle-safe: {e}") from e
+
+    return func
 
 
 def execute_worker_run(

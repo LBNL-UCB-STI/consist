@@ -582,11 +582,12 @@ class Tracker:
         """
         Reconstruct a TrackerConfig dynamically from this tracker instance.
         """
-        user_schemas = []
-        for name, schema in self._registered_schemas.items():
-            if name.startswith("Gtfs"):
-                continue
-            user_schemas.append(schema)
+        builtin_schema_set = set(GTFS_SCHEMAS)
+        user_schemas = [
+            schema
+            for schema in self._registered_schemas.values()
+            if schema not in builtin_schema_set
+        ]
 
         return TrackerConfig(
             run_dir=self.run_dir,

@@ -1483,7 +1483,7 @@ class ScenarioContext:
     def map_runs(
         self,
         rows: Iterable[Dict[str, Any]],
-        fn: Union[str, Callable[..., Any]],
+        fn: str,
         name_template: Optional[str] = None,
         model: Optional[str] = None,
         config_from: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
@@ -1500,8 +1500,9 @@ class ScenarioContext:
         ----------
         rows : Iterable[Dict[str, Any]]
             Rows of inputs/parameter combinations to sweep.
-        fn : Union[str, Callable[..., Any]]
-            The module-path string reference (e.g. "my_module:run_case") or direct callable to run.
+        fn : str
+            Importable module-path string reference (e.g. "my_module:run_case").
+            Direct callables are not supported for the process backend.
         name_template : Optional[str]
             Optional string template to format run names (e.g. "case-{case_id}").
         model : Optional[str]
@@ -1551,8 +1552,7 @@ class ScenarioContext:
             target = PythonCallableTarget(callable_ref=fn)
             run_spec = BatchRunSpec(
                 run_id=run_id,
-                model=model
-                or (fn if isinstance(fn, str) else getattr(fn, "__name__", "unknown")),
+                model=model or fn,
                 config=config,
                 tags=merged_tags,
                 facets=dict(merged_facet),

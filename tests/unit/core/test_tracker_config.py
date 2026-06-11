@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from sqlmodel import SQLModel
 
 from consist.core.tracker import Tracker
 from consist.core.tracker_config import TrackerConfig
@@ -79,6 +80,24 @@ def test_tracker_from_config_matches_direct_constructor(tmp_path: Path) -> None:
     assert from_config_tracker.run_artifact_dir(
         sample_run
     ) == direct_tracker.run_artifact_dir(sample_run)
+
+
+def test_tracker_to_config_preserves_custom_gtfs_prefixed_schemas(
+    tmp_path: Path,
+) -> None:
+    class GtfsCustomSchema(SQLModel):
+        custom_id: str
+
+    tracker = Tracker(
+        run_dir=tmp_path / "runs",
+        builtin_schemas=["gtfs"],
+        schemas=[GtfsCustomSchema],
+    )
+
+    config = tracker.to_config()
+
+    assert config.schemas == [GtfsCustomSchema]
+    assert config.builtin_schemas == ["gtfs"]
 
 
 def test_tracker_config_validation_for_required_and_typed_fields(

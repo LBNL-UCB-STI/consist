@@ -145,24 +145,21 @@ def test_resolve_callable_string():
         resolve_callable("tests.unit.core.test_orchestration:__doc__")
 
 
-def test_resolve_callable_direct():
-    """Verify direct Python callable validation."""
-    # Successful validation
-    resolved = resolve_callable(sample_target_fn)
-    assert resolved == sample_target_fn
+def test_resolve_callable_rejects_direct_callables():
+    """Process execution requires importable string refs, not direct callables."""
+    with pytest.raises(ValueError, match="requires fn to be an importable"):
+        resolve_callable(sample_target_fn)
 
-    # Local function should fail unless it's pickle-safe (which it isn't in standard pickle)
     def local_func(x):
         return x
 
-    with pytest.raises(ValueError, match="is not pickle-safe"):
+    with pytest.raises(ValueError, match="requires fn to be an importable"):
         resolve_callable(local_func)
 
-    # Nested function should fail pickle safety
     def nested_func():
         pass
 
-    with pytest.raises(ValueError, match="is not pickle-safe"):
+    with pytest.raises(ValueError, match="requires fn to be an importable"):
         resolve_callable(nested_func)
 
 
@@ -300,6 +297,18 @@ def test_scenario_map_runs_threads(tracker):
                 fn="tests.unit.core.test_orchestration:sample_scalar_fn",
                 name_template="case-{value}",
                 backend="threads",
+            )
+
+
+def test_scenario_map_runs_processes_rejects_direct_callable(tracker):
+    rows = [{"value": 10}]
+
+    with tracker.scenario("test_process_sweep_rejects_direct_callable") as sc:
+        with pytest.raises(ValueError, match="requires fn to be an importable"):
+            sc.map_runs(
+                rows=rows,
+                fn=sample_scalar_fn,
+                backend="processes",
             )
 
 
