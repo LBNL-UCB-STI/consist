@@ -148,9 +148,7 @@ def _import_callable_ref(module_name: str, attr_path: str) -> Callable[..., Any]
     obj: Any = mod
     for attr_name in attr_path.split("."):
         if not hasattr(obj, attr_name):
-            raise ValueError(
-                f"Module {module_name!r} has no attribute {attr_path!r}"
-            )
+            raise ValueError(f"Module {module_name!r} has no attribute {attr_path!r}")
         obj = getattr(obj, attr_name)
 
     if not callable(obj):
