@@ -14,6 +14,7 @@ If you are new to Consist, start with the
 |---|---|---|
 | One Python callable with declared inputs and outputs | `Tracker.run(...)` | Smallest cache-aware execution surface. |
 | Multi-step workflow with explicit handoffs | `tracker.scenario(...).run(...)` | Groups related steps and caches each child step independently. |
+| Independent parameter sweep or Monte Carlo fan-out | `tracker.scenario(...).map_runs(...)` | Runs one child run per registry row and returns a batch summary. |
 | Inline lifecycle block or custom logging | `tracker.trace(...)` or `sc.trace(...)` | Use when the body needs direct access to the active run context. |
 | Step-to-step artifact handoff | `consist.ref(...)` / `consist.refs(...)` | Makes lineage explicit and avoids ambiguous coupler-key indirection. |
 | External tool that expects local files | `input_binding="paths"` plus requested input staging | Keeps provenance identity separate from workspace-local file layout. |
@@ -213,6 +214,59 @@ Use `scenario(...)` when:
 
 For decorator defaults, templates, and step metadata, see
 [Decorators and Metadata](concepts/decorators-and-metadata.md).
+
+## `ScenarioContext.map_runs(...)`: Parallel Sweeps
+
+Use `map_runs(...)` inside a scenario when you have many independent runs with
+the same callable shape. It is a good fit for parameter sweeps, Monte Carlo
+replicates, and other wide lineage trees where one parent scenario has many
+sibling child runs.
+
+```python
+from pathlib import Path
+
+import consist
+from consist import Tracker
+
+tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+
+rows = [
+    {"case_id": 0, "seed": 100, "scale": 0.8},
+    {"case_id": 1, "seed": 101, "scale": 1.0},
+    {"case_id": 2, "seed": 102, "scale": 1.2},
+]
+
+with tracker.scenario("scale_sweep") as sc:
+    batch = sc.map_runs(
+        rows=rows,
+        fn="my_project.steps:run_case",
+        name_template="case_{case_id}",
+        model="simulation",
+        config_from=lambda row: {"seed": row["seed"], "scale": row["scale"]},
+        facet_from=lambda row: {"case_id": row["case_id"], "scale": row["scale"]},
+        expected_outputs=["result"],
+    )
+
+print(batch.success_count, batch.failure_count)
+print(batch.child_run_ids)
+```
+
+The current process backend intentionally requires `fn` to be an importable
+`"module:function"` string. Notebook-local functions, lambdas, and direct
+callables are not supported for process workers; move the worker into an
+importable module and pass its string reference.
+
+`map_runs(...)` returns a `BatchResult`:
+
+- `results`: one `RunSpecResult` per completed or failed spec that returned a
+  result to the parent.
+- `child_run_ids`: persisted child run IDs that can be queried later.
+- `failed_specs`: `BatchRunSpec` objects for failed rows, suitable for retries.
+- `retry_rows()`: the original config rows for failed specs.
+
+Use `cancel_pending_on_failure=True` when you want a best-effort attempt to
+cancel futures that have not started after the first observed failure.
+Already-running workers may still complete.
 
 ## `ref(...)` and `refs(...)`
 

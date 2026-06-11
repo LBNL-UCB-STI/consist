@@ -7,6 +7,8 @@ Workflow contexts are the APIs that coordinate multi-step pipelines.
 - Use `Tracker.scenario(...)` or `consist.scenario(...)` to group related steps
   under one scenario header run.
 - Use `ScenarioContext.run(...)` for cache-aware function-shaped steps.
+- Use `ScenarioContext.map_runs(...)` for independent parameter sweeps where
+  each row should become one child run under the scenario.
 - Use `ScenarioContext.trace(...)` when the inline block must execute every time
   (including cache hits).
 - Use `RunContext` inside `inject_context=True` runs for managed output paths and
@@ -18,6 +20,7 @@ Workflow contexts are the APIs that coordinate multi-step pipelines.
 |---|---|---|
 | `consist.run` / `Tracker.run` | Single function call | Skips function execution and reuses cached outputs |
 | `ScenarioContext.run` | Function step inside scenario | Same cache behavior as `Tracker.run` |
+| `ScenarioContext.map_runs` | Many independent function runs inside scenario | Executes one child run per row and records a batch result |
 | `ScenarioContext.trace` / `Tracker.trace` | Inline `with` block | Block executes each time; cache state is still recorded |
 
 ## Scenario step identity kwargs
@@ -107,6 +110,58 @@ For direct step-to-step workflow code, `consist.ref(...)` and `consist.refs(...)
 remain the recommended default. Reach for `BindingResult` when a planner or
 external orchestrator has already compiled the binding decision.
 
+## Parallel sweep runs
+
+`ScenarioContext.map_runs(...)` is the scenario-level fan-out helper for
+embarrassingly parallel sweeps. It builds one `BatchRunSpec` per input row,
+executes each spec in a worker process, and returns a `BatchResult` summary.
+
+Use it when:
+
+- Every row can run independently.
+- The worker function is importable as `"module:function"`.
+- The parent scenario should group all child runs for later queries.
+- You want retry metadata for failed rows.
+
+```python
+rows = [
+    {"case_id": 0, "seed": 10, "elasticity": -0.2},
+    {"case_id": 1, "seed": 11, "elasticity": -0.4},
+]
+
+with tracker.scenario("elasticity_sweep") as sc:
+    batch = sc.map_runs(
+        rows=rows,
+        fn="project.steps:run_elasticity_case",
+        name_template="case_{case_id}",
+        model="demand_model",
+        config_from=lambda row: {
+            "seed": row["seed"],
+            "elasticity": row["elasticity"],
+        },
+        facet_from=lambda row: {
+            "case_id": row["case_id"],
+            "elasticity": row["elasticity"],
+        },
+        expected_outputs=["summary"],
+    )
+```
+
+The returned `BatchResult` separates correlation metadata from persisted run
+metadata:
+
+- `BatchResult.results` contains `RunSpecResult` objects for observed outcomes.
+- `RunSpecResult.run_id` is the requested child run ID for the spec.
+- `RunSpecResult.persisted_run_id` is set only when a run record exists.
+- `BatchResult.child_run_ids` includes only persisted child run IDs.
+- `BatchResult.failed_specs` contains `BatchRunSpec` objects that can be retried.
+
+The current backend is `backend="processes"`. It requires an importable callable
+reference and does not support direct callables, lambdas, or notebook-local
+functions. `cancel_pending_on_failure=True` makes a best-effort attempt to
+cancel work that has not started after the first observed failure; running
+workers may still complete.
+
 ## Minimal runnable scenario example
 
 ```python
@@ -152,6 +207,7 @@ with tracker.scenario("baseline") as sc:
         - require_outputs
         - collect_by_keys
         - run
+        - map_runs
         - trace
 
 ## Run Context
