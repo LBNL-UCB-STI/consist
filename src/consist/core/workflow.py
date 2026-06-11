@@ -1490,7 +1490,7 @@ class ScenarioContext:
         facet_from: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         max_workers: Optional[int] = None,
         backend: str = "processes",
-        fail_fast: bool = False,
+        cancel_pending_on_failure: bool = False,
         expected_outputs: Optional[List[str]] = None,
     ) -> "BatchResult":
         """
@@ -1515,8 +1515,10 @@ class ScenarioContext:
             The maximum number of parallel workers. Defaults to executor default.
         backend : str, default "processes"
             The backend executor: "processes" (ProcessPoolExecutor) or "threads" (ThreadPoolExecutor).
-        fail_fast : bool, default False
-            If True, abort immediately on first failure. Otherwise, complete all runs.
+        cancel_pending_on_failure : bool, default False
+            If True, make a best-effort attempt to cancel futures that have not
+            started after the first observed failure. Already-running workers may
+            still complete.
 
         Returns
         -------
@@ -1632,7 +1634,7 @@ class ScenarioContext:
                 else:
                     failure_count += 1
                     failed_specs.append(spec.run_spec)
-                    if fail_fast:
+                    if cancel_pending_on_failure:
                         for pending_fut in futures:
                             pending_fut.cancel()
                         break

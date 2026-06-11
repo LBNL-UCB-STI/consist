@@ -354,20 +354,20 @@ def test_scenario_map_runs_failures(tracker):
     assert res.retry_rows() == [{"value": 2, "fail": True}]
 
 
-def test_scenario_map_runs_fail_fast(tracker):
-    """Test map_runs aborts early with fail_fast=True."""
+def test_scenario_map_runs_cancel_pending_on_failure(tracker):
+    """Test map_runs can stop collecting after first failure."""
     rows = [
         {"value": 1, "fail": False},
         {"value": 2, "fail": True},
         {"value": 3, "fail": False},
     ]
 
-    with tracker.scenario("test_fail_fast") as sc:
+    with tracker.scenario("test_cancel_pending_on_failure") as sc:
         res = sc.map_runs(
             rows=rows,
             fn="tests.unit.core.test_orchestration:sample_conditional_failing_fn",
             backend="processes",
-            fail_fast=True,
+            cancel_pending_on_failure=True,
         )
 
     assert res.total_count == 3
