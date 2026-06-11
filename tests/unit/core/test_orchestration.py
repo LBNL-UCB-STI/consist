@@ -262,6 +262,7 @@ def test_execute_worker_run_invalid_callable_fails_early(run_dir: Path, tmp_path
     result = execute_worker_run(tracker_config, exec_spec)
 
     assert result.status == "failed"
+    assert result.error_message is not None
     assert "Could not import module" in result.error_message
     assert len(result.attempts) == 1
     assert result.attempts[0].status == "failed"
@@ -289,34 +290,17 @@ def test_batch_result_retry_rows():
 
 
 def test_scenario_map_runs_threads(tracker):
-    """Test map_runs with ThreadPoolExecutor."""
+    """Test map_runs with unsupported backend raises NotImplementedError."""
     rows = [{"value": 10}, {"value": 20}, {"value": 30}]
 
     with tracker.scenario("test_thread_sweep") as sc:
-        res = sc.map_runs(
-            rows=rows,
-            fn="tests.unit.core.test_orchestration:sample_scalar_fn",
-            name_template="case-{value}",
-            backend="threads",
-        )
-
-    assert res.total_count == 3
-    assert res.success_count == 3
-    assert res.failure_count == 0
-    assert len(res.results) == 3
-    assert res.results[0].scalar_payload == 10
-    assert res.results[1].scalar_payload == 20
-    assert res.results[2].scalar_payload == 30
-
-    # Check that child runs are recorded in database with correct parent_run_id
-    db = tracker.metadata_store.db
-    from sqlmodel import select
-    from consist.models.run import Run
-    with db.session() as sess:
-        runs = sess.exec(select(Run).where(Run.parent_run_id == sc.run_id)).all()
-        assert len(runs) == 3
-        for run in runs:
-            assert run.parent_run_id == sc.run_id
+        with pytest.raises(NotImplementedError):
+            sc.map_runs(
+                rows=rows,
+                fn="tests.unit.core.test_orchestration:sample_scalar_fn",
+                name_template="case-{value}",
+                backend="threads",
+            )
 
 
 def test_scenario_map_runs_processes(tracker):
@@ -350,7 +334,7 @@ def test_scenario_map_runs_failures(tracker):
         res = sc.map_runs(
             rows=rows,
             fn="tests.unit.core.test_orchestration:sample_conditional_failing_fn",
-            backend="threads",
+            backend="processes",
         )
 
     assert res.total_count == 3
@@ -373,10 +357,40 @@ def test_scenario_map_runs_fail_fast(tracker):
         res = sc.map_runs(
             rows=rows,
             fn="tests.unit.core.test_orchestration:sample_conditional_failing_fn",
-            backend="threads",
+            backend="processes",
             fail_fast=True,
         )
 
     assert res.total_count == 3
     assert res.failure_count >= 1
 
+
+def test_scenario_map_runs_cache_hits_processes(tracker):
+    """Test that fanned-out parallel runs resolve cache hits correctly on a second execution."""
+    rows = [{"value": 100}, {"value": 200}, {"value": 300}]
+
+    # First execution - all should run successfully with 0 cache hits
+    with tracker.scenario("test_cache_sweep_1") as sc1:
+        res1 = sc1.map_runs(
+            rows=rows,
+            fn="tests.unit.core.test_orchestration:sample_scalar_fn",
+            name_template="case-{value}",
+            backend="processes",
+        )
+
+    assert res1.total_count == 3
+    assert res1.success_count == 3
+    assert res1.cache_hit_count == 0
+
+    # Second execution - all should run successfully and return 100% cache hits
+    with tracker.scenario("test_cache_sweep_2") as sc2:
+        res2 = sc2.map_runs(
+            rows=rows,
+            fn="tests.unit.core.test_orchestration:sample_scalar_fn",
+            name_template="case-{value}",
+            backend="processes",
+        )
+
+    assert res2.total_count == 3
+    assert res2.success_count == 3
+    assert res2.cache_hit_count == 3

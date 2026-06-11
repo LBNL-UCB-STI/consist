@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import uuid
+import functools
+import concurrent.futures
+import multiprocessing
 from collections.abc import Iterable, Mapping as MappingABC
 from types import MappingProxyType, TracebackType
 from typing import (
@@ -21,6 +24,15 @@ from consist import Artifact
 from consist.models.run import ConsistRecord, RunResult
 from typing import TYPE_CHECKING
 from consist.core.coupler import Coupler
+from consist.core.orchestration import (
+    resolve_callable,
+    execute_worker_run,
+    BatchRunSpec,
+    ExecutionSpec,
+    PythonCallableTarget,
+    RunSpecResult,
+    BatchResult,
+)
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.input_utils import coerce_input_map
 from consist.core.run_invocation import resolve_run_invocation
@@ -1467,3 +1479,172 @@ class ScenarioContext:
             raise missing_error
 
         return False  # Propagate exceptions
+
+    def map_runs(
+        self,
+        rows: Iterable[Dict[str, Any]],
+        fn: Union[str, Callable[..., Any]],
+        name_template: Optional[str] = None,
+        model: Optional[str] = None,
+        config_from: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+        facet_from: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+        max_workers: Optional[int] = None,
+        backend: str = "processes",
+        fail_fast: bool = False,
+        expected_outputs: Optional[List[str]] = None,
+    ) -> "BatchResult":
+        """
+        Fan out parameter sweep runs in parallel under the parent scenario.
+
+        Parameters
+        ----------
+        rows : Iterable[Dict[str, Any]]
+            Rows of inputs/parameter combinations to sweep.
+        fn : Union[str, Callable[..., Any]]
+            The module-path string reference (e.g. "my_module:run_case") or direct callable to run.
+        name_template : Optional[str]
+            Optional string template to format run names (e.g. "case-{case_id}").
+        model : Optional[str]
+            The model name for categorizing child runs. Defaults to function name.
+        config_from : Optional[Callable[[Dict[str, Any]], Dict[str, Any]]]
+            Optional function to transform a row into a run configuration dict.
+        facet_from : Optional[Callable[[Dict[str, Any]], Dict[str, Any]]]
+            Optional function to extract facets from a row.
+        max_workers : Optional[int]
+            The maximum number of parallel workers. Defaults to executor default.
+        backend : str, default "processes"
+            The backend executor: "processes" (ProcessPoolExecutor) or "threads" (ThreadPoolExecutor).
+        fail_fast : bool, default False
+            If True, abort immediately on first failure. Otherwise, complete all runs.
+
+        Returns
+        -------
+        BatchResult
+            The aggregated results of the parallel run execution.
+        """
+        # 1. Validate the callable early in the parent process
+        resolve_callable(fn)
+
+        # 2. Get the parent tracker configuration
+        tracker_config = self.tracker.to_config()
+
+        # 3. Build the execution specs
+        exec_specs: list[ExecutionSpec] = []
+        for idx, row in enumerate(rows):
+            # Compute run ID / name
+            if name_template:
+                try:
+                    run_name = name_template.format(**row)
+                except Exception:
+                    run_name = f"case-{idx}"
+            else:
+                run_name = f"case-{idx}"
+
+            run_id = f"{self.run_id}-{run_name}-{uuid.uuid4().hex[:6]}"
+
+            config = config_from(row) if config_from else row
+            facets = facet_from(row) if facet_from else {}
+
+            merged_tags = self._merge_step_tags([]) or []
+            merged_facet = self._merge_step_facet(facets) or {}
+
+            target = PythonCallableTarget(callable_ref=fn)
+            run_spec = BatchRunSpec(
+                run_id=run_id,
+                model=model
+                or (fn if isinstance(fn, str) else getattr(fn, "__name__", "unknown")),
+                config=config,
+                tags=merged_tags,
+                facets=dict(merged_facet),
+                parent_run_id=self.run_id,
+                expected_outputs=expected_outputs,
+            )
+            exec_spec = ExecutionSpec(
+                run_id=f"exec-{run_id}",
+                parent_run_id=self.run_id,
+                target=target,
+                run_spec=run_spec,
+            )
+            exec_specs.append(exec_spec)
+
+        if not exec_specs:
+            return BatchResult(
+                total_count=0,
+                success_count=0,
+                failure_count=0,
+                cache_hit_count=0,
+            )
+
+        # 4. Select executor
+        if backend != "processes":
+            raise NotImplementedError(
+                f"Backend {backend!r} is not supported. Currently, only 'processes' "
+                "is implemented to prevent database write contention and catalog collisions."
+            )
+
+        ctx = multiprocessing.get_context("spawn")
+        executor_cls = functools.partial(
+            concurrent.futures.ProcessPoolExecutor, mp_context=ctx
+        )
+
+        results: list[RunSpecResult | None] = [None] * len(exec_specs)
+        failed_specs: list[BatchRunSpec] = []
+        success_count = 0
+        failure_count = 0
+        cache_hit_count = 0
+
+        child_tracker_config = tracker_config.model_copy(
+            update={"db_skip_schema_init": True}
+        )
+        tracker_config_dict = child_tracker_config.model_dump()
+
+        with executor_cls(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(execute_worker_run, tracker_config_dict, spec): (
+                    idx,
+                    spec,
+                )
+                for idx, spec in enumerate(exec_specs)
+            }
+
+            for future in concurrent.futures.as_completed(futures):
+                idx, spec = futures[future]
+                try:
+                    res = future.result()
+                except Exception as e:
+                    import traceback
+
+                    res = RunSpecResult(
+                        spec_id=spec.run_spec.run_id,
+                        run_id=spec.run_spec.run_id,
+                        status="failed",
+                        cache_hit=False,
+                        error_message=str(e),
+                        error_traceback=traceback.format_exc(),
+                    )
+
+                results[idx] = res
+
+                if res.status == "success":
+                    success_count += 1
+                    if res.cache_hit:
+                        cache_hit_count += 1
+                else:
+                    failure_count += 1
+                    failed_specs.append(spec.run_spec)
+                    if fail_fast:
+                        for pending_fut in futures:
+                            pending_fut.cancel()
+                        break
+
+        child_run_ids = [r.run_id for r in results if r is not None]
+
+        return BatchResult(
+            total_count=len(exec_specs),
+            success_count=success_count,
+            failure_count=failure_count,
+            cache_hit_count=cache_hit_count,
+            child_run_ids=child_run_ids,
+            failed_specs=failed_specs,
+            results=[r for r in results if r is not None],
+        )
