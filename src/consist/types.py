@@ -294,9 +294,9 @@ class HasTablePath(Protocol):
 def artifact_table_path(artifact: Any) -> Optional[str]:
     """Return an artifact's table_path when available.
 
-    This centralizes the duck-typed fallback used by loaders and schema profilers
+    This centralizes the protocol check used by loaders and schema profilers
     while still allowing static callers to rely on the `HasTablePath` protocol.
     """
     if isinstance(artifact, HasTablePath):
         return artifact.table_path
-    return getattr(artifact, "table_path", None)
+    return None
