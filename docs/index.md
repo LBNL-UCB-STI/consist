@@ -72,6 +72,7 @@ hide:
       <li><a href="guides/historical-recovery/"><strong>Historical Recovery</strong><span>Restore historical outputs or stage inputs.</span></a></li>
       <li><a href="containers-guide/"><strong>Container Guide</strong><span>Run Docker, Singularity, or Apptainer tools.</span></a></li>
       <li><a href="building-domain-tracker/"><strong>Domain Tracker</strong><span>Wrap Consist behind domain-specific verbs for shared codebases.</span></a></li>
+      <li><a href="integrations/gtfs/"><strong>GTFS Support</strong><span>Canonicalize transit feeds into selected-service slices for Tracker or BEAM.</span></a></li>
       <li><a href="concepts/data-materialization/"><strong>Data Materialization</strong><span>Ingest data for SQL analysis.</span></a></li>
       <li><a href="schema-export/"><strong>Schema Export</strong><span>Generate SQLModel schemas from captured files.</span></a></li>
       <li><a href="cli-reference/"><strong>CLI Reference</strong><span>Inspect runs from the terminal.</span></a></li>

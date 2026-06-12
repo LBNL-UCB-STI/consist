@@ -92,6 +92,32 @@ def test_profile_file_schema_h5_index_columns(tmp_path):
     assert set(field.name for field in result.fields) == {"a", "b"}
 
 
+def test_profile_file_schema_gtfs_member(tmp_path):
+    feed_dir = tmp_path / "feed"
+    feed_dir.mkdir()
+    pd.DataFrame(
+        [
+            {"trip_id": "T1", "route_id": "R1", "service_id": "S1"},
+            {"trip_id": "T2", "route_id": "R1", "service_id": "S2"},
+        ]
+    ).to_csv(feed_dir / "trips.txt", index=False)
+
+    result = profile_file_schema(
+        identity=IdentityManager(),
+        path=str(feed_dir),
+        driver="gtfs",
+        table_path="trips.txt",
+        sample_rows=2,
+        source="file",
+    )
+    assert result.summary["n_columns"] == 3
+    assert [field.name for field in result.fields] == [
+        "trip_id",
+        "route_id",
+        "service_id",
+    ]
+
+
 def test_profile_file_schema_rejects_unsafe_view_name(tmp_path):
     path = tmp_path / "sample.csv"
     pd.DataFrame({"a": [1], "b": ["x"]}).to_csv(path, index=False)

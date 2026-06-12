@@ -106,6 +106,24 @@ def tracker(request, run_dir: Path, tmp_path: Path) -> Iterator[Tracker]:
     2. Schema filtering (fixing the SERIAL/MockTable error)
     3. Transaction/Table cleaning (fixing IntegrityErrors)
     """
+    yield from _build_tracker(request, run_dir, tmp_path)
+
+
+@pytest.fixture
+def gtfs_tracker(request, run_dir: Path, tmp_path: Path) -> Iterator[Tracker]:
+    """
+    Provides a Tracker with built-in GTFS schemas registered.
+    """
+    yield from _build_tracker(request, run_dir, tmp_path, builtin_schemas=("gtfs",))
+
+
+def _build_tracker(
+    request,
+    run_dir: Path,
+    tmp_path: Path,
+    *,
+    builtin_schemas: tuple[str, ...] = (),
+) -> Iterator[Tracker]:
     persist_path = request.config.getoption("--persist-db-path")
 
     if persist_path:
@@ -116,7 +134,11 @@ def tracker(request, run_dir: Path, tmp_path: Path) -> Iterator[Tracker]:
         db_path = str(tmp_path / "provenance.db")
 
     # Initialize the Tracker
-    test_tracker = Tracker(run_dir=run_dir, db_path=db_path)
+    test_tracker = Tracker(
+        run_dir=run_dir,
+        db_path=db_path,
+        builtin_schemas=list(builtin_schemas),
+    )
 
     # --- CRITICAL DATABASE SETUP ---
     # We restrict operations to ONLY these tables to prevent 'create_all'

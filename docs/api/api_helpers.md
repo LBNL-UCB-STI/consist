@@ -20,6 +20,7 @@ a tracker object to every call.
   `consist.output_path`
 - Artifact logging/loading: `consist.log_artifact`, `consist.log_dataframe`,
   `consist.load`, `consist.load_df`
+- Transit feeds: `consist.canonicalize_gtfs`
 - Recovery/staging/archive: `consist.hydrate_run_outputs`,
   `consist.materialize_run_outputs`, `consist.materialize_artifact`,
   `consist.stage_artifact`, `consist.stage_inputs`,
@@ -98,6 +99,7 @@ For class-level equivalents, see [Tracker](tracker.md) and
         - log_dataframe
         - log_meta
         - ingest
+        - canonicalize_gtfs
         - register_views
         - find_run
         - find_runs

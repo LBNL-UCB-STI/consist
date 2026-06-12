@@ -194,6 +194,25 @@ with Session(tracker.engine) as session:
   - `output_or_runtime_ignored` for output/runtime locations that should not
     make equivalent runs miss cache.
 
+## GTFS Transit Bundles
+
+When `beam.routing.r5.directory` points at a real transit bundle, Consist
+recognizes the GTFS feed archives or directories underneath that root and
+treats them as part of the run identity. The service date comes from
+`beam.routing.baseDate`, so transit changes invalidate cache in the same way
+other meaningful BEAM config changes do.
+
+For users, the important behavior is simple:
+
+- if you opt into the GTFS schema pack, the standard GTFS tables are available
+  as typed, queryable views
+- feed-specific extras remain available through the raw table path
+- the bundle is tracked alongside the rest of the BEAM configuration, so you
+  do not need separate GTFS parsing code in your workflow
+
+For a short conceptual overview of the GTFS capability, see
+[GTFS Support](gtfs.md).
+
 For ambiguous bare scalar values, configure a key-specific policy instead of
 relying on key-name inference:
 

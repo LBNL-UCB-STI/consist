@@ -23,6 +23,66 @@ child artifact. These helpers prefer `Artifact.parent_artifact_id` and fall
 back to legacy `artifact.meta["parent_id"]` rows when older databases are
 opened.
 
+## Built-in schema packs
+
+Tracker can pre-register Consist-provided schema packs so their tables are
+available as typed views without manual schema wiring. Use
+`builtin_schemas=["gtfs"]` when you want the standard GTFS tables ready for
+querying:
+
+```python
+from consist import Tracker
+
+tracker = Tracker(
+    run_dir="./runs",
+    db_path="./provenance.duckdb",
+    builtin_schemas=["gtfs"],
+)
+```
+
+This opt-in keeps GTFS visible only for projects that need transit data. The
+standard GTFS tables are registered for querying, while feed-specific extras
+can still flow through the raw tabular path when you need them.
+
+## GTFS canonicalization
+
+Use `Tracker.canonicalize_gtfs(...)` when a transit feed should contribute
+semantic identity, not just a raw file hash. The method runs inside an active
+run, logs the source feed artifact, writes a selected-service manifest, records
+`gtfs_source_bundle_hash` and `gtfs_service_slice_hash` on run metadata, logs a
+logical `selected_service_artifact`, logs selected GTFS tables as child
+artifacts, and optionally ingests supported tables into typed views.
+
+```python
+from consist.models.gtfs import GtfsRoutes
+
+with tracker.start_run("weekday_transit", "gtfs"):
+    weekday = tracker.canonicalize_gtfs(
+        ["./inputs/beartransit-ca-us.zip"],
+        service_date="2021-09-07",
+        feed_keys=["beartransit"],
+    )
+
+trips = tracker.load(weekday.table_artifacts["trips"]).df()
+children = tracker.get_child_artifacts(weekday.selected_service_artifact)
+RouteView = tracker.view(GtfsRoutes)
+```
+
+`selected_service_artifact` is the traversal parent for selected tables.
+`manifest_artifact` is the JSON diagnostics and identity manifest. Use
+`get_child_artifacts(weekday.selected_service_artifact)` to inspect selected
+table artifacts and preview the parent artifact for a GTFS service summary.
+Rows ingested into typed GTFS views use the selected-service parent as
+`consist_artifact_id`, so that field identifies the semantic service slice
+rather than an individual physical table artifact. The selected-service parent
+is a logical artifact backed by the manifest file; preview it for a summary and
+load the child table artifacts for rows.
+
+Raw GTFS driver loads remain source-faithful. Consist-managed columns such as
+`feed_key` appear on canonical selected-service tables, not on raw member loads.
+For the walkthrough, see [Example Gallery](../examples.md) and
+[GTFS Support](../integrations/gtfs.md).
+
 ## Minimal runnable example
 
 ```python
@@ -264,6 +324,7 @@ and `digest`.
         - spatial_metadata
         # Config canonicalization
         - canonicalize_config
+        - canonicalize_gtfs
         - prepare_config
         - apply_config_plan
         - identity_from_config_plan

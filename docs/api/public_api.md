@@ -119,6 +119,12 @@ with tracker.scenario("baseline") as sc:
 - `consist.CacheOptions`, `consist.OutputPolicyOptions`, `consist.ExecutionOptions`
 - `consist.BindingResult` (execution envelope for orchestrator-resolved scenario inputs)
 - `consist.H5ChildSpec` (typed child-artifact customization for HDF5 containers)
+- `consist.GtfsCanonicalizationResult` and `consist.GtfsFeedSnapshot`
+  (GTFS selected-service identity results)
+- `consist.canonicalize_gtfs_bundle` and `consist.discover_gtfs_members`
+  (pure GTFS helpers for dependency-light inspection and identity calculation)
+- GTFS schema models such as `consist.GtfsRoutes`, `consist.GtfsTrips`, and
+  `consist.GtfsStopTimes`
 
 ### Scenario / workflow helpers
 
@@ -155,6 +161,7 @@ Scenario defaults like `name_template` and `cache_epoch` are configured via `con
 - [`consist.log_output`](api_helpers.md#consist.api.log_output)
 - [`consist.ingest`](api_helpers.md#consist.api.ingest)
 - [`consist.log_dataframe`](api_helpers.md#consist.api.log_dataframe)
+- [`consist.canonicalize_gtfs`](api_helpers.md#consist.api.canonicalize_gtfs)
 - [`consist.load`](api_helpers.md#consist.api.load)
 - [`consist.capture_outputs`](api_helpers.md#consist.api.capture_outputs)
 - [`consist.get_artifact`](api_helpers.md#consist.api.get_artifact)
@@ -251,7 +258,8 @@ to Consist, start with the **Core** and **Logging/Loading** groups and reach for
 
 #### Config canonicalization
 
-- `canonicalize_config`, `prepare_config`, `apply_config_plan`, `identity_from_config_plan`
+- `canonicalize_config`, `canonicalize_gtfs`, `prepare_config`,
+  `apply_config_plan`, `identity_from_config_plan`
 
 #### Format-specific logging
 

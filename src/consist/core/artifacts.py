@@ -531,7 +531,7 @@ class ArtifactManager:
                             hash_state.effective_hash is not None
                             and parent.hash == hash_state.effective_hash
                         )
-                    elif driver == "h5_table":
+                    elif driver in {"h5_table", "gtfs"}:
                         should_reuse = (
                             hash_state.effective_hash is not None
                             and parent.hash == hash_state.effective_hash

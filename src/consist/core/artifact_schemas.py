@@ -17,6 +17,7 @@ from uuid import UUID
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 from consist.core.identity import IdentityManager
+from consist.types import DriverType, artifact_table_path
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -501,7 +502,7 @@ class ArtifactSchemaManager:
         artifact: Artifact,
         run: Run,
         resolved_path: str,
-        driver: Literal["parquet", "csv", "h5_table"],
+        driver: Literal["parquet", "csv", "gtfs", "h5_table"],
         sample_rows: Optional[int],
         reuse_if_unchanged: bool = False,
         source: str = "file",
@@ -572,11 +573,12 @@ class ArtifactSchemaManager:
                 )
 
             table_path = None
-            if driver == "h5_table":
-                table_path = getattr(artifact, "table_path", None)
+            if driver in DriverType.table_path_drivers():
+                table_path = artifact_table_path(artifact)
                 if not table_path:
                     logging.warning(
-                        "[Consist] Missing table_path for h5_table schema profile: %s",
+                        "[Consist] Missing table_path for %s schema profile: %s",
+                        driver,
                         getattr(artifact, "key", None),
                     )
                     return

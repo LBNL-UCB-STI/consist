@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -13,6 +14,44 @@ from consist.cli import ConsistShell, app
 
 
 runner = CliRunner()
+
+
+def _write_gtfs_bundle_zip(root: Path) -> Path:
+    feed_dir = root / "feed"
+    feed_dir.mkdir(parents=True, exist_ok=True)
+
+    pd.DataFrame(
+        [
+            {
+                "agency_id": "A1",
+                "agency_name": "Transit",
+                "agency_url": "https://example.com",
+                "agency_timezone": "America/Los_Angeles",
+            }
+        ]
+    ).to_csv(feed_dir / "agency.txt", index=False)
+    pd.DataFrame(
+        [
+            {
+                "route_id": "R1",
+                "agency_id": "A1",
+                "route_short_name": "1",
+                "route_type": 3,
+            }
+        ]
+    ).to_csv(feed_dir / "routes.txt", index=False)
+    pd.DataFrame(
+        [
+            {"trip_id": "T1", "route_id": "R1", "service_id": "S1"},
+        ]
+    ).to_csv(feed_dir / "trips.txt", index=False)
+    (feed_dir / "README.txt").write_text("ignored by GTFS preview", encoding="utf-8")
+
+    zip_path = root / "feed.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for file_path in sorted(feed_dir.iterdir()):
+            zf.write(file_path, arcname=file_path.name)
+    return zip_path
 
 
 def test_preview_shows_driver_specific_hint_for_missing_optional_dependency(
@@ -118,6 +157,104 @@ def test_preview_reports_generic_loading_error(
 
     assert result.exit_code == 1
     assert "Error loading artifact: boom" in result.stdout
+
+
+def test_preview_renders_gtfs_bundle_summary(
+    cli_runner, tracker, tmp_path: Path
+) -> None:
+    """`preview` should summarize a GTFS bundle instead of trying to load it as a table."""
+    feed_zip = _write_gtfs_bundle_zip(tmp_path)
+
+    with tracker.start_run("run_preview_gtfs_bundle", "model"):
+        tracker.log_artifact(
+            str(feed_zip),
+            key="preview_gtfs_bundle",
+            driver="gtfs",
+            direction="output",
+        )
+
+    result = cli_runner.invoke(app, ["preview", "preview_gtfs_bundle"])
+
+    assert result.exit_code == 0
+    assert "GTFS Bundle Summary" in result.stdout
+    assert "Member Tables" in result.stdout
+    assert "agency.txt" in result.stdout
+    assert "routes.txt" in result.stdout
+    assert "trips.txt" in result.stdout
+    assert "Preview a specific table member" in result.stdout
+
+
+def test_preview_renders_gtfs_selected_service_summary(
+    cli_runner, tracker, tmp_path: Path
+) -> None:
+    """`preview` should summarize a selected-service parent without loading it."""
+    manifest_path = tmp_path / "selected_service_manifest.json"
+    manifest_path.write_text('{"service_date": "2024-01-01"}\n', encoding="utf-8")
+    trips_path = tmp_path / "trips.csv"
+    trips_path.write_text("feed_key,trip_id\nfeed,T1\n", encoding="utf-8")
+    routes_path = tmp_path / "routes.csv"
+    routes_path.write_text("feed_key,route_id\nfeed,R1\n", encoding="utf-8")
+    notes_path = tmp_path / "notes.txt"
+    notes_path.write_text("not a selected GTFS table\n", encoding="utf-8")
+
+    with tracker.start_run("run_preview_gtfs_selected_service", "model"):
+        manifest = tracker.log_artifact(
+            manifest_path,
+            key="preview_gtfs_selected_service_manifest",
+            driver="json",
+            direction="output",
+        )
+        parent = tracker.log_artifact(
+            manifest_path,
+            key="preview_gtfs_selected_service",
+            driver="gtfs_selected_service",
+            direction="output",
+            gtfs_selected_service=True,
+            gtfs_manifest_artifact_id=str(manifest.id),
+            service_date="2024-01-01",
+            source_feed_count=1,
+            table_count=2,
+            source_bundle_hash="a" * 64,
+            service_slice_hash="b" * 64,
+        )
+        tracker.log_artifact(
+            trips_path,
+            key="preview_gtfs_selected_service_trips",
+            driver="csv",
+            direction="output",
+            parent_artifact_id=parent.id,
+            gtfs_selected_table=True,
+            gtfs_table_name="trips",
+        )
+        tracker.log_artifact(
+            routes_path,
+            key="preview_gtfs_selected_service_routes",
+            driver="csv",
+            direction="output",
+            parent_artifact_id=parent.id,
+            gtfs_selected_table=True,
+            gtfs_table_name="routes",
+        )
+        tracker.log_artifact(
+            notes_path,
+            key="preview_gtfs_selected_service_notes",
+            driver="txt",
+            direction="output",
+            parent_artifact_id=parent.id,
+        )
+
+    result = cli_runner.invoke(app, ["preview", "preview_gtfs_selected_service"])
+
+    assert result.exit_code == 0
+    assert "GTFS Selected Service Summary" in result.stdout
+    assert "Service date" in result.stdout
+    assert "2024-01-01" in result.stdout
+    assert "Selected Tables" in result.stdout
+    assert "trips" in result.stdout
+    assert "routes" in result.stdout
+    assert "preview_gtfs_selected_service_trips" in result.stdout
+    assert "Other children" in result.stdout
+    assert "preview_gtfs_selected_service_notes" not in result.stdout
 
 
 def test_preview_renders_dimensions_for_xarray_like_dataset(

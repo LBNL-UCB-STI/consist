@@ -10,6 +10,7 @@ def test_driver_literal_contains_expected_values() -> None:
     assert values >= {
         "parquet",
         "csv",
+        "gtfs",
         "zarr",
         "netcdf",
         "openmatrix",

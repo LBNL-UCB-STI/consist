@@ -286,7 +286,7 @@ def profile_file_schema(
     *,
     identity: IdentityManager,
     path: str,
-    driver: Literal["parquet", "csv", "h5_table"],
+    driver: Literal["parquet", "csv", "gtfs", "h5_table"],
     sample_rows: Optional[int],
     table_path: Optional[str] = None,
     source: str = "file",
@@ -301,7 +301,7 @@ def profile_file_schema(
         Identity manager used to hash the canonical schema payload.
     path : str
         Filesystem path to the file to profile.
-    driver : {"parquet", "csv", "h5_table"}
+    driver : {"parquet", "csv", "gtfs", "h5_table"}
         File format driver for the profiler.
     sample_rows : Optional[int]
         Maximum number of rows to sample for dtype inference. None means no limit.
