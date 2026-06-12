@@ -3,6 +3,7 @@ from contextlib import contextmanager
 import importlib
 import logging
 import os
+import uuid
 import warnings
 from pathlib import Path
 from types import ModuleType
@@ -1521,6 +1522,7 @@ def log_artifact(
     validate_content_hash: bool = False,
     reuse_if_unchanged: bool = False,
     reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
+    parent_artifact_id: Optional[uuid.UUID] = None,
     facet: Optional[Any] = None,
     facet_schema_version: Optional[Union[str, int]] = None,
     facet_index: bool = False,
@@ -1568,6 +1570,8 @@ def log_artifact(
     reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
         Deprecated for outputs. `any_uri` is ignored for outputs; content identity
         (`content_id`) governs deduplication. Input-side behavior is unaffected.
+    parent_artifact_id : uuid.UUID | None, optional
+        Canonical parent artifact relation for child/member artifacts.
     facet : Optional[Any], optional
         Optional artifact-level facet payload (dict or Pydantic model).
     facet_schema_version : Optional[Union[str, int]], optional
@@ -1605,6 +1609,7 @@ def log_artifact(
             validate_content_hash=validate_content_hash,
             reuse_if_unchanged=reuse_if_unchanged,
             reuse_scope=reuse_scope,
+            parent_artifact_id=parent_artifact_id,
             facet=facet,
             facet_schema_version=facet_schema_version,
             facet_index=facet_index,
@@ -1621,6 +1626,7 @@ def log_artifact(
         validate_content_hash=validate_content_hash,
         reuse_if_unchanged=reuse_if_unchanged,
         reuse_scope=reuse_scope,
+        parent_artifact_id=parent_artifact_id,
         facet=facet,
         facet_schema_version=facet_schema_version,
         facet_index=facet_index,
@@ -2006,6 +2012,7 @@ def log_dataframe(
     path: Optional[Union[str, Path]] = None,
     driver: Optional[str] = None,
     meta: Optional[Dict[str, Any]] = None,
+    parent_artifact_id: Optional[uuid.UUID] = None,
     **to_file_kwargs: Any,
 ) -> Artifact:
     """
@@ -2031,6 +2038,8 @@ def log_dataframe(
         File format driver (e.g., "parquet" or "csv").
     meta : Optional[Dict[str, Any]], optional
         Additional metadata for the artifact.
+    parent_artifact_id : uuid.UUID | None, optional
+        Canonical parent artifact relation for child/member artifacts.
     **to_file_kwargs : Any
         Keyword arguments forwarded to ``pd.DataFrame.to_parquet`` or ``to_csv``.
 
@@ -2067,7 +2076,13 @@ def log_dataframe(
 
     meta_payload = meta or {}
     art = tr.log_artifact(
-        resolved_path, key=key, direction=direction, schema=schema, **meta_payload
+        resolved_path,
+        key=key,
+        direction=direction,
+        schema=schema,
+        driver=inferred_driver,
+        parent_artifact_id=parent_artifact_id,
+        **meta_payload,
     )
     if schema is not None:
         tr.ingest(art, df, schema=schema)

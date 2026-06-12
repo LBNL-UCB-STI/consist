@@ -374,22 +374,36 @@ def test_tracker_canonicalize_gtfs_logs_manifest_metadata_and_ingests(
         )
         run = gtfs_tracker.current_consist.run
 
+        assert result.selected_service_artifact is not None
+        assert result.selected_service_artifact.key == "consist_gtfs_bundle"
+        assert Path(result.selected_service_artifact.path).exists()
+        assert result.selected_service_artifact.meta["gtfs_selected_service"] is True
+        assert result.selected_service_artifact.meta["gtfs_manifest_artifact_id"]
         assert result.manifest_artifact is not None
-        assert result.manifest_artifact.key == "consist_gtfs_bundle"
+        assert result.manifest_artifact.key == "consist_gtfs_bundle_manifest"
         assert Path(result.manifest_artifact.path).exists()
         assert result.source_artifacts
         assert result.source_artifacts[0].meta["feed_key"] == "feed"
         assert "trips" in result.table_artifacts
         trips_artifact = result.table_artifacts["trips"]
         assert Path(trips_artifact.path).exists()
-        assert trips_artifact.meta["gtfs_selected_table"] is True
-        assert trips_artifact.meta["gtfs_manifest_artifact_id"] == str(
-            result.manifest_artifact.id
+        assert trips_artifact.parent_artifact_id == result.selected_service_artifact.id
+        assert (
+            gtfs_tracker.get_parent_artifact(trips_artifact).id
+            == result.selected_service_artifact.id
         )
+        children = gtfs_tracker.get_child_artifacts(result.selected_service_artifact)
+        assert {child.meta["gtfs_table_name"] for child in children} >= {"trips"}
+        assert trips_artifact.meta["gtfs_selected_table"] is True
+        assert "gtfs_manifest_artifact_id" not in trips_artifact.meta
+        assert "gtfs_parent_artifact_id" not in trips_artifact.meta
         assert trips_artifact.meta["gtfs_table_name"] == "trips"
         assert trips_artifact.meta["service_slice_hash"] == result.service_slice_hash
         assert run.meta["gtfs_source_bundle_hash"] == result.source_bundle_hash
         assert run.meta["gtfs_service_slice_hash"] == result.service_slice_hash
+        assert run.meta["gtfs_selected_service_artifact_id"] == str(
+            result.selected_service_artifact.id
+        )
         assert (
             run.meta["gtfs_identity_manifest"]["service_slice_hash"]
             == result.service_slice_hash
@@ -417,7 +431,7 @@ def test_tracker_canonicalize_gtfs_logs_manifest_metadata_and_ingests(
             ).fetchall()
 
     assert rows == [("feed", "T1")]
-    assert route_rows == [("feed", "R1", str(result.manifest_artifact.id))]
+    assert route_rows == [("feed", "R1", str(result.selected_service_artifact.id))]
 
 
 def test_tracker_canonicalize_gtfs_rejects_non_active_run_id(

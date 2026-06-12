@@ -61,13 +61,22 @@ print(weekday.service_slice_hash)
 print(weekday.manifest["feeds"][0]["selection"]["active_service_ids"])
 weekday.selected_tables["trips"].head()
 tracker.load(weekday.table_artifacts["trips"]).df().head()
+tracker.get_child_artifacts(weekday.selected_service_artifact)
 ```
 
 The returned result includes raw feed hashes, a bundle hash, the selected
-service slice hash, a manifest artifact linked to the run, source feed
-artifacts, selected tables as DataFrames, selected table artifacts that can be
-passed to downstream runs, and ingest specs that the tracker can apply
-automatically.
+service slice hash, a logical selected-service parent artifact, a JSON
+manifest artifact for identity and diagnostics, source feed artifacts, selected
+tables as DataFrames, selected table child artifacts that can be passed to
+downstream runs, and ingest specs that the tracker can apply automatically.
+Use `weekday.selected_service_artifact` with `get_child_artifacts(...)` when
+you want the selected table membership relation; use `weekday.manifest_artifact`
+when you want the JSON manifest file itself.
+Typed GTFS view rows store the selected-service parent ID in
+`consist_artifact_id`, so view queries filter by the semantic service slice.
+The parent artifact is logical and manifest-backed; preview it for a service
+summary, and load table artifacts such as `weekday.table_artifacts["trips"]`
+for row data.
 
 Use `tracker.canonicalize_gtfs(...)` or `consist.canonicalize_gtfs(...)` for
 normal workflows. The lower-level `canonicalize_gtfs_bundle(...)` helper is
