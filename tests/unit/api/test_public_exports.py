@@ -1,3 +1,4 @@
+import consist
 from types import SimpleNamespace
 
 from consist import (
@@ -14,7 +15,9 @@ from consist import (
     register_run_output_recovery_copies,
     stage_artifact,
     stage_inputs,
+    TrackerLike,
 )
+from consist.protocols import TrackerLike as ProtocolTrackerLike
 from consist.api import (
     materialize_artifact as materialize_artifact_api,
 )
@@ -82,3 +85,9 @@ def test_staged_input_types_and_helpers_are_exported_from_top_level() -> None:
     assert StagedInputsResult is CoreStagedInputsResult
     assert stage_artifact is stage_artifact_api
     assert stage_inputs is stage_inputs_api
+
+
+def test_public_package_exports_are_all_present() -> None:
+    missing = [name for name in consist.__all__ if not hasattr(consist, name)]
+    assert missing == []
+    assert TrackerLike is ProtocolTrackerLike

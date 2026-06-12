@@ -224,6 +224,7 @@ class Tracker:
         allow_external_paths: Optional[bool] = None,
         openlineage_enabled: bool = False,
         openlineage_namespace: Optional[str] = None,
+        db_skip_schema_init: bool = False,
     ):
         """
         Orchestrate provenance tracking and intelligent caching for simulation workflows.
@@ -288,6 +289,8 @@ class Tracker:
 
         self.mounts = self.fs.mounts
         self.run_dir = self.fs.run_dir
+        self.openlineage_enabled = openlineage_enabled
+        self.openlineage_namespace = openlineage_namespace
 
         self.access_mode = access_mode
         self._run_subdir_fn = run_subdir_fn
@@ -312,6 +315,7 @@ class Tracker:
         self._db_lock_retries = self.settings.db_lock_retries
         self._db_lock_base_sleep_seconds = self.settings.db_lock_base_sleep_seconds
         self._db_lock_max_sleep_seconds = self.settings.db_lock_max_sleep_seconds
+        self.db_skip_schema_init = db_skip_schema_init
 
         if configured_db_path:
             metadata_db = DatabaseManager(
@@ -319,6 +323,7 @@ class Tracker:
                 lock_retries=self._db_lock_retries,
                 lock_base_sleep_seconds=self._db_lock_base_sleep_seconds,
                 lock_max_sleep_seconds=self._db_lock_max_sleep_seconds,
+                skip_schema_init=db_skip_schema_init,
             )
             self.metadata_store = MetadataStore(db=metadata_db)
             self.hot_data_store = HotDataStore(
@@ -360,6 +365,7 @@ class Tracker:
         # a schema by the artifact's schema_name (e.g., "MyDataSchema") if the
         # tracker was initialized with schemas=[MyDataSchema, ...].
         self._registered_schemas: Dict[str, Type[SQLModel]] = {}
+        self.builtin_schemas = list(builtin_schemas or ())
         registered_schemas: list[Type[SQLModel]] = []
         seen_schema_names: set[str] = set()
         builtin_schema_names = set(builtin_schemas or ())
@@ -570,6 +576,34 @@ class Tracker:
         """
         return cast(
             Mapping[str, Type[SQLModel]], MappingProxyType(self._registered_schemas)
+        )
+
+    def to_config(self) -> TrackerConfig:
+        """
+        Reconstruct a TrackerConfig dynamically from this tracker instance.
+        """
+        builtin_schema_set = set(GTFS_SCHEMAS)
+        user_schemas = [
+            schema
+            for schema in self._registered_schemas.values()
+            if schema not in builtin_schema_set
+        ]
+
+        return TrackerConfig(
+            run_dir=self.run_dir,
+            db_path=self._compat_db_path,
+            mounts=self.mounts,
+            project_root=str(self.identity.project_root),
+            hashing_strategy=self.identity.hashing_strategy,
+            cache_epoch=self._cache_epoch,
+            schemas=user_schemas if user_schemas else None,
+            builtin_schemas=list(self.builtin_schemas or []),
+            access_mode=self.access_mode,
+            run_subdir_fn=self._run_subdir_fn,
+            allow_external_paths=self.allow_external_paths,
+            openlineage_enabled=self.openlineage_enabled,
+            openlineage_namespace=self.openlineage_namespace,
+            db_skip_schema_init=self.db_skip_schema_init,
         )
 
     def get_registered_schema(

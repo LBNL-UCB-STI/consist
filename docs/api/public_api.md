@@ -17,6 +17,7 @@ For tiered guidance:
 | [`Tracker.trace`](tracker.md#consist.core.tracker.Tracker.trace) | You need inline execution with explicit tracker control | Block executes every time |
 | [`consist.scenario`](api_helpers.md#consist.api.scenario) | You need multi-step workflows with shared scenario context | Returns [`ScenarioContext`](workflow.md#scenario-context) |
 | [`ScenarioContext.run`](workflow.md#consist.core.workflow.ScenarioContext.run) | You are inside a scenario and want cache-aware steps | Step-level equivalent of `Tracker.run`; also accepts `binding=BindingResult(...)` for orchestrator-resolved inputs |
+| [`ScenarioContext.map_runs`](workflow.md#consist.core.workflow.ScenarioContext.map_runs) | You are inside a scenario and want one child run per sweep row | Process-backed fan-out for independent parameter sweeps |
 | [`ScenarioContext.trace`](workflow.md#consist.core.workflow.ScenarioContext.trace) | You are inside a scenario and need inline step execution | Step-level equivalent of `Tracker.trace` |
 | [`consist.run`](api_helpers.md#consist.api.run) | You need the legacy context-resolving convenience wrapper | Deprecated compatibility wrapper around `Tracker.run` |
 | [`consist.trace`](api_helpers.md#consist.api.trace) | You need the legacy context-resolving tracing wrapper | Deprecated compatibility wrapper around `Tracker.trace` |
@@ -140,13 +141,26 @@ with tracker.scenario("baseline") as sc:
 - [`consist.trace`](api_helpers.md#consist.api.trace) (deprecated compatibility wrapper)
 - [`consist.start_run`](api_helpers.md#consist.api.start_run) (deprecated compatibility wrapper)
 - [`ScenarioContext`](workflow.md#scenario-context) (returned by `consist.scenario(...)`)
-  - `run_id`, `config`, `inputs`, `add_input`, `declare_outputs`, `require_outputs`, `collect_by_keys`, `run`, `trace`
+  - `run_id`, `config`, `inputs`, `add_input`, `declare_outputs`, `require_outputs`, `collect_by_keys`, `run`, `map_runs`, `trace`
   - `run(..., binding=BindingResult(...))` for resolved orchestrator plans
+  - `map_runs(...)` for independent process-backed sweep rows
 - [`RunContext`](workflow.md#run-context) (injected via `execution_options=ExecutionOptions(inject_context=True)`)
   - `run_dir`, `output_dir`, `output_path`, `inputs`, `load`, `log_artifact`, `log_artifacts`, `log_input`, `log_output`, `log_meta`, `capture_outputs`
 - [`Coupler`](workflow.md#coupler) (available at `scenario.coupler`)
 
 Scenario defaults like `name_template` and `cache_epoch` are configured via `consist.scenario(...)` and flow into `ScenarioContext.run(...)`.
+
+### Parallel orchestration models
+
+These models are returned by, or support, `ScenarioContext.map_runs(...)`:
+
+- `consist.BatchResult`: aggregate result for a sweep/batch.
+- `consist.RunSpecResult`: per-spec result, including `persisted_run_id` when a
+  run record exists.
+- `consist.BatchRunSpec`: serializable description of one child run.
+- `consist.ExecutionAttempt`: status details for one backend attempt.
+- `consist.ExecutionSpec` and `consist.PythonCallableTarget`: lower-level
+  execution request objects used by the process backend.
 
 ### Utilities and Introspection
 
