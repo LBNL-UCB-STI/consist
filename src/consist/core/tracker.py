@@ -2813,6 +2813,7 @@ class Tracker:
         validate_content_hash: bool = False,
         reuse_if_unchanged: bool = False,
         reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
+        parent_artifact_id: Optional[uuid.UUID] = None,
         profile_file_schema: bool | Literal["if_changed"] | None = None,
         file_schema_sample_rows: Optional[int] = None,
         facet: Optional[FacetLike] = None,
@@ -2877,6 +2878,8 @@ class Tracker:
         reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
             Deprecated for outputs. `any_uri` is ignored for outputs; deduplication is governed
             by `content_id`. Input-side behavior is unaffected.
+        parent_artifact_id : uuid.UUID | None, optional
+            Canonical parent artifact relation for child/member artifacts.
         profile_file_schema : bool, default False
             If True, profile a lightweight schema for file-based tabular artifacts.
             Use "if_changed" to skip profiling when matching content identity already
@@ -2919,6 +2922,7 @@ class Tracker:
             validate_content_hash=validate_content_hash,
             reuse_if_unchanged=reuse_if_unchanged,
             reuse_scope=reuse_scope,
+            parent_artifact_id=parent_artifact_id,
             profile_file_schema=profile_file_schema,
             file_schema_sample_rows=file_schema_sample_rows,
             facet=facet,
@@ -2936,6 +2940,7 @@ class Tracker:
         path: Optional[Union[str, Path]] = None,
         driver: Optional[str] = None,
         meta: Optional[Dict[str, Any]] = None,
+        parent_artifact_id: Optional[uuid.UUID] = None,
         profile_file_schema: bool = False,
         file_schema_sample_rows: Optional[int] = 1000,
         **to_file_kwargs: Any,
@@ -2960,6 +2965,8 @@ class Tracker:
             File format driver (e.g., "parquet" or "csv").
         meta : Optional[Dict[str, Any]], optional
             Additional metadata for the artifact.
+        parent_artifact_id : uuid.UUID | None, optional
+            Canonical parent artifact relation for child/member artifacts.
         profile_file_schema : bool, default False
             If True, profile a lightweight schema for file-based tabular artifacts.
         file_schema_sample_rows : Optional[int], default 1000
@@ -3002,6 +3009,8 @@ class Tracker:
             key=key,
             direction=direction,
             schema=schema,
+            driver=inferred_driver,
+            parent_artifact_id=parent_artifact_id,
             profile_file_schema=profile_file_schema,
             file_schema_sample_rows=file_schema_sample_rows,
             **meta_payload,
@@ -3839,10 +3848,11 @@ class Tracker:
 
         This wraps :func:`canonicalize_gtfs_bundle` with tracker-managed
         provenance: source feeds are logged as inputs, the selected-service
-        manifest is logged as an input artifact, GTFS identity metadata is
-        recorded on the run, selected tables are logged as ordinary artifacts
-        for downstream runs, and selected tables can be ingested for querying.
-        Raw GTFS loads remain source-faithful; ``feed_key`` is attached by the
+        slice is logged as a logical parent artifact, the selected-service
+        manifest is logged as a JSON artifact, GTFS identity metadata is
+        recorded on the run, selected tables are logged as child artifacts for
+        downstream runs, and selected tables can be ingested for querying. Raw
+        GTFS loads remain source-faithful; ``feed_key`` is attached by the
         canonicalizer on selected-service tables.
         """
         if run is not None and run_id is not None:
@@ -3897,8 +3907,8 @@ class Tracker:
         manifest_hash = result.service_slice_hash or result.source_bundle_hash
         manifest_artifact = self.log_artifact(
             manifest_path,
-            key=key,
-            direction="input",
+            key=f"{key}_manifest",
+            direction="output",
             driver="json",
             content_hash=manifest_hash,
             force_hash_override=True,
@@ -3907,7 +3917,22 @@ class Tracker:
             service_slice_hash=result.service_slice_hash,
             service_date=result.manifest.get("service_date"),
         )
-
+        selected_service_artifact = self.log_artifact(
+            manifest_path,
+            key=key,
+            direction="output",
+            driver="gtfs_selected_service",
+            content_hash=manifest_hash,
+            force_hash_override=True,
+            gtfs_selected_service=True,
+            gtfs_manifest_artifact_id=str(manifest_artifact.id),
+            kind="selected-service-slice",
+            source_bundle_hash=result.source_bundle_hash,
+            service_slice_hash=result.service_slice_hash,
+            service_date=result.manifest.get("service_date"),
+            table_count=len(result.selected_tables),
+            source_feed_count=len(result.snapshots),
+        )
         table_artifacts: dict[str, Artifact] = {}
         for table_name, frame in sorted(result.selected_tables.items()):
             table_key = f"{key}_{table_name}"
@@ -3915,9 +3940,9 @@ class Tracker:
                 frame,
                 key=table_key,
                 direction="output",
+                parent_artifact_id=selected_service_artifact.id,
                 meta={
                     "gtfs_selected_table": True,
-                    "gtfs_manifest_artifact_id": str(manifest_artifact.id),
                     "gtfs_table_name": table_name,
                     "source_bundle_hash": result.source_bundle_hash,
                     "service_slice_hash": result.service_slice_hash,
@@ -3941,7 +3966,7 @@ class Tracker:
                             continue
                     rows = list(spec.materialize_rows(target_run.id))
                     self.ingest(
-                        manifest_artifact,
+                        selected_service_artifact,
                         data=rows,
                         schema=spec.schema,
                         run=target_run,
@@ -3953,11 +3978,13 @@ class Tracker:
         self.log_meta(
             gtfs_source_bundle_hash=result.source_bundle_hash,
             gtfs_service_slice_hash=result.service_slice_hash,
+            gtfs_selected_service_artifact_id=str(selected_service_artifact.id),
             gtfs_identity_manifest=result.identity_payload,
         )
 
         return replace(
             result,
+            selected_service_artifact=selected_service_artifact,
             manifest_artifact=manifest_artifact,
             source_artifacts=tuple(source_artifacts),
             table_artifacts=table_artifacts,

@@ -8,6 +8,7 @@ persistence calls, and optional facet/schema profiling side effects.
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any, Dict, Literal, Optional, TYPE_CHECKING, Type, Union, cast
 
 from sqlmodel import SQLModel
@@ -134,6 +135,7 @@ class ArtifactLoggingCoordinator:
         validate_content_hash: bool = False,
         reuse_if_unchanged: bool = False,
         reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
+        parent_artifact_id: Optional[uuid.UUID] = None,
         profile_file_schema: bool | Literal["if_changed"] | None = None,
         file_schema_sample_rows: Optional[int] = None,
         facet: Optional[FacetLike] = None,
@@ -174,6 +176,8 @@ class ArtifactLoggingCoordinator:
             bytes share `content_id`. Setting this on outputs emits a warning.
         reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
             Deprecated for outputs. `any_uri` is ignored; deduplication is governed by `content_id`.
+        parent_artifact_id : uuid.UUID | None, optional
+            Canonical parent artifact relation for child/member artifacts.
         profile_file_schema : bool | Literal["if_changed"] | None, optional
             Controls automatic file schema profiling behavior.
         file_schema_sample_rows : int | None, optional
@@ -232,6 +236,7 @@ class ArtifactLoggingCoordinator:
                 validate_content_hash=validate_content_hash,
                 reuse_if_unchanged=reuse_if_unchanged,
                 reuse_scope=reuse_scope,
+                parent_artifact_id=parent_artifact_id,
                 known_latest_artifact_at_uri=known_latest_artifact_at_uri,
                 latest_artifact_lookup_done=latest_artifact_lookup_done,
                 **meta,

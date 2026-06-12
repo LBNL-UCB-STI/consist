@@ -2,6 +2,8 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+
+import consist
 from consist.core.coupler import Coupler
 from consist.core.config_canonicalization import (
     CanonicalConfig,
@@ -376,6 +378,32 @@ def test_step_log_dataframe_defaults_to_run_dir(tracker: Tracker):
         == tracker.run_dir / "outputs" / "scen_df" / "write_df" / "iteration_0"
     )
     assert abs_path.name == "series.parquet"
+
+
+def test_log_dataframe_preserves_explicit_driver_for_extensionless_paths(
+    tracker: Tracker, tmp_path: Path
+):
+    df = pd.DataFrame({"value": [1, 2, 3]})
+
+    with tracker.start_run("tracker_extensionless_csv", "test_model"):
+        tracker_artifact = tracker.log_dataframe(
+            df,
+            key="tracker_series",
+            path=tmp_path / "tracker_series_data",
+            driver="csv",
+        )
+
+    with consist.use_tracker(tracker):
+        with tracker.start_run("api_extensionless_csv", "test_model"):
+            api_artifact = consist.log_dataframe(
+                df,
+                key="api_series",
+                path=tmp_path / "api_series_data",
+                driver="csv",
+            )
+
+    assert tracker_artifact.driver == "csv"
+    assert api_artifact.driver == "csv"
 
 
 def test_scenario_step_cache_hydration_default(tracker: Tracker):

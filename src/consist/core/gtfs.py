@@ -48,6 +48,7 @@ class GtfsCanonicalizationResult:
     ingestables: list[IngestSpec]
     snapshots: tuple[GtfsFeedSnapshot, ...]
     selected_tables: dict[str, pd.DataFrame]
+    selected_service_artifact: Any = None
     manifest_artifact: Any = None
     source_artifacts: tuple[Any, ...] = ()
     table_artifacts: dict[str, Any] = field(default_factory=dict)

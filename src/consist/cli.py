@@ -2362,6 +2362,92 @@ def _render_gtfs_bundle_preview(
     return True
 
 
+def _render_gtfs_selected_service_preview(
+    tracker: Tracker,
+    artifact: "Artifact",
+    *,
+    n_rows: int,
+) -> bool:
+    """Render a compact selected-service GTFS summary for logical parent artifacts."""
+    if artifact.driver != "gtfs_selected_service":
+        return False
+
+    meta = artifact.meta or {}
+    children = tracker.get_child_artifacts(artifact)
+    selected_children = [
+        child
+        for child in children
+        if (child.meta or {}).get("gtfs_selected_table") is True
+    ]
+    other_child_count = len(children) - len(selected_children)
+    table_names = []
+    for child in selected_children:
+        child_meta = child.meta or {}
+        table_names.append(
+            str(child_meta.get("gtfs_table_name") or child.key or child.id)
+        )
+
+    summary = Table.grid(padding=(0, 2))
+    summary.add_column(style="bold cyan")
+    summary.add_column()
+    summary.add_row("Artifact", str(artifact.key))
+    summary.add_row("Type", "GTFS selected service")
+    service_date = meta.get("service_date")
+    if service_date is not None:
+        summary.add_row("Service date", str(service_date))
+    if artifact.hash:
+        summary.add_row("Hash", artifact.hash[:12] + "...")
+    if meta.get("source_bundle_hash"):
+        summary.add_row("Source bundle", str(meta["source_bundle_hash"])[:12] + "...")
+    if meta.get("service_slice_hash"):
+        summary.add_row("Service slice", str(meta["service_slice_hash"])[:12] + "...")
+    summary.add_row("Source feeds", str(meta.get("source_feed_count", "?")))
+    summary.add_row(
+        "Selected tables", str(meta.get("table_count", len(selected_children)))
+    )
+    if other_child_count:
+        summary.add_row("Other children", str(other_child_count))
+    if meta.get("gtfs_manifest_artifact_id"):
+        summary.add_row("Manifest artifact", str(meta["gtfs_manifest_artifact_id"]))
+
+    console.print(
+        Panel(
+            summary,
+            title="GTFS Selected Service Summary",
+            border_style="green",
+            expand=False,
+        )
+    )
+
+    if not selected_children:
+        console.print("[yellow]No selected GTFS table artifacts were found.[/yellow]")
+        return True
+
+    display_count = min(max(n_rows, 1), len(selected_children))
+    table = Table(
+        title=f"Selected Tables (showing {display_count} of {len(selected_children)})"
+    )
+    table.add_column("Table", style="cyan")
+    table.add_column("Artifact Key", style="magenta", overflow="fold")
+    table.add_column("Driver", style="dim")
+
+    for child, table_name in zip(
+        selected_children[:display_count], table_names[:display_count]
+    ):
+        table.add_row(table_name, str(child.key), str(child.driver))
+
+    console.print(table)
+    if len(selected_children) > display_count:
+        console.print(
+            f"[dim]... and {len(selected_children) - display_count} more selected tables[/dim]"
+        )
+    console.print(
+        "[dim]Preview a selected table with its child artifact key, "
+        "such as <bundle_key>_trips.[/dim]"
+    )
+    return True
+
+
 def _load_artifact_with_diagnostics(
     tracker: Tracker,
     artifact: "Artifact",
@@ -2563,6 +2649,8 @@ def preview(
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
     _ensure_tracker_mounts_for_artifact(tracker, artifact, trust_db=trust_db)
+    if _render_gtfs_selected_service_preview(tracker, artifact, n_rows=n_rows):
+        return
     if _render_gtfs_bundle_preview(tracker, artifact, n_rows=n_rows):
         return
 
