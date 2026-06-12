@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import (
+    Any,
     Callable,
     Mapping,
     Optional,
@@ -23,6 +24,26 @@ class ArtifactLike(Protocol):
 
     @property
     def container_uri(self) -> str: ...
+
+
+@runtime_checkable
+class ArtifactRecordLike(ArtifactLike, Protocol):
+    """
+    Structural type for persisted Consist artifact records.
+
+    ``ArtifactLike`` is the narrow path/container contract used by lightweight
+    integrations. This richer protocol captures the stable fields expected by
+    loaders, identity helpers, and schema-aware workflows.
+    """
+
+    id: Any
+    key: str
+    table_path: Optional[str]
+    array_path: Optional[str]
+    meta: dict[str, Any]
+
+    @property
+    def driver(self) -> str: ...
 
 
 @runtime_checkable

@@ -322,7 +322,8 @@ def _lineage_run_depth(node: Dict[str, object]) -> int:
     producing = node.get("producing_run")
     if not isinstance(producing, dict):
         return 0
-    inputs = producing.get("inputs") or []
+    raw_inputs = producing.get("inputs")
+    inputs = raw_inputs if isinstance(raw_inputs, list) else []
     depth = 1
     child_depths = [
         _lineage_run_depth(child) for child in inputs if isinstance(child, dict)

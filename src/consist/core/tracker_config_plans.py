@@ -500,7 +500,7 @@ class TrackerConfigPlanService(_TrackerServiceBase):
         return artifacts_by_key
 
     def _ingest_cache_hit(self, table_name: str, content_hash: str) -> bool:
-        store = getattr(self, "hot_data_store", None)
+        store = self.tracker.hot_data_store
         if store is not None:
             return store.ingest_cache_hit(table_name, content_hash)
 

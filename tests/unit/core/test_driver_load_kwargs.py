@@ -130,7 +130,7 @@ def test_h5_table_load_kwargs_unsupported(tmp_path):
         load(artifact, delimiter=";")
 
 
-def test_gtfs_load_uses_artifact_table_path(tmp_path):
+def test_gtfs_load_uses_table_path(tmp_path):
     artifact = _gtfs_artifact(tmp_path)
     relation = load(artifact)
     df = to_df(relation)

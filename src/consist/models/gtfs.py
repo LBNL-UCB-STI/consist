@@ -223,7 +223,7 @@ GTFS_SCHEMAS: tuple[type[SQLModel], ...] = (
 )
 
 GTFS_SCHEMA_BY_TABLE_NAME: dict[str, type[SQLModel]] = {
-    str(getattr(model, "__tablename__", model.__name__).lower()): model
+    (getattr(model, "__tablename__", None) or model.__name__.lower()).lower(): model
     for model in GTFS_SCHEMAS
 }
 

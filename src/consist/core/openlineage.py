@@ -80,8 +80,8 @@ class OpenLineageEmitter:
         outputs: list[Artifact],
         error: Exception | None,
     ) -> dict[str, Any]:
-        completed_at = getattr(run, "ended_at", None)
-        started_at = getattr(run, "started_at", None)
+        completed_at = run.ended_at
+        started_at = run.started_at
         if event_type == "COMPLETE" and completed_at:
             event_time = completed_at
         elif event_type == "START" and started_at:
@@ -204,7 +204,7 @@ def _parent_facet(
 def _dataset_name_from_artifact(artifact: Artifact, run: Run) -> str:
     year = None
     iteration = None
-    if isinstance(getattr(artifact, "meta", None), dict):
+    if isinstance(artifact.meta, dict):
         year = artifact.meta.get("year")
         iteration = artifact.meta.get("iteration")
     if year is None:
@@ -224,7 +224,7 @@ def _schema_facet_from_artifact(
     schema_resolver: Optional[Callable[[Artifact], Optional[tuple[Any, list[Any]]]]],
 ) -> Optional[dict[str, Any]]:
     profile = None
-    if isinstance(getattr(artifact, "meta", None), dict):
+    if isinstance(artifact.meta, dict):
         profile = artifact.meta.get("schema_profile")
     if profile and isinstance(profile, dict) and "fields" in profile:
         return {
@@ -264,7 +264,7 @@ def _dataset_version_facet_from_artifact(
     # content fingerprint, not a Consist-internal ``content_id``.
     if artifact.hash:
         version = artifact.hash
-    elif isinstance(getattr(artifact, "meta", None), dict):
+    elif isinstance(artifact.meta, dict):
         version = artifact.meta.get("schema_id")
     if not version:
         return None
@@ -272,7 +272,7 @@ def _dataset_version_facet_from_artifact(
 
 
 def _documentation_facet_from_artifact(artifact: Artifact) -> Optional[dict[str, Any]]:
-    if not isinstance(getattr(artifact, "meta", None), dict):
+    if not isinstance(artifact.meta, dict):
         return None
     description = artifact.meta.get("description")
     if not description:
@@ -288,7 +288,7 @@ def _consist_dataset_facet(artifact: Artifact) -> Optional[dict[str, Any]]:
         # Intentional exposure of the raw checksum for external/debug consumers.
         "hash": artifact.hash,
     }
-    if isinstance(getattr(artifact, "meta", None), dict):
+    if isinstance(artifact.meta, dict):
         meta = artifact.meta
         facet["schema_id"] = meta.get("schema_id")
         facet["schema_summary"] = meta.get("schema_summary")

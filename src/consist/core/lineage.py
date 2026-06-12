@@ -137,17 +137,17 @@ def format_lineage_tree(
         return ""
 
     def _artifact_label(artifact: "Artifact") -> str:
-        key = getattr(artifact, "key", None)
-        driver = getattr(artifact, "driver", None)
+        key = artifact.key
+        driver = artifact.driver
         if key and driver:
             return f"{key} ({driver})"
         if key:
             return key
-        return str(getattr(artifact, "id", "artifact"))
+        return str(artifact.id)
 
     def _run_label(run: "Run") -> str:
-        model = getattr(run, "model_name", None)
-        run_id = getattr(run, "id", None)
+        model = run.model_name
+        run_id = run.id
         if model and run_id:
             return f"{model} [{run_id}]"
         return str(run_id or model or "run")
@@ -207,8 +207,8 @@ def print_lineage(
         if artifact is None:
             return
 
-        key = getattr(artifact, "key", "?")
-        driver = getattr(artifact, "driver", None)
+        key = artifact.key
+        driver = artifact.driver
         art_label = f"[bold cyan]{key}[/bold cyan]"
         if driver:
             art_label += f" [dim]({driver})[/dim]"
@@ -223,13 +223,13 @@ def print_lineage(
         if run is None:
             return
 
-        model = getattr(run, "model_name", "?")
-        iteration = getattr(run, "iteration", None)
+        model = run.model_name
+        iteration = run.iteration
         run_label = f"[dim]\u2190[/dim] [yellow]{model}[/yellow]"
         if iteration is not None:
             run_label += f" [dim](iter {iteration})[/dim]"
         if show_run_ids:
-            run_id = getattr(run, "id", None)
+            run_id = run.id
             if run_id:
                 short_id = run_id[:40] + "..." if len(run_id) > 40 else run_id
                 run_label += f" [dim]{short_id}[/dim]"

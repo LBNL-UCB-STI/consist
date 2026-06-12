@@ -12,12 +12,11 @@ from typing import (
     get_args,
     get_origin,
 )
-from uuid import UUID
 
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 from consist.core.identity import IdentityManager
-from consist.types import DriverType, artifact_table_path
+from consist.types import DriverType
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -62,22 +61,18 @@ class ArtifactSchemaManager:
         self.tracker = tracker
 
     def _metadata_db(self) -> DatabaseManager | None:
-        metadata_store = getattr(self.tracker, "metadata_store", None)
+        metadata_store = self.tracker.metadata_store
         if metadata_store is not None:
-            store_db = getattr(metadata_store, "db", None)
-            if store_db is not None:
-                return cast("DatabaseManager", store_db)
+            return metadata_store.db
         # Compatibility alias for single-store mode while migration is in progress.
-        return cast("DatabaseManager | None", getattr(self.tracker, "db", None))
+        return self.tracker.db
 
     def _hot_engine(self) -> Engine | None:
-        hot_data_store = getattr(self.tracker, "hot_data_store", None)
+        hot_data_store = self.tracker.hot_data_store
         if hot_data_store is not None:
-            store_engine = getattr(hot_data_store, "engine", None)
-            if store_engine is not None:
-                return cast("Engine", store_engine)
+            return hot_data_store.engine
         # Compatibility alias for single-store mode while migration is in progress.
-        return cast("Engine | None", getattr(self.tracker, "engine", None))
+        return self.tracker.engine
 
     def _type_annotation_to_logical_type(self, annotation: Any) -> str:
         """
@@ -202,10 +197,12 @@ class ArtifactSchemaManager:
             # 1. Extract fields from the SQLModel class
             fields = []
             relations: list[dict[str, str]] = []
-            table_name = getattr(schema_model, "__tablename__", schema_model.__name__)
+            table_name = (
+                getattr(schema_model, "__tablename__", None) or schema_model.__name__
+            )
 
             # model_fields is a dict of field_name -> FieldInfo from Pydantic
-            if hasattr(schema_model, "model_fields"):
+            if schema_model.model_fields:
 
                 def _resolve_fk_target(field_info: Any) -> Optional[str]:
                     raw_fk = getattr(field_info, "foreign_key", None)
@@ -387,7 +384,7 @@ class ArtifactSchemaManager:
 
             logging.info(
                 "[Consist] Stored user-provided schema for artifact=%s (schema_id=%s, source=%s)",
-                getattr(artifact, "key", None),
+                artifact.key,
                 schema_id,
                 source,
             )
@@ -395,7 +392,7 @@ class ArtifactSchemaManager:
         except Exception as e:
             logging.warning(
                 "[Consist] Failed to profile user-provided schema for artifact=%s: %s",
-                getattr(artifact, "key", None),
+                artifact.key,
                 e,
             )
 
@@ -490,7 +487,7 @@ class ArtifactSchemaManager:
         except Exception as e:
             logging.warning(
                 "[Consist] Failed to profile ingested schema for artifact=%s table=%s.%s: %s",
-                getattr(artifact, "key", None),
+                artifact.key,
                 table_schema,
                 table_name,
                 e,
@@ -542,9 +539,7 @@ class ArtifactSchemaManager:
             return
 
         try:
-            if isinstance(getattr(artifact, "meta", None), dict) and artifact.meta.get(
-                "schema_id"
-            ):
+            if isinstance(artifact.meta, dict) and artifact.meta.get("schema_id"):
                 return
             from consist.models.artifact_schema import (
                 ArtifactSchema,
@@ -574,12 +569,12 @@ class ArtifactSchemaManager:
 
             table_path = None
             if driver in DriverType.table_path_drivers():
-                table_path = artifact_table_path(artifact)
+                table_path = artifact.table_path
                 if not table_path:
                     logging.warning(
                         "[Consist] Missing table_path for %s schema profile: %s",
                         driver,
-                        getattr(artifact, "key", None),
+                        artifact.key,
                     )
                     return
 
@@ -588,11 +583,11 @@ class ArtifactSchemaManager:
                 # Prefer content identity when available, but still fall back to
                 # hash-based lookup when the matching schema observation lives on a
                 # legacy row that has not been backfilled with content_id yet.
-                if getattr(artifact, "content_id", None) is not None:
+                if artifact.content_id is not None:
                     prior_obs = metadata_db.find_schema_observation_for_content_id(
-                        cast(UUID, artifact.content_id)
+                        artifact.content_id
                     )
-                if prior_obs is None and getattr(artifact, "hash", None):
+                if prior_obs is None and artifact.hash:
                     prior_obs = metadata_db.find_schema_observation_for_hash(
                         cast(str, artifact.hash)
                     )
@@ -633,7 +628,7 @@ class ArtifactSchemaManager:
                     identity=self.tracker.identity,
                     container_uri=artifact.container_uri,
                     table_path=table_path,
-                    array_path=getattr(artifact, "array_path", None),
+                    array_path=artifact.array_path,
                 ),
             )
             truncated = result.summary.get("truncated") or {}
@@ -690,7 +685,7 @@ class ArtifactSchemaManager:
         except Exception as e:
             logging.warning(
                 "[Consist] Failed to profile file schema for artifact=%s path=%s: %s",
-                getattr(artifact, "key", None),
+                artifact.key,
                 resolved_path,
                 e,
             )

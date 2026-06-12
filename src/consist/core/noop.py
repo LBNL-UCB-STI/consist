@@ -126,12 +126,15 @@ class NoopCoupler(CouplerMapMixin[Any, DeclaredOutput]):
         artifact = self.require(key) if required else self.get(key)
         if artifact is None:
             return None
-        if hasattr(artifact, "get_path"):
-            return Path(artifact.get_path())
-        if hasattr(artifact, "path"):
-            return Path(artifact.path)
-        if hasattr(artifact, "container_uri"):
-            return Path(artifact.container_uri)
+        path_getter = getattr(artifact, "get_path", None)
+        if callable(path_getter):
+            return Path(path_getter())
+        path_value = getattr(artifact, "path", None)
+        if path_value is not None:
+            return Path(path_value)
+        container_uri = getattr(artifact, "container_uri", None)
+        if container_uri is not None:
+            return Path(container_uri)
         return None
 
 
@@ -425,9 +428,12 @@ def _build_noop_artifact(
     validate_artifact_key(key)
     if isinstance(value, NoopArtifact):
         return value
-    if hasattr(value, "path"):
+    table_path = getattr(value, "table_path", None)
+    array_path = getattr(value, "array_path", None)
+    path_value = getattr(value, "path", None)
+    if path_value is not None:
         try:
-            path = Path(value.path)
+            path = Path(path_value)
         except Exception:
             path = None
         if path is not None:
@@ -436,6 +442,8 @@ def _build_noop_artifact(
                 path=path,
                 container_uri=str(path),
                 meta=dict(meta or {}),
+                table_path=table_path,
+                array_path=array_path,
             )
     path = Path(value) if value is not None else Path(key)
     return NoopArtifact(
@@ -443,6 +451,8 @@ def _build_noop_artifact(
         path=path,
         container_uri=str(path),
         meta=dict(meta or {}),
+        table_path=table_path,
+        array_path=array_path,
     )
 
 

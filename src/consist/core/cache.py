@@ -3,6 +3,7 @@ import os
 import logging
 import shutil
 import tempfile
+import uuid
 import weakref
 from copy import deepcopy
 from dataclasses import dataclass
@@ -30,6 +31,17 @@ if TYPE_CHECKING:
 @runtime_checkable
 class CacheDb(Protocol):
     def get_run(self, run_id: str) -> Optional[Run]: ...
+
+    @property
+    def engine(self) -> Any: ...
+
+    def link_artifacts_to_run_bulk(
+        self,
+        *,
+        artifact_ids: Sequence[uuid.UUID],
+        run_id: str,
+        direction: Literal["input", "output"],
+    ) -> Any: ...
 
 
 @runtime_checkable
@@ -155,7 +167,7 @@ class ActiveRunCacheOptions:
 
 
 def _can_delegate_run_output_materialization(tracker: CacheHydrationContext) -> bool:
-    return callable(getattr(tracker, "materialize_run_outputs", None))
+    return callable(tracker.materialize_run_outputs)
 
 
 def _allowed_materialization_roots(
@@ -165,7 +177,7 @@ def _allowed_materialization_roots(
 ) -> tuple[Path, ...] | None:
     from consist.core.materialize import build_allowed_materialization_roots
 
-    allow_external_paths = bool(getattr(tracker, "allow_external_paths", False))
+    allow_external_paths = bool(tracker.allow_external_paths)
     if (
         target_run is not None
         and isinstance(target_run.meta, dict)
@@ -175,18 +187,18 @@ def _allowed_materialization_roots(
 
     return build_allowed_materialization_roots(
         run_dir=tracker.run_dir,
-        mounts=getattr(tracker, "mounts", {}),
+        mounts=tracker.mounts,
         allow_external_paths=allow_external_paths,
     )
 
 
 def _warn_on_partial_materialization_result(result: Any, *, policy: str) -> None:
-    missing = list(getattr(result, "skipped_missing_source", []) or [])
-    failed = list(getattr(result, "failed", []) or [])
+    missing = list(result.skipped_missing_source or [])
+    failed = list(result.failed or [])
     if not missing and not failed:
         return
 
-    summary = getattr(result, "summary", None)
+    summary = result.summary
     detail = str(summary) if summary else f"missing={len(missing)} failed={len(failed)}"
     logging.warning(
         "[Consist] Cached output materialization completed with partial results "
@@ -246,7 +258,7 @@ def _materialize_cached_outputs_via_run_api(
             db_fallback="if_ingested",
         )
         _warn_on_partial_materialization_result(result, policy="outputs-all")
-        return dict(getattr(result, "materialized", {}) or {})
+        return dict(result.materialized or {})
 
     existing_keys = [key for key in requested_keys if key in hydrated_keys]
     if not existing_keys:
@@ -273,7 +285,7 @@ def _materialize_cached_outputs_via_run_api(
         _warn_on_partial_materialization_result(result, policy="outputs-requested")
 
         staged_items: list[tuple[Artifact, Path, Path]] = []
-        for key, staged_path in dict(getattr(result, "materialized", {}) or {}).items():
+        for key, staged_path in dict(result.materialized or {}).items():
             artifact = outputs_by_key.get(key)
             destination = requested_paths.get(key)
             if artifact is None or destination is None:
@@ -424,9 +436,7 @@ def hydrate_cache_hit_outputs(
     cached_items = tracker.get_artifacts_for_run(cached_run.id)
 
     scenario_hint = (
-        f", scenario='{cached_run.parent_run_id}'"
-        if getattr(cached_run, "parent_run_id", None)
-        else ""
+        f", scenario='{cached_run.parent_run_id}'" if cached_run.parent_run_id else ""
     )
     logging.info(
         "✅ [Consist] Cache HIT for step '%s': matched cached run '%s'%s "
@@ -450,8 +460,8 @@ def hydrate_cache_hit_outputs(
 
     # Ensure the new (cached) run has DB links to its hydrated outputs.
     if link_outputs:
-        db = getattr(tracker, "db", None)
-        if db and getattr(db, "engine", None) is not None:
+        db = tracker.db
+        if db is not None and db.engine is not None:
             try:
                 db.link_artifacts_to_run_bulk(
                     artifact_ids=[a.id for a in record.outputs],
@@ -517,7 +527,7 @@ def hydrate_cache_hit_outputs(
 
                 items: list[tuple[Artifact, Path, Path]] = []
                 on_missing = "warn"
-                db = getattr(tracker, "db", None)
+                db = tracker.db
                 run_cache: dict[str, Optional[Run]] = {}
 
                 if active_options.cache_hydration == "outputs-requested":
@@ -642,7 +652,7 @@ def validate_cached_run_outputs(
     bool
         True if all required outputs are present or validation is disabled.
     """
-    if not getattr(tracker, "db", None):
+    if tracker.db is None:
         return True
 
     policy = "eager"

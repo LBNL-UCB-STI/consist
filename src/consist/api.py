@@ -26,7 +26,6 @@ from typing import (
     Union,
     cast,
     overload,
-    runtime_checkable,
 )
 import weakref
 
@@ -58,12 +57,12 @@ from consist.models.artifact import Artifact, get_tracker_ref
 from consist.models.run import ConsistRecord, Run, RunResult, resolve_run_result_output
 from consist.models.run_config_kv import RunConfigKV
 from consist.core.tracker import Tracker
+from consist.protocols import ArtifactRecordLike
 from consist.types import (
     ArtifactRef,
     CacheOptions,
     DriverType,
     ExecutionOptions,
-    artifact_table_path,
     InputBindingMode,
     IdentityInputs,
     OutputPolicyOptions,
@@ -128,27 +127,7 @@ LoadResult = Union[
 ]
 
 
-@runtime_checkable
-class ArtifactLike(Protocol):
-    """
-    Structural typing for artifact-like objects.
-
-    Any object with `driver`, `container_uri`, `meta` attributes and a `path` property
-    can be used where ArtifactLike is expected.
-    """
-
-    id: Any
-    key: str
-    container_uri: str
-    table_path: Optional[str]
-    array_path: Optional[str]
-    meta: Dict[str, Any]
-
-    @property
-    def driver(self) -> str: ...
-
-    @property
-    def path(self) -> Path: ...
+ArtifactLike = ArtifactRecordLike
 
 
 class DataFrameArtifact(ArtifactLike, Protocol):
@@ -2325,12 +2304,13 @@ def config_run_query(
         SQL query joining the config table to runs.
     """
     if columns is None:
-        if not hasattr(link_table, "run_id"):
+        run_id_column = getattr(link_table, "run_id", None)
+        if run_id_column is None:
             raise ValueError(
                 "config_run_query requires link_table to have a run_id column "
                 "when columns is not specified."
             )
-        columns_list = [link_table.run_id, table]
+        columns_list = [run_id_column, table]
     else:
         if isinstance(columns, (list, tuple, set)):
             columns_list = list(columns)
@@ -2341,7 +2321,10 @@ def config_run_query(
 
     if join_on is None:
         join_on = ["content_hash"]
-        if hasattr(table, "file_name") and hasattr(link_table, "file_name"):
+        if (
+            getattr(table, "file_name", None) is not None
+            and getattr(link_table, "file_name", None) is not None
+        ):
             join_on.append("file_name")
     else:
         join_on = list(join_on)
@@ -2350,11 +2333,13 @@ def config_run_query(
 
     join_clauses = []
     for column in join_on:
-        if not hasattr(table, column) or not hasattr(link_table, column):
+        table_column = getattr(table, column, None)
+        link_column = getattr(link_table, column, None)
+        if table_column is None or link_column is None:
             raise ValueError(
                 f"config_run_query join_on column {column!r} must exist on table and link_table."
             )
-        join_clauses.append(getattr(table, column) == getattr(link_table, column))
+        join_clauses.append(table_column == link_column)
 
     stmt = (
         sa_select(*cast(tuple[Any, ...], tuple(columns_list)))
@@ -2363,14 +2348,20 @@ def config_run_query(
     )
 
     resolved_table_name = table_name
-    if resolved_table_name is None and hasattr(link_table, "table_name"):
-        resolved_table_name = getattr(table, "__tablename__", None)
+    if (
+        resolved_table_name is None
+        and getattr(link_table, "table_name", None) is not None
+    ):
+        resolved_table_name = (
+            getattr(table, "__tablename__", None) or table.__name__.lower()
+        )
     if resolved_table_name is not None:
-        if not hasattr(link_table, "table_name"):
+        table_name_column = getattr(link_table, "table_name", None)
+        if table_name_column is None:
             raise ValueError(
                 "config_run_query table_name provided but link_table has no table_name column."
             )
-        stmt = stmt.where(getattr(link_table, "table_name") == resolved_table_name)
+        stmt = stmt.where(table_name_column == resolved_table_name)
 
     if where is not None:
         if isinstance(where, (list, tuple, set)):
@@ -2928,12 +2919,12 @@ def load(
         artifact.driver in DriverType.table_path_drivers()
         and "table_path" not in load_kwargs
     ):
-        table_path = artifact_table_path(artifact)
+        table_path = artifact.table_path
         if table_path:
             load_kwargs["table_path"] = table_path
     if artifact.driver in DriverType.array_drivers():
         if "array_path" not in load_kwargs:
-            array_path = getattr(artifact, "array_path", None)
+            array_path = artifact.array_path
             if array_path:
                 load_kwargs["array_path"] = array_path
 
@@ -2965,7 +2956,7 @@ def load(
                     f"Hint: call consist.load(...) within a tracker.start_run(..., inputs=[...]) context, "
                     f"or pass db_fallback='always'."
                 )
-            if getattr(tracker, "is_cached", False):
+            if tracker.is_cached:
                 raise FileNotFoundError(
                     f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
                     f" - Disk Path: {path} (Missing)\n"
