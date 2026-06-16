@@ -315,6 +315,11 @@ def test_beam_canonicalize_discovers_gtfs_bundle_from_r5_directory(
         "Caltrain.zip",
         "SF.zip",
     }
+    assert {
+        spec.driver
+        for spec in result.artifacts
+        if spec.meta.get("config_role") == "gtfs_feed"
+    } == {"gtfs"}
 
 
 def test_beam_canonicalize_ingests_gtfs_tables(gtfs_tracker, tmp_path: Path):
@@ -342,6 +347,10 @@ def test_beam_canonicalize_ingests_gtfs_tables(gtfs_tracker, tmp_path: Path):
     run = gtfs_tracker.begin_run("beam_gtfs_ingest_unit", "beam")
     gtfs_tracker.canonicalize_config(adapter, [case_dir], run=run)
     gtfs_tracker.end_run()
+
+    bundle_artifact = gtfs_tracker.get_artifact("consist_gtfs_bundle")
+    assert bundle_artifact is not None
+    assert bundle_artifact.driver == "gtfs"
 
     if gtfs_tracker.engine is None:
         raise AssertionError("Tracker engine missing; DB tests require DuckDB.")
@@ -384,10 +393,11 @@ def test_beam_canonicalize_prefers_directory_root_gtfs_bundle(
     gtfs_payload = result.identity.scalars["gtfs"]
     assert gtfs_payload["manifest"]["feeds"][0]["feed_key"] == gtfs_root.name
     assert len(gtfs_payload["source_feed_hashes"]) == 1
-    assert any(
-        spec.key == "consist_gtfs_bundle" and spec.meta.get("gtfs_bundle")
-        for spec in result.artifacts
+    gtfs_bundle_spec = next(
+        spec for spec in result.artifacts if spec.key == "consist_gtfs_bundle"
     )
+    assert gtfs_bundle_spec.meta.get("gtfs_bundle")
+    assert gtfs_bundle_spec.driver == "gtfs"
 
 
 def test_beam_canonicalize_normalizes_path_aliases(tracker, tmp_path: Path):

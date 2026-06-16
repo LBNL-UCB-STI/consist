@@ -143,7 +143,10 @@ def format_missing_artifact_mount_help(
             f"Mount root mismatch: logged mount_root={hint.recorded_root!r}, current mount_root={hint.configured_root!r}."
         )
         lines.append(
-            "Fix: update your mounts so the scheme points at the same shared location used when the artifact was logged."
+            "Consist used the current configured mount root for resolution; the logged mount_root is historical context."
+        )
+        lines.append(
+            "If the file was moved or archived elsewhere, point this scheme at the location containing the artifact or record recovery_roots."
         )
     else:
         lines.append(
