@@ -486,7 +486,7 @@ wheels = [
 
 [[package]]
 name = "consist"
-version = "0.1.5"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
@@ -615,6 +615,7 @@ requires-dist = [
     { name = "docker", marker = "extra == 'docker'", specifier = ">=7.1.0" },
     { name = "duckdb", specifier = ">=1.4.2" },
     { name = "duckdb-engine", specifier = ">=0.17.0" },
+    { name = "click", specifier = ">=8.3.1" },
     { name = "geopandas", marker = "extra == 'all'", specifier = ">=0.14.0" },
     { name = "geopandas", marker = "extra == 'spatial'", specifier = ">=0.14.0" },
     { name = "gitpython", marker = "extra == 'all'", specifier = ">=3.1.50" },
