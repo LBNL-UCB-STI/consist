@@ -375,11 +375,13 @@ class DatabaseManager:
         lock_retries: int = 20,
         lock_base_sleep_seconds: float = 0.1,
         lock_max_sleep_seconds: float = 2.0,
+        skip_schema_init: bool = False,
     ):
         self.db_path = db_path
         self._lock_retries = max(1, int(lock_retries))
         self._lock_base_sleep_seconds = max(0.0, float(lock_base_sleep_seconds))
         self._lock_max_sleep_seconds = max(0.0, float(lock_max_sleep_seconds))
+        self._skip_schema_init = skip_schema_init
         # Using NullPool ensures the file lock is released when the session closes
         self.engine = create_engine(f"duckdb:///{db_path}", poolclass=NullPool)
         self._session_ctx: contextvars.ContextVar[Session | None] = (
@@ -393,6 +395,8 @@ class DatabaseManager:
 
     def _init_schema(self):
         """Creates tables if they don't exist, wrapped in retry logic."""
+        if self._skip_schema_init:
+            return
 
         def _create():
             SQLModel.metadata.create_all(

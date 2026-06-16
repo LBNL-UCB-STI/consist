@@ -153,6 +153,19 @@ from consist.protocols import (
     TrackerLike,
 )
 
+# Orchestration
+from consist.core.orchestration import (
+    BatchResult,
+    BatchRunSpec,
+    ExecutionAttempt,
+    ExecutionSpec,
+    ExecutionTarget,
+    PythonCallableTarget,
+    RunSpecResult,
+    execute_worker_run,
+    resolve_callable,
+)
+
 __all__ = [
     # Core objects
     "Tracker",
@@ -284,4 +297,14 @@ __all__ = [
     "is_zarr_artifact",
     "is_hdf_artifact",
     "is_spatial_artifact",
+    # Orchestration
+    "BatchResult",
+    "BatchRunSpec",
+    "ExecutionAttempt",
+    "ExecutionSpec",
+    "ExecutionTarget",
+    "PythonCallableTarget",
+    "RunSpecResult",
+    "execute_worker_run",
+    "resolve_callable",
 ]

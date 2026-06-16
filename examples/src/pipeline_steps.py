@@ -81,6 +81,37 @@ def run_one_simulation(
     return time_series
 
 
+def run_one_simulation_sweep(
+    steps: int,
+    dt: float,
+    seed: int,
+    prey_init: int,
+    predator_init: int,
+    prey_birth_rate: float,
+    predation_rate: float,
+    predator_birth_efficiency: float,
+    predator_death_rate: float,
+    sample_every: int,
+    **kwargs: Any,
+) -> pd.DataFrame:
+    """Wrapper function that is cleanly callable by tracker.run with auto-argument binding."""
+    from synth_simulation import PredatorPreyConfig, run_predator_prey
+
+    cfg = PredatorPreyConfig(
+        steps=steps,
+        dt=dt,
+        seed=seed,
+        prey_init=prey_init,
+        predator_init=predator_init,
+        prey_birth_rate=prey_birth_rate,
+        predation_rate=predation_rate,
+        predator_birth_efficiency=predator_birth_efficiency,
+        predator_death_rate=predator_death_rate,
+        sample_every=sample_every,
+    )
+    return run_predator_prey(cfg)
+
+
 def aggregate_parquet(
     *,
     paths: Iterable[Path],
