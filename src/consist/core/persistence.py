@@ -300,6 +300,24 @@ def _clone_artifact(row: Artifact) -> Artifact:
     )
 
 
+def _artifact_has_content_dependents(session: Session, artifact_id: uuid.UUID) -> bool:
+    """Return whether the artifact already has child rows tied to its identity."""
+    return (
+        session.exec(
+            select(ArtifactKV.artifact_id)
+            .where(col(ArtifactKV.artifact_id) == artifact_id)
+            .limit(1)
+        ).first()
+        is not None
+        or session.exec(
+            select(ArtifactSchemaObservation.artifact_id)
+            .where(col(ArtifactSchemaObservation.artifact_id) == artifact_id)
+            .limit(1)
+        ).first()
+        is not None
+    )
+
+
 def _profile_call_name(name: str, profile_label: Optional[str] = None) -> str:
     """Build an internal profiler label, optionally with a caller sub-label."""
     if not profile_label:
@@ -726,10 +744,20 @@ class DatabaseManager:
 
         def _update():
             with self.session_scope() as session:
+                existing_artifact = session.get(Artifact, artifact.id)
+                artifact_for_merge = artifact
+                if (
+                    existing_artifact is not None
+                    and existing_artifact.content_id != artifact.content_id
+                    and _artifact_has_content_dependents(session, artifact.id)
+                ):
+                    artifact_for_merge = _clone_artifact(artifact)
+                    artifact_for_merge.content_id = existing_artifact.content_id
+
                 # Merge ensures we are attached to this session
-                db_art = session.merge(artifact)
+                db_art = session.merge(artifact_for_merge)
                 # Ensure meta is a dict (handle potential None)
-                current_meta = db_art.meta or {}
+                current_meta = dict(db_art.meta or {})
                 for key, value in updates.items():
                     if value is None:
                         current_meta.pop(key, None)
@@ -938,7 +966,17 @@ class DatabaseManager:
 
         def _persist():
             with self.session_scope() as session:
-                db_art = session.merge(artifact)
+                existing_artifact = session.get(Artifact, artifact.id)
+                artifact_for_merge = artifact
+                if (
+                    existing_artifact is not None
+                    and existing_artifact.content_id != artifact.content_id
+                    and _artifact_has_content_dependents(session, artifact.id)
+                ):
+                    artifact_for_merge = _clone_artifact(artifact)
+                    artifact_for_merge.content_id = existing_artifact.content_id
+
+                db_art = session.merge(artifact_for_merge)
 
                 existing = session.get(ArtifactFacet, facet.id)
                 if existing is None:
@@ -963,7 +1001,7 @@ class DatabaseManager:
                         existing.schema_version = facet.schema_version
                     session.add(existing)
 
-                current_meta = db_art.meta or {}
+                current_meta = dict(db_art.meta or {})
                 current_meta.update(meta_updates)
                 db_art.meta = current_meta
                 session.add(db_art)
@@ -1047,10 +1085,20 @@ class DatabaseManager:
                         existing_link.direction,
                     )
 
+                existing_artifact = session.get(Artifact, artifact.id)
+                artifact_for_merge = artifact
+                if (
+                    existing_artifact is not None
+                    and existing_artifact.content_id != artifact.content_id
+                    and _artifact_has_content_dependents(session, artifact.id)
+                ):
+                    artifact_for_merge = _clone_artifact(artifact)
+                    artifact_for_merge.content_id = existing_artifact.content_id
+
                 current_meta = artifact.meta or {}
                 current_meta.update(meta_updates)
-                artifact.meta = current_meta
-                db_art = session.merge(artifact)
+                artifact_for_merge.meta = current_meta
+                db_art = session.merge(artifact_for_merge)
 
                 existing_facet = session.get(ArtifactFacet, facet.id)
                 if existing_facet is None:
@@ -1230,7 +1278,17 @@ class DatabaseManager:
 
         def _persist():
             with self.session_scope() as session:
-                db_art = session.merge(artifact)
+                existing_artifact = session.get(Artifact, artifact.id)
+                artifact_for_merge = artifact
+                if (
+                    existing_artifact is not None
+                    and existing_artifact.content_id != artifact.content_id
+                    and _artifact_has_content_dependents(session, artifact.id)
+                ):
+                    artifact_for_merge = _clone_artifact(artifact)
+                    artifact_for_merge.content_id = existing_artifact.content_id
+
+                db_art = session.merge(artifact_for_merge)
                 session.merge(schema)
                 session.exec(
                     delete(ArtifactSchemaField).where(
@@ -1250,7 +1308,7 @@ class DatabaseManager:
 
                 session.add(observation)
 
-                current_meta = db_art.meta or {}
+                current_meta = dict(db_art.meta or {})
                 current_meta.update(meta_updates)
                 db_art.meta = current_meta
                 session.add(db_art)
@@ -1287,7 +1345,17 @@ class DatabaseManager:
 
         def _persist():
             with self.session_scope() as session:
-                db_art = session.merge(artifact)
+                existing_artifact = session.get(Artifact, artifact.id)
+                artifact_for_merge = artifact
+                if (
+                    existing_artifact is not None
+                    and existing_artifact.content_id != artifact.content_id
+                    and _artifact_has_content_dependents(session, artifact.id)
+                ):
+                    artifact_for_merge = _clone_artifact(artifact)
+                    artifact_for_merge.content_id = existing_artifact.content_id
+
+                db_art = session.merge(artifact_for_merge)
                 session.add(observation)
 
                 current_meta = db_art.meta or {}
@@ -1670,8 +1738,18 @@ class DatabaseManager:
                     .where(RunArtifactLink.artifact_id == artifact.id)
                 ).first()
 
+                existing_artifact = session.get(Artifact, artifact.id)
+                artifact_for_merge = artifact
+                if (
+                    existing_artifact is not None
+                    and existing_artifact.content_id != artifact.content_id
+                    and _artifact_has_content_dependents(session, artifact.id)
+                ):
+                    artifact_for_merge = _clone_artifact(artifact)
+                    artifact_for_merge.content_id = existing_artifact.content_id
+
                 # Merge artifact (create or update)
-                session.merge(artifact)
+                session.merge(artifact_for_merge)
 
                 if existing_link is not None:
                     if existing_link.direction != direction:
@@ -1738,10 +1816,32 @@ class DatabaseManager:
                     with _track_begin_run_phase(
                         "db.sync_artifacts.query_existing_artifacts"
                     ):
-                        existing_artifact_ids = set(
-                            session.exec(
-                                select(Artifact.id).where(
+                        existing_artifacts_by_id = {
+                            row.id: row
+                            for row in session.exec(
+                                select(Artifact).where(
                                     col(Artifact.id).in_(artifact_ids)
+                                )
+                            ).all()
+                        }
+
+                    with _track_begin_run_phase(
+                        "db.sync_artifacts.query_artifact_dependents"
+                    ):
+                        dependent_artifact_ids: set[uuid.UUID] = set()
+                        dependent_artifact_ids.update(
+                            session.exec(
+                                select(ArtifactKV.artifact_id).where(
+                                    col(ArtifactKV.artifact_id).in_(artifact_ids)
+                                )
+                            ).all()
+                        )
+                        dependent_artifact_ids.update(
+                            session.exec(
+                                select(ArtifactSchemaObservation.artifact_id).where(
+                                    col(ArtifactSchemaObservation.artifact_id).in_(
+                                        artifact_ids
+                                    )
                                 )
                             ).all()
                         )
@@ -1752,7 +1852,7 @@ class DatabaseManager:
                         "db.sync_artifacts.partition_artifacts"
                     ):
                         for artifact in deduped.values():
-                            if artifact.id in existing_artifact_ids:
+                            if artifact.id in existing_artifacts_by_id:
                                 existing_artifacts.append(artifact)
                             else:
                                 new_artifacts.append(artifact)
@@ -1772,7 +1872,19 @@ class DatabaseManager:
                             "db.sync_artifacts.merge_existing_artifacts"
                         ):
                             for artifact in existing_artifacts:
-                                session.merge(artifact)
+                                existing_artifact = existing_artifacts_by_id[
+                                    artifact.id
+                                ]
+                                artifact_for_merge = artifact
+                                if (
+                                    existing_artifact.content_id != artifact.content_id
+                                    and artifact.id in dependent_artifact_ids
+                                ):
+                                    artifact_for_merge = _clone_artifact(artifact)
+                                    artifact_for_merge.content_id = (
+                                        existing_artifact.content_id
+                                    )
+                                session.merge(artifact_for_merge)
 
                     with _track_begin_run_phase(
                         "db.sync_artifacts.query_existing_links"
