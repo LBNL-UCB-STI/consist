@@ -691,3 +691,142 @@ def test_persist_artifact_facet_bundle_preserves_existing_content_id(
     assert persisted.content_id is None
     assert persisted.meta["marker"] == "updated"
     assert persisted.meta["facet_applied"] is True
+
+
+def test_sync_artifact_preserves_existing_nonnull_content_id_with_dependents(
+    tmp_path,
+):
+    db = DatabaseManager(str(tmp_path / "artifact_sync_artifact.db"))
+
+    with db.session_scope() as session:
+        content_a = ArtifactContent(content_hash="content_a", driver="csv")
+        content_b = ArtifactContent(content_hash="content_b", driver="csv")
+        original = Artifact(
+            key="sync_artifact",
+            container_uri="outputs://sync_artifact.csv",
+            driver="csv",
+            hash="shared_hash",
+            content_id=content_a.id,
+            run_id="run_a",
+            meta={"marker": "original"},
+        )
+        schema = ArtifactSchema(
+            id="schema_hash_sync_artifact",
+            summary_json={"fields": []},
+        )
+        session.add_all(
+            [
+                content_a,
+                content_b,
+                original,
+                schema,
+                ArtifactSchemaObservation(
+                    artifact_id=original.id,
+                    schema_id=schema.id,
+                    source="file",
+                ),
+            ]
+        )
+        session.commit()
+        artifact_id = original.id
+        content_a_id = content_a.id
+        content_b_id = content_b.id
+
+    artifact = Artifact(
+        id=artifact_id,
+        key="sync_artifact",
+        container_uri="outputs://sync_artifact.csv",
+        driver="csv",
+        hash="shared_hash",
+        content_id=content_b_id,
+        run_id="run_a",
+        meta={"marker": "updated"},
+    )
+
+    db.sync_artifact(artifact, run_id="run_a", direction="output")
+
+    persisted = db.get_artifact(artifact_id)
+    assert persisted is not None
+    assert persisted.content_id == content_a_id
+    assert persisted.meta["marker"] == "updated"
+
+
+def test_sync_artifact_with_facet_bundle_preserves_existing_nonnull_content_id_with_dependents(
+    tmp_path,
+):
+    db = DatabaseManager(str(tmp_path / "artifact_sync_facet_bundle.db"))
+
+    with db.session_scope() as session:
+        content_a = ArtifactContent(content_hash="content_a", driver="csv")
+        content_b = ArtifactContent(content_hash="content_b", driver="csv")
+        original = Artifact(
+            key="sync_facet_artifact",
+            container_uri="outputs://sync_facet_artifact.csv",
+            driver="csv",
+            hash="shared_hash",
+            content_id=content_a.id,
+            run_id="run_a",
+            meta={"marker": "original"},
+        )
+        schema = ArtifactSchema(
+            id="schema_hash_sync_facet_artifact",
+            summary_json={"fields": []},
+        )
+        session.add_all(
+            [
+                content_a,
+                content_b,
+                original,
+                schema,
+                ArtifactSchemaObservation(
+                    artifact_id=original.id,
+                    schema_id=schema.id,
+                    source="file",
+                ),
+            ]
+        )
+        session.commit()
+        artifact_id = original.id
+        content_a_id = content_a.id
+        content_b_id = content_b.id
+
+    artifact = Artifact(
+        id=artifact_id,
+        key="sync_facet_artifact",
+        container_uri="outputs://sync_facet_artifact.csv",
+        driver="csv",
+        hash="shared_hash",
+        content_id=content_b_id,
+        run_id="run_a",
+        meta={"marker": "updated"},
+    )
+    facet = ArtifactFacet(
+        id="facet_hash_sync",
+        namespace="activitysim",
+        schema_name="FacetSchema",
+        schema_version=1,
+        facet_json={"label": "demo"},
+    )
+
+    db.sync_artifact_with_facet_bundle(
+        artifact=artifact,
+        run_id="run_a",
+        direction="output",
+        facet=facet,
+        meta_updates={"facet_applied": True},
+        kv_rows=[
+            ArtifactKV(
+                artifact_id=artifact_id,
+                facet_id=facet.id,
+                key_path="marker",
+                value_type="str",
+                value_str="updated",
+            )
+        ],
+    )
+
+    persisted = db.get_artifact(artifact_id)
+    assert persisted is not None
+    assert persisted.content_id == content_a_id
+    assert persisted.meta["marker"] == "updated"
+    assert persisted.meta["facet_applied"] is True
