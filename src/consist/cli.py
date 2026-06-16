@@ -106,6 +106,19 @@ CLI_EXIT_SUCCESS = 0
 CLI_EXIT_RUNTIME_ERROR = 1
 CLI_EXIT_USAGE_ERROR = 2
 CLI_EXIT_INTERRUPTED = 130
+RUN_DIR_RESOLUTION_HELP = (
+    "Base directory for resolving workspace:// artifacts and relative artifact "
+    "paths like ./outputs/..."
+)
+TRUST_DB_RESOLUTION_HELP = (
+    "Allow database metadata fallback for missing mounts, historical run dirs, "
+    "and recovery roots. Explicit --run-dir and --mount values take precedence."
+)
+MOUNT_OVERRIDE_HELP = (
+    "Mount override mapping (repeatable): NAME=PATH. "
+    "Explicit mounts take precedence over --run-dir and trusted DB metadata. "
+    "Example: --mount workspace=/path/to/archive"
+)
 
 
 def _resolve_cli_version() -> str:
@@ -1062,7 +1075,7 @@ def schema_capture_file(
     run_dir: Optional[str] = typer.Option(
         None,
         "--run-dir",
-        help="Base directory for resolving relative artifact paths like ./outputs/...",
+        help=RUN_DIR_RESOLUTION_HELP,
     ),
     sample_rows: int = typer.Option(
         1000,
@@ -1082,15 +1095,12 @@ def schema_capture_file(
     trust_db: bool = typer.Option(
         False,
         "--trust-db",
-        help="Allow metadata-based mount and run-dir inference when resolving artifact paths.",
+        help=TRUST_DB_RESOLUTION_HELP,
     ),
     mount: Optional[List[str]] = typer.Option(
         None,
         "--mount",
-        help=(
-            "Mount override mapping (repeatable): NAME=PATH. "
-            "Example: --mount workspace=/path/to/archive"
-        ),
+        help=MOUNT_OVERRIDE_HELP,
     ),
     db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
 ) -> None:
@@ -1821,20 +1831,17 @@ def validate(
     run_dir: Optional[str] = typer.Option(
         None,
         "--run-dir",
-        help="Base directory for resolving relative artifact paths like ./outputs/...",
+        help=RUN_DIR_RESOLUTION_HELP,
     ),
     trust_db: bool = typer.Option(
         False,
         "--trust-db",
-        help="Allow metadata-based mount and run-dir inference for artifact validation.",
+        help=TRUST_DB_RESOLUTION_HELP,
     ),
     mount: Optional[List[str]] = typer.Option(
         None,
         "--mount",
-        help=(
-            "Mount override mapping (repeatable): NAME=PATH. "
-            "Example: --mount workspace=/path/to/archive"
-        ),
+        help=MOUNT_OVERRIDE_HELP,
     ),
     fix: bool = typer.Option(
         False, help="Attempt to fix issues (mark artifacts as missing)."
@@ -2616,7 +2623,7 @@ def preview(
     run_dir: Optional[str] = typer.Option(
         None,
         "--run-dir",
-        help="Base directory for resolving relative artifact paths like ./outputs/...",
+        help=RUN_DIR_RESOLUTION_HELP,
     ),
     n_rows: int = typer.Option(
         5,
@@ -2629,15 +2636,12 @@ def preview(
     trust_db: bool = typer.Option(
         False,
         "--trust-db",
-        help="Allow metadata-based mount and run-dir inference for artifact resolution.",
+        help=TRUST_DB_RESOLUTION_HELP,
     ),
     mount: Optional[List[str]] = typer.Option(
         None,
         "--mount",
-        help=(
-            "Mount override mapping (repeatable): NAME=PATH. "
-            "Example: --mount workspace=/path/to/archive"
-        ),
+        help=MOUNT_OVERRIDE_HELP,
     ),
 ) -> None:
     """Shows a small preview of an artifact or GTFS bundle summary when supported."""
@@ -4255,22 +4259,19 @@ def shell(
         None,
         "--run-dir",
         help=(
-            "Base directory for resolving relative artifact paths in shell "
-            "preview/schema_profile/validate/schema capture-file commands."
+            f"{RUN_DIR_RESOLUTION_HELP} in shell preview/schema_profile/"
+            "validate/schema capture-file commands."
         ),
     ),
     mount: Optional[List[str]] = typer.Option(
         None,
         "--mount",
-        help=(
-            "Mount override mapping (repeatable): NAME=PATH. "
-            "Example: --mount workspace=/path/to/archive"
-        ),
+        help=MOUNT_OVERRIDE_HELP,
     ),
     trust_db: bool = typer.Option(
         False,
         "--trust-db",
-        help="Allow metadata-based mount and run-dir inference for artifact resolution.",
+        help=TRUST_DB_RESOLUTION_HELP,
     ),
 ) -> None:
     """

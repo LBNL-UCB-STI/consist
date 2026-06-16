@@ -16,22 +16,25 @@ The CLI looks for the provenance database in this order:
 
 ## Artifact Path Resolution
 
-Some artifacts are stored with relative URIs like `./outputs/...`. For commands
-that load,
-validate, or profile artifact files (`preview`, `validate`,
-`schema capture-file`, and shell `preview`/`schema_profile`), Consist resolves
-relative paths in this order:
+Artifacts may be stored with workspace-relative URIs such as
+`workspace://outputs/table.parquet` or relative URIs such as `./outputs/...`.
+For commands that load, validate, or profile artifact files (`preview`,
+`validate`, `schema capture-file`, and shell `preview`/`schema_profile`),
+Consist resolves paths with this precedence:
 
-1. Explicit `--run-dir`
-2. Parent directory of `--db-path`
-3. `consist_runs/` next to `--db-path`
-4. Current working directory
-5. `_physical_run_dir` from run metadata (**only** when `--trust-db` is enabled)
-5. Ordered `artifact.meta["recovery_roots"]` (**only** when `--trust-db` is enabled)
+1. Explicit `--mount NAME=PATH` values
+2. Explicit `--run-dir`, used as the default `workspace://` root
+3. Parent directory of `--db-path` for relative `./...` artifact URIs
+4. `consist_runs/` next to `--db-path` for relative `./...` artifact URIs
+5. Current working directory for relative `./...` artifact URIs
+6. Stored mount snapshots, `_physical_run_dir`, and ordered
+   `artifact.meta["recovery_roots"]` (**only** when `--trust-db` is enabled)
 
-This keeps default behavior safe while still supporting archived/moved run directories.
-Use `--trust-db` when you want the CLI to reuse recorded run directories, mount
-snapshots, or recovery roots from the database.
+This keeps explicit CLI settings authoritative while still supporting
+archived or moved run directories. Use `--trust-db` when you intentionally want
+the CLI to fall back to recorded run directories, mount snapshots, or recovery
+roots from the database. It never overrides an explicit `--run-dir` or
+`--mount`.
 
 Examples:
 
@@ -44,11 +47,19 @@ consist preview trip_table \
   --db-path archives/beam_core_demo.duckdb \
   --run-dir /data/archive/beam_core_demo
 
-# Allow fallback to _physical_run_dir metadata from the DB
+# Promoted/merged DB: make the archive run directory authoritative for workspace:// artifacts
+consist shell \
+  --db-path /data/archive/provenance.duckdb \
+  --run-dir /data/archive/beam_core_demo \
+  --trust-db
+
+# Allow fallback to metadata from the DB when no explicit path is available
 consist preview trip_table --db-path archives/beam_core_demo.duckdb --trust-db
 
-# Mount-backed artifacts can use explicit mounts or trusted DB mount snapshots
+# Mount-backed artifacts can use explicit mounts or trusted DB mount snapshots.
+# Explicit mounts override --run-dir and trusted DB metadata for that scheme.
 consist preview trips --db-path archive.duckdb --mount inputs=/data/archive/inputs
+consist preview trips --db-path archive.duckdb --mount workspace=/data/archive/beam_core_demo
 consist validate --db-path archive.duckdb --trust-db
 ```
 
@@ -188,9 +199,14 @@ Options:
 
 - `--sample-rows N`: rows to sample during inference (default `1000`)
 - `--if-changed`: reuse a prior schema observation when the artifact hash is unchanged; this affects schema capture only, not artifact-row reuse
-- `--run-dir PATH`: explicit base directory for relative artifact paths
-- `--trust-db`: allow metadata-based mount inference when resolving paths
-- `--mount NAME=PATH`: explicit mount override; repeat for multiple schemes
+- `--run-dir PATH`: explicit base directory for `workspace://` artifacts and
+  relative artifact paths
+- `--trust-db`: allow database metadata fallback for missing mounts,
+  historical run dirs, and recovery roots; explicit `--run-dir` and `--mount`
+  values take precedence
+- `--mount NAME=PATH`: explicit mount override; repeat for multiple schemes.
+  For example, `--mount workspace=/data/archive/run` overrides the workspace
+  root supplied by `--run-dir`.
 - `--db-path`: explicit DB path
 
 ### consist schema export
@@ -318,8 +334,9 @@ Preview tabular artifacts (CSV, Parquet) without loading full data.
 consist preview <artifact_key>
 consist preview <artifact_key> --rows 10
 consist preview --hash a1b2c3d4
-consist preview <artifact_key> --run-dir /path/to/run_root
-consist preview <artifact_key> --trust-db  # Allow metadata-based mount/run-dir inference
+consist preview <artifact_key> --run-dir /path/to/archive_run_root
+consist preview <artifact_key> --mount workspace=/path/to/archive_run_root
+consist preview <artifact_key> --trust-db  # Metadata fallback only
 ```
 
 Hash lookup searches all artifacts by default. In shell workflows, use
@@ -348,8 +365,12 @@ consist shell
 consist shell --db-path examples/runs/beam_core_demo/beam_core_demo_demo.duckdb
 consist shell --run-dir /data/archive/beam_core_demo
 consist shell --mount workspace=/data/archive/beam_core_demo
-consist shell --trust-db  # Allow metadata-based mount/run-dir inference
+consist shell --run-dir /data/archive/beam_core_demo --trust-db
 ```
+
+In shell mode, `--run-dir` becomes the default `workspace://` root for routed
+artifact commands. `--trust-db` may add missing mount or recovery metadata, but
+it does not replace the shell's explicit `--run-dir` or `--mount` defaults.
 
 Inside the shell:
 ```text
