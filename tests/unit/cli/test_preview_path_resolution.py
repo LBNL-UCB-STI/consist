@@ -170,6 +170,65 @@ def test_preview_uses_physical_run_dir_when_trust_db_enabled(
     assert "Preview: trip_table" in result.stdout
 
 
+def test_preview_run_dir_overrides_trusted_stale_workspace_mount(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    stale_run_dir = tmp_path / "job_workspace" / "beam_core_demo"
+    archive_run_dir = tmp_path / "archive" / "beam_core_demo"
+    db_dir = repo_root / "db"
+    db_dir.mkdir(parents=True)
+    stale_run_dir.mkdir(parents=True)
+    archive_run_dir.mkdir(parents=True)
+    db_path = db_dir / "beam_core_demo.duckdb"
+
+    producer = Tracker(
+        run_dir=stale_run_dir,
+        db_path=str(db_path),
+        mounts={"workspace": str(stale_run_dir)},
+    )
+    with producer.start_run("producer_run", "preview_model"):
+        artifact_dir = producer.run_artifact_dir()
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        stale_csv_path = artifact_dir / "network.csv"
+        stale_csv_path.write_text("source,value\nstale,0\n", encoding="utf-8")
+        logged = producer.log_artifact(
+            stale_csv_path, key="network", driver="csv", direction="output"
+        )
+
+    artifact = producer.get_artifact(logged.id)
+    assert artifact is not None
+    assert artifact.container_uri.startswith("workspace://")
+    archive_csv_path = archive_run_dir / artifact.container_uri.removeprefix(
+        "workspace://"
+    )
+    archive_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_csv_path.write_text("source,value\narchive,1\n", encoding="utf-8")
+    stale_csv_path.unlink()
+
+    monkeypatch.chdir(repo_root)
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "preview",
+            "network",
+            "--db-path",
+            "db/beam_core_demo.duckdb",
+            "--run-dir",
+            str(archive_run_dir),
+            "--trust-db",
+            "--rows",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Preview: network" in result.stdout
+    assert "archive" in result.stdout
+    assert "Artifact file not found" not in result.stdout
+
+
 def test_validate_auto_resolves_relative_paths_from_db_parent(
     tmp_path: Path, monkeypatch
 ) -> None:
