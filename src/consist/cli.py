@@ -264,7 +264,14 @@ def get_tracker(
         )
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
     tracker_run_dir = Path(run_dir) if run_dir is not None else Path(".")
-    return Tracker(run_dir=tracker_run_dir, db_path=resolved_path, mounts=mounts)
+    tracker_mounts = dict(mounts or {})
+    if run_dir is not None and "workspace" not in tracker_mounts:
+        tracker_mounts["workspace"] = str(tracker_run_dir.expanduser().resolve())
+    return Tracker(
+        run_dir=tracker_run_dir,
+        db_path=resolved_path,
+        mounts=tracker_mounts or None,
+    )
 
 
 @contextmanager
