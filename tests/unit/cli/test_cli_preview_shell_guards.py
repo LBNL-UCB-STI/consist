@@ -184,6 +184,29 @@ def test_preview_renders_gtfs_bundle_summary(
     assert "Preview a specific table member" in result.stdout
 
 
+def test_preview_renders_legacy_unknown_driver_gtfs_bundle_summary(
+    cli_runner, tracker, tmp_path: Path
+) -> None:
+    """Legacy GTFS bundle artifacts may have driver='unknown' but gtfs_bundle metadata."""
+    feed_zip = _write_gtfs_bundle_zip(tmp_path)
+
+    with tracker.start_run("run_preview_legacy_gtfs_bundle", "model"):
+        tracker.log_artifact(
+            str(feed_zip),
+            key="preview_legacy_gtfs_bundle",
+            driver="unknown",
+            direction="output",
+            gtfs_bundle=True,
+        )
+
+    result = cli_runner.invoke(app, ["preview", "preview_legacy_gtfs_bundle"])
+
+    assert result.exit_code == 0
+    assert "GTFS Bundle Summary" in result.stdout
+    assert "Member Tables" in result.stdout
+    assert "agency.txt" in result.stdout
+
+
 def test_preview_renders_gtfs_selected_service_summary(
     cli_runner, tracker, tmp_path: Path
 ) -> None:

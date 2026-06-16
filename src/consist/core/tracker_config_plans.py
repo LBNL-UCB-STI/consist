@@ -451,6 +451,7 @@ class TrackerConfigPlanService(_TrackerServiceBase):
                     spec.path,
                     key=spec.key,
                     direction=spec.direction,
+                    driver=spec.driver,
                     **spec.meta,
                 )
                 artifacts_by_key[spec.key] = art

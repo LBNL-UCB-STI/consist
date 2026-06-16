@@ -216,6 +216,7 @@ class BeamConfigAdapter:
                     config.root_dirs,
                     role="gtfs_bundle",
                     key=GTFS_BUNDLE_SOURCE_KEY,
+                    driver="gtfs",
                     meta={
                         "gtfs_bundle": True,
                         "source_bundle_hash": gtfs_result.source_bundle_hash,
@@ -227,6 +228,7 @@ class BeamConfigAdapter:
                     snapshot.source_path,
                     config.root_dirs,
                     role="gtfs_feed",
+                    driver="gtfs",
                     meta={
                         "feed_key": snapshot.feed_key,
                         "source_feed_hash": snapshot.source_feed_hash,
@@ -1419,6 +1421,7 @@ def _add_artifact(
     role: str,
     key: Optional[str] = None,
     meta: Optional[dict[str, Any]] = None,
+    driver: Optional[str] = None,
 ) -> None:
     if path in artifacts:
         return
@@ -1430,6 +1433,7 @@ def _add_artifact(
         key=key if key is not None else _artifact_key_for_path(path, config_dirs),
         direction="input",
         meta=data,
+        driver=driver,
     )
 
 

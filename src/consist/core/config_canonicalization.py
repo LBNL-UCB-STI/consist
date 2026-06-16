@@ -113,6 +113,7 @@ class ArtifactSpec(NamedTuple):
     key: str
     direction: Literal["input", "output"]
     meta: dict[str, Any]
+    driver: Optional[str] = None
 
 
 @dataclass(frozen=True)

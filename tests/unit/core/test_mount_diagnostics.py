@@ -64,6 +64,9 @@ def test_missing_artifact_help_includes_mount_root_mismatch() -> None:
     assert "logged mount_root" in msg
     assert "/old/inputs" in msg
     assert "/new/inputs" in msg
+    assert "Consist used the current configured mount root" in msg
+    assert "record recovery_roots" in msg
+    assert "Fix: update your mounts" not in msg
 
 
 def test_missing_artifact_help_mentions_unconfigured_mount() -> None:

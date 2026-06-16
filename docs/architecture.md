@@ -114,7 +114,9 @@ Stored URI: inputs://land_use.csv
 **Run-local paths**: For run-specific output directories, Consist typically stores
 paths relative to the run directory (for example `./outputs/...`). Historical
 resolution also accepts `workspace://...` aliases and uses metadata stored in
-`Run.meta["_physical_run_dir"]`.
+`Run.meta["_physical_run_dir"]`. CLI inspection commands prefer explicit
+`--run-dir` or `--mount workspace=...` values when supplied, and only use stored
+metadata as a fallback when requested.
 
 ---
 
