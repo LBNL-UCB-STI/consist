@@ -42,6 +42,9 @@ The format is based on [Keep a Changelog], and this project adheres to
 - Preserve `content_id` when updating artifacts with existing dependents to
   avoid foreign key failures during persistence by @zneedell
   ([#138](https://github.com/LBNL-UCB-STI/consist/pull/138)).
+- Fix GTFS discovery in BEAM R5 directories so real GTFS zip bundles are
+  found even when the directory also contains CSV sidecars by @zneedell
+  ([#141](https://github.com/LBNL-UCB-STI/consist/pull/141)).
 
 ## [0.1.5] - 2026-05-21
 
