@@ -284,19 +284,3 @@ class HasConsistFacet(Protocol):
 @runtime_checkable
 class HasFacetSchemaVersion(Protocol):
     facet_schema_version: Optional[Union[str, int]]
-
-
-@runtime_checkable
-class HasTablePath(Protocol):
-    table_path: Optional[str]
-
-
-def artifact_table_path(artifact: Any) -> Optional[str]:
-    """Return an artifact's table_path when available.
-
-    This centralizes the protocol check used by loaders and schema profilers
-    while still allowing static callers to rely on the `HasTablePath` protocol.
-    """
-    if isinstance(artifact, HasTablePath):
-        return artifact.table_path
-    return None

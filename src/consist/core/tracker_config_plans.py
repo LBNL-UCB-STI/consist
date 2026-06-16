@@ -28,6 +28,7 @@ from consist.core.config_canonicalization import (
     ConfigPlan,
     validate_config_plan,
 )
+from consist.core.stores import get_hot_data_store
 from consist.models.run import Run
 
 if TYPE_CHECKING:
@@ -500,7 +501,7 @@ class TrackerConfigPlanService(_TrackerServiceBase):
         return artifacts_by_key
 
     def _ingest_cache_hit(self, table_name: str, content_hash: str) -> bool:
-        store = getattr(self, "hot_data_store", None)
+        store = get_hot_data_store(self.tracker)
         if store is not None:
             return store.ingest_cache_hit(table_name, content_hash)
 

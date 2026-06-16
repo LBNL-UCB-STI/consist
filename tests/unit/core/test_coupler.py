@@ -7,6 +7,7 @@ from typing import cast
 import pytest
 
 from consist.core.coupler import Coupler
+from consist.core.noop import NoopRunContext
 from consist.models.artifact import Artifact
 
 
@@ -196,6 +197,22 @@ def test_coupler_set_from_artifact_with_string_path() -> None:
 
     assert result == path_str
     assert coupler.get("data") == path_str
+
+
+def test_noop_run_context_preserves_table_and_array_paths() -> None:
+    ctx = NoopRunContext()
+    artifact = Artifact(
+        key="members",
+        container_uri="workspace://members.h5",
+        driver="h5_table",
+        table_path="/tables/members",
+        array_path="/groups/members",
+    )
+
+    noop_artifact = ctx.log_artifact(artifact, key="members")
+
+    assert noop_artifact.table_path == "/tables/members"
+    assert noop_artifact.array_path == "/groups/members"
 
 
 def test_coupler_view_sets_namespaced_keys_and_preserves_global_access() -> None:

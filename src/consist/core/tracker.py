@@ -200,6 +200,13 @@ class Tracker:
         of previously computed results.
     """
 
+    def _compat_attr(self, name: str) -> Any:
+        """Read optional compatibility state from partially initialized trackers."""
+        try:
+            return object.__getattribute__(self, name)
+        except AttributeError:
+            return None
+
     @classmethod
     def from_config(cls, config: TrackerConfig) -> "Tracker":
         """
@@ -469,14 +476,14 @@ class Tracker:
 
         New code should prefer ``tracker.metadata_store``.
         """
-        metadata_store = getattr(self, "metadata_store", None)
+        metadata_store = self._compat_attr("metadata_store")
         if metadata_store is not None:
             return metadata_store.db
-        return getattr(self, "_compat_db", None)
+        return self._compat_attr("_compat_db")
 
     @db.setter
     def db(self, value: DatabaseManager | None) -> None:
-        metadata_store = getattr(self, "metadata_store", None)
+        metadata_store = self._compat_attr("metadata_store")
         if metadata_store is not None:
             if value is metadata_store.db:
                 return
@@ -494,19 +501,19 @@ class Tracker:
         New code should prefer ``tracker.hot_data_store.db_path`` or
         ``tracker.metadata_store.db_path``.
         """
-        hot_store = getattr(self, "hot_data_store", None)
+        hot_store = self._compat_attr("hot_data_store")
         if hot_store is not None:
             return hot_store.db_path
-        metadata_store = getattr(self, "metadata_store", None)
+        metadata_store = self._compat_attr("metadata_store")
         if metadata_store is not None:
             return metadata_store.db_path
-        return getattr(self, "_compat_db_path", None)
+        return self._compat_attr("_compat_db_path")
 
     @db_path.setter
     def db_path(self, value: str | os.PathLike[str] | None) -> None:
         normalized = os.fspath(value) if value is not None else None
-        hot_store = getattr(self, "hot_data_store", None)
-        metadata_store = getattr(self, "metadata_store", None)
+        hot_store = self._compat_attr("hot_data_store")
+        metadata_store = self._compat_attr("metadata_store")
 
         active_path = None
         if hot_store is not None:
@@ -536,13 +543,13 @@ class Tracker:
         Optional[Engine]
             The SQLAlchemy engine if a database is configured, otherwise ``None``.
         """
-        hot_store = getattr(self, "hot_data_store", None)
+        hot_store = self._compat_attr("hot_data_store")
         if hot_store is not None:
             return hot_store.engine
-        metadata_store = getattr(self, "metadata_store", None)
+        metadata_store = self._compat_attr("metadata_store")
         if metadata_store is not None:
             return metadata_store.engine
-        db = getattr(self, "db", None)
+        db = self._compat_attr("_compat_db")
         if db is None:
             return None
         return db.engine
@@ -3717,7 +3724,7 @@ class Tracker:
         if resolved_schema is None:
             schema_name = (
                 artifact.meta.get("schema_name")
-                if hasattr(artifact, "meta") and isinstance(artifact.meta, dict)
+                if isinstance(artifact.meta, dict)
                 else None
             )
             if isinstance(schema_name, str):
@@ -3728,7 +3735,7 @@ class Tracker:
                 logging.debug(
                     "[Consist] Resolved schema '%s' for artifact=%s from registered schemas",
                     schema_name,
-                    getattr(artifact, "key", None),
+                    artifact.key,
                 )
 
         return ingest_artifact(

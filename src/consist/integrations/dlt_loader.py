@@ -47,7 +47,7 @@ from consist.models.run import Run
 from consist.core.netcdf_utils import resolve_netcdf_engine
 from consist.core.gtfs import load_gtfs_member_df
 from consist.tools.file_batches import yield_file_batches
-from consist.types import DriverType, artifact_table_path
+from consist.types import DriverType
 
 # Optional dependency: `dlt` is only required when using ingestion helpers.
 try:
@@ -404,7 +404,7 @@ def _handle_spatial_metadata(path: str) -> Iterable[Dict[str, Any]]:
 
     try:
         gdf = geopandas.read_file(path)
-        geometry_name = gdf.geometry.name if hasattr(gdf, "geometry") else None
+        geometry_name = gdf.geometry.name
         geometry_series = gdf.geometry if geometry_name else None
         geometry_types = []
         if geometry_series is not None:
@@ -594,7 +594,7 @@ def ingest_artifact(
             data_source = _yield_csv_batches(file_path)
 
         elif artifact.driver in DriverType.table_path_drivers():
-            table_path = artifact_table_path(artifact)
+            table_path = artifact.table_path
             if not table_path:
                 raise ValueError(f"Artifact '{artifact.key}' missing 'table_path'.")
             if artifact.driver == "h5_table":
@@ -624,7 +624,7 @@ def ingest_artifact(
                     raise ImportError("geopandas is required for spatial ingestion.")
 
                 gdf = geopandas.read_file(file_path)
-                geometry_name = gdf.geometry.name if hasattr(gdf, "geometry") else None
+                geometry_name = gdf.geometry.name
                 if not geometry_name:
                     raise ValueError(
                         "Spatial ingest mode 'wkt' requires geometry data."
@@ -656,10 +656,12 @@ def ingest_artifact(
         raise ValueError("No data provided for ingestion.")
 
     # 2. Configure dlt Pipeline
-    if schema_model and hasattr(schema_model, "__tablename__"):
-        desired_table_name = str(schema_model.__tablename__)
-    else:
-        desired_table_name = str(artifact.key)
+    schema_table_name = (
+        getattr(schema_model, "__tablename__", None)
+        if schema_model is not None
+        else None
+    )
+    desired_table_name = str(schema_table_name or artifact.key)
 
     pipeline_uid = uuid.uuid4().hex[:8]
     pipeline = dlt.pipeline(

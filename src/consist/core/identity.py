@@ -25,8 +25,6 @@ from typing import (
 )
 from pathlib import Path
 
-from consist.types import artifact_table_path
-
 # Try importing git, handle error if missing (optional dependency)
 git: Optional[ModuleType]
 try:
@@ -464,11 +462,11 @@ class IdentityManager:
             if artifact.run_id:
                 # Scenario A: Consist-produced artifact (Provenance Link)
                 sig_parts = [
-                    f"driver:{getattr(artifact, 'driver', None)}",
-                    f"key:{getattr(artifact, 'key', None)}",
+                    f"driver:{artifact.driver}",
+                    f"key:{artifact.key}",
                 ]
-                table_path = artifact_table_path(artifact)
-                array_path = getattr(artifact, "array_path", None)
+                table_path = artifact.table_path
+                array_path = artifact.array_path
                 if table_path:
                     sig_parts.append(f"table_path:{table_path}")
                 if array_path:
@@ -487,7 +485,7 @@ class IdentityManager:
                 # Intentional hash usage: run signatures must remain portable and
                 # deterministic across databases, so they use the raw checksum
                 # rather than the DB-local ``content_id`` foreign key.
-                if getattr(artifact, "hash", None):
+                if artifact.hash:
                     sig_parts.append(f"hash:{artifact.hash}")
                 sig = "|".join(sig_parts)
             else:
@@ -501,11 +499,11 @@ class IdentityManager:
                 abs_path = path_resolver(artifact.container_uri)
                 file_hash = self._compute_file_checksum(abs_path)
                 sig_parts = [
-                    f"driver:{getattr(artifact, 'driver', None)}",
+                    f"driver:{artifact.driver}",
                     f"container_uri:{artifact.container_uri}",
                 ]
-                table_path = artifact_table_path(artifact)
-                array_path = getattr(artifact, "array_path", None)
+                table_path = artifact.table_path
+                array_path = artifact.array_path
                 if table_path:
                     sig_parts.append(f"table_path:{table_path}")
                 if array_path:

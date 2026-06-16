@@ -210,10 +210,11 @@ def create_view_model(model: Type[T], name: Optional[str] = None) -> Type[T]:
     Ensures table=True is passed to the metaclass.
     """
     # 1. Determine View Name
+    table_name = getattr(model, "__tablename__", None)
     if name:
         view_name = name
-    elif hasattr(model, "__tablename__"):
-        view_name = f"v_{model.__tablename__}"
+    elif table_name is not None:
+        view_name = f"v_{table_name}"
     else:
         view_name = f"v_{model.__name__.lower()}"
     return _create_view_model_cached(model, view_name)
@@ -257,8 +258,10 @@ class ViewRegistry:
 
             cached = self._class_cache.get(name)
             if cached is not None:
-                concept_key = key or getattr(
-                    model, "__tablename__", model.__name__.lower()
+                concept_key = (
+                    key
+                    or getattr(model, "__tablename__", None)
+                    or model.__name__.lower()
                 )
                 view_name = f"v_{concept_key}"
                 factory.create_hybrid_view(view_name, concept_key, schema_model=model)
@@ -316,7 +319,9 @@ class ViewFactory:
         """
         Creates both the SQL View and the Python SQLModel class for a given schema.
         """
-        concept_key = key or getattr(model, "__tablename__", model.__name__.lower())
+        concept_key = (
+            key or getattr(model, "__tablename__", None) or model.__name__.lower()
+        )
         view_name = f"v_{concept_key}"
 
         # Pass schema_model to handle empty states

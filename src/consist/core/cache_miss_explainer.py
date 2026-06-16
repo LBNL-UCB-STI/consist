@@ -300,11 +300,8 @@ def _normalize_config_source(payload: Any) -> dict[str, Any]:
 def _safe_get_config_values(
     tracker: CacheMissExplainerContext, run_id: str
 ) -> dict[str, Any]:
-    getter = getattr(tracker, "get_config_values", None)
-    if getter is None:
-        return {}
     try:
-        values = getter(run_id)
+        values = tracker.get_config_values(run_id)
     except Exception:
         return {}
     if isinstance(values, dict):
@@ -315,11 +312,8 @@ def _safe_get_config_values(
 def _safe_get_run_config(
     tracker: CacheMissExplainerContext, run_id: str
 ) -> Optional[dict[str, Any]]:
-    getter = getattr(tracker, "get_run_config", None)
-    if getter is None:
-        return None
     try:
-        config = getter(run_id, allow_missing=True)
+        config = tracker.get_run_config(run_id, allow_missing=True)
     except Exception:
         return None
     if isinstance(config, dict):
@@ -330,14 +324,11 @@ def _safe_get_run_config(
 def _safe_get_run_artifacts(
     tracker: CacheMissExplainerContext, run_id: str
 ) -> Optional[Any]:
-    getter = getattr(tracker, "get_artifacts_for_run", None)
-    if getter is None:
-        return None
     try:
-        artifacts = getter(run_id)
+        artifacts = tracker.get_artifacts_for_run(run_id)
     except Exception:
         return None
-    if hasattr(artifacts, "inputs"):
+    if getattr(artifacts, "inputs", None) is not None:
         return artifacts
     return None
 
@@ -361,10 +352,10 @@ def _artifact_map_from_inputs(
 
 
 def _current_input_artifacts(tracker: CacheMissExplainerContext) -> dict[str, Artifact]:
-    current_consist = getattr(tracker, "current_consist", None)
+    current_consist = tracker.current_consist
     if current_consist is None:
         return {}
-    return _artifact_map_from_inputs(getattr(current_consist, "inputs", None))
+    return _artifact_map_from_inputs(current_consist.inputs)
 
 
 def _resolve_run_signature(
@@ -385,7 +376,7 @@ def _resolve_run_signature(
 
 
 def _artifact_content_id(artifact: Artifact) -> Optional[str]:
-    content_id = getattr(artifact, "content_id", None)
+    content_id = artifact.content_id
     if content_id is None:
         return None
     return str(content_id)
@@ -398,8 +389,8 @@ def _artifact_change_labels(
 ) -> list[str]:
     labels: list[str] = []
 
-    current_run_id = getattr(current, "run_id", None)
-    candidate_run_id = getattr(candidate, "run_id", None)
+    current_run_id = current.run_id
+    candidate_run_id = candidate.run_id
     if current_run_id and candidate_run_id and current_run_id != candidate_run_id:
         current_signature = _resolve_run_signature(tracker, current_run_id)
         candidate_signature = _resolve_run_signature(tracker, candidate_run_id)
@@ -408,20 +399,19 @@ def _artifact_change_labels(
         elif current_signature != candidate_signature:
             labels.append("upstream_run_changed")
 
-    if getattr(current, "hash", None) != getattr(candidate, "hash", None):
+    if current.hash != candidate.hash:
         labels.append("artifact_hash_changed")
 
     if _artifact_content_id(current) != _artifact_content_id(candidate):
         labels.append("artifact_content_id_changed")
 
-    if getattr(current, "container_uri", None) != getattr(
-        candidate, "container_uri", None
-    ):
+    if current.container_uri != candidate.container_uri:
         labels.append("input_location_changed")
 
-    if getattr(current, "table_path", None) != getattr(
-        candidate, "table_path", None
-    ) or getattr(current, "array_path", None) != getattr(candidate, "array_path", None):
+    if (
+        current.table_path != candidate.table_path
+        or current.array_path != candidate.array_path
+    ):
         labels.append("container_member_changed")
 
     return labels
@@ -439,9 +429,7 @@ def _build_input_details(
     if candidate_artifacts is None:
         details["fallbacks_used"] = ["candidate_input_artifacts_unavailable"]
         return details
-    candidate_inputs = _artifact_map_from_inputs(
-        getattr(candidate_artifacts, "inputs", None)
-    )
+    candidate_inputs = _artifact_map_from_inputs(candidate_artifacts.inputs)
 
     if not current_inputs and not candidate_inputs:
         return details
@@ -465,49 +453,31 @@ def _build_input_details(
         if not labels:
             continue
         change_entry: dict[str, Any] = {"key": key, "changes": labels}
-        current_signature = _resolve_run_signature(
-            tracker, getattr(current_artifact, "run_id", None)
-        )
-        candidate_signature = _resolve_run_signature(
-            tracker, getattr(candidate_artifact, "run_id", None)
-        )
+        current_signature = _resolve_run_signature(tracker, current_artifact.run_id)
+        candidate_signature = _resolve_run_signature(tracker, candidate_artifact.run_id)
         if "upstream_run_changed" in labels:
-            change_entry["current_run_id"] = getattr(current_artifact, "run_id", None)
-            change_entry["candidate_run_id"] = getattr(
-                candidate_artifact, "run_id", None
-            )
+            change_entry["current_run_id"] = current_artifact.run_id
+            change_entry["candidate_run_id"] = candidate_artifact.run_id
             if current_signature is not None:
                 change_entry["current_run_signature"] = current_signature
             if candidate_signature is not None:
                 change_entry["candidate_run_signature"] = candidate_signature
         if "artifact_hash_changed" in labels:
-            change_entry["current_hash"] = getattr(current_artifact, "hash", None)
-            change_entry["candidate_hash"] = getattr(candidate_artifact, "hash", None)
+            change_entry["current_hash"] = current_artifact.hash
+            change_entry["candidate_hash"] = candidate_artifact.hash
         if "artifact_content_id_changed" in labels:
             change_entry["current_content_id"] = _artifact_content_id(current_artifact)
             change_entry["candidate_content_id"] = _artifact_content_id(
                 candidate_artifact
             )
         if "input_location_changed" in labels:
-            change_entry["current_container_uri"] = getattr(
-                current_artifact, "container_uri", None
-            )
-            change_entry["candidate_container_uri"] = getattr(
-                candidate_artifact, "container_uri", None
-            )
+            change_entry["current_container_uri"] = current_artifact.container_uri
+            change_entry["candidate_container_uri"] = candidate_artifact.container_uri
         if "container_member_changed" in labels:
-            change_entry["current_table_path"] = getattr(
-                current_artifact, "table_path", None
-            )
-            change_entry["candidate_table_path"] = getattr(
-                candidate_artifact, "table_path", None
-            )
-            change_entry["current_array_path"] = getattr(
-                current_artifact, "array_path", None
-            )
-            change_entry["candidate_array_path"] = getattr(
-                candidate_artifact, "array_path", None
-            )
+            change_entry["current_table_path"] = current_artifact.table_path
+            change_entry["candidate_table_path"] = candidate_artifact.table_path
+            change_entry["current_array_path"] = current_artifact.array_path
+            change_entry["candidate_array_path"] = candidate_artifact.array_path
         input_changes.append(change_entry)
 
     if input_changes:
@@ -633,7 +603,7 @@ def _config_facet_diff(
     run: Run,
     candidate: Run,
 ) -> tuple[dict[str, list[str]], bool]:
-    current_consist = getattr(tracker, "current_consist", None)
+    current_consist = tracker.current_consist
     left_facet = {}
     if current_consist is not None:
         facet = getattr(current_consist, "facet", None)
@@ -888,10 +858,8 @@ def _build_config_details(
         details["fallbacks_used"] = ["config_facet"]
         return details
 
-    current_consist = getattr(tracker, "current_consist", None)
-    current_config = (
-        getattr(current_consist, "config", None) if current_consist else None
-    )
+    current_consist = tracker.current_consist
+    current_config = current_consist.config if current_consist else None
     candidate_config = _safe_get_run_config(tracker, candidate.id)
     snapshot_diff, has_snapshot_payload = _config_snapshot_diff(
         current_config, candidate_config

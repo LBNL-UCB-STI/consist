@@ -44,7 +44,6 @@ from consist.core.stores import get_hot_data_engine
 from consist.models.artifact import Artifact
 
 if TYPE_CHECKING:
-    from consist.core.persistence import DatabaseManager
     from consist.core.tracker import Tracker
 
 HydrationStatus = Literal[
@@ -933,16 +932,11 @@ def _validate_allowed_base(
 
 
 def _get_output_artifacts_for_run(tracker: "Tracker", run_id: str) -> list[Artifact]:
-    db = cast("DatabaseManager | None", getattr(tracker, "db", None))
+    db = tracker.db
     if db is None:
         return []
 
-    get_raw_outputs = getattr(db, "get_output_artifacts_for_run", None)
-    if callable(get_raw_outputs):
-        return list(get_raw_outputs(run_id))
-
-    raw_rows = db.get_artifacts_for_run(run_id)
-    return [artifact for artifact, direction in raw_rows if direction == "output"]
+    return list(db.get_output_artifacts_for_run(run_id))
 
 
 def _get_artifact_owning_run(
@@ -951,10 +945,10 @@ def _get_artifact_owning_run(
     selected_run,
     artifact: Artifact,
 ):
-    artifact_run_id = getattr(artifact, "run_id", None)
+    artifact_run_id = artifact.run_id
     if not artifact_run_id or artifact_run_id == selected_run.id:
         return selected_run
-    db = cast("DatabaseManager | None", getattr(tracker, "db", None))
+    db = tracker.db
     if db is None:
         return selected_run
     producing_run = db.get_run(str(artifact_run_id))
@@ -970,16 +964,12 @@ def _derive_historical_remap(
     meta = run.meta if isinstance(run.meta, dict) else {}
     artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
 
-    helper = getattr(tracker.fs, "get_historical_remap", None)
-    if callable(helper):
-        return helper(
-            artifact.container_uri,
-            original_run_dir=meta.get("_physical_run_dir"),
-            mounts_snapshot=meta.get("mounts"),
-            artifact_mount_root=artifact_meta.get("mount_root"),
-        )
-
-    return None
+    return tracker.fs.get_historical_remap(
+        artifact.container_uri,
+        original_run_dir=meta.get("_physical_run_dir"),
+        mounts_snapshot=meta.get("mounts"),
+        artifact_mount_root=artifact_meta.get("mount_root"),
+    )
 
 
 def _derive_remappable_relative_path(
@@ -987,10 +977,7 @@ def _derive_remappable_relative_path(
     *,
     artifact: Artifact,
 ) -> Path | None:
-    helper = getattr(tracker.fs, "get_remappable_relative_path", None)
-    if callable(helper):
-        return helper(artifact.container_uri)
-    return None
+    return tracker.fs.get_remappable_relative_path(artifact.container_uri)
 
 
 def _derive_historical_root(
@@ -1002,19 +989,12 @@ def _derive_historical_root(
     meta = run.meta if isinstance(run.meta, dict) else {}
     artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
 
-    helper = getattr(tracker.fs, "get_historical_root", None)
-    if callable(helper):
-        return helper(
-            artifact.container_uri,
-            original_run_dir=meta.get("_physical_run_dir"),
-            mounts_snapshot=meta.get("mounts"),
-            artifact_mount_root=artifact_meta.get("mount_root"),
-        )
-
-    remap = _derive_historical_remap(tracker, artifact=artifact, run=run)
-    if remap is None:
-        return None
-    return remap[0]
+    return tracker.fs.get_historical_root(
+        artifact.container_uri,
+        original_run_dir=meta.get("_physical_run_dir"),
+        mounts_snapshot=meta.get("mounts"),
+        artifact_mount_root=artifact_meta.get("mount_root"),
+    )
 
 
 def _artifact_recovery_roots(
@@ -1023,10 +1003,12 @@ def _artifact_recovery_roots(
     artifact: Artifact,
 ) -> tuple[Path, ...]:
     artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-    helper = getattr(tracker.fs, "normalize_recovery_roots", None)
-    if not callable(helper):
-        return ()
-    return tuple(Path(root) for root in helper(artifact_meta.get("recovery_roots")))
+    return tuple(
+        Path(root)
+        for root in tracker.fs.normalize_recovery_roots(
+            artifact_meta.get("recovery_roots")
+        )
+    )
 
 
 def _ordered_candidate_roots(
@@ -1521,12 +1503,7 @@ def _resolve_staging_source_path(
         if candidate.exists():
             return candidate
 
-    fs = getattr(tracker, "fs", None)
-    helper = getattr(fs, "get_remappable_relative_path", None)
-    if not callable(helper):
-        return None
-
-    relative_path = helper(artifact.container_uri)
+    relative_path = tracker.fs.get_remappable_relative_path(artifact.container_uri)
     if relative_path is None:
         return None
 
@@ -1559,13 +1536,13 @@ def _stage_artifact_path(
     allow_external_paths: bool | None,
 ) -> StagedInput:
     allow_external = (
-        getattr(tracker, "allow_external_paths", False)
+        tracker.allow_external_paths
         if allow_external_paths is None
         else allow_external_paths
     )
     allowed_base = build_allowed_materialization_roots(
-        run_dir=Path(getattr(tracker, "run_dir")),
-        mounts=getattr(getattr(tracker, "fs", None), "mounts", None),
+        run_dir=Path(tracker.run_dir),
+        mounts=tracker.fs.mounts,
         allow_external_paths=allow_external,
     )
 
