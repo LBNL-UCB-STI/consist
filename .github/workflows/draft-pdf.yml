@@ -1,0 +1,37 @@
+name: Draft PDF
+
+on:
+  push:
+    branches:
+      - joss-paper
+    paths:
+      - papers/JOSS/paper.md
+      - papers/JOSS/paper.bib
+      - papers/JOSS/diagram.pdf
+      - codemeta.json
+      - .github/workflows/draft-pdf.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  paper:
+    runs-on: ubuntu-latest
+    name: Paper Draft
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build draft PDF
+        uses: openjournals/openjournals-draft-action@master
+        with:
+          journal: joss
+          paper-path: papers/JOSS/paper.md
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: joss-paper
+          path: papers/JOSS/paper.pdf
+          if-no-files-found: error
