@@ -865,6 +865,20 @@ def _coerce_mounts(value: Any) -> Dict[str, str]:
     return mounts
 
 
+def _coerce_archive_mounts(value: Any, archive_base: Path) -> Dict[str, str]:
+    if not isinstance(value, Mapping):
+        return {}
+    mounts: Dict[str, str] = {}
+    for key, root in value.items():
+        if not isinstance(key, str) or not isinstance(root, str) or not root:
+            continue
+        root_path = Path(root).expanduser()
+        if not root_path.is_absolute():
+            root_path = archive_base / root_path
+        mounts[key] = str(root_path.resolve())
+    return mounts
+
+
 def _apply_inferred_mounts(tracker: Tracker, mounts: Mapping[str, str]) -> None:
     if not mounts:
         return
@@ -888,8 +902,42 @@ def _preserve_tracker_mounts(tracker: Tracker) -> Iterator[None]:
         _set_tracker_mounts(tracker, original_mounts)
 
 
+def _get_artifact_run_for_mount_inference(
+    tracker: Tracker, artifact: "Artifact", preferred_run_id: Optional[str] = None
+) -> Tuple[Optional["Run"], bool]:
+    if preferred_run_id is not None:
+        run = tracker.get_run(preferred_run_id)
+        if run is not None:
+            return run, False
+
+    from consist.models.run import RunArtifactLink
+
+    if artifact.id is not None:
+        with _tracker_session(tracker) as session:
+            links = list(
+                session.exec(
+                    select(RunArtifactLink).where(
+                        RunArtifactLink.artifact_id == artifact.id
+                    )
+                ).all()
+            )
+        if len(links) == 1:
+            return tracker.get_run(links[0].run_id), False
+        if len(links) > 1:
+            return None, True
+
+    if artifact.run_id:
+        return tracker.get_run(artifact.run_id), False
+    return None, False
+
+
 def _ensure_tracker_mounts_for_artifact(
-    tracker: Tracker, artifact: "Artifact", *, trust_db: bool
+    tracker: Tracker,
+    artifact: "Artifact",
+    *,
+    trust_db: bool,
+    archive_base: Optional[Path | str] = None,
+    preferred_run_id: Optional[str] = None,
 ) -> None:
     if not trust_db:
         return
@@ -904,9 +952,18 @@ def _ensure_tracker_mounts_for_artifact(
         return
 
     inferred: Dict[str, str] = {}
-    run = tracker.get_run(artifact.run_id) if artifact.run_id else None
+    run, ambiguous_run_links = _get_artifact_run_for_mount_inference(
+        tracker, artifact, preferred_run_id=preferred_run_id
+    )
     if run and isinstance(run.meta, dict):
-        inferred.update(_coerce_mounts(run.meta.get("mounts")))
+        if archive_base is not None:
+            inferred.update(
+                _coerce_archive_mounts(
+                    run.meta.get("archive_mounts"), Path(archive_base)
+                )
+            )
+        for name, root in _coerce_mounts(run.meta.get("mounts")).items():
+            inferred.setdefault(name, root)
         run_dir = run.meta.get("_physical_run_dir")
         if (
             scheme == "workspace"
@@ -915,6 +972,9 @@ def _ensure_tracker_mounts_for_artifact(
             and run_dir
         ):
             inferred[scheme] = run_dir
+
+    if ambiguous_run_links and scheme not in inferred:
+        return
 
     if scheme not in inferred:
         meta = artifact.meta or {}
@@ -1176,7 +1236,9 @@ def schema_capture_file(
         )
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
-    _ensure_tracker_mounts_for_artifact(tracker, artifact, trust_db=trust_db)
+    _ensure_tracker_mounts_for_artifact(
+        tracker, artifact, trust_db=trust_db, archive_base=run_dir
+    )
     try:
         resolved_path = _resolve_schema_capture_path(
             tracker=tracker,
@@ -1871,7 +1933,10 @@ def validate(
             original_mounts = dict(tracker.mounts)
             try:
                 _ensure_tracker_mounts_for_artifact(
-                    tracker, artifact, trust_db=trust_db
+                    tracker,
+                    artifact,
+                    trust_db=trust_db,
+                    archive_base=run_dir,
                 )
                 uri = artifact.container_uri
                 found = False
@@ -2661,7 +2726,9 @@ def preview(
         console.print(f"[red]Artifact '{artifact_key}' not found.[/red]")
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
-    _ensure_tracker_mounts_for_artifact(tracker, artifact, trust_db=trust_db)
+    _ensure_tracker_mounts_for_artifact(
+        tracker, artifact, trust_db=trust_db, archive_base=run_dir
+    )
     if _render_gtfs_selected_service_preview(tracker, artifact, n_rows=n_rows):
         return
     if _render_gtfs_bundle_preview(tracker, artifact, n_rows=n_rows):
@@ -3685,6 +3752,12 @@ class ConsistShell(cmd.Cmd):
                 )
 
             artifact = None
+            preferred_run_id = (
+                self._last_artifact_run_id
+                if artifact_selector is not None
+                and artifact_selector.strip().startswith("@")
+                else None
+            )
             if hash_prefix is not None:
                 artifact = self._lookup_artifact_by_hash_prefix(
                     hash_prefix, command_name="preview"
@@ -3709,7 +3782,11 @@ class ConsistShell(cmd.Cmd):
 
             with _preserve_tracker_mounts(self.tracker):
                 _ensure_tracker_mounts_for_artifact(
-                    self.tracker, artifact, trust_db=self.trust_db
+                    self.tracker,
+                    artifact,
+                    trust_db=self.trust_db,
+                    archive_base=self.run_dir,
+                    preferred_run_id=preferred_run_id,
                 )
                 resolution_bases, db_metadata_run_dir = (
                     _build_relative_resolution_bases(
@@ -3810,6 +3887,12 @@ class ConsistShell(cmd.Cmd):
                     "Provide either a positional selector or --hash, not both."
                 )
 
+            preferred_run_id = (
+                self._last_artifact_run_id
+                if artifact_selector is not None
+                and artifact_selector.strip().startswith("@")
+                else None
+            )
             if hash_prefix is not None:
                 artifact = self._lookup_artifact_by_hash_prefix(
                     hash_prefix, command_name="schema_profile"
@@ -3835,7 +3918,11 @@ class ConsistShell(cmd.Cmd):
 
             with _preserve_tracker_mounts(self.tracker):
                 _ensure_tracker_mounts_for_artifact(
-                    self.tracker, artifact, trust_db=self.trust_db
+                    self.tracker,
+                    artifact,
+                    trust_db=self.trust_db,
+                    archive_base=self.run_dir,
+                    preferred_run_id=preferred_run_id,
                 )
                 resolution_bases, db_metadata_run_dir = (
                     _build_relative_resolution_bases(

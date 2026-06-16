@@ -23,18 +23,20 @@ For commands that load, validate, or profile artifact files (`preview`,
 Consist resolves paths with this precedence:
 
 1. Explicit `--mount NAME=PATH` values
-2. Explicit `--run-dir`, used as the default `workspace://` root
-3. Parent directory of `--db-path` for relative `./...` artifact URIs
-4. `consist_runs/` next to `--db-path` for relative `./...` artifact URIs
-5. Current working directory for relative `./...` artifact URIs
-6. Stored mount snapshots, `_physical_run_dir`, and ordered
+2. Explicit `--run-dir` plus persisted `archive_mounts[NAME]` entries when
+   `--trust-db` is enabled
+3. Explicit `--run-dir`, used as the default `workspace://` root
+4. Parent directory of `--db-path` for relative `./...` artifact URIs
+5. `consist_runs/` next to `--db-path` for relative `./...` artifact URIs
+6. Current working directory for relative `./...` artifact URIs
+7. Stored execution mount snapshots, `_physical_run_dir`, and ordered
    `artifact.meta["recovery_roots"]` (**only** when `--trust-db` is enabled)
 
 This keeps explicit CLI settings authoritative while still supporting
 archived or moved run directories. Use `--trust-db` when you intentionally want
-the CLI to fall back to recorded run directories, mount snapshots, or recovery
-roots from the database. It never overrides an explicit `--run-dir` or
-`--mount`.
+the CLI to fall back to recorded archive mounts, run directories, mount
+snapshots, or recovery roots from the database. It never overrides an explicit
+`--run-dir` or `--mount`.
 
 Examples:
 
@@ -62,6 +64,21 @@ consist preview trips --db-path archive.duckdb --mount inputs=/data/archive/inpu
 consist preview trips --db-path archive.duckdb --mount workspace=/data/archive/beam_core_demo
 consist validate --db-path archive.duckdb --trust-db
 ```
+
+Projects that execute on local scratch and later inspect promoted archives can
+persist archive-relative mount roots with `Tracker(archive_mounts=...)`. For
+example, if execution logged `beam_input://seattle/lccm-long.csv` with
+`archive_mounts={"beam_input": "beam/input"}`, then:
+
+```bash
+consist preview lccm_long \
+  --db-path /data/archive/provenance.duckdb \
+  --run-dir /data/archive/pilates-run \
+  --trust-db
+```
+
+resolves the artifact under `/data/archive/pilates-run/beam/input/...` without
+requiring `--mount beam_input=...`.
 
 ## Global Options
 

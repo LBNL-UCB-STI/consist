@@ -432,6 +432,8 @@ class RunLifecycleCoordinator:
             if run.meta is None:
                 run.meta = {}
             run.meta.setdefault("mounts", dict(tracker.mounts))
+            if tracker.archive_mounts:
+                run.meta.setdefault("archive_mounts", dict(tracker.archive_mounts))
             if requested_input_materialization == "requested" and requested_input_paths:
                 run.meta["requested_input_staging"] = {
                     "materialization": requested_input_materialization,

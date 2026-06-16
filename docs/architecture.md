@@ -115,8 +115,9 @@ Stored URI: inputs://land_use.csv
 paths relative to the run directory (for example `./outputs/...`). Historical
 resolution also accepts `workspace://...` aliases and uses metadata stored in
 `Run.meta["_physical_run_dir"]`. CLI inspection commands prefer explicit
-`--run-dir` or `--mount workspace=...` values when supplied, and only use stored
-metadata as a fallback when requested.
+`--run-dir` or `--mount workspace=...` values when supplied, can combine
+`--run-dir` with persisted `Run.meta["archive_mounts"]` for promoted archives,
+and only use stored execution metadata as a fallback when requested.
 
 ---
 

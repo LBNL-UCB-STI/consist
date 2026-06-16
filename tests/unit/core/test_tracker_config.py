@@ -23,6 +23,7 @@ def test_tracker_from_config_matches_direct_constructor(tmp_path: Path) -> None:
         run_dir=tmp_path / "runs",
         db_path=db_path,
         mounts={"inputs": str(mounts_root)},
+        archive_mounts={"inputs": "inputs"},
         project_root=str(tmp_path),
         hashing_strategy="fast",
         cache_epoch=7,
@@ -39,6 +40,7 @@ def test_tracker_from_config_matches_direct_constructor(tmp_path: Path) -> None:
         run_dir=tmp_path / "runs",
         db_path=db_path,
         mounts={"inputs": str(mounts_root)},
+        archive_mounts={"inputs": "inputs"},
         project_root=str(tmp_path),
         hashing_strategy="fast",
         cache_epoch=7,
@@ -60,6 +62,7 @@ def test_tracker_from_config_matches_direct_constructor(tmp_path: Path) -> None:
     assert from_config_tracker.run_dir == direct_tracker.run_dir
     assert from_config_tracker.db_path == direct_tracker.db_path
     assert from_config_tracker.mounts == direct_tracker.mounts
+    assert from_config_tracker.archive_mounts == direct_tracker.archive_mounts
     assert from_config_tracker.access_mode == direct_tracker.access_mode
     assert from_config_tracker._cache_epoch == direct_tracker._cache_epoch
     assert (
@@ -98,6 +101,21 @@ def test_tracker_to_config_preserves_custom_gtfs_prefixed_schemas(
 
     assert config.schemas == [GtfsCustomSchema]
     assert config.builtin_schemas == ["gtfs"]
+
+
+def test_tracker_persists_archive_mounts_in_run_metadata(tmp_path: Path) -> None:
+    tracker = Tracker(
+        run_dir=tmp_path / "runs",
+        archive_mounts={"workspace": ".", "beam_input": "beam/input"},
+    )
+
+    with tracker.start_run("archive_mounts_run", "model"):
+        pass
+
+    assert tracker.last_run.run.meta["archive_mounts"] == {
+        "workspace": ".",
+        "beam_input": "beam/input",
+    }
 
 
 def test_tracker_config_validation_for_required_and_typed_fields(
