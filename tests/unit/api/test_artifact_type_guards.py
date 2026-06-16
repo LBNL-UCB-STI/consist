@@ -34,6 +34,7 @@ class TestDriverType:
         expected = {
             "parquet",
             "csv",
+            "gtfs",
             "zarr",
             "netcdf",
             "openmatrix",
@@ -57,6 +58,7 @@ class TestDriverType:
             assert dt.value in (
                 "parquet",
                 "csv",
+                "gtfs",
                 "zarr",
                 "netcdf",
                 "openmatrix",
@@ -108,7 +110,7 @@ class TestTypeGuards:
 
     def test_is_tabular_artifact_includes_json(self) -> None:
         """Verify is_tabular_artifact recognizes all tabular formats including json."""
-        for driver in ("parquet", "csv", "h5_table", "json"):
+        for driver in ("parquet", "csv", "gtfs", "h5_table", "json"):
             art = _artifact(driver)
             assert is_tabular_artifact(art) is True, f"Expected {driver} to be tabular"
 

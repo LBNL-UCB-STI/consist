@@ -2,10 +2,12 @@ import logging
 import importlib
 import json
 import os
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import pandas as pd
 from sqlalchemy import func, select
 from sqlmodel import Session, SQLModel
 
@@ -18,6 +20,170 @@ from consist.integrations.beam.config_adapter import _resolves_under_config_root
 from consist.models.beam import BeamConfigCache, BeamConfigIngestRunLink
 from consist.types import CacheOptions, ExecutionOptions
 from tests.helpers.beam_fixtures import build_beam_test_configs
+
+
+def _write_gtfs_zip_feed(path: Path, *, route_short_name: str, service_id: str) -> Path:
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr(
+            "agency.txt",
+            pd.DataFrame(
+                [
+                    {
+                        "agency_id": "A1",
+                        "agency_name": "Transit",
+                        "agency_url": "https://example.com",
+                        "agency_timezone": "America/Los_Angeles",
+                    }
+                ]
+            ).to_csv(index=False),
+        )
+        zf.writestr(
+            "routes.txt",
+            pd.DataFrame(
+                [
+                    {
+                        "route_id": "R1",
+                        "agency_id": "A1",
+                        "route_short_name": route_short_name,
+                        "route_type": 3,
+                    }
+                ]
+            ).to_csv(index=False),
+        )
+        zf.writestr(
+            "calendar.txt",
+            pd.DataFrame(
+                [
+                    {
+                        "service_id": service_id,
+                        "monday": 1,
+                        "tuesday": 0,
+                        "wednesday": 0,
+                        "thursday": 0,
+                        "friday": 0,
+                        "saturday": 0,
+                        "sunday": 0,
+                        "start_date": "20240101",
+                        "end_date": "20240101",
+                    }
+                ]
+            ).to_csv(index=False),
+        )
+        zf.writestr(
+            "stops.txt",
+            pd.DataFrame(
+                [
+                    {
+                        "stop_id": "STOP_A",
+                        "stop_name": "Active Stop",
+                        "stop_lat": 37.0,
+                        "stop_lon": -122.0,
+                    }
+                ]
+            ).to_csv(index=False),
+        )
+        zf.writestr(
+            "trips.txt",
+            pd.DataFrame(
+                [
+                    {
+                        "trip_id": "T1",
+                        "route_id": "R1",
+                        "service_id": service_id,
+                    }
+                ]
+            ).to_csv(index=False),
+        )
+        zf.writestr(
+            "stop_times.txt",
+            pd.DataFrame(
+                [
+                    {
+                        "trip_id": "T1",
+                        "arrival_time": "08:00:00",
+                        "departure_time": "08:00:00",
+                        "stop_id": "STOP_A",
+                        "stop_sequence": 1,
+                    }
+                ]
+            ).to_csv(index=False),
+        )
+        zf.writestr("license.txt", "license text that should be ignored\n")
+    return path
+
+
+def _write_gtfs_directory_feed(
+    path: Path, *, route_short_name: str, service_id: str
+) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "agency_id": "A1",
+                "agency_name": "Transit",
+                "agency_url": "https://example.com",
+                "agency_timezone": "America/Los_Angeles",
+            }
+        ]
+    ).to_csv(path / "agency.txt", index=False)
+    pd.DataFrame(
+        [
+            {
+                "route_id": "R1",
+                "agency_id": "A1",
+                "route_short_name": route_short_name,
+                "route_type": 3,
+            }
+        ]
+    ).to_csv(path / "routes.txt", index=False)
+    pd.DataFrame(
+        [
+            {
+                "service_id": service_id,
+                "monday": 1,
+                "tuesday": 0,
+                "wednesday": 0,
+                "thursday": 0,
+                "friday": 0,
+                "saturday": 0,
+                "sunday": 0,
+                "start_date": "20240101",
+                "end_date": "20240101",
+            }
+        ]
+    ).to_csv(path / "calendar.txt", index=False)
+    pd.DataFrame(
+        [
+            {
+                "stop_id": "STOP_A",
+                "stop_name": "Active Stop",
+                "stop_lat": 37.0,
+                "stop_lon": -122.0,
+            }
+        ]
+    ).to_csv(path / "stops.txt", index=False)
+    pd.DataFrame(
+        [
+            {
+                "trip_id": "T1",
+                "route_id": "R1",
+                "service_id": service_id,
+            }
+        ]
+    ).to_csv(path / "trips.txt", index=False)
+    pd.DataFrame(
+        [
+            {
+                "trip_id": "T1",
+                "arrival_time": "08:00:00",
+                "departure_time": "08:00:00",
+                "stop_id": "STOP_A",
+                "stop_sequence": 1,
+            }
+        ]
+    ).to_csv(path / "stop_times.txt", index=False)
+    (path / "license.txt").write_text("license text that should be ignored\n")
+    return path
 
 
 def test_beam_models_register_tables(tracker):
@@ -95,6 +261,133 @@ def test_beam_canonicalize_artifacts_and_rows(tracker, tmp_path: Path, caplog):
     assert missing_ref.canonical_value is not None
     assert missing_ref.canonical_value.endswith("missing/does-not-exist.csv")
     assert any("beam.agentsim.overridePath" in r.message for r in caplog.records)
+
+
+def test_beam_canonicalize_discovers_gtfs_bundle_from_r5_directory(
+    gtfs_tracker, tmp_path: Path
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    gtfs_root = case_dir / "inputs" / "r5" / "sfbay-cbg5500-weakConn-network"
+    gtfs_root.mkdir(parents=True, exist_ok=True)
+    _write_gtfs_zip_feed(
+        gtfs_root / "Caltrain.zip",
+        route_short_name="CT",
+        service_id="S1",
+    )
+    _write_gtfs_zip_feed(
+        gtfs_root / "SF.zip",
+        route_short_name="SF",
+        service_id="S1",
+    )
+    overlay_conf.write_text(
+        overlay_conf.read_text(encoding="utf-8")
+        + '\nbeam.routing.baseDate = "2024-01-01"\n'
+        + '\nbeam.routing.r5.directory = ${beam.inputDirectory}"/r5/sfbay-cbg5500-weakConn-network"\n',
+        encoding="utf-8",
+    )
+
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    canonical = adapter.discover([case_dir], identity=gtfs_tracker.identity)
+    run = gtfs_tracker.begin_run("beam_gtfs_bundle_unit", "beam")
+    result = adapter.canonicalize(canonical, run=run, tracker=gtfs_tracker)
+
+    gtfs_payload = result.identity.scalars["gtfs"]
+    assert gtfs_payload["source_bundle_hash"]
+    assert gtfs_payload["service_slice_hash"]
+    assert len(gtfs_payload["source_feed_hashes"]) == 2
+    assert gtfs_payload["manifest"]["service_date"] == "2024-01-01"
+    assert gtfs_payload["manifest"]["feeds"][0]["feed_key"] == "Caltrain"
+    assert {
+        spec.table_name
+        for spec in result.ingestables
+        if spec.table_name != "beam_config_cache"
+    } >= {"trips", "stop_times", "routes"}
+    assert {
+        spec.meta["config_role"]
+        for spec in result.artifacts
+        if spec.meta.get("config_role") == "gtfs_feed"
+    } == {"gtfs_feed"}
+    assert {
+        spec.path.name
+        for spec in result.artifacts
+        if spec.meta.get("config_role") == "gtfs_feed"
+    } == {
+        "Caltrain.zip",
+        "SF.zip",
+    }
+
+
+def test_beam_canonicalize_ingests_gtfs_tables(gtfs_tracker, tmp_path: Path):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    gtfs_root = case_dir / "inputs" / "r5" / "sfbay-cbg5500-weakConn-network"
+    gtfs_root.mkdir(parents=True, exist_ok=True)
+    _write_gtfs_zip_feed(
+        gtfs_root / "Caltrain.zip",
+        route_short_name="CT",
+        service_id="S1",
+    )
+    _write_gtfs_zip_feed(
+        gtfs_root / "SF.zip",
+        route_short_name="SF",
+        service_id="S1",
+    )
+    overlay_conf.write_text(
+        overlay_conf.read_text(encoding="utf-8")
+        + '\nbeam.routing.baseDate = "2024-01-01"\n'
+        + '\nbeam.routing.r5.directory = ${beam.inputDirectory}"/r5/sfbay-cbg5500-weakConn-network"\n',
+        encoding="utf-8",
+    )
+
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    run = gtfs_tracker.begin_run("beam_gtfs_ingest_unit", "beam")
+    gtfs_tracker.canonicalize_config(adapter, [case_dir], run=run)
+    gtfs_tracker.end_run()
+
+    if gtfs_tracker.engine is None:
+        raise AssertionError("Tracker engine missing; DB tests require DuckDB.")
+
+    with gtfs_tracker.engine.begin() as connection:
+        count = connection.exec_driver_sql(
+            "SELECT COUNT(*) FROM global_tables.trips"
+        ).scalar_one()
+    assert count == 2
+
+
+def test_beam_canonicalize_prefers_directory_root_gtfs_bundle(
+    gtfs_tracker, tmp_path: Path
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    gtfs_root = case_dir / "inputs" / "r5" / "sfbay-cbg5500-weakConn-network"
+    _write_gtfs_directory_feed(
+        gtfs_root,
+        route_short_name="ROOT",
+        service_id="S1",
+    )
+    nested_feed = gtfs_root / "nested" / "ignored"
+    _write_gtfs_directory_feed(
+        nested_feed,
+        route_short_name="NESTED",
+        service_id="S1",
+    )
+    overlay_conf.write_text(
+        overlay_conf.read_text(encoding="utf-8")
+        + '\nbeam.routing.baseDate = "2024-01-01"\n'
+        + '\nbeam.routing.r5.directory = ${beam.inputDirectory}"/r5/sfbay-cbg5500-weakConn-network"\n',
+        encoding="utf-8",
+    )
+
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    canonical = adapter.discover([case_dir], identity=gtfs_tracker.identity)
+    run = gtfs_tracker.begin_run("beam_gtfs_directory_unit", "beam")
+    result = adapter.canonicalize(canonical, run=run, tracker=gtfs_tracker)
+
+    gtfs_payload = result.identity.scalars["gtfs"]
+    assert gtfs_payload["manifest"]["feeds"][0]["feed_key"] == gtfs_root.name
+    assert len(gtfs_payload["source_feed_hashes"]) == 1
+    assert any(
+        spec.key == "consist_gtfs_bundle" and spec.meta.get("gtfs_bundle")
+        for spec in result.artifacts
+    )
 
 
 def test_beam_canonicalize_normalizes_path_aliases(tracker, tmp_path: Path):

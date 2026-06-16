@@ -38,7 +38,13 @@ Model-specific configuration discovery and tracking.
 
 - Automatic discovery of YAML/HOCON hierarchies
 - Queryable configuration tables for sensitivity analysis
-- [Full guide](config_adapters.md) | [ActivitySim](config_adapters_activitysim.md) | [BEAM](config_adapters_beam.md)
+- GTFS support for raw transit feed members and selected-service slices
+- [Full guide](config_adapters.md) | [ActivitySim](config_adapters_activitysim.md) | [BEAM](config_adapters_beam.md) | [GTFS](gtfs.md)
+
+GTFS is available here because it is a standardized feed format with queryable
+tables and service-date identity rather than a bespoke model config tree. Start
+with the GTFS guide if you only need the transit story; use the BEAM guide when
+you want the full BEAM-specific wiring.
 
 ---
 

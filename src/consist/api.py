@@ -3,6 +3,7 @@ from contextlib import contextmanager
 import importlib
 import logging
 import os
+import uuid
 import warnings
 from pathlib import Path
 from types import ModuleType
@@ -47,6 +48,7 @@ from consist.core.decorators import (
     require_runtime_kwargs as require_runtime_kwargs_decorator,
 )
 from consist.core.drivers import ARRAY_DRIVERS, TABLE_DRIVERS, ArrayInfo, TableInfo
+from consist.core.gtfs import GTFS_BUNDLE_SOURCE_KEY, GtfsCanonicalizationResult
 from consist.core.noop import NoopRunContext, NoopScenarioContext
 from consist.core.run_options import raise_legacy_policy_kwargs_error
 from consist.core.stores import get_hot_data_db_path
@@ -61,6 +63,7 @@ from consist.types import (
     CacheOptions,
     DriverType,
     ExecutionOptions,
+    artifact_table_path,
     InputBindingMode,
     IdentityInputs,
     OutputPolicyOptions,
@@ -152,14 +155,14 @@ class DataFrameArtifact(ArtifactLike, Protocol):
     """Artifact that loads as DuckDB Relation."""
 
     @property
-    def driver(self) -> Literal["parquet", "csv", "h5_table"]: ...
+    def driver(self) -> Literal["parquet", "csv", "gtfs", "h5_table"]: ...
 
 
 class TabularArtifact(ArtifactLike, Protocol):
     """Artifact that loads as tabular data (DuckDB Relation)."""
 
     @property
-    def driver(self) -> Literal["parquet", "csv", "h5_table", "json"]: ...
+    def driver(self) -> Literal["parquet", "csv", "gtfs", "h5_table", "json"]: ...
 
 
 class JsonArtifact(ArtifactLike, Protocol):
@@ -1519,6 +1522,7 @@ def log_artifact(
     validate_content_hash: bool = False,
     reuse_if_unchanged: bool = False,
     reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
+    parent_artifact_id: Optional[uuid.UUID] = None,
     facet: Optional[Any] = None,
     facet_schema_version: Optional[Union[str, int]] = None,
     facet_index: bool = False,
@@ -1566,6 +1570,8 @@ def log_artifact(
     reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
         Deprecated for outputs. `any_uri` is ignored for outputs; content identity
         (`content_id`) governs deduplication. Input-side behavior is unaffected.
+    parent_artifact_id : uuid.UUID | None, optional
+        Canonical parent artifact relation for child/member artifacts.
     facet : Optional[Any], optional
         Optional artifact-level facet payload (dict or Pydantic model).
     facet_schema_version : Optional[Union[str, int]], optional
@@ -1603,6 +1609,7 @@ def log_artifact(
             validate_content_hash=validate_content_hash,
             reuse_if_unchanged=reuse_if_unchanged,
             reuse_scope=reuse_scope,
+            parent_artifact_id=parent_artifact_id,
             facet=facet,
             facet_schema_version=facet_schema_version,
             facet_index=facet_index,
@@ -1619,6 +1626,7 @@ def log_artifact(
         validate_content_hash=validate_content_hash,
         reuse_if_unchanged=reuse_if_unchanged,
         reuse_scope=reuse_scope,
+        parent_artifact_id=parent_artifact_id,
         facet=facet,
         facet_schema_version=facet_schema_version,
         facet_index=facet_index,
@@ -1964,6 +1972,37 @@ def ingest(
     )
 
 
+def canonicalize_gtfs(
+    feed_paths: Sequence[Union[str, Path]],
+    *,
+    service_date: Optional[Any] = None,
+    feed_keys: Optional[Sequence[str]] = None,
+    run: Optional[Run] = None,
+    run_id: Optional[str] = None,
+    key: str = GTFS_BUNDLE_SOURCE_KEY,
+    ingest: bool = True,
+    profile_schema: bool = False,
+    log_sources: bool = True,
+    tracker: Optional["Tracker"] = None,
+) -> GtfsCanonicalizationResult:
+    """
+    Canonicalize GTFS feeds with tracker-managed provenance and ingestion.
+
+    This is a convenience proxy to :meth:`Tracker.canonicalize_gtfs`.
+    """
+    return _resolve_tracker(tracker).canonicalize_gtfs(
+        feed_paths,
+        service_date=service_date,
+        feed_keys=feed_keys,
+        run=run,
+        run_id=run_id,
+        key=key,
+        ingest=ingest,
+        profile_schema=profile_schema,
+        log_sources=log_sources,
+    )
+
+
 def log_dataframe(
     df: pd.DataFrame,
     key: str,
@@ -1973,6 +2012,7 @@ def log_dataframe(
     path: Optional[Union[str, Path]] = None,
     driver: Optional[str] = None,
     meta: Optional[Dict[str, Any]] = None,
+    parent_artifact_id: Optional[uuid.UUID] = None,
     **to_file_kwargs: Any,
 ) -> Artifact:
     """
@@ -1998,6 +2038,8 @@ def log_dataframe(
         File format driver (e.g., "parquet" or "csv").
     meta : Optional[Dict[str, Any]], optional
         Additional metadata for the artifact.
+    parent_artifact_id : uuid.UUID | None, optional
+        Canonical parent artifact relation for child/member artifacts.
     **to_file_kwargs : Any
         Keyword arguments forwarded to ``pd.DataFrame.to_parquet`` or ``to_csv``.
 
@@ -2034,7 +2076,13 @@ def log_dataframe(
 
     meta_payload = meta or {}
     art = tr.log_artifact(
-        resolved_path, key=key, direction=direction, schema=schema, **meta_payload
+        resolved_path,
+        key=key,
+        direction=direction,
+        schema=schema,
+        driver=inferred_driver,
+        parent_artifact_id=parent_artifact_id,
+        **meta_payload,
     )
     if schema is not None:
         tr.ingest(art, df, schema=schema)
@@ -2513,7 +2561,7 @@ def capture_outputs(
 
 def is_dataframe_artifact(artifact: ArtifactLike) -> TypeGuard[DataFrameArtifact]:
     """
-    Type guard: narrow artifact to tabular types (parquet, csv, h5_table).
+    Type guard: narrow artifact to tabular types (parquet, csv, gtfs, h5_table).
 
     Use this to enable type-safe loading and IDE autocomplete:
 
@@ -2531,7 +2579,7 @@ def is_dataframe_artifact(artifact: ArtifactLike) -> TypeGuard[DataFrameArtifact
     Returns
     -------
     bool
-        True if artifact driver is parquet, csv, or h5_table.
+        True if artifact driver is parquet, csv, gtfs, or h5_table.
     """
     return artifact.driver in DriverType.dataframe_drivers()
 
@@ -2876,11 +2924,13 @@ def load(
     load_kwargs = dict(kwargs)
 
     # Driver-specific hints from metadata
-    if artifact.driver == "h5_table":
-        if "table_path" not in load_kwargs:
-            table_path = getattr(artifact, "table_path", None)
-            if table_path:
-                load_kwargs["table_path"] = table_path
+    if (
+        artifact.driver in DriverType.table_path_drivers()
+        and "table_path" not in load_kwargs
+    ):
+        table_path = artifact_table_path(artifact)
+        if table_path:
+            load_kwargs["table_path"] = table_path
     if artifact.driver in DriverType.array_drivers():
         if "array_path" not in load_kwargs:
             array_path = getattr(artifact, "array_path", None)

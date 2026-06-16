@@ -1,9 +1,11 @@
 import hashlib
+import json
 import re
 import shutil
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
 from dataclasses import replace
+from datetime import date, datetime
 import logging
 import os
 from types import MappingProxyType
@@ -75,6 +77,11 @@ from consist.core.error_messages import format_problem_cause_fix
 from consist.core.events import EventManager
 from consist.core.fs import FileSystemManager
 from consist.core.identity import IdentityManager
+from consist.core.gtfs import (
+    GTFS_BUNDLE_SOURCE_KEY,
+    GtfsCanonicalizationResult,
+    canonicalize_gtfs_bundle,
+)
 from consist.core.indexing import IndexBySpec
 from consist.core.persistence import (
     ArtifactSchemaSelection,
@@ -101,6 +108,7 @@ from consist.core.queries import RunQueryService
 from consist.core.settings import ConsistSettings
 from consist.core.stores import HotDataStore, MetadataStore
 from consist.core.workflow import OutputCapture, ScenarioContext
+from consist.models.gtfs import GTFS_SCHEMAS
 from consist.models.artifact import Artifact, set_tracker_ref
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.models.run import (
@@ -110,6 +118,7 @@ from consist.models.run import (
     RunResult,
 )
 from consist.types import (
+    BuiltinSchemaLiteral,
     ArtifactRef,
     CacheOptions,
     CodeIdentityMode,
@@ -209,6 +218,7 @@ class Tracker:
         hashing_strategy: str = "full",
         cache_epoch: int = 1,
         schemas: Optional[List[Type[SQLModel]]] = None,
+        builtin_schemas: Optional[Iterable[BuiltinSchemaLiteral]] = None,
         access_mode: AccessMode = "standard",
         run_subdir_fn: Optional[Callable[[Run], str]] = None,
         allow_external_paths: Optional[bool] = None,
@@ -253,6 +263,9 @@ class Tracker:
             within the DuckDB instance for immediate querying. These schemas are
             also registered by class name for runtime lookup via
             ``get_registered_schema(...)``.
+        builtin_schemas : Optional[Iterable[BuiltinSchemaLiteral]], default None
+            Named built-in schema packs to register automatically. Use this for
+            Consist-provided bundles such as ``"gtfs"``.
         access_mode : AccessMode, default "standard"
             Policy for database interactions. 'standard' allows full writes;
             'analysis' permits ingestion but prevents new run recording;
@@ -347,16 +360,36 @@ class Tracker:
         # a schema by the artifact's schema_name (e.g., "MyDataSchema") if the
         # tracker was initialized with schemas=[MyDataSchema, ...].
         self._registered_schemas: Dict[str, Type[SQLModel]] = {}
-        if schemas:
-            if not self.metadata_store:
-                logging.warning(
-                    "[Consist] Schemas provided but no database configured. Views will not be created."
-                )
-            else:
-                for schema in schemas:
-                    # Register by class name so we can look it up later
-                    self._registered_schemas[schema.__name__] = schema
-                    self.view(schema)
+        registered_schemas: list[Type[SQLModel]] = []
+        seen_schema_names: set[str] = set()
+        builtin_schema_names = set(builtin_schemas or ())
+        unknown_builtin_schemas = builtin_schema_names.difference({"gtfs"})
+        if unknown_builtin_schemas:
+            unknown_list = ", ".join(sorted(unknown_builtin_schemas))
+            raise ValueError(f"Unknown builtin_schemas: {unknown_list}")
+
+        builtin_registered_schemas: list[Type[SQLModel]] = []
+        if "gtfs" in builtin_schema_names:
+            builtin_registered_schemas.extend(GTFS_SCHEMAS)
+
+        for schema in builtin_registered_schemas + list(schemas or []):
+            schema_name = schema.__name__
+            if schema_name in seen_schema_names:
+                continue
+            seen_schema_names.add(schema_name)
+            registered_schemas.append(schema)
+            self._registered_schemas[schema_name] = schema
+        if (
+            registered_schemas
+            and not self.metadata_store
+            and (schemas or builtin_schema_names)
+        ):
+            logging.warning(
+                "[Consist] Schemas provided but no database configured. Views will not be created."
+            )
+        if self.metadata_store:
+            for schema in registered_schemas:
+                self.view(schema)
 
         # In-Memory State (The Source of Truth)
         self.current_consist: Optional[ConsistRecord] = None
@@ -2746,6 +2779,7 @@ class Tracker:
         validate_content_hash: bool = False,
         reuse_if_unchanged: bool = False,
         reuse_scope: Literal["same_uri", "any_uri"] = "same_uri",
+        parent_artifact_id: Optional[uuid.UUID] = None,
         profile_file_schema: bool | Literal["if_changed"] | None = None,
         file_schema_sample_rows: Optional[int] = None,
         facet: Optional[FacetLike] = None,
@@ -2810,6 +2844,8 @@ class Tracker:
         reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
             Deprecated for outputs. `any_uri` is ignored for outputs; deduplication is governed
             by `content_id`. Input-side behavior is unaffected.
+        parent_artifact_id : uuid.UUID | None, optional
+            Canonical parent artifact relation for child/member artifacts.
         profile_file_schema : bool, default False
             If True, profile a lightweight schema for file-based tabular artifacts.
             Use "if_changed" to skip profiling when matching content identity already
@@ -2852,6 +2888,7 @@ class Tracker:
             validate_content_hash=validate_content_hash,
             reuse_if_unchanged=reuse_if_unchanged,
             reuse_scope=reuse_scope,
+            parent_artifact_id=parent_artifact_id,
             profile_file_schema=profile_file_schema,
             file_schema_sample_rows=file_schema_sample_rows,
             facet=facet,
@@ -2869,6 +2906,7 @@ class Tracker:
         path: Optional[Union[str, Path]] = None,
         driver: Optional[str] = None,
         meta: Optional[Dict[str, Any]] = None,
+        parent_artifact_id: Optional[uuid.UUID] = None,
         profile_file_schema: bool = False,
         file_schema_sample_rows: Optional[int] = 1000,
         **to_file_kwargs: Any,
@@ -2893,6 +2931,8 @@ class Tracker:
             File format driver (e.g., "parquet" or "csv").
         meta : Optional[Dict[str, Any]], optional
             Additional metadata for the artifact.
+        parent_artifact_id : uuid.UUID | None, optional
+            Canonical parent artifact relation for child/member artifacts.
         profile_file_schema : bool, default False
             If True, profile a lightweight schema for file-based tabular artifacts.
         file_schema_sample_rows : Optional[int], default 1000
@@ -2935,6 +2975,8 @@ class Tracker:
             key=key,
             direction=direction,
             schema=schema,
+            driver=inferred_driver,
+            parent_artifact_id=parent_artifact_id,
             profile_file_schema=profile_file_schema,
             file_schema_sample_rows=file_schema_sample_rows,
             **meta_payload,
@@ -3752,6 +3794,166 @@ class Tracker:
             ingest=ingest,
             profile_schema=profile_schema,
             options=options,
+        )
+
+    def canonicalize_gtfs(
+        self,
+        feed_paths: Sequence[Union[str, Path]],
+        *,
+        service_date: Optional[Union[date, datetime, str]] = None,
+        feed_keys: Optional[Sequence[str]] = None,
+        run: Optional[Run] = None,
+        run_id: Optional[str] = None,
+        key: str = GTFS_BUNDLE_SOURCE_KEY,
+        ingest: bool = True,
+        profile_schema: bool = False,
+        log_sources: bool = True,
+    ) -> GtfsCanonicalizationResult:
+        """
+        Canonicalize GTFS feeds for standalone selected-service workflows.
+
+        This wraps :func:`canonicalize_gtfs_bundle` with tracker-managed
+        provenance: source feeds are logged as inputs, the selected-service
+        slice is logged as a logical parent artifact, the selected-service
+        manifest is logged as a JSON artifact, GTFS identity metadata is
+        recorded on the run, selected tables are logged as child artifacts for
+        downstream runs, and selected tables can be ingested for querying. Raw
+        GTFS loads remain source-faithful; ``feed_key`` is attached by the
+        canonicalizer on selected-service tables.
+        """
+        if run is not None and run_id is not None:
+            raise ValueError("Provide either run= or run_id=, not both.")
+        if self.current_consist is None:
+            raise RuntimeError("canonicalize_gtfs requires an active run.")
+
+        target_run = self.current_consist.run
+        if run is not None and run.id != target_run.id:
+            raise RuntimeError("canonicalize_gtfs run= must match the active run.")
+        if run_id is not None and run_id != target_run.id:
+            raise RuntimeError("canonicalize_gtfs run_id= must match the active run.")
+
+        resolved_feed_paths = [Path(path).resolve() for path in feed_paths]
+        result = canonicalize_gtfs_bundle(
+            resolved_feed_paths,
+            identity=self.identity,
+            service_date=service_date,
+            feed_keys=feed_keys,
+            source_key=key,
+        )
+
+        source_artifacts: list[Artifact] = []
+        if log_sources:
+            for snapshot in result.snapshots:
+                source_key = f"{key}_{snapshot.feed_key}_source"
+                source_artifacts.append(
+                    self.log_artifact(
+                        snapshot.source_path,
+                        key=source_key,
+                        direction="input",
+                        driver="gtfs",
+                        content_hash=snapshot.source_feed_hash,
+                        force_hash_override=True,
+                        gtfs_feed=True,
+                        feed_key=snapshot.feed_key,
+                        source_feed_hash=snapshot.source_feed_hash,
+                        source_bundle_hash=result.source_bundle_hash,
+                    )
+                )
+
+        manifest_dir = self.run_artifact_dir(target_run) / "gtfs"
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        safe_key = self._safe_run_id(key)
+        manifest_path = manifest_dir / f"{safe_key}_manifest.json"
+        manifest_payload = self.identity.normalize_json(result.manifest)
+        manifest_path.write_text(
+            json.dumps(manifest_payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        manifest_hash = result.service_slice_hash or result.source_bundle_hash
+        manifest_artifact = self.log_artifact(
+            manifest_path,
+            key=f"{key}_manifest",
+            direction="output",
+            driver="json",
+            content_hash=manifest_hash,
+            force_hash_override=True,
+            gtfs_manifest=True,
+            source_bundle_hash=result.source_bundle_hash,
+            service_slice_hash=result.service_slice_hash,
+            service_date=result.manifest.get("service_date"),
+        )
+        selected_service_artifact = self.log_artifact(
+            manifest_path,
+            key=key,
+            direction="output",
+            driver="gtfs_selected_service",
+            content_hash=manifest_hash,
+            force_hash_override=True,
+            gtfs_selected_service=True,
+            gtfs_manifest_artifact_id=str(manifest_artifact.id),
+            kind="selected-service-slice",
+            source_bundle_hash=result.source_bundle_hash,
+            service_slice_hash=result.service_slice_hash,
+            service_date=result.manifest.get("service_date"),
+            table_count=len(result.selected_tables),
+            source_feed_count=len(result.snapshots),
+        )
+        table_artifacts: dict[str, Artifact] = {}
+        for table_name, frame in sorted(result.selected_tables.items()):
+            table_key = f"{key}_{table_name}"
+            table_artifacts[table_name] = self.log_dataframe(
+                frame,
+                key=table_key,
+                direction="output",
+                parent_artifact_id=selected_service_artifact.id,
+                meta={
+                    "gtfs_selected_table": True,
+                    "gtfs_table_name": table_name,
+                    "source_bundle_hash": result.source_bundle_hash,
+                    "service_slice_hash": result.service_slice_hash,
+                    "service_date": result.manifest.get("service_date"),
+                },
+            )
+
+        if ingest:
+            dlt_logger = logging.getLogger("dlt")
+            previous_dlt_level = dlt_logger.level
+            dlt_logger.setLevel(logging.ERROR)
+            try:
+                for spec in result.ingestables:
+                    if spec.dedupe_on_hash and spec.content_hash:
+                        if self._ingest_cache_hit(spec.table_name, spec.content_hash):
+                            logging.info(
+                                "[Consist] Skipping ingest for %s; cache hit for %s.",
+                                spec.table_name,
+                                spec.content_hash,
+                            )
+                            continue
+                    rows = list(spec.materialize_rows(target_run.id))
+                    self.ingest(
+                        selected_service_artifact,
+                        data=rows,
+                        schema=spec.schema,
+                        run=target_run,
+                        profile_schema=profile_schema,
+                    )
+            finally:
+                dlt_logger.setLevel(previous_dlt_level)
+
+        self.log_meta(
+            gtfs_source_bundle_hash=result.source_bundle_hash,
+            gtfs_service_slice_hash=result.service_slice_hash,
+            gtfs_selected_service_artifact_id=str(selected_service_artifact.id),
+            gtfs_identity_manifest=result.identity_payload,
+        )
+
+        return replace(
+            result,
+            selected_service_artifact=selected_service_artifact,
+            manifest_artifact=manifest_artifact,
+            source_artifacts=tuple(source_artifacts),
+            table_artifacts=table_artifacts,
         )
 
     def prepare_config(

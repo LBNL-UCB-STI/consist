@@ -4,6 +4,7 @@ import os
 import types
 from copy import copy
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import (
     Any,
@@ -91,6 +92,13 @@ def _facet_type_to_duckdb(value_types: List[str]) -> str:
     return "VARCHAR"
 
 
+def _virtual_view_class_name(model: Type[SQLModel], view_name: str) -> str:
+    safe_suffix = "".join(ch if ch.isalnum() else "_" for ch in view_name).strip("_")
+    if not safe_suffix:
+        safe_suffix = "view"
+    return f"Virtual{model.__name__}_{safe_suffix}"
+
+
 @dataclass(frozen=True)
 class GroupedViewRecord:
     artifact: Artifact
@@ -98,18 +106,15 @@ class GroupedViewRecord:
     facet_values: Dict[str, Any]
 
 
-def create_view_model(model: Type[T], name: Optional[str] = None) -> Type[T]:
+@lru_cache(maxsize=None)
+def _create_view_model_cached(model: Type[T], view_name: str) -> Type[T]:
     """
-    Creates a dynamic SQLModel class that maps to a Consist Hybrid View.
-    Ensures table=True is passed to the metaclass.
+    Build and memoize a dynamic SQLModel class for a given model/view name pair.
+
+    The generated class is structurally identical for repeated calls, so caching it
+    avoids repeated SQLModel/Pydantic registration warnings when the same view is
+    requested multiple times in one process.
     """
-    # 1. Determine View Name
-    if name:
-        view_name = name
-    elif hasattr(model, "__tablename__"):
-        view_name = f"v_{model.__tablename__}"
-    else:
-        view_name = f"v_{model.__name__.lower()}"
 
     # 2. Clone Annotations
     # Prefer resolved Pydantic field annotations (works even when the model was defined
@@ -192,8 +197,26 @@ def create_view_model(model: Type[T], name: Optional[str] = None) -> Type[T]:
 
     # Pass {"table": True} to the keyword args of class creation
     return types.new_class(
-        f"Virtual{model.__name__}", (SQLModel,), {"table": True}, exec_body
+        _virtual_view_class_name(model, view_name),
+        (SQLModel,),
+        {"table": True},
+        exec_body,
     )  # ty: ignore[invalid-return-type]
+
+
+def create_view_model(model: Type[T], name: Optional[str] = None) -> Type[T]:
+    """
+    Creates a dynamic SQLModel class that maps to a Consist Hybrid View.
+    Ensures table=True is passed to the metaclass.
+    """
+    # 1. Determine View Name
+    if name:
+        view_name = name
+    elif hasattr(model, "__tablename__"):
+        view_name = f"v_{model.__tablename__}"
+    else:
+        view_name = f"v_{model.__name__.lower()}"
+    return _create_view_model_cached(model, view_name)
 
 
 class ViewRegistry:

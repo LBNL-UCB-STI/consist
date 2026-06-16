@@ -25,6 +25,8 @@ from typing import (
 )
 from pathlib import Path
 
+from consist.types import artifact_table_path
+
 # Try importing git, handle error if missing (optional dependency)
 git: Optional[ModuleType]
 try:
@@ -465,7 +467,7 @@ class IdentityManager:
                     f"driver:{getattr(artifact, 'driver', None)}",
                     f"key:{getattr(artifact, 'key', None)}",
                 ]
-                table_path = getattr(artifact, "table_path", None)
+                table_path = artifact_table_path(artifact)
                 array_path = getattr(artifact, "array_path", None)
                 if table_path:
                     sig_parts.append(f"table_path:{table_path}")
@@ -502,7 +504,7 @@ class IdentityManager:
                     f"driver:{getattr(artifact, 'driver', None)}",
                     f"container_uri:{artifact.container_uri}",
                 ]
-                table_path = getattr(artifact, "table_path", None)
+                table_path = artifact_table_path(artifact)
                 array_path = getattr(artifact, "array_path", None)
                 if table_path:
                     sig_parts.append(f"table_path:{table_path}")

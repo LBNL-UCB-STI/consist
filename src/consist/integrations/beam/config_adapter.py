@@ -6,6 +6,7 @@ import logging
 import re
 from dataclasses import dataclass, field, replace
 import shutil
+from datetime import date, datetime
 from pathlib import Path
 from typing import (
     Any,
@@ -34,6 +35,13 @@ from consist.core.config_canonicalization import (
 )
 from consist.core.config_canonicalization import ConfigPlan
 from consist.core.identity import IdentityManager
+from consist.core.gtfs import (
+    GTFS_BUNDLE_SOURCE_KEY,
+    GtfsCanonicalizationResult,
+    canonicalize_gtfs_bundle,
+    discover_gtfs_members,
+    _looks_like_csv_table,
+)
 from consist.integrations._config_adapter_shared import (
     OverrideRunHooks as _shared_OverrideRunHooks,
     artifact_key_for_path as _shared_artifact_key_for_path,
@@ -194,6 +202,37 @@ class BeamConfigAdapter:
             self.path_aliases,
             options.path_aliases if options is not None else None,
         )
+        gtfs_result = _canonicalize_gtfs_inputs(
+            config_tree=config_tree,
+            root_dirs=config.root_dirs,
+            tracker=tracker,
+        )
+        if gtfs_result is not None:
+            gtfs_root = _resolve_gtfs_bundle_root(config_tree, config.root_dirs)
+            if gtfs_root is not None:
+                _add_artifact(
+                    artifacts_by_path,
+                    gtfs_root,
+                    config.root_dirs,
+                    role="gtfs_bundle",
+                    key=GTFS_BUNDLE_SOURCE_KEY,
+                    meta={
+                        "gtfs_bundle": True,
+                        "source_bundle_hash": gtfs_result.source_bundle_hash,
+                    },
+                )
+            for snapshot in gtfs_result.snapshots:
+                _add_artifact(
+                    artifacts_by_path,
+                    snapshot.source_path,
+                    config.root_dirs,
+                    role="gtfs_feed",
+                    meta={
+                        "feed_key": snapshot.feed_key,
+                        "source_feed_hash": snapshot.source_feed_hash,
+                        "member_names": list(snapshot.member_names),
+                    },
+                )
         reference_identity = _build_beam_config_identity(
             adapter_name=self.model_name,
             adapter_version=self.adapter_version,
@@ -208,6 +247,9 @@ class BeamConfigAdapter:
                 else self.allow_heuristic_refs
             ),
             tracker=tracker,
+            extra_scalar_payload=(
+                gtfs_result.identity_payload if gtfs_result is not None else None
+            ),
         )
         canonical_config_tree = _canonicalize_config_tree_paths(
             config_tree,
@@ -294,6 +336,8 @@ class BeamConfigAdapter:
             strict=resolved_strict,
         )
         ingestables.extend(tabular_specs)
+        if gtfs_result is not None:
+            ingestables.extend(gtfs_result.ingestables)
 
         artifacts = list(artifacts_by_path.values())
 
@@ -1133,6 +1177,7 @@ def _build_beam_config_identity(
     reference_policies: Mapping[str, BeamReferencePolicy | Mapping[str, Any]],
     allow_heuristic_refs: bool,
     tracker: Optional["Tracker"],
+    extra_scalar_payload: Optional[Mapping[str, Any]] = None,
 ) -> CanonicalConfigIdentity:
     references: list[ConfigReference] = []
     directories: list[DirectoryIdentity] = []
@@ -1234,7 +1279,10 @@ def _build_beam_config_identity(
         for ref in references
         if ref.identity_policy not in {"ignored", "output_or_runtime_ignored"}
     ]
-    scalar_hash = _canonical_json_sha256({"config": canonical_tree})
+    scalar_payload: dict[str, Any] = {"config": canonical_tree}
+    if extra_scalar_payload is not None:
+        scalar_payload["gtfs"] = extra_scalar_payload
+    scalar_hash = _canonical_json_sha256(scalar_payload)
     reference_hash = _canonical_json_sha256({"references": reference_payload})
     directory_hash = _canonical_json_sha256(
         {"directories": [item.to_meta_dict() for item in directories]}
@@ -1273,7 +1321,14 @@ def _build_beam_config_identity(
         scalar_hash=scalar_hash,
         reference_hash=reference_hash,
         directory_hash=directory_hash,
-        scalars={"options": options_payload},
+        scalars={
+            "options": options_payload,
+            **(
+                {"gtfs": extra_scalar_payload}
+                if extra_scalar_payload is not None
+                else {}
+            ),
+        },
         references=tuple(references),
         directories=tuple(directories),
     )
@@ -1362,6 +1417,7 @@ def _add_artifact(
     config_dirs: Sequence[Path],
     *,
     role: str,
+    key: Optional[str] = None,
     meta: Optional[dict[str, Any]] = None,
 ) -> None:
     if path in artifacts:
@@ -1371,7 +1427,7 @@ def _add_artifact(
         data.update(meta)
     artifacts[path] = ArtifactSpec(
         path=path,
-        key=_artifact_key_for_path(path, config_dirs),
+        key=key if key is not None else _artifact_key_for_path(path, config_dirs),
         direction="input",
         meta=data,
     )
@@ -1522,6 +1578,78 @@ def _build_tabular_ingest_specs(
                 )
             )
     return specs
+
+
+def _canonicalize_gtfs_inputs(
+    *,
+    config_tree: dict[str, Any],
+    root_dirs: Sequence[Path],
+    tracker: Optional["Tracker"],
+) -> Optional[GtfsCanonicalizationResult]:
+    gtfs_root = _resolve_gtfs_bundle_root(config_tree, root_dirs)
+    if gtfs_root is None:
+        return None
+    feed_paths = _discover_gtfs_feed_paths(gtfs_root)
+    if not feed_paths:
+        return None
+    service_date = _resolve_beam_service_date(config_tree)
+    return canonicalize_gtfs_bundle(
+        feed_paths,
+        identity=tracker.identity if tracker is not None else IdentityManager(),
+        service_date=service_date,
+    )
+
+
+def _resolve_gtfs_bundle_root(
+    config_tree: dict[str, Any], root_dirs: Sequence[Path]
+) -> Optional[Path]:
+    raw_value = _get_nested_value(config_tree, ["beam", "routing", "r5", "directory"])
+    if not isinstance(raw_value, str) or not raw_value.strip():
+        return None
+    resolved = _resolve_reference(raw_value, root_dirs)
+    if resolved is None or not resolved.exists():
+        return None
+    return resolved
+
+
+def _resolve_beam_service_date(config_tree: dict[str, Any]) -> Optional[date]:
+    raw_value = _get_nested_value(config_tree, ["beam", "routing", "baseDate"])
+    if raw_value is None:
+        return None
+    text = str(raw_value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(text).date()
+    except ValueError:
+        try:
+            return datetime.strptime(text, "%Y%m%d").date()
+        except ValueError:
+            return None
+
+
+def _discover_gtfs_feed_paths(root: Path) -> list[Path]:
+    if root.is_file():
+        return [root] if discover_gtfs_members(root) else []
+    if not root.is_dir():
+        return []
+    if any(
+        entry.is_file() and _looks_like_csv_table(root, entry.name)
+        for entry in root.iterdir()
+    ):
+        return [root]
+    candidates: list[Path] = []
+    for entry in sorted(root.iterdir()):
+        if entry.is_file() and entry.suffix.lower() == ".zip":
+            if discover_gtfs_members(entry):
+                candidates.append(entry)
+            continue
+        if not entry.is_dir():
+            continue
+        candidates.extend(_discover_gtfs_feed_paths(entry))
+    return candidates
 
 
 def _coerce_to_path_values(value: Any) -> list[str]:
