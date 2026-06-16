@@ -55,7 +55,10 @@ class GtfsCanonicalizationResult:
 
 
 def _normalize_member_name(name: str) -> str:
-    return name.replace("\\", "/").lstrip("./")
+    normalized = name.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
 
 
 def _basename(name: str) -> str:
@@ -63,8 +66,16 @@ def _basename(name: str) -> str:
 
 
 def _is_gtfs_junk_name(name: str) -> bool:
-    base = _basename(name)
-    return base in GTFS_JUNK_BASENAMES or base.startswith(("readme", "license"))
+    normalized = _normalize_member_name(name)
+    parts = normalized.split("/")
+    base = Path(normalized).name.lower()
+    return (
+        "__MACOSX" in parts
+        or any(part.startswith(".") for part in parts)
+        or base.startswith("._")
+        or base in GTFS_JUNK_BASENAMES
+        or base.startswith(("readme", "license"))
+    )
 
 
 def _looks_like_table_name(name: str) -> bool:
@@ -137,6 +148,12 @@ def discover_gtfs_members(source_path: Path) -> list[str]:
         return members
 
     raise ValueError(f"GTFS source must be a directory or zip file: {source_path}")
+
+
+def has_gtfs_core_members(source_path: Path) -> bool:
+    members = discover_gtfs_members(source_path)
+    table_names = {Path(member).stem.lower() for member in members}
+    return bool(table_names & set(GTFS_CORE_TABLE_NAMES))
 
 
 def load_gtfs_member_df(source_path: Path | str, member_name: str) -> pd.DataFrame:

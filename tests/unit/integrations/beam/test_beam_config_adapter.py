@@ -322,6 +322,53 @@ def test_beam_canonicalize_discovers_gtfs_bundle_from_r5_directory(
     } == {"gtfs"}
 
 
+def test_beam_canonicalize_ignores_r5_sidecar_csv_and_discovers_zip_feeds(
+    gtfs_tracker, tmp_path: Path
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    gtfs_root = case_dir / "inputs" / "r5" / "seattle-cbg120-ferry-weakConn-network"
+    gtfs_root.mkdir(parents=True, exist_ok=True)
+    (gtfs_root / "clipped_tazs.csv").write_text("taz,x\n1,2\n", encoding="utf-8")
+    _write_gtfs_zip_feed(
+        gtfs_root / "seattle_gtfs.zip",
+        route_short_name="SEA",
+        service_id="S1",
+    )
+    _write_gtfs_zip_feed(
+        gtfs_root / "kitsap_transit.zip",
+        route_short_name="KIT",
+        service_id="S1",
+    )
+    overlay_conf.write_text(
+        overlay_conf.read_text(encoding="utf-8")
+        + '\nbeam.routing.baseDate = "2024-01-01"\n'
+        + '\nbeam.routing.r5.directory = ${beam.inputDirectory}"/r5/seattle-cbg120-ferry-weakConn-network"\n',
+        encoding="utf-8",
+    )
+
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    canonical = adapter.discover([case_dir], identity=gtfs_tracker.identity)
+    run = gtfs_tracker.begin_run("beam_gtfs_zip_discovery_with_sidecars", "beam")
+    result = adapter.canonicalize(canonical, run=run, tracker=gtfs_tracker)
+
+    gtfs_payload = result.identity.scalars["gtfs"]
+
+    assert set(gtfs_payload["source_feed_hashes"]) == {
+        "seattle_gtfs",
+        "kitsap_transit",
+    }
+    assert len(gtfs_payload["manifest"]["feeds"]) == 2
+    assert all(
+        "clipped_tazs.csv" not in feed["member_names"]
+        for feed in gtfs_payload["manifest"]["feeds"]
+    )
+    assert {
+        spec.path.name
+        for spec in result.artifacts
+        if spec.meta.get("config_role") == "gtfs_feed"
+    } == {"seattle_gtfs.zip", "kitsap_transit.zip"}
+
+
 def test_beam_canonicalize_ingests_gtfs_tables(gtfs_tracker, tmp_path: Path):
     case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
     gtfs_root = case_dir / "inputs" / "r5" / "sfbay-cbg5500-weakConn-network"
