@@ -105,7 +105,7 @@ class HotDataStore:
 def get_hot_data_store(tracker: "Tracker | None") -> HotDataStore | None:
     if tracker is None:
         return None
-    store = tracker.hot_data_store
+    store = getattr(tracker, "hot_data_store", None)
     if store is None:
         return None
     return store
@@ -117,7 +117,7 @@ def get_hot_data_db_path(tracker: "Tracker | None") -> str | None:
         return os.fspath(store.db_path)
     if tracker is None:
         return None
-    db_path = tracker.db_path
+    db_path = getattr(tracker, "db_path", None)
     if db_path is None:
         return None
     return os.fspath(db_path)
@@ -129,7 +129,7 @@ def get_hot_data_engine(tracker: "Tracker | None") -> Engine | Any | None:
         return store.engine
     if tracker is None:
         return None
-    return tracker.engine
+    return getattr(tracker, "engine", None)
 
 
 def dispose_hot_data_engine(tracker: "Tracker | None") -> None:

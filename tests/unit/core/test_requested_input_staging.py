@@ -48,6 +48,7 @@ class _FakeTracker:
         self.identity = SimpleNamespace(compute_file_checksum=_sha256)
         self.run_dir = run_dir
         self.mounts = {}
+        self.allow_external_paths = False
 
     def resolve_uri(self, uri: str) -> str:
         return uri
