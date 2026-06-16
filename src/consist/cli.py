@@ -2308,7 +2308,9 @@ def _render_gtfs_bundle_preview(
     n_rows: int,
 ) -> bool:
     """Render a compact GTFS bundle summary for bundle-level preview."""
-    if artifact.driver != "gtfs" or artifact.table_path:
+    meta = artifact.meta or {}
+    is_legacy_gtfs_bundle = meta.get("gtfs_bundle") is True
+    if (artifact.driver != "gtfs" and not is_legacy_gtfs_bundle) or artifact.table_path:
         return False
 
     resolved_path = Path(tracker.resolve_uri(artifact.container_uri))
