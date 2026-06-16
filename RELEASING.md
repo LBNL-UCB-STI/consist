@@ -131,12 +131,9 @@ configuration, use:
 Create the release tag from the same commit whose artifacts were uploaded:
 
 ```bash
-git tag -s vX.Y.Z -m "vX.Y.Z"
+git tag vX.Y.Z -m "vX.Y.Z"
 git push origin vX.Y.Z
 ```
-
-If you do not want a signed tag for a given release, make that decision
-explicitly rather than quietly changing the process.
 
 ### 8. Publish the GitHub release
 

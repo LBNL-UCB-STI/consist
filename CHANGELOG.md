@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## [0.2.0] - 2026-06-16
+
+### Added
+
+- Add native GTFS support and BEAM integration, including a GTFS driver,
+  canonicalization, standard GTFS schemas, CLI preview support, and docs by
+  @zneedell ([#135](https://github.com/LBNL-UCB-STI/consist/pull/135)).
+- Add `ScenarioContext.map_runs(...)` and process-backed orchestration models
+  for parallel scenario sweeps, plus docs and example updates by @zneedell
+  ([#136](https://github.com/LBNL-UCB-STI/consist/pull/136)).
+
+### Changed
+
+- Speed up maintenance merge and recovery-copy registration by @zneedell
+  ([#132](https://github.com/LBNL-UCB-STI/consist/pull/132)).
+- Improve profiling and metadata/cache-hit performance across the tracker and
+  persistence hot paths, with supporting benchmark tooling and attribution
+  helpers by @zneedell ([#131](https://github.com/LBNL-UCB-STI/consist/pull/131)).
+- Remove unnecessary artifact `getattr`/`hasattr` probes in favor of explicit
+  typed attributes, improving artifact typing and materialization code paths
+  by @zneedell ([#137](https://github.com/LBNL-UCB-STI/consist/pull/137)).
+- Fix mount resolution precedence so explicit CLI mounts and `--run-dir` win
+  over trusted DB metadata, with updated CLI docs and GTFS driver propagation
+  by @zneedell ([#139](https://github.com/LBNL-UCB-STI/consist/pull/139)).
+- Add archive-aware mount discovery for promoted or moved runs, including
+  `archive_mounts` in tracker config and run metadata, and improved trusted
+  CLI inference by @zneedell ([#140](https://github.com/LBNL-UCB-STI/consist/pull/140)).
+- Bump runtime and lockfile dependencies by @zneedell
+  ([#133](https://github.com/LBNL-UCB-STI/consist/pull/133)).
+
+### Fixed
+
+- Fix the DuckDB detach error during maintenance export by @zneedell
+  ([#130](https://github.com/LBNL-UCB-STI/consist/pull/130)).
+- Preserve `content_id` when updating artifacts with existing dependents to
+  avoid foreign key failures during persistence by @zneedell
+  ([#138](https://github.com/LBNL-UCB-STI/consist/pull/138)).
+
 ## [0.1.5] - 2026-05-21
 
 ### Added
