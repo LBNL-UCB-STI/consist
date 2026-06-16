@@ -39,8 +39,7 @@ from consist.core.gtfs import (
     GTFS_BUNDLE_SOURCE_KEY,
     GtfsCanonicalizationResult,
     canonicalize_gtfs_bundle,
-    discover_gtfs_members,
-    _looks_like_csv_table,
+    has_gtfs_core_members,
 )
 from consist.integrations._config_adapter_shared import (
     OverrideRunHooks as _shared_OverrideRunHooks,
@@ -1636,18 +1635,15 @@ def _resolve_beam_service_date(config_tree: dict[str, Any]) -> Optional[date]:
 
 def _discover_gtfs_feed_paths(root: Path) -> list[Path]:
     if root.is_file():
-        return [root] if discover_gtfs_members(root) else []
+        return [root] if has_gtfs_core_members(root) else []
     if not root.is_dir():
         return []
-    if any(
-        entry.is_file() and _looks_like_csv_table(root, entry.name)
-        for entry in root.iterdir()
-    ):
+    if has_gtfs_core_members(root):
         return [root]
     candidates: list[Path] = []
     for entry in sorted(root.iterdir()):
         if entry.is_file() and entry.suffix.lower() == ".zip":
-            if discover_gtfs_members(entry):
+            if has_gtfs_core_members(entry):
                 candidates.append(entry)
             continue
         if not entry.is_dir():

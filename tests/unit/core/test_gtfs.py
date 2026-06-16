@@ -167,6 +167,20 @@ def test_gtfs_driver_discovers_and_loads_directory_and_zip(tmp_path: Path) -> No
         )
 
 
+def test_discover_gtfs_members_ignores_macos_resource_forks(tmp_path: Path) -> None:
+    zip_path = tmp_path / "feed.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr(
+            "agency.txt",
+            "agency_id,agency_name,agency_url,agency_timezone\n"
+            "1,A,http://a.test,America/Los_Angeles\n",
+        )
+        zf.writestr("__MACOSX/._agency.txt", "junk")
+        zf.writestr("._routes.txt", "junk")
+
+    assert discover_gtfs_members(zip_path) == ["agency.txt"]
+
+
 def test_gtfs_member_relation_normalizes_string_dtype_for_duckdb(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
