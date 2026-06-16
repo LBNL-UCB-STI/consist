@@ -44,6 +44,41 @@ This opt-in keeps GTFS visible only for projects that need transit data. The
 standard GTFS tables are registered for querying, while feed-specific extras
 can still flow through the raw tabular path when you need them.
 
+## Archive-aware mounts
+
+Use `mounts` for execution-time host paths and `archive_mounts` for
+archive-relative roots that CLI inspection can apply after a run has moved.
+This is useful for HPC workflows where artifacts are logged on node-local
+scratch and later promoted to durable storage:
+
+```python
+tracker = Tracker(
+    run_dir="/local/job123/pilates-run",
+    db_path="/local/job123/pilates-run/.consist/provenance.duckdb",
+    mounts={
+        "workspace": "/local/job123/pilates-run",
+        "beam_input": "/local/job123/pilates-run/beam/input",
+    },
+    archive_mounts={
+        "workspace": ".",
+        "beam_input": "beam/input",
+    },
+)
+```
+
+If an artifact is logged as `beam_input://seattle/lccm-long.csv`, then later
+inspection with:
+
+```bash
+consist shell \
+  --db-path /archive/pilates-run/.consist/provenance.duckdb \
+  --run-dir /archive/pilates-run \
+  --trust-db
+```
+
+resolves it under `/archive/pilates-run/beam/input/seattle/lccm-long.csv`.
+Explicit `--mount` values still take precedence over archive mounts.
+
 ## GTFS canonicalization
 
 Use `Tracker.canonicalize_gtfs(...)` when a transit feed should contribute

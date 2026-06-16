@@ -221,6 +221,7 @@ class Tracker:
         run_dir: Path,
         db_path: Optional[str | os.PathLike[str]] = None,
         mounts: Optional[Dict[str, str]] = None,
+        archive_mounts: Optional[Mapping[str, str | os.PathLike[str]]] = None,
         project_root: str = ".",
         hashing_strategy: str = "full",
         cache_epoch: int = 1,
@@ -257,6 +258,10 @@ class Tracker:
         mounts : Optional[Dict[str, str]], default None
             A mapping of URI schemes (e.g., 'inputs://') to absolute filesystem roots.
             This facilitates environment-independent path resolution and portability.
+        archive_mounts : Optional[Mapping[str, str | os.PathLike[str]]], default None
+            A mapping of URI schemes to archive-relative or absolute roots used by
+            CLI inspection after a run has moved. Relative values are interpreted
+            relative to the inspection ``--run-dir``.
         project_root : str, default "."
             The root directory used for Git-based code versioning and relative
             path resolution during identity hashing.
@@ -295,6 +300,11 @@ class Tracker:
         self.fs = FileSystemManager(run_dir, mounts)
 
         self.mounts = self.fs.mounts
+        self.archive_mounts = {
+            scheme: os.fspath(root)
+            for scheme, root in (archive_mounts or {}).items()
+            if scheme and os.fspath(root)
+        }
         self.run_dir = self.fs.run_dir
         self.openlineage_enabled = openlineage_enabled
         self.openlineage_namespace = openlineage_namespace
@@ -600,6 +610,7 @@ class Tracker:
             run_dir=self.run_dir,
             db_path=self._compat_db_path,
             mounts=self.mounts,
+            archive_mounts=self.archive_mounts,
             project_root=str(self.identity.project_root),
             hashing_strategy=self.identity.hashing_strategy,
             cache_epoch=self._cache_epoch,

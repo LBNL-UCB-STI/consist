@@ -23,6 +23,7 @@ class TrackerConfig(BaseModel):
     run_dir: Path
     db_path: Optional[str | Path] = None
     mounts: Optional[dict[str, str]] = None
+    archive_mounts: Optional[dict[str, str]] = None
     project_root: str = "."
     hashing_strategy: str = "full"
     cache_epoch: int = 1
@@ -43,6 +44,7 @@ class TrackerConfig(BaseModel):
             "run_dir": self.run_dir,
             "db_path": self.db_path,
             "mounts": self.mounts,
+            "archive_mounts": self.archive_mounts,
             "project_root": self.project_root,
             "hashing_strategy": self.hashing_strategy,
             "cache_epoch": self.cache_epoch,
