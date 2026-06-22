@@ -12,6 +12,7 @@ from typing import (
     Callable,
     Dict,
     Hashable,
+    ContextManager,
     Iterable,
     Iterator,
     Literal,
@@ -54,6 +55,7 @@ from consist.core.stores import get_hot_data_db_path
 from consist.core.views import _quote_ident, create_view_model
 from consist.core.workflow import OutputCapture, RunContext
 from consist.integrations.ibis import (
+    ibis_grouped_view as _ibis_grouped_view,
     ibis_connection as _ibis_connection,
     ibis_view as _ibis_view,
 )
@@ -260,6 +262,52 @@ def ibis_view(
     Ensure a Consist view exists and return it as a native Ibis table.
     """
     return _ibis_view(tracker, model=model, key=key)
+
+
+def ibis_grouped_view(
+    tracker: Optional["Tracker"] = None,
+    *,
+    view_name: str,
+    artifact_id: uuid.UUID,
+    namespace: Optional[str] = None,
+    params: Optional[Iterable[str]] = None,
+    drivers: Optional[list[str]] = None,
+    attach_facets: Optional[list[str]] = None,
+    include_system_columns: bool = True,
+    mode: Literal["hybrid", "hot_only", "cold_only"] = "hybrid",
+    if_exists: Literal["replace", "error"] = "replace",
+    missing_files: Literal["warn", "error", "skip_silent"] = "warn",
+    run_id: Optional[str] = None,
+    parent_run_id: Optional[str] = None,
+    model: Optional[str] = None,
+    status: Optional[str] = None,
+    year: Optional[int] = None,
+    iteration: Optional[int] = None,
+    schema_compatible: bool = False,
+) -> ContextManager["IbisTable"]:
+    """
+    Create a grouped Consist view and expose it as a native Ibis table.
+    """
+    return _ibis_grouped_view(
+        tracker,
+        view_name=view_name,
+        artifact_id=artifact_id,
+        namespace=namespace,
+        params=params,
+        drivers=drivers,
+        attach_facets=attach_facets,
+        include_system_columns=include_system_columns,
+        mode=mode,
+        if_exists=if_exists,
+        missing_files=missing_files,
+        run_id=run_id,
+        parent_run_id=parent_run_id,
+        model=model,
+        status=status,
+        year=year,
+        iteration=iteration,
+        schema_compatible=schema_compatible,
+    )
 
 
 # --- Core Access ---

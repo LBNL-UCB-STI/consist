@@ -835,9 +835,14 @@ class RunTraceCoordinator:
                         "Single return value does not match declared outputs."
                     )
                 else:
+                    # Tabular return values are the primary inputs for typed and
+                    # grouped analysis, so capture a lightweight schema by
+                    # default. This lets downstream grouped views select these
+                    # artifacts without extra notebook-side plumbing.
                     outputs_map[outputs[0]] = tracker.log_dataframe(
                         result,
                         key=outputs[0],
+                        profile_file_schema=True,
                     )
             elif isinstance(result, pd.Series):
                 if len(outputs) != 1:
@@ -845,9 +850,12 @@ class RunTraceCoordinator:
                         "Single return value does not match declared outputs."
                     )
                 else:
+                    # Keep Series output behavior aligned with DataFrames: the
+                    # one-column frame should be queryable by grouped views.
                     outputs_map[outputs[0]] = tracker.log_dataframe(
                         result.to_frame(name=outputs[0]),
                         key=outputs[0],
+                        profile_file_schema=True,
                     )
             elif self._helpers.is_xarray_dataset(result):
                 if len(outputs) != 1:
