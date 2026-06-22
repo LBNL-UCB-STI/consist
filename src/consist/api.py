@@ -53,6 +53,10 @@ from consist.core.run_options import raise_legacy_policy_kwargs_error
 from consist.core.stores import get_hot_data_db_path
 from consist.core.views import _quote_ident, create_view_model
 from consist.core.workflow import OutputCapture, RunContext
+from consist.integrations.ibis import (
+    ibis_connection as _ibis_connection,
+    ibis_view as _ibis_view,
+)
 from consist.models.artifact import Artifact, get_tracker_ref
 from consist.models.run import ConsistRecord, Run, RunResult, resolve_run_result_output
 from consist.models.run_config_kv import RunConfigKV
@@ -81,6 +85,9 @@ if TYPE_CHECKING:
     )
     from consist.core.step_context import StepContext
     from consist.runset import RunSet
+    from ibis.backends.duckdb import Backend as IbisDuckDBBackend
+    from ibis.expr.types import Table as IbisTable
+    from consist.core.tracker import Tracker
 
 GeoDataFrameType = Any
 XarrayDatasetType = Any
@@ -232,6 +239,27 @@ def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
     ```
     """
     return create_view_model(model, name)
+
+
+def ibis_connection(
+    tracker: Optional["Tracker"] = None,
+) -> "IbisDuckDBBackend":
+    """
+    Return an Ibis DuckDB backend connected to the active Consist database.
+    """
+    return _ibis_connection(tracker)
+
+
+def ibis_view(
+    tracker: Optional["Tracker"] = None,
+    *,
+    model: Type[SQLModel],
+    key: Optional[str] = None,
+) -> "IbisTable":
+    """
+    Ensure a Consist view exists and return it as a native Ibis table.
+    """
+    return _ibis_view(tracker, model=model, key=key)
 
 
 # --- Core Access ---

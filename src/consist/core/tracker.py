@@ -143,6 +143,8 @@ if TYPE_CHECKING:
     )
     from consist.core.step_context import StepContext
     from consist.runset import RunSet
+    from ibis.backends.duckdb import Backend as IbisDuckDBBackend
+    from ibis.expr.types import Table as IbisTable
 
 AccessMode = Literal["standard", "analysis", "read_only"]
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -4379,6 +4381,26 @@ class Tracker:
             year=year,
             iteration=iteration,
         )
+
+    def ibis_connection(self) -> "IbisDuckDBBackend":
+        """
+        Return an Ibis DuckDB backend bound to this tracker's database.
+        """
+        from consist.integrations.ibis import ibis_connection
+
+        return ibis_connection(self)
+
+    def ibis_view(
+        self,
+        model: Type[SQLModel],
+        key: Optional[str] = None,
+    ) -> "IbisTable":
+        """
+        Create or refresh a Consist view and return it as an Ibis table.
+        """
+        from consist.integrations.ibis import ibis_view
+
+        return ibis_view(self, model=model, key=key)
 
     def load_matrix(
         self,

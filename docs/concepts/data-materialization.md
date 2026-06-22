@@ -192,6 +192,26 @@ Example:
 df = consist.load_df(artifact, tracker=tracker, db_fallback="always")
 ```
 
+## Choosing A Query Surface
+
+Use the narrowest surface that matches the task:
+
+- `consist.load_df(...)` for one artifact when you want an eager pandas DataFrame.
+- `consist.run_query(...)` when you want explicit SQLAlchemy / SQLModel queries
+  against Consist tables or views.
+- `consist.ibis_view(...)` or `consist.ibis_connection(...)` when you want lazy,
+  dataframe-style analysis over a Consist DuckDB view and are willing to install
+  the optional `consist[ibis]` extra.
+- Call Ibis after the current SQLAlchemy session or run has released its DuckDB
+  connection; the adapter opens a separate DuckDB handle for analysis.
+
+Example:
+
+```python
+persons = consist.ibis_view(tracker, model=Person)
+summary = persons.filter(persons.age >= 18).group_by("home_zone_id").count()
+```
+
 ---
 
 ## Loader Kwargs
