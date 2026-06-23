@@ -84,22 +84,17 @@ with tracker.start_run("ingest_people", model="demo", year=2030):
     tracker.log_dataframe(df, key="persons", schema=Person)
 ```
 
-Query the hybrid view:
+Query the typed hybrid view with Ibis:
 
 ```python
-from sqlmodel import Session, func, select
+VPerson = tracker.ibis_view(Person)
 
-VPerson = tracker.views.Person
-
-with Session(tracker.engine) as session:
-    avg_age = session.exec(
-        select(func.avg(VPerson.age)).where(VPerson.consist_year == 2030)
-    ).one()
+avg_age = VPerson.filter(VPerson.consist_year == 2030).age.mean().execute()
 ```
 
 The ingested rows include Consist provenance columns. You can filter or group by
 `consist_run_id`, `consist_scenario_id`, `consist_year`, and related runtime
-metadata exposed by the view.
+metadata exposed by the view before aggregating.
 
 ## Ingesting Files
 

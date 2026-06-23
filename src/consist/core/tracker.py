@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import (
     Any,
     Callable,
+    ContextManager,
     Dict,
     Hashable,
     Iterable,
@@ -143,6 +144,8 @@ if TYPE_CHECKING:
     )
     from consist.core.step_context import StepContext
     from consist.runset import RunSet
+    from ibis.backends.duckdb import Backend as IbisDuckDBBackend
+    from ibis.expr.types import Table as IbisTable
 
 AccessMode = Literal["standard", "analysis", "read_only"]
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -4378,6 +4381,73 @@ class Tracker:
             status=status,
             year=year,
             iteration=iteration,
+        )
+
+    def ibis_connection(self) -> "IbisDuckDBBackend":
+        """
+        Return an Ibis DuckDB backend bound to this tracker's database.
+        """
+        from consist.integrations.ibis import ibis_connection
+
+        return ibis_connection(self)
+
+    def ibis_view(
+        self,
+        model: Type[SQLModel],
+        key: Optional[str] = None,
+    ) -> "IbisTable":
+        """
+        Create or refresh a Consist view and return it as an Ibis table.
+        """
+        from consist.integrations.ibis import ibis_view
+
+        return ibis_view(self, model=model, key=key)
+
+    def ibis_grouped_view(
+        self,
+        *,
+        view_name: str,
+        artifact_id: uuid.UUID,
+        namespace: Optional[str] = None,
+        params: Optional[Iterable[str]] = None,
+        drivers: Optional[List[str]] = None,
+        attach_facets: Optional[List[str]] = None,
+        include_system_columns: bool = True,
+        mode: Literal["hybrid", "hot_only", "cold_only"] = "hybrid",
+        if_exists: Literal["replace", "error"] = "replace",
+        missing_files: Literal["warn", "error", "skip_silent"] = "warn",
+        run_id: Optional[str] = None,
+        parent_run_id: Optional[str] = None,
+        model: Optional[str] = None,
+        status: Optional[str] = None,
+        year: Optional[int] = None,
+        iteration: Optional[int] = None,
+        schema_compatible: bool = False,
+    ) -> ContextManager["IbisTable"]:
+        """
+        Create a grouped Consist view and expose it as a native Ibis table.
+        """
+        from consist.integrations.ibis import ibis_grouped_view
+
+        return ibis_grouped_view(
+            self,
+            view_name=view_name,
+            artifact_id=artifact_id,
+            namespace=namespace,
+            params=params,
+            drivers=drivers,
+            attach_facets=attach_facets,
+            include_system_columns=include_system_columns,
+            mode=mode,
+            if_exists=if_exists,
+            missing_files=missing_files,
+            run_id=run_id,
+            parent_run_id=parent_run_id,
+            model=model,
+            status=status,
+            year=year,
+            iteration=iteration,
+            schema_compatible=schema_compatible,
         )
 
     def load_matrix(

@@ -629,6 +629,20 @@ def test_tracker_run_logs_series_for_single_declared_output(tracker):
     assert loaded["series_out"].tolist() == [3, 4]
 
 
+def test_tracker_run_profiles_tabular_outputs_for_grouped_analysis(tracker):
+    def step() -> pd.DataFrame:
+        return pd.DataFrame({"id": [1, 2], "value": [10.0, 20.0]})
+
+    result = tracker.run(fn=step, outputs=["table"])
+    artifact = result.outputs["table"]
+
+    assert artifact.meta.get("schema_id") is not None
+    assert tracker.db is not None
+    assert (
+        tracker.db.get_artifact_schema_for_artifact(artifact_id=artifact.id) is not None
+    )
+
+
 def test_tracker_run_output_missing_error(tracker):
     def step() -> None:
         return None

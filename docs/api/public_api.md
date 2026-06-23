@@ -304,5 +304,6 @@ These methods are still public, but are more low-level or easier to misuse.
 These APIs are part of the public surface, but require extra dependencies.
 
 - Ingestion helpers: [`consist.ingest`](api_helpers.md#consist.api.ingest) (install with `consist[ingest]`)
+- Ibis query bridge: [`consist.ibis_connection`](api_helpers.md#consist.api.ibis_connection), [`consist.ibis_view`](api_helpers.md#consist.api.ibis_view), [`consist.ibis_grouped_view`](api_helpers.md#consist.api.ibis_grouped_view) (install with `consist[ibis]`)
 - [`consist.integrations.containers`](../integrations/containers.md) (container execution + caching; requires Docker or Singularity)
 - [`consist.integrations.dlt_loader`](../integrations/dlt_loader.md) (low-level ingestion integration; requires `consist[ingest]`)

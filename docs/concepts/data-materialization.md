@@ -160,15 +160,22 @@ VPerson = tracker.views.Person
 Once registered, you can query across all runs (both ingested and cold data):
 
 ```python
-from sqlmodel import select, func
 import consist
 
-query = (
-    select(VPerson.consist_year, func.avg(VPerson.age).label("avg_age"))
-    .group_by(VPerson.consist_year)
+persons = consist.ibis_view(tracker, model=Person)
+summary = (
+    persons.filter(persons.age >= 18)
+    .group_by(persons.consist_year)
+    .agg(avg_age=persons.age.mean())
 )
-rows = consist.run_query(query, tracker=tracker)
+rows = summary.to_pandas()
 ```
+
+Use `consist.run_query(...)` when you need explicit SQLAlchemy / SQLModel
+queries or database-native SQL over tracker tables and views. For lazy analysis
+over typed tracker views, `consist.ibis_view(...)` is the recommended surface.
+For schema-driven cross-artifact analysis, create a grouped view and query it
+with `consist.ibis_grouped_view(...)`.
 
 For schema/facet-driven cross-key analysis, use
 [Grouped Views](grouped-views.md) to create one view over many artifacts that
@@ -190,6 +197,29 @@ Example:
 
 ```python
 df = consist.load_df(artifact, tracker=tracker, db_fallback="always")
+```
+
+## Choosing A Query Surface
+
+Use the narrowest surface that matches the task:
+
+- `consist.load_df(...)` for one artifact when you want an eager pandas DataFrame.
+- `consist.ibis_view(...)` or `consist.ibis_connection(...)` when you want lazy,
+  dataframe-style analysis over a Consist DuckDB view. This is the recommended
+  surface for tabular tracker analysis when you are willing to install the
+  optional `consist[ibis]` extra.
+- `consist.ibis_grouped_view(...)` when you want the same lazy Ibis surface but
+  need to aggregate or compare many artifacts through a grouped DuckDB view.
+- `consist.run_query(...)` when you need explicit SQLAlchemy / SQLModel queries
+  or hand-written SQL against Consist tables or views.
+- Call Ibis after the current SQLAlchemy session or run has released its DuckDB
+  connection; the adapter opens a separate DuckDB handle for analysis.
+
+Example:
+
+```python
+persons = consist.ibis_view(tracker, model=Person)
+summary = persons.filter(persons.age >= 18).group_by("home_zone_id").count()
 ```
 
 ---

@@ -34,6 +34,7 @@ Optional integrations are installed as extras:
 ```bash
 pip install "consist[ingest]"
 pip install "consist[docker]"
+pip install "consist[ibis]"
 ```
 
 > [!NOTE]
