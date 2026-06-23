@@ -12,7 +12,7 @@ from consist.core.config_canonicalization import (
 )
 from consist.core.tracker import Tracker
 from consist.core.workflow import RunContext
-from consist.types import CacheOptions, ExecutionOptions
+from consist.types import CacheOptions, ExecutionOptions, OutputSet
 
 
 def _dummy_config_plan(
@@ -633,3 +633,23 @@ def test_scenario_run_uses_decorator_identity_inputs_default(
         digest_map = record.run.meta.get("consist_hash_inputs")
         assert isinstance(digest_map, dict)
         assert len(digest_map) == 1
+
+
+def test_scenario_run_accepts_output_sets(tracker: Tracker) -> None:
+    def step(ctx) -> None:
+        annual_dir = ctx.run_dir / "annual"
+        annual_dir.mkdir(parents=True)
+        (annual_dir / "annual_2030.csv").write_text("year\n2030\n")
+
+    with tracker.scenario("scen_output_sets") as sc:
+        result = sc.run(
+            fn=step,
+            name="annual_step",
+            output_sets={
+                "annual_outputs": OutputSet(root="annual", include="annual_*.csv")
+            },
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+
+        assert result.outputs["annual_outputs"].driver == "artifact_set"
+        assert sc.coupler["annual_outputs"].driver == "artifact_set"

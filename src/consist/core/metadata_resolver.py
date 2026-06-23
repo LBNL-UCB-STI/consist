@@ -35,6 +35,7 @@ class ResolvedStepMetadata:
     facet_index: Optional[bool]
     outputs: Optional[List[str]]
     output_paths: Optional[Mapping[str, Any]]
+    output_sets: Optional[Mapping[str, Any]]
     inputs: Optional[Union[Mapping[str, Any], Iterable[Any]]]
     input_keys: Optional[Union[Iterable[str], str]]
     optional_input_keys: Optional[Union[Iterable[str], str]]
@@ -86,6 +87,7 @@ class MetadataResolver:
         runtime_kwargs: Optional[Dict[str, Any]],
         outputs: Optional[List[str]],
         output_paths: Optional[Mapping[str, Any]],
+        output_sets: Optional[Mapping[str, Any]] = None,
         cache_mode: Optional[str],
         cache_hydration: Optional[str],
         cache_version: Optional[int],
@@ -176,6 +178,7 @@ class MetadataResolver:
         if resolved_outputs is not None:
             resolved_outputs = list(resolved_outputs)
         resolved_output_paths = _resolve_meta(output_paths, step_def.output_paths)
+        resolved_output_sets = _resolve_meta(output_sets, step_def.output_sets)
         resolved_inputs = _resolve_meta(inputs, step_def.inputs)
         resolved_input_keys = _resolve_meta(input_keys, step_def.input_keys)
         resolved_optional_input_keys = _resolve_meta(
@@ -210,6 +213,7 @@ class MetadataResolver:
             facet_index=resolved_facet_index,
             outputs=resolved_outputs,
             output_paths=resolved_output_paths,
+            output_sets=resolved_output_sets,
             inputs=resolved_inputs,
             input_keys=resolved_input_keys,
             optional_input_keys=resolved_optional_input_keys,

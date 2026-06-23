@@ -25,6 +25,7 @@ from consist.types import (
     InputBindingMode,
     IdentityInputs,
     OutputPolicyOptions,
+    OutputSet,
     PathLike,
     RunInputRef,
 )
@@ -73,6 +74,8 @@ class ResolvedRunInvocation:
         Resolved declared output keys.
     output_paths : Optional[Mapping[str, ArtifactRef]]
         Resolved declared output path mapping.
+    output_sets : Optional[Mapping[str, OutputSet]]
+        Resolved declared output-set mapping.
     cache_mode : str
         Effective cache mode with defaults applied.
     cache_hydration : Optional[str]
@@ -129,6 +132,7 @@ class ResolvedRunInvocation:
     optional_input_keys: Optional[Iterable[str] | str]
     outputs: Optional[List[str]]
     output_paths: Optional[Mapping[str, ArtifactRef]]
+    output_sets: Optional[Mapping[str, OutputSet]]
     cache_mode: str
     cache_hydration: Optional[str]
     cache_version: Optional[int]
@@ -226,6 +230,7 @@ def resolve_run_invocation(
     stage: Optional[str],
     outputs: Optional[List[str]],
     output_paths: Optional[Mapping[str, ArtifactRef]],
+    output_sets: Optional[Mapping[str, OutputSet]],
     cache_options: Optional[CacheOptions],
     output_policy: Optional[OutputPolicyOptions],
     execution_options: Optional[ExecutionOptions],
@@ -293,6 +298,8 @@ def resolve_run_invocation(
         Optional declared output keys.
     output_paths : Optional[Mapping[str, ArtifactRef]]
         Optional declared output path mapping.
+    output_sets : Optional[Mapping[str, OutputSet]]
+        Optional declared output-set mapping.
     cache_options : Optional[CacheOptions]
         Grouped cache options object.
     output_policy : Optional[OutputPolicyOptions]
@@ -552,6 +559,7 @@ def resolve_run_invocation(
         runtime_kwargs=runtime_kwargs_dict,
         outputs=outputs,
         output_paths=output_paths,
+        output_sets=output_sets,
         cache_mode=cache_mode,
         cache_hydration=cache_hydration,
         cache_version=cache_version,
@@ -697,6 +705,9 @@ def resolve_run_invocation(
         optional_input_keys=resolved.optional_input_keys,
         outputs=resolved.outputs,
         output_paths=resolved.output_paths,
+        output_sets=(
+            dict(resolved.output_sets) if resolved.output_sets is not None else None
+        ),
         cache_mode=resolved_cache_mode,
         cache_hydration=resolved.cache_hydration,
         cache_version=resolved.cache_version,

@@ -18,7 +18,7 @@ from consist.core.config_canonicalization import (
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
 from consist.models.run import RunResult
-from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
+from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions, OutputSet
 
 
 def test_tracker_run_load_inputs_requires_mapping(tracker, sample_csv):
@@ -57,6 +57,41 @@ def test_tracker_run_loads_inputs_and_injects_context(tracker, sample_csv):
 
     assert "filtered" in result.outputs
     assert result.outputs["filtered"].path.exists()
+
+
+def test_tracker_run_output_sets_log_parent_children_and_preserve_output_paths(
+    tracker,
+) -> None:
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        output_set_root = ctx.run_dir / "annual"
+        output_set_root.mkdir(parents=True, exist_ok=True)
+        (output_set_root / "annual_2030.csv").write_text("year,value\n2030,1\n")
+        (output_set_root / "annual_2035.csv").write_text("year,value\n2035,2\n")
+        (ctx.run_dir / "summary.csv").write_text("metric,value\ncount,2\n")
+
+    result = tracker.run(
+        fn=step,
+        output_paths={"summary": "summary.csv"},
+        output_sets={"annual": OutputSet(root="annual", include="annual_*.csv")},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert set(result.outputs) == {"summary", "annual"}
+    assert result.outputs["summary"].path.read_text() == "metric,value\ncount,2\n"
+
+    parent = result.outputs["annual"]
+    assert parent.path.is_dir()
+    assert parent.meta["artifact_set"] is True
+    assert parent.meta["member_count"] == 2
+
+    children = tracker.get_child_artifacts(parent)
+    assert [child.key for child in children] == [
+        "annual__annual_2030_csv",
+        "annual__annual_2035_csv",
+    ]
+    assert {child.parent_artifact_id for child in children} == {parent.id}
+    assert {child.meta["output_set_key"] for child in children} == {"annual"}
 
 
 def test_tracker_run_binds_paths_with_input_binding_paths(tracker, sample_csv):
@@ -1361,3 +1396,54 @@ def test_tracker_run_propagates_start_run_optional_kwargs(tracker, monkeypatch):
     )
     assert materialize_path.name == "out.txt"
     assert Path(tracker.run_dir) in materialize_path.parents
+
+
+def test_tracker_run_logs_output_set_parent_members_and_manifest(tracker):
+    def step(ctx) -> None:
+        annual_dir = ctx.run_dir / "annual"
+        annual_dir.mkdir(parents=True)
+        (annual_dir / "annual_2030.csv").write_text("year,value\n2030,1\n")
+        (annual_dir / "annual_2035.csv").write_text("year,value\n2035,2\n")
+        (ctx.run_dir / "summary.txt").write_text("ok\n")
+
+    result = tracker.run(
+        fn=step,
+        name="annual_forecast",
+        config={"years": [2030, 2035]},
+        output_paths={"summary": "summary.txt"},
+        output_sets={
+            "annual_outputs": OutputSet(
+                root="annual",
+                include="annual_*.csv",
+                kind="tabular-partitioned",
+                expected_members=lambda config: [
+                    f"annual_{year}.csv" for year in config["years"]
+                ],
+                member_facets=lambda path, relpath, config: {
+                    "year": int(Path(relpath).stem.removeprefix("annual_"))
+                },
+            )
+        },
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert set(result.outputs) == {"summary", "annual_outputs"}
+    parent = result.outputs["annual_outputs"]
+    assert parent.driver == "artifact_set"
+    assert parent.meta["artifact_set"] is True
+    assert parent.meta["output_set_key"] == "annual_outputs"
+    assert parent.meta["output_set_kind"] == "tabular-partitioned"
+    assert parent.meta["member_count"] == 2
+    assert parent.meta["manifest_artifact_id"]
+
+    children = tracker.get_child_artifacts(parent)
+    assert [child.meta["output_set_relative_path"] for child in children] == [
+        "annual_2030.csv",
+        "annual_2035.csv",
+    ]
+    assert {child.parent_artifact_id for child in children} == {parent.id}
+
+    manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
+    assert manifest is not None
+    assert manifest.driver == "json"
+    assert manifest.meta["output_set_manifest"] is True

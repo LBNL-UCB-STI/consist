@@ -138,6 +138,68 @@ result = tracker.run(
 )
 ```
 
+### When to use `output_sets`
+
+Use `output_sets` when one logical output is written as multiple files, such as
+annual partitions, thread chunks, or diagnostic bundles. The smallest useful
+declaration only needs a root directory and an include pattern:
+
+``` python
+from consist import OutputSet
+
+result = tracker.run(
+    fn=run_forecast,
+    output_sets={
+        "annual_outputs": OutputSet(
+            root="annual",
+            include="annual_*.csv",
+        )
+    },
+)
+```
+
+Here `run_forecast` should write files such as `annual/annual_2030.csv` under
+the run output directory. Consist discovers every file matching `include`, sorts
+the members by relative path, records one logical parent artifact named
+`annual_outputs`, and records each file as a child artifact.
+
+The optional `expected_members` and `expected_count` fields turn discovery into
+a completeness check. They are not required. Use them when the config tells you
+which files must exist and the run should fail if one is missing:
+
+``` python
+result = tracker.run(
+    fn=run_forecast,
+    config={"years": [2030, 2035]},
+    output_sets={
+        "annual_outputs": OutputSet(
+            root="annual",
+            include="annual_*.csv",
+            expected_members=lambda config: [
+                f"annual_{year}.csv" for year in config["years"]
+            ],
+        )
+    },
+)
+```
+
+Consist records one logical parent artifact plus member file artifacts linked by
+`parent_artifact_id`. Cache hydration restores the member files under the
+declared root.
+
+Output-set fields fall into two groups:
+
+- Required: `root`, `include`.
+- Optional discovery controls: `exclude`, `recursive`.
+- Optional metadata: `kind`, `schema`, `partition_key`, `facet`,
+  `member_facets`.
+- Optional validation: `expected_count`, `expected_members`, `validate`.
+
+For v1, `validate="manifest"` is the default and applies the optional
+`expected_*` checks when provided. `validate="exists"` also requires at least one
+member. Stricter hash and schema validation modes are reserved for a future
+release.
+
 ### Auto-loading inputs as DataFrames
 
 If you prefer to receive a DataFrame directly instead of a path, use `input_binding="loaded"` and Consist will load the artifact for you before calling the function. This is convenient for short scripts but hides the I/O boundary — prefer `input_binding="paths"` for pipelines where the function boundary matters.

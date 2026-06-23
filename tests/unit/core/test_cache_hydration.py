@@ -23,6 +23,7 @@ from consist.models.artifact_schema import (
 from consist.models.config_facet import ConfigFacet
 from consist.models.run import ConsistRecord, Run, RunArtifactLink, RunArtifacts
 from consist.models.run_config_kv import RunConfigKV
+from consist.types import CacheOptions, ExecutionOptions, OutputSet
 
 
 def _init_core_tables(tracker: Tracker) -> None:
@@ -44,6 +45,108 @@ def _init_core_tables(tracker: Tracker) -> None:
                 if tracker.db:
                     tracker.db._relax_run_parent_fk()
                     tracker.db._ensure_schema_links_view()
+
+
+def test_tracker_run_output_set_cache_hit_materializes_members_under_new_root(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    run_dir_a = tmp_path / "runs_a"
+    run_dir_b = tmp_path / "runs_b"
+
+    tracker_a = Tracker(run_dir=run_dir_a, db_path=db_path)
+    _init_core_tables(tracker_a)
+    calls: list[str] = []
+
+    def step_a(ctx) -> None:
+        calls.append("a")
+        output_set_root = ctx.run_dir / "annual"
+        output_set_root.mkdir(parents=True, exist_ok=True)
+        (output_set_root / "annual_2030.csv").write_text("year,value\n2030,1\n")
+        (output_set_root / "annual_2035.csv").write_text("year,value\n2035,2\n")
+
+    first = tracker_a.run(
+        fn=step_a,
+        name="annual_step",
+        output_sets={"annual": OutputSet(root="annual", include="annual_*.csv")},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert calls == ["a"]
+    assert set(first.outputs) == {"annual"}
+
+    tracker_b = Tracker(run_dir=run_dir_b, db_path=db_path)
+    _init_core_tables(tracker_b)
+
+    def step_b(ctx) -> None:
+        calls.append("b")
+        raise AssertionError("cache hit should skip execution")
+
+    second = tracker_b.run(
+        fn=step_b,
+        name="annual_step",
+        output_sets={"annual": OutputSet(root="rehydrated", include="annual_*.csv")},
+        cache_options=CacheOptions(cache_hydration="outputs-requested"),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert calls == ["a"]
+    assert second.cache_hit is True
+    assert set(second.outputs) == {"annual"}
+    assert second.outputs["annual"].meta["artifact_set"] is True
+    hydrated_root = run_dir_b / "outputs" / "annual_step" / second.run.id / "rehydrated"
+    assert (hydrated_root / "annual_2030.csv").read_text() == "year,value\n2030,1\n"
+    assert (hydrated_root / "annual_2035.csv").read_text() == "year,value\n2035,2\n"
+
+
+def test_tracker_run_output_set_cache_hit_validates_expected_members(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    run_dir_a = tmp_path / "runs_a"
+    run_dir_b = tmp_path / "runs_b"
+
+    tracker_a = Tracker(run_dir=run_dir_a, db_path=db_path)
+    _init_core_tables(tracker_a)
+
+    def step_a(ctx) -> None:
+        output_set_root = ctx.run_dir / "annual"
+        output_set_root.mkdir(parents=True, exist_ok=True)
+        (output_set_root / "annual_2030.csv").write_text("year,value\n2030,1\n")
+
+    tracker_a.run(
+        fn=step_a,
+        name="annual_step",
+        output_sets={
+            "annual": OutputSet(
+                root="annual",
+                include="annual_*.csv",
+                expected_members=["annual_2030.csv"],
+            )
+        },
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    tracker_b = Tracker(run_dir=run_dir_b, db_path=db_path)
+    _init_core_tables(tracker_b)
+
+    def step_b(ctx) -> None:
+        raise AssertionError("cache hit should validate before execution")
+
+    with pytest.raises(ValueError, match="missing expected members"):
+        tracker_b.run(
+            fn=step_b,
+            name="annual_step",
+            output_sets={
+                "annual": OutputSet(
+                    root="rehydrated",
+                    include="annual_*.csv",
+                    expected_members=["annual_2030.csv", "annual_2035.csv"],
+                )
+            },
+            cache_options=CacheOptions(cache_hydration="outputs-requested"),
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
 
 
 def test_cache_hydration_policies_end_to_end(
@@ -1389,3 +1492,65 @@ def test_outputs_requested_legacy_fallback_warns_on_missing_source(
 
     assert any("source path missing" in record.message for record in caplog.records)
     assert "materialized_outputs" not in (run.meta or {})
+
+
+def test_tracker_run_cache_hit_hydrates_requested_output_set_members(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
+    _init_core_tables(tracker_a)
+    calls = {"count": 0}
+
+    def write_annual_outputs(ctx) -> None:
+        calls["count"] += 1
+        annual_dir = ctx.run_dir / "annual"
+        annual_dir.mkdir(parents=True)
+        (annual_dir / "annual_2030.csv").write_text("year,value\n2030,1\n")
+        (annual_dir / "annual_2035.csv").write_text("year,value\n2035,2\n")
+
+    first = tracker_a.run(
+        fn=write_annual_outputs,
+        name="annual_forecast",
+        config={"years": [2030, 2035]},
+        output_sets={
+            "annual_outputs": OutputSet(
+                root="annual",
+                include="annual_*.csv",
+                expected_members=lambda config: [
+                    f"annual_{year}.csv" for year in config["years"]
+                ],
+            )
+        },
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert first.cache_hit is False
+    assert calls["count"] == 1
+
+    tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
+    _init_core_tables(tracker_b)
+    second = tracker_b.run(
+        fn=write_annual_outputs,
+        name="annual_forecast",
+        config={"years": [2030, 2035]},
+        output_sets={
+            "annual_outputs": OutputSet(
+                root="annual",
+                include="annual_*.csv",
+                expected_members=lambda config: [
+                    f"annual_{year}.csv" for year in config["years"]
+                ],
+            )
+        },
+        cache_options=CacheOptions(cache_hydration="outputs-requested"),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert second.cache_hit is True
+    assert calls["count"] == 1
+    assert set(second.outputs) == {"annual_outputs"}
+    assert second.outputs["annual_outputs"].driver == "artifact_set"
+
+    hydrated_root = tracker_b.run_artifact_dir(second.run) / "annual"
+    assert (hydrated_root / "annual_2030.csv").read_text() == "year,value\n2030,1\n"
+    assert (hydrated_root / "annual_2035.csv").read_text() == "year,value\n2035,2\n"

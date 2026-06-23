@@ -1559,7 +1559,43 @@ def _render_runs_table(
         console.print(table)
 
 
-def _render_artifacts_table(tracker: Tracker, run_id: str) -> List["Artifact"]:
+def _artifact_meta_value(artifact: "Artifact", key: str) -> Any:
+    meta = artifact.meta or {}
+    return meta.get(key)
+
+
+def _artifact_is_output_set_parent(artifact: "Artifact") -> bool:
+    return (
+        artifact.driver == "artifact_set"
+        or _artifact_meta_value(artifact, "artifact_set") is True
+    )
+
+
+def _artifact_is_output_set_manifest(artifact: "Artifact") -> bool:
+    return _artifact_meta_value(artifact, "output_set_manifest") is True
+
+
+def _artifact_schema_label(artifact: "Artifact") -> Optional[str]:
+    for key in ("schema_id", "schema", "schema_name", "schema_signature"):
+        value = _artifact_meta_value(artifact, key)
+        if value is not None:
+            return str(value)
+    return None
+
+
+def _artifact_size_label(total_size_bytes: Any) -> str:
+    if total_size_bytes is None:
+        return "N/A"
+    try:
+        size = int(total_size_bytes)
+    except (TypeError, ValueError):
+        return str(total_size_bytes)
+    return f"{size} bytes"
+
+
+def _render_artifacts_table(
+    tracker: Tracker, run_id: str, *, expand_sets: bool = False
+) -> List["Artifact"]:
     """Shared logic for displaying artifacts for a run."""
     run_artifacts = tracker.get_artifacts_for_run(run_id)
     rendered: List["Artifact"] = []
@@ -1573,6 +1609,8 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> List["Artifact"]:
     table.add_column("Access", overflow="fold")
     table.add_column("Driver")
     table.add_column("Hash", style="magenta")
+    if expand_sets:
+        table.add_column("Set Parent", style="cyan", overflow="fold")
 
     def _style_artifact_access(status: str) -> str:
         if status == "primary":
@@ -1583,12 +1621,34 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> List["Artifact"]:
 
     inputs = sorted(run_artifacts.inputs.values(), key=lambda x: x.key)
     outputs = sorted(run_artifacts.outputs.values(), key=lambda x: x.key)
+    output_set_parent_ids = {
+        artifact.id for artifact in outputs if _artifact_is_output_set_parent(artifact)
+    }
+    hidden_set_member_count = 0
     ref_index = 1
 
+    def _should_hide_set_member(artifact: "Artifact") -> bool:
+        parent_id = artifact.parent_artifact_id
+        if not expand_sets and _artifact_is_output_set_manifest(artifact):
+            return True
+        return (
+            not expand_sets
+            and parent_id is not None
+            and parent_id in output_set_parent_ids
+        )
+
     for artifact in inputs:
+        if _should_hide_set_member(artifact):
+            hidden_set_member_count += 1
+            continue
         rendered.append(artifact)
         accessibility = artifact.accessibility(tracker=tracker)
         access_status = accessibility.status
+        set_parent_key = ""
+        if expand_sets and artifact.parent_artifact_id is not None:
+            parent_artifact = tracker.get_artifact(artifact.parent_artifact_id)
+            if parent_artifact is not None:
+                set_parent_key = parent_artifact.key
         table.add_row(
             str(ref_index),
             "[blue]Input[/blue]",
@@ -1598,6 +1658,7 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> List["Artifact"]:
             f"[{_style_artifact_access(access_status)}]{access_status}[/]",
             artifact.driver,
             artifact.hash[:12] if artifact.hash else "N/A",
+            *([set_parent_key] if expand_sets else []),
         )
         ref_index += 1
 
@@ -1605,9 +1666,17 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> List["Artifact"]:
         table.add_section()
 
     for artifact in outputs:
+        if _should_hide_set_member(artifact):
+            hidden_set_member_count += 1
+            continue
         rendered.append(artifact)
         accessibility = artifact.accessibility(tracker=tracker)
         access_status = accessibility.status
+        set_parent_key = ""
+        if expand_sets and artifact.parent_artifact_id is not None:
+            parent_artifact = tracker.get_artifact(artifact.parent_artifact_id)
+            if parent_artifact is not None:
+                set_parent_key = parent_artifact.key
         table.add_row(
             str(ref_index),
             "[green]Output[/green]",
@@ -1617,10 +1686,16 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> List["Artifact"]:
             f"[{_style_artifact_access(access_status)}]{access_status}[/]",
             artifact.driver,
             artifact.hash[:12] if artifact.hash else "N/A",
+            *([set_parent_key] if expand_sets else []),
         )
         ref_index += 1
 
     console.print(table)
+    if hidden_set_member_count:
+        console.print(
+            f"[dim]Hidden {hidden_set_member_count} output-set member artifact"
+            f"{'s' if hidden_set_member_count != 1 else ''}. Use --expand-sets to show them.[/dim]"
+        )
     if rendered:
         console.print("[dim]Artifact refs:[/dim]")
         max_refs_to_show = 20
@@ -2154,6 +2229,11 @@ def artifacts(
     db_path: Optional[str] = typer.Option(
         None, help="Path to the Consist DuckDB database."
     ),
+    expand_sets: bool = typer.Option(
+        False,
+        "--expand-sets",
+        help="Show output-set member artifacts instead of hiding them.",
+    ),
 ) -> None:
     """Display run artifacts or query artifacts by indexed facet parameters."""
     tracker = get_tracker(db_path)
@@ -2168,7 +2248,7 @@ def artifacts(
         if not run:
             console.print(f"[red]Run with ID '{run_id}' not found.[/red]")
             raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
-        _render_artifacts_table(tracker, run_id)
+        _render_artifacts_table(tracker, run_id, expand_sets=expand_sets)
         return
 
     if run_id is not None:
@@ -2529,6 +2609,91 @@ def _render_gtfs_selected_service_preview(
     return True
 
 
+def _render_artifact_set_preview(
+    tracker: Tracker,
+    artifact: "Artifact",
+    *,
+    n_rows: int,
+) -> bool:
+    """Render a compact artifact_set summary for logical parent artifacts."""
+    if not _artifact_is_output_set_parent(artifact):
+        return False
+
+    meta = artifact.meta or {}
+    children = tracker.get_child_artifacts(artifact)
+    manifest_artifact_id = meta.get("manifest_artifact_id")
+    manifest_artifact = None
+    if manifest_artifact_id is not None:
+        manifest_artifact = tracker.get_artifact(manifest_artifact_id)
+
+    summary = Table.grid(padding=(0, 2))
+    summary.add_column(style="bold cyan")
+    summary.add_column()
+    summary.add_row("Artifact", str(artifact.key))
+    summary.add_row("Kind", str(meta.get("output_set_kind") or artifact.driver))
+    summary.add_row("Member Count", str(meta.get("member_count", len(children))))
+    summary.add_row(
+        "Total Size",
+        _artifact_size_label(meta.get("total_size_bytes")),
+    )
+    schema_label = _artifact_schema_label(artifact)
+    if schema_label is not None:
+        summary.add_row("Schema", schema_label)
+    if manifest_artifact_id is not None:
+        summary.add_row("Manifest ID", str(manifest_artifact_id))
+
+    console.print(
+        Panel(
+            summary,
+            title="Artifact Set Summary",
+            border_style="green",
+            expand=False,
+        )
+    )
+
+    member_artifacts = list(children)
+    if manifest_artifact is not None and all(
+        member.id != manifest_artifact.id for member in member_artifacts
+    ):
+        member_artifacts.append(manifest_artifact)
+
+    if not member_artifacts:
+        console.print("[yellow]No output-set members were found.[/yellow]")
+        return True
+
+    display_count = min(max(n_rows, 1), len(member_artifacts))
+    member_table = Table(
+        title=f"Member Artifacts (showing {display_count} of {len(member_artifacts)})"
+    )
+    member_table.add_column("Role", style="yellow")
+    member_table.add_column("Artifact Key", style="cyan", overflow="fold", no_wrap=True)
+    member_table.add_column("Driver", style="dim")
+    member_table.add_column("Schema", style="magenta", overflow="fold")
+    member_table.add_column("Manifest ID", style="dim", overflow="fold")
+
+    for member in member_artifacts[:display_count]:
+        member_meta = member.meta or {}
+        role = (
+            "manifest"
+            if manifest_artifact is not None and member.id == manifest_artifact.id
+            else "member"
+        )
+        member_table.add_row(
+            role,
+            str(member.key),
+            str(member.driver),
+            _artifact_schema_label(member) or "-",
+            str(member_meta.get("manifest_artifact_id") or "-"),
+        )
+
+    console.print(member_table)
+    if len(member_artifacts) > display_count:
+        console.print(
+            f"[dim]... and {len(member_artifacts) - display_count} more output-set members[/dim]"
+        )
+    return True
+
+
 def _load_artifact_with_diagnostics(
     tracker: Tracker,
     artifact: "Artifact",
@@ -2732,6 +2897,8 @@ def preview(
     if _render_gtfs_selected_service_preview(tracker, artifact, n_rows=n_rows):
         return
     if _render_gtfs_bundle_preview(tracker, artifact, n_rows=n_rows):
+        return
+    if _render_artifact_set_preview(tracker, artifact, n_rows=n_rows):
         return
 
     resolution_bases, db_metadata_run_dir = _build_relative_resolution_bases(
@@ -3669,22 +3836,38 @@ class ConsistShell(cmd.Cmd):
             console.print(f"[red]Error: {exc}[/red]")
 
     def do_artifacts(self, arg: str) -> None:
-        """Show artifacts for a run or query by facets. Usage: artifacts <run_id> | artifacts --param ..."""
-        args = self._safe_split(arg)
-        if args and (len(args) != 1 or args[0].startswith("-")):
-            self._invoke_cli_command("artifacts", arg)
-            return
-
-        run_id = self._resolve_run_id(args[0] if args else "", command_name="artifacts")
-        if run_id is None:
-            return
-
+        """Show artifacts for a run or query by facets. Usage: artifacts <run_id> | artifacts --param ... | artifacts --expand-sets"""
         try:
+            args = self._safe_split(arg)
+            expand_sets = False
+            run_id_arg: Optional[str] = None
+            i = 0
+            while i < len(args):
+                token = args[i]
+                if token == "--expand-sets":
+                    expand_sets = True
+                    i += 1
+                    continue
+                if token.startswith("--"):
+                    self._invoke_cli_command("artifacts", arg)
+                    return
+                if run_id_arg is not None:
+                    self._invoke_cli_command("artifacts", arg)
+                    return
+                run_id_arg = token
+                i += 1
+
+            run_id = self._resolve_run_id(run_id_arg or "", command_name="artifacts")
+            if run_id is None:
+                return
+
             run = self.tracker.get_run(run_id)
             if not run:
                 console.print(f"[red]Run '{run_id}' not found.[/red]")
                 return
-            rendered = _render_artifacts_table(self.tracker, run_id)
+            rendered = _render_artifacts_table(
+                self.tracker, run_id, expand_sets=expand_sets
+            )
             self._last_artifact_run_id = run_id
             self._last_artifact_ids = []
             for artifact in rendered:

@@ -9,7 +9,7 @@ from consist.core.config_canonicalization import (
 )
 from consist.core.decorators import define_step
 from consist.core.tracker import Tracker
-from consist.types import CacheOptions, ExecutionOptions
+from consist.types import CacheOptions, ExecutionOptions, OutputSet
 
 
 def test_define_step_metadata_applied(tracker: Tracker) -> None:
@@ -201,6 +201,25 @@ def test_define_step_identity_inputs_default_applied(
     digest_map = record.run.meta.get("consist_hash_inputs")
     assert isinstance(digest_map, dict)
     assert len(digest_map) == 1
+
+
+def test_define_step_output_sets_default_applied(tracker: Tracker) -> None:
+    @tracker.define_step(
+        output_sets={"annual_outputs": OutputSet(root="annual", include="annual_*.csv")}
+    )
+    def step(ctx) -> None:
+        annual_dir = ctx.run_dir / "annual"
+        annual_dir.mkdir(parents=True)
+        (annual_dir / "annual_2030.csv").write_text("year\n2030\n")
+
+    result = tracker.run(
+        fn=step,
+        name="define_step_output_sets",
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert set(result.outputs) == {"annual_outputs"}
+    assert result.outputs["annual_outputs"].driver == "artifact_set"
 
 
 def test_define_step_legacy_metadata_removed() -> None:
