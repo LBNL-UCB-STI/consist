@@ -206,6 +206,46 @@ coupler.declare_outputs(*schema.keys(), description=schema)
 If outputs are dynamic, provide `schema_outputs=[...]` in `@define_step` so schema
 building stays deterministic.
 
+## Step Contract Introspection
+
+Use `resolve_step_contract` when an orchestrator needs the full resolved
+metadata contract for a step without executing it. This is useful for workflow
+planning, validation, generated schemas, or handoff layers that need to inspect
+the same decorator metadata that `Tracker.run(...)` and
+`ScenarioContext.run(...)` would use.
+
+```python
+from pathlib import Path
+
+import consist
+
+
+@consist.define_step(
+    outputs=lambda ctx: [f"results_{ctx.year}"],
+    identity_inputs=lambda ctx: [
+        ("model_config", ctx.require_runtime("settings")["config_dir"])
+    ],
+    name_template="{func_name}__y{year}",
+)
+def simulate():
+    ...
+
+
+contract = consist.resolve_step_contract(
+    simulate,
+    year=2030,
+    runtime_kwargs={"settings": {"config_dir": Path("configs")}},
+)
+
+print(contract.name)
+print(contract.outputs)
+print(contract.identity_inputs)
+```
+
+For batches of decorated functions, use `collect_step_contracts(steps, **context)`.
+For generated signatures and parameter details, see
+[Step Contracts](../api/step_contracts.md).
+
 ---
 
 ## Artifact Key Registries

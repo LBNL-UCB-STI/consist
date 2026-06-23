@@ -30,6 +30,62 @@ class StepContract:
     carries the declarative fields that orchestrators need before execution
     without owning execution, output registration, or domain-specific coupler
     policy.
+
+    Attributes
+    ----------
+    name : str
+        Resolved step run name after explicit overrides, decorator
+        ``name_template``, and default name templates are applied.
+    model : str
+        Resolved model name that execution would persist on the run record.
+        When no explicit model is provided, this falls back to ``name``.
+    description : str or None
+        Resolved human-readable step description.
+    config : dict[str, Any] or None
+        Resolved configuration payload that would contribute to run identity.
+    adapter : Any or None
+        Resolved config adapter, when decorator metadata or an explicit
+        override provides one.
+    identity_inputs : IdentityInputs
+        Resolved hash-only identity inputs. These are paths or labeled paths
+        that affect run identity without being logged as artifacts.
+    tags : list[str] or None
+        Resolved run tags.
+    facet : FacetLike or None
+        Resolved queryable facet payload.
+    facet_from : list[str] or None
+        Config keys that execution would project into the facet payload.
+    facet_schema_version : str, int, or None
+        Optional schema version for the resolved facet payload.
+    facet_index : bool or None
+        Whether scalar facet values should be indexed for query.
+    inputs : mapping or iterable or None
+        Resolved direct input references before execution-time materialization
+        or coupler lookup.
+    input_keys : iterable[str], str, or None
+        Required coupler input keys resolved from decorator or call-site
+        metadata.
+    optional_input_keys : iterable[str], str, or None
+        Optional coupler input keys resolved from decorator or call-site
+        metadata.
+    outputs : list[str] or None
+        Resolved Python return-value output keys.
+    output_paths : mapping[str, ArtifactRef] or None
+        Resolved key-to-path mapping for file-writing steps.
+    output_sets : mapping[str, OutputSet] or None
+        Resolved logical multi-file outputs.
+    cache_mode : str or None
+        Resolved cache mode, when explicitly supplied by metadata or options.
+    cache_hydration : str or None
+        Resolved cache-hit output hydration policy.
+    cache_version : int or None
+        Resolved per-step cache version.
+    validate_cached_outputs : str or None
+        Resolved cached-output validation policy.
+    input_binding : {"loaded", "paths", "none"} or None
+        Resolved callable input binding mode.
+    load_inputs : bool or None
+        Resolved legacy input-loading preference.
     """
 
     name: str
@@ -98,6 +154,111 @@ def resolve_step_contract(
     Explicit arguments use the same precedence as run execution: call-site
     values override decorator metadata, while callable decorator metadata is
     resolved with a ``StepContext`` populated from the supplied workflow context.
+
+    Parameters
+    ----------
+    step : Callable[..., Any]
+        Step function to inspect. If the function was decorated with
+        ``@define_step``, its metadata is applied using the same precedence as
+        ``Tracker.run`` and ``ScenarioContext.run``.
+    name : str, optional
+        Explicit step name override.
+    model : str, optional
+        Explicit model name override.
+    description : str, optional
+        Explicit description override.
+    config : dict[str, Any], optional
+        Explicit configuration payload override.
+    adapter : Any, optional
+        Explicit config adapter override.
+    identity_inputs : IdentityInputs, optional
+        Explicit hash-only identity inputs.
+    inputs : mapping or iterable, optional
+        Direct input references to include in the resolved contract.
+    input_keys : iterable[str] or str, optional
+        Required coupler input keys.
+    optional_input_keys : iterable[str] or str, optional
+        Optional coupler input keys.
+    tags : list[str], optional
+        Explicit run tags.
+    facet : FacetLike, optional
+        Explicit queryable facet payload.
+    facet_from : list[str], optional
+        Config keys to project into facets during execution.
+    facet_schema_version : str or int, optional
+        Facet schema version.
+    facet_index : bool, optional
+        Whether scalar facet values should be indexed.
+    year : int, optional
+        Workflow year made available to callable metadata and name templates.
+    iteration : int, optional
+        Workflow iteration made available to callable metadata and name
+        templates.
+    phase : str, optional
+        Workflow phase made available to callable metadata and name templates.
+    stage : str, optional
+        Workflow stage made available to callable metadata and name templates.
+    outputs : list[str], optional
+        Explicit return-value output key override.
+    output_paths : mapping[str, ArtifactRef], optional
+        Explicit file output path mapping.
+    output_sets : mapping[str, OutputSet], optional
+        Explicit logical multi-file output mapping.
+    cache_options : CacheOptions, optional
+        Cache policy options whose fields are resolved into the contract.
+    execution_options : ExecutionOptions, optional
+        Execution options whose metadata-relevant fields are resolved into the
+        contract. Runtime kwargs may be supplied here or through
+        ``runtime_kwargs``, but not both.
+    default_name_template : str, optional
+        Name template used when the step decorator does not provide one.
+    allow_template : bool, default True
+        Whether name templates are applied.
+    apply_step_defaults : bool, default True
+        Whether ``@define_step`` metadata defaults are applied.
+    consist_settings : ConsistSettings, optional
+        Consist settings object exposed to callable metadata as
+        ``ctx.consist_settings``.
+    consist_workspace : pathlib.Path, optional
+        Consist run workspace exposed to callable metadata as
+        ``ctx.consist_workspace``.
+    consist_state : ConsistRecord, optional
+        Active Consist state exposed to callable metadata as
+        ``ctx.consist_state``.
+    runtime_kwargs : mapping[str, Any], optional
+        Workflow runtime objects exposed to callable metadata through
+        ``ctx.runtime_kwargs`` and the ``ctx.runtime_*`` convenience fields.
+    missing_name_error : str, default "resolve_step_contract requires a step name."
+        Error message used when neither an explicit name, function name, nor
+        template can resolve a name.
+
+    Returns
+    -------
+    StepContract
+        Fully resolved declarative step metadata.
+
+    Raises
+    ------
+    ValueError
+        If runtime kwargs are provided both directly and through
+        ``execution_options.runtime_kwargs``.
+    ValueError
+        If the step name cannot be resolved.
+
+    Examples
+    --------
+    >>> import consist
+    >>> @consist.define_step(
+    ...     outputs=lambda ctx: [f"results_{ctx.year}"],
+    ...     name_template="{func_name}__y{year}",
+    ... )
+    ... def simulate():
+    ...     pass
+    >>> contract = consist.resolve_step_contract(simulate, year=2030)
+    >>> contract.name
+    'simulate__y2030'
+    >>> contract.outputs
+    ['results_2030']
     """
 
     if runtime_kwargs is not None:
@@ -215,6 +376,30 @@ def collect_step_contracts(
 ) -> list[StepContract]:
     """
     Resolve a sequence of decorated steps with shared workflow context.
+
+    Parameters
+    ----------
+    steps : iterable of Callable[..., Any]
+        Step functions to inspect.
+    **context : Any
+        Shared keyword arguments forwarded to ``resolve_step_contract`` for
+        each step, such as ``year``, ``iteration``, ``runtime_kwargs``,
+        ``cache_options``, or ``default_name_template``.
+
+    Returns
+    -------
+    list[StepContract]
+        Resolved contracts in the same order as ``steps``.
+
+    Examples
+    --------
+    >>> import consist
+    >>> @consist.define_step(outputs=lambda ctx: [f"a_{ctx.year}"])
+    ... def first():
+    ...     pass
+    >>> contracts = consist.collect_step_contracts([first], year=2040)
+    >>> contracts[0].outputs
+    ['a_2040']
     """
 
     return [resolve_step_contract(step, **context) for step in steps]
