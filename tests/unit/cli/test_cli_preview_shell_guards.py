@@ -280,6 +280,67 @@ def test_preview_renders_gtfs_selected_service_summary(
     assert "preview_gtfs_selected_service_notes" not in result.stdout
 
 
+def test_preview_renders_artifact_set_summary(
+    cli_runner, tracker, tmp_path: Path
+) -> None:
+    """`preview` should summarize artifact_set parents without loading them."""
+    manifest_path = tmp_path / "output_set_manifest.json"
+    manifest_path.write_text('{"kind": "table"}\n', encoding="utf-8")
+    member_one_path = tmp_path / "output_set_member_one.csv"
+    member_one_path.write_text("value\n1\n", encoding="utf-8")
+    member_two_path = tmp_path / "output_set_member_two.csv"
+    member_two_path.write_text("value\n2\n", encoding="utf-8")
+
+    with tracker.start_run("run_preview_output_set", "model"):
+        manifest = tracker.log_artifact(
+            manifest_path,
+            key="preview_output_set_manifest",
+            driver="json",
+            direction="output",
+        )
+        parent = tracker.log_artifact(
+            manifest_path,
+            key="preview_output_set",
+            driver="artifact_set",
+            direction="output",
+            artifact_set=True,
+            output_set_key="preview_output_set",
+            output_set_kind="table",
+            manifest_artifact_id=str(manifest.id),
+            member_count=2,
+            total_size_bytes=12,
+            schema_id="schema-preview-output-set",
+        )
+        tracker.log_artifact(
+            member_one_path,
+            key="preview_output_set_member_one",
+            driver="csv",
+            direction="output",
+            parent_artifact_id=parent.id,
+        )
+        tracker.log_artifact(
+            member_two_path,
+            key="preview_output_set_member_two",
+            driver="csv",
+            direction="output",
+            parent_artifact_id=parent.id,
+            schema_id="schema-preview-output-set-member",
+        )
+
+    result = cli_runner.invoke(app, ["preview", "preview_output_set"])
+
+    assert result.exit_code == 0
+    assert "Artifact Set Summary" in result.stdout
+    assert "preview_output_set" in result.stdout
+    assert "Member Count" in result.stdout
+    assert "Total Size" in result.stdout
+    assert "Schema" in result.stdout
+    assert "Manifest ID" in result.stdout
+    assert "preview_output_set_member_one" in result.stdout
+    assert "preview_output_set_member_two" in result.stdout
+    assert "preview_output_set_manifest" in result.stdout
+
+
 def test_preview_renders_dimensions_for_xarray_like_dataset(
     cli_runner,
     tracker,

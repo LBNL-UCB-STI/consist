@@ -130,6 +130,7 @@ from consist.types import (
     HashInputs,
     IdentityInputs,
     OutputPolicyOptions,
+    OutputSet,
     RunInputRef,
 )
 
@@ -1889,6 +1890,7 @@ class Tracker:
         parent_run_id: Optional[str] = None,
         outputs: Optional[List[str]] = None,
         output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        output_sets: Optional[Mapping[str, OutputSet]] = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
         cache_options: Optional[CacheOptions] = None,
@@ -1969,6 +1971,12 @@ class Tracker:
             when ``output_paths`` is not provided.
         output_paths : Optional[Mapping[str, ArtifactRef]], optional
             Output file paths to log. Dict maps artifact keys to host paths or Artifact refs.
+        output_sets : Optional[Mapping[str, OutputSet]], optional
+            Logical output declarations for directory or chunked outputs. Each
+            mapping key becomes the parent artifact key. Each ``OutputSet`` needs
+            only ``root`` and ``include``; ``expected_members`` and
+            ``expected_count`` are optional completeness checks, not required
+            fields.
         capture_dir : Optional[Path], optional
             Directory to scan for outputs (legacy tools that write to specific dirs).
         capture_pattern : str, default "*"
@@ -2065,6 +2073,7 @@ class Tracker:
             parent_run_id=parent_run_id,
             outputs=outputs,
             output_paths=output_paths,
+            output_sets=output_sets,
             capture_dir=capture_dir,
             capture_pattern=capture_pattern,
             cache_options=cache_options,

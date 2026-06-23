@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import inspect
 import logging
@@ -10,9 +10,13 @@ import uuid
 
 from consist.core._coupler_shared import CouplerMapMixin
 from consist.core.coupler import CouplerView, DeclaredOutput
+from consist.core.output_sets import (
+    build_output_set_manifest,
+    discover_output_set_members,
+)
 from consist.core.validation import validate_artifact_key
 from consist.protocols import TrackerLike
-from consist.types import ExecutionOptions
+from consist.types import ExecutionOptions, OutputSet
 
 from consist.models.run import Run
 
@@ -278,6 +282,7 @@ class NoopScenarioContext:
         run_id: Optional[str] = None,
         outputs: Optional[Sequence[str]] = None,
         output_paths: Optional[Mapping[str, Any]] = None,
+        output_sets: Optional[Mapping[str, OutputSet]] = None,
         execution_options: Optional[ExecutionOptions] = None,
         runtime_kwargs: Optional[Dict[str, Any]] = None,
         inject_context: bool | str | None = None,
@@ -317,6 +322,7 @@ class NoopScenarioContext:
             run_id=run_id,
             outputs=outputs,
             output_paths=output_paths,
+            output_sets=output_sets,
             runtime_kwargs=resolved_runtime_kwargs,
             inject_context=resolved_inject_context,
             default_name=self.name,
@@ -376,6 +382,7 @@ class NoopTracker(TrackerLike):
         run_id: Optional[str] = None,
         outputs: Optional[Sequence[str]] = None,
         output_paths: Optional[Mapping[str, Any]] = None,
+        output_sets: Optional[Mapping[str, OutputSet]] = None,
         execution_options: Optional[ExecutionOptions] = None,
         runtime_kwargs: Optional[Dict[str, Any]] = None,
         inject_context: bool | str | None = None,
@@ -416,6 +423,7 @@ class NoopTracker(TrackerLike):
             run_id=run_id,
             outputs=outputs,
             output_paths=output_paths,
+            output_sets=output_sets,
             runtime_kwargs=resolved_runtime_kwargs,
             inject_context=resolved_inject_context,
             output_base_dir=self._output_base_dir,
@@ -463,6 +471,7 @@ def _run_noop_step(
     run_id: Optional[str],
     outputs: Optional[Sequence[str]],
     output_paths: Optional[Mapping[str, Any]],
+    output_sets: Optional[Mapping[str, OutputSet]],
     runtime_kwargs: Optional[Dict[str, Any]],
     inject_context: bool | str,
     default_name: Optional[str] = None,
@@ -474,6 +483,7 @@ def _run_noop_step(
     resolved_name = name or getattr(fn, "__name__", "run")
     base = default_name or resolved_name
     resolved_run_id = run_id or f"{base}_{resolved_name}_{uuid.uuid4().hex[:8]}"
+    base_dir = output_base_dir or Path.cwd()
 
     call_kwargs: Dict[str, Any] = dict(runtime_kwargs or {})
     required_runtime = getattr(fn, "__consist_runtime_required__", ()) if fn else ()
@@ -552,6 +562,27 @@ def _run_noop_step(
                     break
                 inferred[key] = _build_noop_artifact(value, key=key)
             outputs_map.update(inferred)
+
+    if output_sets:
+        for key, output_set in output_sets.items():
+            root_path = _resolve_noop_output_path(output_set.root, base_dir)
+            resolved_output_set = replace(output_set, root=root_path)
+            members = discover_output_set_members(resolved_output_set)
+            outputs_map[str(key)] = _build_noop_artifact(
+                root_path,
+                key=str(key),
+                meta={
+                    "artifact_set": True,
+                    "output_set_key": str(key),
+                    "output_set_manifest": build_output_set_manifest(
+                        key=str(key),
+                        output_set=resolved_output_set,
+                        members=members,
+                        config={},
+                        logged_members=[],
+                    ),
+                },
+            )
 
     if outputs_map and on_outputs is not None:
         on_outputs(outputs_map)

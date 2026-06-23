@@ -423,6 +423,104 @@ def test_artifacts_with_db(mock_db_session, tmp_path):
         assert "processed_data" in result.stdout
 
 
+def test_artifacts_hides_output_set_members_by_default(cli_runner, tracker, tmp_path):
+    parent_path = tmp_path / "output_set_parent.csv"
+    parent_path.write_text("value\n1\n", encoding="utf-8")
+    member_path = tmp_path / "output_set_member.csv"
+    member_path.write_text("value\n2\n", encoding="utf-8")
+    manifest_path = tmp_path / "output_set_manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    standalone_path = tmp_path / "standalone.csv"
+    standalone_path.write_text("value\n3\n", encoding="utf-8")
+
+    with tracker.start_run("run_output_set", "demo"):
+        manifest = tracker.log_artifact(
+            manifest_path,
+            key="output_set_manifest",
+            driver="json",
+            direction="output",
+            output_set_manifest=True,
+        )
+        parent = tracker.log_artifact(
+            parent_path,
+            key="output_set_parent",
+            driver="artifact_set",
+            direction="output",
+            artifact_set=True,
+            output_set_key="output_set_parent",
+            output_set_kind="table",
+            manifest_artifact_id=str(manifest.id),
+            member_count=1,
+            total_size_bytes=2,
+        )
+        tracker.log_artifact(
+            member_path,
+            key="output_set_member",
+            driver="csv",
+            direction="output",
+            parent_artifact_id=parent.id,
+        )
+        tracker.log_artifact(
+            standalone_path,
+            key="standalone_output",
+            driver="csv",
+            direction="output",
+        )
+
+    result = cli_runner.invoke(app, ["artifacts", "run_output_set"])
+
+    assert result.exit_code == 0
+    assert "output_set_parent" in result.stdout
+    assert "standalone_output" in result.stdout
+    assert "output_set_member" not in result.stdout
+    assert "output_set_manifest" not in result.stdout
+
+
+def test_artifacts_expands_output_set_members(cli_runner, tracker, tmp_path):
+    parent_path = tmp_path / "output_set_parent.csv"
+    parent_path.write_text("value\n1\n", encoding="utf-8")
+    member_path = tmp_path / "output_set_member.csv"
+    member_path.write_text("value\n2\n", encoding="utf-8")
+    manifest_path = tmp_path / "output_set_manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    with tracker.start_run("run_output_set_expand", "demo"):
+        manifest = tracker.log_artifact(
+            manifest_path,
+            key="output_set_manifest",
+            driver="json",
+            direction="output",
+            output_set_manifest=True,
+        )
+        parent = tracker.log_artifact(
+            parent_path,
+            key="output_set_parent",
+            driver="artifact_set",
+            direction="output",
+            artifact_set=True,
+            output_set_key="output_set_parent",
+            output_set_kind="table",
+            manifest_artifact_id=str(manifest.id),
+            member_count=1,
+            total_size_bytes=2,
+        )
+        tracker.log_artifact(
+            member_path,
+            key="output_set_member",
+            driver="csv",
+            direction="output",
+            parent_artifact_id=parent.id,
+        )
+
+    result = cli_runner.invoke(
+        app, ["artifacts", "run_output_set_expand", "--expand-sets"]
+    )
+
+    assert result.exit_code == 0
+    assert "output_set_parent" in result.stdout
+    assert "output_set_member" in result.stdout
+
+
 def test_artifacts_query_mode_with_param(cli_runner, tracker, sample_csv):
     with tracker.start_run("run_query_artifacts", "beam"):
         tracker.log_output(
@@ -882,6 +980,13 @@ def test_schema_export_command_passes_prefer_source(mock_db_session, tmp_path):
             )
         assert result.exit_code == 0
         assert mock_export.call_args.kwargs["prefer_source"] == "duckdb"
+
+
+def test_schema_help_does_not_list_export_manifest_command() -> None:
+    result = runner.invoke(app, ["schema", "--help"])
+
+    assert result.exit_code == 0
+    assert "export-manifest" not in result.stdout
 
 
 def test_validate_paginates_artifacts(tmp_path, monkeypatch):
@@ -2389,7 +2494,16 @@ def test_shell_artifacts_calls_renderer():
     shell = ConsistShell(tracker)
     with patch("consist.cli._render_artifacts_table") as render:
         shell.do_artifacts("run1")
-    render.assert_called_once_with(tracker, "run1")
+    render.assert_called_once_with(tracker, "run1", expand_sets=False)
+
+
+def test_shell_artifacts_expands_sets_when_requested():
+    tracker = MagicMock()
+    tracker.get_run.return_value = MagicMock()
+    shell = ConsistShell(tracker)
+    with patch("consist.cli._render_artifacts_table") as render:
+        shell.do_artifacts("run1 --expand-sets")
+    render.assert_called_once_with(tracker, "run1", expand_sets=True)
 
 
 def test_shell_summary_uses_renderer():

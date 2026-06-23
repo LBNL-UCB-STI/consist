@@ -46,6 +46,7 @@ from consist.types import (
     InputBindingMode,
     IdentityInputs,
     OutputPolicyOptions,
+    OutputSet,
     RunInputRef,
 )
 from pathlib import Path
@@ -387,6 +388,7 @@ class ScenarioContext:
         cache_epoch: Optional[int] = None,
         coupler: Optional[Coupler] = None,
         require_outputs: Optional[Iterable[str]] = None,
+        output_sets: Optional[Mapping[str, OutputSet]] = None,
         **kwargs: Any,
     ):
         self.tracker = tracker
@@ -400,6 +402,7 @@ class ScenarioContext:
         self.step_cache_hydration = step_cache_hydration
         self.name_template = name_template
         self.cache_epoch = cache_epoch
+        self.output_sets = output_sets
 
         # Internal State
         self._header_record: Optional[ConsistRecord] = None
@@ -793,6 +796,7 @@ class ScenarioContext:
         parent_run_id: Optional[str] = None,
         outputs: Optional[List[str]] = None,
         output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        output_sets: Optional[Mapping[str, OutputSet]] = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
         cache_options: Optional[CacheOptions] = None,
@@ -928,6 +932,7 @@ class ScenarioContext:
             stage=stage,
             outputs=outputs,
             output_paths=output_paths,
+            output_sets=output_sets,
             cache_options=cache_options,
             output_policy=output_policy,
             execution_options=execution_options,
@@ -1031,6 +1036,7 @@ class ScenarioContext:
             parent_run_id=parent_run_id,
             outputs=resolved_outputs,
             output_paths=resolved_output_paths,
+            output_sets=resolved_invocation.output_sets,
             capture_dir=capture_dir,
             capture_pattern=capture_pattern,
             cache_options=CacheOptions(
@@ -1150,6 +1156,7 @@ class ScenarioContext:
             stage=None,
             outputs=outputs,
             output_paths=output_paths,
+            output_sets=None,
             cache_options=CacheOptions(
                 cache_mode=cache_mode,
                 cache_hydration=cache_hydration,

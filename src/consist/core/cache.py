@@ -23,6 +23,7 @@ from typing import (
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifacts, ConsistRecord
 from consist.core.error_messages import format_problem_cause_fix
+from consist.core.output_sets import build_output_set_child_destinations
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
@@ -157,6 +158,7 @@ class ActiveRunCacheOptions:
     cache_mode: str = "reuse"
     cache_hydration: str = "metadata"  # "metadata" | "inputs-missing" | "outputs-requested" | "outputs-all"
     materialize_cached_output_paths: Optional[Dict[str, Path]] = None
+    materialize_cached_output_set_roots: Optional[Dict[str, Path]] = None
     materialize_cached_outputs_dir: Optional[Path] = None
     materialize_cached_outputs_source_root: Optional[Path] = None
     validate_cached_outputs: str = "lazy"  # "eager" | "lazy"
@@ -232,7 +234,13 @@ def _materialize_cached_outputs_via_run_api(
     active_options: ActiveRunCacheOptions,
     outputs_by_key: dict[str, Artifact],
 ) -> Optional[dict[str, str]]:
-    requested_paths = active_options.materialize_cached_output_paths or {}
+    requested_paths = dict(active_options.materialize_cached_output_paths or {})
+    requested_paths.update(
+        build_output_set_child_destinations(
+            outputs=list(outputs_by_key.values()),
+            output_set_roots=active_options.materialize_cached_output_set_roots or {},
+        )
+    )
     requested_keys = list(requested_paths)
     hydrated_keys = set(outputs_by_key)
     missing_keys = sorted(set(requested_keys) - hydrated_keys)
@@ -304,7 +312,14 @@ def _materialize_cached_outputs_via_run_api(
 
 def parse_materialize_cached_outputs_kwargs(
     kwargs: Dict[str, Any],
-) -> tuple[str, Optional[Dict[str, Path]], Optional[Path], Optional[Path], str]:
+) -> tuple[
+    str,
+    Optional[Dict[str, Path]],
+    Optional[Dict[str, Path]],
+    Optional[Path],
+    Optional[Path],
+    str,
+]:
     """
     Parse and validate cached-output materialization options from run kwargs.
 
@@ -327,6 +342,9 @@ def parse_materialize_cached_outputs_kwargs(
     cache_hydration = str(kwargs.pop("cache_hydration", "metadata")).lower()
     materialize_cached_output_paths_raw = kwargs.pop(
         "materialize_cached_output_paths", None
+    )
+    materialize_cached_output_set_roots_raw = kwargs.pop(
+        "materialize_cached_output_set_roots", None
     )
     materialize_cached_outputs_dir_raw = kwargs.pop(
         "materialize_cached_outputs_dir", None
@@ -351,7 +369,10 @@ def parse_materialize_cached_outputs_kwargs(
         raise ValueError("validate_cached_outputs must be one of: 'eager', 'lazy'")
 
     if cache_hydration == "outputs-requested":
-        if materialize_cached_output_paths_raw is None:
+        if (
+            materialize_cached_output_paths_raw is None
+            and materialize_cached_output_set_roots_raw is None
+        ):
             raise ValueError(
                 "cache_hydration='outputs-requested' requires materialize_cached_output_paths"
             )
@@ -371,6 +392,7 @@ def parse_materialize_cached_outputs_kwargs(
     else:
         if (
             materialize_cached_output_paths_raw is not None
+            or materialize_cached_output_set_roots_raw is not None
             or materialize_cached_outputs_dir_raw is not None
             or materialize_cached_outputs_source_root_raw is not None
         ):
@@ -388,6 +410,13 @@ def parse_materialize_cached_outputs_kwargs(
             for k, v in dict(materialize_cached_output_paths_raw).items()
         }
 
+    materialize_cached_output_set_roots: Optional[Dict[str, Path]] = None
+    if materialize_cached_output_set_roots_raw is not None:
+        materialize_cached_output_set_roots = {
+            str(k): Path(v)
+            for k, v in dict(materialize_cached_output_set_roots_raw).items()
+        }
+
     materialize_cached_outputs_dir: Optional[Path] = (
         Path(materialize_cached_outputs_dir_raw)
         if materialize_cached_outputs_dir_raw is not None
@@ -402,6 +431,7 @@ def parse_materialize_cached_outputs_kwargs(
     return (
         cache_hydration,
         materialize_cached_output_paths,
+        materialize_cached_output_set_roots,
         materialize_cached_outputs_dir,
         materialize_cached_outputs_source_root,
         validate_cached_outputs,

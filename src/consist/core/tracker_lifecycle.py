@@ -247,6 +247,7 @@ class RunLifecycleCoordinator:
             (
                 cache_hydration,
                 materialize_cached_output_paths,
+                materialize_cached_output_set_roots,
                 materialize_cached_outputs_dir,
                 materialize_cached_outputs_source_root,
                 validate_cached_outputs,
@@ -450,6 +451,9 @@ class RunLifecycleCoordinator:
                 cache_mode=cache_mode,
                 cache_hydration=cache_hydration,
                 materialize_cached_output_paths=materialize_cached_output_paths,
+                materialize_cached_output_set_roots=(
+                    materialize_cached_output_set_roots
+                ),
                 materialize_cached_outputs_dir=materialize_cached_outputs_dir,
                 materialize_cached_outputs_source_root=(
                     materialize_cached_outputs_source_root

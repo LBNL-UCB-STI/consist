@@ -21,11 +21,14 @@ from typing import (
     Optional,
     Protocol,
     Literal,
+    Callable,
+    Sequence,
     TypeAlias,
     Union,
     runtime_checkable,
 )
 from pydantic import BaseModel
+from sqlmodel import SQLModel
 
 if TYPE_CHECKING:  # pragma: no cover
     from consist.models.artifact import Artifact
@@ -95,6 +98,80 @@ class OutputPolicyOptions:
 
     output_mismatch: Optional[Literal["warn", "error", "ignore"]] = None
     output_missing: Optional[Literal["warn", "error", "ignore"]] = None
+
+
+@dataclass(frozen=True, slots=True)
+class OutputSet:
+    """
+    Declares a logical output artifact represented by multiple member files.
+
+    Use an output set when a step writes one conceptual output as several files,
+    such as one CSV per year or one partition per worker. Consist records one
+    parent artifact for the logical output and records each discovered file as a
+    child artifact. The JSON manifest artifact stores the detailed member list.
+
+    Only ``root`` and ``include`` are required. The ``expected_*`` fields are
+    optional guardrails: use them when the run should fail if a known partition
+    is missing, but omit them for open-ended bundles where "whatever matched the
+    include pattern" is the desired set.
+
+    Parameters
+    ----------
+    root : str | pathlib.Path
+        Directory containing the member files. Relative roots are resolved under
+        the run's output directory, so ``root="annual"`` means
+        ``<run-output-dir>/annual``.
+    include : str | Sequence[str]
+        Glob-style filename pattern or patterns for files to include. Matching
+        is against each path relative to ``root``. For recursive sets, include
+        subdirectories in the pattern, for example ``"**/*.csv"``.
+    exclude : str | Sequence[str] | None, optional
+        Glob-style pattern or patterns to remove from the included files.
+    recursive : bool, default False
+        If true, search below ``root`` recursively. If false, only direct child
+        files of ``root`` are considered.
+    kind : str | None, optional
+        Human-facing category for the set, such as ``"annual-partitions"`` or
+        ``"diagnostic-bundle"``. This is metadata only.
+    schema : type[SQLModel] | None, optional
+        Optional schema metadata for the logical parent and members. This does
+        not make schema validation happen yet.
+    expected_count : int | Callable[[Mapping[str, Any]], int] | None, optional
+        Optional completeness check for the number of discovered members.
+    expected_members : Sequence[str] | Callable[[Mapping[str, Any]], Sequence[str]] | None, optional
+        Optional completeness check for exact relative member names. This is not
+        required. It is useful for partitioned outputs where the config already
+        tells you the expected files, for example one file per requested year.
+    partition_key : str | None, optional
+        Optional metadata label for the partition dimension represented by the
+        members, such as ``"year"``. Consist does not infer facets from this
+        value.
+    member_facets : Callable[..., Mapping[str, Any]] | None, optional
+        Optional callable returning facets for each member. It receives
+        ``(path, relative_path, config)``.
+    facet : Mapping[str, Any] | None, optional
+        Optional facets for the logical parent artifact.
+    validate : {"exists", "manifest", "hashes", "schema"}, default "manifest"
+        Validation mode. ``"manifest"`` and ``"exists"`` are implemented in v1.
+        ``"manifest"`` records the member manifest and applies any
+        ``expected_*`` checks. ``"exists"`` also requires at least one member.
+        ``"hashes"`` and ``"schema"`` are reserved for future stricter checks.
+    """
+
+    root: PathLike
+    include: str | Sequence[str]
+    exclude: str | Sequence[str] | None = None
+    recursive: bool = False
+    kind: str | None = None
+    schema: type[SQLModel] | None = None
+    expected_count: int | Callable[[Mapping[str, Any]], int] | None = None
+    expected_members: (
+        Sequence[str] | Callable[[Mapping[str, Any]], Sequence[str]] | None
+    ) = None
+    partition_key: str | None = None
+    member_facets: Callable[..., Mapping[str, Any]] | None = None
+    facet: Mapping[str, Any] | None = None
+    validate: Literal["exists", "manifest", "hashes", "schema"] = "manifest"
 
 
 @dataclass(frozen=True, slots=True)

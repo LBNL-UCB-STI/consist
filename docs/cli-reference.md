@@ -173,6 +173,7 @@ Inspect artifacts in two modes:
 
 ```bash
 consist artifacts <run_id>
+consist artifacts <run_id> --expand-sets
 
 # Query by artifact facet params (repeat --param)
 consist artifacts --param beam.phys_sim_iteration=2
@@ -192,6 +193,8 @@ Query-mode options:
 - `--key-prefix`: prefix filter on artifact key
 - `--family-prefix`: prefix filter on indexed `artifact_family` facet
 - `--limit`: maximum results (default `100`)
+- `--expand-sets`: show member artifacts for logical output sets. By default,
+  run mode shows the parent output-set artifact and hides member/manifest rows.
 
 ### consist schema capture-file
 
@@ -345,7 +348,9 @@ consist summary
 
 ### consist preview
 
-Preview tabular artifacts (CSV, Parquet) without loading full data.
+Preview tabular artifacts (CSV, Parquet) without loading full data. For logical
+output sets, `preview` shows a set summary and member list instead of trying to
+load the parent artifact as one table.
 
 ```bash
 consist preview <artifact_key>

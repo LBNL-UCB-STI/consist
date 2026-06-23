@@ -72,6 +72,7 @@ from consist.types import (
     InputBindingMode,
     IdentityInputs,
     OutputPolicyOptions,
+    OutputSet,
 )
 
 if TYPE_CHECKING:
@@ -377,6 +378,7 @@ def define_step(
     outputs: Optional[list[str]] = None,
     schema_outputs: Optional[list[str]] = None,
     output_paths: Optional[Mapping[str, Any]] = None,
+    output_sets: Optional[Mapping[str, OutputSet]] = None,
     inputs: Optional[Union[Mapping[str, Any], Iterable[Any]]] = None,
     input_keys: Optional[Union[Iterable[str], str]] = None,
     optional_input_keys: Optional[Union[Iterable[str], str]] = None,
@@ -405,6 +407,11 @@ def define_step(
     This decorator lets you attach defaults such as ``outputs`` or ``tags`` to a
     function. ``Tracker.run`` and ``ScenarioContext.run`` read this metadata.
     Callable values are resolved at runtime with a StepContext.
+
+    Use ``output_sets`` for defaults that describe one logical output written as
+    many files. Each ``OutputSet`` requires ``root`` and ``include``. Optional
+    fields such as ``expected_members`` and ``expected_count`` add completeness
+    checks but are not required.
     """
     return define_step_decorator(
         model=model,
@@ -412,6 +419,7 @@ def define_step(
         outputs=outputs,
         schema_outputs=schema_outputs,
         output_paths=output_paths,
+        output_sets=output_sets,
         inputs=inputs,
         input_keys=input_keys,
         optional_input_keys=optional_input_keys,
