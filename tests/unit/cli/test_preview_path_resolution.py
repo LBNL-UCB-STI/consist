@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
+
+from rich.console import Console
 
 from typer.testing import CliRunner
 
@@ -767,3 +770,83 @@ def test_shell_preview_uses_trust_db_mount_inference_for_workspace_uris(
     assert "Schema: trip_table" in out
     assert "origin_zone" in out
     assert shell.tracker.mounts == {}
+
+
+def test_shell_artifacts_uses_trust_db_mount_inference_for_named_mount_uris(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "SynthFirm"
+    outputs_root = data_root / "outputs"
+    outputs_root.mkdir(parents=True, exist_ok=True)
+    data_file = outputs_root / "out.csv"
+    data_file.write_text("value\n1\n", encoding="utf-8")
+    db_path = tmp_path / "provenance.duckdb"
+
+    producer = Tracker(
+        run_dir=tmp_path / "producer",
+        db_path=str(db_path),
+        mounts={"data": str(data_root)},
+    )
+    with producer.start_run("producer_run", "synthfirm"):
+        producer.log_artifact(
+            data_file,
+            key="out",
+            driver="csv",
+            direction="output",
+        )
+
+    tracker = get_tracker(str(db_path))
+    shell = ConsistShell(tracker, trust_db=True)
+
+    record_console = Console(record=True, width=200)
+    with patch("consist.cli.console", record_console):
+        shell.do_artifacts("producer_run")
+
+    out = record_console.export_text()
+    assert "Artifacts for Run" in out
+    assert "out.csv" in out
+    assert "primary" in out
+    assert "missing" not in out
+
+
+def test_shell_artifacts_explicit_mount_overrides_trusted_db_metadata(
+    tmp_path: Path,
+) -> None:
+    stale_data_root = tmp_path / "SynthFirm"
+    explicit_data_root = tmp_path / "explicit"
+    stale_outputs_root = stale_data_root / "outputs"
+    explicit_outputs_root = explicit_data_root / "outputs"
+    stale_outputs_root.mkdir(parents=True, exist_ok=True)
+    explicit_outputs_root.mkdir(parents=True, exist_ok=True)
+    data_file = stale_outputs_root / "out.csv"
+    data_file.write_text("value\n1\n", encoding="utf-8")
+    db_path = tmp_path / "provenance.duckdb"
+
+    producer = Tracker(
+        run_dir=tmp_path / "producer",
+        db_path=str(db_path),
+        mounts={"data": str(stale_data_root)},
+    )
+    with producer.start_run("producer_run", "synthfirm"):
+        producer.log_artifact(
+            data_file,
+            key="out",
+            driver="csv",
+            direction="output",
+        )
+
+    data_file.unlink()
+    explicit_file = explicit_outputs_root / "out.csv"
+    explicit_file.write_text("value\n2\n", encoding="utf-8")
+
+    tracker = get_tracker(str(db_path), mounts={"data": str(explicit_data_root)})
+    shell = ConsistShell(tracker, trust_db=True)
+
+    record_console = Console(record=True, width=200)
+    with patch("consist.cli.console", record_console):
+        shell.do_artifacts("producer_run")
+
+    out = record_console.export_text()
+    assert "Artifacts for Run" in out
+    assert "primary" in out
+    assert "missing" not in out
