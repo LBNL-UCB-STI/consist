@@ -98,7 +98,7 @@ def test_shell_preview_requires_artifact_key(capsys) -> None:
     shell.do_preview("")
 
     out = capsys.readouterr().out
-    assert "artifact_key required" in out
+    assert "Artifact key required" in out
 
 
 def test_shell_preview_reports_missing_artifact(capsys) -> None:
@@ -424,7 +424,7 @@ def test_shell_schema_profile_requires_artifact_key(capsys) -> None:
     shell.do_schema_profile("")
 
     out = capsys.readouterr().out
-    assert "artifact_key required" in out
+    assert "Artifact key required" in out
 
 
 def test_shell_schema_profile_reports_missing_artifact(capsys) -> None:
@@ -516,7 +516,7 @@ def test_shell_schema_stub_requires_artifact_key(capsys) -> None:
     shell.do_schema_stub("")
 
     out = capsys.readouterr().out
-    assert "artifact_key required" in out
+    assert "Artifact key required" in out
 
 
 def test_shell_schema_stub_reports_missing_artifact(capsys) -> None:

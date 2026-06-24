@@ -14,8 +14,8 @@ from consist.types import CacheOptions
 
 def _assert_problem_cause_fix(message: str) -> None:
     assert "Problem:" in message
-    assert "Cause:" in message
-    assert "Fix:" in message
+    assert "Likely cause:" in message
+    assert "Suggested fix:" in message
 
 
 def test_pre_pilates_adapter_and_identity_inputs_surface(

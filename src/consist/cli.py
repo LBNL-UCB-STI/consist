@@ -49,10 +49,12 @@ import click
 import duckdb
 import pandas as pd
 import typer
+from rich import box
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
+from rich.text import Text
 from sqlalchemy import and_, or_
 from sqlmodel import Session, col, select
 
@@ -81,6 +83,20 @@ schema_app = typer.Typer(rich_markup_mode="markdown")
 views_app = typer.Typer(rich_markup_mode="markdown")
 db_app = typer.Typer(rich_markup_mode="markdown")
 console = Console()
+
+
+def _print_cli_error(message: str, *, title: str = "Consist error") -> None:
+    """Render an error message in a small boxed panel."""
+    console.print(
+        Panel.fit(
+            Text(message),
+            title=title,
+            border_style="red",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
+
 
 app.add_typer(
     schema_app,
@@ -1254,12 +1270,12 @@ def schema_capture_file(
             trust_db=trust_db,
         )
     except FileNotFoundError as exc:
-        console.print(f"[red]{exc}[/red]")
+        _print_cli_error(str(exc))
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR) from exc
 
     if not resolved_path.exists():
-        console.print(
-            f"[red]Artifact file does not exist at resolved path: {resolved_path}[/red]"
+        _print_cli_error(
+            f"Artifact file does not exist at resolved path: {resolved_path}"
         )
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
@@ -1274,7 +1290,7 @@ def schema_capture_file(
     )
 
     if not tracker.db:
-        console.print("[red]Tracker database not initialized.[/red]")
+        _print_cli_error("Tracker database not initialized.")
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
     fetched = tracker.db.get_artifact_schema_for_artifact(artifact_id=artifact.id)
     if fetched is None:
@@ -1411,7 +1427,7 @@ def schema_apply_fks(
     """Best-effort application of physical foreign key constraints."""
     tracker = get_tracker(db_path)
     if not tracker.db:
-        console.print("[red]Tracker database not initialized.[/red]")
+        _print_cli_error("Tracker database not initialized.")
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
     applied = tracker.db.apply_physical_fks()
     console.print(
@@ -2473,7 +2489,7 @@ def _render_gtfs_bundle_preview(
         _print_missing_artifact_file_help(tracker, artifact)
         return True
     except ValueError as exc:
-        console.print(f"[red]Error reading GTFS bundle: {exc}[/red]")
+        _print_cli_error(f"Error reading GTFS bundle: {exc}")
         return True
 
     standard_members = [
@@ -3350,7 +3366,7 @@ class ConsistShell(cmd.Cmd):
         if not args:
             return
         if args[0] == "shell":
-            console.print("[red]Error: already inside Consist shell.[/red]")
+            _print_cli_error("Already inside Consist shell.")
             return
         try:
             prepared = self._prepare_cli_args(args)
@@ -3358,9 +3374,9 @@ class ConsistShell(cmd.Cmd):
         except typer.Exit:
             return
         except click.ClickException as exc:
-            console.print(f"[red]Error: {exc.format_message()}[/red]")
+            _print_cli_error(exc.format_message())
         except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def _invoke_cli_command(self, command_name: str, arg: str) -> None:
         command_args = [command_name, *self._safe_split(arg)]
@@ -3488,46 +3504,39 @@ class ConsistShell(cmd.Cmd):
             try:
                 selected_index = int(raw_choice)
             except ValueError:
-                console.print(
-                    "[red]Error: enter a number or press Enter to cancel[/red]"
-                )
+                _print_cli_error("Enter a number or press Enter to cancel.")
                 continue
             if 1 <= selected_index <= len(choices):
                 return choices[selected_index - 1]
-            console.print(
-                f"[red]Error: selection must be between 1 and {len(choices)}[/red]"
-            )
+            _print_cli_error(f"Selection must be between 1 and {len(choices)}.")
 
     def _resolve_run_id(self, arg: str, *, command_name: str) -> Optional[str]:
         run_id = arg.strip()
         if run_id:
             if run_id.startswith("#"):
                 if not self._last_run_ids:
-                    console.print(
-                        "[red]Error: no cached run refs. Run `runs` first.[/red]"
-                    )
+                    _print_cli_error("No cached run refs. Run `runs` first.")
                     return None
                 raw_index = run_id[1:]
                 if not raw_index:
-                    console.print("[red]Error: run ref must look like #1[/red]")
+                    _print_cli_error("Run ref must look like #1.")
                     return None
                 try:
                     index = int(raw_index)
                 except ValueError:
-                    console.print("[red]Error: run ref must look like #1[/red]")
+                    _print_cli_error("Run ref must look like #1.")
                     return None
                 if index < 1 or index > len(self._last_run_ids):
-                    console.print(
-                        "[red]Error: run ref out of range "
-                        f"(1-{len(self._last_run_ids)}).[/red]"
+                    _print_cli_error(
+                        f"Run ref out of range (1-{len(self._last_run_ids)})."
                     )
                     return None
                 return self._last_run_ids[index - 1]
             return run_id
         if not self._is_tty():
-            console.print(
-                "[red]Error: run_id required. Pass a run_id or #<n>, or run `runs` "
-                "first to populate shortcuts.[/red]"
+            _print_cli_error(
+                "Run ID required. Pass a run_id or #<n>, or run `runs` "
+                "first to populate shortcuts."
             )
             return None
         return self._select_from_list(
@@ -3544,10 +3553,10 @@ class ConsistShell(cmd.Cmd):
         if args:
             return self._resolve_artifact_ref(args[0])
         if not self._is_tty():
-            console.print(
-                "[red]Error: artifact_key required. Pass a key or @<n>. "
+            _print_cli_error(
+                "Artifact key required. Pass a key or @<n>. "
                 f"{self._artifact_ref_population_hint()} Use `context` to inspect "
-                "shell defaults.[/red]"
+                "shell defaults."
             )
             return None
         return self._select_from_list(
@@ -3565,24 +3574,22 @@ class ConsistShell(cmd.Cmd):
         if not token.startswith("@"):
             return token
         if not self._last_artifact_ids:
-            console.print(
-                "[red]Error: no cached artifact refs. "
-                f"{self._artifact_ref_population_hint()}[/red]"
+            _print_cli_error(
+                f"No cached artifact refs. {self._artifact_ref_population_hint()}"
             )
             return None
         raw_index = token[1:]
         if not raw_index:
-            console.print("[red]Error: artifact ref must look like @1[/red]")
+            _print_cli_error("Artifact ref must look like @1.")
             return None
         try:
             index = int(raw_index)
         except ValueError:
-            console.print("[red]Error: artifact ref must look like @1[/red]")
+            _print_cli_error("Artifact ref must look like @1.")
             return None
         if index < 1 or index > len(self._last_artifact_ids):
-            console.print(
-                "[red]Error: artifact ref out of range "
-                f"(1-{len(self._last_artifact_ids)}).[/red]"
+            _print_cli_error(
+                f"Artifact ref out of range (1-{len(self._last_artifact_ids)})."
             )
             return None
         return self._last_artifact_ids[index - 1]
@@ -3592,7 +3599,7 @@ class ConsistShell(cmd.Cmd):
     ) -> Optional["Artifact"]:
         candidate = hash_prefix.strip()
         if not candidate:
-            console.print("[red]Error: --hash requires a non-empty prefix.[/red]")
+            _print_cli_error("--hash requires a non-empty prefix.")
             return None
 
         try:
@@ -3610,7 +3617,7 @@ class ConsistShell(cmd.Cmd):
                 statement = statement.order_by(col(Artifact.created_at).desc()).limit(6)
                 matches = session.exec(statement).all()
         except Exception as exc:
-            console.print(f"[red]Error: failed hash lookup: {exc}[/red]")
+            _print_cli_error(f"Failed hash lookup: {exc}")
             return None
 
         if not matches:
@@ -3729,7 +3736,7 @@ class ConsistShell(cmd.Cmd):
         )
         if selector_count == 0:
             raise ValueError(
-                "artifact_key required (or provide --artifact-id or --hash)."
+                "Artifact key required (or provide --artifact-id or --hash)."
             )
         if selector_count > 1:
             raise ValueError(
@@ -3768,7 +3775,7 @@ class ConsistShell(cmd.Cmd):
         """Run any consist CLI command. Usage: cli <command> [args...]"""
         args = self._safe_split(arg)
         if not args:
-            console.print("[red]Error: provide a command, e.g. `cli db inspect`.[/red]")
+            _print_cli_error("Provide a command, e.g. `cli db inspect`.")
             return
         self._invoke_cli(args)
 
@@ -3827,7 +3834,7 @@ class ConsistShell(cmd.Cmd):
                 return
             self._invoke_cli(["schema", *normalized])
         except ValueError as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def do_views(self, arg: str) -> None:
         """Run view subcommands. Usage: views create ..."""
@@ -3933,7 +3940,7 @@ class ConsistShell(cmd.Cmd):
                     console.print(f"[dim]  #{index}: {run_id}[/dim]")
                 console.print("[dim]Tip: use show #<n> or artifacts #<n>.[/dim]")
         except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def do_show(self, arg: str) -> None:
         """Show details for a run. Usage: show <run_id>"""
@@ -3949,11 +3956,11 @@ class ConsistShell(cmd.Cmd):
         try:
             run = self.tracker.get_run(run_id)
             if not run:
-                console.print(f"[red]Run '{run_id}' not found.[/red]")
+                _print_cli_error(f"Run '{run_id}' not found.")
                 return
             _render_run_details(run)
         except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def do_artifacts(self, arg: str) -> None:
         """Show artifacts for a run or query by facets. Usage: artifacts <run_id> | artifacts --param ... | artifacts --expand-sets"""
@@ -4000,23 +4007,21 @@ class ConsistShell(cmd.Cmd):
                     "schema_stub @<n> for exact artifact rows.[/dim]"
                 )
         except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def do_members(self, arg: str) -> None:
         """List output-set members. Usage: members <artifact_key|artifact_id|@ref>"""
         try:
             args = self._safe_split(arg)
             if len(args) != 1 or args[0].startswith("-"):
-                console.print(
-                    "[red]Error: members accepts one output-set selector.[/red]"
-                )
+                _print_cli_error("Members accepts one output-set selector.")
                 return
             artifact_key = self._resolve_artifact_ref(args[0])
             if artifact_key is None:
                 return
             artifact = self.tracker.get_artifact(artifact_key)
             if not artifact:
-                console.print(f"[red]Artifact '{args[0]}' not found.[/red]")
+                _print_cli_error(f"Artifact '{args[0]}' not found.")
                 return
             if not _artifact_is_output_set_parent(artifact):
                 console.print(
@@ -4046,7 +4051,7 @@ class ConsistShell(cmd.Cmd):
                 "[dim]Tip: preview a child with `preview @<n>` or its key.[/dim]"
             )
         except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def do_manifest(self, arg: str) -> None:
         """Preview an output-set manifest. Usage: manifest <artifact_key|artifact_id|@ref>"""
@@ -4084,7 +4089,7 @@ class ConsistShell(cmd.Cmd):
                 return
             self.do_preview(str(manifest.id))
         except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def do_preview(self, arg: str) -> None:
         """Preview an artifact. Usage: preview <artifact_key|artifact_id|@ref> [--rows N] | preview --hash <prefix>"""
@@ -4251,7 +4256,7 @@ class ConsistShell(cmd.Cmd):
                 f"[yellow]Preview not implemented for loaded type: {type(data).__name__}[/yellow]"
             )
         except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def do_schema_profile(self, arg: str) -> None:
         """Show artifact schema. Usage: schema_profile <artifact_key|artifact_id|@ref> | schema_profile --hash <prefix>"""
@@ -4303,10 +4308,10 @@ class ConsistShell(cmd.Cmd):
                     return
                 artifact = self.tracker.get_artifact(artifact_key)
             else:
-                console.print(
-                    "[red]Error: artifact_key required. Pass a key or @<n>, use "
+                _print_cli_error(
+                    "Artifact key required. Pass a key or @<n>, use "
                     "`--hash <prefix>`, or run `artifacts <run_id>` first to "
-                    "populate artifact refs.[/red]"
+                    "populate artifact refs."
                 )
                 return
             if not artifact:
@@ -4409,7 +4414,7 @@ class ConsistShell(cmd.Cmd):
                     "[/yellow]"
                 )
         except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def do_schema_stub(self, arg: str) -> None:
         """Export SQLModel schema stub. Usage: schema_stub <artifact_key|artifact_id|@ref>|--artifact-id UUID|--hash PREFIX [--run-id RUN_ID] [--source file|duckdb|user_provided] [--class-name NAME] [--table-name NAME] [--include-system-cols] [--no-stats-comments] [--concrete]"""
@@ -4499,9 +4504,9 @@ class ConsistShell(cmd.Cmd):
                     f"{resolved_artifact_id}` to persist a file schema first.[/yellow]"
                 )
         except ValueError as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
         except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def do_summary(self, arg: str) -> None:
         """Display database summary. Usage: summary"""
@@ -4510,7 +4515,7 @@ class ConsistShell(cmd.Cmd):
                 summary_data = queries.get_summary(session)
             _render_summary(summary_data)
         except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def do_scenarios(self, arg: str) -> None:
         """List scenarios. Usage: scenarios [--limit N]"""
@@ -4538,13 +4543,13 @@ class ConsistShell(cmd.Cmd):
                         maximum=MAX_CLI_LIMIT,
                     )
             except ValueError as exc:
-                console.print(f"[red]Error: {exc}[/red]")
+                _print_cli_error(str(exc))
                 return
 
         try:
             _render_scenarios(self.tracker, limit)
         except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def do_exit(self, arg: str) -> bool:
         """Exit the shell."""

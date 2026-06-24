@@ -39,11 +39,13 @@ def resolve_input_reference(
         ref,
         key,
         type_label="inputs",
-        missing_path_error=(
-            "Problem: Input path does not exist: {path!s}\n"
-            "Cause: The provided input path is missing or not accessible.\n"
-            "Fix: Pass an existing file/directory path or a valid Artifact/RunResult "
-            "reference."
+        missing_path_error=format_problem_cause_fix(
+            problem="Input path does not exist: {path!s}",
+            cause="The provided input path is missing or not accessible.",
+            fix=(
+                "Pass an existing file/directory path or a valid Artifact/RunResult "
+                "reference."
+            ),
         ),
     )
 

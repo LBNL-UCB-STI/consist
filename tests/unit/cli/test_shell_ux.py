@@ -94,9 +94,9 @@ def test_shell_artifacts_no_arg_non_tty_errors_without_prompt(tmp_path, capsys) 
         shell.do_artifacts("")
 
     out = capsys.readouterr().out
-    normalized = " ".join(out.split())
-    assert "run_id required" in out
-    assert "run `runs` first to populate shortcuts" in normalized
+    assert "Run ID required" in out
+    assert "runs" in out
+    assert "shortcuts" in out
     fake_input.assert_not_called()
 
 
@@ -111,10 +111,9 @@ def test_shell_preview_no_arg_non_tty_reports_next_steps(tmp_path, capsys) -> No
     shell.do_preview("")
 
     out = capsys.readouterr().out
-    normalized = " ".join(out.split())
-    assert "artifact_key required" in out
-    assert "Run `artifacts <run_id>` first to populate @refs." in normalized
-    assert "Use `context` to inspect shell defaults." in normalized
+    assert "Artifact key required" in out
+    assert "artifacts <run_id>" in out
+    assert "Use `context` to inspect shell defaults." in out
 
 
 def test_shell_preview_picker_selects_artifact_in_tty_mode(tmp_path) -> None:
@@ -265,7 +264,7 @@ def test_shell_artifact_ref_missing_suggests_how_to_populate_refs(
 
     out = capsys.readouterr().out
     assert resolved is None
-    assert "no cached artifact refs" in out
+    assert "No cached artifact refs." in out
     assert "artifacts <run_id>" in out
     assert "artifacts #<n>" in out
 

@@ -971,11 +971,13 @@ class Tracker:
         key: Optional[str] = None,
         *,
         type_label: str = "inputs",
-        missing_path_error: str = (
-            "Problem: Input path does not exist: {path!s}\n"
-            "Cause: The provided input path is missing or not accessible.\n"
-            "Fix: Pass an existing file/directory path or a valid Artifact/RunResult "
-            "reference."
+        missing_path_error: str = format_problem_cause_fix(
+            problem="Input path does not exist: {path!s}",
+            cause="The provided input path is missing or not accessible.",
+            fix=(
+                "Pass an existing file/directory path or a valid Artifact/RunResult "
+                "reference."
+            ),
         ),
         missing_string_error: Optional[str] = None,
         string_ref_resolver: Optional[Callable[[str], Optional[ArtifactRef]]] = None,
