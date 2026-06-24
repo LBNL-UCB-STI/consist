@@ -363,7 +363,7 @@ For indexed metadata and query helpers, see:
 
 - [Caching and Hydration](concepts/caching-and-hydration.md): signatures,
   hit/miss behavior, hydration, and materialization policies.
-- [Data Materialization](concepts/data-materialization.md): ingestion,
+- [Data Storage and Ingestion](concepts/data-materialization.md): ingestion,
   database fallback, and hybrid views.
 - [Materialization](api/materialize.md): `hydrate_run_outputs(...)`,
   `stage_inputs(...)`, and staging status meanings.

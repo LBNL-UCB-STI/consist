@@ -138,6 +138,7 @@ class ResolvedRunInvocation:
     cache_version: Optional[int]
     cache_epoch: Optional[int]
     validate_cached_outputs: str
+    validate_materialized_inputs: bool
     materialize_cached_outputs_source_root: Optional[PathLike]
     code_identity: Optional[CodeIdentityMode]
     code_identity_extra_deps: Optional[List[str]]
@@ -362,6 +363,7 @@ def resolve_run_invocation(
     cache_version = merged_options.cache_version
     cache_epoch = merged_options.cache_epoch
     validate_cached_outputs = merged_options.validate_cached_outputs
+    validate_materialized_inputs = merged_options.validate_materialized_inputs
     materialize_cached_outputs_source_root = (
         merged_options.materialize_cached_outputs_source_root
     )
@@ -575,6 +577,19 @@ def resolve_run_invocation(
         resolved_cache_mode = "reuse"
     if resolved_validate_cached_outputs is None:
         resolved_validate_cached_outputs = "lazy"
+    resolved_validate_materialized_inputs = (
+        False if validate_materialized_inputs is None else validate_materialized_inputs
+    )
+    if not isinstance(resolved_validate_materialized_inputs, bool):
+        raise ValueError("validate_materialized_inputs must be a boolean")
+    if (
+        resolved_validate_materialized_inputs
+        and resolved.cache_hydration != "inputs-missing"
+    ):
+        raise ValueError(
+            "validate_materialized_inputs=True requires "
+            "cache_hydration='inputs-missing'"
+        )
 
     if requested_input_materialization is not None:
         if requested_input_materialization != "requested":
@@ -713,6 +728,7 @@ def resolve_run_invocation(
         cache_version=resolved.cache_version,
         cache_epoch=cache_epoch,
         validate_cached_outputs=resolved_validate_cached_outputs,
+        validate_materialized_inputs=resolved_validate_materialized_inputs,
         materialize_cached_outputs_source_root=(materialize_cached_outputs_source_root),
         code_identity=code_identity,
         code_identity_extra_deps=(

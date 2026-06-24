@@ -2218,6 +2218,7 @@ class Tracker:
         cache_version: Optional[int] = None,
         cache_epoch: Optional[int] = None,
         validate_cached_outputs: str = "lazy",
+        validate_materialized_inputs: Optional[bool] = None,
         code_identity: Optional[CodeIdentityMode] = None,
         code_identity_extra_deps: Optional[List[str]] = None,
         output_mismatch: str = "warn",
@@ -2308,6 +2309,9 @@ class Tracker:
             Optional cache-epoch discriminator folded into run identity.
         validate_cached_outputs : str, default "lazy"
             Validation for cached outputs: "lazy" (check if files exist), "strict", or "none".
+        validate_materialized_inputs : bool or None, optional
+            When True with ``cache_hydration="inputs-missing"``, validate
+            existing cache-miss input destinations before preserving them.
         code_identity : Optional[CodeIdentityMode], optional
             Strategy for hashing code identity in cache keys.
         code_identity_extra_deps : Optional[List[str]], optional
@@ -2400,6 +2404,7 @@ class Tracker:
             cache_version=cache_version,
             cache_epoch=cache_epoch,
             validate_cached_outputs=validate_cached_outputs,
+            validate_materialized_inputs=validate_materialized_inputs,
             code_identity=code_identity,
             code_identity_extra_deps=code_identity_extra_deps,
             output_mismatch=output_mismatch,

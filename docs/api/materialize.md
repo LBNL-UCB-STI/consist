@@ -1,6 +1,10 @@
 # Materialization
 
-Consist has two related filesystem-recovery stories:
+This page covers filesystem byte recovery and input staging. It is not about
+choosing whether tabular artifacts should be ingested into DuckDB, except where
+ingested artifacts provide a fallback byte source.
+
+Consist has three related filesystem recovery and staging stories:
 
 - historical output recovery, which starts with `hydrate_run_outputs(...)`
 - single-artifact recovery, which starts with `materialize_artifact(...)`
@@ -36,8 +40,8 @@ staging behavior outside a run lifecycle.
 
 ## Recovery Ordering
 
-When Consist rematerializes a historical output, it probes recovery sources in
-this order:
+When Consist rematerializes a historical output or stages a resolved artifact,
+it probes recovery sources in this order:
 
 1. A per-call `source_root=...` override
 2. The historical source derived from the producing run directory, historical

@@ -81,9 +81,10 @@ live in the linked specialized pages.
 | **Facet** | Queryable metadata subset used for filtering runs (does not contribute to the signature). | [Config Management](config-management.md) |
 | **Cache hit / miss** | Hit reuses prior completed outputs; miss executes and records new lineage. | [Caching & Hydration](caching-and-hydration.md) |
 | **Hydration** | Recover artifact metadata/paths without copying bytes. | [Caching & Hydration](caching-and-hydration.md) |
-| **Materialization** | Ensure bytes exist in a target location (filesystem or DB path). | [Data Materialization](data-materialization.md) |
-| **Cold / hot data** | Cold stays file-based; hot is ingested into DuckDB for SQL queries. | [Data Materialization](data-materialization.md) |
-| **Hybrid view** | SQL view that combines ingested rows with file-backed rows. | [Data Materialization](data-materialization.md) |
+| **Filesystem materialization** | Ensure bytes exist at a target filesystem path. | [Caching & Hydration](caching-and-hydration.md) |
+| **DuckDB ingestion** | Store tabular artifact bytes in DuckDB for SQL analysis and database fallback. | [Data Storage and Ingestion](data-materialization.md) |
+| **Cold / hot data** | Cold stays file-based; hot is ingested into DuckDB for SQL queries. | [Data Storage and Ingestion](data-materialization.md) |
+| **Hybrid view** | SQL view that combines ingested rows with file-backed rows. | [Data Storage and Ingestion](data-materialization.md) |
 | **Ghost mode** | Recovery path when files are missing but provenance/ingestion exists. | [Caching & Hydration](caching-and-hydration.md) |
 | **Coupler** | Scenario helper for passing step outputs to downstream inputs. | [Decorators & Metadata](decorators-and-metadata.md) |
 
@@ -242,6 +243,6 @@ If you prefer to receive a DataFrame directly instead of a path, use `input_bind
 - **[Usage Guide](../usage-guide.md)** — Practical patterns for moving from the mental model to working code
 - **[Config Management](config-management.md)** — Understand the config vs. facet distinction and when to use each
 - **[Caching & Hydration](caching-and-hydration.md)** — Caching patterns and data recovery strategies
-- **[Data Materialization](data-materialization.md)** — When to ingest data and use hybrid views
+- **[Data Storage and Ingestion](data-materialization.md)** — When to ingest data and use hybrid views
 - **[Grouped Views](grouped-views.md)** — Build one view across schema-matched artifacts
 - **[Decorators & Metadata](decorators-and-metadata.md)** — Defaults, templates, and schema introspection

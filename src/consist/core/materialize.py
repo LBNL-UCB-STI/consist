@@ -2281,6 +2281,7 @@ def materialize_artifacts_from_sources(
     *,
     allowed_base: Path | Sequence[Path] | None,
     on_missing: Literal["warn", "raise"] = "warn",
+    overwrite_existing: bool = False,
 ) -> dict[str, str]:
     """
     Rehydrate artifacts from explicit source paths to specified destinations.
@@ -2301,6 +2302,8 @@ def materialize_artifacts_from_sources(
     on_missing : {"warn", "raise"}, default "warn"
         The error handling policy for cases where the explicit source path
         is absent from the filesystem.
+    overwrite_existing : bool, default False
+        If True, replace existing destinations after safety checks pass.
 
     Returns
     -------
@@ -2337,11 +2340,17 @@ def materialize_artifacts_from_sources(
                         f"Destination type mismatch for {destination_path}; "
                         "refusing to overwrite."
                     )
-                materialized[artifact.key] = str(destination_path)
-                continue
             if source_path == destination_path:
                 materialized[artifact.key] = str(destination_path)
                 continue
+            if destination_path.exists():
+                if not overwrite_existing:
+                    materialized[artifact.key] = str(destination_path)
+                    continue
+                if destination_path.is_dir():
+                    shutil.rmtree(destination_path)
+                else:
+                    destination_path.unlink()
             if source_path.is_dir():
                 copied = _copy_dir_safe(source_path, destination_path)
             else:

@@ -223,7 +223,7 @@ table name before registering it.
 ## See Also
 
 - [DLT Loader API Reference](integrations/dlt_loader.md) — generated API signatures
-- [Data Materialization](concepts/data-materialization.md) — when to ingest vs. keep cold
+- [Data Storage and Ingestion](concepts/data-materialization.md) — when to ingest vs. keep cold
 - [Integrations Overview](integrations/index.md)
 - [Schema Export](schema-export.md)
 - [dlt Documentation](https://dlthub.com/docs)

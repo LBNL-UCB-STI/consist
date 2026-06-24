@@ -67,6 +67,9 @@ implementation work inside Consist itself.
   filesystem reads.
 - Do not debug cached-output problems without checking `cache_hydration`,
   `output_paths`, `validate_cached_outputs`, and the artifact URI.
+- Do not treat `cache_hydration="inputs-missing"` as stale-input validation by
+  default. Existing input destinations are preserved unless
+  `validate_materialized_inputs=True` is explicitly enabled.
 - Do not confuse `OutputSet` with `RunSet`: an `OutputSet` is one logical
   output made of many files; a `RunSet` is a selected group of runs for
   comparison or analysis.

@@ -251,6 +251,7 @@ class RunLifecycleCoordinator:
                 materialize_cached_outputs_dir,
                 materialize_cached_outputs_source_root,
                 validate_cached_outputs,
+                validate_materialized_inputs,
             ) = parse_materialize_cached_outputs_kwargs(kwargs)
             requested_input_paths_raw = kwargs.pop("requested_input_paths", None)
             requested_input_materialization = kwargs.pop(
@@ -462,6 +463,7 @@ class RunLifecycleCoordinator:
                     materialize_cached_outputs_source_root
                 ),
                 validate_cached_outputs=validate_cached_outputs,
+                validate_materialized_inputs=validate_materialized_inputs,
                 requested_input_paths=requested_input_paths,
                 requested_input_materialization=requested_input_materialization,
                 requested_input_materialization_mode=(

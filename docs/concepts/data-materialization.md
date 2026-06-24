@@ -1,10 +1,16 @@
-# Data Virtualization & Materialization Strategy
+# Data Storage and Ingestion Strategy
 
-This guide explains when to keep data on disk (virtualize) versus ingesting it into DuckDB (materialize).
+This guide explains when to keep data on disk as cold files versus ingesting
+tabular artifacts into DuckDB for SQL analysis and database fallback.
 
 Canonical one-line definitions for cold/hot data, hybrid views, and
-materialization live in [Core Concepts Overview](overview.md). This page focuses
-on decision criteria and implementation patterns.
+ingestion live in [Core Concepts Overview](overview.md). This page focuses on
+decision criteria and implementation patterns.
+
+This is different from filesystem materialization in
+[Caching and Hydration](caching-and-hydration.md), where Consist copies,
+exports, or stages bytes so a local path exists. Ingestion is a database storage
+choice; filesystem materialization is a byte-location/recovery operation.
 
 !!! note "Recommended path"
     For standard execution flow, prefer `tracker.run(...)`, `tracker.trace(...)`,
@@ -271,6 +277,6 @@ Currently `h5_table` uses a staging bridge (`pandas.read_hdf(...)` + `conn.from_
 
 ## See Also
 
-- **[Caching & Hydration](caching-and-hydration.md)** — How materialization interacts with caching
+- **[Caching & Hydration](caching-and-hydration.md)** — How filesystem materialization interacts with caching
 - **[DLT Loader Guide](../dlt-loader-guide.md)** — Detailed ingestion patterns using DLT
 - **[Schema Export](../schema-export.md)** — Generate and manage schemas for ingested data

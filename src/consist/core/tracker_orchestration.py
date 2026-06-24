@@ -336,6 +336,7 @@ class RunTraceCoordinator:
             "iteration": iteration,
             "parent_run_id": parent_run_id,
             "validate_cached_outputs": invocation.validate_cached_outputs,
+            "validate_materialized_inputs": invocation.validate_materialized_inputs,
             "cache_epoch": resolved_cache_epoch,
         }
         if invocation.code_identity is not None:
@@ -1676,6 +1677,7 @@ class RunTraceCoordinator:
         cache_version: Optional[int] = None,
         cache_epoch: Optional[int] = None,
         validate_cached_outputs: str = "lazy",
+        validate_materialized_inputs: Optional[bool] = None,
         code_identity: Optional[CodeIdentityMode] = None,
         code_identity_extra_deps: Optional[List[str]] = None,
         output_mismatch: str = "warn",
@@ -1745,6 +1747,8 @@ class RunTraceCoordinator:
             Cache-epoch discriminator folded into run identity.
         validate_cached_outputs : str, default "lazy"
             Cached-output validation policy.
+        validate_materialized_inputs : bool or None, optional
+            Opt-in stale-input validation for ``inputs-missing`` cache hydration.
         code_identity : CodeIdentityMode | None, optional
             Code identity mode override for hash computation.
         code_identity_extra_deps : list[str] | None, optional
@@ -1795,6 +1799,7 @@ class RunTraceCoordinator:
                 cache_version=cache_version,
                 cache_epoch=cache_epoch,
                 validate_cached_outputs=validate_cached_outputs,
+                validate_materialized_inputs=validate_materialized_inputs,
                 code_identity=code_identity,
                 code_identity_extra_deps=code_identity_extra_deps,
             ),

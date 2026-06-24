@@ -79,5 +79,5 @@ generic "config changed" message.
 ## See Also
 
 - [Config, Facets, and Identity Inputs](../concepts/config-management.md) — In-memory config, facets, and identity inputs
-- [Data Virtualization & Materialization Strategy](../concepts/data-materialization.md) — DLT-based data ingestion
+- [Data Storage and Ingestion Strategy](../concepts/data-materialization.md) — DLT-based data ingestion
 - [Caching and Artifact Hydration Patterns](../concepts/caching-and-hydration.md) — Run signature and caching behavior

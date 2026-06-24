@@ -8,6 +8,9 @@ The short version:
 
 - Use `hydrate_run_outputs(...)` for prior run outputs.
 - Use run-level requested input materialization for inputs needed by a callable.
+- Use `CacheOptions(cache_hydration="inputs-missing",
+  validate_materialized_inputs=True)` when a cache-miss run must replace a
+  stale path-bound input only after a portable hash proves it is wrong.
 - Use `stage_artifact(...)` / `stage_inputs(...)` only when staging already
   resolved artifacts outside a run lifecycle.
 - Use `recovery_roots` when archived bytes should remain discoverable across
@@ -289,6 +292,11 @@ result = tracker.run(
 
 This keeps artifact identity canonical in `inputs={...}` while making an exact
 local copy available to path-bound code.
+
+If a cache-miss workflow uses `cache_hydration="inputs-missing"` and the
+destination path may already contain stale bytes, opt into
+`validate_materialized_inputs=True`. Without that opt-in, Consist preserves
+existing input destinations and only restores inputs whose paths are absent.
 
 Use low-level staging only when you already have resolved artifacts and are
 outside a run lifecycle:
