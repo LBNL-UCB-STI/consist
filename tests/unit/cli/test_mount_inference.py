@@ -241,6 +241,70 @@ def test_shared_input_archive_mount_requires_preferred_run(
     )
 
 
+def test_scenario_linked_artifact_uses_preferred_run_for_mount_inference(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "SynthFirm"
+    outputs_root = data_root / "outputs"
+    outputs_root.mkdir(parents=True, exist_ok=True)
+    data_file = outputs_root / "out.csv"
+    data_file.write_text("value\n1\n", encoding="utf-8")
+
+    db_path = tmp_path / "provenance.duckdb"
+    producer = Tracker(
+        run_dir=tmp_path / "producer",
+        db_path=str(db_path),
+        mounts={"data": str(data_root)},
+    )
+    with producer.scenario("scenario") as sc:
+        with sc.trace("step") as t:
+            t.log_artifact(data_file, key="out", direction="output")
+
+    inspector = Tracker(run_dir=tmp_path / "inspector", db_path=str(db_path))
+    artifact = inspector.get_artifact("out")
+    assert artifact is not None
+
+    _ensure_tracker_mounts_for_artifact(
+        inspector,
+        artifact,
+        trust_db=True,
+        preferred_run_id="scenario_step",
+    )
+
+    assert inspector.mounts["data"] == str(data_root.resolve())
+    assert inspector.resolve_uri(artifact.container_uri) == str(data_file.resolve())
+
+
+def test_ambiguous_scenario_linked_artifact_uses_recorded_mount_root(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "SynthFirm"
+    outputs_root = data_root / "outputs"
+    outputs_root.mkdir(parents=True, exist_ok=True)
+    data_file = outputs_root / "out.csv"
+    data_file.write_text("value\n1\n", encoding="utf-8")
+
+    db_path = tmp_path / "provenance.duckdb"
+    producer = Tracker(
+        run_dir=tmp_path / "producer",
+        db_path=str(db_path),
+        mounts={"data": str(data_root)},
+    )
+    with producer.scenario("scenario") as sc:
+        with sc.trace("step") as t:
+            t.log_artifact(data_file, key="out", direction="output")
+
+    inspector = Tracker(run_dir=tmp_path / "inspector", db_path=str(db_path))
+    artifact = inspector.get_artifact("out")
+    assert artifact is not None
+    assert artifact.meta["mount_root"] == str(data_root.resolve())
+
+    _ensure_tracker_mounts_for_artifact(inspector, artifact, trust_db=True)
+
+    assert inspector.mounts["data"] == str(data_root.resolve())
+    assert inspector.resolve_uri(artifact.container_uri) == str(data_file.resolve())
+
+
 def test_explicit_workspace_mount_overrides_run_dir_workspace_mount(
     tmp_path: Path,
 ) -> None:

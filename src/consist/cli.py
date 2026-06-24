@@ -918,15 +918,25 @@ def _preserve_tracker_mounts(tracker: Tracker) -> Iterator[None]:
         _set_tracker_mounts(tracker, original_mounts)
 
 
+def _run_has_mount_metadata(run: "Run") -> bool:
+    if not isinstance(run.meta, dict):
+        return False
+    return any(
+        bool(run.meta.get(field))
+        for field in ("mounts", "archive_mounts", "_physical_run_dir")
+    )
+
+
 def _get_artifact_run_for_mount_inference(
     tracker: Tracker, artifact: "Artifact", preferred_run_id: Optional[str] = None
 ) -> Tuple[Optional["Run"], bool]:
-    if preferred_run_id is not None:
-        run = tracker.get_run(preferred_run_id)
-        if run is not None:
-            return run, False
-
     from consist.models.run import RunArtifactLink
+
+    preferred_run = (
+        tracker.get_run(preferred_run_id) if preferred_run_id is not None else None
+    )
+    if preferred_run is not None and _run_has_mount_metadata(preferred_run):
+        return preferred_run, False
 
     if artifact.id is not None:
         with _tracker_session(tracker) as session:
@@ -937,11 +947,51 @@ def _get_artifact_run_for_mount_inference(
                     )
                 ).all()
             )
-        if len(links) == 1:
-            return tracker.get_run(links[0].run_id), False
+        linked_runs = [
+            run for link in links if (run := tracker.get_run(link.run_id)) is not None
+        ]
+        linked_runs_with_mounts = [
+            run for run in linked_runs if _run_has_mount_metadata(run)
+        ]
+        if preferred_run is not None:
+            if preferred_run.parent_run_id is not None:
+                parent_run = next(
+                    (
+                        run
+                        for run in linked_runs_with_mounts
+                        if run.id == preferred_run.parent_run_id
+                    ),
+                    None,
+                )
+                if parent_run is not None:
+                    return parent_run, False
+            child_run = next(
+                (
+                    run
+                    for run in linked_runs_with_mounts
+                    if run.parent_run_id == preferred_run.id
+                ),
+                None,
+            )
+            if child_run is not None:
+                return child_run, False
+        leaf_runs = [
+            run
+            for run in linked_runs_with_mounts
+            if not any(
+                other.id != run.id and other.parent_run_id == run.id
+                for other in linked_runs_with_mounts
+            )
+        ]
+        if len(leaf_runs) == 1:
+            return leaf_runs[0], False
+        if len(linked_runs_with_mounts) == 1:
+            return linked_runs_with_mounts[0], False
         if len(links) > 1:
             return None, True
 
+    if preferred_run is not None:
+        return preferred_run, False
     if artifact.run_id:
         return tracker.get_run(artifact.run_id), False
     return None, False
@@ -991,12 +1041,6 @@ def _ensure_tracker_mounts_for_artifact(
 
     if ambiguous_run_links and scheme not in inferred:
         return
-
-    if scheme not in inferred:
-        meta = artifact.meta or {}
-        mount_root = meta.get("mount_root")
-        if isinstance(mount_root, str) and mount_root:
-            inferred[scheme] = mount_root
 
     _apply_inferred_mounts(tracker, inferred)
 
@@ -1671,6 +1715,7 @@ def _render_artifacts_table(
                     artifact,
                     trust_db=trust_db,
                     archive_base=archive_base,
+                    preferred_run_id=run_id,
                 )
             if _should_hide_set_member(artifact):
                 hidden_set_member_count += 1
@@ -1706,6 +1751,7 @@ def _render_artifacts_table(
                     artifact,
                     trust_db=trust_db,
                     archive_base=archive_base,
+                    preferred_run_id=run_id,
                 )
             if _should_hide_set_member(artifact):
                 hidden_set_member_count += 1
