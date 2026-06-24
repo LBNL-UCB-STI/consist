@@ -164,6 +164,9 @@ These models are returned by, or support, `ScenarioContext.map_runs(...)`:
 
 ### Utilities and Introspection
 
+- [`StepContract`](step_contracts.md#consist.core.step_contracts.StepContract) (Resolved declarative metadata for a decorated step)
+- [`resolve_step_contract`](step_contracts.md#consist.core.step_contracts.resolve_step_contract) (Resolve one decorated step without executing it)
+- [`collect_step_contracts`](step_contracts.md#consist.core.step_contracts.collect_step_contracts) (Resolve a sequence of decorated steps with shared context)
 - [`collect_step_schema`](../concepts/decorators-and-metadata.md#schema-introspection) (Extract outputs for Coupler schemas)
 - [`ArtifactKeyRegistry`](../concepts/decorators-and-metadata.md#artifact-key-registries) (Manage consistent artifact keys)
 

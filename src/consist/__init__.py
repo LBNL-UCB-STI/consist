@@ -169,6 +169,11 @@ from consist.core.orchestration import (
     execute_worker_run,
     resolve_callable,
 )
+from consist.core.step_contracts import (
+    StepContract,
+    collect_step_contracts,
+    resolve_step_contract,
+)
 
 __all__ = [
     # Core objects
@@ -315,4 +320,7 @@ __all__ = [
     "RunSpecResult",
     "execute_worker_run",
     "resolve_callable",
+    "StepContract",
+    "collect_step_contracts",
+    "resolve_step_contract",
 ]
