@@ -29,7 +29,7 @@ class OutputSetTracker(Protocol):
         key: str | None = None,
         direction: str = "output",
         schema: type[SQLModel] | None = None,
-        strict_schema: bool = True,
+        strict_schema: bool = False,
         driver: str | None = None,
         table_path: str | None = None,
         array_path: str | None = None,

@@ -215,7 +215,8 @@ declared root.
 If you pass `schema=...` on an `OutputSet`, Consist tags both the logical parent
 and discovered member artifacts with that schema. Member CSV/Parquet artifacts
 can also be profiled with `OutputSet(profile_file_schema=True)` or an enclosing
-`Tracker.run(..., profile_file_schema=True)`.
+`Tracker.run(..., profile_file_schema=True)` /
+`ScenarioContext.run(..., profile_file_schema=True)`.
 
 Output-set fields fall into two groups:
 

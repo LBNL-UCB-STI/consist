@@ -2842,7 +2842,7 @@ class Tracker:
         key: Optional[str] = None,
         direction: str = "output",
         schema: Optional[Type[SQLModel]] = None,
-        strict_schema: bool = True,
+        strict_schema: bool = False,
         driver: Optional[str] = None,
         table_path: Optional[str] = None,
         array_path: Optional[str] = None,
@@ -2873,7 +2873,7 @@ class Tracker:
             **"Path Resolution & Mounts"**.
 
         -   **Schema Metadata Injection**: Embeds schema information (if provided) into the
-            artifact's metadata, useful for later "Strict Mode" validation or introspection.
+            artifact's metadata for discovery, export, and optional validation workflows.
 
         -   **Immediate Persistence**: This single-artifact method flushes JSON state
             and syncs artifact links to the database immediately for this call.
@@ -2891,12 +2891,12 @@ class Tracker:
             Specifies whether the artifact is an "input" or "output" for the
             current run. Defaults to "output".
         schema : Optional[Type[SQLModel]], optional
-            An optional SQLModel class that defines the expected schema for the artifact's data.
-            Its name will be stored in artifact metadata.
-        strict_schema : bool, default True
-            Whether a schema tag should mark the artifact as strict. Declaration
-            helpers such as ``ArtifactSpec`` pass ``False`` so tagging does not
-            imply validation.
+            An optional SQLModel class that names the artifact's logical schema.
+            Its name will be stored in artifact metadata. This tags metadata; it
+            does not validate file contents by default.
+        strict_schema : bool, default False
+            Whether a schema tag should also mark the artifact as strict for
+            validation workflows. Schema tagging itself is non-strict by default.
         driver : Optional[str], optional
             Explicitly specify the driver (e.g., 'h5_table').
             If None, the driver is inferred from the file extension.
@@ -3685,7 +3685,9 @@ class Tracker:
             was logged with a schema (e.g., ``log_artifact(path, schema=MySchema)``)
             and that schema was registered with the Tracker at initialization
             (e.g., ``Tracker(..., schemas=[MySchema])``), it will be automatically
-            looked up and used for ingestion.
+            looked up and used for ingestion. Logging the artifact with
+            ``schema=...`` only tags metadata; ingestion is the step that applies
+            the schema to data.
         data : Optional[Union[Iterable[Dict[str, Any]], Any]], optional
             An iterable (e.g., list of dicts, generator) where each item represents a
             row of data to be ingested. If `data` is omitted, Consist attempts to

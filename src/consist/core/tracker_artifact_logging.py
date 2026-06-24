@@ -127,7 +127,7 @@ class ArtifactLoggingCoordinator:
         key: Optional[str] = None,
         direction: str = "output",
         schema: Optional[Type[SQLModel]] = None,
-        strict_schema: bool = True,
+        strict_schema: bool = False,
         driver: Optional[str] = None,
         table_path: Optional[str] = None,
         array_path: Optional[str] = None,
@@ -158,7 +158,7 @@ class ArtifactLoggingCoordinator:
             Link direction relative to active run ("input" or "output").
         schema : type[SQLModel] | None, optional
             Optional user-provided schema model.
-        strict_schema : bool, default True
+        strict_schema : bool, default False
             Whether a schema tag should mark the artifact as strict.
         driver : str | None, optional
             Explicit driver override.

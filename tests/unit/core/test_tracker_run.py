@@ -102,7 +102,34 @@ def test_tracker_run_output_path_spec_tags_schema_and_profiles_output(
     assert tracker.db.get_artifact_schema_for_artifact(artifact_id=artifact.id)
 
 
-def test_tracker_log_artifact_schema_remains_strict_by_default(tracker) -> None:
+def test_tracker_log_artifact_schema_tags_non_strict_by_default(tracker) -> None:
+    class TaggedOutput(SQLModel):
+        item_id: int
+        value: int
+
+    logged: dict[str, Artifact] = {}
+
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        output_path = ctx.run_dir / "strict.csv"
+        output_path.write_text("item_id,value\n1,2\n", encoding="utf-8")
+        logged["strict"] = tracker.log_artifact(
+            output_path,
+            key="strict",
+            schema=TaggedOutput,
+            direction="output",
+        )
+
+    tracker.run(fn=step, execution_options=ExecutionOptions(inject_context="ctx"))
+
+    artifact = logged["strict"]
+    assert artifact.meta["schema_name"] == "TaggedOutput"
+    assert artifact.meta.get("has_strict_schema") is not True
+
+
+def test_tracker_log_artifact_schema_strictness_can_be_explicitly_enabled(
+    tracker,
+) -> None:
     class StrictOutput(SQLModel):
         item_id: int
         value: int
@@ -117,6 +144,7 @@ def test_tracker_log_artifact_schema_remains_strict_by_default(tracker) -> None:
             output_path,
             key="strict",
             schema=StrictOutput,
+            strict_schema=True,
             direction="output",
         )
 

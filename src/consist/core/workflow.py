@@ -805,6 +805,7 @@ class ScenarioContext:
         outputs: Optional[List[str]] = None,
         output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         output_sets: Optional[Mapping[str, OutputSet]] = None,
+        profile_file_schema: bool | Literal["if_changed"] | None = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
         cache_options: Optional[CacheOptions] = None,
@@ -829,6 +830,9 @@ class ScenarioContext:
 
         ``adapter`` and ``identity_inputs`` are the public identity-related
         kwargs.
+        ``profile_file_schema`` is the scenario-step equivalent of
+        ``Tracker.run(..., profile_file_schema=...)``: it profiles named
+        tabular inputs and declared tabular outputs logged during this step.
 
         Examples
         --------
@@ -1045,6 +1049,7 @@ class ScenarioContext:
             outputs=resolved_outputs,
             output_paths=resolved_output_paths,
             output_sets=resolved_invocation.output_sets,
+            profile_file_schema=profile_file_schema,
             capture_dir=capture_dir,
             capture_pattern=capture_pattern,
             cache_options=CacheOptions(

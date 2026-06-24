@@ -262,7 +262,7 @@ class ArtifactManager:
         parent_artifact_id: Optional[uuid.UUID] = None,
         known_latest_artifact_at_uri: Optional[Artifact] = None,
         latest_artifact_lookup_done: bool = False,
-        strict_schema: bool = True,
+        strict_schema: bool = False,
         **meta: Any,
     ) -> Artifact:
         """
@@ -288,7 +288,7 @@ class ArtifactManager:
             The relationship of the artifact to the run: "input" or "output".
         schema : Optional[Type[SQLModel]], optional
             A SQLModel class used to tag expected structure and enable hybrid views.
-        strict_schema : bool, default True
+        strict_schema : bool, default False
             Whether the schema tag should also mark the artifact for strict
             schema validation semantics.
         driver : Optional[str], optional

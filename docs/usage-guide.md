@@ -68,8 +68,8 @@ Reach for this first when:
 - Outputs can be returned as `dict[str, Path]` or declared with
   `output_paths={...}`.
 - Use `ArtifactSpec(path=..., schema=..., profile_file_schema=True)` inside
-  `output_paths` when a legacy file-writing step needs schema metadata at the
-  same declaration site as the output path.
+  `output_paths` when a legacy file-writing step needs non-strict logical schema
+  metadata at the same declaration site as the output path.
 
 Use options objects for policy controls:
 
