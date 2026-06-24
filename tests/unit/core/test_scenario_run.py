@@ -5,6 +5,7 @@ from typing import Any
 
 import pandas as pd
 import pytest
+from sqlmodel import SQLModel
 
 import consist
 from consist.core.config_canonicalization import (
@@ -12,7 +13,12 @@ from consist.core.config_canonicalization import (
     ConfigPlan,
     canonical_identity_from_config,
 )
-from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
+from consist.types import (
+    ArtifactSpec,
+    CacheOptions,
+    ExecutionOptions,
+    OutputPolicyOptions,
+)
 
 
 def _assert_problem_cause_fix(message: str) -> None:
@@ -105,6 +111,63 @@ def test_scenario_run_profile_file_schema_profiles_inputs_and_outputs(
     assert tracker.db.get_artifact_schema_for_artifact(
         artifact_id=result.outputs["summary"].id
     )
+
+
+def test_scenario_run_output_path_artifact_spec_profiles_declared_output(
+    tracker,
+) -> None:
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "out.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+
+    with tracker.scenario("scen_artifact_spec_profile") as sc:
+        parent_run_id = sc.run_id
+        result = sc.run(
+            fn=step,
+            output_paths={
+                "out": ArtifactSpec(
+                    path="out.csv",
+                    profile_file_schema=True,
+                )
+            },
+            profile_file_schema=True,
+            cache_options=CacheOptions(cache_mode="overwrite"),
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+
+    artifact = result.outputs["out"]
+    assert artifact.path.name == "out.csv"
+    assert result.run.parent_run_id == parent_run_id
+    assert tracker.db.get_artifact_schema_for_artifact(artifact_id=artifact.id)
+
+
+def test_scenario_run_output_path_artifact_spec_tags_schema(tracker) -> None:
+    class ScenarioOutput(SQLModel):
+        a: int
+        b: int
+
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "typed.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+
+    with tracker.scenario("scen_artifact_spec_schema") as sc:
+        result = sc.run(
+            fn=step,
+            output_paths={
+                "typed": ArtifactSpec(
+                    path="typed.csv",
+                    schema=ScenarioOutput,
+                    driver="csv",
+                )
+            },
+            cache_options=CacheOptions(cache_mode="overwrite"),
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+
+    artifact = result.outputs["typed"]
+    assert artifact.driver == "csv"
+    assert artifact.meta["schema_name"] == "ScenarioOutput"
+    assert artifact.meta.get("has_strict_schema") is not True
 
 
 def test_scenario_run_promotes_coupler_inputs_for_path_binding(tracker):
