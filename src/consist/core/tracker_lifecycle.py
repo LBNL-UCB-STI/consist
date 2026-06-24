@@ -15,7 +15,7 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union, cast
+from typing import Any, Dict, List, Literal, Optional, TYPE_CHECKING, Union, cast
 
 from pydantic import BaseModel
 
@@ -311,6 +311,9 @@ class RunLifecycleCoordinator:
             cache_version = kwargs.pop("cache_version", None)
             parent_run_id = kwargs.pop("parent_run_id", None)
             code_identity_callable = kwargs.pop("_consist_code_identity_callable", None)
+            profile_file_schema: bool | Literal["if_changed"] | None = kwargs.pop(
+                "profile_file_schema", None
+            )
 
             if artifact_dir is not None:
                 kwargs["artifact_dir"] = str(artifact_dir)
@@ -534,6 +537,7 @@ class RunLifecycleCoordinator:
                             tracker._artifact_logging.log_artifact(
                                 item,
                                 direction="input",
+                                profile_file_schema=profile_file_schema,
                             )
                         else:
                             key = Path(item).stem
@@ -541,6 +545,7 @@ class RunLifecycleCoordinator:
                                 item,
                                 key=key,
                                 direction="input",
+                                profile_file_schema=profile_file_schema,
                                 known_latest_artifact_at_uri=known_latest_by_index.get(
                                     index
                                 ),

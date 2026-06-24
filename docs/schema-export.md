@@ -53,7 +53,40 @@ Schema export uses the schema captured from a DuckDB-ingested table. In practice
 
 If you already see `schema_id` in an artifact’s `meta`, you’re ready to export.
 
-You can also capture schemas **without ingestion** for CSV/Parquet artifacts by enabling lightweight file profiling at log time (`profile_file_schema=True`, optional `file_schema_sample_rows=`). This writes the same `schema_id` pointer into `artifact.meta`, allowing schema export even if the original file is later missing or moved.
+You can also capture schemas **without ingestion** for CSV/Parquet artifacts by
+enabling lightweight file profiling at log time (`profile_file_schema=True`,
+optional `file_schema_sample_rows=`). This writes the same `schema_id` pointer
+into `artifact.meta`, allowing schema export even if the original file is later
+missing or moved.
+
+For wrapped file-writing steps, enable profiling at the run level or at the
+individual output declaration:
+
+```python
+from consist import ArtifactSpec
+
+result = tracker.run(
+    fn=run_step,
+    inputs={"raw_firms": raw_firms_csv},
+    output_paths={
+        "synthetic_firms": ArtifactSpec(
+            path=output_dir / "synthetic_firms.csv",
+            schema=SyntheticFirms,
+            profile_file_schema=True,
+        )
+    },
+    profile_file_schema=True,
+)
+```
+
+The run-level flag profiles tabular artifacts logged through the normal run
+lifecycle, including named `Tracker.run(inputs={...})` inputs and declared
+`output_paths`. A per-output `ArtifactSpec(profile_file_schema=...)` overrides
+the run default for that output. These declarations apply when the artifact is
+logged. If a step returns from cache, newly added `ArtifactSpec` schema/profile
+metadata is not backfilled onto the cached artifact; use
+`cache_mode="overwrite"` or change the cache version/epoch when you need to
+persist new metadata for an already-cached output.
 
 If an artifact was already logged without schema profiling, you can backfill file
 schema metadata later (as long as the file is still accessible):

@@ -229,6 +229,10 @@ Options:
   root supplied by `--run-dir`.
 - `--db-path`: explicit DB path
 
+`schema capture-file` attaches an observation to an artifact's producing run. For
+exogenous/input artifacts with no producing `run_id`, enable automatic run-time
+profiling instead, for example `Tracker.run(..., profile_file_schema=True)`.
+
 ### consist schema export
 
 Export a captured artifact schema as an editable SQLModel stub. Select exactly
@@ -400,6 +404,8 @@ Inside the shell:
 (consist) show #1
 (consist) artifacts #1
 (consist) preview @1
+(consist) members @1
+(consist) manifest @1
 (consist) schema_profile @1
 (consist) schema capture-file @1
 (consist) schema_stub --run-id abc123 --hash a1b2c3d4
@@ -424,6 +430,8 @@ Useful shell shortcuts:
   artifacts by hash prefix.
 - `schema_stub --hash <prefix> --run-id <run_id>` narrows hash lookup to one run
   when you want deterministic selection.
+- `members @<n>` lists child artifacts for an output set. `manifest @<n>`
+  previews its JSON manifest artifact.
 
 Tips:
 

@@ -262,6 +262,7 @@ class ArtifactManager:
         parent_artifact_id: Optional[uuid.UUID] = None,
         known_latest_artifact_at_uri: Optional[Artifact] = None,
         latest_artifact_lookup_done: bool = False,
+        strict_schema: bool = True,
         **meta: Any,
     ) -> Artifact:
         """
@@ -286,7 +287,10 @@ class ArtifactManager:
         direction : str, default "output"
             The relationship of the artifact to the run: "input" or "output".
         schema : Optional[Type[SQLModel]], optional
-            A SQLModel class used to enforce structure and enable hybrid views.
+            A SQLModel class used to tag expected structure and enable hybrid views.
+        strict_schema : bool, default True
+            Whether the schema tag should also mark the artifact for strict
+            schema validation semantics.
         driver : Optional[str], optional
             The format handler (e.g., 'parquet', 'csv', 'zarr'). If omitted,
             the driver is inferred from the file extension.
@@ -574,7 +578,10 @@ class ArtifactManager:
 
         if schema:
             artifact_obj.meta["schema_name"] = schema.__name__
-            artifact_obj.meta["has_strict_schema"] = True
+            if strict_schema:
+                artifact_obj.meta["has_strict_schema"] = True
+            else:
+                artifact_obj.meta.pop("has_strict_schema", None)
 
         if artifact_obj.meta is None:
             artifact_obj.meta = {}

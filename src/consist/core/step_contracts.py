@@ -9,12 +9,12 @@ from consist.core.run_options import merge_run_options
 from consist.core.settings import ConsistSettings
 from consist.models.run import ConsistRecord
 from consist.types import (
-    ArtifactRef,
     CacheOptions,
     ExecutionOptions,
     FacetLike,
     IdentityInputs,
     InputBindingMode,
+    OutputPathRef,
     OutputSet,
     RunInputRef,
 )
@@ -103,7 +103,7 @@ class StepContract:
     input_keys: Optional[Union[Iterable[str], str]]
     optional_input_keys: Optional[Union[Iterable[str], str]]
     outputs: Optional[List[str]]
-    output_paths: Optional[Mapping[str, ArtifactRef]]
+    output_paths: Optional[Mapping[str, OutputPathRef]]
     output_sets: Optional[Mapping[str, OutputSet]]
     cache_mode: Optional[str]
     cache_hydration: Optional[str]
@@ -135,7 +135,7 @@ def resolve_step_contract(
     phase: Optional[str] = None,
     stage: Optional[str] = None,
     outputs: Optional[List[str]] = None,
-    output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+    output_paths: Optional[Mapping[str, OutputPathRef]] = None,
     output_sets: Optional[Mapping[str, OutputSet]] = None,
     cache_options: Optional[CacheOptions] = None,
     execution_options: Optional[ExecutionOptions] = None,

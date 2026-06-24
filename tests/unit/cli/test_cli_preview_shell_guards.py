@@ -338,7 +338,44 @@ def test_preview_renders_artifact_set_summary(
     assert "Manifest ID" in result.stdout
     assert "preview_output_set_member_one" in result.stdout
     assert "preview_output_set_member_two" in result.stdout
-    assert "preview_output_set_manifest" in result.stdout
+
+
+def test_preview_renders_nested_output_set_manifest_json(
+    cli_runner, tracker, tmp_path: Path
+) -> None:
+    """`preview` should summarize nested output-set manifest JSON artifacts."""
+    manifest_path = tmp_path / "nested_output_set_manifest.json"
+    manifest_path.write_text(
+        """
+        {
+          "output_set_key": "annual",
+          "members": [
+            {"key": "annual__2030", "relative_path": "annual_2030.csv"},
+            {"key": "annual__2035", "relative_path": "annual_2035.csv"}
+          ],
+          "totals": {"file_count": 2, "byte_size": 12}
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    with tracker.start_run("run_preview_output_set_manifest", "model"):
+        tracker.log_artifact(
+            manifest_path,
+            key="nested_output_set_manifest",
+            driver="json",
+            direction="output",
+            output_set_key="annual",
+            output_set_manifest=True,
+        )
+
+    result = cli_runner.invoke(app, ["preview", "nested_output_set_manifest"])
+
+    assert result.exit_code == 0
+    assert "JSON Manifest Summary" in result.stdout
+    assert "annual" in result.stdout
+    assert "annual__2030" in result.stdout
+    assert "annual_2035.csv" in result.stdout
 
 
 def test_preview_renders_dimensions_for_xarray_like_dataset(
