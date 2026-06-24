@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## [0.2.1] - 2026-06-24
+
+### Added
+
+- Add a thin, optional Ibis bridge on top of existing Consist DuckDB views so
+  tabular analysis can use native Ibis table expressions . Consist still owns 
+  view creation, provenance, and grouping logic; Ibis is only used as the query 
+  surface by @zneedell 
+  ([#144](https://github.com/LBNL-UCB-STI/consist/pull/144)).
+- Add first-class `OutputSet` support for logical outputs written as multiple
+  files, including a deterministic JSON manifest, `parent_artifact_id`
+  links, cache hydration of member files, CLI inspection, and security
+  hardening against symlinked or traversed paths by @zneedell
+  ([#145](https://github.com/LBNL-UCB-STI/consist/pull/145)).
+- Add `StepContract`, `resolve_step_contract(...)`, and
+  `collect_step_contracts(...)` so downstream orchestrators can resolve
+  declarative step metadata without executing the step by @zneedell
+  ([#146](https://github.com/LBNL-UCB-STI/consist/pull/146)).
+- Add `ArtifactSpec` / `OutputArtifactSpec` for richer `output_paths`
+  declarations, run-level file schema profiling, and expanded OutputSet and
+  shell inspection UX by @zneedell
+  ([#147](https://github.com/LBNL-UCB-STI/consist/pull/147)).
+- Add a provider-agnostic LLM skill package for agents working with Consist in
+  downstream projects by @zneedell
+  ([#151](https://github.com/LBNL-UCB-STI/consist/pull/151), 
+  [#152](https://github.com/LBNL-UCB-STI/consist/pull/152)).
+
+### Changed
+
+- Improve Consist’s error-message UX by standardizing core diagnostics around
+  `Problem / Likely cause / Suggested fix` and rendering key CLI errors in a
+  Rich box by @zneedell
+  ([#148](https://github.com/LBNL-UCB-STI/consist/pull/148)).
+
+### Fixed
+
+- Fix `ScenarioContext.run(output_paths=...)` so it accepts
+  `ArtifactSpec` / `OutputArtifactSpec`, matching `Tracker.run(...)`
+  by @zneedell ([#149](https://github.com/LBNL-UCB-STI/consist/pull/149)).
+- Fix shell mount resolution so `consist shell --trust-db` applies trusted
+  mount metadata before computing artifact accessibility by @zneedell
+  ([#150](https://github.com/LBNL-UCB-STI/consist/pull/150)).
+
 ## [0.2.0] - 2026-06-16
 
 ### Added
@@ -405,7 +448,11 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
 
-[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.2.1...HEAD
+
+[0.2.1]: https://github.com/LBNL-UCB-STI/consist/compare/v0.2.0...v0.2.1
+
+[0.2.0]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.5...v0.2.0
 
 [0.1.5]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.4...v0.1.5
 
