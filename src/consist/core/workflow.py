@@ -35,7 +35,6 @@ from consist.core.orchestration import (
     BatchResult,
 )
 from consist.core.error_messages import format_problem_cause_fix
-from consist.core.input_utils import coerce_input_map
 from consist.core.run_invocation import resolve_run_invocation
 from consist.types import (
     ArtifactRef,
@@ -750,8 +749,17 @@ class ScenarioContext:
         if output_paths is None:
             return None
         resolved_output_paths: Dict[str, OutputPathRef] = {}
-        for key, ref in coerce_input_map(output_paths).items():
+        for key, ref in output_paths.items():
+            if not isinstance(key, str):
+                raise TypeError(
+                    f"output_paths mapping keys must be str (got {type(key)})."
+                )
             output_ref = ref.path if isinstance(ref, OutputArtifactSpec) else ref
+            if not isinstance(output_ref, (Artifact, str, Path)):
+                raise TypeError(
+                    "output_paths mapping values must be Artifact, Path, str, "
+                    f"or OutputArtifactSpec (got {type(ref)})."
+                )
             if isinstance(output_ref, str) and output_ref in self.coupler:
                 path = self.coupler.path(output_ref)
                 if path is None:
