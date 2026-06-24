@@ -21,7 +21,7 @@ if __package__ is None and __spec__ is None:
         sys.path.insert(0, package_root)
 
 import cmd
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 import importlib
 from importlib.metadata import PackageNotFoundError, version as package_version
@@ -1614,7 +1614,12 @@ def _artifact_size_label(total_size_bytes: Any) -> str:
 
 
 def _render_artifacts_table(
-    tracker: Tracker, run_id: str, *, expand_sets: bool = False
+    tracker: Tracker,
+    run_id: str,
+    *,
+    expand_sets: bool = False,
+    trust_db: bool = False,
+    archive_base: Optional[Path | str] = None,
 ) -> List["Artifact"]:
     """Shared logic for displaying artifacts for a run."""
     run_artifacts = tracker.get_artifacts_for_run(run_id)
@@ -1639,14 +1644,6 @@ def _render_artifacts_table(
             return "yellow"
         return "red"
 
-    inputs = sorted(run_artifacts.inputs.values(), key=lambda x: x.key)
-    outputs = sorted(run_artifacts.outputs.values(), key=lambda x: x.key)
-    output_set_parent_ids = {
-        artifact.id for artifact in outputs if _artifact_is_output_set_parent(artifact)
-    }
-    hidden_set_member_count = 0
-    ref_index = 1
-
     def _should_hide_set_member(artifact: "Artifact") -> bool:
         parent_id = artifact.parent_artifact_id
         if not expand_sets and _artifact_is_output_set_manifest(artifact):
@@ -1657,58 +1654,82 @@ def _render_artifacts_table(
             and parent_id in output_set_parent_ids
         )
 
-    for artifact in inputs:
-        if _should_hide_set_member(artifact):
-            hidden_set_member_count += 1
-            continue
-        rendered.append(artifact)
-        accessibility = artifact.accessibility(tracker=tracker)
-        access_status = accessibility.status
-        set_parent_key = ""
-        if expand_sets and artifact.parent_artifact_id is not None:
-            parent_artifact = tracker.get_artifact(artifact.parent_artifact_id)
-            if parent_artifact is not None:
-                set_parent_key = parent_artifact.key
-        table.add_row(
-            str(ref_index),
-            "[blue]Input[/blue]",
-            artifact.key,
-            str(artifact.id),
-            artifact.container_uri,
-            f"[{_style_artifact_access(access_status)}]{access_status}[/]",
-            artifact.driver,
-            artifact.hash[:12] if artifact.hash else "N/A",
-            *([set_parent_key] if expand_sets else []),
-        )
-        ref_index += 1
+    inputs = sorted(run_artifacts.inputs.values(), key=lambda x: x.key)
+    outputs = sorted(run_artifacts.outputs.values(), key=lambda x: x.key)
+    output_set_parent_ids = {
+        artifact.id for artifact in outputs if _artifact_is_output_set_parent(artifact)
+    }
+    hidden_set_member_count = 0
+    ref_index = 1
 
-    if inputs and outputs:
-        table.add_section()
+    render_context = _preserve_tracker_mounts(tracker) if trust_db else nullcontext()
+    with render_context:
+        for artifact in inputs:
+            if trust_db:
+                _ensure_tracker_mounts_for_artifact(
+                    tracker,
+                    artifact,
+                    trust_db=trust_db,
+                    archive_base=archive_base,
+                )
+            if _should_hide_set_member(artifact):
+                hidden_set_member_count += 1
+                continue
+            rendered.append(artifact)
+            accessibility = artifact.accessibility(tracker=tracker)
+            access_status = accessibility.status
+            set_parent_key = ""
+            if expand_sets and artifact.parent_artifact_id is not None:
+                parent_artifact = tracker.get_artifact(artifact.parent_artifact_id)
+                if parent_artifact is not None:
+                    set_parent_key = parent_artifact.key
+            table.add_row(
+                str(ref_index),
+                "[blue]Input[/blue]",
+                artifact.key,
+                str(artifact.id),
+                artifact.container_uri,
+                f"[{_style_artifact_access(access_status)}]{access_status}[/]",
+                artifact.driver,
+                artifact.hash[:12] if artifact.hash else "N/A",
+                *([set_parent_key] if expand_sets else []),
+            )
+            ref_index += 1
 
-    for artifact in outputs:
-        if _should_hide_set_member(artifact):
-            hidden_set_member_count += 1
-            continue
-        rendered.append(artifact)
-        accessibility = artifact.accessibility(tracker=tracker)
-        access_status = accessibility.status
-        set_parent_key = ""
-        if expand_sets and artifact.parent_artifact_id is not None:
-            parent_artifact = tracker.get_artifact(artifact.parent_artifact_id)
-            if parent_artifact is not None:
-                set_parent_key = parent_artifact.key
-        table.add_row(
-            str(ref_index),
-            "[green]Output[/green]",
-            artifact.key,
-            str(artifact.id),
-            artifact.container_uri,
-            f"[{_style_artifact_access(access_status)}]{access_status}[/]",
-            artifact.driver,
-            artifact.hash[:12] if artifact.hash else "N/A",
-            *([set_parent_key] if expand_sets else []),
-        )
-        ref_index += 1
+        if inputs and outputs:
+            table.add_section()
+
+        for artifact in outputs:
+            if trust_db:
+                _ensure_tracker_mounts_for_artifact(
+                    tracker,
+                    artifact,
+                    trust_db=trust_db,
+                    archive_base=archive_base,
+                )
+            if _should_hide_set_member(artifact):
+                hidden_set_member_count += 1
+                continue
+            rendered.append(artifact)
+            accessibility = artifact.accessibility(tracker=tracker)
+            access_status = accessibility.status
+            set_parent_key = ""
+            if expand_sets and artifact.parent_artifact_id is not None:
+                parent_artifact = tracker.get_artifact(artifact.parent_artifact_id)
+                if parent_artifact is not None:
+                    set_parent_key = parent_artifact.key
+            table.add_row(
+                str(ref_index),
+                "[green]Output[/green]",
+                artifact.key,
+                str(artifact.id),
+                artifact.container_uri,
+                f"[{_style_artifact_access(access_status)}]{access_status}[/]",
+                artifact.driver,
+                artifact.hash[:12] if artifact.hash else "N/A",
+                *([set_parent_key] if expand_sets else []),
+            )
+            ref_index += 1
 
     console.print(table)
     if hidden_set_member_count:
@@ -3993,7 +4014,11 @@ class ConsistShell(cmd.Cmd):
                 console.print(f"[red]Run '{run_id}' not found.[/red]")
                 return
             rendered = _render_artifacts_table(
-                self.tracker, run_id, expand_sets=expand_sets
+                self.tracker,
+                run_id,
+                expand_sets=expand_sets,
+                trust_db=self.trust_db,
+                archive_base=self.run_dir,
             )
             self._last_artifact_run_id = run_id
             self._last_artifact_ids = []

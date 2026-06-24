@@ -2494,7 +2494,13 @@ def test_shell_artifacts_calls_renderer():
     shell = ConsistShell(tracker)
     with patch("consist.cli._render_artifacts_table") as render:
         shell.do_artifacts("run1")
-    render.assert_called_once_with(tracker, "run1", expand_sets=False)
+    render.assert_called_once_with(
+        tracker,
+        "run1",
+        expand_sets=False,
+        trust_db=False,
+        archive_base=None,
+    )
 
 
 def test_shell_artifacts_expands_sets_when_requested():
@@ -2503,7 +2509,13 @@ def test_shell_artifacts_expands_sets_when_requested():
     shell = ConsistShell(tracker)
     with patch("consist.cli._render_artifacts_table") as render:
         shell.do_artifacts("run1 --expand-sets")
-    render.assert_called_once_with(tracker, "run1", expand_sets=True)
+    render.assert_called_once_with(
+        tracker,
+        "run1",
+        expand_sets=True,
+        trust_db=False,
+        archive_base=None,
+    )
 
 
 def test_shell_summary_uses_renderer():
