@@ -17,8 +17,8 @@ from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
 
 def _assert_problem_cause_fix(message: str) -> None:
     assert "Problem:" in message
-    assert "Cause:" in message
-    assert "Fix:" in message
+    assert "Likely cause:" in message
+    assert "Suggested fix:" in message
 
 
 def test_scenario_run_updates_coupler_and_cache_hit(tracker):

@@ -161,4 +161,5 @@ def test_schema_apply_fks_errors_when_tracker_db_missing() -> None:
         result = runner.invoke(app, ["schema", "apply-fks"])
 
     assert result.exit_code == 1
+    assert "╭" in result.stdout
     assert "Tracker database not initialized" in result.stdout

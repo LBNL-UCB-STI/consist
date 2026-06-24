@@ -10,13 +10,14 @@ from consist.core.config_canonicalization import (
     ConfigPlan,
     canonical_identity_from_config,
 )
+from consist.core.error_messages import format_problem_cause_fix
 from consist.types import CacheOptions, ExecutionOptions
 
 
 def _assert_problem_cause_fix(message: str) -> None:
     assert "Problem:" in message
-    assert "Cause:" in message
-    assert "Fix:" in message
+    assert "Likely cause:" in message
+    assert "Suggested fix:" in message
 
 
 def test_run_rejects_removed_hash_inputs_kwarg(tracker) -> None:
@@ -30,6 +31,20 @@ def test_run_rejects_removed_hash_inputs_kwarg(tracker) -> None:
 
     message = str(excinfo.value)
     assert "unexpected keyword argument 'hash_inputs'" in message
+
+
+def test_problem_cause_fix_format_is_polished() -> None:
+    message = format_problem_cause_fix(
+        problem="Something went wrong.",
+        cause="The input value was missing.",
+        fix="Provide the required input value.",
+    )
+
+    assert message == (
+        "Problem: Something went wrong.\n"
+        "Likely cause: The input value was missing.\n"
+        "Suggested fix: Provide the required input value."
+    )
 
 
 def test_trace_rejects_removed_hash_inputs_kwarg(tracker) -> None:

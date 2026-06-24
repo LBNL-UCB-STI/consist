@@ -661,18 +661,26 @@ class ScenarioContext:
         return self.tracker._resolve_input_reference(
             value,
             type_label="Scenario inputs",
-            missing_path_error=(
-                "Problem: Scenario input path does not exist: {path!s}\n"
-                "Cause: The provided scenario input path is missing or not accessible.\n"
-                "Fix: Use an existing path, or pass a Coupler key from a prior step. "
-                "For the recommended path, use consist.refs(...) between steps."
+            missing_path_error=format_problem_cause_fix(
+                problem="Scenario input path does not exist: {path!s}",
+                cause=(
+                    "The provided scenario input path is missing or not accessible."
+                ),
+                fix=(
+                    "Use an existing path, or pass a Coupler key from a prior step. "
+                    "For the recommended path, use consist.refs(...) between steps."
+                ),
             ),
-            missing_string_error=(
-                "Problem: Scenario input string did not resolve: {value!r} "
-                "(checked path: {path!s}).\n"
-                "Cause: The string is neither a Coupler key nor an existing path.\n"
-                "Fix: Use a Coupler key produced earlier in the scenario, or provide "
-                "a valid file path. For the recommended path, use consist.refs(...)."
+            missing_string_error=format_problem_cause_fix(
+                problem=(
+                    "Scenario input string did not resolve: {value!r} "
+                    "(checked path: {path!s})."
+                ),
+                cause=("The string is neither a Coupler key nor an existing path."),
+                fix=(
+                    "Use a Coupler key produced earlier in the scenario, or provide "
+                    "a valid file path. For the recommended path, use consist.refs(...)."
+                ),
             ),
             string_ref_resolver=_resolve_coupler_ref,
         )
