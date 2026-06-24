@@ -799,8 +799,7 @@ def materialize_missing_inputs(
             )
             return True
 
-    preserve_items: list[tuple[Artifact, Path, Path]] = []
-    overwrite_items: list[tuple[Artifact, Path, Path]] = []
+    items: list[tuple[Artifact, Path, Path]] = []
     db_items: list[tuple[Artifact, Path, bool]] = []
 
     for artifact in tracker.current_consist.inputs:
@@ -827,10 +826,7 @@ def materialize_missing_inputs(
                 source_root=None,
             )
         if source is not None:
-            if destination.exists():
-                overwrite_items.append((artifact, source, destination))
-            else:
-                preserve_items.append((artifact, source, destination))
+            items.append((artifact, source, destination))
             continue
 
         if artifact.meta.get("is_ingested", False):
@@ -846,30 +842,21 @@ def materialize_missing_inputs(
 
     materialized: dict[str, str] = {}
 
-    if preserve_items or overwrite_items:
+    if items:
         from consist.core.materialize import materialize_artifacts_from_sources
 
         allowed_base = _allowed_materialization_roots(
             tracker, target_run=tracker.current_consist.run
         )
-        if preserve_items:
-            materialized.update(
-                materialize_artifacts_from_sources(
-                    preserve_items,
-                    allowed_base=allowed_base,
-                    on_missing="warn",
-                )
+        materialized.update(
+            materialize_artifacts_from_sources(
+                items,
+                allowed_base=allowed_base,
+                on_missing="warn",
+                overwrite_existing=active_options.validate_materialized_inputs,
             )
-        if overwrite_items:
-            materialized.update(
-                materialize_artifacts_from_sources(
-                    overwrite_items,
-                    allowed_base=allowed_base,
-                    on_missing="warn",
-                    overwrite_existing=True,
-                )
-            )
-        for artifact, _, destination in [*preserve_items, *overwrite_items]:
+        )
+        for artifact, _, destination in items:
             artifact.abs_path = str(destination)
 
     if db_items:
