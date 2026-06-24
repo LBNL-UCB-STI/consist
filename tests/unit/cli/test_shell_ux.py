@@ -682,3 +682,92 @@ def test_shell_preview_accepts_cached_artifact_ref(tmp_path) -> None:
         shell.do_preview("@1")
 
     tracker.get_artifact.assert_called_once_with("artifact-id")
+
+
+def test_shell_preview_renders_artifact_set_without_loading_parent(tmp_path) -> None:
+    tracker = MagicMock()
+    parent = SimpleNamespace(
+        id="parent-id",
+        key="annual",
+        driver="artifact_set",
+        run_id="run-1",
+        container_uri="./outputs/annual",
+        meta={"artifact_set": True},
+    )
+    tracker.get_artifact.return_value = parent
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+
+    with (
+        patch("consist.cli._render_artifact_set_preview", return_value=True) as render,
+        patch("consist.cli._load_artifact_with_diagnostics") as load_artifact,
+    ):
+        shell.do_preview("annual")
+
+    render.assert_called_once_with(tracker, parent, n_rows=5)
+    load_artifact.assert_not_called()
+
+
+def test_shell_members_lists_artifact_set_children(tmp_path, capsys) -> None:
+    tracker = MagicMock()
+    parent = SimpleNamespace(
+        id="parent-id",
+        key="annual",
+        driver="artifact_set",
+        run_id="run-1",
+        container_uri="./outputs/annual",
+        meta={"artifact_set": True},
+    )
+    tracker.get_artifact.return_value = parent
+    tracker.get_child_artifacts.return_value = [
+        SimpleNamespace(
+            key="annual__annual_2030_csv",
+            driver="csv",
+            meta={"output_set_relative_path": "annual_2030.csv"},
+        )
+    ]
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+
+    shell.do_members("annual")
+
+    out = capsys.readouterr().out
+    assert "annual__annual_2030_csv" in out
+    assert "annual_2030.csv" in out
+
+
+def test_shell_manifest_previews_artifact_set_manifest(tmp_path) -> None:
+    tracker = MagicMock()
+    parent = SimpleNamespace(
+        id="parent-id",
+        key="annual",
+        driver="artifact_set",
+        run_id="run-1",
+        container_uri="./outputs/annual",
+        meta={"artifact_set": True, "manifest_artifact_id": "manifest-id"},
+    )
+    manifest = SimpleNamespace(
+        id="manifest-id",
+        key="annual_manifest",
+        driver="json",
+        run_id="run-1",
+        container_uri="./outputs/annual.output_set_manifest.json",
+        meta={"output_set_manifest": True},
+    )
+    tracker.get_artifact.side_effect = [parent, manifest]
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+
+    with patch.object(shell, "do_preview") as do_preview:
+        shell.do_manifest("annual")
+
+    do_preview.assert_called_once_with("manifest-id")

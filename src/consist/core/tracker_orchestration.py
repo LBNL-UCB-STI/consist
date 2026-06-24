@@ -50,7 +50,9 @@ from consist.types import (
     FacetLike,
     InputBindingMode,
     IdentityInputs,
+    OutputArtifactSpec,
     OutputPolicyOptions,
+    OutputPathRef,
     OutputSet,
     RunInputRef,
 )
@@ -129,8 +131,9 @@ class RunInvocationContext:
     config: Optional[Union[Dict[str, Any], BaseModel]]
     config_plan: Optional["ConfigPlan"]
     outputs: Optional[List[str]]
-    output_paths: Optional[Mapping[str, ArtifactRef]]
+    output_paths: Optional[Mapping[str, OutputPathRef]]
     output_sets: Optional[Mapping[str, OutputSet]]
+    profile_file_schema: bool | Literal["if_changed"] | None
     inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]]
     output_mismatch: Literal["warn", "error", "ignore"]
     output_missing: Literal["warn", "error", "ignore"]
@@ -146,6 +149,41 @@ class RunInvocationContext:
     requested_input_materialization_mode: Optional[str]
     run_id: str
     start_kwargs: Dict[str, Any]
+
+
+def _output_spec_path(ref: OutputPathRef) -> ArtifactRef:
+    if isinstance(ref, OutputArtifactSpec):
+        return ref.path
+    return ref
+
+
+def _output_spec_log_kwargs(
+    ref: OutputPathRef,
+    *,
+    default_profile_file_schema: bool | Literal["if_changed"] | None,
+) -> Dict[str, Any]:
+    if not isinstance(ref, OutputArtifactSpec):
+        if default_profile_file_schema is None:
+            return {}
+        return {"profile_file_schema": default_profile_file_schema}
+
+    kwargs: Dict[str, Any] = {
+        "schema": ref.schema,
+        "strict_schema": False,
+        "driver": ref.driver,
+        "facet": ref.facet,
+        "facet_schema_version": ref.facet_schema_version,
+        "facet_index": ref.facet_index,
+        "profile_file_schema": (
+            default_profile_file_schema
+            if ref.profile_file_schema is None
+            else ref.profile_file_schema
+        ),
+        "file_schema_sample_rows": ref.file_schema_sample_rows,
+    }
+    if ref.meta is not None:
+        kwargs.update(dict(ref.meta))
+    return {key: value for key, value in kwargs.items() if value is not None}
 
 
 class RunTraceCoordinator:
@@ -280,6 +318,7 @@ class RunTraceCoordinator:
         requested_input_paths: Optional[Mapping[str, Any]] = None,
         requested_input_materialization: Optional[str] = None,
         requested_input_materialization_mode: Optional[str] = None,
+        profile_file_schema: bool | Literal["if_changed"] | None = None,
     ) -> Dict[str, Any]:
         """Build the kwargs payload passed into ``tracker.start_run``."""
         start_kwargs: Dict[str, Any] = {
@@ -334,6 +373,7 @@ class RunTraceCoordinator:
             "materialize_cached_outputs_source_root": (
                 materialize_cached_outputs_source_root
             ),
+            "profile_file_schema": profile_file_schema,
         }
         for key, value in optional_values.items():
             if value is not None:
@@ -345,7 +385,7 @@ class RunTraceCoordinator:
         *,
         tracker: "Tracker",
         cache_hydration: Optional[str],
-        output_paths: Optional[Mapping[str, ArtifactRef]],
+        output_paths: Optional[Mapping[str, OutputPathRef]],
         output_sets: Optional[Mapping[str, OutputSet]],
         run_id: str,
         model: str,
@@ -392,7 +432,7 @@ class RunTraceCoordinator:
                 materialize_cached_output_paths = {
                     str(output_key): self._helpers.resolve_output_path(
                         tracker,
-                        ref,
+                        _output_spec_path(ref),
                         output_base_dir,
                     )
                     for output_key, ref in output_paths.items()
@@ -450,8 +490,9 @@ class RunTraceCoordinator:
         stage: Optional[str],
         parent_run_id: Optional[str],
         outputs: Optional[List[str]],
-        output_paths: Optional[Mapping[str, ArtifactRef]],
+        output_paths: Optional[Mapping[str, OutputPathRef]],
         output_sets: Optional[Mapping[str, OutputSet]],
+        profile_file_schema: bool | Literal["if_changed"] | None,
         cache_options: Optional[CacheOptions],
         output_policy: Optional[OutputPolicyOptions],
         execution_options: Optional[ExecutionOptions],
@@ -649,6 +690,7 @@ class RunTraceCoordinator:
             requested_input_paths=requested_input_paths,
             requested_input_materialization=requested_input_materialization,
             requested_input_materialization_mode=(requested_input_materialization_mode),
+            profile_file_schema=profile_file_schema,
         )
 
         return RunInvocationContext(
@@ -658,6 +700,7 @@ class RunTraceCoordinator:
             outputs=invocation.outputs,
             output_paths=invocation.output_paths,
             output_sets=invocation.output_sets,
+            profile_file_schema=profile_file_schema,
             inputs=invocation.inputs,
             output_mismatch=invocation.output_mismatch,
             output_missing=invocation.output_missing,
@@ -777,8 +820,9 @@ class RunTraceCoordinator:
         *,
         tracker: "Tracker",
         resolved_name: str,
-        output_paths: Optional[Mapping[str, ArtifactRef]],
+        output_paths: Optional[Mapping[str, OutputPathRef]],
         output_base_dir: Path,
+        profile_file_schema: bool | Literal["if_changed"] | None,
         on_missing_outputs: Callable[[str, List[str]], None],
     ) -> Dict[str, Artifact]:
         outputs_map: Dict[str, Artifact] = {}
@@ -787,23 +831,30 @@ class RunTraceCoordinator:
 
         with tracker.persistence.batch_artifact_writes():
             for output_key, ref in output_paths.items():
+                output_ref = _output_spec_path(ref)
                 ref_path = self._helpers.resolve_output_path(
-                    tracker, ref, output_base_dir
+                    tracker, output_ref, output_base_dir
                 )
                 if not ref_path.exists():
                     on_missing_outputs(f"Run {resolved_name!r}", [str(output_key)])
                     continue
-                if isinstance(ref, Artifact):
+                log_kwargs = _output_spec_log_kwargs(
+                    ref,
+                    default_profile_file_schema=profile_file_schema,
+                )
+                if isinstance(output_ref, Artifact):
                     outputs_map[output_key] = tracker.log_artifact(
-                        ref,
+                        output_ref,
                         key=output_key,
                         direction="output",
+                        **log_kwargs,
                     )
                 else:
                     outputs_map[output_key] = tracker.log_artifact(
                         ref_path,
                         key=output_key,
                         direction="output",
+                        **log_kwargs,
                     )
         return outputs_map
 
@@ -815,8 +866,9 @@ class RunTraceCoordinator:
         fn: Optional[Callable[..., Any]],
         resolved_name: str,
         outputs: Optional[List[str]],
-        output_paths: Optional[Mapping[str, ArtifactRef]],
+        output_paths: Optional[Mapping[str, OutputPathRef]],
         output_sets: Optional[Mapping[str, OutputSet]],
+        profile_file_schema: bool | Literal["if_changed"] | None,
         result: Any,
         captured_outputs: Mapping[str, Artifact],
         on_missing_outputs: Callable[[str, List[str]], None],
@@ -828,6 +880,7 @@ class RunTraceCoordinator:
             resolved_name=resolved_name,
             output_paths=output_paths,
             output_base_dir=output_base_dir,
+            profile_file_schema=profile_file_schema,
             on_missing_outputs=on_missing_outputs,
         )
 
@@ -967,6 +1020,7 @@ class RunTraceCoordinator:
                         else None
                     ),
                     output_base_dir=output_base_dir,
+                    profile_file_schema=profile_file_schema,
                 )
             except ValueError:
                 raise
@@ -981,7 +1035,7 @@ class RunTraceCoordinator:
         run_id: str,
         run: Any,
         resolved_name: str,
-        output_paths: Optional[Mapping[str, ArtifactRef]],
+        output_paths: Optional[Mapping[str, OutputPathRef]],
         container: Any,
         input_binding: InputBindingMode,
         resolved_inputs: List[ArtifactRef],
@@ -1068,7 +1122,16 @@ class RunTraceCoordinator:
 
         output_base_dir = tracker.run_artifact_dir()
         resolved_output_paths: Dict[str, Union[str, Path]] = {
-            str(key): self._helpers.resolve_output_path(tracker, ref, output_base_dir)
+            str(key): self._helpers.resolve_output_path(
+                tracker, _output_spec_path(ref), output_base_dir
+            )
+            for key, ref in output_paths.items()
+        }
+        output_log_kwargs = {
+            str(key): _output_spec_log_kwargs(
+                ref,
+                default_profile_file_schema=None,
+            )
             for key, ref in output_paths.items()
         }
 
@@ -1085,6 +1148,7 @@ class RunTraceCoordinator:
             backend_type=backend_type,
             pull_latest=pull_latest,
             lineage_mode=lineage_mode,
+            output_log_kwargs=output_log_kwargs,
         )
 
         outputs_map = dict(result.artifacts)
@@ -1318,8 +1382,9 @@ class RunTraceCoordinator:
         stage: Optional[str] = None,
         parent_run_id: Optional[str] = None,
         outputs: Optional[List[str]] = None,
-        output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         output_sets: Optional[Mapping[str, OutputSet]] = None,
+        profile_file_schema: bool | Literal["if_changed"] | None = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
         cache_options: Optional[CacheOptions] = None,
@@ -1442,6 +1507,7 @@ class RunTraceCoordinator:
             outputs=outputs,
             output_paths=output_paths,
             output_sets=output_sets,
+            profile_file_schema=profile_file_schema,
             cache_options=cache_options,
             output_policy=output_policy,
             execution_options=execution_options,
@@ -1561,6 +1627,7 @@ class RunTraceCoordinator:
                 outputs=outputs,
                 output_paths=output_paths,
                 output_sets=output_sets,
+                profile_file_schema=context.profile_file_schema,
                 result=result,
                 captured_outputs=captured_outputs,
                 on_missing_outputs=_handle_missing_outputs,
@@ -1601,7 +1668,7 @@ class RunTraceCoordinator:
         iteration: Optional[int] = None,
         parent_run_id: Optional[str] = None,
         outputs: Optional[List[str]] = None,
-        output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
         cache_mode: str = "reuse",
@@ -1859,6 +1926,7 @@ class RunTraceCoordinator:
                     resolved_name=resolved_name,
                     output_paths=resolved_invocation.output_paths,
                     output_base_dir=output_base_dir,
+                    profile_file_schema=None,
                     on_missing_outputs=_handle_missing_outputs,
                 )
 

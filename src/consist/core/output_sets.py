@@ -29,6 +29,7 @@ class OutputSetTracker(Protocol):
         key: str | None = None,
         direction: str = "output",
         schema: type[SQLModel] | None = None,
+        strict_schema: bool = False,
         driver: str | None = None,
         table_path: str | None = None,
         array_path: str | None = None,
@@ -230,6 +231,7 @@ def register_output_sets(
     output_sets: Mapping[str, OutputSet] | None,
     config: Mapping[str, Any] | None,
     output_base_dir: Path,
+    profile_file_schema: bool | Literal["if_changed"] | None = None,
 ) -> dict[str, Artifact]:
     """Log output-set parent artifacts, member artifacts, and manifests.
 
@@ -268,6 +270,7 @@ def register_output_sets(
             key=key,
             direction="output",
             schema=resolved_output_set.schema,
+            strict_schema=False,
             driver="artifact_set",
             content_hash=_manifest_identity_hash(parent_manifest),
             force_hash_override=True,
@@ -282,6 +285,11 @@ def register_output_sets(
         )
 
         logged_members: list[Artifact] = []
+        member_profile_file_schema = (
+            profile_file_schema
+            if resolved_output_set.profile_file_schema is None
+            else resolved_output_set.profile_file_schema
+        )
         for member in members:
             facets = _member_facets(
                 key=key,
@@ -294,7 +302,11 @@ def register_output_sets(
                     member.path,
                     key=_member_key(key, member.relative_path),
                     direction="output",
+                    schema=resolved_output_set.schema,
+                    strict_schema=False,
                     parent_artifact_id=parent.id,
+                    profile_file_schema=member_profile_file_schema,
+                    file_schema_sample_rows=resolved_output_set.file_schema_sample_rows,
                     facet=facets,
                     facet_index=True,
                     output_set_key=key,
@@ -543,7 +555,6 @@ def _parent_metadata(
         metadata["manifest_artifact_id"] = manifest_artifact_id
     if output_set.schema is not None:
         metadata["schema_name"] = output_set.schema.__name__
-        metadata["has_strict_schema"] = True
     return metadata
 
 

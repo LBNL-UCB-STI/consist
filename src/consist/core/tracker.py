@@ -130,6 +130,7 @@ from consist.types import (
     HashInputs,
     IdentityInputs,
     OutputPolicyOptions,
+    OutputPathRef,
     OutputSet,
     RunInputRef,
 )
@@ -1889,8 +1890,9 @@ class Tracker:
         stage: Optional[str] = None,
         parent_run_id: Optional[str] = None,
         outputs: Optional[List[str]] = None,
-        output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         output_sets: Optional[Mapping[str, OutputSet]] = None,
+        profile_file_schema: bool | Literal["if_changed"] | None = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
         cache_options: Optional[CacheOptions] = None,
@@ -1970,7 +1972,11 @@ class Tracker:
             Consist auto-logs artifact-like returns (Path/str/Artifact or dict[str, ...])
             when ``output_paths`` is not provided.
         output_paths : Optional[Mapping[str, ArtifactRef]], optional
-            Output file paths to log. Dict maps artifact keys to host paths or Artifact refs.
+            Output file paths to log. Dict maps artifact keys to host paths,
+            Artifact refs, or ``ArtifactSpec`` declarations.
+        profile_file_schema : bool | {"if_changed"} | None, optional
+            Run-scoped default for automatic file schema profiling of logged
+            inputs and declared file outputs. Per-artifact specs can override it.
         output_sets : Optional[Mapping[str, OutputSet]], optional
             Logical output declarations for directory or chunked outputs. Each
             mapping key becomes the parent artifact key. Each ``OutputSet`` needs
@@ -2074,6 +2080,7 @@ class Tracker:
             outputs=outputs,
             output_paths=output_paths,
             output_sets=output_sets,
+            profile_file_schema=profile_file_schema,
             capture_dir=capture_dir,
             capture_pattern=capture_pattern,
             cache_options=cache_options,
@@ -2201,7 +2208,7 @@ class Tracker:
         iteration: Optional[int] = None,
         parent_run_id: Optional[str] = None,
         outputs: Optional[List[str]] = None,
-        output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
         cache_mode: str = "reuse",
@@ -2835,6 +2842,7 @@ class Tracker:
         key: Optional[str] = None,
         direction: str = "output",
         schema: Optional[Type[SQLModel]] = None,
+        strict_schema: bool = False,
         driver: Optional[str] = None,
         table_path: Optional[str] = None,
         array_path: Optional[str] = None,
@@ -2865,7 +2873,7 @@ class Tracker:
             **"Path Resolution & Mounts"**.
 
         -   **Schema Metadata Injection**: Embeds schema information (if provided) into the
-            artifact's metadata, useful for later "Strict Mode" validation or introspection.
+            artifact's metadata for discovery, export, and optional validation workflows.
 
         -   **Immediate Persistence**: This single-artifact method flushes JSON state
             and syncs artifact links to the database immediately for this call.
@@ -2883,8 +2891,12 @@ class Tracker:
             Specifies whether the artifact is an "input" or "output" for the
             current run. Defaults to "output".
         schema : Optional[Type[SQLModel]], optional
-            An optional SQLModel class that defines the expected schema for the artifact's data.
-            Its name will be stored in artifact metadata.
+            An optional SQLModel class that names the artifact's logical schema.
+            Its name will be stored in artifact metadata. This tags metadata; it
+            does not validate file contents by default.
+        strict_schema : bool, default False
+            Whether a schema tag should also mark the artifact as strict for
+            validation workflows. Schema tagging itself is non-strict by default.
         driver : Optional[str], optional
             Explicitly specify the driver (e.g., 'h5_table').
             If None, the driver is inferred from the file extension.
@@ -2944,6 +2956,7 @@ class Tracker:
             key=key,
             direction=direction,
             schema=schema,
+            strict_schema=strict_schema,
             driver=driver,
             table_path=table_path,
             array_path=array_path,
@@ -3672,7 +3685,9 @@ class Tracker:
             was logged with a schema (e.g., ``log_artifact(path, schema=MySchema)``)
             and that schema was registered with the Tracker at initialization
             (e.g., ``Tracker(..., schemas=[MySchema])``), it will be automatically
-            looked up and used for ingestion.
+            looked up and used for ingestion. Logging the artifact with
+            ``schema=...`` only tags metadata; ingestion is the step that applies
+            the schema to data.
         data : Optional[Union[Iterable[Dict[str, Any]], Any]], optional
             An iterable (e.g., list of dicts, generator) where each item represents a
             row of data to be ingested. If `data` is omitted, Consist attempts to

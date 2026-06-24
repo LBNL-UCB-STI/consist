@@ -116,7 +116,10 @@ with tracker.start_run("strict_ingest", model="demo"):
     tracker.ingest(artifact, schema=Person)
 ```
 
-Strict mode rejects incompatible data rather than silently coercing it.
+`log_artifact(..., schema=Person)` tags the artifact with logical schema
+metadata; it does not validate the file by itself. The validation happens during
+`tracker.ingest(..., schema=Person)`, where strict mode rejects incompatible data
+rather than silently coercing it.
 
 ---
 

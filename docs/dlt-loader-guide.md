@@ -113,6 +113,9 @@ with tracker.start_run("ingest_trips", model="demo"):
     tracker.ingest(artifact, schema=Trip)
 ```
 
+The `log_artifact(..., schema=Trip)` call records logical schema metadata on the
+artifact. The strict data check happens in `tracker.ingest(..., schema=Trip)`.
+
 For DataFrames, `tracker.log_dataframe(..., schema=...)` is the shorter path and
 is usually the simplest ingestion API.
 

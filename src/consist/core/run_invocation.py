@@ -17,7 +17,6 @@ from consist.core.run_options import merge_run_options
 from consist.core.settings import ConsistSettings
 from consist.models.run import ConsistRecord
 from consist.types import (
-    ArtifactRef,
     CacheOptions,
     CodeIdentityMode,
     ExecutionOptions,
@@ -25,6 +24,7 @@ from consist.types import (
     InputBindingMode,
     IdentityInputs,
     OutputPolicyOptions,
+    OutputPathRef,
     OutputSet,
     PathLike,
     RunInputRef,
@@ -131,7 +131,7 @@ class ResolvedRunInvocation:
     input_keys: Optional[Iterable[str] | str]
     optional_input_keys: Optional[Iterable[str] | str]
     outputs: Optional[List[str]]
-    output_paths: Optional[Mapping[str, ArtifactRef]]
+    output_paths: Optional[Mapping[str, OutputPathRef]]
     output_sets: Optional[Mapping[str, OutputSet]]
     cache_mode: str
     cache_hydration: Optional[str]
@@ -229,7 +229,7 @@ def resolve_run_invocation(
     phase: Optional[str],
     stage: Optional[str],
     outputs: Optional[List[str]],
-    output_paths: Optional[Mapping[str, ArtifactRef]],
+    output_paths: Optional[Mapping[str, OutputPathRef]],
     output_sets: Optional[Mapping[str, OutputSet]],
     cache_options: Optional[CacheOptions],
     output_policy: Optional[OutputPolicyOptions],

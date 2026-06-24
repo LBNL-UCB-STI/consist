@@ -73,6 +73,40 @@ def test_scenario_run_resolves_coupler_inputs(tracker):
         )
 
 
+def test_scenario_run_profile_file_schema_profiles_inputs_and_outputs(
+    tracker, tmp_path
+):
+    raw_path = tmp_path / "raw.csv"
+    raw_path.write_text("firm_id,employment\n1,42\n", encoding="utf-8")
+
+    def step(raw: Path, ctx) -> None:
+        assert raw == raw_path
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "summary.csv").write_text(
+            "metric,value\nemployment,42\n",
+            encoding="utf-8",
+        )
+
+    with tracker.scenario("scen_profile_schema") as sc:
+        result = sc.run(
+            fn=step,
+            inputs={"raw": raw_path},
+            output_paths={"summary": "summary.csv"},
+            profile_file_schema=True,
+            execution_options=ExecutionOptions(
+                input_binding="paths",
+                inject_context="ctx",
+            ),
+        )
+
+    input_artifact = tracker.db.get_artifact("raw", run_id=result.run.id)
+    assert input_artifact is not None
+    assert tracker.db.get_artifact_schema_for_artifact(artifact_id=input_artifact.id)
+    assert tracker.db.get_artifact_schema_for_artifact(
+        artifact_id=result.outputs["summary"].id
+    )
+
+
 def test_scenario_run_promotes_coupler_inputs_for_path_binding(tracker):
     def produce(ctx) -> None:
         ctx.run_dir.mkdir(parents=True, exist_ok=True)

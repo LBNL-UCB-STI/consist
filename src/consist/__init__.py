@@ -122,13 +122,16 @@ from consist.api import (
 
 # Types
 from consist.types import (
+    ArtifactSpec,
     BindingResult,
     BuiltinSchemaLiteral,
     CacheOptions,
     DriverType,
     ExecutionOptions,
     H5ChildSpec,
+    OutputArtifactSpec,
     OutputPolicyOptions,
+    OutputPathRef,
     OutputSet,
 )
 from consist.core.noop import (
@@ -208,6 +211,9 @@ __all__ = [
     "discover_gtfs_members",
     # Types
     "BindingResult",
+    "ArtifactSpec",
+    "OutputArtifactSpec",
+    "OutputPathRef",
     "BuiltinSchemaLiteral",
     "DriverType",
     "CacheOptions",

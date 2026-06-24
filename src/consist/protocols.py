@@ -12,6 +12,7 @@ from typing import (
 )
 
 from consist.types import ArtifactRef
+from consist.types import OutputPathRef
 from consist.types import OutputSet
 
 if TYPE_CHECKING:
@@ -66,7 +67,7 @@ class ScenarioLike(Protocol):
         name: Optional[str] = None,
         *,
         outputs: Optional[list[str]] = None,
-        output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         output_sets: Optional[Mapping[str, OutputSet]] = None,
         runtime_kwargs: Optional[Mapping[str, object]] = None,
         inject_context: bool | str = False,

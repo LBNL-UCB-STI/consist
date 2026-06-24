@@ -151,6 +151,36 @@ def test_schema_capture_file_rejects_invalid_mount_override_syntax() -> None:
     mock_get_tracker.assert_not_called()
 
 
+def test_schema_capture_file_explains_exogenous_input_artifacts() -> None:
+    """`schema capture-file` should explain how to profile input artifacts."""
+    with patch("consist.cli.get_tracker") as mock_get_tracker:
+        tracker = mock_get_tracker.return_value
+        tracker.get_artifact.return_value = SimpleNamespace(
+            id="00000000-0000-0000-0000-000000000123",
+            key="raw_firms",
+            driver="csv",
+            run_id=None,
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "schema",
+                "capture-file",
+                "--artifact-key",
+                "raw_firms",
+                "--db-path",
+                "mock.db",
+            ],
+        )
+
+    assert result.exit_code == 1
+    normalized = " ".join(result.stdout.split())
+    assert "Artifact has no producing run_id" in normalized
+    assert "Tracker.run(..., profile_file_schema=True)" in normalized
+    assert "post-hoc capture needs a producing run context" in normalized
+
+
 def test_schema_export_missing_schema_suggests_capture_file() -> None:
     """`schema export` should suggest capture-file when no schema is persisted."""
     with patch("consist.cli.get_tracker") as mock_get_tracker:

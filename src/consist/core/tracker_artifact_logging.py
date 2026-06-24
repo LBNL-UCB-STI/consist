@@ -127,6 +127,7 @@ class ArtifactLoggingCoordinator:
         key: Optional[str] = None,
         direction: str = "output",
         schema: Optional[Type[SQLModel]] = None,
+        strict_schema: bool = False,
         driver: Optional[str] = None,
         table_path: Optional[str] = None,
         array_path: Optional[str] = None,
@@ -157,6 +158,8 @@ class ArtifactLoggingCoordinator:
             Link direction relative to active run ("input" or "output").
         schema : type[SQLModel] | None, optional
             Optional user-provided schema model.
+        strict_schema : bool, default False
+            Whether a schema tag should mark the artifact as strict.
         driver : str | None, optional
             Explicit driver override.
         table_path : str | None, optional
@@ -239,6 +242,7 @@ class ArtifactLoggingCoordinator:
                 parent_artifact_id=parent_artifact_id,
                 known_latest_artifact_at_uri=known_latest_artifact_at_uri,
                 latest_artifact_lookup_done=latest_artifact_lookup_done,
+                strict_schema=strict_schema,
                 **meta,
             )
         with _track_begin_run_phase("input_binding.prepare_facet"):

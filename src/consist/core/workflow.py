@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 import uuid
 import functools
 import concurrent.futures
@@ -45,7 +46,9 @@ from consist.types import (
     FacetLike,
     InputBindingMode,
     IdentityInputs,
+    OutputArtifactSpec,
     OutputPolicyOptions,
+    OutputPathRef,
     OutputSet,
     RunInputRef,
 )
@@ -734,19 +737,20 @@ class ScenarioContext:
         return inputs
 
     def _resolve_output_paths(
-        self, output_paths: Optional[Mapping[str, ArtifactRef]]
-    ) -> Optional[Dict[str, ArtifactRef]]:
+        self, output_paths: Optional[Mapping[str, OutputPathRef]]
+    ) -> Optional[Dict[str, OutputPathRef]]:
         if output_paths is None:
             return None
-        resolved_output_paths: Dict[str, ArtifactRef] = {}
+        resolved_output_paths: Dict[str, OutputPathRef] = {}
         for key, ref in coerce_input_map(output_paths).items():
-            if isinstance(ref, str) and ref in self.coupler:
-                path = self.coupler.path(ref)
+            output_ref = ref.path if isinstance(ref, OutputArtifactSpec) else ref
+            if isinstance(output_ref, str) and output_ref in self.coupler:
+                path = self.coupler.path(output_ref)
                 if path is None:
                     raise RuntimeError(
                         format_problem_cause_fix(
                             problem=(
-                                f"Coupler key {ref!r} has no path to use for "
+                                f"Coupler key {output_ref!r} has no path to use for "
                                 f"output_paths[{key!r}]."
                             ),
                             cause=(
@@ -759,7 +763,11 @@ class ScenarioContext:
                             ),
                         )
                     )
-                resolved_output_paths[str(key)] = path
+                resolved_output_paths[str(key)] = (
+                    replace(ref, path=path)
+                    if isinstance(ref, OutputArtifactSpec)
+                    else path
+                )
             else:
                 resolved_output_paths[str(key)] = ref
         return resolved_output_paths
@@ -795,8 +803,9 @@ class ScenarioContext:
         stage: Optional[str] = None,
         parent_run_id: Optional[str] = None,
         outputs: Optional[List[str]] = None,
-        output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         output_sets: Optional[Mapping[str, OutputSet]] = None,
+        profile_file_schema: bool | Literal["if_changed"] | None = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
         cache_options: Optional[CacheOptions] = None,
@@ -821,6 +830,9 @@ class ScenarioContext:
 
         ``adapter`` and ``identity_inputs`` are the public identity-related
         kwargs.
+        ``profile_file_schema`` is the scenario-step equivalent of
+        ``Tracker.run(..., profile_file_schema=...)``: it profiles named
+        tabular inputs and declared tabular outputs logged during this step.
 
         Examples
         --------
@@ -1037,6 +1049,7 @@ class ScenarioContext:
             outputs=resolved_outputs,
             output_paths=resolved_output_paths,
             output_sets=resolved_invocation.output_sets,
+            profile_file_schema=profile_file_schema,
             capture_dir=capture_dir,
             capture_pattern=capture_pattern,
             cache_options=CacheOptions(
@@ -1103,7 +1116,7 @@ class ScenarioContext:
         iteration: Optional[int] = None,
         parent_run_id: Optional[str] = None,
         outputs: Optional[List[str]] = None,
-        output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
         cache_mode: str = "reuse",

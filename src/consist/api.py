@@ -1579,6 +1579,7 @@ def log_artifact(
     key: Optional[str] = None,
     direction: str = "output",
     schema: Optional[Type[SQLModel]] = None,
+    strict_schema: bool = False,
     driver: Optional[str] = None,
     content_hash: Optional[str] = None,
     force_hash_override: bool = False,
@@ -1611,8 +1612,12 @@ def log_artifact(
         Specifies whether the artifact is an "input" or "output" for the
         current run. Defaults to "output".
     schema : Optional[Type[SQLModel]], optional
-        An optional SQLModel class that defines the expected schema for the artifact's data.
-        Its name will be stored in artifact metadata.
+        An optional SQLModel class that names the artifact's logical schema.
+        Its name will be stored in artifact metadata. This tags metadata; it
+        does not validate file contents by default.
+    strict_schema : bool, default False
+        Whether a schema tag should also mark the artifact as strict for
+        validation workflows. Schema tagging itself is non-strict by default.
     driver : Optional[str], optional
         Explicitly specify the driver (e.g., 'h5_table').
         If None, the driver is inferred from the file extension.
@@ -1666,6 +1671,7 @@ def log_artifact(
             key=key,
             direction=direction,
             schema=schema,
+            strict_schema=strict_schema,
             driver=driver,
             content_hash=content_hash,
             force_hash_override=force_hash_override,
@@ -1683,6 +1689,7 @@ def log_artifact(
         key=key,
         direction=direction,
         schema=schema,
+        strict_schema=strict_schema,
         driver=driver,
         content_hash=content_hash,
         force_hash_override=force_hash_override,

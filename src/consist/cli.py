@@ -1226,7 +1226,11 @@ def schema_capture_file(
 
     if artifact.run_id is None:
         console.print(
-            "[red]Artifact has no producing run_id; cannot attach schema observation.[/red]"
+            "[red]Artifact has no producing run_id; cannot attach schema observation.[/red]\n"
+            "[yellow]For inputs or other exogenous artifacts, enable automatic "
+            "run-time profiling with `Tracker.run(..., profile_file_schema=True)` "
+            "or `tracker.settings.schema_profile_enabled=True`. post-hoc capture "
+            "needs a producing run context so Consist can attach the observation.[/yellow]"
         )
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
     run = tracker.get_run(artifact.run_id)
@@ -2694,6 +2698,115 @@ def _render_artifact_set_preview(
     return True
 
 
+def _resolve_artifact_json_path(
+    tracker: Tracker,
+    artifact: "Artifact",
+    *,
+    trust_db: bool,
+) -> Path | None:
+    candidates: List[Path] = []
+    if artifact.abs_path is not None:
+        candidates.append(Path(artifact.abs_path))
+    try:
+        candidates.append(Path(tracker.resolve_uri(artifact.container_uri)))
+    except (OSError, RuntimeError, TypeError, ValueError):
+        pass
+    candidates.extend(
+        path
+        for _, path in _artifact_recovery_candidate_paths(
+            tracker, artifact, trust_db=trust_db
+        )
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _render_output_set_manifest_preview(
+    tracker: Tracker,
+    artifact: "Artifact",
+    *,
+    n_rows: int,
+    trust_db: bool = False,
+) -> bool:
+    """Render nested output-set manifest JSON without dataframe coercion."""
+    if not _artifact_is_output_set_manifest(artifact):
+        return False
+
+    resolved_path = _resolve_artifact_json_path(
+        tracker,
+        artifact,
+        trust_db=trust_db,
+    )
+    if resolved_path is None:
+        console.print(
+            "[red]Could not resolve output-set manifest JSON path for preview.[/red]"
+        )
+        return True
+
+    try:
+        manifest = json.loads(resolved_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        console.print(f"[red]Could not read output-set manifest JSON: {exc}[/red]")
+        return True
+
+    if not isinstance(manifest, dict):
+        console.print("[yellow]Output-set manifest JSON is not an object.[/yellow]")
+        return True
+
+    members = manifest.get("members")
+    member_rows = members if isinstance(members, list) else []
+    totals = manifest.get("totals")
+    totals_map = totals if isinstance(totals, dict) else {}
+
+    summary = Table.grid(padding=(0, 2))
+    summary.add_column(style="bold cyan")
+    summary.add_column()
+    summary.add_row("Artifact", str(artifact.key))
+    summary.add_row("Output Set", str(manifest.get("output_set_key") or "-"))
+    summary.add_row("Members", str(len(member_rows)))
+    if "file_count" in totals_map:
+        summary.add_row("Manifest File Count", str(totals_map["file_count"]))
+    if "byte_size" in totals_map:
+        summary.add_row("Total Size", _artifact_size_label(totals_map["byte_size"]))
+
+    console.print(
+        Panel(
+            summary,
+            title="JSON Manifest Summary",
+            border_style="green",
+            expand=False,
+        )
+    )
+
+    if not member_rows:
+        return True
+
+    display_count = min(max(n_rows, 1), len(member_rows))
+    table = Table(
+        title=f"Manifest Members (showing {display_count} of {len(member_rows)})"
+    )
+    table.add_column("Key", style="cyan", overflow="fold", no_wrap=True)
+    table.add_column("Relative Path", style="magenta", overflow="fold")
+    table.add_column("Driver", style="dim")
+    table.add_column("Hash", style="dim", overflow="fold")
+    for member in member_rows[:display_count]:
+        member_map = member if isinstance(member, dict) else {}
+        table.add_row(
+            str(member_map.get("key") or "-"),
+            str(member_map.get("relative_path") or "-"),
+            str(member_map.get("driver") or "-"),
+            str(member_map.get("content_hash") or "-"),
+        )
+    console.print(table)
+    if len(member_rows) > display_count:
+        console.print(
+            f"[dim]... and {len(member_rows) - display_count} more manifest members[/dim]"
+        )
+    return True
+
+
 def _load_artifact_with_diagnostics(
     tracker: Tracker,
     artifact: "Artifact",
@@ -2899,6 +3012,13 @@ def preview(
     if _render_gtfs_bundle_preview(tracker, artifact, n_rows=n_rows):
         return
     if _render_artifact_set_preview(tracker, artifact, n_rows=n_rows):
+        return
+    if _render_output_set_manifest_preview(
+        tracker,
+        artifact,
+        n_rows=n_rows,
+        trust_db=trust_db,
+    ):
         return
 
     resolution_bases, db_metadata_run_dir = _build_relative_resolution_bases(
@@ -3882,6 +4002,90 @@ class ConsistShell(cmd.Cmd):
         except Exception as exc:
             console.print(f"[red]Error: {exc}[/red]")
 
+    def do_members(self, arg: str) -> None:
+        """List output-set members. Usage: members <artifact_key|artifact_id|@ref>"""
+        try:
+            args = self._safe_split(arg)
+            if len(args) != 1 or args[0].startswith("-"):
+                console.print(
+                    "[red]Error: members accepts one output-set selector.[/red]"
+                )
+                return
+            artifact_key = self._resolve_artifact_ref(args[0])
+            if artifact_key is None:
+                return
+            artifact = self.tracker.get_artifact(artifact_key)
+            if not artifact:
+                console.print(f"[red]Artifact '{args[0]}' not found.[/red]")
+                return
+            if not _artifact_is_output_set_parent(artifact):
+                console.print(
+                    f"[yellow]Artifact '{artifact.key}' is not an output set.[/yellow]"
+                )
+                return
+            children = self.tracker.get_child_artifacts(artifact)
+            if not children:
+                console.print("[yellow]No output-set members were found.[/yellow]")
+                return
+
+            table = Table(title=f"Members: {artifact.key}")
+            table.add_column("Artifact Key", style="cyan", overflow="fold")
+            table.add_column("Driver", style="dim")
+            table.add_column("Relative Path", style="magenta", overflow="fold")
+            table.add_column("Schema", style="yellow", overflow="fold")
+            for child in children:
+                meta = child.meta or {}
+                table.add_row(
+                    str(child.key),
+                    str(child.driver),
+                    str(meta.get("output_set_relative_path") or "-"),
+                    _artifact_schema_label(child) or "-",
+                )
+            console.print(table)
+            console.print(
+                "[dim]Tip: preview a child with `preview @<n>` or its key.[/dim]"
+            )
+        except Exception as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+
+    def do_manifest(self, arg: str) -> None:
+        """Preview an output-set manifest. Usage: manifest <artifact_key|artifact_id|@ref>"""
+        try:
+            args = self._safe_split(arg)
+            if len(args) != 1 or args[0].startswith("-"):
+                console.print(
+                    "[red]Error: manifest accepts one output-set selector.[/red]"
+                )
+                return
+            artifact_key = self._resolve_artifact_ref(args[0])
+            if artifact_key is None:
+                return
+            artifact = self.tracker.get_artifact(artifact_key)
+            if not artifact:
+                console.print(f"[red]Artifact '{args[0]}' not found.[/red]")
+                return
+            if not _artifact_is_output_set_parent(artifact):
+                console.print(
+                    f"[yellow]Artifact '{artifact.key}' is not an output set.[/yellow]"
+                )
+                return
+            meta = artifact.meta or {}
+            manifest_id = meta.get("manifest_artifact_id")
+            if not isinstance(manifest_id, str) or not manifest_id:
+                console.print(
+                    f"[yellow]Artifact '{artifact.key}' has no manifest artifact id.[/yellow]"
+                )
+                return
+            manifest = self.tracker.get_artifact(manifest_id)
+            if not manifest:
+                console.print(
+                    f"[yellow]Manifest artifact '{manifest_id}' was not found.[/yellow]"
+                )
+                return
+            self.do_preview(str(manifest.id))
+        except Exception as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+
     def do_preview(self, arg: str) -> None:
         """Preview an artifact. Usage: preview <artifact_key|artifact_id|@ref> [--rows N] | preview --hash <prefix>"""
         try:
@@ -3971,6 +4175,19 @@ class ConsistShell(cmd.Cmd):
                     archive_base=self.run_dir,
                     preferred_run_id=preferred_run_id,
                 )
+                if _render_artifact_set_preview(
+                    self.tracker,
+                    artifact,
+                    n_rows=n_rows,
+                ):
+                    return
+                if _render_output_set_manifest_preview(
+                    self.tracker,
+                    artifact,
+                    n_rows=n_rows,
+                    trust_db=self.trust_db,
+                ):
+                    return
                 resolution_bases, db_metadata_run_dir = (
                     _build_relative_resolution_bases(
                         self.tracker,

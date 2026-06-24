@@ -101,6 +101,32 @@ class OutputPolicyOptions:
 
 
 @dataclass(frozen=True, slots=True)
+class OutputArtifactSpec:
+    """
+    Declares one file output with optional artifact logging metadata.
+
+    ``output_paths={key: path}`` remains the shorthand for plain path outputs.
+    Use this richer declaration when the output path should carry schema,
+    driver, facet, profiling, or future validation metadata at the declaration
+    site.
+    """
+
+    path: ArtifactRef
+    schema: type[SQLModel] | None = None
+    driver: str | None = None
+    facet: FacetLike | None = None
+    facet_schema_version: str | int | None = None
+    facet_index: bool = False
+    profile_file_schema: bool | Literal["if_changed"] | None = None
+    file_schema_sample_rows: int | None = None
+    meta: Mapping[str, Any] | None = None
+
+
+ArtifactSpec = OutputArtifactSpec
+OutputPathRef: TypeAlias = Union[ArtifactRef, OutputArtifactSpec]
+
+
+@dataclass(frozen=True, slots=True)
 class OutputSet:
     """
     Declares a logical output artifact represented by multiple member files.
@@ -136,6 +162,11 @@ class OutputSet:
     schema : type[SQLModel] | None, optional
         Optional schema metadata for the logical parent and members. This does
         not make schema validation happen yet.
+    profile_file_schema : bool | {"if_changed"} | None, optional
+        Optional per-set file schema profiling control for tabular member files.
+        ``None`` means use the enclosing run/tracker default.
+    file_schema_sample_rows : int | None, optional
+        Optional sample size used when member file schema profiling is enabled.
     expected_count : int | Callable[[Mapping[str, Any]], int] | None, optional
         Optional completeness check for the number of discovered members.
     expected_members : Sequence[str] | Callable[[Mapping[str, Any]], Sequence[str]] | None, optional
@@ -164,6 +195,8 @@ class OutputSet:
     recursive: bool = False
     kind: str | None = None
     schema: type[SQLModel] | None = None
+    profile_file_schema: bool | Literal["if_changed"] | None = None
+    file_schema_sample_rows: int | None = None
     expected_count: int | Callable[[Mapping[str, Any]], int] | None = None
     expected_members: (
         Sequence[str] | Callable[[Mapping[str, Any]], Sequence[str]] | None

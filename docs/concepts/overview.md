@@ -138,6 +138,31 @@ result = tracker.run(
 )
 ```
 
+Use `ArtifactSpec` when a declared output also needs schema, driver, facet, or
+file-profiling metadata:
+
+``` python
+from consist import ArtifactSpec
+
+result = tracker.run(
+    fn=run_legacy_model,
+    inputs={"config": config_artifact},
+    output_paths={
+        "synthetic_firms": ArtifactSpec(
+            path=Path("./synthetic_firms.csv"),
+            schema=SyntheticFirms,
+            profile_file_schema=True,
+        )
+    },
+)
+```
+
+`schema=...` tags and persists the logical schema metadata. It does not validate
+the file contents; stricter validation remains a separate workflow. The
+declaration is applied when Consist logs the output. On cache hits, newly added
+schema or profiling metadata is not backfilled onto cached artifacts; force a
+rerun or change the cache version/epoch when you need that metadata recorded.
+
 ### When to use `output_sets`
 
 Use `output_sets` when one logical output is written as multiple files, such as
@@ -186,6 +211,12 @@ result = tracker.run(
 Consist records one logical parent artifact plus member file artifacts linked by
 `parent_artifact_id`. Cache hydration restores the member files under the
 declared root.
+
+If you pass `schema=...` on an `OutputSet`, Consist tags both the logical parent
+and discovered member artifacts with that schema. Member CSV/Parquet artifacts
+can also be profiled with `OutputSet(profile_file_schema=True)` or an enclosing
+`Tracker.run(..., profile_file_schema=True)` /
+`ScenarioContext.run(..., profile_file_schema=True)`.
 
 Output-set fields fall into two groups:
 
