@@ -30,10 +30,10 @@ jobs:
             python-version: "3.12"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -142,7 +142,7 @@ jobs:
 
       - name: Upload CLI startup benchmark
         if: runner.os == 'Linux' && matrix.python-version == '3.11'
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
           name: cli-startup-benchmark-${{ github.sha }}
           path: ci-artifacts/cli-startup-benchmark.json
