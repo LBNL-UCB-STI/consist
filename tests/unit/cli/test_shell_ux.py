@@ -683,6 +683,81 @@ def test_shell_preview_accepts_cached_artifact_ref(tmp_path) -> None:
     tracker.get_artifact.assert_called_once_with("artifact-id")
 
 
+def test_shell_preview_uses_cached_artifact_run_context(tmp_path) -> None:
+    tracker = MagicMock()
+    tracker.get_artifact.return_value = SimpleNamespace(
+        id="artifact-id",
+        key="artifact-key",
+        driver="csv",
+        run_id="run-123",
+        container_uri="data://outputs/file.csv",
+        meta={},
+    )
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+    shell._last_artifact_ids = ["artifact-id"]
+    shell._last_artifact_run_id = "run-123"
+
+    with (
+        patch("consist.cli._ensure_tracker_mounts_for_artifact") as ensure_mounts,
+        patch("consist.cli._render_artifact_set_preview", return_value=False),
+        patch("consist.cli._render_output_set_manifest_preview", return_value=False),
+        patch(
+            "consist.cli._build_relative_resolution_bases",
+            return_value=([], None),
+        ),
+        patch(
+            "consist.cli._load_artifact_with_diagnostics",
+            return_value=pd.DataFrame({"value": [1]}),
+        ),
+    ):
+        shell.do_preview("@1")
+
+    ensure_mounts.assert_called_once()
+    assert ensure_mounts.call_args.kwargs["preferred_run_id"] == "run-123"
+
+
+def test_shell_schema_profile_uses_cached_artifact_run_context(tmp_path) -> None:
+    tracker = MagicMock()
+    tracker.get_artifact.return_value = SimpleNamespace(
+        id="artifact-id",
+        key="artifact-key",
+        driver="csv",
+        run_id="run-123",
+        container_uri="data://outputs/file.csv",
+        meta={},
+    )
+    tracker.db = None
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+    shell._last_artifact_ids = ["artifact-id"]
+    shell._last_artifact_run_id = "run-123"
+
+    with (
+        patch("consist.cli._ensure_tracker_mounts_for_artifact") as ensure_mounts,
+        patch("consist.cli._render_artifact_set_preview", return_value=False),
+        patch("consist.cli._render_output_set_manifest_preview", return_value=False),
+        patch(
+            "consist.cli._build_relative_resolution_bases",
+            return_value=([], None),
+        ),
+        patch(
+            "consist.cli._load_artifact_with_diagnostics",
+            return_value=pd.DataFrame({"value": [1]}),
+        ),
+    ):
+        shell.do_schema_profile("@1")
+
+    ensure_mounts.assert_called_once()
+    assert ensure_mounts.call_args.kwargs["preferred_run_id"] == "run-123"
+
+
 def test_shell_preview_renders_artifact_set_without_loading_parent(tmp_path) -> None:
     tracker = MagicMock()
     parent = SimpleNamespace(

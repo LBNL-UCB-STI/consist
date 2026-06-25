@@ -43,6 +43,25 @@ def _create_workspace_csv_artifact(run_dir: Path, db_path: Path) -> None:
     assert artifact.container_uri.startswith("workspace://")
 
 
+def _create_scenario_csv_artifact(run_dir: Path, db_path: Path) -> None:
+    data_root = run_dir / "SynthFirm"
+    outputs_root = data_root / "outputs"
+    outputs_root.mkdir(parents=True, exist_ok=True)
+    csv_path = outputs_root / "synthetic_firms.csv"
+    csv_path.write_text("city,value\nAustin,1\n", encoding="utf-8")
+
+    tracker = Tracker(
+        run_dir=run_dir,
+        db_path=str(db_path),
+        mounts={"data": str(data_root)},
+    )
+    with tracker.scenario("scenario") as sc:
+        with sc.trace("step") as t:
+            t.log_artifact(
+                csv_path, key="synthetic_firms", driver="csv", direction="output"
+            )
+
+
 def test_preview_resolves_relative_paths_from_current_working_directory(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -770,6 +789,29 @@ def test_shell_preview_uses_trust_db_mount_inference_for_workspace_uris(
     assert "Schema: trip_table" in out
     assert "origin_zone" in out
     assert shell.tracker.mounts == {}
+
+
+def test_shell_preview_and_schema_profile_use_recorded_mount_root_for_ambiguous_scenario_artifacts(
+    tmp_path: Path, capsys
+) -> None:
+    run_dir = tmp_path / "inspector"
+    db_path = tmp_path / "provenance.duckdb"
+    _create_scenario_csv_artifact(run_dir=run_dir, db_path=db_path)
+
+    tracker = Tracker(run_dir=run_dir, db_path=str(db_path))
+    shell = ConsistShell(tracker, trust_db=True)
+
+    shell.do_preview("synthetic_firms --rows 1")
+    out = capsys.readouterr().out
+    assert "Preview: synthetic_firms" in out
+    assert "Austin" in out
+    assert "Artifact file not found" not in out
+
+    shell.do_schema_profile("synthetic_firms")
+    out = capsys.readouterr().out
+    assert "Schema: synthetic_firms" in out
+    assert "city" in out
+    assert "Artifact file not found" not in out
 
 
 def test_shell_artifacts_uses_trust_db_mount_inference_for_named_mount_uris(
