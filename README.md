@@ -81,8 +81,8 @@ print(first.cache_hit, second.cache_hit)  # False, True
 cleaned = consist.load_df(second.outputs["cleaned"])
 ```
 
-In this example, `input_binding="paths"` tells Consist to pass local `Path` objects 
-into the callable instead of loading input files. Those same paths are still hashed 
+In this example, `input_binding="paths"` tells Consist to pass local `Path` objects
+into the callable instead of loading input files. Those same paths are still hashed
 and recorded for cache identity and lineage. For tools that need inputs copied to
 specific local filenames, see [Usage Guide](docs/usage-guide.md#path-staging-example).
 

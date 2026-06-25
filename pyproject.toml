@@ -108,6 +108,7 @@ dev = [
     "xarray>=2024.9.0",
     "zarr>=2.18,<3",
     "ty>=0.0.40",
+    "pre-commit",
 ]
 docs = [
     "mkdocs-material>=9.7.0",
