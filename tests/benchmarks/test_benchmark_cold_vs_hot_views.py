@@ -286,11 +286,11 @@ def test_comparative_analysis_benchmark(tmp_path: Path):
         with tracker.engine.connect() as conn:
             query = text(
                 """
-                SELECT 
-                    consist_run_id, 
-                    AVG(val), 
-                    AVG(subsidy) 
-                FROM v_bench_cold 
+                SELECT
+                    consist_run_id,
+                    AVG(val),
+                    AVG(subsidy)
+                FROM v_bench_cold
                 GROUP BY 1
             """
             )

@@ -10,9 +10,9 @@ The format is based on [Keep a Changelog], and this project adheres to
 ### Added
 
 - Add a thin, optional Ibis bridge on top of existing Consist DuckDB views so
-  tabular analysis can use native Ibis table expressions . Consist still owns 
-  view creation, provenance, and grouping logic; Ibis is only used as the query 
-  surface by @zneedell 
+  tabular analysis can use native Ibis table expressions . Consist still owns
+  view creation, provenance, and grouping logic; Ibis is only used as the query
+  surface by @zneedell
   ([#144](https://github.com/LBNL-UCB-STI/consist/pull/144)).
 - Add first-class `OutputSet` support for logical outputs written as multiple
   files, including a deterministic JSON manifest, `parent_artifact_id`
@@ -29,7 +29,7 @@ The format is based on [Keep a Changelog], and this project adheres to
   ([#147](https://github.com/LBNL-UCB-STI/consist/pull/147)).
 - Add a provider-agnostic LLM skill package for agents working with Consist in
   downstream projects by @zneedell
-  ([#151](https://github.com/LBNL-UCB-STI/consist/pull/151), 
+  ([#151](https://github.com/LBNL-UCB-STI/consist/pull/151),
   [#152](https://github.com/LBNL-UCB-STI/consist/pull/152)).
 
 ### Changed

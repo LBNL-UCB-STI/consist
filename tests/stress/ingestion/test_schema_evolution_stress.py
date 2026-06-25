@@ -63,7 +63,7 @@ def test_schema_evolution_and_comparison(tmp_path):
     with tracker.engine.connect() as conn:
         query = text(
             """
-            SELECT 
+            SELECT
                 consist_run_id,
                 COUNT(*) as count,
                 AVG(income) as avg_income,
