@@ -77,8 +77,8 @@ def test_simulation_pipeline_stress_v2(tmp_path):
         with tracker.engine.connect() as conn:
             query = text(
                 """
-                SELECT 
-                    c.mode, 
+                SELECT
+                    c.mode,
                     COUNT(*) as trips,
                     AVG(c.income) as avg_income,
                     AVG(z.parking_cost) as avg_parking_at_home
