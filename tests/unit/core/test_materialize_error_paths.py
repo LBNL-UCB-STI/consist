@@ -22,8 +22,8 @@ def _artifact(*, key: str, driver: str = "csv", is_ingested: bool = False) -> Ar
     )
 
 
-def test_materialize_artifacts_blocks_symlink_destination_when_resolution_is_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_materialize_artifacts_blocks_symlink_destination(
+    tmp_path: Path,
 ) -> None:
     source = tmp_path / "source.csv"
     source.write_text("x\n1\n", encoding="utf-8")
@@ -32,9 +32,6 @@ def test_materialize_artifacts_blocks_symlink_destination_when_resolution_is_ide
     target.write_text("x\n2\n", encoding="utf-8")
     destination = tmp_path / "dest.csv"
     destination.symlink_to(target)
-
-    # Keep paths un-resolved so the symlink guard sees the link path directly.
-    monkeypatch.setattr(Path, "resolve", lambda self: self)
 
     tracker = SimpleNamespace(resolve_uri=lambda _uri: str(source))
     artifact = _artifact(key="symlinked")
@@ -168,7 +165,7 @@ def test_materialize_artifacts_from_sources_refuses_overwrite_type_mismatch(
 
 
 def test_materialize_artifacts_from_sources_refuses_symlink_destination_when_overwriting(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     source = tmp_path / "source.csv"
     source.write_text("value\nexpected\n", encoding="utf-8")
@@ -177,9 +174,6 @@ def test_materialize_artifacts_from_sources_refuses_symlink_destination_when_ove
     destination = tmp_path / "destination.csv"
     destination.symlink_to(target)
     artifact = _artifact(key="symlinked")
-
-    # Keep paths un-resolved so the symlink guard sees the link path directly.
-    monkeypatch.setattr(Path, "resolve", lambda self: self)
 
     with pytest.raises(ValueError, match="Symlink detected in destination path"):
         materialize_artifacts_from_sources(

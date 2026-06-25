@@ -1,6 +1,6 @@
 import hashlib
-import os
 import logging
+import os
 import shutil
 import tempfile
 import uuid
@@ -9,21 +9,21 @@ from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Any,
     Dict,
     Literal,
     Optional,
     Protocol,
     Sequence,
-    TYPE_CHECKING,
     cast,
     runtime_checkable,
 )
 
-from consist.models.artifact import Artifact
-from consist.models.run import Run, RunArtifacts, ConsistRecord
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.output_sets import build_output_set_child_destinations
+from consist.models.artifact import Artifact
+from consist.models.run import ConsistRecord, Run, RunArtifacts
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
@@ -1024,7 +1024,6 @@ def materialize_requested_inputs(
             )
 
         artifact = matches[0]
-        destination_path = Path(destination).resolve()
 
         from consist.core.materialize import (
             _ensure_destination_not_symlink,
@@ -1033,16 +1032,14 @@ def materialize_requested_inputs(
             validate_allowed_materialization_destination,
         )
 
+        _ensure_destination_not_symlink(Path(destination))
+        destination_path = Path(destination).resolve()
+
         validate_allowed_materialization_destination(destination_path, allowed_base)
-        _ensure_destination_not_symlink(destination_path)
         destination_path.parent.mkdir(parents=True, exist_ok=True)
 
         source_path = _resolve_source(artifact)
         if destination_path.exists():
-            if destination_path.is_symlink():
-                raise ValueError(
-                    f"Symlink detected in destination path: {destination_path}"
-                )
             if (
                 source_path is None
                 and artifact.hash

@@ -697,7 +697,7 @@ def fold_hydrated_run_outputs_result(
 
 
 def _ensure_destination_not_symlink(path: Path) -> None:
-    if path.exists() and path.is_symlink():
+    if path.is_symlink():
         raise ValueError(f"Symlink detected in destination path: {path}")
 
 
@@ -2217,8 +2217,8 @@ def materialize_artifacts(
     materialized: dict[str, str] = {}
 
     for artifact, destination in items:
+        _ensure_destination_not_symlink(Path(destination))
         destination_path = Path(destination).resolve()
-        _ensure_destination_not_symlink(destination_path)
         destination_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -2313,10 +2313,10 @@ def materialize_artifacts_from_sources(
     """
     materialized: dict[str, str] = {}
     for artifact, source, destination in items:
+        _ensure_destination_not_symlink(Path(destination))
         source_path = Path(source).resolve()
         destination_path = Path(destination).resolve()
         validate_allowed_materialization_destination(destination_path, allowed_base)
-        _ensure_destination_not_symlink(destination_path)
         destination_path.parent.mkdir(parents=True, exist_ok=True)
 
         if not source_path.exists():
@@ -2596,8 +2596,8 @@ def materialize_ingested_artifact_from_db(
             f"No ingested rows found for artifact {artifact.key!r} ({artifact.id})."
         )
 
+    _ensure_destination_not_symlink(Path(destination))
     destination_path = Path(destination).resolve()
-    _ensure_destination_not_symlink(destination_path)
     destination_path.parent.mkdir(parents=True, exist_ok=True)
 
     if destination_path.exists() and destination_path.is_dir():
