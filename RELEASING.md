@@ -80,7 +80,7 @@ Use a clean environment so you are testing the actual release artifacts rather
 than the editable checkout.
 
 ```bash
-python -m venv /tmp/consist-release-smoke
+python -m venv --clear /tmp/consist-release-smoke
 /tmp/consist-release-smoke/bin/python -m pip install --upgrade pip
 /tmp/consist-release-smoke/bin/python -m pip install dist/*.whl
 /tmp/consist-release-smoke/bin/python -c "import consist; print(consist.__file__)"

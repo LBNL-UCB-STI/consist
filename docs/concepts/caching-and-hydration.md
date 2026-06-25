@@ -7,8 +7,24 @@ declare inputs -> compute signature -> check cache -> hydrate or execute
 ```
 
 This page focuses on the run signature, cache hit/miss behavior, hydration
-versus materialization, and the policy knobs you are likely to use. For
-runnable workflow patterns, see the [Usage Guide](../usage-guide.md).
+versus filesystem materialization, and the policy knobs you are likely to use.
+For runnable workflow patterns, see the [Usage Guide](../usage-guide.md).
+
+## Which Layer Am I In?
+
+Consist uses a few related mechanisms to make prior work reusable. Keep the
+layer straight before choosing an option:
+
+| Layer | Question it answers | Main surface |
+|---|---|---|
+| Cache reuse | Can this step skip execution? | Run signature and cache lookup |
+| Metadata hydration | Which prior artifacts belong to this result? | Default cache-hit behavior |
+| Filesystem materialization | Do bytes need to exist at a local path? | `cache_hydration`, requested input staging, `hydrate_run_outputs(...)` |
+| DuckDB ingestion | Should tabular bytes be queryable and recoverable from the database? | `tracker.ingest(...)`, `consist.load_df(..., db_fallback=...)` |
+
+This page uses **materialization** to mean filesystem byte recovery or staging.
+DuckDB ingestion is a storage/querying choice covered in
+[Data Storage and Ingestion](data-materialization.md).
 
 ## Core Terms
 
@@ -18,11 +34,12 @@ runnable workflow patterns, see the [Usage Guide](../usage-guide.md).
 | Cache hit | A completed prior run has the same signature and reusable outputs. |
 | Cache miss | No reusable completed run matches, so Consist executes the step. |
 | Hydration | Recover artifact metadata, paths, and provenance records. |
-| Materialization | Ensure artifact bytes exist at a target filesystem path. |
+| Filesystem materialization | Ensure artifact bytes exist at a target filesystem path. |
+| DuckDB ingestion | Store tabular artifact bytes in DuckDB for SQL analysis and database fallback. |
 | Ghost mode | Recovery path when provenance exists but original files are missing. |
 
-Hydration and materialization are deliberately separate. A cache hit can return
-artifact metadata without copying bytes.
+Hydration and filesystem materialization are deliberately separate. A cache hit
+can return artifact metadata without copying bytes.
 
 ## Run Signature
 
@@ -86,7 +103,8 @@ On a cache hit, Consist:
 - Skips callable execution for `run(...)`-style function execution.
 
 On a cache hit, Consist does not automatically copy every output file into the
-new run directory. That only happens when a materialization policy asks for it.
+new run directory. That only happens when a filesystem materialization policy
+asks for it.
 
 On a cache miss, Consist executes the step, records a new run, logs declared
 outputs, and stores enough identity metadata to explain future hits and misses.
@@ -126,7 +144,7 @@ if explanation:
 Common reasons include config drift, input drift, code drift, invalid cached
 outputs, or no similar prior run.
 
-## Hydration vs Materialization
+## Hydration vs Filesystem Materialization
 
 Hydration recovers information about an artifact:
 
@@ -136,7 +154,7 @@ Hydration recovers information about an artifact:
 - metadata and format
 - canonical fingerprint on `artifact.hash`
 
-Materialization moves or recreates bytes:
+Filesystem materialization moves or recreates bytes:
 
 - copy a cached output to a requested path
 - stage an input file for a path-bound tool
@@ -148,21 +166,22 @@ and large simulations from duplicating files unnecessarily.
 
 Use `consist.load_df(...)`, `consist.load(...)`, or `consist.load_relation(...)`
 when you need to read artifact bytes. See
-[Data Materialization](data-materialization.md) for ingestion and database
+[Data Storage and Ingestion](data-materialization.md) for ingestion and database
 fallback behavior.
 
 ## Cache Hydration Policies
 
-Set cache-hit materialization behavior with
-`CacheOptions(cache_hydration=...)` on `run(...)`, or the equivalent lifecycle
-argument on lower-level APIs.
+Set byte-availability behavior with `CacheOptions(cache_hydration=...)` on
+`run(...)`, or the equivalent lifecycle argument on lower-level APIs. Some
+policies apply only after a cache hit; `inputs-missing` applies before
+executing a cache miss.
 
-| Policy | Behavior | Typical use |
-|---|---|---|
-| `metadata` | Hydrate artifact records only. | Default for provenance and most analysis. |
-| `inputs-missing` | Materialize missing declared inputs before execution. | Continue workflows across run directories. |
-| `outputs-requested` | Materialize selected cached outputs to requested paths. | External tools need known output filenames. |
-| `outputs-all` | Materialize all cached outputs under a target directory. | Build a self-contained local copy. |
+| Policy | Phase | Behavior | Typical use |
+|---|---|---|---|
+| `metadata` | Cache hit | Hydrate artifact records only. | Default for provenance and most analysis. |
+| `inputs-missing` | Cache miss | Materialize missing declared inputs before execution. | Continue workflows across run directories. |
+| `outputs-requested` | Cache hit | Materialize selected cached outputs to requested paths. | External tools need known output filenames. |
+| `outputs-all` | Cache hit | Materialize all cached outputs under a target directory. | Build a self-contained local copy. |
 
 For `outputs-requested`, provide explicit output paths. For `outputs-all`,
 provide a target output directory. `run(...)` accepts the high-level
@@ -183,6 +202,24 @@ not the same knob.
 Path-bound workflows often use `cache_hydration="inputs-missing"` when work
 moves across run directories. Loaded workflows can often keep
 `cache_hydration="metadata"` and load data on demand.
+
+By default, `inputs-missing` restores only destinations that are absent. If a
+path-bound legacy workflow reuses the same filename for different logical
+artifacts, opt into validation:
+
+```python
+from consist import CacheOptions
+
+cache_options = CacheOptions(
+    cache_hydration="inputs-missing",
+    validate_materialized_inputs=True,
+)
+```
+
+With validation enabled, Consist preserves an existing destination unless it can
+prove from a portable artifact hash that the bytes are stale. Proven stale
+inputs are restored from the historical root, artifact `recovery_roots`, or the
+ingested DB fallback when available.
 
 ## Requested Input Staging
 
@@ -243,12 +280,13 @@ and archive helpers.
 |---|---|
 | Fast reruns without copying large outputs | `cache_hydration="metadata"` |
 | Continue a workflow when cached inputs are missing locally | `cache_hydration="inputs-missing"` |
+| Restore stale path-bound cache-miss inputs only when hash-proven wrong | `CacheOptions(cache_hydration="inputs-missing", validate_materialized_inputs=True)` |
 | Give a path-bound callable exact input filenames | `ExecutionOptions(input_materialization="requested", input_paths={...})` |
 | Give an external consumer selected cached outputs | `cache_hydration="outputs-requested"` plus requested output paths |
 | Make all cached outputs local | `cache_hydration="outputs-all"` |
 | Find the prior run for restart recovery | `find_matching_run(...)` |
 | Rehydrate old run outputs into a new workspace | `hydrate_run_outputs(...)` |
-| Query or recover tabular bytes from DuckDB | Ingest artifacts; see [Data Materialization](data-materialization.md) |
+| Query or recover tabular bytes from DuckDB | Ingest artifacts; see [Data Storage and Ingestion](data-materialization.md) |
 
 ## Intentional Invalidation
 
@@ -279,7 +317,7 @@ scenario epoch, or tracker epoch.
 
 - [Usage Guide](../usage-guide.md): choosing `run`, `trace`, `scenario`, input
   binding, and step references.
-- [Data Materialization](data-materialization.md): ingestion, hot/cold data,
+- [Data Storage and Ingestion](data-materialization.md): ingestion, hot/cold data,
   hybrid views, and loader fallback.
 - [Materialization](../api/materialize.md): input staging,
   `hydrate_run_outputs(...)`, and recovery status objects.

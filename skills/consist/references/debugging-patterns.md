@@ -6,6 +6,7 @@
 - Identity and cache-miss debugging
 - Scenario and step wiring
 - Output hydration and missing files
+- Cache-miss input hydration
 - Path and mount resolution
 - Inspection surfaces
 - When to read Consist source
@@ -72,11 +73,11 @@ CONSIST_CACHE_TIMING=1 CONSIST_CACHE_DEBUG=1 /path/to/python script.py
   paths.
 - Use `capture_dir=...` when a tool always writes to a fixed folder and the
   simpler direct-capture surface is enough.
-- Use `validate_cached_outputs=\"eager\"` when the problem might be stale or
+- Use `validate_cached_outputs="eager"` when the problem might be stale or
   missing materialized outputs.
-- Use `result.output_path(\"key\")` or `tracker.load_run_output(...)` to verify
+- Use `result.output_path("key")` or `tracker.load_run_output(...)` to verify
   what path or artifact Consist thinks belongs to the run.
-- Use `load_df(..., db_fallback=\"always\")` when the artifact was ingested and
+- Use `load_df(..., db_fallback="always")` when the artifact was ingested and
   the original file may no longer exist.
 - If a tool writes nested directories, prefer top-level
   `consist.capture_outputs(..., recursive=True)` or
@@ -85,6 +86,24 @@ CONSIST_CACHE_TIMING=1 CONSIST_CACHE_DEBUG=1 /path/to/python script.py
 - Auto-captured keys come from filename stems. If nested outputs can repeat the
   same basename, log them manually with stable keys instead of relying on
   automatic capture.
+
+## Cache-Miss Input Hydration
+
+- `cache_hydration="inputs-missing"` is cache-miss behavior, not cache-hit
+  behavior. By default it restores declared inputs only when their destination
+  path is absent.
+- For in-place workflows that reuse the same path for different logical input
+  versions, opt into stale-input checks with
+  `CacheOptions(cache_hydration="inputs-missing", validate_materialized_inputs=True)`.
+- With validation enabled, Consist preserves existing destinations unless a
+  portable full-content hash proves the path is stale. Missing or stale inputs
+  can recover from historical run roots, artifact `recovery_roots`, or ingested
+  DB fallback.
+- Hash validation intentionally stays conservative: destinations are preserved
+  when an artifact has no portable hash, the run did not use full hashing, or
+  the local path cannot be read safely.
+- DB fallback is for ingested file-like artifacts. Directory inputs and
+  non-portable artifacts need a filesystem recovery source.
 
 ## Path And Mount Resolution
 

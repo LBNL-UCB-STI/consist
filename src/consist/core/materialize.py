@@ -697,7 +697,7 @@ def fold_hydrated_run_outputs_result(
 
 
 def _ensure_destination_not_symlink(path: Path) -> None:
-    if path.exists() and path.is_symlink():
+    if path.is_symlink():
         raise ValueError(f"Symlink detected in destination path: {path}")
 
 
@@ -2217,8 +2217,8 @@ def materialize_artifacts(
     materialized: dict[str, str] = {}
 
     for artifact, destination in items:
+        _ensure_destination_not_symlink(Path(destination))
         destination_path = Path(destination).resolve()
-        _ensure_destination_not_symlink(destination_path)
         destination_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -2281,6 +2281,7 @@ def materialize_artifacts_from_sources(
     *,
     allowed_base: Path | Sequence[Path] | None,
     on_missing: Literal["warn", "raise"] = "warn",
+    overwrite_existing: bool = False,
 ) -> dict[str, str]:
     """
     Rehydrate artifacts from explicit source paths to specified destinations.
@@ -2301,6 +2302,8 @@ def materialize_artifacts_from_sources(
     on_missing : {"warn", "raise"}, default "warn"
         The error handling policy for cases where the explicit source path
         is absent from the filesystem.
+    overwrite_existing : bool, default False
+        If True, replace existing destinations after safety checks pass.
 
     Returns
     -------
@@ -2310,10 +2313,10 @@ def materialize_artifacts_from_sources(
     """
     materialized: dict[str, str] = {}
     for artifact, source, destination in items:
+        _ensure_destination_not_symlink(Path(destination))
         source_path = Path(source).resolve()
         destination_path = Path(destination).resolve()
         validate_allowed_materialization_destination(destination_path, allowed_base)
-        _ensure_destination_not_symlink(destination_path)
         destination_path.parent.mkdir(parents=True, exist_ok=True)
 
         if not source_path.exists():
@@ -2337,11 +2340,17 @@ def materialize_artifacts_from_sources(
                         f"Destination type mismatch for {destination_path}; "
                         "refusing to overwrite."
                     )
-                materialized[artifact.key] = str(destination_path)
-                continue
             if source_path == destination_path:
                 materialized[artifact.key] = str(destination_path)
                 continue
+            if destination_path.exists():
+                if not overwrite_existing:
+                    materialized[artifact.key] = str(destination_path)
+                    continue
+                if destination_path.is_dir():
+                    shutil.rmtree(destination_path)
+                else:
+                    destination_path.unlink()
             if source_path.is_dir():
                 copied = _copy_dir_safe(source_path, destination_path)
             else:
@@ -2587,8 +2596,8 @@ def materialize_ingested_artifact_from_db(
             f"No ingested rows found for artifact {artifact.key!r} ({artifact.id})."
         )
 
+    _ensure_destination_not_symlink(Path(destination))
     destination_path = Path(destination).resolve()
-    _ensure_destination_not_symlink(destination_path)
     destination_path.parent.mkdir(parents=True, exist_ok=True)
 
     if destination_path.exists() and destination_path.is_dir():

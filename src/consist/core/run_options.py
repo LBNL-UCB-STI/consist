@@ -55,6 +55,7 @@ class ResolvedRunOptions:
     cache_version: Optional[int]
     cache_epoch: Optional[int]
     validate_cached_outputs: Optional[str]
+    validate_materialized_inputs: Optional[bool]
     materialize_cached_outputs_source_root: Optional[PathLike]
     code_identity: Optional[CodeIdentityMode]
     code_identity_extra_deps: Optional[list[str]]
@@ -159,6 +160,7 @@ def merge_run_options(
         cache_version=cache_obj.cache_version,
         cache_epoch=cache_obj.cache_epoch,
         validate_cached_outputs=cache_obj.validate_cached_outputs,
+        validate_materialized_inputs=cache_obj.validate_materialized_inputs,
         materialize_cached_outputs_source_root=(
             cache_obj.materialize_cached_outputs_source_root
         ),

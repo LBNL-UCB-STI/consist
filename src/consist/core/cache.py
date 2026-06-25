@@ -1,6 +1,6 @@
 import hashlib
-import os
 import logging
+import os
 import shutil
 import tempfile
 import uuid
@@ -9,21 +9,21 @@ from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Any,
     Dict,
     Literal,
     Optional,
     Protocol,
     Sequence,
-    TYPE_CHECKING,
     cast,
     runtime_checkable,
 )
 
-from consist.models.artifact import Artifact
-from consist.models.run import Run, RunArtifacts, ConsistRecord
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.output_sets import build_output_set_child_destinations
+from consist.models.artifact import Artifact
+from consist.models.run import ConsistRecord, Run, RunArtifacts
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
@@ -70,6 +70,8 @@ class CacheFs(Protocol):
 
 @runtime_checkable
 class CacheIdentity(Protocol):
+    hashing_strategy: str
+
     def compute_file_checksum(self, file_path: str | Path) -> str: ...
 
 
@@ -162,6 +164,7 @@ class ActiveRunCacheOptions:
     materialize_cached_outputs_dir: Optional[Path] = None
     materialize_cached_outputs_source_root: Optional[Path] = None
     validate_cached_outputs: str = "lazy"  # "eager" | "lazy"
+    validate_materialized_inputs: bool = False
     requested_input_paths: Optional[Dict[str, Path]] = None
     requested_input_materialization: Optional[str] = None
     requested_input_materialization_mode: Optional[str] = None
@@ -319,6 +322,7 @@ def parse_materialize_cached_outputs_kwargs(
     Optional[Path],
     Optional[Path],
     str,
+    bool,
 ]:
     """
     Parse and validate cached-output materialization options from run kwargs.
@@ -353,6 +357,12 @@ def parse_materialize_cached_outputs_kwargs(
         "materialize_cached_outputs_source_root", None
     )
     validate_cached_outputs = str(kwargs.pop("validate_cached_outputs", "lazy")).lower()
+    validate_materialized_inputs_raw = kwargs.pop("validate_materialized_inputs", False)
+    validate_materialized_inputs = (
+        False
+        if validate_materialized_inputs_raw is None
+        else validate_materialized_inputs_raw
+    )
 
     if cache_hydration not in {
         "metadata",
@@ -367,6 +377,13 @@ def parse_materialize_cached_outputs_kwargs(
 
     if validate_cached_outputs not in {"eager", "lazy"}:
         raise ValueError("validate_cached_outputs must be one of: 'eager', 'lazy'")
+    if not isinstance(validate_materialized_inputs, bool):
+        raise ValueError("validate_materialized_inputs must be a boolean")
+    if validate_materialized_inputs and cache_hydration != "inputs-missing":
+        raise ValueError(
+            "validate_materialized_inputs=True requires "
+            "cache_hydration='inputs-missing'"
+        )
 
     if cache_hydration == "outputs-requested":
         if (
@@ -435,6 +452,7 @@ def parse_materialize_cached_outputs_kwargs(
         materialize_cached_outputs_dir,
         materialize_cached_outputs_source_root,
         validate_cached_outputs,
+        validate_materialized_inputs,
     )
 
 
@@ -763,8 +781,26 @@ def materialize_missing_inputs(
     if db is None:
         return
 
+    def _should_preserve_existing_input(artifact: Artifact, path: Path) -> bool:
+        if not artifact.hash:
+            return True
+        if tracker.identity.hashing_strategy != "full":
+            return True
+        try:
+            return tracker.identity.compute_file_checksum(path) == artifact.hash
+        except FileNotFoundError:
+            return False
+        except (OSError, ValueError) as exc:
+            logging.debug(
+                "[Consist] Could not validate existing input %s at %s: %s",
+                artifact.key,
+                path,
+                exc,
+            )
+            return True
+
     items: list[tuple[Artifact, Path, Path]] = []
-    db_items: list[tuple[Artifact, Path]] = []
+    db_items: list[tuple[Artifact, Path, bool]] = []
 
     for artifact in tracker.current_consist.inputs:
         if not artifact.run_id:
@@ -772,38 +808,52 @@ def materialize_missing_inputs(
 
         destination = Path(tracker.resolve_uri(artifact.container_uri))
         if destination.exists():
-            continue
+            if not active_options.validate_materialized_inputs:
+                continue
+            if _should_preserve_existing_input(artifact, destination):
+                continue
 
         run_id = str(artifact.run_id)
         run = db.get_run(run_id)
-        original_run_dir = (
-            run.meta.get("_physical_run_dir") if run and run.meta else None
-        )
-        if not original_run_dir:
-            continue
+        source: Path | None = None
+        if run is not None:
+            from consist.core.materialize import find_existing_recovery_source_path
 
-        source = Path(
-            tracker.fs.resolve_historical_path(artifact.container_uri, original_run_dir)
-        )
-        if source is not None and source.exists():
+            _, source, _ = find_existing_recovery_source_path(
+                cast("Tracker", tracker),
+                artifact=artifact,
+                run=run,
+                source_root=None,
+            )
+        if source is not None:
             items.append((artifact, source, destination))
             continue
 
         if artifact.meta.get("is_ingested", False):
-            db_items.append((artifact, destination))
+            if destination.exists() and destination.is_dir():
+                logging.warning(
+                    "[Consist] Cannot materialize ingested input %r over "
+                    "directory destination %s.",
+                    artifact.key,
+                    destination,
+                )
+                continue
+            db_items.append((artifact, destination, destination.exists()))
 
     materialized: dict[str, str] = {}
 
     if items:
         from consist.core.materialize import materialize_artifacts_from_sources
 
+        allowed_base = _allowed_materialization_roots(
+            tracker, target_run=tracker.current_consist.run
+        )
         materialized.update(
             materialize_artifacts_from_sources(
                 items,
-                allowed_base=_allowed_materialization_roots(
-                    tracker, target_run=tracker.current_consist.run
-                ),
+                allowed_base=allowed_base,
                 on_missing="warn",
+                overwrite_existing=active_options.validate_materialized_inputs,
             )
         )
         for artifact, _, destination in items:
@@ -812,11 +862,12 @@ def materialize_missing_inputs(
     if db_items:
         from consist.core.materialize import materialize_ingested_artifact_from_db
 
-        for artifact, destination in db_items:
+        for artifact, destination, overwrite in db_items:
             materialized_path = materialize_ingested_artifact_from_db(
                 artifact=artifact,
                 tracker=cast("Tracker", tracker),
                 destination=destination,
+                overwrite=overwrite,
             )
             materialized[artifact.key] = materialized_path
             artifact.abs_path = materialized_path
@@ -973,7 +1024,6 @@ def materialize_requested_inputs(
             )
 
         artifact = matches[0]
-        destination_path = Path(destination).resolve()
 
         from consist.core.materialize import (
             _ensure_destination_not_symlink,
@@ -982,16 +1032,14 @@ def materialize_requested_inputs(
             validate_allowed_materialization_destination,
         )
 
+        _ensure_destination_not_symlink(Path(destination))
+        destination_path = Path(destination).resolve()
+
         validate_allowed_materialization_destination(destination_path, allowed_base)
-        _ensure_destination_not_symlink(destination_path)
         destination_path.parent.mkdir(parents=True, exist_ok=True)
 
         source_path = _resolve_source(artifact)
         if destination_path.exists():
-            if destination_path.is_symlink():
-                raise ValueError(
-                    f"Symlink detected in destination path: {destination_path}"
-                )
             if (
                 source_path is None
                 and artifact.hash

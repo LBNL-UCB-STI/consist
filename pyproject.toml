@@ -133,6 +133,9 @@ markers = [
 target-version = "py311"
 line-length = 88
 
+[tool.ty.environment]
+extra-paths = ["src"]
+
 [tool.ty.src]
 include = ["src", "tests"]
 

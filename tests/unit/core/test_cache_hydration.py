@@ -590,6 +590,216 @@ def test_inputs_missing_permission_denied_warns_and_continues(
         tracker_b.engine.dispose()
 
 
+def test_inputs_missing_preserves_existing_stale_destination_by_default(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
+    _init_core_tables(tracker_a)
+
+    with tracker_a.start_run("producer_default_preserve", model="producer"):
+        out_dir = tracker_a.run_dir / "outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        source = out_dir / "a.csv"
+        source.write_text("value\nexpected\n", encoding="utf-8")
+        artifact = tracker_a.log_artifact(source, key="a", direction="output")
+
+    tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
+    _init_core_tables(tracker_b)
+    destination = tracker_b.run_dir / "outputs" / "a.csv"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text("value\nstale\n", encoding="utf-8")
+
+    with tracker_b.start_run(
+        "consumer_default_preserve",
+        model="consumer",
+        inputs=[artifact],
+        cache_mode="reuse",
+        cache_hydration="inputs-missing",
+    ):
+        assert destination.read_text(encoding="utf-8") == "value\nstale\n"
+
+    run = tracker_b.get_run("consumer_default_preserve")
+    assert run is not None
+    assert "materialized_inputs" not in (run.meta or {})
+
+
+def test_inputs_missing_restores_missing_input_from_recovery_roots(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    archive_root = tmp_path / "archive"
+    tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
+    _init_core_tables(tracker_a)
+
+    with tracker_a.start_run("producer_input_recovery_root", model="producer"):
+        out_dir = tracker_a.run_dir / "outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        source = out_dir / "a.csv"
+        source.write_text("value\nexpected\n", encoding="utf-8")
+        tracker_a.log_artifact(source, key="a", direction="output")
+
+    archive_output = archive_root / "outputs" / "a.csv"
+    archive_output.parent.mkdir(parents=True, exist_ok=True)
+    archive_output.write_text("value\nexpected\n", encoding="utf-8")
+    artifact = tracker_a.get_run_outputs("producer_input_recovery_root")["a"]
+    tracker_a.set_artifact_recovery_roots(artifact, [archive_root])
+    (tracker_a.run_dir / "outputs" / "a.csv").unlink()
+
+    tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
+    _init_core_tables(tracker_b)
+    destination = tracker_b.run_dir / "outputs" / "a.csv"
+
+    with tracker_b.start_run(
+        "consumer_input_recovery_root",
+        model="consumer",
+        inputs=[artifact],
+        cache_mode="reuse",
+        cache_hydration="inputs-missing",
+    ):
+        assert destination.read_text(encoding="utf-8") == "value\nexpected\n"
+
+    run = tracker_b.get_run("consumer_input_recovery_root")
+    assert run is not None
+    assert (run.meta or {}).get("materialized_inputs") == {
+        "a": str(destination.resolve())
+    }
+
+
+def test_inputs_missing_validates_and_overwrites_stale_destination_from_recovery_roots(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    archive_root = tmp_path / "archive"
+    tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
+    _init_core_tables(tracker_a)
+
+    with tracker_a.start_run("producer_stale_recovery_root", model="producer"):
+        out_dir = tracker_a.run_dir / "outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        source = out_dir / "a.csv"
+        source.write_text("value\nexpected\n", encoding="utf-8")
+        tracker_a.log_artifact(source, key="a", direction="output")
+
+    archive_output = archive_root / "outputs" / "a.csv"
+    archive_output.parent.mkdir(parents=True, exist_ok=True)
+    archive_output.write_text("value\nexpected\n", encoding="utf-8")
+    artifact = tracker_a.get_run_outputs("producer_stale_recovery_root")["a"]
+    tracker_a.set_artifact_recovery_roots(artifact, [archive_root])
+    (tracker_a.run_dir / "outputs" / "a.csv").unlink()
+
+    tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
+    _init_core_tables(tracker_b)
+    destination = tracker_b.run_dir / "outputs" / "a.csv"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text("value\nstale\n", encoding="utf-8")
+
+    with tracker_b.start_run(
+        "consumer_stale_recovery_root",
+        model="consumer",
+        inputs=[artifact],
+        cache_mode="reuse",
+        cache_hydration="inputs-missing",
+        validate_materialized_inputs=True,
+    ):
+        assert destination.read_text(encoding="utf-8") == "value\nexpected\n"
+
+    run = tracker_b.get_run("consumer_stale_recovery_root")
+    assert run is not None
+    assert (run.meta or {}).get("materialized_inputs") == {
+        "a": str(destination.resolve())
+    }
+
+
+def test_inputs_missing_validation_preserves_existing_destination_without_hash(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
+    _init_core_tables(tracker_a)
+
+    with tracker_a.start_run("producer_no_hash", model="producer"):
+        out_dir = tracker_a.run_dir / "outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        source = out_dir / "a.csv"
+        source.write_text("value\nexpected\n", encoding="utf-8")
+        artifact = tracker_a.log_artifact(source, key="a", direction="output")
+    artifact.hash = None
+
+    tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
+    _init_core_tables(tracker_b)
+    destination = tracker_b.run_dir / "outputs" / "a.csv"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text("value\nstale\n", encoding="utf-8")
+
+    with tracker_b.start_run(
+        "consumer_no_hash",
+        model="consumer",
+        inputs=[artifact],
+        cache_mode="reuse",
+        cache_hydration="inputs-missing",
+        validate_materialized_inputs=True,
+    ):
+        assert destination.read_text(encoding="utf-8") == "value\nstale\n"
+
+
+def test_inputs_missing_validation_overwrites_stale_ingested_db_fallback(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
+    _init_core_tables(tracker_a)
+
+    with tracker_a.start_run("producer_ingested_stale", model="producer"):
+        out_dir = tracker_a.run_dir / "outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        source = out_dir / "a.csv"
+        source.write_text("value\nexpected\n", encoding="utf-8")
+        artifact = tracker_a.log_artifact(source, key="a", direction="output")
+    tracker_a.ingest(artifact)
+    artifact = tracker_a.get_artifacts_for_run("producer_ingested_stale").outputs["a"]
+    (tracker_a.run_dir / "outputs" / "a.csv").unlink()
+
+    tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
+    _init_core_tables(tracker_b)
+    destination = tracker_b.run_dir / "outputs" / "a.csv"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text("value\nstale\n", encoding="utf-8")
+
+    with tracker_b.start_run(
+        "consumer_ingested_stale",
+        model="consumer",
+        inputs=[artifact],
+        cache_mode="reuse",
+        cache_hydration="inputs-missing",
+        validate_materialized_inputs=True,
+    ):
+        df = pd.read_csv(destination)
+        assert df["value"].tolist() == ["expected"]
+
+    run = tracker_b.get_run("consumer_ingested_stale")
+    assert run is not None
+    assert (run.meta or {}).get("materialized_inputs") == {
+        "a": str(destination.resolve())
+    }
+
+
+def test_validate_materialized_inputs_requires_inputs_missing(
+    tmp_path: Path,
+) -> None:
+    tracker = Tracker(run_dir=tmp_path / "runs", db_path=str(tmp_path / "db.duckdb"))
+    _init_core_tables(tracker)
+
+    with pytest.raises(ValueError, match="requires cache_hydration='inputs-missing'"):
+        with tracker.start_run(
+            "invalid_validate_materialized_inputs",
+            model="model",
+            cache_hydration="metadata",
+            validate_materialized_inputs=True,
+        ):
+            pass
+
+
 def test_outputs_requested_uses_historical_mount_metadata_when_current_mount_is_stale(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

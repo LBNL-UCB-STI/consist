@@ -1074,6 +1074,9 @@ class ScenarioContext:
                 cache_version=resolved_cache_version,
                 cache_epoch=resolved_cache_epoch,
                 validate_cached_outputs=resolved_validate_cached_outputs,
+                validate_materialized_inputs=(
+                    resolved_invocation.validate_materialized_inputs
+                ),
                 code_identity=resolved_invocation.code_identity,
                 code_identity_extra_deps=resolved_invocation.code_identity_extra_deps,
             ),
@@ -1192,6 +1195,7 @@ class ScenarioContext:
                 cache_version=cache_version,
                 cache_epoch=cache_epoch,
                 validate_cached_outputs=validate_cached_outputs,
+                validate_materialized_inputs=None,
                 code_identity=code_identity,
                 code_identity_extra_deps=code_identity_extra_deps,
             ),
@@ -1281,6 +1285,9 @@ class ScenarioContext:
                 cache_version=resolved_cache_version,
                 cache_epoch=resolved_cache_epoch,
                 validate_cached_outputs=resolved_validate_cached_outputs,
+                validate_materialized_inputs=(
+                    resolved_invocation.validate_materialized_inputs
+                ),
                 code_identity=resolved_invocation.code_identity,
                 code_identity_extra_deps=resolved_invocation.code_identity_extra_deps,
                 output_mismatch=resolved_invocation.output_mismatch,

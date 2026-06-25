@@ -262,4 +262,4 @@ export is designed to keep working even when the summary JSON is truncated.
 
 - [DLT Loader Integration Guide](dlt-loader-guide.md) — Ingesting tabular data so schemas are captured
 - [Architecture: Data Virtualization](architecture.md#data-virtualization) — How hybrid views work
-- [Data Materialization Strategy](concepts/data-materialization.md)
+- [Data Storage and Ingestion Strategy](concepts/data-materialization.md)
