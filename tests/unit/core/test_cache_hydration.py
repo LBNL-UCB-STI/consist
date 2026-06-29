@@ -711,6 +711,59 @@ def test_inputs_missing_validates_and_overwrites_stale_destination_from_recovery
     }
 
 
+def test_inputs_missing_validation_skips_stale_historical_source_for_recovery_root(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    archive_root = tmp_path / "archive"
+    tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
+    _init_core_tables(tracker_a)
+
+    live_file = tracker_a.run_dir / "outputs" / "file.csv"
+    live_file.parent.mkdir(parents=True, exist_ok=True)
+    with tracker_a.start_run("producer_baseline_same_path", model="producer"):
+        live_file.write_text("kind,value\nbaseline,1\n", encoding="utf-8")
+        tracker_a.log_artifact(live_file, key="baseline", direction="output")
+
+    baseline = tracker_a.get_run_outputs("producer_baseline_same_path")["baseline"]
+    archive_file = archive_root / "outputs" / "file.csv"
+    archive_file.parent.mkdir(parents=True, exist_ok=True)
+    archive_file.write_text("kind,value\nbaseline,1\n", encoding="utf-8")
+    tracker_a.set_artifact_recovery_roots(baseline, [archive_root])
+
+    with tracker_a.start_run(
+        "producer_forecasted_same_path",
+        model="producer",
+        cache_mode="overwrite",
+    ):
+        live_file.write_text("kind,value\nforecasted,2\n", encoding="utf-8")
+        tracker_a.log_artifact(live_file, key="forecasted", direction="output")
+
+    assert live_file.read_text(encoding="utf-8") == "kind,value\nforecasted,2\n"
+
+    tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
+    _init_core_tables(tracker_b)
+    destination = tracker_b.run_dir / "outputs" / "file.csv"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text("kind,value\nforecasted,2\n", encoding="utf-8")
+
+    with tracker_b.start_run(
+        "consumer_baseline_same_path",
+        model="consumer",
+        inputs=[baseline],
+        cache_mode="reuse",
+        cache_hydration="inputs-missing",
+        validate_materialized_inputs=True,
+    ):
+        assert destination.read_text(encoding="utf-8") == "kind,value\nbaseline,1\n"
+
+    run = tracker_b.get_run("consumer_baseline_same_path")
+    assert run is not None
+    assert (run.meta or {}).get("materialized_inputs") == {
+        "baseline": str(destination.resolve())
+    }
+
+
 def test_inputs_missing_validation_preserves_existing_destination_without_hash(
     tmp_path: Path,
 ) -> None:

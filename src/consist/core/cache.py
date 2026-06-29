@@ -759,10 +759,13 @@ def materialize_missing_inputs(
     *, tracker: CacheMaterializationContext, options: Optional[ActiveRunCacheOptions]
 ) -> None:
     """
-    Copy cached-input artifacts into the current run_dir when missing.
+    Copy cached-input artifacts into the current run_dir when needed.
 
     This is intended for cache-miss runs that rely on cached outputs from
-    previous runs in a different run_dir.
+    previous runs in a different run_dir. By default only absent destinations
+    are restored. With ``validate_materialized_inputs=True``, existing
+    destinations are replaced only when a portable full-content hash proves they
+    are stale.
 
     Parameters
     ----------
@@ -799,6 +802,24 @@ def materialize_missing_inputs(
             )
             return True
 
+    def _recovery_source_matches_artifact(artifact: Artifact, path: Path) -> bool:
+        if not active_options.validate_materialized_inputs:
+            return True
+        if not artifact.hash:
+            return True
+        if tracker.identity.hashing_strategy != "full":
+            return True
+        try:
+            return tracker.identity.compute_file_checksum(path) == artifact.hash
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            logging.debug(
+                "[Consist] Skipping recovery source for input %s at %s: %s",
+                artifact.key,
+                path,
+                exc,
+            )
+            return False
+
     items: list[tuple[Artifact, Path, Path]] = []
     db_items: list[tuple[Artifact, Path, bool]] = []
 
@@ -824,6 +845,9 @@ def materialize_missing_inputs(
                 artifact=artifact,
                 run=run,
                 source_root=None,
+                source_validator=lambda path, artifact=artifact: (
+                    _recovery_source_matches_artifact(artifact, path)
+                ),
             )
         if source is not None:
             items.append((artifact, source, destination))
