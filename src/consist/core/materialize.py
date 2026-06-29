@@ -31,6 +31,7 @@ from typing import (
     Mapping,
     Sequence,
     TYPE_CHECKING,
+    Callable,
     cast,
     get_args,
 )
@@ -1038,6 +1039,7 @@ def find_existing_recovery_source_path(
     artifact: Artifact,
     run,
     source_root: Path | None,
+    source_validator: Callable[[Path], bool] | None = None,
 ) -> tuple[Path | None, Path | None, bool]:
     """
     Return the rematerializable relative path and first existing filesystem source.
@@ -1048,8 +1050,10 @@ def find_existing_recovery_source_path(
     2. the historical root derived from run metadata / mount snapshots
     3. ordered artifact ``recovery_roots``
 
-    The boolean return value reports whether any filesystem roots were available
-    to probe for that artifact.
+    If ``source_validator`` is provided, existing candidates that return
+    ``False`` are skipped and later recovery roots are still probed. The boolean
+    return value reports whether any filesystem roots were available to probe
+    for that artifact.
     """
     relative_path = _derive_remappable_relative_path(tracker, artifact=artifact)
     if relative_path is None:
@@ -1064,7 +1068,9 @@ def find_existing_recovery_source_path(
     )
     for root in candidate_roots:
         candidate = (root / relative_path).resolve()
-        if candidate.exists():
+        if candidate.exists() and (
+            source_validator is None or source_validator(candidate)
+        ):
             return relative_path, candidate, True
 
     return relative_path, None, bool(candidate_roots)

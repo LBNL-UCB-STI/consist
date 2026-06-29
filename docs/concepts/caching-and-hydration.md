@@ -221,6 +221,10 @@ prove from a portable artifact hash that the bytes are stale. Proven stale
 inputs are restored from the historical root, artifact `recovery_roots`, or the
 ingested DB fallback when available.
 
+Use this for in-place legacy workflows where one live filename can represent
+different logical artifacts at different points in the workflow, as long as the
+earlier artifact has recoverable bytes and a portable full-content hash.
+
 ## Requested Input Staging
 
 Requested input staging is input-side materialization attached to normal run
