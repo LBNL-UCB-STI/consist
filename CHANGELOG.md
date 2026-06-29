@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## [0.2.2] - 2026-06-29
+
+### Added
+
+- Add opt-in stale-input recovery for `cache_hydration="inputs-missing"` with
+  `validate_materialized_inputs=True`, restoring missing or proven-stale
+  inputs from historical roots, `recovery_roots`, or DB fallback by @zneedell
+  ([#155](https://github.com/LBNL-UCB-STI/consist/pull/155)).
+
+### Changed
+
+- Add Dependabot and pre-commit hooks, and run Ruff across the repository by
+  @zneedell ([#162](https://github.com/LBNL-UCB-STI/consist/pull/162)).
+- Bump the `github-actions-dependencies` group, upgrading `actions/checkout`,
+  `actions/setup-python`, and `actions/upload-artifact` by dependabot[bot]
+  ([#163](https://github.com/LBNL-UCB-STI/consist/pull/163)).
+
+### Fixed
+
+- Fix trusted-DB shell mount inference for scenario-linked artifacts so
+  `consist shell --trust-db` resolves multi-linked `data://...` artifacts
+  consistently by @zneedell
+  ([#154](https://github.com/LBNL-UCB-STI/consist/pull/154)).
+- Tighten validated cache-miss input recovery for same-path workflows so
+  stale historical sources are skipped in favor of later recovery roots by
+  @zneedell ([#164](https://github.com/LBNL-UCB-STI/consist/pull/164)).
+
 ## [0.2.1] - 2026-06-24
 
 ### Added
@@ -448,7 +475,9 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
 
-[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.2.2...HEAD
+
+[0.2.2]: https://github.com/LBNL-UCB-STI/consist/compare/v0.2.1...v0.2.2
 
 [0.2.1]: https://github.com/LBNL-UCB-STI/consist/compare/v0.2.0...v0.2.1
 
