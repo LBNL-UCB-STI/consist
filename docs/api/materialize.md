@@ -77,10 +77,11 @@ next_inputs = archive.outputs["persons"]
 ```
 
 `archive_current_run_outputs(...)` and `archive_run_outputs(...)` return an
-`ArchivedOutputs` mapping. It still behaves like `dict[str, Path]` for the
-archived bytes, while `.outputs` gives you refreshed artifacts that already
-carry the new recovery root. Pass those refreshed artifacts directly into a
-later `inputs={...}` mapping when you want the next run to consume the archive.
+`ArchivedOutputs` mapping. It still behaves like a read-only `Mapping[str,
+Path]` for the archived bytes, while `.outputs` gives you refreshed artifacts
+that already carry the new recovery root. Pass those refreshed artifacts
+directly into a later `inputs={...}` mapping when you want the next run to
+consume the archive.
 
 Use the lower-level helpers when you want to manage archival yourself:
 

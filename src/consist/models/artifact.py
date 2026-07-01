@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 import weakref
 from dataclasses import dataclass
-from collections.abc import Sequence
+from collections.abc import Iterator, Mapping as MappingABC, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, Protocol, cast
@@ -627,11 +627,12 @@ class ArtifactContent(SQLModel, table=True):
         )
 
 
-class ArchivedOutputs(dict):
+class ArchivedOutputs(MappingABC[str, Path]):
     """
     Mapping of archived output paths returned by archive_run_outputs(...).
 
-    Behaves as ``dict[str, Path]`` for backward compatibility. Also exposes
+    Behaves as a read-only ``Mapping[str, Path]`` for backward compatibility
+    with the previous ``dict[str, Path]`` return value. Also exposes
     ``.outputs``, a ``dict[str, Artifact]`` of refreshed artifacts whose
     recovery metadata reflects the newly registered archive root.
 
@@ -649,8 +650,17 @@ class ArchivedOutputs(dict):
         paths: dict[str, Path],
         outputs: dict[str, "Artifact"],
     ) -> None:
-        super().__init__(paths)
+        self._paths: dict[str, Path] = paths
         self.outputs: dict[str, Artifact] = outputs
 
+    def __getitem__(self, key: str) -> Path:
+        return self._paths[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._paths)
+
+    def __len__(self) -> int:
+        return len(self._paths)
+
     def __repr__(self) -> str:
-        return f"ArchivedOutputs(paths={dict(self)!r}, outputs={self.outputs!r})"
+        return f"ArchivedOutputs(paths={self._paths!r}, outputs={self.outputs!r})"

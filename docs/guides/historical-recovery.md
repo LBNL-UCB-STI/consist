@@ -193,10 +193,11 @@ Use `mode="copy"` when the workspace file should remain in place. Use
 `mode="move"` when the archive copy should become the durable byte source.
 
 `archive_current_run_outputs(...)` and `archive_run_outputs(...)` now return an
-`ArchivedOutputs` mapping. Treat the mapping like `dict[str, Path]` for the
-archived bytes, and use `.outputs` when you want the refreshed artifacts with
-the new recovery root already attached. Pass those refreshed artifacts directly
-into a later `inputs={...}` mapping instead of calling `get_run_outputs(...)`
+`ArchivedOutputs` mapping. Treat the mapping like a read-only `Mapping[str,
+Path]` for the archived bytes, and use `.outputs` when you want the refreshed
+artifacts with the new recovery root already attached. Pass those refreshed
+artifacts directly into a later `inputs={...}` mapping instead of calling
+`get_run_outputs(...)`
 again.
 
 If bytes were already copied by another system, verify the archive-side file

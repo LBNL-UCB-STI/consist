@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import hashlib
 import os
 from pathlib import Path
@@ -836,7 +837,7 @@ def test_archive_run_outputs_returns_archived_outputs_type(
     result = tracker.archive_run_outputs("producer_typed", archive_root)
 
     assert isinstance(result, ArchivedOutputs)
-    assert isinstance(result, dict)
+    assert isinstance(result, Mapping)
 
 
 def test_archive_run_outputs_outputs_attr_has_refreshed_recovery_roots(

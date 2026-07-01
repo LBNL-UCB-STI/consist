@@ -1495,8 +1495,8 @@ def archive_run_outputs(
     This is the bulk form of ``archive_artifact(...)`` for iteration/archive
     workflows that promote all or a subset of outputs after a run completes.
 
-    Returns an :class:`ArchivedOutputs` mapping that behaves as
-    ``dict[str, Path]`` for backward compatibility.  Access ``.outputs`` to
+    Returns an :class:`ArchivedOutputs` mapping that behaves as a read-only
+    ``Mapping[str, Path]`` for backward compatibility.  Access ``.outputs`` to
     get refreshed :class:`Artifact` objects with the new recovery root set,
     ready to pass into downstream ``sc.run(inputs=...)`` calls.
     """
