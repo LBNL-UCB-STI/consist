@@ -58,6 +58,15 @@ artifacts (`consist.run`, `consist.ref`, `consist.refs`, `consist.load*`).
 For query helpers that traverse child artifacts, see
 [Tracker](tracker.md#tracker).
 
+## Archived Outputs
+
+`tracker.archive_run_outputs(...)` and
+`tracker.archive_current_run_outputs(...)` return `ArchivedOutputs`, a
+dict-like mapping of archived paths. Use the mapping itself when you want the
+archived filesystem locations, and use `.outputs` when you want the refreshed
+artifacts with the new recovery root already attached for downstream
+`inputs=...` reuse.
+
 ::: consist.models.artifact.Artifact
     options:
       show_source: false

@@ -110,7 +110,7 @@ from consist.core.settings import ConsistSettings
 from consist.core.stores import HotDataStore, MetadataStore
 from consist.core.workflow import OutputCapture, ScenarioContext
 from consist.models.gtfs import GTFS_SCHEMAS
-from consist.models.artifact import Artifact, set_tracker_ref
+from consist.models.artifact import Artifact, ArchivedOutputs, set_tracker_ref
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.models.run import (
     ConsistRecord,
@@ -1563,12 +1563,19 @@ class Tracker:
         keys: Sequence[str] | None = None,
         mode: Literal["copy", "move"] = "copy",
         append: bool = True,
-    ) -> dict[str, Path]:
+    ) -> ArchivedOutputs:
         """
         Archive one or more historical run outputs into a stable recovery root.
 
         Each archived output retains its canonical artifact identity and gains
         ``archive_root`` as an advisory recovery root.
+
+        Returns an :class:`ArchivedOutputs` mapping that behaves as
+        ``dict[str, Path]`` for backward compatibility.  The ``.outputs``
+        attribute exposes refreshed :class:`Artifact` objects whose recovery
+        metadata reflects the newly registered archive root, so callers can
+        pass them directly into downstream ``sc.run(inputs=...)`` calls
+        without a second ``get_run_outputs(...)`` call.
         """
         normalized_keys = normalize_materialize_output_keys(
             keys,
@@ -1586,15 +1593,26 @@ class Tracker:
         else:
             selected = outputs
 
-        archived: dict[str, Path] = {}
+        archived_paths: dict[str, Path] = {}
         for key, artifact in selected.items():
-            archived[key] = self.archive_artifact(
+            archived_paths[key] = self.archive_artifact(
                 artifact,
                 archive_root,
                 mode=mode,
                 append=append,
             )
-        return archived
+
+        refreshed_outputs = self.get_run_outputs(run_id)
+        if normalized_keys is not None:
+            refreshed_selected = {
+                key: refreshed_outputs[key]
+                for key in normalized_keys
+                if key in refreshed_outputs
+            }
+        else:
+            refreshed_selected = refreshed_outputs
+
+        return ArchivedOutputs(paths=archived_paths, outputs=refreshed_selected)
 
     def archive_current_run_outputs(
         self,
@@ -1603,7 +1621,7 @@ class Tracker:
         keys: Sequence[str] | None = None,
         mode: Literal["copy", "move"] = "copy",
         append: bool = True,
-    ) -> dict[str, Path]:
+    ) -> ArchivedOutputs:
         """
         Archive outputs for the currently active run into a stable recovery root.
 

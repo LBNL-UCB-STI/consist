@@ -625,3 +625,32 @@ class ArtifactContent(SQLModel, table=True):
             f"ArtifactContent(hash={self.content_hash}, "
             f"driver={self.driver}, id={self.id})"
         )
+
+
+class ArchivedOutputs(dict):
+    """
+    Mapping of archived output paths returned by archive_run_outputs(...).
+
+    Behaves as ``dict[str, Path]`` for backward compatibility. Also exposes
+    ``.outputs``, a ``dict[str, Artifact]`` of refreshed artifacts whose
+    recovery metadata reflects the newly registered archive root.
+
+    Use ``.outputs`` to pass archived artifacts into downstream
+    ``scenario.run(inputs=...)`` calls without a second ``get_run_outputs``
+    call::
+
+        archive = tracker.archive_run_outputs(result.run.id, archive_root)
+        archive["my_key"]           # archived Path (backward-compatible)
+        archive.outputs["my_key"]   # refreshed Artifact with recovery root set
+    """
+
+    def __init__(
+        self,
+        paths: dict[str, Path],
+        outputs: dict[str, "Artifact"],
+    ) -> None:
+        super().__init__(paths)
+        self.outputs: dict[str, Artifact] = outputs
+
+    def __repr__(self) -> str:
+        return f"ArchivedOutputs(paths={dict(self)!r}, outputs={self.outputs!r})"
