@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import hashlib
 import os
 from pathlib import Path
@@ -22,7 +23,7 @@ from consist.api import (
 )
 from consist.api import set_artifact_recovery_roots as set_artifact_recovery_roots_api
 from consist.core.tracker import Tracker
-from consist.models.artifact import Artifact
+from consist.models.artifact import Artifact, ArchivedOutputs
 from consist.models.run import Run
 
 
@@ -819,6 +820,183 @@ def test_archive_run_outputs_archives_selected_keys(
     outputs = tracker.get_run_outputs("producer_archive_bulk")
     assert outputs["a"].meta["recovery_roots"] == [str(archive_root.resolve())]
     assert "recovery_roots" not in outputs["b"].meta
+
+
+def test_archive_run_outputs_returns_archived_outputs_type(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "typed.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n1\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_typed"
+
+    with tracker.start_run("producer_typed", model="producer"):
+        tracker.log_artifact(output_path, key="typed", direction="output")
+
+    result = tracker.archive_run_outputs("producer_typed", archive_root)
+
+    assert isinstance(result, ArchivedOutputs)
+    assert isinstance(result, Mapping)
+
+
+def test_archive_run_outputs_outputs_attr_has_refreshed_recovery_roots(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "refreshed.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n2\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_refreshed"
+
+    with tracker.start_run("producer_refreshed", model="producer"):
+        tracker.log_artifact(output_path, key="refreshed", direction="output")
+
+    result = tracker.archive_run_outputs("producer_refreshed", archive_root)
+
+    refreshed = result.outputs["refreshed"]
+    assert isinstance(refreshed, Artifact)
+    assert str(archive_root.resolve()) in refreshed.recovery_roots
+
+
+def test_archive_run_outputs_outputs_attr_without_extra_get_run_outputs_call(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """Footgun regression: archive should hand back refreshed artifacts directly.
+
+    Before ArchivedOutputs, callers had to call get_run_outputs() again after
+    archive_run_outputs() to get artifacts with recovery_roots set.  Verify the
+    returned .outputs already reflects the new archive root.
+    """
+    output_path = tracker.run_dir / "outputs" / "stale.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n3\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_stale"
+
+    with tracker.start_run("producer_stale", model="producer"):
+        tracker.log_artifact(output_path, key="stale", direction="output")
+
+    result = tracker.archive_run_outputs("producer_stale", archive_root)
+
+    # .outputs must already carry recovery_roots — no second call needed
+    assert str(archive_root.resolve()) in result.outputs["stale"].recovery_roots
+
+
+def test_archive_run_outputs_outputs_attr_respects_keys_filter(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    a_path = tracker.run_dir / "outputs" / "fa.csv"
+    b_path = tracker.run_dir / "outputs" / "fb.csv"
+    a_path.parent.mkdir(parents=True, exist_ok=True)
+    a_path.write_text("value\n1\n", encoding="utf-8")
+    b_path.write_text("value\n2\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_filter"
+
+    with tracker.start_run("producer_filter", model="producer"):
+        tracker.log_artifact(a_path, key="fa", direction="output")
+        tracker.log_artifact(b_path, key="fb", direction="output")
+
+    result = tracker.archive_run_outputs("producer_filter", archive_root, keys=["fa"])
+
+    assert set(result.keys()) == {"fa"}
+    assert set(result.outputs.keys()) == {"fa"}
+    assert "fb" not in result
+    assert "fb" not in result.outputs
+
+
+def test_archive_run_outputs_backward_compatible_dict_access(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "compat.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n4\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_compat"
+
+    with tracker.start_run("producer_compat", model="producer"):
+        tracker.log_artifact(output_path, key="compat", direction="output")
+
+    result = tracker.archive_run_outputs("producer_compat", archive_root)
+
+    expected_path = (archive_root / "outputs" / "compat.csv").resolve()
+    assert result["compat"] == expected_path
+    assert result == {"compat": expected_path}
+
+
+def test_archive_run_outputs_outputs_attr_can_feed_downstream_run(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "handoff.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n7\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_handoff"
+
+    with tracker.start_run("producer_handoff", model="producer"):
+        tracker.log_artifact(output_path, key="handoff", direction="output")
+
+    archive = tracker.archive_run_outputs("producer_handoff", archive_root)
+
+    def consume_handoff(handoff: Path) -> dict[str, Path]:
+        out = consist.output_path("handoff_copy", ext="csv")
+        out.write_text(handoff.read_text(encoding="utf-8"), encoding="utf-8")
+        return {"handoff_copy": out}
+
+    result = tracker.run(
+        name="consume_handoff",
+        model="consumer",
+        fn=consume_handoff,
+        inputs={"handoff": archive.outputs["handoff"]},
+        outputs=["handoff_copy"],
+        execution_options=consist.ExecutionOptions(input_binding="paths"),
+    )
+
+    assert result.outputs["handoff_copy"].path.read_text(encoding="utf-8") == (
+        "value\n7\n"
+    )
+
+
+def test_archive_current_run_outputs_returns_archived_outputs_type(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "current_typed.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n5\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_current_typed"
+
+    with tracker.start_run("producer_current_typed", model="producer"):
+        tracker.log_artifact(output_path, key="current_typed", direction="output")
+        result = tracker.archive_current_run_outputs(archive_root)
+
+    assert isinstance(result, ArchivedOutputs)
+    assert str(archive_root.resolve()) in result.outputs["current_typed"].recovery_roots
+
+
+def test_api_archive_run_outputs_returns_archived_outputs_type(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "api_typed.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n6\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_api_typed"
+
+    with tracker.start_run("producer_api_typed", model="producer"):
+        tracker.log_artifact(output_path, key="api_typed", direction="output")
+
+    result = archive_run_outputs_api(
+        "producer_api_typed", archive_root, tracker=tracker
+    )
+
+    assert isinstance(result, ArchivedOutputs)
+    assert str(archive_root.resolve()) in result.outputs["api_typed"].recovery_roots
+
+
+def test_consist_exports_archived_outputs_type() -> None:
+    assert consist.ArchivedOutputs is ArchivedOutputs
 
 
 def test_register_run_output_recovery_copies_reports_mixed_statuses_and_unknown_keys(

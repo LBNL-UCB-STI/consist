@@ -158,21 +158,25 @@ and cache-hit validation can find the files without repeated overrides.
 For outputs of the active run:
 
 ```python
-tracker.archive_current_run_outputs(
+archive = tracker.archive_current_run_outputs(
     Path("/archive/iteration_004"),
     mode="copy",
 )
+
+next_inputs = archive.outputs["persons"]
 ```
 
 For a prior run:
 
 ```python
-tracker.archive_run_outputs(
+archive = tracker.archive_run_outputs(
     "prior_run_id",
     Path("/archive/iteration_004"),
     keys=["persons", "households"],
     mode="copy",
 )
+
+next_inputs = archive.outputs["persons"]
 ```
 
 For one artifact:
@@ -187,6 +191,14 @@ tracker.archive_artifact(
 
 Use `mode="copy"` when the workspace file should remain in place. Use
 `mode="move"` when the archive copy should become the durable byte source.
+
+`archive_current_run_outputs(...)` and `archive_run_outputs(...)` now return an
+`ArchivedOutputs` mapping. Treat the mapping like a read-only `Mapping[str,
+Path]` for the archived bytes, and use `.outputs` when you want the refreshed
+artifacts with the new recovery root already attached. Pass those refreshed
+artifacts directly into a later `inputs={...}` mapping instead of calling
+`get_run_outputs(...)`
+again.
 
 If bytes were already copied by another system, verify the archive-side file
 and then record the root:

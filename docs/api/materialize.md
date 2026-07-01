@@ -62,7 +62,7 @@ on every restart:
 archive_root = Path("/archive/pilates/iteration_004")
 run_id = tracker.current_consist.run.id
 
-tracker.archive_current_run_outputs(
+archive = tracker.archive_current_run_outputs(
     archive_root,
     mode="copy",
 )
@@ -72,7 +72,16 @@ hydrated = tracker.hydrate_run_outputs(
     keys=["persons"],
     target_root=tracker.run_dir / "restored_workspace",
 )
+
+next_inputs = archive.outputs["persons"]
 ```
+
+`archive_current_run_outputs(...)` and `archive_run_outputs(...)` return an
+`ArchivedOutputs` mapping. It still behaves like a read-only `Mapping[str,
+Path]` for the archived bytes, while `.outputs` gives you refreshed artifacts
+that already carry the new recovery root. Pass those refreshed artifacts
+directly into a later `inputs={...}` mapping when you want the next run to
+consume the archive.
 
 Use the lower-level helpers when you want to manage archival yourself:
 

@@ -40,6 +40,11 @@ a tracker object to every call.
 restart-friendly semantic matcher with optional `cache_epoch=` and caller-owned
 `run_scope=` prefix filtering.
 
+`consist.archive_run_outputs(...)` and
+`consist.archive_current_run_outputs(...)` return `ArchivedOutputs`, a
+dict-like mapping of archived paths whose `.outputs` attribute exposes the
+refreshed artifacts for downstream `inputs=...` reuse.
+
 ## Minimal runnable helper workflow
 
 ```python
