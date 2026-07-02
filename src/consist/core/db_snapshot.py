@@ -12,6 +12,12 @@ from typing import Any, Dict, Optional
 from consist.core._db_ops_base import _DatabaseOpsBase
 
 
+def snapshot_sidecar_path(destination: Path) -> Path:
+    """Return the metadata sidecar path paired with a snapshot database file."""
+    base_name = destination.stem if destination.suffix else destination.name
+    return destination.with_name(f"{base_name}.snapshot_meta.json")
+
+
 class DatabaseSnapshotOps(_DatabaseOpsBase):
     """
     Snapshot and atomic file-write helpers extracted from ``DatabaseManager``.
@@ -49,8 +55,7 @@ class DatabaseSnapshotOps(_DatabaseOpsBase):
             self._unlink_temp_path(temp_path)
 
     def _snapshot_sidecar_path(self, destination: Path) -> Path:
-        base_name = destination.stem if destination.suffix else destination.name
-        return destination.with_name(f"{base_name}.snapshot_meta.json")
+        return snapshot_sidecar_path(destination)
 
     def snapshot_to(
         self,
