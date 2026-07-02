@@ -1344,19 +1344,13 @@ class ScenarioContext:
         return {key: config_dict[key] for key in facet_from}
 
     def _record_step_in_parent(self, child_run, child_inputs, child_outputs):
-        # Resolve Parent Lists (assuming header_record is the wrapper)
-        # If header_record is just a Run, you need to capture its lists in __enter__ too.
-        if hasattr(self._header_record, "inputs"):
-            parent_run = self._header_record.run
-            parent_inputs_list = self._header_record.inputs
-            parent_outputs_list = self._header_record.outputs
-        else:
-            # Fallback if header is weird, but ideally this shouldn't happen with the fix above
-            parent_run = self._header_record
-            parent_inputs_list = []
-            parent_outputs_list = []
-        if parent_run is None:
+        header_record = self._header_record
+        if header_record is None:
             return
+
+        parent_run = header_record.run
+        parent_inputs_list = header_record.inputs
+        parent_outputs_list = header_record.outputs
 
         # --- Smart Merge Logic ---
         parent_output_ids = {a.id for a in parent_outputs_list}
